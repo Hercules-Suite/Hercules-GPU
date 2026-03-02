@@ -82,6 +82,9 @@ extern "C" {
 MPI_Comm comm_solver;
 MPI_Comm comm_IO;
 
+static int32_t g_dampingElemCountGPU = -1;
+static int32_t* g_dampingElemMapperDevice = NULL;
+
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
 #endif
@@ -156,6 +159,7 @@ static void mesh_output(void);
 static void mesh_correct_properties(etree_t* cvm);
 
 static void gpu_init(int32_t myID);
+static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
 static void solver_init(void);
 static void solver_printstat(mysolver_t* solver);
 static void solver_delete(void);
@@ -3901,6 +3905,10 @@ void mu_and_lambda(double* theMu, double* theLambda, edata_t* edata,
  */
 static void gpu_init(int32_t myID) {
   int myDevID, devCount;
+  int localRank = 0;
+  const char* rankEnv;
+  const char* allowOversubEnv;
+  int allowOversub = 0;
 
   /* Select a GPU device for this process */
   if (cudaGetDeviceCount(&devCount) != cudaSuccess) {
@@ -3915,7 +3923,38 @@ static void gpu_init(int32_t myID) {
     exit(1);
   }
 
-  myDevID = (Global.myID % devCount);
+  rankEnv = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
+  if (rankEnv == NULL) {
+    rankEnv = getenv("MV2_COMM_WORLD_LOCAL_RANK");
+  }
+  if (rankEnv == NULL) {
+    rankEnv = getenv("SLURM_LOCALID");
+  }
+  if (rankEnv == NULL) {
+    rankEnv = getenv("MPI_LOCALRANKID");
+  }
+  if (rankEnv != NULL) {
+    localRank = atoi(rankEnv);
+  }
+
+  allowOversubEnv = getenv("HERCULES_ALLOW_MULTI_RANK_PER_GPU");
+  if ((allowOversubEnv != NULL) &&
+      ((strcmp(allowOversubEnv, "1") == 0) ||
+       (strcasecmp(allowOversubEnv, "yes") == 0) ||
+       (strcasecmp(allowOversubEnv, "true") == 0))) {
+    allowOversub = 1;
+  }
+
+  if ((localRank >= devCount) && (allowOversub == 0)) {
+    fprintf(stderr,
+            "Thread %d: local MPI rank %d oversubscribes %d GPU(s). "
+            "Run one MPI rank per GPU or set HERCULES_ALLOW_MULTI_RANK_PER_GPU=1 to override.\n",
+            myID, localRank, devCount);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  myDevID = (localRank % devCount);
   if (cudaSetDevice(myDevID) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to set device\n", myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -5111,6 +5150,12 @@ static void solver_delete() {
 
   cudaFree(Global.mySolver->gpuDataDevice);
 
+  if (g_dampingElemMapperDevice != NULL) {
+    cudaFree(g_dampingElemMapperDevice);
+    g_dampingElemMapperDevice = NULL;
+  }
+  g_dampingElemCountGPU = -1;
+
   /* Destroy streams */
   for (int i = 0; i < MAX_CUDA_STREAM; i++) {
     cudaStreamDestroy(Global.mySolver->streams[i]);
@@ -5495,6 +5540,65 @@ static void solver_load_fixedbase_displacements(mysolver_t* solver, int step) {
   Timer_Stop("Load Fixedbase Disps");
 }
 
+static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
+  int32_t eindex;
+  int32_t count;
+  int32_t* mapperHost;
+
+  if (g_dampingElemCountGPU >= 0) {
+    return;
+  }
+
+  count = 0;
+  for (eindex = 0; eindex < mesh->lenum; eindex++) {
+    if ((isThisElementNonLinear(mesh, eindex) == NO) &&
+        (IsDampingElement(mesh, eindex) == YES)) {
+      count++;
+    }
+  }
+
+  g_dampingElemCountGPU = count;
+  if (count == 0) {
+    g_dampingElemMapperDevice = NULL;
+    return;
+  }
+
+  mapperHost = (int32_t*)malloc(sizeof(int32_t) * count);
+  if (mapperHost == NULL) {
+    fprintf(stderr, "Thread %d: damping mapper host allocation failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  count = 0;
+  for (eindex = 0; eindex < mesh->lenum; eindex++) {
+    if ((isThisElementNonLinear(mesh, eindex) == NO) &&
+        (IsDampingElement(mesh, eindex) == YES)) {
+      mapperHost[count++] = eindex;
+    }
+  }
+
+  if (cudaMalloc((void**)&g_dampingElemMapperDevice,
+                 sizeof(int32_t) * g_dampingElemCountGPU) != cudaSuccess) {
+    free(mapperHost);
+    fprintf(stderr,
+            "Thread %d: damping mapper device allocation failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (cudaMemcpy(g_dampingElemMapperDevice, mapperHost,
+                 sizeof(int32_t) * g_dampingElemCountGPU,
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    free(mapperHost);
+    fprintf(stderr, "Thread %d: damping mapper copy to device failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  free(mapperHost);
+}
+
 /** Compute the force due to the earthquake source. */
 static void solver_compute_force_source(int step) {
   Timer_Start("Compute addforces s");
@@ -5524,6 +5628,11 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
                                              double theDeltaTSquared) {
   (void)theDeltaTSquared;
 
+  solver_init_damping_gpu_mapper(myID, mesh);
+  if (g_dampingElemCountGPU <= 0) {
+    return;
+  }
+
   double rmax;
   if (Param.theTypeOfDamping == BKT) {
     rmax = 2. * M_PI * theFreq * theDeltaT;
@@ -5539,7 +5648,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,
                           solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
-      (int32_t)Param.theTypeOfDamping);
+      (int32_t)Param.theTypeOfDamping, g_dampingElemCountGPU,
+      g_dampingElemMapperDevice);
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -5550,9 +5660,9 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   }
 
   solver->gpu_spec->numflops +=
-      kernel_flops_per_thread(FLOP_CALCCONV_KERNEL) * mesh->lenum;
+      kernel_flops_per_thread(FLOP_CALCCONV_KERNEL) * g_dampingElemCountGPU;
   solver->gpu_spec->numbytes +=
-      kernel_mem_per_thread(FLOP_CALCCONV_KERNEL) * mesh->lenum;
+      kernel_mem_per_thread(FLOP_CALCCONV_KERNEL) * g_dampingElemCountGPU;
 
   blocksize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].blocksize;
   gridsize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].gridsize;
@@ -5561,7 +5671,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   cudaGetLastError();
   kernelDampingCalcLocal<<<gridsize, blocksize, sharedmem,
                            solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, solver->gpuDataDevice);
+      mesh->lenum, solver->gpuDataDevice, g_dampingElemCountGPU,
+      g_dampingElemMapperDevice);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -5572,9 +5683,9 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   }
 
   solver->gpu_spec->numflops +=
-      kernel_flops_per_thread(FLOP_DAMPING_KERNEL) * mesh->lenum;
+      kernel_flops_per_thread(FLOP_DAMPING_KERNEL) * g_dampingElemCountGPU;
   solver->gpu_spec->numbytes +=
-      kernel_mem_per_thread(FLOP_DAMPING_KERNEL) * mesh->lenum;
+      kernel_mem_per_thread(FLOP_DAMPING_KERNEL) * g_dampingElemCountGPU;
 }
 
 /** Compute contribution of damping to the force vector */

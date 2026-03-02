@@ -52,10 +52,14 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
 				       int32_t numcomp,
 				       gpu_data_t *gpuData,
 				       double rmax,
-				       int32_t dampingType);
+				       int32_t dampingType,
+				       int32_t dampingElemCount,
+				       int32_t* dampingElemMapperDevice);
 
 __global__  void kernelDampingCalcLocal(int32_t lenum,
-					gpu_data_t *gpuData);
+					gpu_data_t *gpuData,
+					int32_t dampingElemCount,
+					int32_t* dampingElemMapperDevice);
 
 __global__  void kernelDispCalc(int32_t nharbored,
 				gpu_data_t* gpuData,

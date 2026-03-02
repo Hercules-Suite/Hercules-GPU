@@ -284,16 +284,21 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
 				       int32_t numcomp,
 				       gpu_data_t *gpuData,
                double rmax,
-               int32_t dampingType)
+               int32_t dampingType,
+               int32_t dampingElemCount,
+               int32_t* dampingElemMapperDevice)
 {
   int i;
-  int32_t   eindex = (blockIdx.x * blockDim.x) + threadIdx.x; // Element number
+  int32_t   lin_eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  int32_t   eindex;
 
   /* Since number of elements may not be exactly divisible by block size,
      check that we are not off the end of the element array */
-  if (eindex >= lenum) {
+  if (lin_eindex >= dampingElemCount) {
     return;
   }
+
+  eindex = dampingElemMapperDevice[lin_eindex];
 
   double g0, g1, g2;
   double coef_1_shear, coef_2_shear, coef_3_shear, coef_4_shear;
@@ -532,17 +537,22 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
 __global__
 //__launch_bounds__(512, 1)
 void kernelDampingCalcLocal(int32_t lenum,
-			    gpu_data_t *gpuData)
+			    gpu_data_t *gpuData,
+			    int32_t dampingElemCount,
+			    int32_t* dampingElemMapperDevice)
 {
   int       i;
-  int32_t   eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  int32_t   lin_eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  int32_t   eindex;
   fvector_t damping_vector[8];
 
   /* Since number of elements may not be exactly divisible by block size,
      check that we are not off the end of the element array */
-  if (eindex >= lenum) {
+  if (lin_eindex >= dampingElemCount) {
     return;
   }
+
+  eindex = dampingElemMapperDevice[lin_eindex];
 
   int         numcomp = lenum * 8;
   int32_t     *lnid;
