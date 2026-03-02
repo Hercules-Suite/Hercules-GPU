@@ -85,6 +85,9 @@
 #include <math.h>
 #include <mpi.h>
 #include <glob.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "cvm.h"
 #include "commutil.h"
@@ -3442,23 +3445,31 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       }
 
       for (iActive = 0; iActive < activeSourceCount; iActive++) {
-          iSrc = activeSourceList[iActive];
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64)
+#endif
+      for (iActive = 0; iActive < activeSourceCount; iActive++) {
+          ptsrc_t localSrc;
+          int32_t localSourceIndex = activeSourceList[iActive];
 
-          pntSrc.domainCoords = activeSourceDomainCoords[iActive];
-          pntSrc.displacement =
+          memset(&localSrc, 0, sizeof(ptsrc_t));
+          localSrc.dt = theSRFHdt;
+          localSrc.numberOfTimeSteps = theNumberOfTimeSteps;
+          localSrc.domainCoords = activeSourceDomainCoords[iActive];
+          localSrc.displacement =
               activeSourceDisplacements + ((size_t)iActive * theNumberOfTimeSteps);
 
-          update_point_source_srfh(&pntSrc, iSrc, utmZone);
+          update_point_source_srfh(&localSrc, localSourceIndex, utmZone);
 
-          activeSourceStrike[iActive] = pntSrc.strike;
-          activeSourceDip[iActive] = pntSrc.dip;
-          activeSourceRake[iActive] = pntSrc.rake;
-          activeSourceArea[iActive] = pntSrc.area;
-          activeSourceMaxSlip[iActive] = pntSrc.maxSlip;
-          activeSourceDelay[iActive] = pntSrc.delayTime;
-          activeSourceNt1[iActive] = pntSrc.nt1;
-          activeSourceDtFunction[iActive] = pntSrc.dtfunction;
-          activeSourceSlipFunDiscrete[iActive] = pntSrc.slipfundiscrete;
+          activeSourceStrike[iActive] = localSrc.strike;
+          activeSourceDip[iActive] = localSrc.dip;
+          activeSourceRake[iActive] = localSrc.rake;
+          activeSourceArea[iActive] = localSrc.area;
+          activeSourceMaxSlip[iActive] = localSrc.maxSlip;
+          activeSourceDelay[iActive] = localSrc.delayTime;
+          activeSourceNt1[iActive] = localSrc.nt1;
+          activeSourceDtFunction[iActive] = localSrc.dtfunction;
+          activeSourceSlipFunDiscrete[iActive] = localSrc.slipfundiscrete;
       }
   }
 

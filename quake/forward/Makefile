@@ -19,6 +19,13 @@ ifeq ($(filter -O%,$(CXXFLAGS)),)
 	CXXFLAGS += -O3
 endif
 
+ENABLE_OMP_SOURCE_INIT ?= 1
+ifeq ($(ENABLE_OMP_SOURCE_INIT),1)
+	OMPFLAGS ?= -fopenmp
+	CXXFLAGS += $(OMPFLAGS)
+	LDFLAGS += $(OMPFLAGS)
+endif
+
 # Earthquake related, set these in user.mk
 #
 # -DDAMPING
