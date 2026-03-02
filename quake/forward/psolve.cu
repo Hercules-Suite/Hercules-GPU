@@ -6215,6 +6215,10 @@ static void solver_run() {
     solver_compute_force_topography(Global.mySolver, Global.myMesh,
                                     Param.theDeltaTSquared);
 
+    /* Push host-side source/DRM/topography force terms to device before
+     * GPU stiffness/damping accumulation. */
+    solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
                      Global.theK2);
     solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
