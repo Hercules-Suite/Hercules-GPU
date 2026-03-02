@@ -5863,8 +5863,16 @@ static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Synchronize for beginning of timestep */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
-  /* Copy displacements */
+  /* Copy displacements for both time levels (tm1 and tm2).
+   * Host pointers are swapped every step, so both device buffers must
+   * be refreshed to keep recurrence state consistent. */
   cudaMemcpyAsync(solver->gpuData->tm1Device, solver->tm1,
+                  solver->gpuData->nharbored * sizeof(fvector_t),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      solver->gpuData->nharbored * sizeof(fvector_t);
+
+  cudaMemcpyAsync(solver->gpuData->tm2Device, solver->tm2,
                   solver->gpuData->nharbored * sizeof(fvector_t),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
