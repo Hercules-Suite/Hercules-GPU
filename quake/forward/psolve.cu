@@ -7755,14 +7755,15 @@ int is_nodeloaded(int32_t iNode, char* onoff) {
   /* \todo move the routine declaration to the source generation file */
 
   int32_t whichByte, whichBit;
-  unsigned char mask, test;
+
+  char mask, test;
 
   whichByte = iNode / 8;
   whichBit = 7 - iNode % 8;
 
-  mask = (unsigned char)(1u << whichBit);
+  mask = (char)pow(2, whichBit);
 
-  test = ((unsigned char)onoff[whichByte]) & mask;
+  test = onoff[whichByte] & mask;
 
   return (test == mask); /* 1 if equal, 0 otherwise */
 }
@@ -7804,88 +7805,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how) {
   solver_float* vtable = (solver_float*)valuetable;
   int32_t dnindex;
-
-  if (itemsperentry == 3) {
-    if (how == DISTRIBUTION) {
-      for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
-        dnode_t* dnode;
-        solver_float* myvalue;
-        int32link_t* int32link;
-#ifdef DEBUG
-        int32_t deps = 0;
-#endif /* DEBUG */
-
-        dnode = &Global.myMesh->dnodeTable[dnindex];
-        myvalue = vtable + dnode->ldnid * 3;
-
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
-#ifdef DEBUG
-          deps++;
-#endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
-          parentvalue[0] += d0;
-          parentvalue[1] += d1;
-          parentvalue[2] += d2;
-          int32link = int32link->next;
-        }
-
-#ifdef DEBUG
-        if (deps != (int)dnode->deps) {
-          fprintf(stderr, "Thread %d: compute_adjust distri: ", Global.myID);
-          fprintf(stderr, "deps don't match\n");
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-#endif /* DEBUG */
-      }
-    } else {
-      for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
-        dnode_t* dnode;
-        solver_float* myvalue;
-        int32link_t* int32link;
-#ifdef DEBUG
-        int32_t deps = 0;
-#endif /* DEBUG */
-
-        dnode = &Global.myMesh->dnodeTable[dnindex];
-        myvalue = vtable + dnode->ldnid * 3;
-        myvalue[0] = 0;
-        myvalue[1] = 0;
-        myvalue[2] = 0;
-
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
-
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
-#ifdef DEBUG
-          deps++;
-#endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
-          myvalue[0] += parentvalue[0] * invdeps;
-          myvalue[1] += parentvalue[1] * invdeps;
-          myvalue[2] += parentvalue[2] * invdeps;
-          int32link = int32link->next;
-        }
-
-#ifdef DEBUG
-        if (deps != (int)dnode->deps) {
-          fprintf(stderr, "Thread %d: compute_adjust assign: ", Global.myID);
-          fprintf(stderr, "deps don't match\n");
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-#endif /* DEBUG */
-      }
-    }
-
-    return;
-  }
 
   if (how == DISTRIBUTION) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
