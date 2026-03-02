@@ -3321,6 +3321,16 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t* activeSourceElemIndex = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
+    double* activeSourceDisplacements = NULL;
+    double* activeSourceStrike = NULL;
+    double* activeSourceDip = NULL;
+    double* activeSourceRake = NULL;
+    double* activeSourceArea = NULL;
+    double* activeSourceMaxSlip = NULL;
+    double* activeSourceDelay = NULL;
+    int32_t* activeSourceNt1 = NULL;
+    double* activeSourceDtFunction = NULL;
+    double** activeSourceSlipFunDiscrete = NULL;
 
   numStepsNecessary = theNumberOfTimeSteps;
 
@@ -3328,11 +3338,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   theIOInitTime          = -MPI_Wtime();
 
 
-  pntSrc.displacement = (double*)calloc(theNumberOfTimeSteps, sizeof(double) ); // Dorian says: changed to calloc for array initialization
-  if(pntSrc.displacement == NULL){
-    fprintf(stdout, "Err alloc displacments");
-    return -1;
-  }
+    pntSrc.displacement = NULL;
 
   //pntSrc.dt = theDeltaT;
   pntSrc.dt = theSRFHdt;
@@ -3411,6 +3417,53 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
 
+  if (activeSourceCount > 0) {
+      activeSourceDisplacements =
+          (double*)calloc((size_t)activeSourceCount * theNumberOfTimeSteps,
+                          sizeof(double));
+      activeSourceStrike = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceDip = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceRake = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceArea = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceMaxSlip = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceDelay = (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceNt1 = (int32_t*)malloc(sizeof(int32_t) * activeSourceCount);
+      activeSourceDtFunction =
+          (double*)malloc(sizeof(double) * activeSourceCount);
+      activeSourceSlipFunDiscrete =
+          (double**)malloc(sizeof(double*) * activeSourceCount);
+
+      if ((activeSourceDisplacements == NULL) || (activeSourceStrike == NULL) ||
+          (activeSourceDip == NULL) || (activeSourceRake == NULL) ||
+          (activeSourceArea == NULL) || (activeSourceMaxSlip == NULL) ||
+          (activeSourceDelay == NULL) || (activeSourceNt1 == NULL) ||
+          (activeSourceDtFunction == NULL) ||
+          (activeSourceSlipFunDiscrete == NULL)) {
+          fprintf(stdout, "Err allocating per-source displacement cache\n");
+          return -1;
+      }
+
+      for (iActive = 0; iActive < activeSourceCount; iActive++) {
+          iSrc = activeSourceList[iActive];
+
+          pntSrc.domainCoords = activeSourceDomainCoords[iActive];
+          pntSrc.displacement =
+              activeSourceDisplacements + ((size_t)iActive * theNumberOfTimeSteps);
+
+          update_point_source_srfh(&pntSrc, iSrc, utmZone);
+
+          activeSourceStrike[iActive] = pntSrc.strike;
+          activeSourceDip[iActive] = pntSrc.dip;
+          activeSourceRake[iActive] = pntSrc.rake;
+          activeSourceArea[iActive] = pntSrc.area;
+          activeSourceMaxSlip[iActive] = pntSrc.maxSlip;
+          activeSourceDelay[iActive] = pntSrc.delayTime;
+          activeSourceNt1[iActive] = pntSrc.nt1;
+          activeSourceDtFunction[iActive] = pntSrc.dtfunction;
+          activeSourceSlipFunDiscrete[iActive] = pntSrc.slipfundiscrete;
+      }
+  }
+
   memoryRequiredPerNode = sizeof( vector3D_t ) * theNumberOfTimeSteps;
 
   if(memoryRequiredPerNode > theForcesBufferSize ){
@@ -3471,8 +3524,18 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       if (is_forceinprocessor(iSrc, is_force_in_processor) == 1) {
           octant = activeSourceOctant[iActive];
           pntSrc.domainCoords = activeSourceDomainCoords[iActive];
-
-          update_point_source_srfh(&pntSrc, iSrc, utmZone);
+          pntSrc.strike = activeSourceStrike[iActive];
+          pntSrc.dip = activeSourceDip[iActive];
+          pntSrc.rake = activeSourceRake[iActive];
+          pntSrc.area = activeSourceArea[iActive];
+          pntSrc.maxSlip = activeSourceMaxSlip[iActive];
+          pntSrc.delayTime = activeSourceDelay[iActive];
+          pntSrc.nt1 = activeSourceNt1[iActive];
+          pntSrc.dtfunction = activeSourceDtFunction[iActive];
+          pntSrc.slipfundiscrete = activeSourceSlipFunDiscrete[iActive];
+          pntSrc.displacement =
+              activeSourceDisplacements + ((size_t)iActive * theNumberOfTimeSteps);
+          pntSrc.sourceFunctionType = (source_function_t)theSourceFunctionType;
           load_myForces_with_point_source(octant, &pntSrc,
                           is_force_in_processor, iCycle,
                           iSrc,
@@ -3543,6 +3606,17 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   if (myID == 0) {
       printf( "done...%.2f s", theConcatTime );
   }
+
+    free(activeSourceDisplacements);
+    free(activeSourceStrike);
+    free(activeSourceDip);
+    free(activeSourceRake);
+    free(activeSourceArea);
+    free(activeSourceMaxSlip);
+    free(activeSourceDelay);
+    free(activeSourceNt1);
+    free(activeSourceDtFunction);
+    free(activeSourceSlipFunDiscrete);
 
   return 1;
 }
