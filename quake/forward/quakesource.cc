@@ -3012,8 +3012,6 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
       close_file( &fpdsrc );
   }
 
-  free(pntSrc.displacement);
-
   WAIT;
   theForceGenerationTime += MPI_Wtime();
 
