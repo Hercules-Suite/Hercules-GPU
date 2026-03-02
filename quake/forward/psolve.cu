@@ -6187,13 +6187,6 @@ static void solver_run() {
     solver_load_disp_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Memory Copy");
 
-    Timer_Start("Compute Physics");
-    solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
-                                   Global.theK2);
-    solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
-                                 Global.theK2);
-    Timer_Stop("Compute Physics");
-
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
     solver_update_status(step, startingStep);
@@ -6208,12 +6201,7 @@ static void solver_run() {
                                      Param.theTotalSteps);
     Timer_Stop("Solver I/O");
 
-    Timer_Start("GPU Memory Copy");
-    solver_unload_forces_gpu(Global.mySolver, Global.myMesh);
-    Timer_Stop("GPU Memory Copy");
-
     Timer_Start("Compute Physics");
-    solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     solver_compute_force_source(step);
@@ -6226,10 +6214,21 @@ static void solver_run() {
 
     solver_compute_force_topography(Global.mySolver, Global.myMesh,
                                     Param.theDeltaTSquared);
-    /* solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1, */
-    /*                                Global.theK2); */
-    /* solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1, */
-    /*                              Global.theK2); */
+
+    solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
+                     Global.theK2);
+    solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
+                   Global.theK2);
+
+    Timer_Stop("Compute Physics");
+
+    Timer_Start("GPU Memory Copy");
+    solver_unload_forces_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Memory Copy");
+
+    Timer_Start("Compute Physics");
+    solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
+
     solver_compute_force_gravity(Global.mySolver, Global.myMesh, step);
     solver_compute_force_nonlinear(Global.mySolver, Global.myMesh,
                                    Param.theDeltaTSquared);
