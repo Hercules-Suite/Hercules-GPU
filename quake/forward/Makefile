@@ -8,6 +8,13 @@ endif
 include $(WORKDIR)/systemdef.mk
 include $(WORKDIR)/common.mk
 
+# Ensure optimized builds for both CUDA translation units and host C++ code.
+# User-provided CFLAGS from user.mk are propagated to C++ compilation and to
+# NVCC host compilation. NVFLAGS can still be overridden from user.mk.
+CXXFLAGS += $(CFLAGS)
+NVFLAGS ?= -O3
+NVFLAGS += -Xcompiler "$(CFLAGS)"
+
 # Earthquake related, set these in user.mk
 #
 # -DDAMPING

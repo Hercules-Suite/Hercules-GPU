@@ -4041,31 +4041,34 @@ static void solver_init() {
   /*     (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t)); */
   /* Global.mySolver->force = */
   /*     (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t)); */
-  Global.mySolver->tm1 =
-      (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
-  if (Global.mySolver->tm1 == NULL) {
-    fprintf(stderr, "Thread %d: Failed to allocate tm1 memory on host\n",
+  if (cudaMallocHost(&(Global.mySolver->tm1),
+                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
+      cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate tm1 pinned memory on host\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  Global.mySolver->tm2 =
-      (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
-  if (Global.mySolver->tm2 == NULL) {
-    fprintf(stderr, "Thread %d: Failed to allocate tm2 memory\n",
+  memset(Global.mySolver->tm1, 0, Global.myMesh->nharbored * sizeof(fvector_t));
+  if (cudaMallocHost(&(Global.mySolver->tm2),
+                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
+      cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate tm2 pinned memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-
-  Global.mySolver->force =
-      (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
-  if (Global.mySolver->force == NULL) {
-    fprintf(stderr, "Thread %d: Failed to allocate force memory\n",
+  memset(Global.mySolver->tm2, 0, Global.myMesh->nharbored * sizeof(fvector_t));
+  if (cudaMallocHost(&(Global.mySolver->force),
+                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
+      cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  memset(Global.mySolver->force, 0,
+         Global.myMesh->nharbored * sizeof(fvector_t));
 
   if (Param.theTypeOfDamping >= BKT) {
     Global.mySolver->conv_shear_1 =
@@ -4969,9 +4972,6 @@ static void solver_init() {
   k->handle = (char*)kernelDispCalc;
   k->blocksize =
       gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
-  if (k->blocksize > 512) {
-    k->blocksize = 512;
-  }
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
@@ -5168,9 +5168,9 @@ static void solver_delete() {
   free(Global.mySolver->eTable);
   free(Global.mySolver->nTable);
 
-  free(Global.mySolver->tm1);
-  free(Global.mySolver->tm2);
-  free(Global.mySolver->force);
+  cudaFreeHost(Global.mySolver->tm1);
+  cudaFreeHost(Global.mySolver->tm2);
+  cudaFreeHost(Global.mySolver->force);
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
