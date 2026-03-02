@@ -3444,7 +3444,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
           return -1;
       }
 
-      for (iActive = 0; iActive < activeSourceCount; iActive++) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 64)
 #endif
@@ -3471,7 +3470,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
           activeSourceDtFunction[iActive] = localSrc.dtfunction;
           activeSourceSlipFunDiscrete[iActive] = localSrc.slipfundiscrete;
       }
-  }
+    }
 
   memoryRequiredPerNode = sizeof( vector3D_t ) * theNumberOfTimeSteps;
 
