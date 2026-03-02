@@ -3338,13 +3338,17 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     double* activeSourceDtFunction = NULL;
     double** activeSourceSlipFunDiscrete = NULL;
 
-  numStepsNecessary = theNumberOfTimeSteps;
+    numStepsNecessary = theNumberOfTimeSteps;
 
-  theForceGenerationTime = -MPI_Wtime();
-  theIOInitTime          = -MPI_Wtime();
+    theForceGenerationTime = -MPI_Wtime();
+    theIOInitTime          = -MPI_Wtime();
 
-
-    pntSrc.displacement = NULL;
+    pntSrc.displacement =
+            (double*)calloc(theNumberOfTimeSteps, sizeof(double));
+    if (pntSrc.displacement == NULL) {
+        fprintf(stdout, "Err alloc displacments");
+        return -1;
+    }
 
   //pntSrc.dt = theDeltaT;
   pntSrc.dt = theSRFHdt;
@@ -3420,60 +3424,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
 
-  if (activeSourceCount > 0) {
-      activeSourceDisplacements =
-          (double*)calloc((size_t)activeSourceCount * theNumberOfTimeSteps,
-                          sizeof(double));
-      activeSourceStrike = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceDip = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceRake = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceArea = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceMaxSlip = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceDelay = (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceNt1 = (int32_t*)malloc(sizeof(int32_t) * activeSourceCount);
-      activeSourceDtFunction =
-          (double*)malloc(sizeof(double) * activeSourceCount);
-      activeSourceSlipFunDiscrete =
-          (double**)malloc(sizeof(double*) * activeSourceCount);
-
-      if ((activeSourceDisplacements == NULL) || (activeSourceStrike == NULL) ||
-          (activeSourceDip == NULL) || (activeSourceRake == NULL) ||
-          (activeSourceArea == NULL) || (activeSourceMaxSlip == NULL) ||
-          (activeSourceDelay == NULL) || (activeSourceNt1 == NULL) ||
-          (activeSourceDtFunction == NULL) ||
-          (activeSourceSlipFunDiscrete == NULL)) {
-          fprintf(stdout, "Err allocating per-source displacement cache\n");
-          return -1;
-      }
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 64)
-#endif
-      for (iActive = 0; iActive < activeSourceCount; iActive++) {
-          ptsrc_t localSrc;
-          int32_t localSourceIndex = activeSourceList[iActive];
-
-          memset(&localSrc, 0, sizeof(ptsrc_t));
-          localSrc.dt = theSRFHdt;
-          localSrc.numberOfTimeSteps = theNumberOfTimeSteps;
-          localSrc.domainCoords = activeSourceDomainCoords[iActive];
-          localSrc.displacement =
-              activeSourceDisplacements + ((size_t)iActive * theNumberOfTimeSteps);
-
-          update_point_source_srfh(&localSrc, localSourceIndex, utmZone);
-
-          activeSourceStrike[iActive] = localSrc.strike;
-          activeSourceDip[iActive] = localSrc.dip;
-          activeSourceRake[iActive] = localSrc.rake;
-          activeSourceArea[iActive] = localSrc.area;
-          activeSourceMaxSlip[iActive] = localSrc.maxSlip;
-          activeSourceDelay[iActive] = localSrc.delayTime;
-          activeSourceNt1[iActive] = localSrc.nt1;
-          activeSourceDtFunction[iActive] = localSrc.dtfunction;
-          activeSourceSlipFunDiscrete[iActive] = localSrc.slipfundiscrete;
-      }
-    }
-
   memoryRequiredPerNode = sizeof( vector3D_t ) * theNumberOfTimeSteps;
 
   if(memoryRequiredPerNode > theForcesBufferSize ){
@@ -3534,18 +3484,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       if (is_forceinprocessor(iSrc, is_force_in_processor) == 1) {
           octant = activeSourceOctant[iActive];
           pntSrc.domainCoords = activeSourceDomainCoords[iActive];
-          pntSrc.strike = activeSourceStrike[iActive];
-          pntSrc.dip = activeSourceDip[iActive];
-          pntSrc.rake = activeSourceRake[iActive];
-          pntSrc.area = activeSourceArea[iActive];
-          pntSrc.maxSlip = activeSourceMaxSlip[iActive];
-          pntSrc.delayTime = activeSourceDelay[iActive];
-          pntSrc.nt1 = activeSourceNt1[iActive];
-          pntSrc.dtfunction = activeSourceDtFunction[iActive];
-          pntSrc.slipfundiscrete = activeSourceSlipFunDiscrete[iActive];
-          pntSrc.displacement =
-              activeSourceDisplacements + ((size_t)iActive * theNumberOfTimeSteps);
-          pntSrc.sourceFunctionType = (source_function_t)theSourceFunctionType;
+
+          update_point_source_srfh(&pntSrc, iSrc, utmZone);
           load_myForces_with_point_source(octant, &pntSrc,
                           is_force_in_processor, iCycle,
                           iSrc,
@@ -3578,6 +3518,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   if (myID == 0) {	/* PE 0: close source description file */
       close_file( &fpdsrc );
   }
+
+    free(pntSrc.displacement);
 
   WAIT;
   theForceGenerationTime += MPI_Wtime();
@@ -3614,17 +3556,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   if (myID == 0) {
       printf( "done...%.2f s", theConcatTime );
   }
-
-    free(activeSourceDisplacements);
-    free(activeSourceStrike);
-    free(activeSourceDip);
-    free(activeSourceRake);
-    free(activeSourceArea);
-    free(activeSourceMaxSlip);
-    free(activeSourceDelay);
-    free(activeSourceNt1);
-    free(activeSourceDtFunction);
-    free(activeSourceSlipFunDiscrete);
 
   return 1;
 }
