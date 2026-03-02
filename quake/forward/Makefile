@@ -15,6 +15,10 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
+ifeq ($(filter -O%,$(CXXFLAGS)),)
+	CXXFLAGS += -O3
+endif
+
 # Earthquake related, set these in user.mk
 #
 # -DDAMPING

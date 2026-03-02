@@ -237,6 +237,8 @@ static char   theSourceOutputDir[256];
 /** Exported global configuration variable.  Default value = 100 MB */
 int theForcesBufferSize = 104857600;
 
+#define SOURCE_FILE_BUFFER_BYTES (8 * 1024 * 1024)
+
 /*------------------------FUNCTIONS-------------------------------------------*/
 
 void delete_files(const char *path) {
@@ -259,6 +261,12 @@ void delete_files(const char *path) {
         remove(glob_result.gl_pathv[i]);
     }
     globfree(&glob_result);
+}
+
+static void source_set_file_buffer(FILE* fp) {
+    if (fp != NULL) {
+        setvbuf(fp, NULL, _IOFBF, SOURCE_FILE_BUFFER_BYTES);
+    }
 }
 
 static int read_planewithkinks (FILE *fp);
@@ -1773,6 +1781,7 @@ open_file_in_dir( const char* directory, const char* file, const char* flags )
 
     if (NULL != path) {
 	fp = hu_fopen( path, flags );
+    source_set_file_buffer(fp);
 	free( path );
     }
 
@@ -1841,8 +1850,9 @@ FILE*
 source_open_forces_file( const char* flags )
 {
     const char* force_filename = source_get_local_forces_filename();
-
-    return hu_fopen( force_filename, flags );
+    FILE* fp = hu_fopen( force_filename, flags );
+    source_set_file_buffer(fp);
+    return fp;
 }
 
 
@@ -3892,6 +3902,7 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 
     /* read domain and source path from physics.in */
     FILE* fp = hu_fopen( physicsin, "r" );
+    source_set_file_buffer(fp);
 
     if (read_domain( fp ) != 0) {
 	return -1;
@@ -3902,10 +3913,13 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
     /* If the source output directory exists, remove all files named "force_process.*" 
     and "sourcedescription.out" as they are the temporary files created by the source
     generation process */
-    snprintf(force_process_file, sizeof(force_process_file), "%s/force_process.*", theSourceOutputDir);
-    snprintf(sourcedescription_file, sizeof(sourcedescription_file), "%s/sourcedescription.out", theSourceOutputDir);
-    delete_files(force_process_file);
-    delete_files(sourcedescription_file);
+    const char* skip_cleanup = getenv("HERCULES_SKIP_SOURCE_CLEANUP");
+    if (!(skip_cleanup && atoi(skip_cleanup) != 0)) {
+        snprintf(force_process_file, sizeof(force_process_file), "%s/force_process.*", theSourceOutputDir);
+        snprintf(sourcedescription_file, sizeof(sourcedescription_file), "%s/sourcedescription.out", theSourceOutputDir);
+        delete_files(force_process_file);
+        delete_files(sourcedescription_file);
+    }
 
     close_file( &fp );
 
@@ -3938,11 +3952,13 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 	    fprintf(stderr, "Error opening %s\n", slipin);
 	    return -1;
 	}
+        source_set_file_buffer(fpslip);
 
 	if ((fprake = fopen(rakein, "r" ) ) == NULL) {
 	    fprintf(stderr, "Error opening %s\n", rakein);
 	    return -1;
 	}
+        source_set_file_buffer(fprake);
 
 	if( read_plane_source( fpsrc, fpslip, fprake ) == -1 ) {
 	    return -1;
@@ -3971,6 +3987,13 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 	    fprintf(stderr, "Error opening srfh files\n" );
 	    return -1;
 	}
+        source_set_file_buffer(fpcoords);
+        source_set_file_buffer(fparea);
+        source_set_file_buffer(fpstrike);
+        source_set_file_buffer(fpdip);
+        source_set_file_buffer(fprake);
+        source_set_file_buffer(fpslip);
+        source_set_file_buffer(fpslipfun);
 
 	if (read_srfh_source( fpsrc, fpcoords, fparea, fpstrike, fpdip,
 			      fprake, fpslip, fpslipfun, globalDelayT,
