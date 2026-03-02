@@ -4970,11 +4970,10 @@ static void solver_init() {
   k = &Global.gpu_kernel[CUDA_KERNEL_DISPLACEMENT];
   strcpy(k->name, CUDA_KERNEL_NAME_DISPLACEMENT);
   k->handle = (char*)kernelDispCalc;
-  k->blocksize =
-      gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc,
-                        3 * 3 * sizeof(solver_float));
+    k->blocksize =
+      gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
   k->gridsize = (Global.myMesh->nharbored / k->blocksize) + 1;
-  k->sharedmem = k->blocksize * 3 * 3 * sizeof(solver_float);
+    k->sharedmem = 0;
 
   /* Save reference to kernel data in solver */
   Global.mySolver->gpu_kernel = &(Global.gpu_kernel[0]);

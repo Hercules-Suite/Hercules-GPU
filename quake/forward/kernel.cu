@@ -642,89 +642,50 @@ __global__  void kernelDispCalc(int32_t nharbored,
 				gpu_data_t* gpuData,
 				noyesflag_t printAccel)
 {
-    lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x; 
+    (void)nharbored;
+    (void)printAccel;
 
-    /* Shared memory for coalesced reads */
-    extern __shared__ solver_float disp[];
-    solver_float *t1, *t2, *f;
-    int32_t i, startnode, stride, offset;
+    lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+    solver_float mass2_minusaM, mass_minusaM, mass_simple;
+    fvector_t tm1Disp, tm2Disp, nodalForce;
 
-    fvector_t       *tm1Disp, *tm2Disp, *nodalForce;
-    solver_float     mass2_minusaM, mass_minusaM, mass_simple;
-
-    startnode = blockIdx.x * blockDim.x;
-
-    /* Since number of nodes may not be exactly divisible by block size,
-       check that we are not off the end of the node array */
-    if ((nindex >= gpuData->nharbored) || (startnode >= gpuData->nharbored)) {
+    if (nindex >= gpuData->nharbored) {
       return;
     }
 
-    stride = (startnode + blockDim.x >= gpuData->nharbored) ? (gpuData->nharbored - startnode) : blockDim.x;
+    tm1Disp = gpuData->tm1Device[nindex];
+    tm2Disp = gpuData->tm2Device[nindex];
+    nodalForce = gpuData->forceDevice[nindex];
 
-    offset = threadIdx.x;
-    //t1 = &disp[threadIdx.x];
-    //t2 = &disp[3*blockDim.x + threadIdx.x];
-    //f = &disp[6*blockDim.x + threadIdx.x];
-    t1 = &disp[threadIdx.x];
-    t2 = t1 + 3*blockDim.x;
-    f = t2 + 3*blockDim.x;;
-    for (i = 0; i < 3; i++) {
-      *t1 = *(((solver_float *)(gpuData->tm1Device + startnode)) + offset);
-      *t2 = *(((solver_float *)(gpuData->tm2Device + startnode)) + offset);
-      *f = *(((solver_float *)(gpuData->forceDevice + startnode)) + offset);
-      
-      offset += stride;
-      t1 += stride;
-      t2 += stride;
-      f += stride;
-    }
-
-    __syncthreads();
-
-    //tm1Disp = (fvector_t *)&disp[threadIdx.x*3];
-    //tm2Disp = (fvector_t *)&disp[3*blockDim.x + threadIdx.x*3];
-    //nodalForce = (fvector_t *)&disp[6*blockDim.x + threadIdx.x*3];
-    tm1Disp = (fvector_t *)&disp[threadIdx.x*3];
-    tm2Disp = tm1Disp + blockDim.x;
-    nodalForce = tm2Disp + blockDim.x;
     mass_simple = gpuData->mass_simpleArrayDevice[nindex];
-
     if (mass_simple > 0) {
-      /* total nodal forces */
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[0][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[0][nindex];
-      tm2Disp->f[0] = (nodalForce->f[0] + mass2_minusaM * tm1Disp->f[0]
-			       - mass_minusaM  * tm2Disp->f[0]) / mass_simple;
+      tm2Disp.f[0] =
+          (nodalForce.f[0] + mass2_minusaM * tm1Disp.f[0] -
+           mass_minusaM * tm2Disp.f[0]) /
+          mass_simple;
 
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[1][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[1][nindex];
-      tm2Disp->f[1] = (nodalForce->f[1] + mass2_minusaM * tm1Disp->f[1]
-			       - mass_minusaM  * tm2Disp->f[1]) / mass_simple;
+      tm2Disp.f[1] =
+          (nodalForce.f[1] + mass2_minusaM * tm1Disp.f[1] -
+           mass_minusaM * tm2Disp.f[1]) /
+          mass_simple;
 
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[2][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[2][nindex];
-      tm2Disp->f[2] = (nodalForce->f[2] + mass2_minusaM * tm1Disp->f[2]
-			       - mass_minusaM  * tm2Disp->f[2]) / mass_simple;
+      tm2Disp.f[2] =
+          (nodalForce.f[2] + mass2_minusaM * tm1Disp.f[2] -
+           mass_minusaM * tm2Disp.f[2]) /
+          mass_simple;
     } else {
-      tm2Disp->f[0] = 0;
-      tm2Disp->f[1] = 0;
-      tm2Disp->f[2] = 0;
+      tm2Disp.f[0] = 0;
+      tm2Disp.f[1] = 0;
+      tm2Disp.f[2] = 0;
     }
 
-    __syncthreads();
-
-    /* overwrite tm2 */
-    offset = threadIdx.x;
-    t2 = &disp[3*blockDim.x + threadIdx.x];
-    for (i = 0; i < 3; i++) {
-      *(((solver_float *)(gpuData->tm2Device + startnode)) + offset) = *t2;
-
-      offset += stride;
-      t2 += stride;
-    }
-
-    return;
+    gpuData->tm2Device[nindex] = tm2Disp;
 }
 
 
