@@ -1174,7 +1174,7 @@ load_myForces_with_point_source(
 	char*     is_force_in_processor,
 	int32_t   cycle,
     int32_t   iForce,
-    int32_t   cached_eindex
+    int32_t*  cached_eindex
 	)
 {
 
@@ -1195,10 +1195,13 @@ load_myForces_with_point_source(
     center_y = myMesh->ticksize * (octant->ly + edgeticks / 2);
     center_z = myMesh->ticksize * (octant->lz + edgeticks / 2);
 
-    if (cached_eindex >= 0) {
-    eindex = cached_eindex;
+    if ((cached_eindex != NULL) && (*cached_eindex >= 0)) {
+	eindex = *cached_eindex;
     } else {
     eindex = source_find_element_for_octant(octant);
+        if (cached_eindex != NULL) {
+            *cached_eindex = eindex;
+        }
     }
 
     if (eindex < 0) {
@@ -2991,9 +2994,10 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 
 	      /* This is the part that has to be reviewed */
 	      update_point_source( &pntSrc,currentDownDip,currentAlongStrike,area);
+          int32_t elem_cache = -1;
 	      load_myForces_with_point_source( octant, &pntSrc,
 					       is_force_in_processor, iCycle,
-                           iForce, -1 );
+                           iForce, &elem_cache );
 	    }
 	  }
 	  iForce += 1;
@@ -3283,8 +3287,9 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
 
     compute_source_function( &pntSrc );
     myNumberOfNodesLoaded = 0;
+    int32_t elem_cache = -1;
     load_myForces_with_point_source( octant, &pntSrc, &is_force_in_processor,
-				     0, 0, -1 );
+				     0, 0, &elem_cache );
 
     FILE* fptmpsrc = source_open_forces_file( "w" );
 
@@ -3381,6 +3386,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       return -1;
   }
 
+  for (iSrc = 0; iSrc < theNumberOfPointSources; iSrc++) {
+      activeSourceElemIndex[iSrc] = -1;
+  }
+
   myNumberOfNodesLoaded =0;
   iForce=0;
   myNumberOfForces=0;
@@ -3402,13 +3411,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     activeSourceList[activeSourceCount] = iSrc;
     activeSourceOctant[activeSourceCount] = octant;
     activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
-    activeSourceElemIndex[activeSourceCount] =
-        source_find_element_for_octant(octant);
-    if (activeSourceElemIndex[activeSourceCount] < 0) {
-        fprintf(stderr, "Thread %d: source_init: failed to map octant to element\n", myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-    }
     activeSourceCount++;
     }
     iForce+=1;
@@ -3547,7 +3549,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
           load_myForces_with_point_source(octant, &pntSrc,
                           is_force_in_processor, iCycle,
                           iSrc,
-                          activeSourceElemIndex[iActive]);
+                          &(activeSourceElemIndex[iActive]));
 
           if (myID == 0 && iCycle == 0) {
           fprintf(fpdsrc, "%f %f %f %f %f %f %f %f\n",
