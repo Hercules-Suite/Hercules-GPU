@@ -3567,8 +3567,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       close_file( &fpdsrc );
   }
 
-  free(pntSrc.displacement);
-
   WAIT;
   theForceGenerationTime += MPI_Wtime();
 
