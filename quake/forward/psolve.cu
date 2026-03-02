@@ -4948,7 +4948,7 @@ static void solver_init() {
   k->handle = (char*)kernelStiffnessCalcLocal;
   k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                    (char*)kernelStiffnessCalcLocal, 0);
-  k->gridsize = (Global.myMesh->lenum / k->blocksize) + 1;
+  k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_CONV];
@@ -4956,7 +4956,7 @@ static void solver_init() {
   k->handle = (char*)kernelDampingCalcConv;
   k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                    (char*)kernelDampingCalcConv, 0);
-  k->gridsize = (Global.myMesh->lenum / k->blocksize) + 1;
+  k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_FORCE];
@@ -4964,15 +4964,18 @@ static void solver_init() {
   k->handle = (char*)kernelDampingCalcLocal;
   k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                    (char*)kernelDampingCalcLocal, 0);
-  k->gridsize = (Global.myMesh->lenum / k->blocksize) + 1;
+  k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DISPLACEMENT];
   strcpy(k->name, CUDA_KERNEL_NAME_DISPLACEMENT);
   k->handle = (char*)kernelDispCalc;
-    k->blocksize =
+  k->blocksize =
       gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
-  k->gridsize = (Global.myMesh->nharbored / k->blocksize) + 1;
+  if (k->blocksize > 512) {
+    k->blocksize = 512;
+  }
+  k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
   /* Save reference to kernel data in solver */
@@ -5863,16 +5866,11 @@ static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Synchronize for beginning of timestep */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
-  /* Copy displacements for both time levels (tm1 and tm2).
-   * Host pointers are swapped every step, so both device buffers must
-   * be refreshed to keep recurrence state consistent. */
+  /* Copy current tm1 displacement only.
+   * tm2 is maintained on device by the end-of-step device pointer swap in
+   * solver_reset_gpu(), matching legacy GPU behavior and reducing PCIe/NVLink
+   * traffic by one full displacement vector per step. */
   cudaMemcpyAsync(solver->gpuData->tm1Device, solver->tm1,
-                  solver->gpuData->nharbored * sizeof(fvector_t),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      solver->gpuData->nharbored * sizeof(fvector_t);
-
-  cudaMemcpyAsync(solver->gpuData->tm2Device, solver->tm2,
                   solver->gpuData->nharbored * sizeof(fvector_t),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
