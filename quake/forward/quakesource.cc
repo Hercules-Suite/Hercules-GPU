@@ -1029,6 +1029,9 @@ print_myForces_filepercycle_nodes(const char* filenameroot, int cycle,
 
     sprintf(forcefile, "%s.%d", filenameroot, cycle);
     fp = fopen(forcefile, "w");
+    if (fp == NULL) {
+        solver_abort(__FUNCTION_NAME, "fopen", "Could not open %s for write", forcefile);
+    }
 
     fwrite(&numberOfNodes, sizeof(int32_t), 1, fp);
 
@@ -1036,6 +1039,11 @@ print_myForces_filepercycle_nodes(const char* filenameroot, int cycle,
         int32_t idx;
         for (idx = 0; idx < numberOfNodes; idx++) {
             int32_t lnid = cycleNodes[idx];
+            if (myForces[lnid] == NULL) {
+                solver_abort(__FUNCTION_NAME, NULL,
+                             "NULL force buffer for lnid=%d cycle=%d idx=%d",
+                             lnid, cycle, idx);
+            }
             fwrite(myForces[lnid][j].x, sizeof(double), 3, fp);
         }
     }
@@ -3552,6 +3560,34 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       myNumberOfCycles++;
   }
 
+    if (myID == 0) {
+#ifdef PROJ
+            fprintf(stdout,
+                            "\n SRFH debug: PROJ=ON activeSources=%d cycles=%d timesteps=%d dt=%g",
+                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
+                            theSRFHdt);
+#else
+            fprintf(stdout,
+                            "\n SRFH debug: PROJ=OFF activeSources=%d cycles=%d timesteps=%d dt=%g",
+                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
+                            theSRFHdt);
+#endif
+    }
+
+  /* go through myForceCycle and put the cycle for each node loaded */
+  iCycle = 0;
+  iInternal = 0;
+  for ( iNode = 0; iNode <  myMesh->nharbored; iNode++){
+    if( myForcesCycle[iNode] !=-1 ){
+	myForcesCycle[ iNode ] = iCycle;
+	iInternal +=1;
+	if(iInternal == nodesPerCycle) {
+	    iCycle +=1;
+	    iInternal = 0;
+	}
+    }
+  }
+
   cycleNodeCounts = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
   cycleNodeOffsets = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
   cycleNodeCursor = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
@@ -3584,34 +3620,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       if (c >= 0) {
           cycleNodeList[cycleNodeCursor[c]++] = iNode;
       }
-  }
-
-    if (myID == 0) {
-#ifdef PROJ
-            fprintf(stdout,
-                            "\n SRFH debug: PROJ=ON activeSources=%d cycles=%d timesteps=%d dt=%g",
-                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
-                            theSRFHdt);
-#else
-            fprintf(stdout,
-                            "\n SRFH debug: PROJ=OFF activeSources=%d cycles=%d timesteps=%d dt=%g",
-                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
-                            theSRFHdt);
-#endif
-    }
-
-  /* go through myForceCycle and put the cycle for each node loaded */
-  iCycle = 0;
-  iInternal = 0;
-  for ( iNode = 0; iNode <  myMesh->nharbored; iNode++){
-    if( myForcesCycle[iNode] !=-1 ){
-	myForcesCycle[ iNode ] = iCycle;
-	iInternal +=1;
-	if(iInternal == nodesPerCycle) {
-	    iCycle +=1;
-	    iInternal = 0;
-	}
-    }
   }
 
   /* PE 0: open source description file */
