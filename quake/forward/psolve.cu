@@ -84,6 +84,7 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
+static fvector_t* g_forceHostMappedDevice = NULL;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -4059,13 +4060,27 @@ static void solver_init() {
     exit(1);
   }
   memset(Global.mySolver->tm2, 0, Global.myMesh->nharbored * sizeof(fvector_t));
-  if (cudaMallocHost(&(Global.mySolver->force),
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-      cudaSuccess) {
-    fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  {
+    cudaError_t cerror;
+    cerror = cudaHostAlloc((void**)&(Global.mySolver->force),
+                           Global.myMesh->nharbored * sizeof(fvector_t),
+                           cudaHostAllocMapped);
+    if (cerror != cudaSuccess) {
+      cerror = cudaMallocHost((void**)&(Global.mySolver->force),
+                              Global.myMesh->nharbored * sizeof(fvector_t));
+    }
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    cerror = cudaHostGetDevicePointer((void**)&g_forceHostMappedDevice,
+                                      (void*)Global.mySolver->force, 0);
+    if (cerror != cudaSuccess) {
+      g_forceHostMappedDevice = NULL;
+    }
   }
   memset(Global.mySolver->force, 0,
          Global.myMesh->nharbored * sizeof(fvector_t));
@@ -5171,6 +5186,7 @@ static void solver_delete() {
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
   cudaFreeHost(Global.mySolver->force);
+  g_forceHostMappedDevice = NULL;
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
@@ -6018,7 +6034,13 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   /* zero out the force vector for all nodes */
   Timer_Start("Disp host force clear");
-  memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  if (g_forceHostMappedDevice != NULL) {
+    cudaMemsetAsync(g_forceHostMappedDevice, 0,
+                    sizeof(fvector_t) * mesh->nharbored,
+                    solver->streams[CUDA_STREAM_MAIN]);
+  } else {
+    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  }
   Timer_Stop("Disp host force clear");
 
   /* Uncomment for timing tests */
