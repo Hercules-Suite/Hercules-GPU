@@ -15,15 +15,6 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
-# Optional OpenMP acceleration for SRFH source initialization.
-# Enable with: make USE_OPENMP_SRFH=1
-ifeq ($(USE_OPENMP_SRFH),1)
-	CXXFLAGS += -fopenmp
-	NVFLAGS += -Xcompiler -fopenmp
-	LDFLAGS += -fopenmp
-	CPPFLAGS += -DUSE_OPENMP_SRFH
-endif
-
 ifeq ($(filter -O%,$(CXXFLAGS)),)
 	CXXFLAGS += -O3
 endif

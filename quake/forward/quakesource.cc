@@ -86,9 +86,6 @@
 #include <mpi.h>
 #include <glob.h>
 #include <unordered_map>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 #include "cvm.h"
 #include "commutil.h"
@@ -1020,40 +1017,6 @@ print_myForces_filepercycle( const char *filenameroot, int cycle )
 
     fclose(fp);
 }
-
-static void
-print_myForces_filepercycle_nodes(const char* filenameroot, int cycle,
-                                  const int32_t* cycleNodes,
-                                  int32_t numberOfNodes)
-{
-    int32_t j;
-    char forcefile[256];
-    FILE* fp;
-
-    sprintf(forcefile, "%s.%d", filenameroot, cycle);
-    fp = fopen(forcefile, "w");
-    if (fp == NULL) {
-        solver_abort(__FUNCTION_NAME, "fopen", "Could not open %s for write", forcefile);
-    }
-
-    fwrite(&numberOfNodes, sizeof(int32_t), 1, fp);
-
-    for (j = 0; j < theNumberOfTimeSteps; j++) {
-        int32_t idx;
-        for (idx = 0; idx < numberOfNodes; idx++) {
-            int32_t lnid = cycleNodes[idx];
-            if (myForces[lnid] == NULL) {
-                solver_abort(__FUNCTION_NAME, NULL,
-                             "NULL force buffer for lnid=%d cycle=%d idx=%d",
-                             lnid, cycle, idx);
-            }
-            fwrite(myForces[lnid][j].x, sizeof(double), 3, fp);
-        }
-    }
-
-    fclose(fp);
-}
-
 
 /**
  * print_myForce:
@@ -2611,6 +2574,56 @@ print_header_myForces( FILE* fptmpsrc, int32_t loaded_node_count )
 
 
 /*
+ * Write one SRFH cycle directly into the final force file layout.
+ * Layout is transposed by time, with nodes ordered by the header order.
+ */
+static void
+write_myForces_cycle_direct(FILE* fptmpsrc,
+                            int64_t data_start_offset,
+                            int32_t loaded_node_count,
+                            int32_t cycle_node_offset,
+                            const int32_t* cycle_nodes,
+                            int32_t cycle_node_count,
+                            double* cycle_write_buffer)
+{
+    int32_t iTime, iNode;
+
+    if (cycle_node_count <= 0) {
+        return;
+    }
+
+    for (iTime = 0; iTime < theNumberOfTimeSteps; iTime++) {
+        int64_t write_offset;
+        size_t values_to_write;
+        size_t values_written;
+
+        for (iNode = 0; iNode < cycle_node_count; iNode++) {
+            int32_t lnid = cycle_nodes[iNode];
+            memcpy(&cycle_write_buffer[3 * iNode], myForces[lnid][iTime].x,
+                   3 * sizeof(double));
+        }
+
+        write_offset = data_start_offset +
+            ((int64_t)iTime * (int64_t)loaded_node_count +
+             (int64_t)cycle_node_offset) * (int64_t)(3 * sizeof(double));
+
+        if (fseeko(fptmpsrc, (off_t)write_offset, SEEK_SET) != 0) {
+            solver_abort(__FUNCTION_NAME, "fseeko",
+                         "Failed to seek to offset %lld", (long long)write_offset);
+        }
+
+        values_to_write = (size_t)(3 * cycle_node_count);
+        values_written = fwrite(cycle_write_buffer, sizeof(double),
+                                values_to_write, fptmpsrc);
+        if (values_written != values_to_write) {
+            solver_abort(__FUNCTION_NAME, "fwrite",
+                         "Failed direct write for cycle chunk, time=%d", iTime);
+        }
+    }
+}
+
+
+/*
  *
  *  concat_filespercylce_in_fptmpsrc:
  *
@@ -3429,9 +3442,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   octant_t *octant;
   ptsrc_t pntSrc;
   int ActivePE;
-    const char* cycle_tmp_dir;
-    char cycle_files_root[512];
-    char cycle_files_glob[576];
+        int32_t maxCycleNodes = 0;
+        double* cycleWriteBuffer = NULL;
+        int64_t sourceDataStartOffset = 0;
 
   /* i/o related vars */
   int32_t nodesPerCycle, memoryRequiredPerNode;
@@ -3441,9 +3454,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t* activeSourceList = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
-    octant_t** prepassOctant = NULL;
-    vector3D_t* prepassDomainCoords = NULL;
-    char* prepassIsActive = NULL;
         int32_t* cycleNodeCounts = NULL;
         int32_t* cycleNodeOffsets = NULL;
         int32_t* cycleNodeCursor = NULL;
@@ -3498,14 +3508,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
   activeSourceDomainCoords =
       (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
-  prepassOctant = (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
-  prepassDomainCoords =
-      (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
-  prepassIsActive = (char*)calloc(theNumberOfPointSources, sizeof(char));
 
   if ((activeSourceList == NULL) || (activeSourceOctant == NULL) ||
-      (activeSourceDomainCoords == NULL) || (prepassOctant == NULL) ||
-      (prepassDomainCoords == NULL) || (prepassIsActive == NULL)) {
+      (activeSourceDomainCoords == NULL)) {
       fprintf(stdout, "Err allocating active source cache\n");
       return -1;
   }
@@ -3516,64 +3521,32 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
     sourcePrepassTime = -MPI_Wtime();
 
-  /* Parallel, read-only prepass: source coordinates + ownership test. */
-#if defined(_OPENMP) && defined(USE_OPENMP_SRFH)
-#pragma omp parallel for schedule(static)
-#endif
-  for (iSrc = 0; iSrc < theNumberOfPointSources; iSrc++) {
-      vector3D_t srcDomainCoords = compute_domain_coords_linearinterp(
-          theSourceLonArray[iSrc], theSourceLatArray[iSrc],
-          theSurfaceCornersLong, theSurfaceCornersLat,
-          theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-      octant_t* srcOctant = NULL;
+  /* Go through the fault */
+  for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
 
-      srcDomainCoords.x[2] = theSourceDepthArray[iSrc];
-      prepassDomainCoords[iSrc] = srcDomainCoords;
+    pntSrc.domainCoords = compute_domain_coords_linearinterp(
+        theSourceLonArray[iSrc], theSourceLatArray[iSrc],
+        theSurfaceCornersLong, theSurfaceCornersLat,
+        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+    pntSrc.domainCoords.x[2]= theSourceDepthArray[iSrc];
 
-      if (search_point(srcDomainCoords, &srcOctant) == 1) {
-          prepassIsActive[iSrc] = 1;
-          prepassOctant[iSrc] = srcOctant;
-      }
-      else {
-          prepassIsActive[iSrc] = 0;
-          prepassOctant[iSrc] = NULL;
-      }
+    /* Check if this force is contained in this processor */
+    if ( search_point( pntSrc.domainCoords, &octant ) == 1){
+	tag_myForcesCycle ( octant, &pntSrc );
+	update_forceinprocessor( iForce, is_force_in_processor, 1);
+	myNumberOfForces +=1;
+    activeSourceList[activeSourceCount] = iSrc;
+    activeSourceOctant[activeSourceCount] = octant;
+    activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
+    activeSourceCount++;
+    }
+    iForce+=1;
   }
-
-  /* Serial commit pass: mutate myForcesCycle/bitmasks/active lists. */
-  for (iSrc = 0; iSrc < theNumberOfPointSources; iSrc++) {
-      if (prepassIsActive[iSrc]) {
-          pntSrc.domainCoords = prepassDomainCoords[iSrc];
-          octant = prepassOctant[iSrc];
-          tag_myForcesCycle(octant, &pntSrc);
-          update_forceinprocessor(iSrc, is_force_in_processor, 1);
-          myNumberOfForces += 1;
-          activeSourceList[activeSourceCount] = iSrc;
-          activeSourceOctant[activeSourceCount] = octant;
-          activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
-          activeSourceCount++;
-      }
-  }
-
-  iForce = theNumberOfPointSources;
 
   WAIT;
     sourcePrepassTime += MPI_Wtime();
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
-
-  cycle_tmp_dir = getenv("HERCULES_SOURCE_TMPDIR");
-  if (cycle_tmp_dir == NULL || cycle_tmp_dir[0] == '\0') {
-      cycle_tmp_dir = getenv("TMPDIR");
-  }
-  if (cycle_tmp_dir == NULL || cycle_tmp_dir[0] == '\0') {
-      cycle_tmp_dir = "/tmp";
-  }
-  snprintf(cycle_files_root, sizeof(cycle_files_root),
-           "%s/hercules_force_process.%d.%d", cycle_tmp_dir, myID,
-           (int)getpid());
-  snprintf(cycle_files_glob, sizeof(cycle_files_glob), "%s.*",
-           cycle_files_root);
 
   memoryRequiredPerNode = sizeof( vector3D_t ) * theNumberOfTimeSteps;
 
@@ -3664,6 +3637,24 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       ActivePE=1;
       fptmpsrc = source_open_forces_file( "w" );
       print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
+      sourceDataStartOffset =
+          (int64_t)sizeof(int32_t) +
+          (int64_t)myNumberOfNodesLoaded * (int64_t)sizeof(int32_t);
+
+      for (iCycle = 0; iCycle < myNumberOfCycles; iCycle++) {
+          if (cycleNodeCounts[iCycle] > maxCycleNodes) {
+              maxCycleNodes = cycleNodeCounts[iCycle];
+          }
+      }
+
+      if (maxCycleNodes > 0) {
+          cycleWriteBuffer = (double*)malloc(sizeof(double) *
+                                             (size_t)(3 * maxCycleNodes));
+          if (cycleWriteBuffer == NULL) {
+              fprintf(stdout, "Err allocating direct-write cycle buffer\n");
+              return -1;
+          }
+      }
   }
   
   WAIT;
@@ -3716,12 +3707,14 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     }
 
     if(ActivePE){
-    const char* local_forces_filename = cycle_files_root;
     const int32_t* cycleNodes = cycleNodeList + cycleNodeOffsets[iCycle];
+    int32_t cycleNodeOffset = cycleNodeOffsets[iCycle];
     int32_t cycleNodeCount = cycleNodeCounts[iCycle];
 	sourceWriteTime -= MPI_Wtime();
-    print_myForces_filepercycle_nodes(local_forces_filename, iCycle,
-                      cycleNodes, cycleNodeCount);
+    write_myForces_cycle_direct(fptmpsrc, sourceDataStartOffset,
+                                myNumberOfNodesLoaded, cycleNodeOffset,
+                                cycleNodes, cycleNodeCount,
+                                cycleWriteBuffer);
 	sourceWriteTime += MPI_Wtime();
     }
 
@@ -3746,26 +3739,15 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   }
 
   theConcatTime = -MPI_Wtime();
-  /* concatenation process */
-  if (myNumberOfCycles != 0) {
-      if(ActivePE){
-      const char* local_forces_filename = cycle_files_root;
-	  concat_filespercycle_in_fptmpsrc( local_forces_filename, fptmpsrc,
-			    myNumberOfCycles );
-      delete_files(cycle_files_glob);
-      }
-  }
 
   if(ActivePE){
       close_file( &fptmpsrc );
+      free(cycleWriteBuffer);
   }
 
     free(activeSourceList);
     free(activeSourceOctant);
     free(activeSourceDomainCoords);
-    free(prepassOctant);
-    free(prepassDomainCoords);
-    free(prepassIsActive);
     free(cycleNodeCounts);
     free(cycleNodeOffsets);
     free(cycleNodeCursor);
