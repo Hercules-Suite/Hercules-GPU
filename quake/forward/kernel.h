@@ -65,10 +65,6 @@ __global__  void kernelDispCalc(int32_t nharbored,
 				gpu_data_t* gpuData,
                                 noyesflag_t printAccel);
 
-__global__  void kernelDispCalcShared(int32_t nharbored,
-				      gpu_data_t* gpuData,
-                                      noyesflag_t printAccel);
-
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);

@@ -84,8 +84,6 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
-static int32_t* g_dnodeParentIds = NULL;
-static uint8_t* g_dnodeParentCount = NULL;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -162,8 +160,6 @@ static void mesh_correct_properties(etree_t* cvm);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
-static void solver_init_dnode_parent_cache(mesh_t* mesh);
-static void solver_free_dnode_parent_cache(void);
 static void solver_init(void);
 static void solver_printstat(mysolver_t* solver);
 static void solver_delete(void);
@@ -4097,8 +4093,6 @@ static void solver_init() {
   Global.mySolver->dn_sched = schedule_new();
   Global.mySolver->an_sched = schedule_new();
 
-  solver_init_dnode_parent_cache(Global.myMesh);
-
   if (Param.theTypeOfDamping >= BKT3) {
     Global.mySolver->conv_shear_3 =
         (fvector_t*)calloc(8 * Global.myMesh->lenum, sizeof(fvector_t));
@@ -4978,23 +4972,6 @@ static void solver_init() {
   k->handle = (char*)kernelDispCalc;
   k->blocksize =
       gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
-  {
-    const char* disp_block_env = getenv("HERCULES_GPU_DISP_BLOCKSIZE");
-    if ((disp_block_env != NULL) && (disp_block_env[0] != '\0')) {
-      int requested = atoi(disp_block_env);
-      int warp = Global.mySolver->gpu_spec->warp_size;
-      if (requested >= warp) {
-        requested = (requested / warp) * warp;
-        if (requested > 0 && requested <= Global.mySolver->gpu_spec->max_threads) {
-          k->blocksize = requested;
-          if (Global.myID == 0) {
-            printf("Overriding displacement block size via HERCULES_GPU_DISP_BLOCKSIZE=%d\n",
-                   k->blocksize);
-          }
-        }
-      }
-    }
-  }
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
@@ -5178,8 +5155,6 @@ static void solver_delete() {
   }
   g_dampingElemCountGPU = -1;
 
-  solver_free_dnode_parent_cache();
-
   /* Destroy streams */
   for (int i = 0; i < MAX_CUDA_STREAM; i++) {
     cudaStreamDestroy(Global.mySolver->streams[i]);
@@ -5213,55 +5188,6 @@ static void solver_delete() {
   schedule_delete(Global.mySolver->an_sched);
 
   free(Global.mySolver);
-}
-
-static void solver_free_dnode_parent_cache(void) {
-  if (g_dnodeParentIds != NULL) {
-    free(g_dnodeParentIds);
-    g_dnodeParentIds = NULL;
-  }
-  if (g_dnodeParentCount != NULL) {
-    free(g_dnodeParentCount);
-    g_dnodeParentCount = NULL;
-  }
-}
-
-static void solver_init_dnode_parent_cache(mesh_t* mesh) {
-  int32_t dnindex;
-
-  solver_free_dnode_parent_cache();
-
-  if (mesh->ldnnum <= 0) {
-    return;
-  }
-
-  g_dnodeParentIds = (int32_t*)malloc(sizeof(int32_t) * mesh->ldnnum * 4);
-  g_dnodeParentCount = (uint8_t*)malloc(sizeof(uint8_t) * mesh->ldnnum);
-
-  if ((g_dnodeParentIds == NULL) || (g_dnodeParentCount == NULL)) {
-    solver_free_dnode_parent_cache();
-    return;
-  }
-
-  for (dnindex = 0; dnindex < mesh->ldnnum; dnindex++) {
-    dnode_t* dnode = &mesh->dnodeTable[dnindex];
-    int32link_t* link = dnode->lanid;
-    int32_t base = dnindex * 4;
-    int32_t count = 0;
-
-    g_dnodeParentIds[base + 0] = -1;
-    g_dnodeParentIds[base + 1] = -1;
-    g_dnodeParentIds[base + 2] = -1;
-    g_dnodeParentIds[base + 3] = -1;
-
-    while ((link != NULL) && (count < 4)) {
-      g_dnodeParentIds[base + count] = link->id;
-      count++;
-      link = link->next;
-    }
-
-    g_dnodeParentCount[dnindex] = (uint8_t)count;
-  }
 }
 
 static int read_myForces(int32_t timestep, double dt) {
@@ -5960,10 +5886,6 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
-  /* Create an event for the force transfer */
-  cudaEventRecord(solver->events[CUDA_EVENT_FORCE_WAIT],
-                  solver->streams[CUDA_STREAM_MAIN]);
-
   /* Uncomment for timing tests */
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
@@ -6037,35 +5959,18 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  Timer_Start("Displacement stream wait");
+  Timer_Start("Compute new displacement");
 
   /* Uncomment for timing tests */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
-  Timer_Stop("Displacement stream wait");
+  Timer_Stop("Compute new displacement");
   return;
 }
 
 /** Compute new displacements of my harbored nodes */
 static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
                                             mesh_t* mesh) {
-  static int disp_shared_mode = -1;
-
-  if (disp_shared_mode < 0) {
-    const char* use_shared = getenv("HERCULES_GPU_DISP_SHARED");
-    if ((use_shared != NULL) &&
-        ((strcmp(use_shared, "1") == 0) ||
-         (strcasecmp(use_shared, "yes") == 0) ||
-         (strcasecmp(use_shared, "true") == 0))) {
-      disp_shared_mode = 1;
-      if (myID == 0) {
-        printf("Using shared-memory displacement kernel (HERCULES_GPU_DISP_SHARED=1)\n");
-      }
-    } else {
-      disp_shared_mode = 0;
-    }
-  }
-
   Timer_Start("Compute new displacement");
 
   /* Ensure host forces have been copied to device */
@@ -6077,18 +5982,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   cudaGetLastError();
 
-  if (disp_shared_mode == 1) {
-    int sharedmem_disp = (int)(9 * blocksize * sizeof(solver_float));
-    kernelDispCalcShared<<<gridsize, blocksize, sharedmem_disp,
-                           solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->nharbored, solver->gpuDataDevice,
-        Param.printStationAccelerations);
-  } else {
-    kernelDispCalc<<<gridsize, blocksize, sharedmem,
-                     solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->nharbored, solver->gpuDataDevice,
-        Param.printStationAccelerations);
-  }
+  kernelDispCalc<<<gridsize, blocksize, sharedmem,
+                   solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->nharbored, solver->gpuDataDevice, Param.printStationAccelerations);
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -6224,10 +6120,6 @@ static void solver_run_collect_timers(void) {
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
-  if (Timer_Exists("Displacement stream wait")) {
-    Timer_Reduce("Displacement stream wait", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("2nd compute adjust (assignment)",
@@ -7911,6 +7803,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
+        int32link_t* int32link;
 #ifdef DEBUG
         int32_t deps = 0;
 #endif /* DEBUG */
@@ -7918,45 +7811,21 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         dnode = &Global.myMesh->dnodeTable[dnindex];
         myvalue = vtable + dnode->ldnid * 3;
 
-        uint32_t deps_local = dnode->deps;
-        int32_t* parents = NULL;
-        int32_t pcount = 0;
-        if ((g_dnodeParentIds != NULL) && (g_dnodeParentCount != NULL)) {
-          parents = &g_dnodeParentIds[dnindex * 4];
-          pcount = g_dnodeParentCount[dnindex];
-          if (pcount > 0) {
-            deps_local = (uint32_t)pcount;
-          }
-        }
-
-        const solver_float invdeps = (solver_float)1.0 / deps_local;
+        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        if (pcount > 0) {
-          int32_t p;
-          for (p = 0; p < pcount; p++) {
+        int32link = dnode->lanid;
+        while (int32link != NULL) {
 #ifdef DEBUG
-            deps++;
+          deps++;
 #endif
-            solver_float* parentvalue = vtable + parents[p] * 3;
-            parentvalue[0] += d0;
-            parentvalue[1] += d1;
-            parentvalue[2] += d2;
-          }
-        } else {
-          int32link_t* int32link = dnode->lanid;
-          while (int32link != NULL) {
-#ifdef DEBUG
-            deps++;
-#endif
-            solver_float* parentvalue = vtable + int32link->id * 3;
-            parentvalue[0] += d0;
-            parentvalue[1] += d1;
-            parentvalue[2] += d2;
-            int32link = int32link->next;
-          }
+          solver_float* parentvalue = vtable + int32link->id * 3;
+          parentvalue[0] += d0;
+          parentvalue[1] += d1;
+          parentvalue[2] += d2;
+          int32link = int32link->next;
         }
 
 #ifdef DEBUG
@@ -7972,57 +7841,30 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
+        int32link_t* int32link;
 #ifdef DEBUG
         int32_t deps = 0;
 #endif /* DEBUG */
 
         dnode = &Global.myMesh->dnodeTable[dnindex];
         myvalue = vtable + dnode->ldnid * 3;
+        myvalue[0] = 0;
+        myvalue[1] = 0;
+        myvalue[2] = 0;
 
-        uint32_t deps_local = dnode->deps;
-        int32_t* parents = NULL;
-        int32_t pcount = 0;
-        if ((g_dnodeParentIds != NULL) && (g_dnodeParentCount != NULL)) {
-          parents = &g_dnodeParentIds[dnindex * 4];
-          pcount = g_dnodeParentCount[dnindex];
-          if (pcount > 0) {
-            deps_local = (uint32_t)pcount;
-          }
-        }
+        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
 
-        const solver_float invdeps = (solver_float)1.0 / deps_local;
-        solver_float a0 = 0;
-        solver_float a1 = 0;
-        solver_float a2 = 0;
-
-        if (pcount > 0) {
-          int32_t p;
-          for (p = 0; p < pcount; p++) {
+        int32link = dnode->lanid;
+        while (int32link != NULL) {
 #ifdef DEBUG
-            deps++;
+          deps++;
 #endif
-            solver_float* parentvalue = vtable + parents[p] * 3;
-            a0 += parentvalue[0];
-            a1 += parentvalue[1];
-            a2 += parentvalue[2];
-          }
-        } else {
-          int32link_t* int32link = dnode->lanid;
-          while (int32link != NULL) {
-#ifdef DEBUG
-            deps++;
-#endif
-            solver_float* parentvalue = vtable + int32link->id * 3;
-            a0 += parentvalue[0];
-            a1 += parentvalue[1];
-            a2 += parentvalue[2];
-            int32link = int32link->next;
-          }
+          solver_float* parentvalue = vtable + int32link->id * 3;
+          myvalue[0] += parentvalue[0] * invdeps;
+          myvalue[1] += parentvalue[1] * invdeps;
+          myvalue[2] += parentvalue[2] * invdeps;
+          int32link = int32link->next;
         }
-
-        myvalue[0] = a0 * invdeps;
-        myvalue[1] = a1 * invdeps;
-        myvalue[2] = a2 * invdeps;
 
 #ifdef DEBUG
         if (deps != (int)dnode->deps) {
@@ -8354,14 +8196,6 @@ static void print_timing_stat() {
       Timer_Value("Compute new displacement", AVERAGE),
       Timer_Value("Compute new displacement", MAX),
       Timer_Value("Compute new displacement", MIN));
-  if (Timer_Exists("Displacement stream wait")) {
-    printf(
-        "    Displacement stream wait       : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Displacement stream wait", AVERAGE),
-        Timer_Value("Displacement stream wait", MAX),
-        Timer_Value("Displacement stream wait", MIN));
-  }
   printf(
       "    3rd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
