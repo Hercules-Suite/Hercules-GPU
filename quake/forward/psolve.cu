@@ -6049,6 +6049,23 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 /** Compute new displacements of my harbored nodes */
 static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
                                             mesh_t* mesh) {
+  static int disp_shared_mode = -1;
+
+  if (disp_shared_mode < 0) {
+    const char* use_shared = getenv("HERCULES_GPU_DISP_SHARED");
+    if ((use_shared != NULL) &&
+        ((strcmp(use_shared, "1") == 0) ||
+         (strcasecmp(use_shared, "yes") == 0) ||
+         (strcasecmp(use_shared, "true") == 0))) {
+      disp_shared_mode = 1;
+      if (myID == 0) {
+        printf("Using shared-memory displacement kernel (HERCULES_GPU_DISP_SHARED=1)\n");
+      }
+    } else {
+      disp_shared_mode = 0;
+    }
+  }
+
   Timer_Start("Compute new displacement");
 
   /* Ensure host forces have been copied to device */
@@ -6060,9 +6077,18 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   cudaGetLastError();
 
-  kernelDispCalc<<<gridsize, blocksize, sharedmem,
-                   solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice, Param.printStationAccelerations);
+  if (disp_shared_mode == 1) {
+    int sharedmem_disp = (int)(9 * blocksize * sizeof(solver_float));
+    kernelDispCalcShared<<<gridsize, blocksize, sharedmem_disp,
+                           solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->nharbored, solver->gpuDataDevice,
+        Param.printStationAccelerations);
+  } else {
+    kernelDispCalc<<<gridsize, blocksize, sharedmem,
+                     solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->nharbored, solver->gpuDataDevice,
+        Param.printStationAccelerations);
+  }
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {

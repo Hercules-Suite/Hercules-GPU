@@ -691,6 +691,81 @@ __global__  void kernelDispCalc(int32_t nharbored,
 }
 
 
+/* Optional shared-memory variant for displacement update.
+   Enable at runtime with HERCULES_GPU_DISP_SHARED=1. */
+__global__  void kernelDispCalcShared(int32_t nharbored,
+                                      gpu_data_t* gpuData,
+                                      noyesflag_t printAccel)
+{
+    (void)printAccel;
+
+    const int tid = threadIdx.x;
+    const int block_threads = blockDim.x;
+    const lnid_t nindex = (blockIdx.x * block_threads) + tid;
+
+    extern __shared__ solver_float disp[];
+
+    solver_float* tm1x = disp;
+    solver_float* tm1y = tm1x + block_threads;
+    solver_float* tm1z = tm1y + block_threads;
+    solver_float* tm2x = tm1z + block_threads;
+    solver_float* tm2y = tm2x + block_threads;
+    solver_float* tm2z = tm2y + block_threads;
+    solver_float* fx = tm2z + block_threads;
+    solver_float* fy = fx + block_threads;
+    solver_float* fz = fy + block_threads;
+
+    if (nindex < nharbored) {
+      const fvector_t tm1Disp = gpuData->tm1Device[nindex];
+      const fvector_t tm2Disp = gpuData->tm2Device[nindex];
+      const fvector_t nodalForce = gpuData->forceDevice[nindex];
+
+      tm1x[tid] = tm1Disp.f[0];
+      tm1y[tid] = tm1Disp.f[1];
+      tm1z[tid] = tm1Disp.f[2];
+      tm2x[tid] = tm2Disp.f[0];
+      tm2y[tid] = tm2Disp.f[1];
+      tm2z[tid] = tm2Disp.f[2];
+      fx[tid] = nodalForce.f[0];
+      fy[tid] = nodalForce.f[1];
+      fz[tid] = nodalForce.f[2];
+    }
+
+    __syncthreads();
+
+    if (nindex >= nharbored) {
+      return;
+    }
+
+    const solver_float mass_simple = gpuData->mass_simpleArrayDevice[nindex];
+    if (mass_simple > 0) {
+      const solver_float inv_mass = 1.0 / mass_simple;
+      const solver_float* __restrict__ mass2x = gpuData->mass2_minusaMArrayDevice[0];
+      const solver_float* __restrict__ mass2y = gpuData->mass2_minusaMArrayDevice[1];
+      const solver_float* __restrict__ mass2z = gpuData->mass2_minusaMArrayDevice[2];
+      const solver_float* __restrict__ massx = gpuData->mass_minusaMArrayDevice[0];
+      const solver_float* __restrict__ massy = gpuData->mass_minusaMArrayDevice[1];
+      const solver_float* __restrict__ massz = gpuData->mass_minusaMArrayDevice[2];
+
+      tm2x[tid] = (fx[tid] + mass2x[nindex] * tm1x[tid] - massx[nindex] * tm2x[tid]) * inv_mass;
+      tm2y[tid] = (fy[tid] + mass2y[nindex] * tm1y[tid] - massy[nindex] * tm2y[tid]) * inv_mass;
+      tm2z[tid] = (fz[tid] + mass2z[nindex] * tm1z[tid] - massz[nindex] * tm2z[tid]) * inv_mass;
+    } else {
+      tm2x[tid] = 0;
+      tm2y[tid] = 0;
+      tm2z[tid] = 0;
+    }
+
+    __syncthreads();
+
+    fvector_t out;
+    out.f[0] = tm2x[tid];
+    out.f[1] = tm2y[tid];
+    out.f[2] = tm2z[tid];
+    gpuData->tm2Device[nindex] = out;
+}
+
+
 
 /* tm2Disp Alignment Kernel
    FLOPs: 0 (overhead kernel)
