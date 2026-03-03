@@ -3393,6 +3393,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   octant_t *octant;
   ptsrc_t pntSrc;
   int ActivePE;
+    const char* cycle_tmp_dir;
+    char cycle_files_root[512];
+    char cycle_files_glob[576];
 
   /* i/o related vars */
   int32_t nodesPerCycle, memoryRequiredPerNode;
@@ -3491,6 +3494,19 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     sourcePrepassTime += MPI_Wtime();
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
+
+  cycle_tmp_dir = getenv("HERCULES_SOURCE_TMPDIR");
+  if (cycle_tmp_dir == NULL || cycle_tmp_dir[0] == '\0') {
+      cycle_tmp_dir = getenv("TMPDIR");
+  }
+  if (cycle_tmp_dir == NULL || cycle_tmp_dir[0] == '\0') {
+      cycle_tmp_dir = "/tmp";
+  }
+  snprintf(cycle_files_root, sizeof(cycle_files_root),
+           "%s/hercules_force_process.%d.%d", cycle_tmp_dir, myID,
+           (int)getpid());
+  snprintf(cycle_files_glob, sizeof(cycle_files_glob), "%s.*",
+           cycle_files_root);
 
   memoryRequiredPerNode = sizeof( vector3D_t ) * theNumberOfTimeSteps;
 
@@ -3599,7 +3615,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     }
 
     if(ActivePE){
-	const char* local_forces_filename = source_get_local_forces_filename();
+    const char* local_forces_filename = cycle_files_root;
 	sourceWriteTime -= MPI_Wtime();
 	print_myForces_filepercycle( local_forces_filename, iCycle );
 	sourceWriteTime += MPI_Wtime();
@@ -3629,9 +3645,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   /* concatenation process */
   if (myNumberOfCycles != 0) {
       if(ActivePE){
-	  const char* local_forces_filename = source_get_local_forces_filename();
+      const char* local_forces_filename = cycle_files_root;
 	  concat_filespercycle_in_fptmpsrc( local_forces_filename, fptmpsrc,
 			    myNumberOfCycles );
+      delete_files(cycle_files_glob);
       }
   }
 
