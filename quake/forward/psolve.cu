@@ -6004,9 +6004,6 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   solver->gpu_spec->numbytes +=
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
-  /* Ensure host forces have been copied to device */
-  cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
-
   /* zero out the force vector for all nodes */
   memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
 
