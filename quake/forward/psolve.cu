@@ -6095,10 +6095,15 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Compute new displacement");
 
-  /* Uncomment for timing tests */
+  Timer_Start("Disp kernel wait only");
+  cudaEventSynchronize(solver->events[CUDA_EVENT_DISP_KERNEL_DONE]);
+  Timer_Stop("Disp kernel wait only");
+
+  Timer_Start("Disp postcopy sync wait");
   Timer_Start("Disp kernel sync wait");
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Disp kernel sync wait");
+  Timer_Stop("Disp postcopy sync wait");
 
   Timer_Stop("Compute new displacement");
   return;
@@ -6130,6 +6135,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  cudaEventRecord(solver->events[CUDA_EVENT_DISP_KERNEL_DONE],
+                  solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Disp kernel enqueue");
 
   solver->gpu_spec->numflops +=
@@ -6272,6 +6280,14 @@ static void solver_run_collect_timers(void) {
   }
   if (Timer_Exists("Disp kernel sync wait")) {
     Timer_Reduce("Disp kernel sync wait", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Disp kernel wait only")) {
+    Timer_Reduce("Disp kernel wait only", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Disp postcopy sync wait")) {
+    Timer_Reduce("Disp postcopy sync wait", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
   Timer_Reduce("3rd schedule send data (sharing)",
@@ -8437,6 +8453,22 @@ static void print_timing_stat() {
         Timer_Value("Disp kernel sync wait", AVERAGE),
         Timer_Value("Disp kernel sync wait", MAX),
         Timer_Value("Disp kernel sync wait", MIN));
+  }
+  if (Timer_Exists("Disp kernel wait only")) {
+    printf(
+        "      Disp kernel wait only        : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp kernel wait only", AVERAGE),
+        Timer_Value("Disp kernel wait only", MAX),
+        Timer_Value("Disp kernel wait only", MIN));
+  }
+  if (Timer_Exists("Disp postcopy sync wait")) {
+    printf(
+        "      Disp postcopy sync wait      : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp postcopy sync wait", AVERAGE),
+        Timer_Value("Disp postcopy sync wait", MAX),
+        Timer_Value("Disp postcopy sync wait", MIN));
   }
   printf(
       "    3rd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
