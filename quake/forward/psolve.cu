@@ -38,7 +38,6 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <thread>
 #include <unistd.h>
 
 #include "util.h"
@@ -85,8 +84,6 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
-static std::thread g_force_clear_thread;
-static int g_force_clear_pending = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -5171,11 +5168,6 @@ static void solver_delete() {
   free(Global.mySolver->eTable);
   free(Global.mySolver->nTable);
 
-  if (g_force_clear_pending) {
-    g_force_clear_thread.join();
-    g_force_clear_pending = 0;
-  }
-
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
   cudaFreeHost(Global.mySolver->force);
@@ -5985,28 +5977,6 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
-static void solver_launch_force_clear_async(mysolver_t* solver, mesh_t* mesh) {
-  if (g_force_clear_pending) {
-    g_force_clear_thread.join();
-    g_force_clear_pending = 0;
-  }
-
-  g_force_clear_thread = std::thread([solver, mesh]() {
-    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
-  });
-  g_force_clear_pending = 1;
-}
-
-static void solver_wait_force_clear_gpu(mysolver_t* solver) {
-  (void)solver;
-  if (g_force_clear_pending) {
-    Timer_Start("Disp wait force clear");
-    g_force_clear_thread.join();
-    g_force_clear_pending = 0;
-    Timer_Stop("Disp wait force clear");
-  }
-}
-
 /** Compute new displacements of my harbored nodes */
 static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
                                             mesh_t* mesh) {
@@ -6041,12 +6011,14 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   solver->gpu_spec->numbytes +=
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
-  /* Force H2D and displacement kernel are enqueued on the same stream,
-   * so stream ordering already guarantees correctness without host event wait. */
+  /* Ensure host forces have been copied to device before host force reuse. */
+  Timer_Start("Disp wait force H2D");
+  cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
+  Timer_Stop("Disp wait force H2D");
 
   /* zero out the force vector for all nodes */
   Timer_Start("Disp host force clear");
-  solver_launch_force_clear_async(solver, mesh);
+  memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   Timer_Stop("Disp host force clear");
 
   /* Uncomment for timing tests */
@@ -6178,10 +6150,6 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Disp host force clear", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
-  if (Timer_Exists("Disp wait force clear")) {
-    Timer_Reduce("Disp wait force clear", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
   if (Timer_Exists("Disp stream wait")) {
     Timer_Reduce("Disp stream wait", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
@@ -6256,7 +6224,6 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
 
     Timer_Start("Compute Physics");
-    solver_wait_force_clear_gpu(Global.mySolver);
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     solver_compute_force_source(step);
