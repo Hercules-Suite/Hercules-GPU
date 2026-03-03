@@ -3402,6 +3402,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t* activeSourceList = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
+        double sourcePrepassTime = 0.0;
+        double sourceUpdateTime = 0.0;
+        double sourceLoadTime = 0.0;
 
   numStepsNecessary = theNumberOfTimeSteps;
 
@@ -3456,6 +3459,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   iForce=0;
   myNumberOfForces=0;
 
+    sourcePrepassTime = -MPI_Wtime();
+
   /* Go through the fault */
   for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
 
@@ -3479,6 +3484,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   }
 
   WAIT;
+    sourcePrepassTime += MPI_Wtime();
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
 
@@ -3496,6 +3502,20 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   if (myNumberOfNodesLoaded % nodesPerCycle != 0) {
       myNumberOfCycles++;
   }
+
+    if (myID == 0) {
+#ifdef PROJ
+            fprintf(stdout,
+                            "\n SRFH debug: PROJ=ON activeSources=%d cycles=%d timesteps=%d dt=%g",
+                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
+                            theSRFHdt);
+#else
+            fprintf(stdout,
+                            "\n SRFH debug: PROJ=OFF activeSources=%d cycles=%d timesteps=%d dt=%g",
+                            activeSourceCount, myNumberOfCycles, theNumberOfTimeSteps,
+                            theSRFHdt);
+#endif
+    }
 
   /* go through myForceCycle and put the cycle for each node loaded */
   iCycle = 0;
@@ -3543,12 +3563,16 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
           octant = activeSourceOctant[iActive];
           pntSrc.domainCoords = activeSourceDomainCoords[iActive];
 
+          sourceUpdateTime -= MPI_Wtime();
           update_point_source_srfh(&pntSrc, iSrc, utmZone);
+          sourceUpdateTime += MPI_Wtime();
 
+          sourceLoadTime -= MPI_Wtime();
           load_myForces_with_point_source(octant, &pntSrc,
                           is_force_in_processor, iCycle,
                           iSrc,
                           -1);
+          sourceLoadTime += MPI_Wtime();
 
           if (myID == 0 && iCycle == 0) {
           fprintf(fpdsrc, "%f %f %f %f %f %f %f %f\n",
@@ -3583,6 +3607,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   if (myID == 0) {
       printf( "done...%.2f s", theForceGenerationTime );
+      printf("\n SRFH breakdown: prepass=%.2f s update=%.2f s load=%.2f s",
+             sourcePrepassTime, sourceUpdateTime, sourceLoadTime);
       printf( "\n Concatenation process..." );
   }
 
