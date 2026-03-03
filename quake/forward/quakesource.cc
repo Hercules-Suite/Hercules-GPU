@@ -1018,6 +1018,31 @@ print_myForces_filepercycle( const char *filenameroot, int cycle )
     fclose(fp);
 }
 
+static void
+print_myForces_filepercycle_nodes(const char* filenameroot, int cycle,
+                                  const int32_t* cycleNodes,
+                                  int32_t numberOfNodes)
+{
+    int32_t j;
+    char forcefile[256];
+    FILE* fp;
+
+    sprintf(forcefile, "%s.%d", filenameroot, cycle);
+    fp = fopen(forcefile, "w");
+
+    fwrite(&numberOfNodes, sizeof(int32_t), 1, fp);
+
+    for (j = 0; j < theNumberOfTimeSteps; j++) {
+        int32_t idx;
+        for (idx = 0; idx < numberOfNodes; idx++) {
+            int32_t lnid = cycleNodes[idx];
+            fwrite(myForces[lnid][j].x, sizeof(double), 3, fp);
+        }
+    }
+
+    fclose(fp);
+}
+
 
 /**
  * print_myForce:
@@ -3405,6 +3430,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t* activeSourceList = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
+        int32_t* cycleNodeCounts = NULL;
+        int32_t* cycleNodeOffsets = NULL;
+        int32_t* cycleNodeCursor = NULL;
+        int32_t* cycleNodeList = NULL;
         double sourcePrepassTime = 0.0;
         double sourceUpdateTime = 0.0;
         double sourceLoadTime = 0.0;
@@ -3523,6 +3552,40 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       myNumberOfCycles++;
   }
 
+  cycleNodeCounts = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
+  cycleNodeOffsets = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
+  cycleNodeCursor = (int32_t*)calloc(myNumberOfCycles, sizeof(int32_t));
+  cycleNodeList = (int32_t*)malloc(sizeof(int32_t) * myNumberOfNodesLoaded);
+
+  if ((cycleNodeCounts == NULL) || (cycleNodeOffsets == NULL) ||
+      (cycleNodeCursor == NULL) || (cycleNodeList == NULL)) {
+      fprintf(stdout, "Err allocating cycle node index buffers\n");
+      return -1;
+  }
+
+  for (iNode = 0; iNode < myMesh->nharbored; iNode++) {
+      int32_t c = myForcesCycle[iNode];
+      if (c >= 0) {
+          cycleNodeCounts[c]++;
+      }
+  }
+
+  for (iCycle = 1; iCycle < myNumberOfCycles; iCycle++) {
+      cycleNodeOffsets[iCycle] =
+          cycleNodeOffsets[iCycle - 1] + cycleNodeCounts[iCycle - 1];
+  }
+
+  for (iCycle = 0; iCycle < myNumberOfCycles; iCycle++) {
+      cycleNodeCursor[iCycle] = cycleNodeOffsets[iCycle];
+  }
+
+  for (iNode = 0; iNode < myMesh->nharbored; iNode++) {
+      int32_t c = myForcesCycle[iNode];
+      if (c >= 0) {
+          cycleNodeList[cycleNodeCursor[c]++] = iNode;
+      }
+  }
+
     if (myID == 0) {
 #ifdef PROJ
             fprintf(stdout,
@@ -3616,8 +3679,11 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
     if(ActivePE){
     const char* local_forces_filename = cycle_files_root;
+    const int32_t* cycleNodes = cycleNodeList + cycleNodeOffsets[iCycle];
+    int32_t cycleNodeCount = cycleNodeCounts[iCycle];
 	sourceWriteTime -= MPI_Wtime();
-	print_myForces_filepercycle( local_forces_filename, iCycle );
+    print_myForces_filepercycle_nodes(local_forces_filename, iCycle,
+                      cycleNodes, cycleNodeCount);
 	sourceWriteTime += MPI_Wtime();
     }
 
@@ -3659,6 +3725,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     free(activeSourceList);
     free(activeSourceOctant);
     free(activeSourceDomainCoords);
+    free(cycleNodeCounts);
+    free(cycleNodeOffsets);
+    free(cycleNodeCursor);
+    free(cycleNodeList);
 
   free( myForces );
 
