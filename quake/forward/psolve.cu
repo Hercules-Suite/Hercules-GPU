@@ -5886,7 +5886,7 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
-  /* Mark completion of force H2D copy (for inter-stream dependencies). */
+  /* Create an event for the force transfer */
   cudaEventRecord(solver->events[CUDA_EVENT_FORCE_WAIT],
                   solver->streams[CUDA_STREAM_MAIN]);
 
@@ -6011,7 +6011,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   solver->gpu_spec->numbytes +=
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
-  /* Ensure host forces have been copied to device before host force reuse. */
+  /* Ensure host forces have been copied to device */
   Timer_Start("Disp wait force H2D");
   cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
   Timer_Stop("Disp wait force H2D");
