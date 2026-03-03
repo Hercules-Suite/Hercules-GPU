@@ -5005,6 +5005,27 @@ static void solver_init() {
   k->handle = (char*)kernelDispCalc;
   k->blocksize =
       gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
+  {
+    const char* bs_env = getenv("HERCULES_DISP_BLOCKSIZE");
+    if (bs_env != NULL && bs_env[0] != '\0') {
+      int requested = atoi(bs_env);
+      int max_threads = Global.mySolver->gpu_spec->max_threads;
+
+      if (requested > 0) {
+        if (requested > max_threads) {
+          requested = max_threads;
+        }
+
+        /* Keep warp-aligned block size */
+        requested = (requested / 32) * 32;
+        if (requested < 32) {
+          requested = 32;
+        }
+
+        k->blocksize = requested;
+      }
+    }
+  }
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
