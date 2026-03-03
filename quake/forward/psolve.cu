@@ -4059,14 +4059,16 @@ static void solver_init() {
     exit(1);
   }
   memset(Global.mySolver->tm2, 0, Global.myMesh->nharbored * sizeof(fvector_t));
-  Global.mySolver->force =
-      (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
-  if (Global.mySolver->force == NULL) {
-    fprintf(stderr, "Thread %d: Failed to allocate force host memory\n",
+  if (cudaMallocHost(&(Global.mySolver->force),
+                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
+      cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  memset(Global.mySolver->force, 0,
+         Global.myMesh->nharbored * sizeof(fvector_t));
 
   if (Param.theTypeOfDamping >= BKT) {
     Global.mySolver->conv_shear_1 =
@@ -5168,7 +5170,7 @@ static void solver_delete() {
 
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
-  free(Global.mySolver->force);
+  cudaFreeHost(Global.mySolver->force);
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
