@@ -40,10 +40,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
-#include <omp.h>
-#endif
-
 #include "util.h"
 #include "commutil.h"
 #include "timers.h"
@@ -4063,16 +4059,14 @@ static void solver_init() {
     exit(1);
   }
   memset(Global.mySolver->tm2, 0, Global.myMesh->nharbored * sizeof(fvector_t));
-  if (cudaMallocHost(&(Global.mySolver->force),
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-      cudaSuccess) {
-    fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
+  Global.mySolver->force =
+      (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
+  if (Global.mySolver->force == NULL) {
+    fprintf(stderr, "Thread %d: Failed to allocate force host memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  memset(Global.mySolver->force, 0,
-         Global.myMesh->nharbored * sizeof(fvector_t));
 
   if (Param.theTypeOfDamping >= BKT) {
     Global.mySolver->conv_shear_1 =
@@ -5174,7 +5168,7 @@ static void solver_delete() {
 
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
-  cudaFreeHost(Global.mySolver->force);
+  free(Global.mySolver->force);
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
@@ -7860,9 +7854,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 #endif /* DEBUG */
       }
     } else {
-#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
-#pragma omp parallel for schedule(static)
-#endif
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
@@ -7953,9 +7944,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   } else {
     /* Assign the value of the anchored parents to the dangling nodes*/
 
-#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
-#pragma omp parallel for schedule(static)
-#endif
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
       dnode_t* dnode;
       solver_float *myvalue, *parentvalue;

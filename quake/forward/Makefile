@@ -15,15 +15,6 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
-# Optional OpenMP acceleration for compute_adjust assignment path.
-# Enable with: make USE_OPENMP_ADJUST=1
-ifeq ($(USE_OPENMP_ADJUST),1)
-	CXXFLAGS += -fopenmp
-	NVFLAGS += -Xcompiler -fopenmp
-	LDFLAGS += -fopenmp
-	CPPFLAGS += -DUSE_OPENMP_ADJUST
-endif
-
 ifeq ($(filter -O%,$(CXXFLAGS)),)
 	CXXFLAGS += -O3
 endif
