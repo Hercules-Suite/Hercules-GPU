@@ -87,6 +87,12 @@ static int32_t* g_dampingElemMapperDevice = NULL;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
+static int32_t* g_adjustParentOffsets = NULL;
+static int32_t* g_adjustParentIds = NULL;
+static int32_t* g_adjustDanglingLnid = NULL;
+static solver_float* g_adjustInvDeps = NULL;
+static int32_t g_adjustDnCount = 0;
+static int32_t g_adjustParentCount = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -209,6 +215,8 @@ static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
+static void compute_adjust_cache_build(void);
+static void compute_adjust_cache_free(void);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -5188,6 +5196,8 @@ static void solver_delete() {
   }
   g_sourceNodeCapacity = 0;
 
+  compute_adjust_cache_free();
+
   /* Destroy streams */
   for (int i = 0; i < MAX_CUDA_STREAM; i++) {
     cudaStreamDestroy(Global.mySolver->streams[i]);
@@ -7935,6 +7945,89 @@ static void compute_addforce_s(int32_t timestep) {
   }
 }
 
+static void compute_adjust_cache_free(void) {
+  free(g_adjustParentOffsets);
+  free(g_adjustParentIds);
+  free(g_adjustDanglingLnid);
+  free(g_adjustInvDeps);
+
+  g_adjustParentOffsets = NULL;
+  g_adjustParentIds = NULL;
+  g_adjustDanglingLnid = NULL;
+  g_adjustInvDeps = NULL;
+  g_adjustDnCount = 0;
+  g_adjustParentCount = 0;
+}
+
+static void compute_adjust_cache_build(void) {
+  int32_t dnindex;
+  int32_t totalParents = 0;
+  int32_t cursor = 0;
+
+  if ((g_adjustParentOffsets != NULL) &&
+      (g_adjustDnCount == Global.myMesh->ldnnum)) {
+    return;
+  }
+
+  compute_adjust_cache_free();
+
+  g_adjustDnCount = Global.myMesh->ldnnum;
+  if (g_adjustDnCount <= 0) {
+    return;
+  }
+
+  g_adjustParentOffsets =
+      (int32_t*)malloc(sizeof(int32_t) * (g_adjustDnCount + 1));
+  g_adjustDanglingLnid = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
+  g_adjustInvDeps = (solver_float*)malloc(sizeof(solver_float) * g_adjustDnCount);
+
+  if ((g_adjustParentOffsets == NULL) || (g_adjustDanglingLnid == NULL) ||
+      (g_adjustInvDeps == NULL)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating compute_adjust cache arrays");
+  }
+
+  g_adjustParentOffsets[0] = 0;
+  for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+    dnode_t* dnode = &Global.myMesh->dnodeTable[dnindex];
+    int32_t deps = (int32_t)dnode->deps;
+    if (deps < 0) {
+      solver_abort(__FUNCTION_NAME, NULL, "Invalid deps count for dnode %d",
+                   dnindex);
+    }
+    g_adjustDanglingLnid[dnindex] = dnode->ldnid;
+    g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
+    totalParents += deps;
+    g_adjustParentOffsets[dnindex + 1] = totalParents;
+  }
+
+  g_adjustParentIds = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+  if ((totalParents > 0) && (g_adjustParentIds == NULL)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating compute_adjust parent id array");
+  }
+
+  for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+    int32link_t* int32link = Global.myMesh->dnodeTable[dnindex].lanid;
+    while (int32link != NULL) {
+      if (cursor >= totalParents) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "compute_adjust cache overflow while building parent ids");
+      }
+      g_adjustParentIds[cursor++] = int32link->id;
+      int32link = int32link->next;
+    }
+  }
+
+  if (cursor != totalParents) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "compute_adjust cache mismatch: cursor=%d total=%d", cursor,
+                 totalParents);
+  }
+
+  g_adjustParentCount = totalParents;
+}
+
 /**
  * compute_adjust: Either distribute the values from LOCAL dangling nodes
  *                 to LOCAL anchored nodes, or assign values from LOCAL
@@ -7947,81 +8040,43 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   int32_t dnindex;
 
   if (itemsperentry == 3) {
+    compute_adjust_cache_build();
+
     if (how == DISTRIBUTION) {
-      for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
-        dnode_t* dnode;
-        solver_float* myvalue;
-        int32link_t* int32link;
-#ifdef DEBUG
-        int32_t deps = 0;
-#endif /* DEBUG */
-
-        dnode = &Global.myMesh->dnodeTable[dnindex];
-        myvalue = vtable + dnode->ldnid * 3;
-
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
+      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+        int32_t start = g_adjustParentOffsets[dnindex];
+        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        solver_float* myvalue = vtable + g_adjustDanglingLnid[dnindex] * 3;
+        const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
-#ifdef DEBUG
-          deps++;
-#endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
+        int32_t p;
+        for (p = start; p < end; p++) {
+          solver_float* parentvalue = vtable + g_adjustParentIds[p] * 3;
           parentvalue[0] += d0;
           parentvalue[1] += d1;
           parentvalue[2] += d2;
-          int32link = int32link->next;
         }
-
-#ifdef DEBUG
-        if (deps != (int)dnode->deps) {
-          fprintf(stderr, "Thread %d: compute_adjust distri: ", Global.myID);
-          fprintf(stderr, "deps don't match\n");
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-#endif /* DEBUG */
       }
     } else {
-      for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
-        dnode_t* dnode;
-        solver_float* myvalue;
-        int32link_t* int32link;
-#ifdef DEBUG
-        int32_t deps = 0;
-#endif /* DEBUG */
-
-        dnode = &Global.myMesh->dnodeTable[dnindex];
-        myvalue = vtable + dnode->ldnid * 3;
+      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+        int32_t start = g_adjustParentOffsets[dnindex];
+        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        solver_float* myvalue = vtable + g_adjustDanglingLnid[dnindex] * 3;
         myvalue[0] = 0;
         myvalue[1] = 0;
         myvalue[2] = 0;
 
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
-
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
-#ifdef DEBUG
-          deps++;
-#endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
+        const solver_float invdeps = g_adjustInvDeps[dnindex];
+        int32_t p;
+        for (p = start; p < end; p++) {
+          solver_float* parentvalue = vtable + g_adjustParentIds[p] * 3;
           myvalue[0] += parentvalue[0] * invdeps;
           myvalue[1] += parentvalue[1] * invdeps;
           myvalue[2] += parentvalue[2] * invdeps;
-          int32link = int32link->next;
         }
-
-#ifdef DEBUG
-        if (deps != (int)dnode->deps) {
-          fprintf(stderr, "Thread %d: compute_adjust assign: ", Global.myID);
-          fprintf(stderr, "deps don't match\n");
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-#endif /* DEBUG */
       }
     }
 
