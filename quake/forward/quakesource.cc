@@ -85,6 +85,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <glob.h>
+#include <unordered_map>
 
 #include "cvm.h"
 #include "commutil.h"
@@ -233,6 +234,36 @@ static double theIOInitTime = 0;
 
 static char   theSourceOutputDir[256];
 
+struct SourceOctantKey {
+    tick_t x;
+    tick_t y;
+    tick_t z;
+    int32_t level;
+
+    bool operator==(const SourceOctantKey& other) const {
+        return (x == other.x) && (y == other.y) && (z == other.z) &&
+               (level == other.level);
+    }
+};
+
+struct SourceOctantKeyHash {
+    size_t operator()(const SourceOctantKey& key) const {
+        size_t h = 1469598103934665603ull;
+        h ^= (size_t)key.x;
+        h *= 1099511628211ull;
+        h ^= (size_t)key.y;
+        h *= 1099511628211ull;
+        h ^= (size_t)key.z;
+        h *= 1099511628211ull;
+        h ^= (size_t)key.level;
+        h *= 1099511628211ull;
+        return h;
+    }
+};
+
+static std::unordered_map<SourceOctantKey, int32_t, SourceOctantKeyHash>*
+    g_sourceElementLookup = NULL;
+
 
 /** Exported global configuration variable.  Default value = 100 MB */
 int theForcesBufferSize = 104857600;
@@ -272,6 +303,72 @@ static void source_set_file_buffer(FILE* fp) {
 static int read_planewithkinks (FILE *fp);
 
 static void compute_point_source_strike(ptsrc_t* ps, UTMZone_t* utmZone);
+
+static vector3D_t
+compute_domain_coords_linearinterp_legacy(double lon, double lat,
+                                          double* longcorner,
+                                          double* latcorner,
+                                          double domainlengthetha,
+                                          double domainlengthcsi)
+{
+    int i;
+    double Ax, Ay, Bx, By, Cx, Cy, Dx, Dy;
+    double res;
+    double Xi[4], Yi[4], XN[2];
+    double M[2][2], F[2], DXN[2];
+    double X, Y;
+    vector3D_t domainCoords;
+
+    X = lat;
+    Y = lon;
+
+    for (i = 0; i < 4; i++) {
+        Xi[i] = latcorner[i];
+        Yi[i] = longcorner[i];
+    }
+
+    Ax = 4 * X - (Xi[0] + Xi[1] + Xi[2] + Xi[3]);
+    Ay = 4 * Y - (Yi[0] + Yi[1] + Yi[2] + Yi[3]);
+
+    Bx = -Xi[0] + Xi[1] + Xi[2] - Xi[3];
+    By = -Yi[0] + Yi[1] + Yi[2] - Yi[3];
+
+    Cx = -Xi[0] - Xi[1] + Xi[2] + Xi[3];
+    Cy = -Yi[0] - Yi[1] + Yi[2] + Yi[3];
+
+    Dx = Xi[0] - Xi[1] + Xi[2] - Xi[3];
+    Dy = Yi[0] - Yi[1] + Yi[2] - Yi[3];
+
+    XN[0] = 0;
+    XN[1] = 0;
+    res = 1e10;
+
+    while (res > 1e-6) {
+        M[0][0] = Bx + Dx * XN[1];
+        M[0][1] = Cx + Dx * XN[0];
+        M[1][0] = By + Dy * XN[1];
+        M[1][1] = Cy + Dy * XN[0];
+
+        F[0] = -Ax + Bx * XN[0] + Cx * XN[1] + Dx * XN[0] * XN[1];
+        F[1] = -Ay + By * XN[0] + Cy * XN[1] + Dy * XN[0] * XN[1];
+
+        DXN[0] = -(F[0] * M[1][1] - F[1] * M[0][1]) /
+                 (M[0][0] * M[1][1] - M[1][0] * M[0][1]);
+
+        DXN[1] = -(F[1] * M[0][0] - F[0] * M[1][0]) /
+                 (M[0][0] * M[1][1] - M[1][0] * M[0][1]);
+
+        res = fabs(F[0]) + fabs(F[1]);
+        XN[0] = XN[0] + DXN[0];
+        XN[1] = XN[1] + DXN[1];
+    }
+
+    domainCoords.x[0] = .5 * (XN[0] + 1) * domainlengthcsi;
+    domainCoords.x[1] = .5 * (XN[1] + 1) * domainlengthetha;
+    domainCoords.x[2] = 0;
+
+    return domainCoords;
+}
 
 int
 source_get_local_loaded_nodes_count()
@@ -1135,21 +1232,27 @@ filter_myForce()
 static int32_t
 source_find_element_for_octant(const octant_t* octant)
 {
-    int32_t eindex;
+    if (g_sourceElementLookup == NULL) {
+        int32_t eindex;
 
-    for (eindex = 0; eindex < myMesh->lenum; eindex++) {
-        int32_t lnid0 = myMesh->elemTable[eindex].lnid[0];
+        g_sourceElementLookup = new std::unordered_map<
+            SourceOctantKey, int32_t, SourceOctantKeyHash>();
+        g_sourceElementLookup->reserve((size_t)myMesh->lenum);
 
-        if ((myMesh->nodeTable[lnid0].x == octant->lx) &&
-            (myMesh->nodeTable[lnid0].y == octant->ly) &&
-            (myMesh->nodeTable[lnid0].z == octant->lz)) {
-            if (myMesh->elemTable[eindex].level != octant->level) {
-                fprintf(stderr, "Thread %d: source_init: error\n", myID);
-                MPI_Abort(MPI_COMM_WORLD, ERROR);
-                exit(1);
-            }
-            return eindex;
+        for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+            int32_t lnid0 = myMesh->elemTable[eindex].lnid[0];
+            SourceOctantKey key = {myMesh->nodeTable[lnid0].x,
+                                   myMesh->nodeTable[lnid0].y,
+                                   myMesh->nodeTable[lnid0].z,
+                                   myMesh->elemTable[eindex].level};
+            (*g_sourceElementLookup)[key] = eindex;
         }
+    }
+
+    SourceOctantKey key = {octant->lx, octant->ly, octant->lz, octant->level};
+    auto it = g_sourceElementLookup->find(key);
+    if (it != g_sourceElementLookup->end()) {
+        return it->second;
     }
 
     return -1;
@@ -1347,15 +1450,16 @@ compute_point_source_strike_srfh (ptsrc_t* ps, int32_t iSrc, UTMZone_t* utmZone)
 
   if( theLonlatOrCartesian == 0 ){
 
-    pivot = compute_domain_coords_linearinterp(
+    (void)utmZone;
+    pivot = compute_domain_coords_linearinterp_legacy(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc],
         theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+        theRegionLengthEastM, theRegionLengthNorthM);
 
-    pointInNorth = compute_domain_coords_linearinterp(
+    pointInNorth = compute_domain_coords_linearinterp_legacy(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc]+.1,
         theSurfaceCornersLong , theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+        theRegionLengthEastM, theRegionLengthNorthM);
 
 
     /* Compute Unit Vector */
@@ -1660,42 +1764,23 @@ static double compute_strike_planewithkinks(vector3D_t point){
  */
 static int tag_myForcesCycle(octant_t *octant, ptsrc_t *pointSource){
 
-  int32_t eindex;
+    int32_t eindex;
 
   int j, iNode;
 
 //   tick_t edgeticks;
 //   edgeticks = (tick_t)1 << (PIXELLEVEL - octant->level);
 
-  /* Go through my local elements to find which one matches the
-     containing octant.*/
-  for ( eindex = 0; eindex < myMesh->lenum; eindex++ ) {
-    int32_t lnid0;
-    lnid0 = myMesh->elemTable[eindex].lnid[0];
-    if ( ( myMesh->nodeTable[lnid0].x == octant->lx ) &&
-	 ( myMesh->nodeTable[lnid0].y == octant->ly ) &&
-	 ( myMesh->nodeTable[lnid0].z == octant->lz ) ) {
-      /* Sanity check */
-      if ( myMesh->elemTable[eindex].level != octant->level ) {
-	fprintf(stderr, "Thread %d: source_init: internal error\n",
-		myID);
-	MPI_Abort(MPI_COMM_WORLD, ERROR);
-	exit(1);
-      }
+    eindex = source_find_element_for_octant(octant);
 
-      /* Fill in the local node ids of the containing element */
-      memcpy ( pointSource->lnid, myMesh->elemTable[eindex].lnid,
-	       sizeof(int32_t) * 8 );
-      break;
-    }
-
-  }  /* for all the local elements */
-
-  if ( eindex == myMesh->lenum ) {
+    if (eindex < 0) {
     fprintf ( stderr, "Thread %d: source_init: ", myID );
     fprintf ( stderr, "No element matches the containing octant.\n" );
     return -1;
   }
+
+    memcpy(pointSource->lnid, myMesh->elemTable[eindex].lnid,
+	 sizeof(int32_t) * 8);
 
   for ( iNode = 0; iNode < 8; iNode++){
     j = pointSource -> lnid [ iNode ];
@@ -3375,10 +3460,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   /* Go through the fault */
   for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
 
-    pntSrc.domainCoords = compute_domain_coords_linearinterp(
+    pntSrc.domainCoords = compute_domain_coords_linearinterp_legacy(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc],
         theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+        theRegionLengthEastM, theRegionLengthNorthM);
     pntSrc.domainCoords.x[2]= theSourceDepthArray[iSrc];
 
     /* Check if this force is contained in this processor */
