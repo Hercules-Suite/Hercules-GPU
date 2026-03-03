@@ -5966,7 +5966,9 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Compute new displacement");
 
   /* Uncomment for timing tests */
+  Timer_Start("Disp kernel sync wait");
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Disp kernel sync wait");
 
   Timer_Stop("Compute new displacement");
   return;
@@ -5986,6 +5988,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   cudaGetLastError();
 
+  Timer_Start("Disp kernel enqueue");
   kernelDispCalc<<<gridsize, blocksize, sharedmem,
                    solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->nharbored, solver->gpuDataDevice, Param.printStationAccelerations);
@@ -5997,6 +6000,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  Timer_Stop("Disp kernel enqueue");
 
   solver->gpu_spec->numflops +=
       kernel_flops_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
@@ -6005,7 +6009,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
   /* zero out the force vector for all nodes */
+  Timer_Start("Disp host force reset");
   memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  Timer_Stop("Disp host force reset");
 
   /* Uncomment for timing tests */
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
@@ -6124,6 +6130,18 @@ static void solver_run_collect_timers(void) {
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
+  if (Timer_Exists("Disp kernel enqueue")) {
+    Timer_Reduce("Disp kernel enqueue", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Disp host force reset")) {
+    Timer_Reduce("Disp host force reset", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Disp kernel sync wait")) {
+    Timer_Reduce("Disp kernel sync wait", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("2nd compute adjust (assignment)",
@@ -8206,6 +8224,30 @@ static void print_timing_stat() {
       Timer_Value("Compute new displacement", AVERAGE),
       Timer_Value("Compute new displacement", MAX),
       Timer_Value("Compute new displacement", MIN));
+  if (Timer_Exists("Disp kernel enqueue")) {
+    printf(
+        "      Disp kernel enqueue          : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp kernel enqueue", AVERAGE),
+        Timer_Value("Disp kernel enqueue", MAX),
+        Timer_Value("Disp kernel enqueue", MIN));
+  }
+  if (Timer_Exists("Disp host force reset")) {
+    printf(
+        "      Disp host force reset        : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp host force reset", AVERAGE),
+        Timer_Value("Disp host force reset", MAX),
+        Timer_Value("Disp host force reset", MIN));
+  }
+  if (Timer_Exists("Disp kernel sync wait")) {
+    printf(
+        "      Disp kernel sync wait        : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp kernel sync wait", AVERAGE),
+        Timer_Value("Disp kernel sync wait", MAX),
+        Timer_Value("Disp kernel sync wait", MIN));
+  }
   printf(
       "    3rd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
