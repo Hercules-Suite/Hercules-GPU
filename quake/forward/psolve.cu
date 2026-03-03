@@ -84,6 +84,9 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
+static int32_t* g_sourceNodeListDevice = NULL;
+static vector3D_t* g_sourceForcesDevice = NULL;
+static int32_t g_sourceNodeCapacity = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -203,10 +206,30 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static void compute_addforce_s(int32_t timestep);
+static void solver_compute_force_source_gpu(int32_t timestep);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 
 static int interpolate_station_displacements(int32_t step);
+
+__global__ static void kernelSourceForceScatter(int32_t count,
+                                                const int32_t* lnidList,
+                                                const vector3D_t* srcForces,
+                                                fvector_t* forceDevice,
+                                                double dt2) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  int32_t lnid = lnidList[idx];
+  const vector3D_t src = srcForces[idx];
+  fvector_t out;
+  out.f[0] = src.x[0] * dt2;
+  out.f[1] = src.x[1] * dt2;
+  out.f[2] = src.x[2] * dt2;
+  forceDevice[lnid] = out;
+}
 
 double** malloc2dDouble(int n, int m) {
   /* NOTE: To MPI_Bcast a 2D array, the pre-allocated memory blocks have to be
@@ -5155,6 +5178,16 @@ static void solver_delete() {
   }
   g_dampingElemCountGPU = -1;
 
+  if (g_sourceNodeListDevice != NULL) {
+    cudaFree(g_sourceNodeListDevice);
+    g_sourceNodeListDevice = NULL;
+  }
+  if (g_sourceForcesDevice != NULL) {
+    cudaFree(g_sourceForcesDevice);
+    g_sourceForcesDevice = NULL;
+  }
+  g_sourceNodeCapacity = 0;
+
   /* Destroy streams */
   for (int i = 0; i < MAX_CUDA_STREAM; i++) {
     cudaStreamDestroy(Global.mySolver->streams[i]);
@@ -5605,6 +5638,95 @@ static void solver_compute_force_source(int step) {
   Timer_Stop("Compute addforces s");
 }
 
+static int use_gpu_source_fastpath(void) {
+  if (Param.drmImplement == YES) {
+    return 0;
+  }
+  if (Param.includeTopography == YES) {
+    return 0;
+  }
+  if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
+    return 0;
+  }
+  return 1;
+}
+
+static void solver_compute_force_source_gpu(int32_t step) {
+  int32_t count = Global.theNodesLoaded;
+  mysolver_t* solver = Global.mySolver;
+  mesh_t* mesh = Global.myMesh;
+  int blocksize;
+  int gridsize;
+
+  (void)step;
+
+  Timer_Start("Compute addforces s");
+
+  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                  mesh->nharbored * sizeof(fvector_t),
+                  solver->streams[CUDA_STREAM_MAIN]);
+
+  if (count <= 0) {
+    Timer_Stop("Compute addforces s");
+    return;
+  }
+
+  if (count > g_sourceNodeCapacity) {
+    if (g_sourceNodeListDevice != NULL) {
+      cudaFree(g_sourceNodeListDevice);
+      g_sourceNodeListDevice = NULL;
+    }
+    if (g_sourceForcesDevice != NULL) {
+      cudaFree(g_sourceForcesDevice);
+      g_sourceForcesDevice = NULL;
+    }
+
+    if (cudaMalloc((void**)&g_sourceNodeListDevice,
+                   count * sizeof(int32_t)) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: source node list device alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&g_sourceForcesDevice,
+                   count * sizeof(vector3D_t)) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: source force device alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    g_sourceNodeCapacity = count;
+
+    cudaMemcpyAsync(g_sourceNodeListDevice, Global.theNodesLoadedList,
+                    count * sizeof(int32_t), cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci += count * sizeof(int32_t);
+  }
+
+  cudaMemcpyAsync(g_sourceForcesDevice, Global.myForces,
+                  count * sizeof(vector3D_t), cudaMemcpyHostToDevice,
+                  solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci += count * sizeof(vector3D_t);
+
+  blocksize = 256;
+  gridsize = (count + blocksize - 1) / blocksize;
+  kernelSourceForceScatter<<<gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN]>>>(
+      count, g_sourceNodeListDevice, g_sourceForcesDevice,
+      solver->gpuData->forceDevice, Param.theDeltaTSquared);
+
+  cudaError_t cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: source force scatter kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  Timer_Stop("Compute addforces s");
+}
+
 /** Compute the force due to element stiffness matrices. */
 static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
                                            fmatrix_t k1[8][8],
@@ -6004,9 +6126,11 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   solver->gpu_spec->numbytes +=
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
-  /* zero out the force vector for all nodes */
   Timer_Start("Disp host force reset");
-  memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  if (!use_gpu_source_fastpath()) {
+    /* zero out the force vector for all nodes */
+    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  }
   Timer_Stop("Disp host force reset");
 
   /* Uncomment for timing tests */
@@ -6210,7 +6334,11 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
-    solver_compute_force_source(step);
+    if (use_gpu_source_fastpath()) {
+      solver_compute_force_source_gpu(step);
+    } else {
+      solver_compute_force_source(step);
+    }
     // solver_compute_effective_drm_force( Global.mySolver,
     // Global.myMesh,Global.theK1, Global.theK2, step, Param.theDeltaT );
     solver_compute_effective_drm_force_v2(
@@ -6223,7 +6351,9 @@ static void solver_run() {
 
     /* Push host-side source/DRM/topography force terms to device before
      * GPU stiffness/damping accumulation. */
-    solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    if (!use_gpu_source_fastpath()) {
+      solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    }
 
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
                      Global.theK2);
