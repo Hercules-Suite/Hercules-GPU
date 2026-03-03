@@ -1450,16 +1450,15 @@ compute_point_source_strike_srfh (ptsrc_t* ps, int32_t iSrc, UTMZone_t* utmZone)
 
   if( theLonlatOrCartesian == 0 ){
 
-    (void)utmZone;
-    pivot = compute_domain_coords_linearinterp_legacy(
+    pivot = compute_domain_coords_linearinterp(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc],
         theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM);
+        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
 
-    pointInNorth = compute_domain_coords_linearinterp_legacy(
+    pointInNorth = compute_domain_coords_linearinterp(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc]+.1,
         theSurfaceCornersLong , theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM);
+        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
 
 
     /* Compute Unit Vector */
@@ -3460,10 +3459,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   /* Go through the fault */
   for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
 
-    pntSrc.domainCoords = compute_domain_coords_linearinterp_legacy(
+    pntSrc.domainCoords = compute_domain_coords_linearinterp(
         theSourceLonArray[iSrc], theSourceLatArray[iSrc],
         theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM);
+        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
     pntSrc.domainCoords.x[2]= theSourceDepthArray[iSrc];
 
     /* Check if this force is contained in this processor */
