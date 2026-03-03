@@ -84,6 +84,8 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
+static int32_t* g_dnodeParentIds = NULL;
+static uint8_t* g_dnodeParentCount = NULL;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -160,6 +162,8 @@ static void mesh_correct_properties(etree_t* cvm);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
+static void solver_init_dnode_parent_cache(mesh_t* mesh);
+static void solver_free_dnode_parent_cache(void);
 static void solver_init(void);
 static void solver_printstat(mysolver_t* solver);
 static void solver_delete(void);
@@ -4093,6 +4097,8 @@ static void solver_init() {
   Global.mySolver->dn_sched = schedule_new();
   Global.mySolver->an_sched = schedule_new();
 
+  solver_init_dnode_parent_cache(Global.myMesh);
+
   if (Param.theTypeOfDamping >= BKT3) {
     Global.mySolver->conv_shear_3 =
         (fvector_t*)calloc(8 * Global.myMesh->lenum, sizeof(fvector_t));
@@ -5172,6 +5178,8 @@ static void solver_delete() {
   }
   g_dampingElemCountGPU = -1;
 
+  solver_free_dnode_parent_cache();
+
   /* Destroy streams */
   for (int i = 0; i < MAX_CUDA_STREAM; i++) {
     cudaStreamDestroy(Global.mySolver->streams[i]);
@@ -5205,6 +5213,55 @@ static void solver_delete() {
   schedule_delete(Global.mySolver->an_sched);
 
   free(Global.mySolver);
+}
+
+static void solver_free_dnode_parent_cache(void) {
+  if (g_dnodeParentIds != NULL) {
+    free(g_dnodeParentIds);
+    g_dnodeParentIds = NULL;
+  }
+  if (g_dnodeParentCount != NULL) {
+    free(g_dnodeParentCount);
+    g_dnodeParentCount = NULL;
+  }
+}
+
+static void solver_init_dnode_parent_cache(mesh_t* mesh) {
+  int32_t dnindex;
+
+  solver_free_dnode_parent_cache();
+
+  if (mesh->ldnnum <= 0) {
+    return;
+  }
+
+  g_dnodeParentIds = (int32_t*)malloc(sizeof(int32_t) * mesh->ldnnum * 4);
+  g_dnodeParentCount = (uint8_t*)malloc(sizeof(uint8_t) * mesh->ldnnum);
+
+  if ((g_dnodeParentIds == NULL) || (g_dnodeParentCount == NULL)) {
+    solver_free_dnode_parent_cache();
+    return;
+  }
+
+  for (dnindex = 0; dnindex < mesh->ldnnum; dnindex++) {
+    dnode_t* dnode = &mesh->dnodeTable[dnindex];
+    int32link_t* link = dnode->lanid;
+    int32_t base = dnindex * 4;
+    int32_t count = 0;
+
+    g_dnodeParentIds[base + 0] = -1;
+    g_dnodeParentIds[base + 1] = -1;
+    g_dnodeParentIds[base + 2] = -1;
+    g_dnodeParentIds[base + 3] = -1;
+
+    while ((link != NULL) && (count < 4)) {
+      g_dnodeParentIds[base + count] = link->id;
+      count++;
+      link = link->next;
+    }
+
+    g_dnodeParentCount[dnindex] = (uint8_t)count;
+  }
 }
 
 static int read_myForces(int32_t timestep, double dt) {
@@ -7828,7 +7885,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
-        int32link_t* int32link;
 #ifdef DEBUG
         int32_t deps = 0;
 #endif /* DEBUG */
@@ -7836,21 +7892,45 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         dnode = &Global.myMesh->dnodeTable[dnindex];
         myvalue = vtable + dnode->ldnid * 3;
 
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
+        uint32_t deps_local = dnode->deps;
+        int32_t* parents = NULL;
+        int32_t pcount = 0;
+        if ((g_dnodeParentIds != NULL) && (g_dnodeParentCount != NULL)) {
+          parents = &g_dnodeParentIds[dnindex * 4];
+          pcount = g_dnodeParentCount[dnindex];
+          if (pcount > 0) {
+            deps_local = (uint32_t)pcount;
+          }
+        }
+
+        const solver_float invdeps = (solver_float)1.0 / deps_local;
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
+        if (pcount > 0) {
+          int32_t p;
+          for (p = 0; p < pcount; p++) {
 #ifdef DEBUG
-          deps++;
+            deps++;
 #endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
-          parentvalue[0] += d0;
-          parentvalue[1] += d1;
-          parentvalue[2] += d2;
-          int32link = int32link->next;
+            solver_float* parentvalue = vtable + parents[p] * 3;
+            parentvalue[0] += d0;
+            parentvalue[1] += d1;
+            parentvalue[2] += d2;
+          }
+        } else {
+          int32link_t* int32link = dnode->lanid;
+          while (int32link != NULL) {
+#ifdef DEBUG
+            deps++;
+#endif
+            solver_float* parentvalue = vtable + int32link->id * 3;
+            parentvalue[0] += d0;
+            parentvalue[1] += d1;
+            parentvalue[2] += d2;
+            int32link = int32link->next;
+          }
         }
 
 #ifdef DEBUG
@@ -7866,30 +7946,57 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
-        int32link_t* int32link;
 #ifdef DEBUG
         int32_t deps = 0;
 #endif /* DEBUG */
 
         dnode = &Global.myMesh->dnodeTable[dnindex];
         myvalue = vtable + dnode->ldnid * 3;
-        myvalue[0] = 0;
-        myvalue[1] = 0;
-        myvalue[2] = 0;
 
-        const solver_float invdeps = (solver_float)1.0 / dnode->deps;
-
-        int32link = dnode->lanid;
-        while (int32link != NULL) {
-#ifdef DEBUG
-          deps++;
-#endif
-          solver_float* parentvalue = vtable + int32link->id * 3;
-          myvalue[0] += parentvalue[0] * invdeps;
-          myvalue[1] += parentvalue[1] * invdeps;
-          myvalue[2] += parentvalue[2] * invdeps;
-          int32link = int32link->next;
+        uint32_t deps_local = dnode->deps;
+        int32_t* parents = NULL;
+        int32_t pcount = 0;
+        if ((g_dnodeParentIds != NULL) && (g_dnodeParentCount != NULL)) {
+          parents = &g_dnodeParentIds[dnindex * 4];
+          pcount = g_dnodeParentCount[dnindex];
+          if (pcount > 0) {
+            deps_local = (uint32_t)pcount;
+          }
         }
+
+        const solver_float invdeps = (solver_float)1.0 / deps_local;
+        solver_float a0 = 0;
+        solver_float a1 = 0;
+        solver_float a2 = 0;
+
+        if (pcount > 0) {
+          int32_t p;
+          for (p = 0; p < pcount; p++) {
+#ifdef DEBUG
+            deps++;
+#endif
+            solver_float* parentvalue = vtable + parents[p] * 3;
+            a0 += parentvalue[0];
+            a1 += parentvalue[1];
+            a2 += parentvalue[2];
+          }
+        } else {
+          int32link_t* int32link = dnode->lanid;
+          while (int32link != NULL) {
+#ifdef DEBUG
+            deps++;
+#endif
+            solver_float* parentvalue = vtable + int32link->id * 3;
+            a0 += parentvalue[0];
+            a1 += parentvalue[1];
+            a2 += parentvalue[2];
+            int32link = int32link->next;
+          }
+        }
+
+        myvalue[0] = a0 * invdeps;
+        myvalue[1] = a1 * invdeps;
+        myvalue[2] = a2 * invdeps;
 
 #ifdef DEBUG
         if (deps != (int)dnode->deps) {
