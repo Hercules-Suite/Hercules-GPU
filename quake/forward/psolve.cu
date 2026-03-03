@@ -5963,15 +5963,10 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  (void)mesh;
-
   Timer_Start("Compute new displacement");
-  Timer_Start("Disp stream wait");
 
   /* Uncomment for timing tests */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  Timer_Stop("Disp stream wait");
 
   Timer_Stop("Compute new displacement");
   return;
@@ -5991,11 +5986,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   cudaGetLastError();
 
-  Timer_Start("Disp kernel launch");
   kernelDispCalc<<<gridsize, blocksize, sharedmem,
                    solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->nharbored, solver->gpuDataDevice, Param.printStationAccelerations);
-  Timer_Stop("Disp kernel launch");
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -6012,14 +6005,10 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
   /* Ensure host forces have been copied to device */
-  Timer_Start("Disp wait force H2D");
   cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
-  Timer_Stop("Disp wait force H2D");
 
   /* zero out the force vector for all nodes */
-  Timer_Start("Disp host force clear");
   memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
-  Timer_Stop("Disp host force clear");
 
   /* Uncomment for timing tests */
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
@@ -6138,22 +6127,6 @@ static void solver_run_collect_timers(void) {
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
-  if (Timer_Exists("Disp kernel launch")) {
-    Timer_Reduce("Disp kernel launch", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp wait force H2D")) {
-    Timer_Reduce("Disp wait force H2D", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp host force clear")) {
-    Timer_Reduce("Disp host force clear", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp stream wait")) {
-    Timer_Reduce("Disp stream wait", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("2nd compute adjust (assignment)",
