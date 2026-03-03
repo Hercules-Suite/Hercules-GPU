@@ -4972,6 +4972,23 @@ static void solver_init() {
   k->handle = (char*)kernelDispCalc;
   k->blocksize =
       gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
+  {
+    const char* disp_block_env = getenv("HERCULES_GPU_DISP_BLOCKSIZE");
+    if ((disp_block_env != NULL) && (disp_block_env[0] != '\0')) {
+      int requested = atoi(disp_block_env);
+      int warp = Global.mySolver->gpu_spec->warp_size;
+      if (requested >= warp) {
+        requested = (requested / warp) * warp;
+        if (requested > 0 && requested <= Global.mySolver->gpu_spec->max_threads) {
+          k->blocksize = requested;
+          if (Global.myID == 0) {
+            printf("Overriding displacement block size via HERCULES_GPU_DISP_BLOCKSIZE=%d\n",
+                   k->blocksize);
+          }
+        }
+      }
+    }
+  }
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
@@ -5963,12 +5980,12 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  Timer_Start("Compute new displacement");
+  Timer_Start("Displacement stream wait");
 
   /* Uncomment for timing tests */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
-  Timer_Stop("Compute new displacement");
+  Timer_Stop("Displacement stream wait");
   return;
 }
 
@@ -6124,6 +6141,10 @@ static void solver_run_collect_timers(void) {
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
+  if (Timer_Exists("Displacement stream wait")) {
+    Timer_Reduce("Displacement stream wait", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("2nd compute adjust (assignment)",
@@ -8200,6 +8221,14 @@ static void print_timing_stat() {
       Timer_Value("Compute new displacement", AVERAGE),
       Timer_Value("Compute new displacement", MAX),
       Timer_Value("Compute new displacement", MIN));
+  if (Timer_Exists("Displacement stream wait")) {
+    printf(
+        "    Displacement stream wait       : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Displacement stream wait", AVERAGE),
+        Timer_Value("Displacement stream wait", MAX),
+        Timer_Value("Displacement stream wait", MIN));
+  }
   printf(
       "    3rd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
