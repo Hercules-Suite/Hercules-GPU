@@ -38,6 +38,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h>
 
 #include "util.h"
@@ -84,7 +85,8 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
-static fvector_t* g_forceHostMappedDevice = NULL;
+static std::thread g_force_clear_thread;
+static int g_force_clear_pending = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -4060,27 +4062,13 @@ static void solver_init() {
     exit(1);
   }
   memset(Global.mySolver->tm2, 0, Global.myMesh->nharbored * sizeof(fvector_t));
-  {
-    cudaError_t cerror;
-    cerror = cudaHostAlloc((void**)&(Global.mySolver->force),
-                           Global.myMesh->nharbored * sizeof(fvector_t),
-                           cudaHostAllocMapped);
-    if (cerror != cudaSuccess) {
-      cerror = cudaMallocHost((void**)&(Global.mySolver->force),
-                              Global.myMesh->nharbored * sizeof(fvector_t));
-    }
-    if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    cerror = cudaHostGetDevicePointer((void**)&g_forceHostMappedDevice,
-                                      (void*)Global.mySolver->force, 0);
-    if (cerror != cudaSuccess) {
-      g_forceHostMappedDevice = NULL;
-    }
+  if (cudaMallocHost(&(Global.mySolver->force),
+                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
+      cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate force pinned memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
   memset(Global.mySolver->force, 0,
          Global.myMesh->nharbored * sizeof(fvector_t));
@@ -5183,10 +5171,14 @@ static void solver_delete() {
   free(Global.mySolver->eTable);
   free(Global.mySolver->nTable);
 
+  if (g_force_clear_pending) {
+    g_force_clear_thread.join();
+    g_force_clear_pending = 0;
+  }
+
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
   cudaFreeHost(Global.mySolver->force);
-  g_forceHostMappedDevice = NULL;
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
@@ -5993,10 +5985,24 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
+static void solver_launch_force_clear_async(mysolver_t* solver, mesh_t* mesh) {
+  if (g_force_clear_pending) {
+    g_force_clear_thread.join();
+    g_force_clear_pending = 0;
+  }
+
+  g_force_clear_thread = std::thread([solver, mesh]() {
+    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+  });
+  g_force_clear_pending = 1;
+}
+
 static void solver_wait_force_clear_gpu(mysolver_t* solver) {
-  if (g_forceHostMappedDevice != NULL) {
+  (void)solver;
+  if (g_force_clear_pending) {
     Timer_Start("Disp wait force clear");
-    cudaStreamSynchronize(solver->streams[CUDA_STREAM_SECONDARY]);
+    g_force_clear_thread.join();
+    g_force_clear_pending = 0;
     Timer_Stop("Disp wait force clear");
   }
 }
@@ -6040,16 +6046,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   /* zero out the force vector for all nodes */
   Timer_Start("Disp host force clear");
-  if (g_forceHostMappedDevice != NULL) {
-    /* Ensure clear starts only after force H2D copy has completed. */
-    cudaStreamWaitEvent(solver->streams[CUDA_STREAM_SECONDARY],
-                        solver->events[CUDA_EVENT_FORCE_WAIT], 0);
-    cudaMemsetAsync(g_forceHostMappedDevice, 0,
-                    sizeof(fvector_t) * mesh->nharbored,
-                    solver->streams[CUDA_STREAM_SECONDARY]);
-  } else {
-    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
-  }
+  solver_launch_force_clear_async(solver, mesh);
   Timer_Stop("Disp host force clear");
 
   /* Uncomment for timing tests */
