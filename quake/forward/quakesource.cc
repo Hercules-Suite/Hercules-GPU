@@ -86,6 +86,9 @@
 #include <mpi.h>
 #include <glob.h>
 #include <unordered_map>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "cvm.h"
 #include "commutil.h"
@@ -3438,6 +3441,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t* activeSourceList = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
+    octant_t** prepassOctant = NULL;
+    vector3D_t* prepassDomainCoords = NULL;
+    char* prepassIsActive = NULL;
         int32_t* cycleNodeCounts = NULL;
         int32_t* cycleNodeOffsets = NULL;
         int32_t* cycleNodeCursor = NULL;
@@ -3492,9 +3498,14 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
   activeSourceDomainCoords =
       (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
+  prepassOctant = (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
+  prepassDomainCoords =
+      (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
+  prepassIsActive = (char*)calloc(theNumberOfPointSources, sizeof(char));
 
   if ((activeSourceList == NULL) || (activeSourceOctant == NULL) ||
-      (activeSourceDomainCoords == NULL)) {
+      (activeSourceDomainCoords == NULL) || (prepassOctant == NULL) ||
+      (prepassDomainCoords == NULL) || (prepassIsActive == NULL)) {
       fprintf(stdout, "Err allocating active source cache\n");
       return -1;
   }
@@ -3505,27 +3516,46 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
     sourcePrepassTime = -MPI_Wtime();
 
-  /* Go through the fault */
-  for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
+  /* Parallel, read-only prepass: source coordinates + ownership test. */
+#if defined(_OPENMP) && defined(USE_OPENMP_SRFH)
+#pragma omp parallel for schedule(static)
+#endif
+  for (iSrc = 0; iSrc < theNumberOfPointSources; iSrc++) {
+      vector3D_t srcDomainCoords = compute_domain_coords_linearinterp(
+          theSourceLonArray[iSrc], theSourceLatArray[iSrc],
+          theSurfaceCornersLong, theSurfaceCornersLat,
+          theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+      octant_t* srcOctant = NULL;
 
-    pntSrc.domainCoords = compute_domain_coords_linearinterp(
-        theSourceLonArray[iSrc], theSourceLatArray[iSrc],
-        theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-    pntSrc.domainCoords.x[2]= theSourceDepthArray[iSrc];
+      srcDomainCoords.x[2] = theSourceDepthArray[iSrc];
+      prepassDomainCoords[iSrc] = srcDomainCoords;
 
-    /* Check if this force is contained in this processor */
-    if ( search_point( pntSrc.domainCoords, &octant ) == 1){
-	tag_myForcesCycle ( octant, &pntSrc );
-	update_forceinprocessor( iForce, is_force_in_processor, 1);
-	myNumberOfForces +=1;
-    activeSourceList[activeSourceCount] = iSrc;
-    activeSourceOctant[activeSourceCount] = octant;
-    activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
-    activeSourceCount++;
-    }
-    iForce+=1;
+      if (search_point(srcDomainCoords, &srcOctant) == 1) {
+          prepassIsActive[iSrc] = 1;
+          prepassOctant[iSrc] = srcOctant;
+      }
+      else {
+          prepassIsActive[iSrc] = 0;
+          prepassOctant[iSrc] = NULL;
+      }
   }
+
+  /* Serial commit pass: mutate myForcesCycle/bitmasks/active lists. */
+  for (iSrc = 0; iSrc < theNumberOfPointSources; iSrc++) {
+      if (prepassIsActive[iSrc]) {
+          pntSrc.domainCoords = prepassDomainCoords[iSrc];
+          octant = prepassOctant[iSrc];
+          tag_myForcesCycle(octant, &pntSrc);
+          update_forceinprocessor(iSrc, is_force_in_processor, 1);
+          myNumberOfForces += 1;
+          activeSourceList[activeSourceCount] = iSrc;
+          activeSourceOctant[activeSourceCount] = octant;
+          activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
+          activeSourceCount++;
+      }
+  }
+
+  iForce = theNumberOfPointSources;
 
   WAIT;
     sourcePrepassTime += MPI_Wtime();
@@ -3733,6 +3763,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     free(activeSourceList);
     free(activeSourceOctant);
     free(activeSourceDomainCoords);
+    free(prepassOctant);
+    free(prepassDomainCoords);
+    free(prepassIsActive);
     free(cycleNodeCounts);
     free(cycleNodeOffsets);
     free(cycleNodeCursor);
