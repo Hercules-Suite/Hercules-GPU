@@ -40,6 +40,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
+#include <omp.h>
+#endif
+
 #include "util.h"
 #include "commutil.h"
 #include "timers.h"
@@ -7838,6 +7842,9 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 #endif /* DEBUG */
       }
     } else {
+#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
+#pragma omp parallel for schedule(static)
+#endif
       for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
         dnode_t* dnode;
         solver_float* myvalue;
@@ -7928,6 +7935,9 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   } else {
     /* Assign the value of the anchored parents to the dangling nodes*/
 
+#if defined(_OPENMP) && defined(USE_OPENMP_ADJUST)
+#pragma omp parallel for schedule(static)
+#endif
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
       dnode_t* dnode;
       solver_float *myvalue, *parentvalue;
