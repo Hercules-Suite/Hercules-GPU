@@ -3443,6 +3443,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   ptsrc_t pntSrc;
   int ActivePE;
         int32_t maxCycleNodes = 0;
+        int32_t totalLoadedNodeCount = 0;
         double* cycleWriteBuffer = NULL;
         int64_t sourceDataStartOffset = 0;
 
@@ -3637,9 +3638,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       ActivePE=1;
       fptmpsrc = source_open_forces_file( "w" );
       print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
+      totalLoadedNodeCount = myNumberOfNodesLoaded;
       sourceDataStartOffset =
           (int64_t)sizeof(int32_t) +
-          (int64_t)myNumberOfNodesLoaded * (int64_t)sizeof(int32_t);
+          (int64_t)totalLoadedNodeCount * (int64_t)sizeof(int32_t);
 
       for (iCycle = 0; iCycle < myNumberOfCycles; iCycle++) {
           if (cycleNodeCounts[iCycle] > maxCycleNodes) {
@@ -3712,7 +3714,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t cycleNodeCount = cycleNodeCounts[iCycle];
 	sourceWriteTime -= MPI_Wtime();
     write_myForces_cycle_direct(fptmpsrc, sourceDataStartOffset,
-                                myNumberOfNodesLoaded, cycleNodeOffset,
+                                totalLoadedNodeCount, cycleNodeOffset,
                                 cycleNodes, cycleNodeCount,
                                 cycleWriteBuffer);
 	sourceWriteTime += MPI_Wtime();
