@@ -3405,6 +3405,10 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
         double sourcePrepassTime = 0.0;
         double sourceUpdateTime = 0.0;
         double sourceLoadTime = 0.0;
+        double sourceFillTime = 0.0;
+        double sourceFilterTime = 0.0;
+        double sourceWriteTime = 0.0;
+        double sourceFreeTime = 0.0;
 
   numStepsNecessary = theNumberOfTimeSteps;
 
@@ -3584,18 +3588,26 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       }
       }
 
+    sourceFillTime -= MPI_Wtime();
     fill_myForces_cycle(iCycle);
+    sourceFillTime += MPI_Wtime();
 
     if (theSourceIsFiltered == 1) {
+	sourceFilterTime -= MPI_Wtime();
 	filter_myForce();
+	sourceFilterTime += MPI_Wtime();
     }
 
     if(ActivePE){
 	const char* local_forces_filename = source_get_local_forces_filename();
+	sourceWriteTime -= MPI_Wtime();
 	print_myForces_filepercycle( local_forces_filename, iCycle );
+	sourceWriteTime += MPI_Wtime();
     }
 
+    sourceFreeTime -= MPI_Wtime();
     free_myForces();
+    sourceFreeTime += MPI_Wtime();
   }
 
   if (myID == 0) {	/* PE 0: close source description file */
@@ -3607,8 +3619,9 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   if (myID == 0) {
       printf( "done...%.2f s", theForceGenerationTime );
-      printf("\n SRFH breakdown: prepass=%.2f s update=%.2f s load=%.2f s",
-             sourcePrepassTime, sourceUpdateTime, sourceLoadTime);
+      printf("\n SRFH breakdown: prepass=%.2f s update=%.2f s load=%.2f s fill=%.2f s filter=%.2f s write=%.2f s free=%.2f s",
+          sourcePrepassTime, sourceUpdateTime, sourceLoadTime,
+          sourceFillTime, sourceFilterTime, sourceWriteTime, sourceFreeTime);
       printf( "\n Concatenation process..." );
   }
 
