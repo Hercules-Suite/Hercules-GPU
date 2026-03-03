@@ -5993,6 +5993,14 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
+static void solver_wait_force_clear_gpu(mysolver_t* solver) {
+  if (g_forceHostMappedDevice != NULL) {
+    Timer_Start("Disp wait force clear");
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_SECONDARY]);
+    Timer_Stop("Disp wait force clear");
+  }
+}
+
 /** Compute new displacements of my harbored nodes */
 static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
                                             mesh_t* mesh) {
@@ -6037,7 +6045,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   if (g_forceHostMappedDevice != NULL) {
     cudaMemsetAsync(g_forceHostMappedDevice, 0,
                     sizeof(fvector_t) * mesh->nharbored,
-                    solver->streams[CUDA_STREAM_MAIN]);
+                    solver->streams[CUDA_STREAM_SECONDARY]);
   } else {
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   }
@@ -6172,6 +6180,10 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Disp host force clear", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
+  if (Timer_Exists("Disp wait force clear")) {
+    Timer_Reduce("Disp wait force clear", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   if (Timer_Exists("Disp stream wait")) {
     Timer_Reduce("Disp stream wait", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
@@ -6246,6 +6258,7 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
 
     Timer_Start("Compute Physics");
+    solver_wait_force_clear_gpu(Global.mySolver);
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     solver_compute_force_source(step);
