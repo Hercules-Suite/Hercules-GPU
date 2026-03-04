@@ -1849,7 +1849,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         }
 
         if (myTopoNodesCount > 0) {
-            const int32_t mergeGapThreshold = 64;
+            const int32_t mergeGapThreshold = 256;
             int32_t rangeWrite = 0;
             int32_t currentStart = myTopoNodesList[0];
             int32_t currentLen = 1;
