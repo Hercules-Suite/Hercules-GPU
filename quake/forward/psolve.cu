@@ -6809,8 +6809,13 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
     sched->irecvstats_c =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
+    sched->isendreqs_c =
+        (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
+    sched->isendstats_c =
+        (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
 
-    if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL)) {
+    if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL) ||
+        (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6819,6 +6824,8 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_c = NULL;
     sched->irecvstats_c = NULL;
+    sched->isendreqs_c = NULL;
+    sched->isendstats_c = NULL;
   }
 
   if (sched->s_count != 0) {
@@ -6826,8 +6833,13 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
     sched->irecvstats_s =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
+    sched->isendreqs_s =
+        (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
+    sched->isendstats_s =
+        (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
 
-    if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL)) {
+    if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL) ||
+        (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6836,6 +6848,8 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_s = NULL;
     sched->irecvstats_s = NULL;
+    sched->isendreqs_s = NULL;
+    sched->isendstats_s = NULL;
   }
 
   return;
@@ -7028,10 +7042,14 @@ static void schedule_delete(schedule_t* sched) {
 
   if (sched->irecvreqs_c != NULL) free(sched->irecvreqs_c);
   if (sched->irecvstats_c != NULL) free(sched->irecvstats_c);
+  if (sched->isendreqs_c != NULL) free(sched->isendreqs_c);
+  if (sched->isendstats_c != NULL) free(sched->isendstats_c);
   free(sched->messenger_c);
 
   if (sched->irecvreqs_s != NULL) free(sched->irecvreqs_s);
   if (sched->irecvstats_s != NULL) free(sched->irecvstats_s);
+  if (sched->isendreqs_s != NULL) free(sched->isendreqs_s);
+  if (sched->isendstats_s != NULL) free(sched->isendstats_s);
   free(sched->messenger_s);
 
   free(sched);
@@ -7075,8 +7093,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   int32_t irecvcount, irecvnum, isendcount, isendnum, bytesize;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
-  MPI_Request* isendreqs = NULL;
-  MPI_Status* isendstats = NULL;
+  MPI_Request* isendreqs;
+  MPI_Status* isendstats;
   const char* timer_post = NULL;
   const char* timer_pack = NULL;
   const char* timer_send = NULL;
@@ -7094,6 +7112,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
     irecvstats = sched->irecvstats_s;
+    isendreqs = sched->isendreqs_c;
+    isendstats = sched->isendstats_c;
     timer_post = "Sched post irecv (contribution)";
     timer_pack = "Sched pack out (contribution)";
     timer_send = "Sched send (contribution)";
@@ -7106,22 +7126,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
     irecvstats = sched->irecvstats_c;
+    isendreqs = sched->isendreqs_s;
+    isendstats = sched->isendstats_s;
     timer_post = "Sched post irecv (sharing)";
     timer_pack = "Sched pack out (sharing)";
     timer_send = "Sched send (sharing)";
     timer_wait = "Sched wait (sharing)";
     timer_unpack = "Sched unpack in (sharing)";
-  }
-
-  if (isendcount > 0) {
-    isendreqs = (MPI_Request*)malloc(sizeof(MPI_Request) * isendcount);
-    isendstats = (MPI_Status*)malloc(sizeof(MPI_Status) * isendcount);
-    if ((isendreqs == NULL) || (isendstats == NULL)) {
-      fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
   }
 
   /* Post receives */
@@ -7238,13 +7249,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     recv_messenger = recv_messenger->next;
   }
   Timer_Stop(timer_unpack);
-
-  if (isendreqs != NULL) {
-    free(isendreqs);
-  }
-  if (isendstats != NULL) {
-    free(isendstats);
-  }
 
   /* MPI_Barrier(comm_solver);  */
 
