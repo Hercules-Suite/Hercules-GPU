@@ -6297,6 +6297,47 @@ static void solver_run_collect_timers(void) {
   Timer_Reduce("4th schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
+  if (Timer_Exists("Sched post irecv (contribution)")) {
+    Timer_Reduce("Sched post irecv (contribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched pack out (contribution)")) {
+    Timer_Reduce("Sched pack out (contribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched send (contribution)")) {
+    Timer_Reduce("Sched send (contribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched wait (contribution)")) {
+    Timer_Reduce("Sched wait (contribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched unpack in (contribution)")) {
+    Timer_Reduce("Sched unpack in (contribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched post irecv (sharing)")) {
+    Timer_Reduce("Sched post irecv (sharing)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched pack out (sharing)")) {
+    Timer_Reduce("Sched pack out (sharing)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched send (sharing)")) {
+    Timer_Reduce("Sched send (sharing)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched wait (sharing)")) {
+    Timer_Reduce("Sched wait (sharing)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Sched unpack in (sharing)")) {
+    Timer_Reduce("Sched unpack in (sharing)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+
   Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
@@ -7034,6 +7075,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   int32_t irecvcount, irecvnum, bytesize;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
+  const char* timer_post = NULL;
+  const char* timer_pack = NULL;
+  const char* timer_send = NULL;
+  const char* timer_wait = NULL;
+  const char* timer_unpack = NULL;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7045,15 +7091,26 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvcount = sched->s_count;
     irecvreqs = sched->irecvreqs_s;
     irecvstats = sched->irecvstats_s;
+    timer_post = "Sched post irecv (contribution)";
+    timer_pack = "Sched pack out (contribution)";
+    timer_send = "Sched send (contribution)";
+    timer_wait = "Sched wait (contribution)";
+    timer_unpack = "Sched unpack in (contribution)";
   } else {
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
     irecvcount = sched->c_count;
     irecvreqs = sched->irecvreqs_c;
     irecvstats = sched->irecvstats_c;
+    timer_post = "Sched post irecv (sharing)";
+    timer_pack = "Sched pack out (sharing)";
+    timer_send = "Sched send (sharing)";
+    timer_wait = "Sched wait (sharing)";
+    timer_unpack = "Sched unpack in (sharing)";
   }
 
   /* Post receives */
+  Timer_Start(timer_post);
   irecvnum = 0;
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
@@ -7064,8 +7121,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvnum++;
     recv_messenger = recv_messenger->next;
   }
+  Timer_Stop(timer_post);
 
   /* Asssemble outgoing messages */
+  Timer_Start(timer_pack);
   while (send_messenger != NULL) {
     int32_t lnid, idx, entry;
     solver_float* dvalue;
@@ -7091,6 +7150,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     send_messenger = send_messenger->next;
   }
+  Timer_Stop(timer_pack);
 
   /* Revisit messengers */
   if (direction == CONTRIBUTION) {
@@ -7102,18 +7162,23 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* Send the data */
+  Timer_Start(timer_send);
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
     MPI_Send(send_messenger->outdata, bytesize, MPI_CHAR,
              send_messenger->procid, msgtag, comm_solver);
     send_messenger = send_messenger->next;
   }
+  Timer_Stop(timer_send);
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
+    Timer_Start(timer_wait);
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+    Timer_Stop(timer_wait);
   }
 
+  Timer_Start(timer_unpack);
   while (recv_messenger != NULL) {
     int32_t lnid, idx, entry;
     solver_float* dvalue;
@@ -7151,6 +7216,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     recv_messenger = recv_messenger->next;
   }
+  Timer_Stop(timer_unpack);
 
   /* MPI_Barrier(comm_solver);  */
 
@@ -8488,6 +8554,70 @@ static void print_timing_stat() {
       Timer_Value("4th schedule send data (sharing)", AVERAGE),
       Timer_Value("4th schedule send data (sharing)", MAX),
       Timer_Value("4th schedule send data (sharing)", MIN));
+  if (Timer_Exists("Sched pack out (contribution)")) {
+    printf(
+        "      Sched pack out (contrib)     : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched pack out (contribution)", AVERAGE),
+        Timer_Value("Sched pack out (contribution)", MAX),
+        Timer_Value("Sched pack out (contribution)", MIN));
+  }
+  if (Timer_Exists("Sched send (contribution)")) {
+    printf(
+        "      Sched send (contrib)         : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched send (contribution)", AVERAGE),
+        Timer_Value("Sched send (contribution)", MAX),
+        Timer_Value("Sched send (contribution)", MIN));
+  }
+  if (Timer_Exists("Sched wait (contribution)")) {
+    printf(
+        "      Sched wait (contrib)         : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched wait (contribution)", AVERAGE),
+        Timer_Value("Sched wait (contribution)", MAX),
+        Timer_Value("Sched wait (contribution)", MIN));
+  }
+  if (Timer_Exists("Sched unpack in (contribution)")) {
+    printf(
+        "      Sched unpack in (contrib)    : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched unpack in (contribution)", AVERAGE),
+        Timer_Value("Sched unpack in (contribution)", MAX),
+        Timer_Value("Sched unpack in (contribution)", MIN));
+  }
+  if (Timer_Exists("Sched pack out (sharing)")) {
+    printf(
+        "      Sched pack out (sharing)     : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched pack out (sharing)", AVERAGE),
+        Timer_Value("Sched pack out (sharing)", MAX),
+        Timer_Value("Sched pack out (sharing)", MIN));
+  }
+  if (Timer_Exists("Sched send (sharing)")) {
+    printf(
+        "      Sched send (sharing)         : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched send (sharing)", AVERAGE),
+        Timer_Value("Sched send (sharing)", MAX),
+        Timer_Value("Sched send (sharing)", MIN));
+  }
+  if (Timer_Exists("Sched wait (sharing)")) {
+    printf(
+        "      Sched wait (sharing)         : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched wait (sharing)", AVERAGE),
+        Timer_Value("Sched wait (sharing)", MAX),
+        Timer_Value("Sched wait (sharing)", MIN));
+  }
+  if (Timer_Exists("Sched unpack in (sharing)")) {
+    printf(
+        "      Sched unpack in (sharing)    : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Sched unpack in (sharing)", AVERAGE),
+        Timer_Value("Sched unpack in (sharing)", MAX),
+        Timer_Value("Sched unpack in (sharing)", MIN));
+  }
   printf("    IO\n");
 
   if (Timer_Exists("Solver drm output")) {
