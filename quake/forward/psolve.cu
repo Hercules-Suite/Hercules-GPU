@@ -8309,18 +8309,21 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        myvalue[0] = 0;
-        myvalue[1] = 0;
-        myvalue[2] = 0;
-
         const solver_float invdeps = g_adjustInvDeps[dnindex];
+        solver_float s0 = 0;
+        solver_float s1 = 0;
+        solver_float s2 = 0;
         int32_t p;
         for (p = start; p < end; p++) {
           solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-          myvalue[0] += parentvalue[0] * invdeps;
-          myvalue[1] += parentvalue[1] * invdeps;
-          myvalue[2] += parentvalue[2] * invdeps;
+          s0 += parentvalue[0] * invdeps;
+          s1 += parentvalue[1] * invdeps;
+          s2 += parentvalue[2] * invdeps;
         }
+
+        myvalue[0] = s0;
+        myvalue[1] = s1;
+        myvalue[2] = s2;
       }
     }
 
