@@ -7198,9 +7198,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendnum++;
     send_messenger = send_messenger->next;
   }
-  if (isendcount != 0) {
-    MPI_Waitall(isendcount, isendreqs, isendstats);
-  }
   Timer_Stop(timer_send);
 
   /* Wait till I receive all the data I want */
@@ -7249,6 +7246,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     recv_messenger = recv_messenger->next;
   }
   Timer_Stop(timer_unpack);
+
+  /* Ensure outgoing sends are completed before returning/reusing buffers. */
+  Timer_Start(timer_send);
+  if (isendcount != 0) {
+    MPI_Waitall(isendcount, isendreqs, isendstats);
+  }
+  Timer_Stop(timer_send);
 
   /* MPI_Barrier(comm_solver);  */
 
