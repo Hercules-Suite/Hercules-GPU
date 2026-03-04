@@ -323,8 +323,6 @@ struct schedule_t {
     messenger_t** messenger_c;  /**< Fast lookup table to build c-list. */
     MPI_Request*  irecvreqs_c;  /**< control for non-blocking receives. */
     MPI_Status*   irecvstats_c;
-    MPI_Request*  isendreqs_c;  /**< control for non-blocking sends.    */
-    MPI_Status*   isendstats_c;
 
     /** Number of processors who share nodes owned by me. */
     int32_t       s_count;
@@ -332,8 +330,6 @@ struct schedule_t {
     messenger_t** messenger_s;  /* Fast lookup table to build s-list.      */
     MPI_Request*  irecvreqs_s;  /* controls for non-blocking MPI receives. */
     MPI_Status*   irecvstats_s;
-    MPI_Request*  isendreqs_s;  /* controls for non-blocking MPI sends.    */
-    MPI_Status*   isendstats_s;
 };
 
 typedef struct schedule_t schedule_t;

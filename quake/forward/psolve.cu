@@ -6297,47 +6297,6 @@ static void solver_run_collect_timers(void) {
   Timer_Reduce("4th schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
-  if (Timer_Exists("Sched post irecv (contribution)")) {
-    Timer_Reduce("Sched post irecv (contribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched pack out (contribution)")) {
-    Timer_Reduce("Sched pack out (contribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched send (contribution)")) {
-    Timer_Reduce("Sched send (contribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched wait (contribution)")) {
-    Timer_Reduce("Sched wait (contribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched unpack in (contribution)")) {
-    Timer_Reduce("Sched unpack in (contribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched post irecv (sharing)")) {
-    Timer_Reduce("Sched post irecv (sharing)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched pack out (sharing)")) {
-    Timer_Reduce("Sched pack out (sharing)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched send (sharing)")) {
-    Timer_Reduce("Sched send (sharing)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched wait (sharing)")) {
-    Timer_Reduce("Sched wait (sharing)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Sched unpack in (sharing)")) {
-    Timer_Reduce("Sched unpack in (sharing)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
   Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
@@ -6809,13 +6768,8 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
     sched->irecvstats_c =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
-    sched->isendreqs_c =
-        (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
-    sched->isendstats_c =
-        (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
 
-    if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL) ||
-        (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
+    if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6824,8 +6778,6 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_c = NULL;
     sched->irecvstats_c = NULL;
-    sched->isendreqs_c = NULL;
-    sched->isendstats_c = NULL;
   }
 
   if (sched->s_count != 0) {
@@ -6833,13 +6785,8 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
     sched->irecvstats_s =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
-    sched->isendreqs_s =
-        (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
-    sched->isendstats_s =
-        (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
 
-    if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL) ||
-        (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
+    if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6848,8 +6795,6 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_s = NULL;
     sched->irecvstats_s = NULL;
-    sched->isendreqs_s = NULL;
-    sched->isendstats_s = NULL;
   }
 
   return;
@@ -7042,14 +6987,10 @@ static void schedule_delete(schedule_t* sched) {
 
   if (sched->irecvreqs_c != NULL) free(sched->irecvreqs_c);
   if (sched->irecvstats_c != NULL) free(sched->irecvstats_c);
-  if (sched->isendreqs_c != NULL) free(sched->isendreqs_c);
-  if (sched->isendstats_c != NULL) free(sched->isendstats_c);
   free(sched->messenger_c);
 
   if (sched->irecvreqs_s != NULL) free(sched->irecvreqs_s);
   if (sched->irecvstats_s != NULL) free(sched->irecvstats_s);
-  if (sched->isendreqs_s != NULL) free(sched->isendreqs_s);
-  if (sched->isendstats_s != NULL) free(sched->isendstats_s);
   free(sched->messenger_s);
 
   free(sched);
@@ -7090,16 +7031,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
                               int32_t msgtag) {
   messenger_t *send_messenger, *recv_messenger;
-  int32_t irecvcount, irecvnum, isendcount, isendnum, bytesize;
+  int32_t irecvcount, irecvnum, bytesize;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
-  MPI_Request* isendreqs;
-  MPI_Status* isendstats;
-  const char* timer_post = NULL;
-  const char* timer_pack = NULL;
-  const char* timer_send = NULL;
-  const char* timer_wait = NULL;
-  const char* timer_unpack = NULL;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7109,34 +7043,17 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = sched->first_c;
     recv_messenger = sched->first_s;
     irecvcount = sched->s_count;
-    isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
     irecvstats = sched->irecvstats_s;
-    isendreqs = sched->isendreqs_c;
-    isendstats = sched->isendstats_c;
-    timer_post = "Sched post irecv (contribution)";
-    timer_pack = "Sched pack out (contribution)";
-    timer_send = "Sched send (contribution)";
-    timer_wait = "Sched wait (contribution)";
-    timer_unpack = "Sched unpack in (contribution)";
   } else {
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
     irecvcount = sched->c_count;
-    isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
     irecvstats = sched->irecvstats_c;
-    isendreqs = sched->isendreqs_s;
-    isendstats = sched->isendstats_s;
-    timer_post = "Sched post irecv (sharing)";
-    timer_pack = "Sched pack out (sharing)";
-    timer_send = "Sched send (sharing)";
-    timer_wait = "Sched wait (sharing)";
-    timer_unpack = "Sched unpack in (sharing)";
   }
 
   /* Post receives */
-  Timer_Start(timer_post);
   irecvnum = 0;
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
@@ -7147,15 +7064,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvnum++;
     recv_messenger = recv_messenger->next;
   }
-  Timer_Stop(timer_post);
 
   /* Asssemble outgoing messages */
-  Timer_Start(timer_pack);
   while (send_messenger != NULL) {
-    int32_t lnid, idx;
+    int32_t lnid, idx, entry;
     solver_float* dvalue;
     solver_float* out;
-    size_t copy_bytes = (size_t)itemsperentry * sizeof(solver_float);
 
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       lnid = send_messenger->mapping[idx];
@@ -7165,7 +7079,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
       dvalue = (solver_float*)valuetable + itemsperentry * lnid;
 
-      memcpy(out, dvalue, copy_bytes);
+      for (entry = 0; entry < itemsperentry; entry++)
+        *(out + entry) = *(dvalue + entry);
 
 #ifdef DEBUG
       /* For debug, carry the global node id */
@@ -7176,7 +7091,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     send_messenger = send_messenger->next;
   }
-  Timer_Stop(timer_pack);
 
   /* Revisit messengers */
   if (direction == CONTRIBUTION) {
@@ -7188,100 +7102,55 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* Send the data */
-  Timer_Start(timer_send);
-  isendnum = 0;
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
-    MPI_Isend(send_messenger->outdata, bytesize, MPI_CHAR,
-              send_messenger->procid, msgtag, comm_solver,
-              &isendreqs[isendnum]);
-    isendnum++;
+    MPI_Send(send_messenger->outdata, bytesize, MPI_CHAR,
+             send_messenger->procid, msgtag, comm_solver);
     send_messenger = send_messenger->next;
   }
-  Timer_Stop(timer_send);
 
   /* Wait till I receive all the data I want */
-  Timer_Start(timer_wait);
   if (irecvcount != 0) {
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
   }
-  Timer_Stop(timer_wait);
 
-  Timer_Start(timer_unpack);
-  if (direction == CONTRIBUTION) {
-    while (recv_messenger != NULL) {
-      int32_t lnid, idx, entry;
-      solver_float* dvalue;
-      solver_float* in;
+  while (recv_messenger != NULL) {
+    int32_t lnid, idx, entry;
+    solver_float* dvalue;
+    solver_float* in;
 
-      for (idx = 0; idx < recv_messenger->nidx; idx++) {
-        lnid = recv_messenger->mapping[idx];
+    for (idx = 0; idx < recv_messenger->nidx; idx++) {
+      lnid = recv_messenger->mapping[idx];
 
-        in = (solver_float*)((char*)recv_messenger->indata +
-                             recv_messenger->insize * idx);
+      in = (solver_float*)((char*)recv_messenger->indata +
+                           recv_messenger->insize * idx);
 
-        dvalue = (solver_float*)valuetable + itemsperentry * lnid;
+      dvalue = (solver_float*)valuetable + itemsperentry * lnid;
 
-        for (entry = 0; entry < itemsperentry; entry++) {
+      for (entry = 0; entry < itemsperentry; entry++) {
+        if (direction == CONTRIBUTION) {
           *(dvalue + entry) += *(in + entry);
+        } else {
+          /* SHARING, overwrite my local value */
+          *(dvalue + entry) = *(in + entry);
         }
+      }
 
 #ifdef DEBUG
-        /* For debug, check the global node id */
-        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+      /* For debug, check the global node id */
+      gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
 
-        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
-          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
+      if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+        fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
 #endif /* DEBUG */
-      } /* for all the incoming data */
+    } /* for all the incoming data */
 
-      recv_messenger = recv_messenger->next;
-    }
-  } else {
-    while (recv_messenger != NULL) {
-      int32_t lnid, idx;
-      solver_float* dvalue;
-      solver_float* in;
-      size_t copy_bytes = (size_t)itemsperentry * sizeof(solver_float);
-
-      for (idx = 0; idx < recv_messenger->nidx; idx++) {
-        lnid = recv_messenger->mapping[idx];
-
-        in = (solver_float*)((char*)recv_messenger->indata +
-                             recv_messenger->insize * idx);
-
-        dvalue = (solver_float*)valuetable + itemsperentry * lnid;
-
-        memcpy(dvalue, in, copy_bytes);
-
-#ifdef DEBUG
-        /* For debug, check the global node id */
-        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
-
-        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
-          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-#endif /* DEBUG */
-      } /* for all the incoming data */
-
-      recv_messenger = recv_messenger->next;
-    }
+    recv_messenger = recv_messenger->next;
   }
-  Timer_Stop(timer_unpack);
-
-  /* Ensure outgoing sends are completed before returning/reusing buffers. */
-  Timer_Start(timer_send);
-  if (isendcount != 0) {
-    MPI_Waitall(isendcount, isendreqs, isendstats);
-  }
-  Timer_Stop(timer_send);
 
   /* MPI_Barrier(comm_solver);  */
 
@@ -8619,70 +8488,6 @@ static void print_timing_stat() {
       Timer_Value("4th schedule send data (sharing)", AVERAGE),
       Timer_Value("4th schedule send data (sharing)", MAX),
       Timer_Value("4th schedule send data (sharing)", MIN));
-  if (Timer_Exists("Sched pack out (contribution)")) {
-    printf(
-        "      Sched pack out (contrib)     : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched pack out (contribution)", AVERAGE),
-        Timer_Value("Sched pack out (contribution)", MAX),
-        Timer_Value("Sched pack out (contribution)", MIN));
-  }
-  if (Timer_Exists("Sched send (contribution)")) {
-    printf(
-        "      Sched send (contrib)         : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched send (contribution)", AVERAGE),
-        Timer_Value("Sched send (contribution)", MAX),
-        Timer_Value("Sched send (contribution)", MIN));
-  }
-  if (Timer_Exists("Sched wait (contribution)")) {
-    printf(
-        "      Sched wait (contrib)         : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched wait (contribution)", AVERAGE),
-        Timer_Value("Sched wait (contribution)", MAX),
-        Timer_Value("Sched wait (contribution)", MIN));
-  }
-  if (Timer_Exists("Sched unpack in (contribution)")) {
-    printf(
-        "      Sched unpack in (contrib)    : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched unpack in (contribution)", AVERAGE),
-        Timer_Value("Sched unpack in (contribution)", MAX),
-        Timer_Value("Sched unpack in (contribution)", MIN));
-  }
-  if (Timer_Exists("Sched pack out (sharing)")) {
-    printf(
-        "      Sched pack out (sharing)     : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched pack out (sharing)", AVERAGE),
-        Timer_Value("Sched pack out (sharing)", MAX),
-        Timer_Value("Sched pack out (sharing)", MIN));
-  }
-  if (Timer_Exists("Sched send (sharing)")) {
-    printf(
-        "      Sched send (sharing)         : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched send (sharing)", AVERAGE),
-        Timer_Value("Sched send (sharing)", MAX),
-        Timer_Value("Sched send (sharing)", MIN));
-  }
-  if (Timer_Exists("Sched wait (sharing)")) {
-    printf(
-        "      Sched wait (sharing)         : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched wait (sharing)", AVERAGE),
-        Timer_Value("Sched wait (sharing)", MAX),
-        Timer_Value("Sched wait (sharing)", MIN));
-  }
-  if (Timer_Exists("Sched unpack in (sharing)")) {
-    printf(
-        "      Sched unpack in (sharing)    : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Sched unpack in (sharing)", AVERAGE),
-        Timer_Value("Sched unpack in (sharing)", MAX),
-        Timer_Value("Sched unpack in (sharing)", MIN));
-  }
   printf("    IO\n");
 
   if (Timer_Exists("Solver drm output")) {
