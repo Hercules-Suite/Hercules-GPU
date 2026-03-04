@@ -7202,8 +7202,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t msgtag) {
   messenger_t *send_messenger, *recv_messenger;
   int32_t irecvcount, irecvnum, bytesize;
+  int32_t isendcount, isendnum;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
+  MPI_Request* isendreqs = NULL;
+  MPI_Status* isendstats = NULL;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7213,14 +7216,26 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = sched->first_c;
     recv_messenger = sched->first_s;
     irecvcount = sched->s_count;
+    isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
     irecvstats = sched->irecvstats_s;
   } else {
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
     irecvcount = sched->c_count;
+    isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
     irecvstats = sched->irecvstats_c;
+  }
+
+  if (isendcount > 0) {
+    isendreqs = (MPI_Request*)malloc(sizeof(MPI_Request) * isendcount);
+    isendstats = (MPI_Status*)malloc(sizeof(MPI_Status) * isendcount);
+    if ((isendreqs == NULL) || (isendstats == NULL)) {
+      fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n", Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   /* Post receives */
@@ -7272,16 +7287,23 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* Send the data */
+  isendnum = 0;
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
-    MPI_Send(send_messenger->outdata, bytesize, MPI_CHAR,
-             send_messenger->procid, msgtag, comm_solver);
+    MPI_Isend(send_messenger->outdata, bytesize, MPI_CHAR,
+              send_messenger->procid, msgtag, comm_solver,
+              &isendreqs[isendnum]);
+    isendnum++;
     send_messenger = send_messenger->next;
   }
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+  }
+
+  if (isendnum != 0) {
+    MPI_Waitall(isendnum, isendreqs, isendstats);
   }
 
   while (recv_messenger != NULL) {
@@ -7323,6 +7345,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* MPI_Barrier(comm_solver);  */
+
+  if (isendreqs != NULL) {
+    free(isendreqs);
+  }
+  if (isendstats != NULL) {
+    free(isendstats);
+  }
 
   return;
 }
