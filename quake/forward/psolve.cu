@@ -6222,48 +6222,8 @@ static void solver_send_displacement_anchored(mysolver_t* solver) {
 /** Adjust the displacements of my LOCAL dangling nodes. */
 static void solver_adjust_displacement(mysolver_t* solver) {
   Timer_Start("2nd compute adjust (assignment)");
-
-  compute_adjust_cache_build();
-
-  if (g_adjustDnCount > 0) {
-    int blocksize;
-    int gridsize;
-
-    compute_adjust_cache_upload_device();
-
-    cudaMemcpyAsync(solver->gpuData->tm2Device, solver->tm2,
-                    Global.myMesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-    solver->gpu_spec->numbytespci +=
-        Global.myMesh->nharbored * sizeof(fvector_t);
-
-    blocksize = 256;
-    gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
-    kernelAdjustAssignmentTm2<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
-        g_adjustDnCount, g_adjustParentOffsetsDevice, g_adjustParentBase3Device,
-        g_adjustDanglingBase3Device, g_adjustInvDepsDevice,
-        solver->gpuData->tm2Device);
-
-    cudaError_t cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: assignment adjust kernel - %s\n", Global.myID,
-              cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
-                    Global.myMesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-    solver->gpu_spec->numbytespci +=
-        Global.myMesh->nharbored * sizeof(fvector_t);
-
-    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-  } else {
-    compute_adjust(Global.mySolver->tm2,
-                   sizeof(fvector_t) / sizeof(solver_float), ASSIGNMENT);
-  }
+  compute_adjust(Global.mySolver->tm2, sizeof(fvector_t) / sizeof(solver_float),
+                 ASSIGNMENT);
 
   Timer_Stop("2nd compute adjust (assignment)");
 }
