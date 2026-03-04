@@ -7092,9 +7092,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   messenger_t *send_messenger, *recv_messenger;
   int32_t irecvcount, irecvnum, isendcount, isendnum, bytesize;
   MPI_Request* irecvreqs;
+  MPI_Status* irecvstats;
   MPI_Request* isendreqs;
   MPI_Status* isendstats;
-  messenger_t** recv_slots = NULL;
   const char* timer_post = NULL;
   const char* timer_pack = NULL;
   const char* timer_send = NULL;
@@ -7111,6 +7111,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvcount = sched->s_count;
     isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
+    irecvstats = sched->irecvstats_s;
     isendreqs = sched->isendreqs_c;
     isendstats = sched->isendstats_c;
     timer_post = "Sched post irecv (contribution)";
@@ -7124,6 +7125,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvcount = sched->c_count;
     isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
+    irecvstats = sched->irecvstats_c;
     isendreqs = sched->isendreqs_s;
     isendstats = sched->isendstats_s;
     timer_post = "Sched post irecv (sharing)";
@@ -7133,22 +7135,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     timer_unpack = "Sched unpack in (sharing)";
   }
 
-  if (irecvcount > 0) {
-    recv_slots = (messenger_t**)malloc(sizeof(messenger_t*) * irecvcount);
-    if (recv_slots == NULL) {
-      fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
   /* Post receives */
   Timer_Start(timer_post);
   irecvnum = 0;
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
-    recv_slots[irecvnum] = recv_messenger;
     MPI_Irecv(recv_messenger->indata, bytesize, MPI_CHAR,
               recv_messenger->procid, msgtag, comm_solver,
               &irecvreqs[irecvnum]);
@@ -7209,71 +7200,52 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
   Timer_Stop(timer_send);
 
-  /* Instantiate timers on all ranks to keep reductions balanced. */
+  /* Wait till I receive all the data I want */
   Timer_Start(timer_wait);
-  Timer_Stop(timer_wait);
-  Timer_Start(timer_unpack);
-  Timer_Stop(timer_unpack);
-
-  /* Wait on receives and unpack each completed message immediately. */
   if (irecvcount != 0) {
-    int32_t completed = 0;
+    MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+  }
+  Timer_Stop(timer_wait);
 
-    while (completed < irecvcount) {
-      int recv_index;
-      MPI_Status recv_status;
+  Timer_Start(timer_unpack);
+  while (recv_messenger != NULL) {
+    int32_t lnid, idx, entry;
+    solver_float* dvalue;
+    solver_float* in;
 
-      Timer_Start(timer_wait);
-      MPI_Waitany(irecvcount, irecvreqs, &recv_index, &recv_status);
-      Timer_Stop(timer_wait);
+    for (idx = 0; idx < recv_messenger->nidx; idx++) {
+      lnid = recv_messenger->mapping[idx];
 
-      if (recv_index == MPI_UNDEFINED) {
-        break;
-      }
+      in = (solver_float*)((char*)recv_messenger->indata +
+                           recv_messenger->insize * idx);
 
-      recv_messenger = recv_slots[recv_index];
+      dvalue = (solver_float*)valuetable + itemsperentry * lnid;
 
-      Timer_Start(timer_unpack);
-      {
-        int32_t lnid, idx, entry;
-        solver_float* dvalue;
-        solver_float* in;
-
-        for (idx = 0; idx < recv_messenger->nidx; idx++) {
-          lnid = recv_messenger->mapping[idx];
-
-          in = (solver_float*)((char*)recv_messenger->indata +
-                               recv_messenger->insize * idx);
-
-          dvalue = (solver_float*)valuetable + itemsperentry * lnid;
-
-          for (entry = 0; entry < itemsperentry; entry++) {
-            if (direction == CONTRIBUTION) {
-              *(dvalue + entry) += *(in + entry);
-            } else {
-              /* SHARING, overwrite my local value */
-              *(dvalue + entry) = *(in + entry);
-            }
-          }
-
-#ifdef DEBUG
-          /* For debug, check the global node id */
-          gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
-
-          if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
-            fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
-                    Global.myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR);
-            exit(1);
-          }
-#endif /* DEBUG */
+      for (entry = 0; entry < itemsperentry; entry++) {
+        if (direction == CONTRIBUTION) {
+          *(dvalue + entry) += *(in + entry);
+        } else {
+          /* SHARING, overwrite my local value */
+          *(dvalue + entry) = *(in + entry);
         }
       }
-      Timer_Stop(timer_unpack);
 
-      completed++;
-    }
+#ifdef DEBUG
+      /* For debug, check the global node id */
+      gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+
+      if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+        fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+#endif /* DEBUG */
+    } /* for all the incoming data */
+
+    recv_messenger = recv_messenger->next;
   }
+  Timer_Stop(timer_unpack);
 
   /* Ensure outgoing sends are completed before returning/reusing buffers. */
   Timer_Start(timer_send);
@@ -7281,10 +7253,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     MPI_Waitall(isendcount, isendreqs, isendstats);
   }
   Timer_Stop(timer_send);
-
-  if (recv_slots != NULL) {
-    free(recv_slots);
-  }
 
   /* MPI_Barrier(comm_solver);  */
 
