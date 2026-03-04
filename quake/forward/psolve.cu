@@ -8269,6 +8269,21 @@ static void compute_adjust_cache_build(void) {
     g_adjustParentBase3[cursor] = g_adjustParentIds[cursor] * 3;
   }
 
+  for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+    int32_t start = g_adjustParentOffsets[dnindex];
+    int32_t end = g_adjustParentOffsets[dnindex + 1];
+    int32_t i, j;
+    for (i = start + 1; i < end; i++) {
+      int32_t key = g_adjustParentBase3[i];
+      j = i - 1;
+      while ((j >= start) && (g_adjustParentBase3[j] > key)) {
+        g_adjustParentBase3[j + 1] = g_adjustParentBase3[j];
+        j--;
+      }
+      g_adjustParentBase3[j + 1] = key;
+    }
+  }
+
   g_adjustParentCount = totalParents;
 }
 
