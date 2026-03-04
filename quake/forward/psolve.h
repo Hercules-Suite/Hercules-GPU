@@ -375,6 +375,7 @@ typedef struct gpu_data_t {
     double*      a2_kappaArrayDevice;
 
     solver_float *mass_simpleArrayDevice;
+    solver_float *mass_inv_simpleArrayDevice;
     solver_float *mass2_minusaMArrayDevice[3];
     solver_float *mass_minusaMArrayDevice[3];
 

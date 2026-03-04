@@ -4582,6 +4582,16 @@ static void solver_init() {
     exit(1);
   }
 
+  if (cudaMalloc((void**)&(Global.gpuData.mass_inv_simpleArrayDevice),
+                 Global.myMesh->nharbored * sizeof(solver_float)) !=
+      cudaSuccess) {
+    fprintf(stderr,
+            "Thread %d: Failed to allocate mass_inv_simple array memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
     for (int i = 0; i < 3; i++) {
     if (cudaMalloc((void**)&(Global.gpuData.mass2_minusaMArrayDevice[i]),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
@@ -4641,6 +4651,8 @@ static void solver_init() {
       (double*)malloc(Global.myMesh->lenum * sizeof(double));
 
   solver_float* mass_simpleArray =
+      (solver_float*)malloc(Global.myMesh->nharbored * sizeof(solver_float));
+    solver_float* mass_inv_simpleArray =
       (solver_float*)malloc(Global.myMesh->nharbored * sizeof(solver_float));
   solver_float *mass2_minusaMArray[3], *mass_minusaMArray[3];
   for (int i = 0; i < 3; i++) {
@@ -4703,6 +4715,10 @@ static void solver_init() {
 
   for (int i = 0; i < Global.myMesh->nharbored; i++) {
     mass_simpleArray[i] = Global.mySolver->nTable[i].mass_simple;
+     mass_inv_simpleArray[i] = (Global.mySolver->nTable[i].mass_simple > 0)
+                         ? ((solver_float)1.0 /
+                           Global.mySolver->nTable[i].mass_simple)
+                         : 0;
     mass2_minusaMArray[0][i] = Global.mySolver->nTable[i].mass2_minusaM[0];
     mass2_minusaMArray[1][i] = Global.mySolver->nTable[i].mass2_minusaM[1];
     mass2_minusaMArray[2][i] = Global.mySolver->nTable[i].mass2_minusaM[2];
@@ -4858,6 +4874,15 @@ static void solver_init() {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  if (cudaMemcpy(Global.gpuData.mass_inv_simpleArrayDevice,
+                 mass_inv_simpleArray,
+                 Global.myMesh->nharbored * sizeof(solver_float),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to copy inv mass simple array\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 
   free(c1Array);
   free(c2Array);
@@ -4877,6 +4902,7 @@ static void solver_init() {
   free(a1_kappaArray);
   free(a2_kappaArray);
   free(mass_simpleArray);
+  free(mass_inv_simpleArray);
   for (int i = 0; i < 3; i++) {
     free(mass2_minusaMArray[i]);
     free(mass_minusaMArray[i]);
@@ -5174,6 +5200,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.shearVectorDevice);
   cudaFree(Global.gpuData.kappaVectorDevice);
   cudaFree(Global.gpuData.mass_simpleArrayDevice);
+  cudaFree(Global.gpuData.mass_inv_simpleArrayDevice);
   // cudaFree(Global.gpuData.matPropsDevice);
   for (int i = 0; i < 3; i++) {
     cudaFree(Global.gpuData.mass2_minusaMArrayDevice[i]);
