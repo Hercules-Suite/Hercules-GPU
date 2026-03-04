@@ -74,10 +74,9 @@
 #define CUDA_KERNEL_NAME_DISPLACEMENT          "kernelDispCalc"
 
 /* Maximum simultaneous CUDA events */
-#define MAX_CUDA_EVENT               3
-#define CUDA_EVENT_FORCE_WAIT        0
-#define CUDA_EVENT_DISP_KERNEL_DONE  1
-#define CUDA_EVENT_DISP_COPY_DONE    2
+#define MAX_CUDA_EVENT             2
+#define CUDA_EVENT_FORCE_WAIT      0
+#define CUDA_EVENT_DISP_KERNEL_DONE 1
 
 /* GPU device specifications */
 typedef struct {
@@ -375,7 +374,6 @@ typedef struct gpu_data_t {
     double*      a2_kappaArrayDevice;
 
     solver_float *mass_simpleArrayDevice;
-    solver_float *mass_inv_simpleArrayDevice;
     solver_float *mass2_minusaMArrayDevice[3];
     solver_float *mass_minusaMArrayDevice[3];
 
