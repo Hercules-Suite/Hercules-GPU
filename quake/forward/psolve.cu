@@ -7209,6 +7209,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
   Timer_Stop(timer_send);
 
+  /* Instantiate timers on all ranks to keep reductions balanced. */
+  Timer_Start(timer_wait);
+  Timer_Stop(timer_wait);
+  Timer_Start(timer_unpack);
+  Timer_Stop(timer_unpack);
+
   /* Wait on receives and unpack each completed message immediately. */
   if (irecvcount != 0) {
     int32_t completed = 0;
