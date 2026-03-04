@@ -6181,16 +6181,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  int32_t sourceCount = Global.theNodesLoaded;
   int32_t topoCount = topo_get_nodes_count();
   const int32_t* topoNodes = topo_get_nodes_list();
-
-  for (int32_t i = 0; i < sourceCount; i++) {
-    int32_t lnid = Global.theNodesLoadedList[i];
-    solver->force[lnid].f[0] = 0;
-    solver->force[lnid].f[1] = 0;
-    solver->force[lnid].f[2] = 0;
-  }
 
   for (int32_t i = 0; i < topoCount; i++) {
     int32_t lnid = topoNodes[i];
@@ -6321,7 +6313,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
   Timer_Start("Disp host force reset");
-  if (!use_gpu_source_fastpath() && !use_sparse_force_upload_topo()) {
+  if (use_sparse_force_upload_topo()) {
+    solver_clear_sparse_host_forces(solver);
+  } else if (!use_gpu_source_fastpath()) {
     /* zero out the force vector for all nodes */
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   }
@@ -6536,9 +6530,6 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
-    if (use_sparse_force_upload_topo()) {
-      solver_clear_sparse_host_forces(Global.mySolver);
-    }
     if (use_gpu_source_fastpath()) {
       solver_compute_force_source_gpu(step);
     } else {
