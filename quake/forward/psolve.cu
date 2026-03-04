@@ -6181,14 +6181,14 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  int32_t topoCount = topo_get_nodes_count();
-  const int32_t* topoNodes = topo_get_nodes_list();
+  int32_t rangeCount = topo_get_node_range_count();
+  const int32_t* rangeStarts = topo_get_node_range_starts();
+  const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-  for (int32_t i = 0; i < topoCount; i++) {
-    int32_t lnid = topoNodes[i];
-    solver->force[lnid].f[0] = 0;
-    solver->force[lnid].f[1] = 0;
-    solver->force[lnid].f[2] = 0;
+  for (int32_t i = 0; i < rangeCount; i++) {
+    int32_t start = rangeStarts[i];
+    int32_t len = rangeLengths[i];
+    memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
   }
 }
 

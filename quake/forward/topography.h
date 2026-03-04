@@ -119,6 +119,9 @@ void topo_print_stats(int32_t *topoElementsCount, int32_t *topoStationsCount,
 
 int32_t topo_get_nodes_count();
 const int32_t* topo_get_nodes_list();
+int32_t topo_get_node_range_count();
+const int32_t* topo_get_node_range_starts();
+const int32_t* topo_get_node_range_lengths();
 
 noyesflag_t    	get_topo_nonlin_flag();
 int   get_cube_partition(int32_t eindex);

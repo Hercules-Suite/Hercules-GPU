@@ -52,6 +52,9 @@ static int32_t            myTopoElementsCount = 0;
 static int32_t            *myTopoElementsMapping;
 static int32_t            myTopoNodesCount = 0;
 static int32_t            *myTopoNodesList = NULL;
+static int32_t            myTopoNodeRangeCount = 0;
+static int32_t            *myTopoNodeRangeStarts = NULL;
+static int32_t            *myTopoNodeRangeLengths = NULL;
 static topometh_t         theTopoMethod;
 static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
@@ -1795,7 +1798,16 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         free(myTopoNodesList);
         myTopoNodesList = NULL;
     }
+    if (myTopoNodeRangeStarts != NULL) {
+        free(myTopoNodeRangeStarts);
+        myTopoNodeRangeStarts = NULL;
+    }
+    if (myTopoNodeRangeLengths != NULL) {
+        free(myTopoNodeRangeLengths);
+        myTopoNodeRangeLengths = NULL;
+    }
     myTopoNodesCount = 0;
+    myTopoNodeRangeCount = 0;
 
     isTopoNode = (char *)calloc((size_t)myMesh->nharbored, sizeof(char));
     if (isTopoNode == NULL) {
@@ -1834,6 +1846,50 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
             if (isTopoNode[nodeIdx] != 0) {
                 myTopoNodesList[outIdx++] = nodeIdx;
             }
+        }
+
+        if (myTopoNodesCount > 0) {
+            int32_t rangeCount = 0;
+            int32_t currentStart = myTopoNodesList[0];
+            int32_t currentLen = 1;
+
+            for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
+                if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
+                    currentLen++;
+                } else {
+                    rangeCount++;
+                    currentStart = myTopoNodesList[nodeIdx];
+                    currentLen = 1;
+                }
+            }
+            rangeCount++;
+
+            myTopoNodeRangeStarts = (int32_t *)malloc(sizeof(int32_t) * rangeCount);
+            myTopoNodeRangeLengths = (int32_t *)malloc(sizeof(int32_t) * rangeCount);
+            if ((myTopoNodeRangeStarts == NULL) || (myTopoNodeRangeLengths == NULL)) {
+                free(isTopoNode);
+                fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+
+            myTopoNodeRangeCount = 0;
+            currentStart = myTopoNodesList[0];
+            currentLen = 1;
+            for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
+                if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
+                    currentLen++;
+                } else {
+                    myTopoNodeRangeStarts[myTopoNodeRangeCount] = currentStart;
+                    myTopoNodeRangeLengths[myTopoNodeRangeCount] = currentLen;
+                    myTopoNodeRangeCount++;
+                    currentStart = myTopoNodesList[nodeIdx];
+                    currentLen = 1;
+                }
+            }
+            myTopoNodeRangeStarts[myTopoNodeRangeCount] = currentStart;
+            myTopoNodeRangeLengths[myTopoNodeRangeCount] = currentLen;
+            myTopoNodeRangeCount++;
         }
     }
 
@@ -1916,6 +1972,18 @@ int32_t topo_get_nodes_count() {
 
 const int32_t* topo_get_nodes_list() {
     return myTopoNodesList;
+}
+
+int32_t topo_get_node_range_count() {
+    return myTopoNodeRangeCount;
+}
+
+const int32_t* topo_get_node_range_starts() {
+    return myTopoNodeRangeStarts;
+}
+
+const int32_t* topo_get_node_range_lengths() {
+    return myTopoNodeRangeLengths;
 }
 
 void compute_addforce_topoEffective ( mesh_t     *myMesh,
