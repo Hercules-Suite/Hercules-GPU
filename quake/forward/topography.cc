@@ -1849,23 +1849,13 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         }
 
         if (myTopoNodesCount > 0) {
-            int32_t rangeCount = 0;
+            const int32_t mergeGapThreshold = 64;
+            int32_t rangeWrite = 0;
             int32_t currentStart = myTopoNodesList[0];
             int32_t currentLen = 1;
 
-            for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
-                if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
-                    currentLen++;
-                } else {
-                    rangeCount++;
-                    currentStart = myTopoNodesList[nodeIdx];
-                    currentLen = 1;
-                }
-            }
-            rangeCount++;
-
-            myTopoNodeRangeStarts = (int32_t *)malloc(sizeof(int32_t) * rangeCount);
-            myTopoNodeRangeLengths = (int32_t *)malloc(sizeof(int32_t) * rangeCount);
+            myTopoNodeRangeStarts = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
+            myTopoNodeRangeLengths = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
             if ((myTopoNodeRangeStarts == NULL) || (myTopoNodeRangeLengths == NULL)) {
                 free(isTopoNode);
                 fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
@@ -1873,23 +1863,42 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
                 exit(1);
             }
 
-            myTopoNodeRangeCount = 0;
-            currentStart = myTopoNodesList[0];
-            currentLen = 1;
             for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
                 if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
                     currentLen++;
                 } else {
-                    myTopoNodeRangeStarts[myTopoNodeRangeCount] = currentStart;
-                    myTopoNodeRangeLengths[myTopoNodeRangeCount] = currentLen;
-                    myTopoNodeRangeCount++;
+                    myTopoNodeRangeStarts[rangeWrite] = currentStart;
+                    myTopoNodeRangeLengths[rangeWrite] = currentLen;
+                    rangeWrite++;
                     currentStart = myTopoNodesList[nodeIdx];
                     currentLen = 1;
                 }
             }
-            myTopoNodeRangeStarts[myTopoNodeRangeCount] = currentStart;
-            myTopoNodeRangeLengths[myTopoNodeRangeCount] = currentLen;
-            myTopoNodeRangeCount++;
+            myTopoNodeRangeStarts[rangeWrite] = currentStart;
+            myTopoNodeRangeLengths[rangeWrite] = currentLen;
+            rangeWrite++;
+
+            if (rangeWrite > 0) {
+                int32_t mergeWrite = 0;
+                for (int32_t ridx = 1; ridx < rangeWrite; ridx++) {
+                    int32_t prevStart = myTopoNodeRangeStarts[mergeWrite];
+                    int32_t prevLen = myTopoNodeRangeLengths[mergeWrite];
+                    int32_t prevEnd = prevStart + prevLen;
+                    int32_t nextStart = myTopoNodeRangeStarts[ridx];
+                    int32_t nextLen = myTopoNodeRangeLengths[ridx];
+                    int32_t gap = nextStart - prevEnd;
+
+                    if (gap <= mergeGapThreshold) {
+                        myTopoNodeRangeLengths[mergeWrite] =
+                            (nextStart + nextLen) - prevStart;
+                    } else {
+                        mergeWrite++;
+                        myTopoNodeRangeStarts[mergeWrite] = nextStart;
+                        myTopoNodeRangeLengths[mergeWrite] = nextLen;
+                    }
+                }
+                myTopoNodeRangeCount = mergeWrite + 1;
+            }
         }
     }
 
