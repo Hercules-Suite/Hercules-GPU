@@ -87,6 +87,11 @@ static int32_t* g_dampingElemMapperDevice = NULL;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
+static int32_t* g_sparseNodeListDevice = NULL;
+static fvector_t* g_sparseForcesDevice = NULL;
+static int32_t g_sparseNodeCapacity = 0;
+static int32_t* g_sparseNodeListHost = NULL;
+static fvector_t* g_sparseForcesHost = NULL;
 static int32_t* g_adjustParentOffsets = NULL;
 static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
@@ -215,6 +220,7 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
+static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
@@ -239,6 +245,19 @@ __global__ static void kernelSourceForceScatter(int32_t count,
   out.f[1] = src.x[1] * dt2;
   out.f[2] = src.x[2] * dt2;
   forceDevice[lnid] = out;
+}
+
+__global__ static void kernelSparseForceScatter(int32_t count,
+                                                const int32_t* lnidList,
+                                                const fvector_t* srcForces,
+                                                fvector_t* forceDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  int32_t lnid = lnidList[idx];
+  forceDevice[lnid] = srcForces[idx];
 }
 
 double** malloc2dDouble(int n, int m) {
@@ -5198,6 +5217,24 @@ static void solver_delete() {
   }
   g_sourceNodeCapacity = 0;
 
+  if (g_sparseNodeListDevice != NULL) {
+    cudaFree(g_sparseNodeListDevice);
+    g_sparseNodeListDevice = NULL;
+  }
+  if (g_sparseForcesDevice != NULL) {
+    cudaFree(g_sparseForcesDevice);
+    g_sparseForcesDevice = NULL;
+  }
+  if (g_sparseNodeListHost != NULL) {
+    free(g_sparseNodeListHost);
+    g_sparseNodeListHost = NULL;
+  }
+  if (g_sparseForcesHost != NULL) {
+    free(g_sparseForcesHost);
+    g_sparseForcesHost = NULL;
+  }
+  g_sparseNodeCapacity = 0;
+
   compute_adjust_cache_free();
 
   /* Destroy streams */
@@ -5663,6 +5700,19 @@ static int use_gpu_source_fastpath(void) {
   return 1;
 }
 
+static int use_sparse_force_upload_topo(void) {
+  if (Param.includeTopography != YES) {
+    return 0;
+  }
+  if (Param.drmImplement == YES) {
+    return 0;
+  }
+  if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
+    return 0;
+  }
+  return 1;
+}
+
 static void solver_compute_force_source_gpu(int32_t step) {
   int32_t count = Global.theNodesLoaded;
   mysolver_t* solver = Global.mySolver;
@@ -6026,6 +6076,109 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
+static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
+  int32_t sourceCount = Global.theNodesLoaded;
+  int32_t topoCount = topo_get_nodes_count();
+  const int32_t* topoNodes = topo_get_nodes_list();
+  int32_t totalCount = sourceCount + topoCount;
+  int32_t idx;
+  int blocksize;
+  int gridsize;
+
+  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                  mesh->nharbored * sizeof(fvector_t),
+                  solver->streams[CUDA_STREAM_MAIN]);
+
+  if (totalCount <= 0) {
+    return;
+  }
+
+  if (totalCount > g_sparseNodeCapacity) {
+    if (g_sparseNodeListDevice != NULL) {
+      cudaFree(g_sparseNodeListDevice);
+      g_sparseNodeListDevice = NULL;
+    }
+    if (g_sparseForcesDevice != NULL) {
+      cudaFree(g_sparseForcesDevice);
+      g_sparseForcesDevice = NULL;
+    }
+    if (g_sparseNodeListHost != NULL) {
+      free(g_sparseNodeListHost);
+      g_sparseNodeListHost = NULL;
+    }
+    if (g_sparseForcesHost != NULL) {
+      free(g_sparseForcesHost);
+      g_sparseForcesHost = NULL;
+    }
+
+    if (cudaMalloc((void**)&g_sparseNodeListDevice,
+                   totalCount * sizeof(int32_t)) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: sparse node list device alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&g_sparseForcesDevice,
+                   totalCount * sizeof(fvector_t)) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: sparse force device alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    g_sparseNodeListHost = (int32_t*)malloc(totalCount * sizeof(int32_t));
+    g_sparseForcesHost = (fvector_t*)malloc(totalCount * sizeof(fvector_t));
+    if ((g_sparseNodeListHost == NULL) || (g_sparseForcesHost == NULL)) {
+      fprintf(stderr, "Thread %d: sparse force host alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    g_sparseNodeCapacity = totalCount;
+  }
+
+  idx = 0;
+  for (int32_t i = 0; i < sourceCount; i++) {
+    int32_t lnid = Global.theNodesLoadedList[i];
+    g_sparseNodeListHost[idx] = lnid;
+    g_sparseForcesHost[idx] = solver->force[lnid];
+    idx++;
+  }
+
+  for (int32_t i = 0; i < topoCount; i++) {
+    int32_t lnid = topoNodes[i];
+    g_sparseNodeListHost[idx] = lnid;
+    g_sparseForcesHost[idx] = solver->force[lnid];
+    idx++;
+  }
+
+  cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
+                  totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
+                  solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci += totalCount * sizeof(int32_t);
+
+  cudaMemcpyAsync(g_sparseForcesDevice, g_sparseForcesHost,
+                  totalCount * sizeof(fvector_t), cudaMemcpyHostToDevice,
+                  solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci += totalCount * sizeof(fvector_t);
+
+  blocksize = 256;
+  gridsize = (totalCount + blocksize - 1) / blocksize;
+  kernelSparseForceScatter<<<gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN]>>>(
+      totalCount, g_sparseNodeListDevice, g_sparseForcesDevice,
+      solver->gpuData->forceDevice);
+
+  cudaError_t cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: sparse force scatter kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
 static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Only copy forces back if Stiffness-Effective or BKT damping */
   if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness == EFFECTIVE) ||
@@ -6147,7 +6300,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
   Timer_Start("Disp host force reset");
-  if (!use_gpu_source_fastpath()) {
+  if (!use_gpu_source_fastpath() && !use_sparse_force_upload_topo()) {
     /* zero out the force vector for all nodes */
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   }
@@ -6379,7 +6532,9 @@ static void solver_run() {
 
     /* Push host-side source/DRM/topography force terms to device before
      * GPU stiffness/damping accumulation. */
-    if (!use_gpu_source_fastpath()) {
+    if (use_sparse_force_upload_topo()) {
+      solver_load_forces_sparse_gpu(Global.mySolver, Global.myMesh);
+    } else if (!use_gpu_source_fastpath()) {
       solver_load_forces_gpu(Global.mySolver, Global.myMesh);
     }
 

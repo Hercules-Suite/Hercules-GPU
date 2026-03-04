@@ -50,6 +50,8 @@ static double             *theTopoInfo;
 static etreetype_t        theEtreeType;
 static int32_t            myTopoElementsCount = 0;
 static int32_t            *myTopoElementsMapping;
+static int32_t            myTopoNodesCount = 0;
+static int32_t            *myTopoNodesList = NULL;
 static topometh_t         theTopoMethod;
 static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
@@ -1783,9 +1785,59 @@ void topography_elements_mapping(int32_t myID, mesh_t *myMesh) {
 void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
     int32_t eindex, topo_eindex;
+    int32_t nodeIdx;
+    char *isTopoNode;
 
     topography_elements_count   ( myID, myMesh );
     topography_elements_mapping ( myID, myMesh );
+
+    if (myTopoNodesList != NULL) {
+        free(myTopoNodesList);
+        myTopoNodesList = NULL;
+    }
+    myTopoNodesCount = 0;
+
+    isTopoNode = (char *)calloc((size_t)myMesh->nharbored, sizeof(char));
+    if (isTopoNode == NULL) {
+        fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
+        elem_t *elemp;
+
+        eindex = myTopoElementsMapping[topo_eindex];
+        elemp = &myMesh->elemTable[eindex];
+
+        for (nodeIdx = 0; nodeIdx < 8; nodeIdx++) {
+            int32_t lnid = elemp->lnid[nodeIdx];
+            if ((lnid >= 0) && (lnid < myMesh->nharbored) &&
+                (isTopoNode[lnid] == 0)) {
+                isTopoNode[lnid] = 1;
+                myTopoNodesCount++;
+            }
+        }
+    }
+
+    if (myTopoNodesCount > 0) {
+        myTopoNodesList = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
+        if (myTopoNodesList == NULL) {
+            free(isTopoNode);
+            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+
+        int32_t outIdx = 0;
+        for (nodeIdx = 0; nodeIdx < myMesh->nharbored; nodeIdx++) {
+            if (isTopoNode[nodeIdx] != 0) {
+                myTopoNodesList[outIdx++] = nodeIdx;
+            }
+        }
+    }
+
+    free(isTopoNode);
 
     /* Memory allocation for mother structure */
     myTopoSolver = (toposolver_t *)malloc(sizeof(toposolver_t));
@@ -1856,6 +1908,14 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 //  if ( myTopoElementsCount != 0  )
 //      hu_fclosep( &TopoElements );
 
+}
+
+int32_t topo_get_nodes_count() {
+    return myTopoNodesCount;
+}
+
+const int32_t* topo_get_nodes_list() {
+    return myTopoNodesList;
 }
 
 void compute_addforce_topoEffective ( mesh_t     *myMesh,
