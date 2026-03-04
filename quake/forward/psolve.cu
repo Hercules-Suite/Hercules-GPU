@@ -7152,9 +7152,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   /* Asssemble outgoing messages */
   Timer_Start(timer_pack);
   while (send_messenger != NULL) {
-    int32_t lnid, idx, entry;
+    int32_t lnid, idx;
     solver_float* dvalue;
     solver_float* out;
+    size_t copy_bytes = (size_t)itemsperentry * sizeof(solver_float);
 
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       lnid = send_messenger->mapping[idx];
@@ -7164,8 +7165,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
       dvalue = (solver_float*)valuetable + itemsperentry * lnid;
 
-      for (entry = 0; entry < itemsperentry; entry++)
-        *(out + entry) = *(dvalue + entry);
+      memcpy(out, dvalue, copy_bytes);
 
 #ifdef DEBUG
       /* For debug, carry the global node id */
@@ -7208,42 +7208,71 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   Timer_Stop(timer_wait);
 
   Timer_Start(timer_unpack);
-  while (recv_messenger != NULL) {
-    int32_t lnid, idx, entry;
-    solver_float* dvalue;
-    solver_float* in;
+  if (direction == CONTRIBUTION) {
+    while (recv_messenger != NULL) {
+      int32_t lnid, idx, entry;
+      solver_float* dvalue;
+      solver_float* in;
 
-    for (idx = 0; idx < recv_messenger->nidx; idx++) {
-      lnid = recv_messenger->mapping[idx];
+      for (idx = 0; idx < recv_messenger->nidx; idx++) {
+        lnid = recv_messenger->mapping[idx];
 
-      in = (solver_float*)((char*)recv_messenger->indata +
-                           recv_messenger->insize * idx);
+        in = (solver_float*)((char*)recv_messenger->indata +
+                             recv_messenger->insize * idx);
 
-      dvalue = (solver_float*)valuetable + itemsperentry * lnid;
+        dvalue = (solver_float*)valuetable + itemsperentry * lnid;
 
-      for (entry = 0; entry < itemsperentry; entry++) {
-        if (direction == CONTRIBUTION) {
+        for (entry = 0; entry < itemsperentry; entry++) {
           *(dvalue + entry) += *(in + entry);
-        } else {
-          /* SHARING, overwrite my local value */
-          *(dvalue + entry) = *(in + entry);
         }
-      }
 
 #ifdef DEBUG
-      /* For debug, check the global node id */
-      gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+        /* For debug, check the global node id */
+        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
 
-      if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
-        fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
+        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
 #endif /* DEBUG */
-    } /* for all the incoming data */
+      } /* for all the incoming data */
 
-    recv_messenger = recv_messenger->next;
+      recv_messenger = recv_messenger->next;
+    }
+  } else {
+    while (recv_messenger != NULL) {
+      int32_t lnid, idx;
+      solver_float* dvalue;
+      solver_float* in;
+      size_t copy_bytes = (size_t)itemsperentry * sizeof(solver_float);
+
+      for (idx = 0; idx < recv_messenger->nidx; idx++) {
+        lnid = recv_messenger->mapping[idx];
+
+        in = (solver_float*)((char*)recv_messenger->indata +
+                             recv_messenger->insize * idx);
+
+        dvalue = (solver_float*)valuetable + itemsperentry * lnid;
+
+        memcpy(dvalue, in, copy_bytes);
+
+#ifdef DEBUG
+        /* For debug, check the global node id */
+        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+
+        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+#endif /* DEBUG */
+      } /* for all the incoming data */
+
+      recv_messenger = recv_messenger->next;
+    }
   }
   Timer_Stop(timer_unpack);
 
