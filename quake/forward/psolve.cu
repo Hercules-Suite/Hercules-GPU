@@ -7284,9 +7284,14 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                             send_messenger->outsize * idx);
 
       dvalue = (solver_float*)valuetable + itemsperentry * lnid;
-
-      for (entry = 0; entry < itemsperentry; entry++)
-        *(out + entry) = *(dvalue + entry);
+      if (itemsperentry == 3) {
+        out[0] = dvalue[0];
+        out[1] = dvalue[1];
+        out[2] = dvalue[2];
+      } else {
+        for (entry = 0; entry < itemsperentry; entry++)
+          *(out + entry) = *(dvalue + entry);
+      }
 
 #ifdef DEBUG
       /* For debug, carry the global node id */
@@ -7339,13 +7344,24 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                            recv_messenger->insize * idx);
 
       dvalue = (solver_float*)valuetable + itemsperentry * lnid;
-
-      for (entry = 0; entry < itemsperentry; entry++) {
+      if (itemsperentry == 3) {
         if (direction == CONTRIBUTION) {
-          *(dvalue + entry) += *(in + entry);
+          dvalue[0] += in[0];
+          dvalue[1] += in[1];
+          dvalue[2] += in[2];
         } else {
-          /* SHARING, overwrite my local value */
-          *(dvalue + entry) = *(in + entry);
+          dvalue[0] = in[0];
+          dvalue[1] = in[1];
+          dvalue[2] = in[2];
+        }
+      } else {
+        for (entry = 0; entry < itemsperentry; entry++) {
+          if (direction == CONTRIBUTION) {
+            *(dvalue + entry) += *(in + entry);
+          } else {
+            /* SHARING, overwrite my local value */
+            *(dvalue + entry) = *(in + entry);
+          }
         }
       }
 
