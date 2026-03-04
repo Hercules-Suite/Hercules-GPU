@@ -7172,11 +7172,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   Timer_Stop(timer_send);
 
   /* Wait till I receive all the data I want */
+  Timer_Start(timer_wait);
   if (irecvcount != 0) {
-    Timer_Start(timer_wait);
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
-    Timer_Stop(timer_wait);
   }
+  Timer_Stop(timer_wait);
 
   Timer_Start(timer_unpack);
   while (recv_messenger != NULL) {
