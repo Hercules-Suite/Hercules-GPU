@@ -6313,7 +6313,9 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_DISPLACEMENT) * mesh->nharbored;
 
   Timer_Start("Disp host force reset");
-  if (!use_gpu_source_fastpath() && !use_sparse_force_upload_topo()) {
+  if (use_sparse_force_upload_topo()) {
+    solver_clear_sparse_host_forces(solver);
+  } else if (!use_gpu_source_fastpath()) {
     /* zero out the force vector for all nodes */
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   }
@@ -6555,10 +6557,6 @@ static void solver_run() {
                      Global.theK2);
     solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
                    Global.theK2);
-
-    if (use_sparse_force_upload_topo()) {
-      solver_clear_sparse_host_forces(Global.mySolver);
-    }
 
     Timer_Stop("Compute Physics");
 
