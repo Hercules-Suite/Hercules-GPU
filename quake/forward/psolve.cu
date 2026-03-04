@@ -7072,9 +7072,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
                               int32_t msgtag) {
   messenger_t *send_messenger, *recv_messenger;
-  int32_t irecvcount, irecvnum, bytesize;
+  int32_t irecvcount, irecvnum, isendcount, isendnum, bytesize;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
+  MPI_Request* isendreqs = NULL;
+  MPI_Status* isendstats = NULL;
   const char* timer_post = NULL;
   const char* timer_pack = NULL;
   const char* timer_send = NULL;
@@ -7089,6 +7091,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = sched->first_c;
     recv_messenger = sched->first_s;
     irecvcount = sched->s_count;
+    isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
     irecvstats = sched->irecvstats_s;
     timer_post = "Sched post irecv (contribution)";
@@ -7100,6 +7103,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
     irecvcount = sched->c_count;
+    isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
     irecvstats = sched->irecvstats_c;
     timer_post = "Sched post irecv (sharing)";
@@ -7107,6 +7111,17 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     timer_send = "Sched send (sharing)";
     timer_wait = "Sched wait (sharing)";
     timer_unpack = "Sched unpack in (sharing)";
+  }
+
+  if (isendcount > 0) {
+    isendreqs = (MPI_Request*)malloc(sizeof(MPI_Request) * isendcount);
+    isendstats = (MPI_Status*)malloc(sizeof(MPI_Status) * isendcount);
+    if ((isendreqs == NULL) || (isendstats == NULL)) {
+      fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   /* Post receives */
@@ -7163,11 +7178,17 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   /* Send the data */
   Timer_Start(timer_send);
+  isendnum = 0;
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
-    MPI_Send(send_messenger->outdata, bytesize, MPI_CHAR,
-             send_messenger->procid, msgtag, comm_solver);
+    MPI_Isend(send_messenger->outdata, bytesize, MPI_CHAR,
+              send_messenger->procid, msgtag, comm_solver,
+              &isendreqs[isendnum]);
+    isendnum++;
     send_messenger = send_messenger->next;
+  }
+  if (isendcount != 0) {
+    MPI_Waitall(isendcount, isendreqs, isendstats);
   }
   Timer_Stop(timer_send);
 
@@ -7217,6 +7238,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     recv_messenger = recv_messenger->next;
   }
   Timer_Stop(timer_unpack);
+
+  if (isendreqs != NULL) {
+    free(isendreqs);
+  }
+  if (isendstats != NULL) {
+    free(isendstats);
+  }
 
   /* MPI_Barrier(comm_solver);  */
 
