@@ -95,6 +95,11 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int32_t* g_adjustParentOffsetsDevice = NULL;
+static int32_t* g_adjustParentBase3Device = NULL;
+static int32_t* g_adjustDanglingBase3Device = NULL;
+static solver_float* g_adjustInvDepsDevice = NULL;
+static int g_adjustDeviceCacheReady = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -219,6 +224,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
 static void compute_adjust_cache_free(void);
+static void compute_adjust_cache_upload_device(void);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -239,6 +245,38 @@ __global__ static void kernelSourceForceScatter(int32_t count,
   out.f[1] = src.x[1] * dt2;
   out.f[2] = src.x[2] * dt2;
   forceDevice[lnid] = out;
+}
+
+__global__ static void kernelAdjustAssignmentTm2(
+    int32_t dnCount, const int32_t* parentOffsets, const int32_t* parentBase3,
+    const int32_t* danglingBase3, const solver_float* invDeps,
+    fvector_t* tm2Device) {
+  int32_t dn = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (dn >= dnCount) {
+    return;
+  }
+
+  int32_t myNode = danglingBase3[dn] / 3;
+  int32_t start = parentOffsets[dn];
+  int32_t end = parentOffsets[dn + 1];
+  solver_float w = invDeps[dn];
+
+  solver_float sum0 = 0;
+  solver_float sum1 = 0;
+  solver_float sum2 = 0;
+
+  for (int32_t p = start; p < end; p++) {
+    int32_t parentNode = parentBase3[p] / 3;
+    const fvector_t* parent = tm2Device + parentNode;
+    sum0 += parent->f[0] * w;
+    sum1 += parent->f[1] * w;
+    sum2 += parent->f[2] * w;
+  }
+
+  fvector_t* me = tm2Device + myNode;
+  me->f[0] = sum0;
+  me->f[1] = sum1;
+  me->f[2] = sum2;
 }
 
 double** malloc2dDouble(int n, int m) {
@@ -6184,8 +6222,49 @@ static void solver_send_displacement_anchored(mysolver_t* solver) {
 /** Adjust the displacements of my LOCAL dangling nodes. */
 static void solver_adjust_displacement(mysolver_t* solver) {
   Timer_Start("2nd compute adjust (assignment)");
-  compute_adjust(Global.mySolver->tm2, sizeof(fvector_t) / sizeof(solver_float),
-                 ASSIGNMENT);
+
+  compute_adjust_cache_build();
+
+  if (g_adjustDnCount > 0) {
+    int blocksize;
+    int gridsize;
+
+    compute_adjust_cache_upload_device();
+
+    cudaMemcpyAsync(solver->gpuData->tm2Device, solver->tm2,
+                    Global.myMesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        Global.myMesh->nharbored * sizeof(fvector_t);
+
+    blocksize = 256;
+    gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
+    kernelAdjustAssignmentTm2<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_adjustDnCount, g_adjustParentOffsetsDevice, g_adjustParentBase3Device,
+        g_adjustDanglingBase3Device, g_adjustInvDepsDevice,
+        solver->gpuData->tm2Device);
+
+    cudaError_t cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: assignment adjust kernel - %s\n", Global.myID,
+              cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
+                    Global.myMesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        Global.myMesh->nharbored * sizeof(fvector_t);
+
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  } else {
+    compute_adjust(Global.mySolver->tm2,
+                   sizeof(fvector_t) / sizeof(solver_float), ASSIGNMENT);
+  }
+
   Timer_Stop("2nd compute adjust (assignment)");
 }
 
@@ -7979,6 +8058,77 @@ static void compute_adjust_cache_free(void) {
   g_adjustInvDeps = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
+
+  if (g_adjustParentOffsetsDevice != NULL) {
+    cudaFree(g_adjustParentOffsetsDevice);
+    g_adjustParentOffsetsDevice = NULL;
+  }
+  if (g_adjustParentBase3Device != NULL) {
+    cudaFree(g_adjustParentBase3Device);
+    g_adjustParentBase3Device = NULL;
+  }
+  if (g_adjustDanglingBase3Device != NULL) {
+    cudaFree(g_adjustDanglingBase3Device);
+    g_adjustDanglingBase3Device = NULL;
+  }
+  if (g_adjustInvDepsDevice != NULL) {
+    cudaFree(g_adjustInvDepsDevice);
+    g_adjustInvDepsDevice = NULL;
+  }
+  g_adjustDeviceCacheReady = 0;
+}
+
+static void compute_adjust_cache_upload_device(void) {
+  if (g_adjustDeviceCacheReady) {
+    return;
+  }
+
+  if (g_adjustDnCount <= 0) {
+    g_adjustDeviceCacheReady = 1;
+    return;
+  }
+
+  if ((cudaMalloc((void**)&g_adjustParentOffsetsDevice,
+                  sizeof(int32_t) * (g_adjustDnCount + 1)) != cudaSuccess) ||
+      (cudaMalloc((void**)&g_adjustDanglingBase3Device,
+                  sizeof(int32_t) * g_adjustDnCount) != cudaSuccess) ||
+      (cudaMalloc((void**)&g_adjustInvDepsDevice,
+                  sizeof(solver_float) * g_adjustDnCount) != cudaSuccess)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating compute_adjust device cache arrays");
+  }
+
+  if (g_adjustParentCount > 0) {
+    if (cudaMalloc((void**)&g_adjustParentBase3Device,
+                   sizeof(int32_t) * g_adjustParentCount) != cudaSuccess) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating compute_adjust parent device cache");
+    }
+  }
+
+  if ((cudaMemcpy(g_adjustParentOffsetsDevice, g_adjustParentOffsets,
+                  sizeof(int32_t) * (g_adjustDnCount + 1),
+                  cudaMemcpyHostToDevice) != cudaSuccess) ||
+      (cudaMemcpy(g_adjustDanglingBase3Device, g_adjustDanglingBase3,
+                  sizeof(int32_t) * g_adjustDnCount,
+                  cudaMemcpyHostToDevice) != cudaSuccess) ||
+      (cudaMemcpy(g_adjustInvDepsDevice, g_adjustInvDeps,
+                  sizeof(solver_float) * g_adjustDnCount,
+                  cudaMemcpyHostToDevice) != cudaSuccess)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed copying compute_adjust cache arrays to device");
+  }
+
+  if (g_adjustParentCount > 0) {
+    if (cudaMemcpy(g_adjustParentBase3Device, g_adjustParentBase3,
+                   sizeof(int32_t) * g_adjustParentCount,
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed copying compute_adjust parent cache to device");
+    }
+  }
+
+  g_adjustDeviceCacheReady = 1;
 }
 
 static void compute_adjust_cache_build(void) {
@@ -8057,6 +8207,7 @@ static void compute_adjust_cache_build(void) {
   }
 
   g_adjustParentCount = totalParents;
+  g_adjustDeviceCacheReady = 0;
 }
 
 /**
