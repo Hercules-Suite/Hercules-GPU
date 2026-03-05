@@ -116,11 +116,6 @@ static double g_schedSendBytesAvg = 0.0;
 static double g_schedRecvBytesMin = 0.0;
 static double g_schedRecvBytesMax = 0.0;
 static double g_schedRecvBytesAvg = 0.0;
-static int g_rankSkewCount = 0;
-static double* g_rankLdn = NULL;
-static double* g_rankDepsTotal = NULL;
-static double* g_rankSendBytes = NULL;
-static double* g_rankRecvBytes = NULL;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -6440,93 +6435,9 @@ static void schedule_accumulate_comm_bytes(const schedule_t* sched,
   }
 }
 
-static void imbalance_rank_buffers_free(void) {
-  free(g_rankLdn);
-  free(g_rankDepsTotal);
-  free(g_rankSendBytes);
-  free(g_rankRecvBytes);
-
-  g_rankLdn = NULL;
-  g_rankDepsTotal = NULL;
-  g_rankSendBytes = NULL;
-  g_rankRecvBytes = NULL;
-  g_rankSkewCount = 0;
-}
-
-static int imbalance_rank_buffers_ensure(int32_t nranks) {
-  if (Global.myID != 0) {
-    return 1;
-  }
-
-  if (nranks <= 0) {
-    imbalance_rank_buffers_free();
-    return 0;
-  }
-
-  if ((g_rankSkewCount == nranks) && (g_rankLdn != NULL) &&
-      (g_rankDepsTotal != NULL) && (g_rankSendBytes != NULL) &&
-      (g_rankRecvBytes != NULL)) {
-    return 1;
-  }
-
-  imbalance_rank_buffers_free();
-
-  g_rankLdn = (double*)malloc(sizeof(double) * nranks);
-  g_rankDepsTotal = (double*)malloc(sizeof(double) * nranks);
-  g_rankSendBytes = (double*)malloc(sizeof(double) * nranks);
-  g_rankRecvBytes = (double*)malloc(sizeof(double) * nranks);
-  if ((g_rankLdn == NULL) || (g_rankDepsTotal == NULL) ||
-      (g_rankSendBytes == NULL) || (g_rankRecvBytes == NULL)) {
-    imbalance_rank_buffers_free();
-    return 0;
-  }
-
-  g_rankSkewCount = nranks;
-  return 1;
-}
-
-static int imbalance_pick_top_desc(const double* values, int32_t count,
-                                   int32_t topN, int32_t* outIndices) {
-  int32_t k;
-  char* selected;
-
-  if ((values == NULL) || (outIndices == NULL) || (count <= 0) || (topN <= 0)) {
-    return 0;
-  }
-
-  selected = (char*)calloc((size_t)count, sizeof(char));
-  if (selected == NULL) {
-    return 0;
-  }
-
-  for (k = 0; k < topN; k++) {
-    int32_t i;
-    int32_t best = -1;
-    double bestValue = -DBL_MAX;
-
-    for (i = 0; i < count; i++) {
-      if (selected[i] == 0 && values[i] > bestValue) {
-        bestValue = values[i];
-        best = i;
-      }
-    }
-
-    if (best < 0) {
-      break;
-    }
-
-    outIndices[k] = best;
-    selected[best] = 1;
-  }
-
-  free(selected);
-  return k;
-}
-
 static void solver_collect_imbalance_stats(void) {
   int32_t dnindex;
-  int32_t nranks = 1;
-  int32_t solverRank = -1;
+  int32_t nranks = Global.theGroupSize;
   double localVals[5];
   double minVals[5];
   double maxVals[5];
@@ -6534,18 +6445,6 @@ static void solver_collect_imbalance_stats(void) {
   double depsTotal = 0.0;
   double sendBytes = 0.0;
   double recvBytes = 0.0;
-  double localRankVals[4];
-  double dummyRecv[4];
-  double* recvLdn = dummyRecv;
-  double* recvDepsTotal = dummyRecv;
-  double* recvSendBytes = dummyRecv;
-  double* recvRecvBytes = dummyRecv;
-
-  MPI_Comm_size(comm_solver, &nranks);
-  MPI_Comm_rank(comm_solver, &solverRank);
-  if (nranks <= 0) {
-    nranks = 1;
-  }
 
   if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
@@ -6573,39 +6472,11 @@ static void solver_collect_imbalance_stats(void) {
   localVals[3] = sendBytes;
   localVals[4] = recvBytes;
 
-  localRankVals[0] = localVals[0];
-  localRankVals[1] = localVals[1];
-  localRankVals[2] = localVals[3];
-  localRankVals[3] = localVals[4];
-
   MPI_Reduce(localVals, minVals, 5, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
   MPI_Reduce(localVals, maxVals, 5, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
   MPI_Reduce(localVals, sumVals, 5, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
 
-  if (solverRank == 0) {
-    if (!imbalance_rank_buffers_ensure(nranks)) {
-      fprintf(stderr,
-              "Thread 0: solver_collect_imbalance_stats: out of memory\n");
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    recvLdn = g_rankLdn;
-    recvDepsTotal = g_rankDepsTotal;
-    recvSendBytes = g_rankSendBytes;
-    recvRecvBytes = g_rankRecvBytes;
-  }
-
-  MPI_Gather(&localRankVals[0], 1, MPI_DOUBLE, recvLdn, 1, MPI_DOUBLE, 0,
-             comm_solver);
-  MPI_Gather(&localRankVals[1], 1, MPI_DOUBLE, recvDepsTotal, 1, MPI_DOUBLE,
-             0, comm_solver);
-  MPI_Gather(&localRankVals[2], 1, MPI_DOUBLE, recvSendBytes, 1, MPI_DOUBLE,
-             0, comm_solver);
-  MPI_Gather(&localRankVals[3], 1, MPI_DOUBLE, recvRecvBytes, 1, MPI_DOUBLE,
-             0, comm_solver);
-
-  if (solverRank == 0) {
+  if (Global.myID == 0) {
     if (nranks <= 0) {
       nranks = 1;
     }
@@ -9057,34 +8928,6 @@ static void print_timing_stat() {
       "[%.2fx skew]\n",
       g_schedRecvBytesAvg * bytesToMiB, g_schedRecvBytesMin * bytesToMiB,
       g_schedRecvBytesMax * bytesToMiB, recvSkew);
-
-    if ((g_rankSkewCount > 0) && (g_rankLdn != NULL) &&
-        (g_rankDepsTotal != NULL) && (g_rankSendBytes != NULL) &&
-        (g_rankRecvBytes != NULL)) {
-      int32_t topIndices[8];
-      int32_t topN = 8;
-      int32_t i;
-      int32_t picked;
-
-      if (topN > g_rankSkewCount) {
-        topN = g_rankSkewCount;
-      }
-
-      picked =
-          imbalance_pick_top_desc(g_rankRecvBytes, g_rankSkewCount, topN,
-                                  topIndices);
-      if (picked > 0) {
-        printf("Top ranks by schedule recv volume:\n");
-        printf("  Rank  LdnNodes  DepsTotal  SendMiB  RecvMiB\n");
-        for (i = 0; i < picked; i++) {
-          int32_t rank = topIndices[i];
-          printf("  %4d  %8d  %9.0f  %7.2f  %7.2f\n", rank,
-                 (int32_t)g_rankLdn[rank], g_rankDepsTotal[rank],
-                 g_rankSendBytes[rank] * bytesToMiB,
-                 g_rankRecvBytes[rank] * bytesToMiB);
-        }
-      }
-    }
     printf("\n");
     }
 
