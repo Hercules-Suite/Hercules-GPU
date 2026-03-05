@@ -4194,9 +4194,6 @@ static void mesh_load_from_etree() {
         mesh->ldnnum++;
       }
     }
-    }
-      }
-    }
 
     free(reqSendCounts);
     free(reqRecvCounts);
