@@ -8759,8 +8759,15 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             p3[2] += d2;
           }
         } else {
-          for (int32_t p = start; p < end; p++) {
-            solver_float* parentvalue = vtable + g_adjustParentBase3[p];
+          int32_t* parentBase3 = g_adjustParentBase3 + start;
+          int32_t parentCount = end - start;
+          for (int32_t p = 0; p < parentCount; p++) {
+#if defined(__GNUC__) || defined(__clang__)
+            if (p + 1 < parentCount) {
+              __builtin_prefetch(vtable + parentBase3[p + 1], 1, 1);
+            }
+#endif
+            solver_float* parentvalue = vtable + parentBase3[p];
             parentvalue[0] += d0;
             parentvalue[1] += d1;
             parentvalue[2] += d2;
@@ -8805,8 +8812,15 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             s2 += p3[2];
           }
         } else {
-          for (int32_t p = start; p < end; p++) {
-            solver_float* parentvalue = vtable + g_adjustParentBase3[p];
+          int32_t* parentBase3 = g_adjustParentBase3 + start;
+          int32_t parentCount = end - start;
+          for (int32_t p = 0; p < parentCount; p++) {
+#if defined(__GNUC__) || defined(__clang__)
+            if (p + 1 < parentCount) {
+              __builtin_prefetch(vtable + parentBase3[p + 1], 0, 1);
+            }
+#endif
+            solver_float* parentvalue = vtable + parentBase3[p];
             s0 += parentvalue[0];
             s1 += parentvalue[1];
             s2 += parentvalue[2];
