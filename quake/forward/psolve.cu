@@ -98,18 +98,9 @@ static int32_t* g_adjustDanglingLnid = NULL;
 static int32_t* g_adjustParentBase3 = NULL;
 static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
-static int32_t* g_adjustDnDeps1 = NULL;
-static int32_t* g_adjustDnDeps2 = NULL;
-static int32_t* g_adjustDnDeps3 = NULL;
-static int32_t* g_adjustDnDeps4 = NULL;
-static int32_t* g_adjustDnDepsMany = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
-static int32_t g_adjustDnDeps1Count = 0;
-static int32_t g_adjustDnDeps2Count = 0;
-static int32_t g_adjustDnDeps3Count = 0;
-static int32_t g_adjustDnDeps4Count = 0;
-static int32_t g_adjustDnDepsManyCount = 0;
+static int32_t g_adjustSmallDepsFastPath = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -8572,11 +8563,6 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
   free(g_adjustInvDeps);
-  free(g_adjustDnDeps1);
-  free(g_adjustDnDeps2);
-  free(g_adjustDnDeps3);
-  free(g_adjustDnDeps4);
-  free(g_adjustDnDepsMany);
 
   g_adjustParentOffsets = NULL;
   g_adjustParentIds = NULL;
@@ -8584,29 +8570,14 @@ static void compute_adjust_cache_free(void) {
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
   g_adjustInvDeps = NULL;
-  g_adjustDnDeps1 = NULL;
-  g_adjustDnDeps2 = NULL;
-  g_adjustDnDeps3 = NULL;
-  g_adjustDnDeps4 = NULL;
-  g_adjustDnDepsMany = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
-  g_adjustDnDeps1Count = 0;
-  g_adjustDnDeps2Count = 0;
-  g_adjustDnDeps3Count = 0;
-  g_adjustDnDeps4Count = 0;
-  g_adjustDnDepsManyCount = 0;
 }
 
 static void compute_adjust_cache_build(void) {
   int32_t dnindex;
   int32_t totalParents = 0;
   int32_t cursor = 0;
-  int32_t deps1Count = 0;
-  int32_t deps2Count = 0;
-  int32_t deps3Count = 0;
-  int32_t deps4Count = 0;
-  int32_t depsManyCount = 0;
 
   if ((g_adjustParentOffsets != NULL) &&
       (g_adjustDnCount == Global.myMesh->ldnnum)) {
@@ -8644,17 +8615,6 @@ static void compute_adjust_cache_build(void) {
     g_adjustDanglingLnid[dnindex] = dnode->ldnid;
     g_adjustDanglingBase3[dnindex] = dnode->ldnid * 3;
     g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
-    if (deps == 1) {
-      deps1Count++;
-    } else if (deps == 2) {
-      deps2Count++;
-    } else if (deps == 3) {
-      deps3Count++;
-    } else if (deps == 4) {
-      deps4Count++;
-    } else {
-      depsManyCount++;
-    }
     totalParents += deps;
     g_adjustParentOffsets[dnindex + 1] = totalParents;
   }
@@ -8704,57 +8664,7 @@ static void compute_adjust_cache_build(void) {
     }
   }
 
-  if (deps1Count > 0) {
-    g_adjustDnDeps1 = (int32_t*)malloc(sizeof(int32_t) * deps1Count);
-  }
-  if (deps2Count > 0) {
-    g_adjustDnDeps2 = (int32_t*)malloc(sizeof(int32_t) * deps2Count);
-  }
-  if (deps3Count > 0) {
-    g_adjustDnDeps3 = (int32_t*)malloc(sizeof(int32_t) * deps3Count);
-  }
-  if (deps4Count > 0) {
-    g_adjustDnDeps4 = (int32_t*)malloc(sizeof(int32_t) * deps4Count);
-  }
-  if (depsManyCount > 0) {
-    g_adjustDnDepsMany = (int32_t*)malloc(sizeof(int32_t) * depsManyCount);
-  }
-
-  if ((deps1Count > 0 && g_adjustDnDeps1 == NULL) ||
-      (deps2Count > 0 && g_adjustDnDeps2 == NULL) ||
-      (deps3Count > 0 && g_adjustDnDeps3 == NULL) ||
-      (deps4Count > 0 && g_adjustDnDeps4 == NULL) ||
-      (depsManyCount > 0 && g_adjustDnDepsMany == NULL)) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating compute_adjust dependency buckets");
-  }
-
-  {
-    int32_t i1 = 0, i2 = 0, i3 = 0, i4 = 0, iMany = 0;
-    for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
-      int32_t start = g_adjustParentOffsets[dnindex];
-      int32_t end = g_adjustParentOffsets[dnindex + 1];
-      int32_t deps = end - start;
-      if (deps == 1) {
-        g_adjustDnDeps1[i1++] = dnindex;
-      } else if (deps == 2) {
-        g_adjustDnDeps2[i2++] = dnindex;
-      } else if (deps == 3) {
-        g_adjustDnDeps3[i3++] = dnindex;
-      } else if (deps == 4) {
-        g_adjustDnDeps4[i4++] = dnindex;
-      } else {
-        g_adjustDnDepsMany[iMany++] = dnindex;
-      }
-    }
-  }
-
   g_adjustParentCount = totalParents;
-  g_adjustDnDeps1Count = deps1Count;
-  g_adjustDnDeps2Count = deps2Count;
-  g_adjustDnDeps3Count = deps3Count;
-  g_adjustDnDeps4Count = deps4Count;
-  g_adjustDnDepsManyCount = depsManyCount;
 }
 
 /**
@@ -8768,6 +8678,12 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   solver_float* vtable = (solver_float*)valuetable;
   int32_t dnindex;
 
+  if (g_adjustSmallDepsFastPath < 0) {
+    const char* envFastAdjust = getenv("HERC_ADJUST_SMALL_DEPS_FASTPATH");
+    g_adjustSmallDepsFastPath =
+        (envFastAdjust == NULL || atoi(envFastAdjust) != 0) ? 1 : 0;
+  }
+
   if (itemsperentry == 3) {
     Timer_Start("Adjust Cache Build");
     compute_adjust_cache_build();
@@ -8775,169 +8691,93 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
-      for (int32_t i = 0; i < g_adjustDnDeps1Count; i++) {
-        dnindex = g_adjustDnDeps1[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps2Count; i++) {
-        dnindex = g_adjustDnDeps2[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-        p1[0] += d0;
-        p1[1] += d1;
-        p1[2] += d2;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps3Count; i++) {
-        dnindex = g_adjustDnDeps3[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-        p1[0] += d0;
-        p1[1] += d1;
-        p1[2] += d2;
-        p2[0] += d0;
-        p2[1] += d1;
-        p2[2] += d2;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps4Count; i++) {
-        dnindex = g_adjustDnDeps4[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-        p1[0] += d0;
-        p1[1] += d1;
-        p1[2] += d2;
-        p2[0] += d0;
-        p2[1] += d1;
-        p2[2] += d2;
-        p3[0] += d0;
-        p3[1] += d1;
-        p3[2] += d2;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDepsManyCount; i++) {
-        dnindex = g_adjustDnDepsMany[i];
+      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t deps = end - start;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        for (int32_t p = start; p < end; p++) {
-          solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-          parentvalue[0] += d0;
-          parentvalue[1] += d1;
-          parentvalue[2] += d2;
+        if (g_adjustSmallDepsFastPath && deps <= 4) {
+          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          p0[0] += d0;
+          p0[1] += d1;
+          p0[2] += d2;
+
+          if (deps >= 2) {
+            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            p1[0] += d0;
+            p1[1] += d1;
+            p1[2] += d2;
+          }
+          if (deps >= 3) {
+            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            p2[0] += d0;
+            p2[1] += d1;
+            p2[2] += d2;
+          }
+          if (deps == 4) {
+            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            p3[0] += d0;
+            p3[1] += d1;
+            p3[2] += d2;
+          }
+        } else {
+          for (int32_t p = start; p < end; p++) {
+            solver_float* parentvalue = vtable + g_adjustParentBase3[p];
+            parentvalue[0] += d0;
+            parentvalue[1] += d1;
+            parentvalue[2] += d2;
+          }
         }
       }
       Timer_Stop("Adjust Distribution Core");
     } else {
       Timer_Start("Adjust Assignment Core");
-      for (int32_t i = 0; i < g_adjustDnDeps1Count; i++) {
-        dnindex = g_adjustDnDeps1[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        myvalue[0] = p0[0];
-        myvalue[1] = p0[1];
-        myvalue[2] = p0[2];
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps2Count; i++) {
-        dnindex = g_adjustDnDeps2[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        myvalue[0] = (p0[0] + p1[0]) * invdeps;
-        myvalue[1] = (p0[1] + p1[1]) * invdeps;
-        myvalue[2] = (p0[2] + p1[2]) * invdeps;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps3Count; i++) {
-        dnindex = g_adjustDnDeps3[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        myvalue[0] = (p0[0] + p1[0] + p2[0]) * invdeps;
-        myvalue[1] = (p0[1] + p1[1] + p2[1]) * invdeps;
-        myvalue[2] = (p0[2] + p1[2] + p2[2]) * invdeps;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDeps4Count; i++) {
-        dnindex = g_adjustDnDeps4[i];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-        myvalue[0] = (p0[0] + p1[0] + p2[0] + p3[0]) * invdeps;
-        myvalue[1] = (p0[1] + p1[1] + p2[1] + p3[1]) * invdeps;
-        myvalue[2] = (p0[2] + p1[2] + p2[2] + p3[2]) * invdeps;
-      }
-
-      for (int32_t i = 0; i < g_adjustDnDepsManyCount; i++) {
-        dnindex = g_adjustDnDepsMany[i];
+      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t deps = end - start;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         solver_float s0 = 0;
         solver_float s1 = 0;
         solver_float s2 = 0;
-        for (int32_t p = start; p < end; p++) {
-          solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-          s0 += parentvalue[0];
-          s1 += parentvalue[1];
-          s2 += parentvalue[2];
+
+        if (g_adjustSmallDepsFastPath && deps <= 4) {
+          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          s0 = p0[0];
+          s1 = p0[1];
+          s2 = p0[2];
+
+          if (deps >= 2) {
+            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            s0 += p1[0];
+            s1 += p1[1];
+            s2 += p1[2];
+          }
+          if (deps >= 3) {
+            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            s0 += p2[0];
+            s1 += p2[1];
+            s2 += p2[2];
+          }
+          if (deps == 4) {
+            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            s0 += p3[0];
+            s1 += p3[1];
+            s2 += p3[2];
+          }
+        } else {
+          for (int32_t p = start; p < end; p++) {
+            solver_float* parentvalue = vtable + g_adjustParentBase3[p];
+            s0 += parentvalue[0];
+            s1 += parentvalue[1];
+            s2 += parentvalue[2];
+          }
         }
 
         myvalue[0] = s0 * invdeps;
