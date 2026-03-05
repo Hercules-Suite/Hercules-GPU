@@ -1808,6 +1808,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
     myTopoElementsCount = 0;
 
+    Timer_Start("Topo Init Select Elements");
     if (myMesh->lenum > 0) {
         size_t lenum = (size_t)myMesh->lenum;
         topoElementsCapacity = (lenum < 65536u) ? lenum : 65536u;
@@ -1939,7 +1940,9 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
             }
         }
     }
+    Timer_Stop("Topo Init Select Elements");
 
+    Timer_Start("Topo Init Build Node Sets");
     if (myTopoNodesList != NULL) {
         free(myTopoNodesList);
         myTopoNodesList = NULL;
@@ -2062,7 +2065,9 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     }
 
     free(isTopoNode);
+    Timer_Stop("Topo Init Build Node Sets");
 
+    Timer_Start("Topo Init Build Constants");
     /* Memory allocation for mother structure */
     myTopoSolver = (toposolver_t *)malloc(sizeof(toposolver_t));
 
@@ -2140,6 +2145,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
     free(cachedTetraVol);
     free(cachedCubePart);
+    Timer_Stop("Topo Init Build Constants");
 
 }
 

@@ -8721,6 +8721,27 @@ static void print_timing_stat() {
              Timer_Value("Topography Solver Init", AVERAGE),
              Timer_Value("Topography Solver Init", MAX),
              Timer_Value("Topography Solver Init", MIN));
+      if (Timer_Exists("Topo Init Select Elements")) {
+        printf("      Topo Init Select Elements   : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Topo Init Select Elements", AVERAGE),
+               Timer_Value("Topo Init Select Elements", MAX),
+               Timer_Value("Topo Init Select Elements", MIN));
+      }
+      if (Timer_Exists("Topo Init Build Node Sets")) {
+        printf("      Topo Init Build Node Sets   : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Topo Init Build Node Sets", AVERAGE),
+               Timer_Value("Topo Init Build Node Sets", MAX),
+               Timer_Value("Topo Init Build Node Sets", MIN));
+      }
+      if (Timer_Exists("Topo Init Build Constants")) {
+        printf("      Topo Init Build Constants   : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Topo Init Build Constants", AVERAGE),
+               Timer_Value("Topo Init Build Constants", MAX),
+               Timer_Value("Topo Init Build Constants", MIN));
+      }
     }
     if (Timer_Exists("Phase Sync/Coordination")) {
       printf("    Phase Sync/Coordination        : %.2f (Average)   %.2f (Max) %.2f "
@@ -10706,6 +10727,18 @@ int main(int argc, char** argv) {
     Timer_Stop("Topography Solver Init");
     Timer_Reduce("Topography Solver Init", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+    if (Timer_Exists("Topo Init Select Elements")) {
+      Timer_Reduce("Topo Init Select Elements", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Topo Init Build Node Sets")) {
+      Timer_Reduce("Topo Init Build Node Sets", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Topo Init Build Constants")) {
+      Timer_Reduce("Topo Init Build Constants", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
   }
 
   if (Param.theMeshOutFlag && DO_OUTPUT) {
