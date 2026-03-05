@@ -6525,7 +6525,7 @@ static int imbalance_pick_top_desc(const double* values, int32_t count,
 
 static void solver_collect_imbalance_stats(void) {
   int32_t dnindex;
-  int32_t nranks = Global.theGroupSize;
+  int32_t nranks = 1;
   double localVals[5];
   double minVals[5];
   double maxVals[5];
@@ -6534,6 +6534,16 @@ static void solver_collect_imbalance_stats(void) {
   double sendBytes = 0.0;
   double recvBytes = 0.0;
   double localRankVals[4];
+  double dummyRecv[4];
+  double* recvLdn = dummyRecv;
+  double* recvDepsTotal = dummyRecv;
+  double* recvSendBytes = dummyRecv;
+  double* recvRecvBytes = dummyRecv;
+
+  MPI_Comm_size(comm_solver, &nranks);
+  if (nranks <= 0) {
+    nranks = 1;
+  }
 
   if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
@@ -6577,15 +6587,20 @@ static void solver_collect_imbalance_stats(void) {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+
+    recvLdn = g_rankLdn;
+    recvDepsTotal = g_rankDepsTotal;
+    recvSendBytes = g_rankSendBytes;
+    recvRecvBytes = g_rankRecvBytes;
   }
 
-  MPI_Gather(&localRankVals[0], 1, MPI_DOUBLE, g_rankLdn, 1, MPI_DOUBLE, 0,
+  MPI_Gather(&localRankVals[0], 1, MPI_DOUBLE, recvLdn, 1, MPI_DOUBLE, 0,
              comm_solver);
-  MPI_Gather(&localRankVals[1], 1, MPI_DOUBLE, g_rankDepsTotal, 1, MPI_DOUBLE,
+  MPI_Gather(&localRankVals[1], 1, MPI_DOUBLE, recvDepsTotal, 1, MPI_DOUBLE,
              0, comm_solver);
-  MPI_Gather(&localRankVals[2], 1, MPI_DOUBLE, g_rankSendBytes, 1, MPI_DOUBLE,
+  MPI_Gather(&localRankVals[2], 1, MPI_DOUBLE, recvSendBytes, 1, MPI_DOUBLE,
              0, comm_solver);
-  MPI_Gather(&localRankVals[3], 1, MPI_DOUBLE, g_rankRecvBytes, 1, MPI_DOUBLE,
+  MPI_Gather(&localRankVals[3], 1, MPI_DOUBLE, recvRecvBytes, 1, MPI_DOUBLE,
              0, comm_solver);
 
   if (Global.myID == 0) {
