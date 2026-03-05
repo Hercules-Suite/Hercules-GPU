@@ -120,6 +120,27 @@ static double g_dnDiagMax[DN_DIAG_METRIC_COUNT] = {0.0};
 static double g_dnDiagAvg[DN_DIAG_METRIC_COUNT] = {0.0};
 static int32_t g_dnDiagReady = 0;
 
+#define WAIT_RECV_STAGE_COUNT 4
+enum {
+  WAIT_RECV_STAGE_1_DN_FORCE = 0,
+  WAIT_RECV_STAGE_2_AN_FORCE,
+  WAIT_RECV_STAGE_3_AN_DISP,
+  WAIT_RECV_STAGE_4_DN_DISP
+};
+
+static const char* g_waitRecvStageNames[WAIT_RECV_STAGE_COUNT] = {
+    "1st send data (contribution)",
+    "2nd send data (contribution)",
+    "3rd send data (sharing)",
+    "4th send data (sharing)"};
+
+static double g_waitRecvStageLocal[WAIT_RECV_STAGE_COUNT] = {0.0};
+static double g_waitRecvStageMin[WAIT_RECV_STAGE_COUNT] = {0.0};
+static double g_waitRecvStageMax[WAIT_RECV_STAGE_COUNT] = {0.0};
+static double g_waitRecvStageAvg[WAIT_RECV_STAGE_COUNT] = {0.0};
+static int32_t g_waitRecvStageMaxRank[WAIT_RECV_STAGE_COUNT] = {-1, -1, -1,
+                                                                 -1};
+
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
 #endif
@@ -250,6 +271,7 @@ static void compute_adjust_cache_free(void);
 static void solver_diag_reset(void);
 static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
+static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -7309,6 +7331,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   MPI_Status* irecvstats;
   MPI_Request* isendreqs;
   MPI_Status* isendstats;
+  int32_t waitStage = wait_recv_stage_from_msgtag(msgtag);
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7418,9 +7441,16 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
+    double waitRecvStart = 0.0;
+    if (waitStage >= 0) {
+      waitRecvStart = MPI_Wtime();
+    }
     Timer_Start("Schedule Wait Recv");
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
     Timer_Stop("Schedule Wait Recv");
+    if (waitStage >= 0) {
+      g_waitRecvStageLocal[waitStage] += (MPI_Wtime() - waitRecvStart);
+    }
   }
 
   if (isendcount != 0) {
@@ -7496,6 +7526,14 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
 static void solver_diag_reset(void) {
   memset(g_dnDiagLocal, 0, sizeof(g_dnDiagLocal));
+  memset(g_waitRecvStageLocal, 0, sizeof(g_waitRecvStageLocal));
+  memset(g_waitRecvStageMin, 0, sizeof(g_waitRecvStageMin));
+  memset(g_waitRecvStageMax, 0, sizeof(g_waitRecvStageMax));
+  memset(g_waitRecvStageAvg, 0, sizeof(g_waitRecvStageAvg));
+  g_waitRecvStageMaxRank[0] = -1;
+  g_waitRecvStageMaxRank[1] = -1;
+  g_waitRecvStageMaxRank[2] = -1;
+  g_waitRecvStageMaxRank[3] = -1;
   g_dnDiagReady = 0;
 }
 
@@ -7517,6 +7555,8 @@ static void solver_diag_prepare_local(mesh_t* mesh) {
 }
 
 static void solver_diag_reduce(void) {
+  double* gatheredStage = NULL;
+
   MPI_Reduce(g_dnDiagLocal, g_dnDiagMin, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
              MPI_MIN, 0, comm_solver);
   MPI_Reduce(g_dnDiagLocal, g_dnDiagMax, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
@@ -7524,12 +7564,59 @@ static void solver_diag_reduce(void) {
   MPI_Reduce(g_dnDiagLocal, g_dnDiagAvg, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
              MPI_SUM, 0, comm_solver);
 
+  MPI_Reduce(g_waitRecvStageLocal, g_waitRecvStageMin, WAIT_RECV_STAGE_COUNT,
+             MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_waitRecvStageLocal, g_waitRecvStageMax, WAIT_RECV_STAGE_COUNT,
+             MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(g_waitRecvStageLocal, g_waitRecvStageAvg, WAIT_RECV_STAGE_COUNT,
+             MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    gatheredStage =
+        (double*)malloc(sizeof(double) * WAIT_RECV_STAGE_COUNT *
+                        (size_t)Global.theGroupSize);
+  }
+
+  MPI_Gather(g_waitRecvStageLocal, WAIT_RECV_STAGE_COUNT, MPI_DOUBLE,
+             gatheredStage, WAIT_RECV_STAGE_COUNT, MPI_DOUBLE, 0, comm_solver);
+
   if (Global.myID == 0) {
     int i;
     for (i = 0; i < DN_DIAG_METRIC_COUNT; i++) {
       g_dnDiagAvg[i] /= (double)Global.theGroupSize;
     }
+
+    for (i = 0; i < WAIT_RECV_STAGE_COUNT; i++) {
+      int rank;
+      double maxVal = -1.0;
+      g_waitRecvStageAvg[i] /= (double)Global.theGroupSize;
+      g_waitRecvStageMaxRank[i] = 0;
+      for (rank = 0; rank < Global.theGroupSize; rank++) {
+        double v = gatheredStage[(size_t)rank * WAIT_RECV_STAGE_COUNT + i];
+        if (v > maxVal) {
+          maxVal = v;
+          g_waitRecvStageMaxRank[i] = rank;
+        }
+      }
+    }
+
+    free(gatheredStage);
     g_dnDiagReady = 1;
+  }
+}
+
+static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
+  switch (msgtag) {
+    case DN_FORCE_MSG:
+      return WAIT_RECV_STAGE_1_DN_FORCE;
+    case AN_FORCE_MSG:
+      return WAIT_RECV_STAGE_2_AN_FORCE;
+    case AN_DISP_MSG:
+      return WAIT_RECV_STAGE_3_AN_DISP;
+    case DN_DISP_MSG:
+      return WAIT_RECV_STAGE_4_DN_DISP;
+    default:
+      return -1;
   }
 }
 
@@ -9356,6 +9443,16 @@ static void print_timing_stat() {
           g_dnDiagAvg[DN_DIAG_ADJUST_NODES],
           g_dnDiagMax[DN_DIAG_ADJUST_NODES],
           g_dnDiagMin[DN_DIAG_ADJUST_NODES]);
+
+          printf("    Wait Recv by schedule stage (solver loop cumulative)\n");
+          for (int i = 0; i < WAIT_RECV_STAGE_COUNT; i++) {
+          printf(
+            "      %-29s : %.2f (Average)   %.2f (Max, rank %d) %.2f (Min) "
+            "seconds\n",
+            g_waitRecvStageNames[i], g_waitRecvStageAvg[i],
+            g_waitRecvStageMax[i], g_waitRecvStageMaxRank[i],
+            g_waitRecvStageMin[i]);
+          }
       }
   }
   if (Timer_Exists("Adjust Cache Build") ||
