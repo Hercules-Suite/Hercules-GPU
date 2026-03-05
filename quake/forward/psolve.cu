@@ -100,22 +100,6 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
-static int32_t* g_adjustDnDeg2 = NULL;
-static int32_t* g_adjustDnDeg4 = NULL;
-static int32_t g_adjustDnDeg2Count = 0;
-static int32_t g_adjustDnDeg4Count = 0;
-static int64_t g_adjustDepsHistDistLocal[5] = {0, 0, 0, 0, 0};
-static int64_t g_adjustDepsHistAssignLocal[5] = {0, 0, 0, 0, 0};
-static int64_t g_adjustDepsHistDistGlobal[5] = {0, 0, 0, 0, 0};
-static int64_t g_adjustDepsHistAssignGlobal[5] = {0, 0, 0, 0, 0};
-
-static int adjust_deps_bucket(int32_t deps) {
-  if (deps <= 1) return 0;
-  if (deps == 2) return 1;
-  if (deps == 3) return 2;
-  if (deps == 4) return 3;
-  return 4;
-}
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -210,7 +194,8 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
                              int32_t s_insize);
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
-                              int32_t msgtag);
+                              int32_t msgtag,
+                              int32_t overlap_local_adjust_how);
 static int schedule_print(schedule_t* sched, char type, FILE* out);
 static int schedule_print_detail(schedule_t* sched, char type, FILE* out);
 static int schedule_print_messenger_list(schedule_t* sched, messenger_t* msg,
@@ -4378,7 +4363,7 @@ static void solver_init() {
   /* Send mass information of dangling nodes to their owners */
   schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->nTable,
                     sizeof(n_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_MASS_MSG);
+                    DN_MASS_MSG, 0);
 
   /* Distribute the mass from dangling nodes to anchored nodes. (local) */
   compute_adjust(Global.mySolver->nTable, sizeof(n_t) / sizeof(solver_float),
@@ -4387,7 +4372,7 @@ static void solver_init() {
   /* Send mass information of anchored nodes to their owner processors*/
   schedule_senddata(Global.mySolver->an_sched, Global.mySolver->nTable,
                     sizeof(n_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_MASS_MSG);
+                    AN_MASS_MSG, 0);
 
   if (Global.myID == 0) {
     fprintf(stdout, "GPU device memory allocation: start\n");
@@ -5732,6 +5717,17 @@ static int use_sparse_force_upload_topo(void) {
   return 1;
 }
 
+static int use_force_adjust_overlap(void) {
+  static int initialized = 0;
+  static int enabled = 0;
+  if (!initialized) {
+    const char* env = getenv("HERC_OVERLAP_DN_FORCE_ADJUST");
+    enabled = (env != NULL && atoi(env) != 0) ? 1 : 0;
+    initialized = 1;
+  }
+  return enabled;
+}
+
 static void solver_compute_force_source_gpu(int32_t step) {
   int32_t count = Global.theNodesLoaded;
   mysolver_t* solver = Global.mySolver;
@@ -5979,11 +5975,15 @@ static void solver_send_force_dangling(mysolver_t* solver) {
   Timer_Start("1st schedule send data (contribution)");
   schedule_senddata(solver->dn_sched, solver->force,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_FORCE_MSG);
+                    DN_FORCE_MSG,
+                    use_force_adjust_overlap() ? DISTRIBUTION : 0);
   Timer_Stop("1st schedule send data (contribution)");
 }
 
 static void solver_adjust_forces(mysolver_t* solver) {
+  if (use_force_adjust_overlap()) {
+    return;
+  }
   Timer_Start("1st compute adjust (distribution)");
   /* Distribute the forces to LOCAL anchored nodes */
   compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
@@ -5998,7 +5998,7 @@ static void solver_send_force_anchored(mysolver_t* solver) {
   /* Send the forces on anchored nodes to their owner processors */
   schedule_senddata(solver->an_sched, solver->force,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_FORCE_MSG);
+                    AN_FORCE_MSG, 0);
   Timer_Stop("2nd schedule send data (contribution)");
 }
 
@@ -6363,7 +6363,7 @@ static void solver_send_displacement_anchored(mysolver_t* solver) {
   Timer_Start("3rd schedule send data (sharing)");
   schedule_senddata(Global.mySolver->an_sched, Global.mySolver->tm2,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_DISP_MSG);
+                    AN_DISP_MSG, 0);
   Timer_Stop("3rd schedule send data (sharing)");
 }
 
@@ -6382,7 +6382,7 @@ static void solver_send_displacement_dangling(mysolver_t* solver) {
   Timer_Start("4th schedule send data (sharing)");
   schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->tm2,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_DISP_MSG);
+                    DN_DISP_MSG, 0);
   Timer_Stop("4th schedule send data (sharing)");
 }
 
@@ -6507,6 +6507,10 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Schedule Unpack Incoming", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
+  if (Timer_Exists("Schedule Overlap Local Adjust")) {
+    Timer_Reduce("Schedule Overlap Local Adjust",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
   if (Timer_Exists("Adjust Cache Build")) {
     Timer_Reduce("Adjust Cache Build", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
@@ -6520,11 +6524,6 @@ static void solver_run_collect_timers(void) {
                  comm_solver);
   }
 
-  MPI_Allreduce(g_adjustDepsHistDistLocal, g_adjustDepsHistDistGlobal, 5,
-                MPI_LONG_LONG, MPI_SUM, comm_solver);
-  MPI_Allreduce(g_adjustDepsHistAssignLocal, g_adjustDepsHistAssignGlobal, 5,
-                MPI_LONG_LONG, MPI_SUM, comm_solver);
-
   Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
@@ -6536,11 +6535,6 @@ static void solver_run_collect_timers(void) {
  */
 static void solver_run() {
   int32_t step, startingStep;
-
-  memset(g_adjustDepsHistDistLocal, 0, sizeof(g_adjustDepsHistDistLocal));
-  memset(g_adjustDepsHistAssignLocal, 0, sizeof(g_adjustDepsHistAssignLocal));
-  memset(g_adjustDepsHistDistGlobal, 0, sizeof(g_adjustDepsHistDistGlobal));
-  memset(g_adjustDepsHistAssignGlobal, 0, sizeof(g_adjustDepsHistAssignGlobal));
 
   solver_run_init_comm(Global.mySolver);
 
@@ -7291,7 +7285,8 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
  */
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
-                              int32_t msgtag) {
+                              int32_t msgtag,
+                              int32_t overlap_local_adjust_how) {
   messenger_t *send_messenger, *recv_messenger;
   messenger_t *send_head, *recv_head;
   int32_t irecvcount, irecvnum, bytesize;
@@ -7400,6 +7395,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = send_messenger->next;
   }
   Timer_Stop("Schedule Post Send");
+
+  if ((direction == CONTRIBUTION) && (overlap_local_adjust_how != 0)) {
+    Timer_Start("Schedule Overlap Local Adjust");
+    compute_adjust(valuetable, itemsperentry, overlap_local_adjust_how);
+    Timer_Stop("Schedule Overlap Local Adjust");
+  }
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
@@ -8320,8 +8321,6 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
   free(g_adjustInvDeps);
-  free(g_adjustDnDeg2);
-  free(g_adjustDnDeg4);
 
   g_adjustParentOffsets = NULL;
   g_adjustParentIds = NULL;
@@ -8329,12 +8328,8 @@ static void compute_adjust_cache_free(void) {
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
   g_adjustInvDeps = NULL;
-  g_adjustDnDeg2 = NULL;
-  g_adjustDnDeg4 = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
-  g_adjustDnDeg2Count = 0;
-  g_adjustDnDeg4Count = 0;
 }
 
 static void compute_adjust_cache_build(void) {
@@ -8380,29 +8375,6 @@ static void compute_adjust_cache_build(void) {
     g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
     totalParents += deps;
     g_adjustParentOffsets[dnindex + 1] = totalParents;
-  }
-
-  if (g_adjustDnCount > 0) {
-    int32_t w2 = 0;
-    int32_t w4 = 0;
-    g_adjustDnDeg2 = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
-    g_adjustDnDeg4 = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
-    if ((g_adjustDnDeg2 == NULL) || (g_adjustDnDeg4 == NULL)) {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "Failed allocating compute_adjust degree lists");
-    }
-
-    for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
-      int32_t deps = g_adjustParentOffsets[dnindex + 1] -
-                     g_adjustParentOffsets[dnindex];
-      if (deps == 2) {
-        g_adjustDnDeg2[w2++] = dnindex;
-      } else if (deps == 4) {
-        g_adjustDnDeg4[w4++] = dnindex;
-      }
-    }
-    g_adjustDnDeg2Count = w2;
-    g_adjustDnDeg4Count = w4;
   }
 
   g_adjustParentIds = (int32_t*)malloc(sizeof(int32_t) * totalParents);
@@ -8471,56 +8443,10 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
-      for (dnindex = 0; dnindex < g_adjustDnDeg2Count; dnindex++) {
-        int32_t d = g_adjustDnDeg2[dnindex];
-        int32_t start = g_adjustParentOffsets[d];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[d];
-        const solver_float invdeps = g_adjustInvDeps[d];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        g_adjustDepsHistDistLocal[1]++;
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-        p1[0] += d0;
-        p1[1] += d1;
-        p1[2] += d2;
-      }
-      for (dnindex = 0; dnindex < g_adjustDnDeg4Count; dnindex++) {
-        int32_t d = g_adjustDnDeg4[dnindex];
-        int32_t start = g_adjustParentOffsets[d];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[d];
-        const solver_float invdeps = g_adjustInvDeps[d];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-        g_adjustDepsHistDistLocal[3]++;
-        p0[0] += d0;
-        p0[1] += d1;
-        p0[2] += d2;
-        p1[0] += d0;
-        p1[1] += d1;
-        p1[2] += d2;
-        p2[0] += d0;
-        p2[1] += d1;
-        p2[2] += d2;
-        p3[0] += d0;
-        p3[1] += d1;
-        p3[2] += d2;
-      }
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
-        if ((deps == 2) || (deps == 4)) continue;
-        g_adjustDepsHistDistLocal[adjust_deps_bucket(deps)]++;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
@@ -8584,38 +8510,10 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Stop("Adjust Distribution Core");
     } else {
       Timer_Start("Adjust Assignment Core");
-      for (dnindex = 0; dnindex < g_adjustDnDeg2Count; dnindex++) {
-        int32_t d = g_adjustDnDeg2[dnindex];
-        int32_t start = g_adjustParentOffsets[d];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[d];
-        const solver_float invdeps = g_adjustInvDeps[d];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        g_adjustDepsHistAssignLocal[1]++;
-        myvalue[0] = (p0[0] + p1[0]) * invdeps;
-        myvalue[1] = (p0[1] + p1[1]) * invdeps;
-        myvalue[2] = (p0[2] + p1[2]) * invdeps;
-      }
-      for (dnindex = 0; dnindex < g_adjustDnDeg4Count; dnindex++) {
-        int32_t d = g_adjustDnDeg4[dnindex];
-        int32_t start = g_adjustParentOffsets[d];
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[d];
-        const solver_float invdeps = g_adjustInvDeps[d];
-        solver_float* p0 = vtable + g_adjustParentBase3[start];
-        solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-        solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-        solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-        g_adjustDepsHistAssignLocal[3]++;
-        myvalue[0] = (p0[0] + p1[0] + p2[0] + p3[0]) * invdeps;
-        myvalue[1] = (p0[1] + p1[1] + p2[1] + p3[1]) * invdeps;
-        myvalue[2] = (p0[2] + p1[2] + p2[2] + p3[2]) * invdeps;
-      }
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
-        if ((deps == 2) || (deps == 4)) continue;
-        g_adjustDepsHistAssignLocal[adjust_deps_bucket(deps)]++;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
 
@@ -9284,7 +9182,8 @@ static void print_timing_stat() {
       Timer_Exists("Schedule Post Send") ||
       Timer_Exists("Schedule Wait Recv") ||
       Timer_Exists("Schedule Wait Send") ||
-      Timer_Exists("Schedule Unpack Incoming")) {
+      Timer_Exists("Schedule Unpack Incoming") ||
+      Timer_Exists("Schedule Overlap Local Adjust")) {
     printf("    Schedule internals (all send phases)\n");
     if (Timer_Exists("Schedule Post Recv")) {
       printf(
@@ -9334,18 +9233,18 @@ static void print_timing_stat() {
           Timer_Value("Schedule Unpack Incoming", MAX),
           Timer_Value("Schedule Unpack Incoming", MIN));
     }
+    if (Timer_Exists("Schedule Overlap Local Adjust")) {
+      printf(
+          "      Overlap Local Adjust          : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Overlap Local Adjust", AVERAGE),
+          Timer_Value("Schedule Overlap Local Adjust", MAX),
+          Timer_Value("Schedule Overlap Local Adjust", MIN));
+    }
   }
   if (Timer_Exists("Adjust Cache Build") ||
       Timer_Exists("Adjust Distribution Core") ||
       Timer_Exists("Adjust Assignment Core")) {
-    int64_t distTotal = g_adjustDepsHistDistGlobal[0] + g_adjustDepsHistDistGlobal[1] +
-                        g_adjustDepsHistDistGlobal[2] + g_adjustDepsHistDistGlobal[3] +
-                        g_adjustDepsHistDistGlobal[4];
-    int64_t assignTotal = g_adjustDepsHistAssignGlobal[0] +
-                          g_adjustDepsHistAssignGlobal[1] +
-                          g_adjustDepsHistAssignGlobal[2] +
-                          g_adjustDepsHistAssignGlobal[3] +
-                          g_adjustDepsHistAssignGlobal[4];
     printf("    Compute adjust internals\n");
     if (Timer_Exists("Adjust Cache Build")) {
       printf(
@@ -9370,18 +9269,6 @@ static void print_timing_stat() {
           Timer_Value("Adjust Assignment Core", AVERAGE),
           Timer_Value("Adjust Assignment Core", MAX),
           Timer_Value("Adjust Assignment Core", MIN));
-    }
-    if ((distTotal > 0) || (assignTotal > 0)) {
-      printf(
-          "      Deps Histogram Dist (1,2,3,4,5+): %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT "\n",
-          g_adjustDepsHistDistGlobal[0], g_adjustDepsHistDistGlobal[1],
-          g_adjustDepsHistDistGlobal[2], g_adjustDepsHistDistGlobal[3],
-          g_adjustDepsHistDistGlobal[4]);
-      printf(
-          "      Deps Histogram Asgn (1,2,3,4,5+): %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT "\n",
-          g_adjustDepsHistAssignGlobal[0], g_adjustDepsHistAssignGlobal[1],
-          g_adjustDepsHistAssignGlobal[2], g_adjustDepsHistAssignGlobal[3],
-          g_adjustDepsHistAssignGlobal[4]);
     }
   }
   printf("    IO\n");
