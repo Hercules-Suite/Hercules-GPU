@@ -8459,6 +8459,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
 static void print_timing_stat() {
   double TotalMeshingTime;
+  double OtherPhasesTime = 0.0;
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
                      Timer_Value("Octor Refinetree", (TimerKind)0) +
                      Timer_Value("Octor Balancetree", (TimerKind)0) +
@@ -8469,6 +8470,16 @@ static void print_timing_stat() {
 
   if (Param.includeBuildings == YES) {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
+  }
+
+  if (Timer_Exists("Global Init")) {
+    OtherPhasesTime += Timer_Value("Global Init", (TimerKind)0);
+  }
+  if (Timer_Exists("Pre Solver Setup")) {
+    OtherPhasesTime += Timer_Value("Pre Solver Setup", (TimerKind)0);
+  }
+  if (Timer_Exists("Post Solver Finalize")) {
+    OtherPhasesTime += Timer_Value("Post Solver Finalize", (TimerKind)0);
   }
 
   printf(
@@ -8597,6 +8608,31 @@ static void print_timing_stat() {
   printf(
       "SOURCE INITIALIZATION               : %.2f (Max) %.2f (Min) seconds\n",
       Timer_Value("Source Init", MAX), Timer_Value("Source Init", MIN));
+  if (Timer_Exists("Global Init") || Timer_Exists("Pre Solver Setup") ||
+      Timer_Exists("Post Solver Finalize")) {
+    printf("OTHER PHASES (outside mesh/solver/source): %.2f seconds\n",
+           OtherPhasesTime);
+    if (Timer_Exists("Global Init")) {
+      printf("    Global Init                    : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Global Init", AVERAGE),
+             Timer_Value("Global Init", MAX), Timer_Value("Global Init", MIN));
+    }
+    if (Timer_Exists("Pre Solver Setup")) {
+      printf("    Pre Solver Setup               : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Pre Solver Setup", AVERAGE),
+             Timer_Value("Pre Solver Setup", MAX),
+             Timer_Value("Pre Solver Setup", MIN));
+    }
+    if (Timer_Exists("Post Solver Finalize")) {
+      printf("    Post Solver Finalize           : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Post Solver Finalize", AVERAGE),
+             Timer_Value("Post Solver Finalize", MAX),
+             Timer_Value("Post Solver Finalize", MIN));
+    }
+  }
   printf("\n");
   printf("TOTAL SOLVER                        : %.2f seconds\n",
          Timer_Value("Solver", (TimerKind)0));
@@ -10458,6 +10494,7 @@ int main(int argc, char** argv) {
   }
 
   /* Read input parameters from file */
+  Timer_Start("Global Init");
   read_parameters(argc, argv);
 
   if (Param.useProfile == YES) {
@@ -10517,6 +10554,8 @@ int main(int argc, char** argv) {
   // INTRODUCE BKT MODEL
   /* Init Quality Factor Table */
   constract_Quality_Factor_Table();
+  Timer_Stop("Global Init");
+  Timer_Reduce("Global Init", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
   /* Generate, partition and output unstructured octree mesh */
   mesh_generate();
@@ -10570,6 +10609,8 @@ int main(int argc, char** argv) {
                   Global.theGroupSize, Param.theMeshStatFilename);
   Timer_Stop("Mesh Stats Print");
   Timer_Reduce("Mesh Stats Print", (TimerKind)(MAX | MIN), comm_solver);
+
+  Timer_Start("Pre Solver Setup");
 
   if (Param.theNumberOfStations != 0) {
     output_stations_init(Param.parameters_input_file);
@@ -10639,12 +10680,18 @@ int main(int argc, char** argv) {
    */
   output_init(Param.parameters_input_file, &Param.theOutputParameters);
 
+  Timer_Stop("Pre Solver Setup");
+  Timer_Reduce("Pre Solver Setup", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+
   /* Run the solver and output the results */
   MPI_Barrier(comm_solver);
   Timer_Start("Solver");
   solver_run();
   Timer_Stop("Solver");
   MPI_Barrier(comm_solver);
+
+  Timer_Start("Post Solver Finalize");
 
   if (Param.includeNonlinearAnalysis == YES) {
     nonlinear_yield_stats(Global.myMesh, Global.myID, Param.theTotalSteps,
@@ -10670,6 +10717,10 @@ int main(int argc, char** argv) {
   local_finalize();
 
   output_get_stats();
+
+  Timer_Stop("Post Solver Finalize");
+  Timer_Reduce("Post Solver Finalize", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
 
   MPI_Barrier(comm_solver);
   Timer_Stop("Total Wall Clock");
