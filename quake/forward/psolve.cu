@@ -98,8 +98,14 @@ static int32_t* g_adjustDanglingLnid = NULL;
 static int32_t* g_adjustParentBase3 = NULL;
 static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
+static int32_t* g_adjustEdgeDnIndex = NULL;
+static int32_t* g_adjustParentEdgeOffsets = NULL;
+static int32_t* g_adjustParentEdgeList = NULL;
+static int32_t* g_adjustActiveParents = NULL;
+static solver_float* g_adjustDnAccum = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int32_t g_adjustActiveParentCount = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -287,6 +293,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
 static void compute_adjust_cache_free(void);
+static int use_adjust_owner_centric(void);
 static void solver_diag_reset(void);
 static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
@@ -8562,6 +8569,11 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
   free(g_adjustInvDeps);
+  free(g_adjustEdgeDnIndex);
+  free(g_adjustParentEdgeOffsets);
+  free(g_adjustParentEdgeList);
+  free(g_adjustActiveParents);
+  free(g_adjustDnAccum);
 
   g_adjustParentOffsets = NULL;
   g_adjustParentIds = NULL;
@@ -8569,17 +8581,28 @@ static void compute_adjust_cache_free(void) {
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
   g_adjustInvDeps = NULL;
+  g_adjustEdgeDnIndex = NULL;
+  g_adjustParentEdgeOffsets = NULL;
+  g_adjustParentEdgeList = NULL;
+  g_adjustActiveParents = NULL;
+  g_adjustDnAccum = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
+  g_adjustActiveParentCount = 0;
 }
 
 static void compute_adjust_cache_build(void) {
   int32_t dnindex;
   int32_t totalParents = 0;
   int32_t cursor = 0;
+  const int ownerCentric = use_adjust_owner_centric();
 
   if ((g_adjustParentOffsets != NULL) &&
-      (g_adjustDnCount == Global.myMesh->ldnnum)) {
+      (g_adjustDnCount == Global.myMesh->ldnnum) &&
+      ((!ownerCentric) ||
+       ((g_adjustParentEdgeOffsets != NULL) && (g_adjustParentEdgeList != NULL) &&
+        (g_adjustEdgeDnIndex != NULL) && (g_adjustActiveParents != NULL) &&
+        (g_adjustDnAccum != NULL)))) {
     return;
   }
 
@@ -8620,8 +8643,12 @@ static void compute_adjust_cache_build(void) {
 
   g_adjustParentIds = (int32_t*)malloc(sizeof(int32_t) * totalParents);
   g_adjustParentBase3 = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+  if (ownerCentric && (totalParents > 0)) {
+    g_adjustEdgeDnIndex = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+  }
   if ((totalParents > 0) &&
-      ((g_adjustParentIds == NULL) || (g_adjustParentBase3 == NULL))) {
+      ((g_adjustParentIds == NULL) || (g_adjustParentBase3 == NULL) ||
+       (ownerCentric && (g_adjustEdgeDnIndex == NULL)))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Failed allocating compute_adjust parent id array");
   }
@@ -8634,6 +8661,9 @@ static void compute_adjust_cache_build(void) {
                      "compute_adjust cache overflow while building parent ids");
       }
       g_adjustParentIds[cursor++] = int32link->id;
+      if (ownerCentric) {
+        g_adjustEdgeDnIndex[cursor - 1] = dnindex;
+      }
       int32link = int32link->next;
     }
   }
@@ -8664,6 +8694,128 @@ static void compute_adjust_cache_build(void) {
   }
 
   g_adjustParentCount = totalParents;
+
+  if (ownerCentric) {
+    int32_t parentlnid;
+    int32_t nharbored = Global.myMesh->nharbored;
+    int32_t* parentCounts = NULL;
+    int32_t* parentCursor = NULL;
+
+    if (nharbored <= 0) {
+      return;
+    }
+
+    g_adjustParentEdgeOffsets =
+        (int32_t*)malloc(sizeof(int32_t) * (nharbored + 1));
+    if (g_adjustParentEdgeOffsets == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating compute_adjust parent edge offsets");
+    }
+
+    if (totalParents > 0) {
+      g_adjustParentEdgeList = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+      if (g_adjustParentEdgeList == NULL) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Failed allocating compute_adjust parent edge list");
+      }
+    }
+
+    g_adjustDnAccum =
+        (solver_float*)malloc(sizeof(solver_float) * (size_t)g_adjustDnCount * 3);
+    if (g_adjustDnAccum == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating compute_adjust dangling accumulator");
+    }
+
+    parentCounts = (int32_t*)calloc(nharbored, sizeof(int32_t));
+    parentCursor = (int32_t*)malloc(sizeof(int32_t) * nharbored);
+    if ((parentCounts == NULL) || (parentCursor == NULL)) {
+      free(parentCounts);
+      free(parentCursor);
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating compute_adjust parent counters");
+    }
+
+    for (cursor = 0; cursor < totalParents; cursor++) {
+      parentlnid = g_adjustParentIds[cursor];
+      if ((parentlnid < 0) || (parentlnid >= nharbored)) {
+        free(parentCounts);
+        free(parentCursor);
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Invalid parent local id %d in compute_adjust cache",
+                     parentlnid);
+      }
+      parentCounts[parentlnid]++;
+    }
+
+    g_adjustParentEdgeOffsets[0] = 0;
+    g_adjustActiveParentCount = 0;
+    for (parentlnid = 0; parentlnid < nharbored; parentlnid++) {
+      g_adjustParentEdgeOffsets[parentlnid + 1] =
+          g_adjustParentEdgeOffsets[parentlnid] + parentCounts[parentlnid];
+      if (parentCounts[parentlnid] > 0) {
+        g_adjustActiveParentCount++;
+      }
+    }
+
+    if (g_adjustActiveParentCount > 0) {
+      g_adjustActiveParents =
+          (int32_t*)malloc(sizeof(int32_t) * g_adjustActiveParentCount);
+      if (g_adjustActiveParents == NULL) {
+        free(parentCounts);
+        free(parentCursor);
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Failed allocating compute_adjust active parent list");
+      }
+    }
+
+    for (parentlnid = 0; parentlnid < nharbored; parentlnid++) {
+      parentCursor[parentlnid] = g_adjustParentEdgeOffsets[parentlnid];
+    }
+
+    for (cursor = 0; cursor < totalParents; cursor++) {
+      int32_t pos;
+      parentlnid = g_adjustParentIds[cursor];
+      pos = parentCursor[parentlnid]++;
+      g_adjustParentEdgeList[pos] = cursor;
+    }
+
+    if (g_adjustActiveParentCount > 0) {
+      int32_t activeIdx = 0;
+      for (parentlnid = 0; parentlnid < nharbored; parentlnid++) {
+        if (parentCounts[parentlnid] > 0) {
+          g_adjustActiveParents[activeIdx++] = parentlnid;
+        }
+      }
+    }
+
+    free(parentCounts);
+    free(parentCursor);
+  }
+}
+
+static int use_adjust_owner_centric(void) {
+  static int enabled = -1;
+  const char* env;
+
+  if (enabled >= 0) {
+    return enabled;
+  }
+
+  env = getenv("HERC_ADJUST_OWNER_CENTRIC");
+  if (env == NULL) {
+    enabled = 0;
+    return enabled;
+  }
+
+  if ((strcmp(env, "1") == 0) || (strcasecmp(env, "true") == 0) ||
+      (strcasecmp(env, "yes") == 0) || (strcasecmp(env, "on") == 0)) {
+    enabled = 1;
+  } else {
+    enabled = 0;
+  }
+
+  return enabled;
 }
 
 /**
@@ -8678,9 +8830,74 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   int32_t dnindex;
 
   if (itemsperentry == 3) {
+    int useOwnerCentric = use_adjust_owner_centric();
     Timer_Start("Adjust Cache Build");
     compute_adjust_cache_build();
     Timer_Stop("Adjust Cache Build");
+
+    if (useOwnerCentric && (g_adjustParentEdgeOffsets != NULL) &&
+        (g_adjustParentEdgeList != NULL) && (g_adjustEdgeDnIndex != NULL) &&
+        (g_adjustActiveParents != NULL) && (g_adjustDnAccum != NULL)) {
+      if (how == DISTRIBUTION) {
+        Timer_Start("Adjust Distribution Core");
+        for (int32_t ap = 0; ap < g_adjustActiveParentCount; ap++) {
+          int32_t parentlnid = g_adjustActiveParents[ap];
+          int32_t start = g_adjustParentEdgeOffsets[parentlnid];
+          int32_t end = g_adjustParentEdgeOffsets[parentlnid + 1];
+          solver_float* parentvalue = vtable + (parentlnid * 3);
+          solver_float add0 = 0;
+          solver_float add1 = 0;
+          solver_float add2 = 0;
+
+          for (int32_t p = start; p < end; p++) {
+            int32_t edgeIndex = g_adjustParentEdgeList[p];
+            int32_t dn = g_adjustEdgeDnIndex[edgeIndex];
+            solver_float* myvalue = vtable + g_adjustDanglingBase3[dn];
+            solver_float invdeps = g_adjustInvDeps[dn];
+            add0 += myvalue[0] * invdeps;
+            add1 += myvalue[1] * invdeps;
+            add2 += myvalue[2] * invdeps;
+          }
+
+          parentvalue[0] += add0;
+          parentvalue[1] += add1;
+          parentvalue[2] += add2;
+        }
+        Timer_Stop("Adjust Distribution Core");
+      } else {
+        Timer_Start("Adjust Assignment Core");
+        memset(g_adjustDnAccum, 0,
+               sizeof(solver_float) * (size_t)g_adjustDnCount * 3);
+
+        for (int32_t ap = 0; ap < g_adjustActiveParentCount; ap++) {
+          int32_t parentlnid = g_adjustActiveParents[ap];
+          int32_t start = g_adjustParentEdgeOffsets[parentlnid];
+          int32_t end = g_adjustParentEdgeOffsets[parentlnid + 1];
+          solver_float* parentvalue = vtable + (parentlnid * 3);
+
+          for (int32_t p = start; p < end; p++) {
+            int32_t edgeIndex = g_adjustParentEdgeList[p];
+            int32_t dn = g_adjustEdgeDnIndex[edgeIndex];
+            solver_float* acc = g_adjustDnAccum + (dn * 3);
+            acc[0] += parentvalue[0];
+            acc[1] += parentvalue[1];
+            acc[2] += parentvalue[2];
+          }
+        }
+
+        for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+          solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
+          solver_float* acc = g_adjustDnAccum + (dnindex * 3);
+          solver_float invdeps = g_adjustInvDeps[dnindex];
+          myvalue[0] = acc[0] * invdeps;
+          myvalue[1] = acc[1] * invdeps;
+          myvalue[2] = acc[2] * invdeps;
+        }
+        Timer_Stop("Adjust Assignment Core");
+      }
+
+      return;
+    }
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
