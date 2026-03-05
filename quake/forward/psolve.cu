@@ -6464,9 +6464,10 @@ static void solver_collect_imbalance_stats(void) {
                                    &sendBytes, &recvBytes);
   }
 
-  localVals[0] = (double)Global.myMesh->ldnnum;
+  localVals[0] =
+      (Global.myMesh != NULL) ? (double)Global.myMesh->ldnnum : 0.0;
   localVals[1] = depsTotal;
-  localVals[2] = (Global.myMesh->ldnnum > 0)
+  localVals[2] = ((Global.myMesh != NULL) && (Global.myMesh->ldnnum > 0))
                      ? (depsTotal / (double)Global.myMesh->ldnnum)
                      : 0.0;
   localVals[3] = sendBytes;
@@ -11423,6 +11424,8 @@ int main(int argc, char** argv) {
   }
 #endif /* DEBUG */
 
+  solver_collect_imbalance_stats();
+
   local_finalize();
 
   output_get_stats();
@@ -11460,8 +11463,6 @@ int main(int argc, char** argv) {
     Timer_Reduce("Carve Buildings", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
-
-  solver_collect_imbalance_stats();
 
   /* Print out the timing stat */
   if (Global.myID == 0) {
