@@ -97,11 +97,10 @@ static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
 static int32_t* g_adjustParentBase3 = NULL;
 static int32_t* g_adjustDanglingBase3 = NULL;
+static int32_t* g_adjustParentDeps = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
-static int32_t g_adjustSmallDepsFastPath = -1;
-static int32_t g_sharingWaitsomePath = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -7383,13 +7382,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
-
-  if (g_sharingWaitsomePath < 0) {
-    const char* envWaitsome = getenv("HERC_SHARING_WAITSOME");
-    g_sharingWaitsomePath =
-        (envWaitsome == NULL || atoi(envWaitsome) != 0) ? 1 : 0;
-  }
-  useWaitsome = (direction == SHARING && g_sharingWaitsomePath) ? 1 : 0;
+  useWaitsome = (direction == SHARING) ? 1 : 0;
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -8609,6 +8602,7 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustDanglingLnid);
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
+  free(g_adjustParentDeps);
   free(g_adjustInvDeps);
 
   g_adjustParentOffsets = NULL;
@@ -8616,6 +8610,7 @@ static void compute_adjust_cache_free(void) {
   g_adjustDanglingLnid = NULL;
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
+  g_adjustParentDeps = NULL;
   g_adjustInvDeps = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
@@ -8641,12 +8636,14 @@ static void compute_adjust_cache_build(void) {
   g_adjustParentOffsets =
       (int32_t*)malloc(sizeof(int32_t) * (g_adjustDnCount + 1));
   g_adjustDanglingLnid = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
-    g_adjustDanglingBase3 =
+  g_adjustDanglingBase3 =
       (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
+  g_adjustParentDeps = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
   g_adjustInvDeps = (solver_float*)malloc(sizeof(solver_float) * g_adjustDnCount);
 
-    if ((g_adjustParentOffsets == NULL) || (g_adjustDanglingLnid == NULL) ||
-      (g_adjustDanglingBase3 == NULL) || (g_adjustInvDeps == NULL)) {
+  if ((g_adjustParentOffsets == NULL) || (g_adjustDanglingLnid == NULL) ||
+      (g_adjustDanglingBase3 == NULL) || (g_adjustParentDeps == NULL) ||
+      (g_adjustInvDeps == NULL)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Failed allocating compute_adjust cache arrays");
   }
@@ -8661,6 +8658,7 @@ static void compute_adjust_cache_build(void) {
     }
     g_adjustDanglingLnid[dnindex] = dnode->ldnid;
     g_adjustDanglingBase3[dnindex] = dnode->ldnid * 3;
+    g_adjustParentDeps[dnindex] = deps;
     g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
     totalParents += deps;
     g_adjustParentOffsets[dnindex + 1] = totalParents;
@@ -8725,12 +8723,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   solver_float* vtable = (solver_float*)valuetable;
   int32_t dnindex;
 
-  if (g_adjustSmallDepsFastPath < 0) {
-    const char* envFastAdjust = getenv("HERC_ADJUST_SMALL_DEPS_FASTPATH");
-    g_adjustSmallDepsFastPath =
-        (envFastAdjust == NULL || atoi(envFastAdjust) != 0) ? 1 : 0;
-  }
-
   if (itemsperentry == 3) {
     Timer_Start("Adjust Cache Build");
     compute_adjust_cache_build();
@@ -8740,15 +8732,14 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Distribution Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t end = g_adjustParentOffsets[dnindex + 1];
-        int32_t deps = end - start;
+        int32_t deps = g_adjustParentDeps[dnindex];
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        if (g_adjustSmallDepsFastPath && deps <= 4) {
+        if (deps <= 4) {
           solver_float* p0 = vtable + g_adjustParentBase3[start];
           p0[0] += d0;
           p0[1] += d1;
@@ -8773,6 +8764,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             p3[2] += d2;
           }
         } else {
+          int32_t end = start + deps;
           for (int32_t p = start; p < end; p++) {
             solver_float* parentvalue = vtable + g_adjustParentBase3[p];
             parentvalue[0] += d0;
@@ -8786,15 +8778,14 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Assignment Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t end = g_adjustParentOffsets[dnindex + 1];
-        int32_t deps = end - start;
+        int32_t deps = g_adjustParentDeps[dnindex];
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         solver_float s0 = 0;
         solver_float s1 = 0;
         solver_float s2 = 0;
 
-        if (g_adjustSmallDepsFastPath && deps <= 4) {
+        if (deps <= 4) {
           solver_float* p0 = vtable + g_adjustParentBase3[start];
           s0 = p0[0];
           s1 = p0[1];
@@ -8819,6 +8810,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             s2 += p3[2];
           }
         } else {
+          int32_t end = start + deps;
           for (int32_t p = start; p < end; p++) {
             solver_float* parentvalue = vtable + g_adjustParentBase3[p];
             s0 += parentvalue[0];
