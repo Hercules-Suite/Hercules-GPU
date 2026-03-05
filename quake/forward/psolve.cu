@@ -3097,6 +3097,16 @@ typedef struct mesh_anchor_msg_t {
   int32_t isanchored;
 } mesh_anchor_msg_t;
 
+typedef struct mesh_owner_req_t {
+  int64_t gnid;
+  int32_t rank;
+} mesh_owner_req_t;
+
+typedef struct mesh_owner_rsp_t {
+  int64_t gnid;
+  int32_t owner;
+} mesh_owner_rsp_t;
+
 static int mesh_cmp_node_raw_gnid(const void* a, const void* b) {
   const mesh_node_raw_t* lhs = (const mesh_node_raw_t*)a;
   const mesh_node_raw_t* rhs = (const mesh_node_raw_t*)b;
@@ -3125,6 +3135,17 @@ static int mesh_cmp_coord_index(const void* a, const void* b) {
   if (lhs->y > rhs->y) return 1;
   if (lhs->z < rhs->z) return -1;
   if (lhs->z > rhs->z) return 1;
+  return 0;
+}
+
+static int mesh_cmp_owner_req(const void* a, const void* b) {
+  const mesh_owner_req_t* lhs = (const mesh_owner_req_t*)a;
+  const mesh_owner_req_t* rhs = (const mesh_owner_req_t*)b;
+
+  if (lhs->gnid < rhs->gnid) return -1;
+  if (lhs->gnid > rhs->gnid) return 1;
+  if (lhs->rank < rhs->rank) return -1;
+  if (lhs->rank > rhs->rank) return 1;
   return 0;
 }
 
@@ -3527,28 +3548,207 @@ static void mesh_load_from_etree() {
 
   mesh->lnnum = 0;
   for (i = 0; i < mesh->nharbored; i++) {
-    int32_t owner = -1;
+    mesh->nodeTable[i].ismine = 0;
+    mesh->nodeTable[i].proc.ownerid = -1;
+  }
+
+  {
+    int32_t pcount = Global.theGroupSize;
+    int32_t* reqSendCounts = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqRecvCounts = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqSendDispls = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqRecvDispls = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqSendCountsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqRecvCountsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqSendDisplsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqRecvDisplsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* reqCursor = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t reqSendTotal = 0;
+    int32_t reqRecvTotal = 0;
+    mesh_owner_req_t* reqSendBuf;
+    mesh_owner_req_t* reqRecvBuf;
     int32_t r;
 
-    for (r = 0; r < Global.theGroupSize; r++) {
-      if (nodeUsers[i * Global.theGroupSize + r]) {
-        owner = r;
-        break;
+    int32_t* rspSendCounts = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspRecvCounts = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspSendDispls = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspRecvDispls = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspSendCountsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspRecvCountsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspSendDisplsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspRecvDisplsBytes = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t* rspCursor = (int32_t*)calloc(pcount, sizeof(int32_t));
+    int32_t rspSendTotal = 0;
+    int32_t rspRecvTotal = 0;
+    mesh_owner_rsp_t* rspSendBuf;
+    mesh_owner_rsp_t* rspRecvBuf;
+
+    if ((reqSendCounts == NULL) || (reqRecvCounts == NULL) ||
+        (reqSendDispls == NULL) || (reqRecvDispls == NULL) ||
+        (reqSendCountsBytes == NULL) || (reqRecvCountsBytes == NULL) ||
+        (reqSendDisplsBytes == NULL) || (reqRecvDisplsBytes == NULL) ||
+        (reqCursor == NULL) || (rspSendCounts == NULL) ||
+        (rspRecvCounts == NULL) || (rspSendDispls == NULL) ||
+        (rspRecvDispls == NULL) || (rspSendCountsBytes == NULL) ||
+        (rspRecvCountsBytes == NULL) || (rspSendDisplsBytes == NULL) ||
+        (rspRecvDisplsBytes == NULL) || (rspCursor == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating owner election tables");
+    }
+
+    for (i = 0; i < mesh->nharbored; i++) {
+      int32_t broker =
+          (int32_t)(((uint64_t)mesh->nodeTable[i].gnid) % (uint64_t)pcount);
+      reqSendCounts[broker]++;
+    }
+
+    MPI_Alltoall(reqSendCounts, 1, MPI_INT, reqRecvCounts, 1, MPI_INT,
+                 comm_solver);
+
+    for (r = 0; r < pcount; r++) {
+      reqSendDispls[r] = reqSendTotal;
+      reqRecvDispls[r] = reqRecvTotal;
+      reqSendTotal += reqSendCounts[r];
+      reqRecvTotal += reqRecvCounts[r];
+    }
+
+    reqSendBuf = (mesh_owner_req_t*)calloc(reqSendTotal, sizeof(mesh_owner_req_t));
+    reqRecvBuf = (mesh_owner_req_t*)calloc(reqRecvTotal, sizeof(mesh_owner_req_t));
+    if ((reqSendBuf == NULL && reqSendTotal > 0) ||
+        (reqRecvBuf == NULL && reqRecvTotal > 0)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating owner election request buffers");
+    }
+
+    memcpy(reqCursor, reqSendDispls, sizeof(int32_t) * pcount);
+    for (i = 0; i < mesh->nharbored; i++) {
+      int32_t broker =
+          (int32_t)(((uint64_t)mesh->nodeTable[i].gnid) % (uint64_t)pcount);
+      int32_t idx = reqCursor[broker]++;
+      reqSendBuf[idx].gnid = mesh->nodeTable[i].gnid;
+      reqSendBuf[idx].rank = Global.myID;
+    }
+
+    for (r = 0; r < pcount; r++) {
+      reqSendCountsBytes[r] = reqSendCounts[r] * (int32_t)sizeof(mesh_owner_req_t);
+      reqRecvCountsBytes[r] = reqRecvCounts[r] * (int32_t)sizeof(mesh_owner_req_t);
+      reqSendDisplsBytes[r] = reqSendDispls[r] * (int32_t)sizeof(mesh_owner_req_t);
+      reqRecvDisplsBytes[r] = reqRecvDispls[r] * (int32_t)sizeof(mesh_owner_req_t);
+    }
+
+    MPI_Alltoallv(reqSendBuf, reqSendCountsBytes, reqSendDisplsBytes, MPI_BYTE,
+                  reqRecvBuf, reqRecvCountsBytes, reqRecvDisplsBytes, MPI_BYTE,
+                  comm_solver);
+
+    if (reqRecvTotal > 0) {
+      qsort(reqRecvBuf, reqRecvTotal, sizeof(mesh_owner_req_t), mesh_cmp_owner_req);
+    }
+
+    for (i = 0; i < reqRecvTotal; i++) {
+      int32_t dst = reqRecvBuf[i].rank;
+      if (dst >= 0 && dst < pcount) {
+        rspSendCounts[dst]++;
       }
     }
 
-    if (owner < 0) {
-      owner = Global.myID;
+    MPI_Alltoall(rspSendCounts, 1, MPI_INT, rspRecvCounts, 1, MPI_INT,
+                 comm_solver);
+
+    for (r = 0; r < pcount; r++) {
+      rspSendDispls[r] = rspSendTotal;
+      rspRecvDispls[r] = rspRecvTotal;
+      rspSendTotal += rspSendCounts[r];
+      rspRecvTotal += rspRecvCounts[r];
     }
 
-    if (owner == Global.myID) {
-      mesh->nodeTable[i].ismine = 1;
-      mesh->lnnum++;
-      mesh->nodeTable[i].proc.share = NULL;
-    } else {
-      mesh->nodeTable[i].ismine = 0;
-      mesh->nodeTable[i].proc.ownerid = owner;
+    rspSendBuf = (mesh_owner_rsp_t*)calloc(rspSendTotal, sizeof(mesh_owner_rsp_t));
+    rspRecvBuf = (mesh_owner_rsp_t*)calloc(rspRecvTotal, sizeof(mesh_owner_rsp_t));
+    if ((rspSendBuf == NULL && rspSendTotal > 0) ||
+        (rspRecvBuf == NULL && rspRecvTotal > 0)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating owner election response buffers");
     }
+
+    memcpy(rspCursor, rspSendDispls, sizeof(int32_t) * pcount);
+    {
+      int32_t start = 0;
+      while (start < reqRecvTotal) {
+        int32_t end = start + 1;
+        int32_t owner = reqRecvBuf[start].rank;
+        while (end < reqRecvTotal && reqRecvBuf[end].gnid == reqRecvBuf[start].gnid) {
+          if (reqRecvBuf[end].rank < owner) {
+            owner = reqRecvBuf[end].rank;
+          }
+          end++;
+        }
+
+        for (i = start; i < end; i++) {
+          int32_t dst = reqRecvBuf[i].rank;
+          int32_t idx = rspCursor[dst]++;
+          rspSendBuf[idx].gnid = reqRecvBuf[i].gnid;
+          rspSendBuf[idx].owner = owner;
+        }
+        start = end;
+      }
+    }
+
+    for (r = 0; r < pcount; r++) {
+      rspSendCountsBytes[r] = rspSendCounts[r] * (int32_t)sizeof(mesh_owner_rsp_t);
+      rspRecvCountsBytes[r] = rspRecvCounts[r] * (int32_t)sizeof(mesh_owner_rsp_t);
+      rspSendDisplsBytes[r] = rspSendDispls[r] * (int32_t)sizeof(mesh_owner_rsp_t);
+      rspRecvDisplsBytes[r] = rspRecvDispls[r] * (int32_t)sizeof(mesh_owner_rsp_t);
+    }
+
+    MPI_Alltoallv(rspSendBuf, rspSendCountsBytes, rspSendDisplsBytes, MPI_BYTE,
+                  rspRecvBuf, rspRecvCountsBytes, rspRecvDisplsBytes, MPI_BYTE,
+                  comm_solver);
+
+    for (i = 0; i < rspRecvTotal; i++) {
+      int32_t lnid =
+          mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, rspRecvBuf[i].gnid);
+      if (lnid < 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "owner election response for unknown gnid=%" INT64_FMT,
+                     rspRecvBuf[i].gnid);
+      }
+      mesh->nodeTable[lnid].proc.ownerid = rspRecvBuf[i].owner;
+    }
+
+    mesh->lnnum = 0;
+    for (i = 0; i < mesh->nharbored; i++) {
+      int32_t owner = mesh->nodeTable[i].proc.ownerid;
+      if (owner == Global.myID || owner < 0 || owner >= pcount) {
+        mesh->nodeTable[i].ismine = 1;
+        mesh->nodeTable[i].proc.share = NULL;
+        mesh->lnnum++;
+      } else {
+        mesh->nodeTable[i].ismine = 0;
+      }
+    }
+
+    free(reqSendCounts);
+    free(reqRecvCounts);
+    free(reqSendDispls);
+    free(reqRecvDispls);
+    free(reqSendCountsBytes);
+    free(reqRecvCountsBytes);
+    free(reqSendDisplsBytes);
+    free(reqRecvDisplsBytes);
+    free(reqCursor);
+    free(reqSendBuf);
+    free(reqRecvBuf);
+
+    free(rspSendCounts);
+    free(rspRecvCounts);
+    free(rspSendDispls);
+    free(rspRecvDispls);
+    free(rspSendCountsBytes);
+    free(rspRecvCountsBytes);
+    free(rspSendDisplsBytes);
+    free(rspRecvDisplsBytes);
+    free(rspCursor);
+    free(rspSendBuf);
+    free(rspRecvBuf);
   }
 
   {
@@ -3594,7 +3794,8 @@ static void mesh_load_from_etree() {
 
     sendBuf = (int64_t*)calloc(sendTotal, sizeof(int64_t));
     recvBuf = (int64_t*)calloc(recvTotal, sizeof(int64_t));
-    if ((sendBuf == NULL && sendTotal > 0) || (recvBuf == NULL && recvTotal > 0)) {
+    if ((sendBuf == NULL && sendTotal > 0) ||
+        (recvBuf == NULL && recvTotal > 0)) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "out of memory allocating owner-share exchange buffers");
     }
@@ -3621,22 +3822,11 @@ static void mesh_load_from_etree() {
         int32_t lnid =
             mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, recvBuf[idx]);
 
-        if (lnid < 0) {
+        if (lnid < 0 || !mesh->nodeTable[lnid].ismine) {
           solver_abort(__FUNCTION_NAME, NULL,
-                       "owner-share registration for unknown gnid=%" INT64_FMT
+                       "owner-share registration mismatch for gnid=%" INT64_FMT
                        " from rank %d",
                        recvBuf[idx], r);
-        }
-
-        if (!mesh->nodeTable[lnid].ismine) {
-          mesh->nodeTable[lnid].ismine = 1;
-          mesh->nodeTable[lnid].proc.share = NULL;
-          mesh->lnnum++;
-
-          monitor_print(
-              "mesh_from_etree: ownership cycle resolved for gnid=%" INT64_FMT
-              " (promoted owner on rank %d, sender rank %d)\n",
-              recvBuf[idx], Global.myID, r);
         }
 
         {
