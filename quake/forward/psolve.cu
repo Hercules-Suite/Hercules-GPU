@@ -3611,6 +3611,7 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
       mesh->dnodeTable = shrunk;
     }
   }
+  }
 
   free(records);
   free(deps);
@@ -4191,9 +4192,10 @@ static void mesh_load_from_etree() {
       if (owner == Global.myID || owner < 0 || owner >= pcount) {
         mesh->nodeTable[i].ismine = 1;
         mesh->nodeTable[i].proc.share = NULL;
-        mesh->lnnum++;
-      } else {
-        mesh->nodeTable[i].ismine = 0;
+        mesh->ldnnum++;
+      }
+    }
+    }
       }
     }
 
@@ -4487,8 +4489,6 @@ static void mesh_load_from_etree() {
     free(recvBuf);
   }
 
-  }
-
   for (i = 0; i < mesh->nharbored; i++) {
     int32_t h;
     int32_t rem[3];
@@ -4603,6 +4603,7 @@ static void mesh_load_from_etree() {
     if (shrunk != NULL) {
       mesh->dnodeTable = shrunk;
     }
+  }
   }
 
   etree_close(mep);
