@@ -6450,8 +6450,10 @@ static void solver_run_collect_timers(void) {
                comm_solver);
   Timer_Reduce("1st schedule send data (contribution)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("1st compute adjust (distribution)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  if (Timer_Exists("1st compute adjust (distribution)")) {
+    Timer_Reduce("1st compute adjust (distribution)",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
   Timer_Reduce("2nd schedule send data (contribution)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
