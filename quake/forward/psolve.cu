@@ -3569,6 +3569,20 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
     if (lnid >= 0) {
       mesh->nodeTable[lnid].isanchored = records[i].isanchored;
 
+      if (records[i].dep_count < 0 || records[i].dep_offset < 0 ||
+          (int64_t)records[i].dep_offset + (int64_t)records[i].dep_count > depCount) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "invalid dependency range in topology snapshot for gnid=%" INT64_FMT,
+                     records[i].gnid);
+      }
+
+      if (!records[i].isanchored && mesh->nodeTable[lnid].ismine &&
+          records[i].dep_count <= 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "invalid dangling node with zero dependencies for gnid=%" INT64_FMT,
+                     records[i].gnid);
+      }
+
       if (!records[i].isanchored && records[i].dep_count > 0 &&
           mesh->nodeTable[lnid].ismine) {
         int64_t off = records[i].dep_offset;
@@ -4195,10 +4209,18 @@ static void mesh_load_from_etree() {
     mesh->lnnum = 0;
     for (i = 0; i < mesh->nharbored; i++) {
       int32_t owner = mesh->nodeTable[i].proc.ownerid;
-      if (owner == Global.myID || owner < 0 || owner >= pcount) {
+      if (owner < 0 || owner >= pcount) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "owner election produced invalid owner %d for gnid=%" INT64_FMT,
+                     owner, mesh->nodeTable[i].gnid);
+      }
+
+      if (owner == Global.myID) {
         mesh->nodeTable[i].ismine = 1;
         mesh->nodeTable[i].proc.share = NULL;
         mesh->lnnum++;
+      } else {
+        mesh->nodeTable[i].ismine = 0;
       }
     }
 
