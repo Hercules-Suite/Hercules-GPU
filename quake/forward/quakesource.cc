@@ -3455,6 +3455,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   int32_t iCycle, iInternal, iNode;
     int32_t activeSourceCount = 0;
     int32_t* activeSourceList = NULL;
+        int32_t* activeSourceElementIndex = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
         int32_t* cycleNodeCounts = NULL;
@@ -3500,12 +3501,15 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   }
 
   activeSourceList = (int32_t*)malloc(sizeof(int32_t) * theNumberOfPointSources);
+  activeSourceElementIndex =
+      (int32_t*)malloc(sizeof(int32_t) * theNumberOfPointSources);
   activeSourceOctant =
       (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
   activeSourceDomainCoords =
       (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
 
-  if ((activeSourceList == NULL) || (activeSourceOctant == NULL) ||
+  if ((activeSourceList == NULL) || (activeSourceElementIndex == NULL) ||
+      (activeSourceOctant == NULL) ||
       (activeSourceDomainCoords == NULL)) {
       fprintf(stdout, "Err allocating active source cache\n");
       return -1;
@@ -3530,6 +3534,13 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 	update_forceinprocessor( iForce, is_force_in_processor, 1);
 	myNumberOfForces +=1;
     activeSourceList[activeSourceCount] = iSrc;
+    activeSourceElementIndex[activeSourceCount] =
+        source_find_element_for_octant(octant);
+    if (activeSourceElementIndex[activeSourceCount] < 0) {
+      fprintf(stderr, "Thread %d: source_init: No element matches active source octant\n", myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     activeSourceOctant[activeSourceCount] = octant;
     activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
     activeSourceCount++;
@@ -3673,7 +3684,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       load_myForces_with_point_source(octant, &pntSrc,
                       is_force_in_processor, iCycle,
                       iSrc,
-                      -1);
+                      activeSourceElementIndex[iActive]);
 
       if (myID == 0 && iCycle == 0) {
       fprintf(fpdsrc, "%f %f %f %f %f %f %f %f\n",
@@ -3723,6 +3734,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   }
 
     free(activeSourceList);
+    free(activeSourceElementIndex);
     free(activeSourceOctant);
     free(activeSourceDomainCoords);
     free(cycleNodeCounts);
