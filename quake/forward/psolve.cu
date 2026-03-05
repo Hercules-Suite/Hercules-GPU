@@ -100,6 +100,27 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int g_imbalanceStatsReady = 0;
+static double g_ldnMin = 0.0;
+static double g_ldnMax = 0.0;
+static double g_ldnAvg = 0.0;
+static double g_depsTotalMin = 0.0;
+static double g_depsTotalMax = 0.0;
+static double g_depsTotalAvg = 0.0;
+static double g_depsPerDnMin = 0.0;
+static double g_depsPerDnMax = 0.0;
+static double g_depsPerDnAvg = 0.0;
+static double g_schedSendBytesMin = 0.0;
+static double g_schedSendBytesMax = 0.0;
+static double g_schedSendBytesAvg = 0.0;
+static double g_schedRecvBytesMin = 0.0;
+static double g_schedRecvBytesMax = 0.0;
+static double g_schedRecvBytesAvg = 0.0;
+static int g_rankSkewCount = 0;
+static double* g_rankLdn = NULL;
+static double* g_rankDepsTotal = NULL;
+static double* g_rankSendBytes = NULL;
+static double* g_rankRecvBytes = NULL;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -195,6 +216,7 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
                               int32_t msgtag);
+static void solver_collect_imbalance_stats(void);
 static int schedule_print(schedule_t* sched, char type, FILE* out);
 static int schedule_print_detail(schedule_t* sched, char type, FILE* out);
 static int schedule_print_messenger_list(schedule_t* sched, messenger_t* msg,
@@ -6386,6 +6408,215 @@ static void solver_output_wavefield_close(void) {
   }
 }
 
+static void schedule_accumulate_comm_bytes(const schedule_t* sched,
+                                           int32_t direction,
+                                           double* sendBytes,
+                                           double* recvBytes) {
+  const messenger_t* sendMessenger;
+  const messenger_t* recvMessenger;
+
+  if ((sched == NULL) || (sendBytes == NULL) || (recvBytes == NULL)) {
+    return;
+  }
+
+  if (direction == CONTRIBUTION) {
+    sendMessenger = sched->first_c;
+    recvMessenger = sched->first_s;
+  } else {
+    sendMessenger = sched->first_s;
+    recvMessenger = sched->first_c;
+  }
+
+  while (sendMessenger != NULL) {
+    *sendBytes +=
+        (double)sendMessenger->nodecount * (double)sendMessenger->outsize;
+    sendMessenger = sendMessenger->next;
+  }
+
+  while (recvMessenger != NULL) {
+    *recvBytes +=
+        (double)recvMessenger->nodecount * (double)recvMessenger->insize;
+    recvMessenger = recvMessenger->next;
+  }
+}
+
+static void imbalance_rank_buffers_free(void) {
+  free(g_rankLdn);
+  free(g_rankDepsTotal);
+  free(g_rankSendBytes);
+  free(g_rankRecvBytes);
+
+  g_rankLdn = NULL;
+  g_rankDepsTotal = NULL;
+  g_rankSendBytes = NULL;
+  g_rankRecvBytes = NULL;
+  g_rankSkewCount = 0;
+}
+
+static int imbalance_rank_buffers_ensure(int32_t nranks) {
+  if (Global.myID != 0) {
+    return 1;
+  }
+
+  if (nranks <= 0) {
+    imbalance_rank_buffers_free();
+    return 0;
+  }
+
+  if ((g_rankSkewCount == nranks) && (g_rankLdn != NULL) &&
+      (g_rankDepsTotal != NULL) && (g_rankSendBytes != NULL) &&
+      (g_rankRecvBytes != NULL)) {
+    return 1;
+  }
+
+  imbalance_rank_buffers_free();
+
+  g_rankLdn = (double*)malloc(sizeof(double) * nranks);
+  g_rankDepsTotal = (double*)malloc(sizeof(double) * nranks);
+  g_rankSendBytes = (double*)malloc(sizeof(double) * nranks);
+  g_rankRecvBytes = (double*)malloc(sizeof(double) * nranks);
+  if ((g_rankLdn == NULL) || (g_rankDepsTotal == NULL) ||
+      (g_rankSendBytes == NULL) || (g_rankRecvBytes == NULL)) {
+    imbalance_rank_buffers_free();
+    return 0;
+  }
+
+  g_rankSkewCount = nranks;
+  return 1;
+}
+
+static int imbalance_pick_top_desc(const double* values, int32_t count,
+                                   int32_t topN, int32_t* outIndices) {
+  int32_t k;
+  char* selected;
+
+  if ((values == NULL) || (outIndices == NULL) || (count <= 0) || (topN <= 0)) {
+    return 0;
+  }
+
+  selected = (char*)calloc((size_t)count, sizeof(char));
+  if (selected == NULL) {
+    return 0;
+  }
+
+  for (k = 0; k < topN; k++) {
+    int32_t i;
+    int32_t best = -1;
+    double bestValue = -DBL_MAX;
+
+    for (i = 0; i < count; i++) {
+      if (selected[i] == 0 && values[i] > bestValue) {
+        bestValue = values[i];
+        best = i;
+      }
+    }
+
+    if (best < 0) {
+      break;
+    }
+
+    outIndices[k] = best;
+    selected[best] = 1;
+  }
+
+  free(selected);
+  return k;
+}
+
+static void solver_collect_imbalance_stats(void) {
+  int32_t dnindex;
+  int32_t nranks = Global.theGroupSize;
+  double localVals[5];
+  double minVals[5];
+  double maxVals[5];
+  double sumVals[5];
+  double depsTotal = 0.0;
+  double sendBytes = 0.0;
+  double recvBytes = 0.0;
+  double localRankVals[4];
+
+  if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
+    for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
+      depsTotal += (double)Global.myMesh->dnodeTable[dnindex].deps;
+    }
+  }
+
+  if ((Global.mySolver != NULL) && (Global.mySolver->dn_sched != NULL) &&
+      (Global.mySolver->an_sched != NULL)) {
+    schedule_accumulate_comm_bytes(Global.mySolver->dn_sched, CONTRIBUTION,
+                                   &sendBytes, &recvBytes);
+    schedule_accumulate_comm_bytes(Global.mySolver->an_sched, CONTRIBUTION,
+                                   &sendBytes, &recvBytes);
+    schedule_accumulate_comm_bytes(Global.mySolver->an_sched, SHARING,
+                                   &sendBytes, &recvBytes);
+    schedule_accumulate_comm_bytes(Global.mySolver->dn_sched, SHARING,
+                                   &sendBytes, &recvBytes);
+  }
+
+  localVals[0] = (double)Global.myMesh->ldnnum;
+  localVals[1] = depsTotal;
+  localVals[2] = (Global.myMesh->ldnnum > 0)
+                     ? (depsTotal / (double)Global.myMesh->ldnnum)
+                     : 0.0;
+  localVals[3] = sendBytes;
+  localVals[4] = recvBytes;
+
+  localRankVals[0] = localVals[0];
+  localRankVals[1] = localVals[1];
+  localRankVals[2] = localVals[3];
+  localRankVals[3] = localVals[4];
+
+  MPI_Reduce(localVals, minVals, 5, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(localVals, maxVals, 5, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(localVals, sumVals, 5, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    if (!imbalance_rank_buffers_ensure(nranks)) {
+      fprintf(stderr,
+              "Thread 0: solver_collect_imbalance_stats: out of memory\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  MPI_Gather(&localRankVals[0], 1, MPI_DOUBLE, g_rankLdn, 1, MPI_DOUBLE, 0,
+             comm_solver);
+  MPI_Gather(&localRankVals[1], 1, MPI_DOUBLE, g_rankDepsTotal, 1, MPI_DOUBLE,
+             0, comm_solver);
+  MPI_Gather(&localRankVals[2], 1, MPI_DOUBLE, g_rankSendBytes, 1, MPI_DOUBLE,
+             0, comm_solver);
+  MPI_Gather(&localRankVals[3], 1, MPI_DOUBLE, g_rankRecvBytes, 1, MPI_DOUBLE,
+             0, comm_solver);
+
+  if (Global.myID == 0) {
+    if (nranks <= 0) {
+      nranks = 1;
+    }
+
+    g_ldnMin = minVals[0];
+    g_ldnMax = maxVals[0];
+    g_ldnAvg = sumVals[0] / nranks;
+
+    g_depsTotalMin = minVals[1];
+    g_depsTotalMax = maxVals[1];
+    g_depsTotalAvg = sumVals[1] / nranks;
+
+    g_depsPerDnMin = minVals[2];
+    g_depsPerDnMax = maxVals[2];
+    g_depsPerDnAvg = sumVals[2] / nranks;
+
+    g_schedSendBytesMin = minVals[3];
+    g_schedSendBytesMax = maxVals[3];
+    g_schedSendBytesAvg = sumVals[3] / nranks;
+
+    g_schedRecvBytesMin = minVals[4];
+    g_schedRecvBytesMax = maxVals[4];
+    g_schedRecvBytesAvg = sumVals[4] / nranks;
+
+    g_imbalanceStatsReady = 1;
+  }
+}
+
 static void solver_run_collect_timers(void) {
   /* Get min and max of individual cumulative times.
    * this is NOT best and worst single step times
@@ -8774,6 +9005,71 @@ static void print_timing_stat() {
       Global.fastestTimeSteps, Global.slowestTimeSteps,
       Param.monitor_stats_rate);
   printf("\n");
+
+    if (g_imbalanceStatsReady) {
+    double ldnSkew = (g_ldnAvg > 0.0) ? (g_ldnMax / g_ldnAvg) : 0.0;
+    double depsSkew =
+      (g_depsTotalAvg > 0.0) ? (g_depsTotalMax / g_depsTotalAvg) : 0.0;
+    double sendSkew =
+      (g_schedSendBytesAvg > 0.0) ? (g_schedSendBytesMax / g_schedSendBytesAvg)
+                    : 0.0;
+    double recvSkew =
+      (g_schedRecvBytesAvg > 0.0) ? (g_schedRecvBytesMax / g_schedRecvBytesAvg)
+                    : 0.0;
+    const double bytesToMiB = 1.0 / (1024.0 * 1024.0);
+
+    printf("\n_________Rank Skew Diagnostics (per step static load)_________\n");
+    printf(
+      "Dangling nodes/rank          : %.1f (Avg) %.1f (Min) %.1f (Max) [%.2fx "
+      "skew]\n",
+      g_ldnAvg, g_ldnMin, g_ldnMax, ldnSkew);
+    printf(
+      "Dangling dependencies/rank   : %.1f (Avg) %.1f (Min) %.1f (Max) [%.2fx "
+      "skew]\n",
+      g_depsTotalAvg, g_depsTotalMin, g_depsTotalMax, depsSkew);
+    printf(
+      "Avg deps per dangling node   : %.2f (Avg) %.2f (Min) %.2f (Max)\n",
+      g_depsPerDnAvg, g_depsPerDnMin, g_depsPerDnMax);
+    printf(
+      "Schedule send volume/rank    : %.2f (Avg) %.2f (Min) %.2f (Max) MiB "
+      "[%.2fx skew]\n",
+      g_schedSendBytesAvg * bytesToMiB, g_schedSendBytesMin * bytesToMiB,
+      g_schedSendBytesMax * bytesToMiB, sendSkew);
+    printf(
+      "Schedule recv volume/rank    : %.2f (Avg) %.2f (Min) %.2f (Max) MiB "
+      "[%.2fx skew]\n",
+      g_schedRecvBytesAvg * bytesToMiB, g_schedRecvBytesMin * bytesToMiB,
+      g_schedRecvBytesMax * bytesToMiB, recvSkew);
+
+    if ((g_rankSkewCount > 0) && (g_rankLdn != NULL) &&
+        (g_rankDepsTotal != NULL) && (g_rankSendBytes != NULL) &&
+        (g_rankRecvBytes != NULL)) {
+      int32_t topIndices[8];
+      int32_t topN = 8;
+      int32_t i;
+      int32_t picked;
+
+      if (topN > g_rankSkewCount) {
+        topN = g_rankSkewCount;
+      }
+
+      picked =
+          imbalance_pick_top_desc(g_rankRecvBytes, g_rankSkewCount, topN,
+                                  topIndices);
+      if (picked > 0) {
+        printf("Top ranks by schedule recv volume:\n");
+        printf("  Rank  LdnNodes  DepsTotal  SendMiB  RecvMiB\n");
+        for (i = 0; i < picked; i++) {
+          int32_t rank = topIndices[i];
+          printf("  %4d  %8d  %9.0f  %7.2f  %7.2f\n", rank,
+                 (int32_t)g_rankLdn[rank], g_rankDepsTotal[rank],
+                 g_rankSendBytes[rank] * bytesToMiB,
+                 g_rankRecvBytes[rank] * bytesToMiB);
+        }
+      }
+    }
+    printf("\n");
+    }
 
   printf("\n____________Breakdown____________\n");
   printf("TOTAL MESHING                       : %.2f seconds\n",
@@ -11304,6 +11600,8 @@ int main(int argc, char** argv) {
     Timer_Reduce("Carve Buildings", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
+
+  solver_collect_imbalance_stats();
 
   /* Print out the timing stat */
   if (Global.myID == 0) {
