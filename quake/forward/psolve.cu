@@ -3611,7 +3611,6 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
       mesh->dnodeTable = shrunk;
     }
   }
-  }
 
   free(records);
   free(deps);
