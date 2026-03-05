@@ -169,6 +169,12 @@ int *global_np_ns =&np_ns;
 /*                                  Functions                                 */
 /* -------------------------------------------------------------------------- */
 
+static int topo_compare_int32_asc(const void *lhs, const void *rhs) {
+    const int32_t a = *(const int32_t *)lhs;
+    const int32_t b = *(const int32_t *)rhs;
+    return (a > b) - (a < b);
+}
+
 double get_thebase_topo() {
     return thebase_zcoord;
 }
@@ -1789,6 +1795,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
     int32_t eindex, topo_eindex;
     int32_t nodeIdx;
+    size_t topoNodesCapacity = 0;
     char *isTopoNode;
 
     topography_elements_count   ( myID, myMesh );
@@ -1816,6 +1823,23 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         exit(1);
     }
 
+    if (myTopoElementsCount > 0) {
+        size_t maxUniqueNodes = (size_t)myMesh->nharbored;
+        size_t candidateNodes = (size_t)myTopoElementsCount * 8u;
+        topoNodesCapacity = (candidateNodes < maxUniqueNodes) ?
+            candidateNodes : maxUniqueNodes;
+
+        if (topoNodesCapacity > 0) {
+            myTopoNodesList = (int32_t *)malloc(sizeof(int32_t) * topoNodesCapacity);
+            if (myTopoNodesList == NULL) {
+                free(isTopoNode);
+                fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+        }
+    }
+
     for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
         elem_t *elemp;
 
@@ -1827,78 +1851,74 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
             if ((lnid >= 0) && (lnid < myMesh->nharbored) &&
                 (isTopoNode[lnid] == 0)) {
                 isTopoNode[lnid] = 1;
+                if ((size_t)myTopoNodesCount >= topoNodesCapacity) {
+                    free(isTopoNode);
+                    fprintf(stderr, "Thread %d: topography_init: topo node buffer overflow\n", myID);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                myTopoNodesList[myTopoNodesCount] = lnid;
                 myTopoNodesCount++;
             }
         }
     }
 
     if (myTopoNodesCount > 0) {
-        myTopoNodesList = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
-        if (myTopoNodesList == NULL) {
+        const int32_t mergeGapThreshold = 256;
+        int32_t rangeWrite = 0;
+        int32_t currentStart;
+        int32_t currentLen;
+
+        qsort(myTopoNodesList, (size_t)myTopoNodesCount, sizeof(int32_t),
+              topo_compare_int32_asc);
+
+        myTopoNodeRangeStarts = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
+        myTopoNodeRangeLengths = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
+        if ((myTopoNodeRangeStarts == NULL) || (myTopoNodeRangeLengths == NULL)) {
             free(isTopoNode);
             fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
 
-        int32_t outIdx = 0;
-        for (nodeIdx = 0; nodeIdx < myMesh->nharbored; nodeIdx++) {
-            if (isTopoNode[nodeIdx] != 0) {
-                myTopoNodesList[outIdx++] = nodeIdx;
+        currentStart = myTopoNodesList[0];
+        currentLen = 1;
+
+        for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
+            if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
+                currentLen++;
+            } else {
+                myTopoNodeRangeStarts[rangeWrite] = currentStart;
+                myTopoNodeRangeLengths[rangeWrite] = currentLen;
+                rangeWrite++;
+                currentStart = myTopoNodesList[nodeIdx];
+                currentLen = 1;
             }
         }
+        myTopoNodeRangeStarts[rangeWrite] = currentStart;
+        myTopoNodeRangeLengths[rangeWrite] = currentLen;
+        rangeWrite++;
 
-        if (myTopoNodesCount > 0) {
-            const int32_t mergeGapThreshold = 256;
-            int32_t rangeWrite = 0;
-            int32_t currentStart = myTopoNodesList[0];
-            int32_t currentLen = 1;
+        if (rangeWrite > 0) {
+            int32_t mergeWrite = 0;
+            for (int32_t ridx = 1; ridx < rangeWrite; ridx++) {
+                int32_t prevStart = myTopoNodeRangeStarts[mergeWrite];
+                int32_t prevLen = myTopoNodeRangeLengths[mergeWrite];
+                int32_t prevEnd = prevStart + prevLen;
+                int32_t nextStart = myTopoNodeRangeStarts[ridx];
+                int32_t nextLen = myTopoNodeRangeLengths[ridx];
+                int32_t gap = nextStart - prevEnd;
 
-            myTopoNodeRangeStarts = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
-            myTopoNodeRangeLengths = (int32_t *)malloc(sizeof(int32_t) * myTopoNodesCount);
-            if ((myTopoNodeRangeStarts == NULL) || (myTopoNodeRangeLengths == NULL)) {
-                free(isTopoNode);
-                fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                MPI_Abort(MPI_COMM_WORLD, ERROR);
-                exit(1);
-            }
-
-            for (nodeIdx = 1; nodeIdx < myTopoNodesCount; nodeIdx++) {
-                if (myTopoNodesList[nodeIdx] == myTopoNodesList[nodeIdx - 1] + 1) {
-                    currentLen++;
+                if (gap <= mergeGapThreshold) {
+                    myTopoNodeRangeLengths[mergeWrite] =
+                        (nextStart + nextLen) - prevStart;
                 } else {
-                    myTopoNodeRangeStarts[rangeWrite] = currentStart;
-                    myTopoNodeRangeLengths[rangeWrite] = currentLen;
-                    rangeWrite++;
-                    currentStart = myTopoNodesList[nodeIdx];
-                    currentLen = 1;
+                    mergeWrite++;
+                    myTopoNodeRangeStarts[mergeWrite] = nextStart;
+                    myTopoNodeRangeLengths[mergeWrite] = nextLen;
                 }
             }
-            myTopoNodeRangeStarts[rangeWrite] = currentStart;
-            myTopoNodeRangeLengths[rangeWrite] = currentLen;
-            rangeWrite++;
-
-            if (rangeWrite > 0) {
-                int32_t mergeWrite = 0;
-                for (int32_t ridx = 1; ridx < rangeWrite; ridx++) {
-                    int32_t prevStart = myTopoNodeRangeStarts[mergeWrite];
-                    int32_t prevLen = myTopoNodeRangeLengths[mergeWrite];
-                    int32_t prevEnd = prevStart + prevLen;
-                    int32_t nextStart = myTopoNodeRangeStarts[ridx];
-                    int32_t nextLen = myTopoNodeRangeLengths[ridx];
-                    int32_t gap = nextStart - prevEnd;
-
-                    if (gap <= mergeGapThreshold) {
-                        myTopoNodeRangeLengths[mergeWrite] =
-                            (nextStart + nextLen) - prevStart;
-                    } else {
-                        mergeWrite++;
-                        myTopoNodeRangeStarts[mergeWrite] = nextStart;
-                        myTopoNodeRangeLengths[mergeWrite] = nextLen;
-                    }
-                }
-                myTopoNodeRangeCount = mergeWrite + 1;
-            }
+            myTopoNodeRangeCount = mergeWrite + 1;
         }
     }
 
