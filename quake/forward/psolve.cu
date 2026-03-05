@@ -3092,6 +3092,11 @@ typedef struct mesh_coord_index_t {
   int32_t lnid;
 } mesh_coord_index_t;
 
+typedef struct mesh_anchor_msg_t {
+  int64_t gnid;
+  int32_t isanchored;
+} mesh_anchor_msg_t;
+
 static int mesh_cmp_node_raw_gnid(const void* a, const void* b) {
   const mesh_node_raw_t* lhs = (const mesh_node_raw_t*)a;
   const mesh_node_raw_t* rhs = (const mesh_node_raw_t*)b;
@@ -3597,6 +3602,11 @@ static void mesh_load_from_etree() {
   for (i = 0; i < mesh->nharbored; i++) {
     int32_t h = nodeBuild[i].maxEdgeTicks;
 
+    if (!mesh->nodeTable[i].ismine) {
+      mesh->nodeTable[i].isanchored = 1;
+      continue;
+    }
+
     if (h <= 0) {
       h = 1;
     }
@@ -3606,6 +3616,113 @@ static void mesh_load_from_etree() {
          (mesh->nodeTable[i].z % h) == 0)
             ? 1
             : 0;
+  }
+
+  {
+    int32_t* sendCounts =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvCounts =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendDispls =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvDispls =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendCountsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvCountsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendDisplsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvDisplsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendCursor =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t sendTotal = 0;
+    int32_t recvTotal = 0;
+    mesh_anchor_msg_t* sendBuf;
+    mesh_anchor_msg_t* recvBuf;
+    int32_t r;
+
+    if ((sendCounts == NULL) || (recvCounts == NULL) || (sendDispls == NULL) ||
+        (recvDispls == NULL) || (sendCountsBytes == NULL) ||
+        (recvCountsBytes == NULL) || (sendDisplsBytes == NULL) ||
+        (recvDisplsBytes == NULL) || (sendCursor == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating anchor exchange tables");
+    }
+
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (mesh->nodeTable[i].ismine) {
+        int32link_t* link = mesh->nodeTable[i].proc.share;
+        while (link != NULL) {
+          sendCounts[link->id]++;
+          link = link->next;
+        }
+      } else {
+        int32_t owner = mesh->nodeTable[i].proc.ownerid;
+        if (owner >= 0 && owner < Global.theGroupSize) {
+          recvCounts[owner]++;
+        }
+      }
+    }
+
+    for (r = 0; r < Global.theGroupSize; r++) {
+      sendDispls[r] = sendTotal;
+      recvDispls[r] = recvTotal;
+      sendTotal += sendCounts[r];
+      recvTotal += recvCounts[r];
+    }
+
+    sendBuf = (mesh_anchor_msg_t*)calloc(sendTotal, sizeof(mesh_anchor_msg_t));
+    recvBuf = (mesh_anchor_msg_t*)calloc(recvTotal, sizeof(mesh_anchor_msg_t));
+    if ((sendBuf == NULL && sendTotal > 0) || (recvBuf == NULL && recvTotal > 0)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating anchor exchange buffers");
+    }
+
+    memcpy(sendCursor, sendDispls, sizeof(int32_t) * Global.theGroupSize);
+
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (mesh->nodeTable[i].ismine) {
+        int32link_t* link = mesh->nodeTable[i].proc.share;
+        while (link != NULL) {
+          int32_t idx = sendCursor[link->id]++;
+          sendBuf[idx].gnid = mesh->nodeTable[i].gnid;
+          sendBuf[idx].isanchored = mesh->nodeTable[i].isanchored;
+          link = link->next;
+        }
+      }
+    }
+
+    for (r = 0; r < Global.theGroupSize; r++) {
+      sendCountsBytes[r] = sendCounts[r] * (int32_t)sizeof(mesh_anchor_msg_t);
+      recvCountsBytes[r] = recvCounts[r] * (int32_t)sizeof(mesh_anchor_msg_t);
+      sendDisplsBytes[r] = sendDispls[r] * (int32_t)sizeof(mesh_anchor_msg_t);
+      recvDisplsBytes[r] = recvDispls[r] * (int32_t)sizeof(mesh_anchor_msg_t);
+    }
+
+    MPI_Alltoallv(sendBuf, sendCountsBytes, sendDisplsBytes, MPI_BYTE, recvBuf,
+                  recvCountsBytes, recvDisplsBytes, MPI_BYTE, comm_solver);
+
+    for (i = 0; i < recvTotal; i++) {
+      int32_t lnid =
+          mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, recvBuf[i].gnid);
+      if (lnid >= 0 && !mesh->nodeTable[lnid].ismine) {
+        mesh->nodeTable[lnid].isanchored = recvBuf[i].isanchored;
+      }
+    }
+
+    free(sendCounts);
+    free(recvCounts);
+    free(sendDispls);
+    free(recvDispls);
+    free(sendCountsBytes);
+    free(recvCountsBytes);
+    free(sendDisplsBytes);
+    free(recvDisplsBytes);
+    free(sendCursor);
+    free(sendBuf);
+    free(recvBuf);
   }
 
   for (i = 0; i < mesh->nharbored; i++) {
