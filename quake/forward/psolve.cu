@@ -225,9 +225,11 @@ typedef struct mrecord_t {
 static int32_t toexpand(octant_t* leaf, double ticksize, const void* data);
 static void setrec(octant_t* leaf, double ticksize, void* data);
 static void mesh_generate(void);
+static void mesh_load_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
 static void mesh_correct_properties(etree_t* cvm);
+static void mesh_loaded_deallocate(mesh_t* mesh);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -495,6 +497,7 @@ static struct Param_t {
   double the4DOutSize;
   int theMeshOutFlag;
   int theMeshOnlyFlag;
+  int theMeshFromEtreeFlag;
   char theCVMFlatFile[128];
   output_parameters_t theOutputParameters;
   double theRegionLong;
@@ -553,6 +556,7 @@ static struct Param_t {
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .theMeshOnlyFlag = 0,
+           .theMeshFromEtreeFlag = 0,
            .useProfile = NO,
            .theNumberOfLayers = 0};
 
@@ -593,6 +597,7 @@ static struct Global_t {
   gpu_spec_t gpu_spec;
   gpu_kernel_t gpu_kernel[MAX_CUDA_KERNEL];
   gpu_data_t gpuData;
+  int meshLoadedFromEtree;
 
 } Global = {.myID = -1,
             .theGroupSize = -1,
@@ -612,7 +617,8 @@ static struct Global_t {
             .theXForMeshOrigin = 0.0,
             .theYForMeshOrigin = 0.0,
             .theZForMeshOrigin = 0.0,
-            .theCVMRecordSize = sizeof(cvmrecord_t)};
+            .theCVMRecordSize = sizeof(cvmrecord_t),
+            .meshLoadedFromEtree = 0};
 
 /* ------------------------------End of
  * declarations------------------------------ */
@@ -689,7 +695,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  32 /* Must adjust this if adding int params */
+  33 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -796,6 +802,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[29] = (int)Param.basinZCount;
   int_message[30] = (int)Param.threeDVelocityModel;
   int_message[31] = Param.theMeshOnlyFlag;
+  int_message[32] = Param.theMeshFromEtreeFlag;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -832,6 +839,7 @@ static void read_parameters(int argc, char** argv) {
   Param.basinZCount = int_message[29];
   Param.threeDVelocityModel = (noyesflag_t)int_message[30];
   Param.theMeshOnlyFlag = int_message[31];
+  Param.theMeshFromEtreeFlag = int_message[32];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -909,7 +917,11 @@ static void read_parameters(int argc, char** argv) {
 static void local_finalize() {
   /* Free memory associated with the octree and mesh */
   octor_deletetree(Global.myOctree);
-  octor_deletemesh(Global.myMesh);
+  if (Global.meshLoadedFromEtree) {
+    mesh_loaded_deallocate(Global.myMesh);
+  } else {
+    octor_deletemesh(Global.myMesh);
+  }
 
   /* Free the memory used by the source */
   free(Global.myForces);
@@ -1280,6 +1292,7 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "schedule_print_stdout",
                         &Param.theSchedulePrintToStdout);
   hu_config_get_int_opt(fp, "mesh_only", &Param.theMeshOnlyFlag);
+  hu_config_get_int_opt(fp, "mesh_from_etree", &Param.theMeshFromEtreeFlag);
 
   size_t schedule_stat_len = 0;
   hu_config_get_string_def(fp, "stat_schedule_filename",
@@ -1385,6 +1398,18 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if ((Param.theMeshOnlyFlag < 0) || (Param.theMeshOnlyFlag > 1)) {
     fprintf(stderr, "Illegal mesh_only flag %d\n", Param.theMeshOnlyFlag);
+    return -1;
+  }
+
+  if ((Param.theMeshFromEtreeFlag < 0) || (Param.theMeshFromEtreeFlag > 1)) {
+    fprintf(stderr, "Illegal mesh_from_etree flag %d\n",
+            Param.theMeshFromEtreeFlag);
+    return -1;
+  }
+
+  if (Param.theMeshFromEtreeFlag && (Param.mesh_etree_output_file[0] == '\0')) {
+    fprintf(stderr,
+            "mesh_from_etree requires mesh_etree_output_file in input file\n");
     return -1;
   }
 
@@ -3034,6 +3059,654 @@ static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count) {
   }
 
   return 0;
+}
+
+typedef struct mesh_input_elem_t {
+  etree_addr_t addr;
+  mdata_t mdata;
+  int64_t geid;
+} mesh_input_elem_t;
+
+typedef struct mesh_node_raw_t {
+  int64_t gnid;
+  tick_t x;
+  tick_t y;
+  tick_t z;
+  int32_t edgeTicks;
+} mesh_node_raw_t;
+
+typedef struct mesh_node_build_t {
+  int64_t gnid;
+  tick_t x;
+  tick_t y;
+  tick_t z;
+  int32_t minEdgeTicks;
+} mesh_node_build_t;
+
+typedef struct mesh_coord_index_t {
+  tick_t x;
+  tick_t y;
+  tick_t z;
+  int32_t lnid;
+} mesh_coord_index_t;
+
+static int mesh_cmp_node_raw_gnid(const void* a, const void* b) {
+  const mesh_node_raw_t* lhs = (const mesh_node_raw_t*)a;
+  const mesh_node_raw_t* rhs = (const mesh_node_raw_t*)b;
+
+  if (lhs->gnid < rhs->gnid) return -1;
+  if (lhs->gnid > rhs->gnid) return 1;
+  return 0;
+}
+
+static int mesh_cmp_node_build_gnid(const void* a, const void* b) {
+  const mesh_node_build_t* lhs = (const mesh_node_build_t*)a;
+  const mesh_node_build_t* rhs = (const mesh_node_build_t*)b;
+
+  if (lhs->gnid < rhs->gnid) return -1;
+  if (lhs->gnid > rhs->gnid) return 1;
+  return 0;
+}
+
+static int mesh_cmp_coord_index(const void* a, const void* b) {
+  const mesh_coord_index_t* lhs = (const mesh_coord_index_t*)a;
+  const mesh_coord_index_t* rhs = (const mesh_coord_index_t*)b;
+
+  if (lhs->x < rhs->x) return -1;
+  if (lhs->x > rhs->x) return 1;
+  if (lhs->y < rhs->y) return -1;
+  if (lhs->y > rhs->y) return 1;
+  if (lhs->z < rhs->z) return -1;
+  if (lhs->z > rhs->z) return 1;
+  return 0;
+}
+
+static int32_t mesh_owner_rank_for_element(int64_t geid, int64_t totalElems,
+                                           int32_t groupSize) {
+  int64_t owner;
+
+  if (totalElems <= 0 || groupSize <= 1) {
+    return 0;
+  }
+
+  owner = (geid * groupSize) / totalElems;
+  if (owner < 0) {
+    owner = 0;
+  } else if (owner >= groupSize) {
+    owner = groupSize - 1;
+  }
+
+  return (int32_t)owner;
+}
+
+static int32_t mesh_find_lnid_by_gnid(const mesh_node_build_t* nodes,
+                                      int32_t nodeCount, int64_t gnid) {
+  int32_t lo = 0;
+  int32_t hi = nodeCount - 1;
+
+  while (lo <= hi) {
+    int32_t mid = lo + (hi - lo) / 2;
+    int64_t key = nodes[mid].gnid;
+
+    if (key == gnid) {
+      return mid;
+    }
+    if (key < gnid) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return -1;
+}
+
+static int32_t mesh_find_lnid_by_coord(const mesh_coord_index_t* index,
+                                       int32_t nodeCount, tick_t x, tick_t y,
+                                       tick_t z) {
+  int32_t lo = 0;
+  int32_t hi = nodeCount - 1;
+
+  while (lo <= hi) {
+    int32_t mid = lo + (hi - lo) / 2;
+    const mesh_coord_index_t* key = &index[mid];
+
+    if (key->x == x && key->y == y && key->z == z) {
+      return key->lnid;
+    }
+
+    if ((key->x < x) || (key->x == x && key->y < y) ||
+        (key->x == x && key->y == y && key->z < z)) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return -1;
+}
+
+static int64_t mesh_count_elements_in_etree(etree_t* mep) {
+  etree_addr_t addr = {0, 0, 0, 0, 0, ETREE_LEAF};
+  etree_addr_t hit;
+  mdata_t payload;
+  int64_t count = 0;
+
+  if (etree_initcursor(mep, addr) != 0) {
+    solver_abort(__FUNCTION_NAME, NULL, "etree_initcursor failed: %s",
+                 etree_strerror(etree_errno(mep)));
+  }
+
+  while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
+    if (hit.type == ETREE_LEAF) {
+      count++;
+    }
+
+    if (etree_advcursor(mep) != 0) {
+      if (etree_errno(mep) == ET_END_OF_TREE) {
+        break;
+      }
+      solver_abort(__FUNCTION_NAME, NULL, "etree_advcursor failed: %s",
+                   etree_strerror(etree_errno(mep)));
+    }
+  }
+
+  etree_stopcursor(mep);
+
+  return count;
+}
+
+static void mesh_loaded_deallocate(mesh_t* mesh) {
+  int32_t i;
+
+  if (mesh == NULL) {
+    return;
+  }
+
+  if (mesh->elemTable != NULL) {
+    for (i = 0; i < mesh->lenum; i++) {
+      free(mesh->elemTable[i].data);
+      mesh->elemTable[i].data = NULL;
+    }
+    free(mesh->elemTable);
+  }
+
+  if (mesh->nodeTable != NULL) {
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (mesh->nodeTable[i].ismine) {
+        int32link_t* p = mesh->nodeTable[i].proc.share;
+        while (p != NULL) {
+          int32link_t* next = p->next;
+          free(p);
+          p = next;
+        }
+      }
+    }
+    free(mesh->nodeTable);
+  }
+
+  if (mesh->dnodeTable != NULL) {
+    for (i = 0; i < mesh->ldnnum; i++) {
+      int32link_t* p = mesh->dnodeTable[i].lanid;
+      while (p != NULL) {
+        int32link_t* next = p->next;
+        free(p);
+        p = next;
+      }
+    }
+    free(mesh->dnodeTable);
+  }
+
+  free(mesh);
+}
+
+static void mesh_load_from_etree() {
+  static const int8_t cornerOffset[8][3] = {
+      {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0},
+      {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}};
+
+  etree_t* mep;
+  etree_addr_t addr = {0, 0, 0, 0, 0, ETREE_LEAF};
+  etree_addr_t hit;
+  mdata_t payload;
+  int64_t geid;
+  int64_t totalElems;
+  int64_t localBegin;
+  int64_t localEnd;
+  int64_t localElemCount;
+  mesh_input_elem_t* localElems;
+  mesh_node_raw_t* nodeRaw;
+  mesh_node_build_t* nodeBuild;
+  mesh_coord_index_t* coordIndex;
+  uint8_t* nodeUsers;
+  mesh_t* mesh;
+  int32_t localNodeCount;
+  int32_t i;
+
+  if (Param.mesh_etree_output_file[0] == '\0') {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "mesh_from_etree requires mesh_etree_output_file");
+  }
+
+  mep = etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
+  if (mep == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL, "cannot open mesh etree: %s",
+                 Param.mesh_etree_output_file);
+  }
+
+  totalElems = mesh_count_elements_in_etree(mep);
+  localBegin = (totalElems * Global.myID) / Global.theGroupSize;
+  localEnd = (totalElems * (Global.myID + 1)) / Global.theGroupSize;
+  localElemCount = localEnd - localBegin;
+
+  localElems = (mesh_input_elem_t*)calloc(localElemCount, sizeof(mesh_input_elem_t));
+  if (localElems == NULL && localElemCount > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating local mesh input elements");
+  }
+
+  if (etree_initcursor(mep, addr) != 0) {
+    solver_abort(__FUNCTION_NAME, NULL, "etree_initcursor failed: %s",
+                 etree_strerror(etree_errno(mep)));
+  }
+
+  geid = 0;
+  while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
+    if (hit.type == ETREE_LEAF) {
+      if (geid >= localBegin && geid < localEnd) {
+        int64_t idx = geid - localBegin;
+        localElems[idx].addr = hit;
+        localElems[idx].mdata = payload;
+        localElems[idx].geid = geid;
+      }
+      geid++;
+    }
+
+    if (etree_advcursor(mep) != 0) {
+      if (etree_errno(mep) == ET_END_OF_TREE) {
+        break;
+      }
+      solver_abort(__FUNCTION_NAME, NULL, "etree_advcursor failed: %s",
+                   etree_strerror(etree_errno(mep)));
+    }
+  }
+  etree_stopcursor(mep);
+
+  nodeRaw = (mesh_node_raw_t*)calloc(localElemCount * 8, sizeof(mesh_node_raw_t));
+  if (nodeRaw == NULL && localElemCount > 0) {
+    solver_abort(__FUNCTION_NAME, NULL, "out of memory allocating node raw table");
+  }
+
+  for (i = 0; i < localElemCount; i++) {
+    int32_t c;
+    int32_t edgeTicks = 1 << (PIXELLEVEL - localElems[i].addr.level);
+
+    for (c = 0; c < 8; c++) {
+      mesh_node_raw_t* row = &nodeRaw[i * 8 + c];
+      row->gnid = localElems[i].mdata.nid[c];
+      row->x = localElems[i].addr.x + cornerOffset[c][0] * edgeTicks;
+      row->y = localElems[i].addr.y + cornerOffset[c][1] * edgeTicks;
+      row->z = localElems[i].addr.z + cornerOffset[c][2] * edgeTicks;
+      row->edgeTicks = edgeTicks;
+    }
+  }
+
+  qsort(nodeRaw, localElemCount * 8, sizeof(mesh_node_raw_t),
+        mesh_cmp_node_raw_gnid);
+
+  nodeBuild = (mesh_node_build_t*)calloc(localElemCount * 8, sizeof(mesh_node_build_t));
+  if (nodeBuild == NULL && localElemCount > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating node build table");
+  }
+
+  localNodeCount = 0;
+  for (i = 0; i < localElemCount * 8; i++) {
+    if (i == 0 || nodeRaw[i].gnid != nodeRaw[i - 1].gnid) {
+      nodeBuild[localNodeCount].gnid = nodeRaw[i].gnid;
+      nodeBuild[localNodeCount].x = nodeRaw[i].x;
+      nodeBuild[localNodeCount].y = nodeRaw[i].y;
+      nodeBuild[localNodeCount].z = nodeRaw[i].z;
+      nodeBuild[localNodeCount].minEdgeTicks = nodeRaw[i].edgeTicks;
+      localNodeCount++;
+    } else {
+      mesh_node_build_t* prior = &nodeBuild[localNodeCount - 1];
+
+      if (prior->x != nodeRaw[i].x || prior->y != nodeRaw[i].y ||
+          prior->z != nodeRaw[i].z) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "inconsistent coordinates for gnid=%" INT64_FMT,
+                     nodeRaw[i].gnid);
+      }
+
+      if (nodeRaw[i].edgeTicks < prior->minEdgeTicks) {
+        prior->minEdgeTicks = nodeRaw[i].edgeTicks;
+      }
+    }
+  }
+
+  mesh = (mesh_t*)calloc(1, sizeof(mesh_t));
+  if (mesh == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL, "out of memory allocating mesh");
+  }
+
+  mesh->ticksize = Global.myOctree->ticksize;
+  mesh->lenum = (int32_t)localElemCount;
+  mesh->nharbored = localNodeCount;
+  mesh->elemTable = (elem_t*)calloc(mesh->lenum, sizeof(elem_t));
+  mesh->nodeTable = (node_t*)calloc(mesh->nharbored, sizeof(node_t));
+  if ((mesh->elemTable == NULL && mesh->lenum > 0) ||
+      (mesh->nodeTable == NULL && mesh->nharbored > 0)) {
+    solver_abort(__FUNCTION_NAME, NULL, "out of memory allocating mesh tables");
+  }
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    mesh->nodeTable[i].x = nodeBuild[i].x;
+    mesh->nodeTable[i].y = nodeBuild[i].y;
+    mesh->nodeTable[i].z = nodeBuild[i].z;
+    mesh->nodeTable[i].gnid = nodeBuild[i].gnid;
+    mesh->nodeTable[i].ismine = 0;
+    mesh->nodeTable[i].isanchored = 1;
+    mesh->nodeTable[i].proc.ownerid = -1;
+  }
+
+  for (i = 0; i < mesh->lenum; i++) {
+    int32_t c;
+    int32_t edgeTicks = 1 << (PIXELLEVEL - localElems[i].addr.level);
+    elem_t* elem = &mesh->elemTable[i];
+    edata_t* edata = (edata_t*)calloc(1, sizeof(edata_t));
+
+    if (edata == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating element payload");
+    }
+
+    elem->geid = localElems[i].geid;
+    elem->level = (int8_t)localElems[i].addr.level;
+    elem->data = edata;
+
+    edata->edgesize = (float)(mesh->ticksize * edgeTicks);
+    if (localElems[i].mdata.edgesize > 0.0f) {
+      edata->edgesize = localElems[i].mdata.edgesize;
+    }
+    edata->Vp = localElems[i].mdata.Vp;
+    edata->Vs = localElems[i].mdata.Vs;
+    edata->rho = localElems[i].mdata.rho;
+
+    for (c = 0; c < 8; c++) {
+      int32_t lnid =
+          mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored,
+                                 localElems[i].mdata.nid[c]);
+      if (lnid < 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Cannot map element node gnid=%" INT64_FMT,
+                     localElems[i].mdata.nid[c]);
+      }
+      elem->lnid[c] = lnid;
+    }
+  }
+
+  nodeUsers = (uint8_t*)calloc((size_t)mesh->nharbored * Global.theGroupSize,
+                               sizeof(uint8_t));
+  if (nodeUsers == NULL && mesh->nharbored > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating node users table");
+  }
+
+  if (etree_initcursor(mep, addr) != 0) {
+    solver_abort(__FUNCTION_NAME, NULL, "etree_initcursor failed: %s",
+                 etree_strerror(etree_errno(mep)));
+  }
+
+  geid = 0;
+  while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
+    if (hit.type == ETREE_LEAF) {
+      int32_t owner =
+          mesh_owner_rank_for_element(geid, totalElems, Global.theGroupSize);
+      int32_t c;
+
+      for (c = 0; c < 8; c++) {
+        int32_t lnid =
+            mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, payload.nid[c]);
+        if (lnid >= 0) {
+          nodeUsers[lnid * Global.theGroupSize + owner] = 1;
+        }
+      }
+      geid++;
+    }
+
+    if (etree_advcursor(mep) != 0) {
+      if (etree_errno(mep) == ET_END_OF_TREE) {
+        break;
+      }
+      solver_abort(__FUNCTION_NAME, NULL, "etree_advcursor failed: %s",
+                   etree_strerror(etree_errno(mep)));
+    }
+  }
+  etree_stopcursor(mep);
+
+  mesh->lnnum = 0;
+  for (i = 0; i < mesh->nharbored; i++) {
+    int32_t owner = -1;
+    int32_t r;
+
+    for (r = 0; r < Global.theGroupSize; r++) {
+      if (nodeUsers[i * Global.theGroupSize + r]) {
+        owner = r;
+        break;
+      }
+    }
+
+    if (owner < 0) {
+      owner = Global.myID;
+    }
+
+    if (owner == Global.myID) {
+      int32link_t* first = NULL;
+      int32link_t* tail = NULL;
+
+      mesh->nodeTable[i].ismine = 1;
+      mesh->lnnum++;
+
+      for (r = 0; r < Global.theGroupSize; r++) {
+        if (r == Global.myID) {
+          continue;
+        }
+        if (nodeUsers[i * Global.theGroupSize + r]) {
+          int32link_t* link = (int32link_t*)malloc(sizeof(int32link_t));
+          if (link == NULL) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "out of memory allocating share list");
+          }
+          link->id = r;
+          link->next = NULL;
+          if (first == NULL) {
+            first = link;
+            tail = link;
+          } else {
+            tail->next = link;
+            tail = link;
+          }
+        }
+      }
+      mesh->nodeTable[i].proc.share = first;
+    } else {
+      mesh->nodeTable[i].ismine = 0;
+      mesh->nodeTable[i].proc.ownerid = owner;
+    }
+  }
+
+  coordIndex = (mesh_coord_index_t*)calloc(mesh->nharbored,
+                                           sizeof(mesh_coord_index_t));
+  if (coordIndex == NULL && mesh->nharbored > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating coordinate index");
+  }
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    coordIndex[i].x = mesh->nodeTable[i].x;
+    coordIndex[i].y = mesh->nodeTable[i].y;
+    coordIndex[i].z = mesh->nodeTable[i].z;
+    coordIndex[i].lnid = i;
+  }
+  qsort(coordIndex, mesh->nharbored, sizeof(mesh_coord_index_t),
+        mesh_cmp_coord_index);
+
+  mesh->dnodeTable = (dnode_t*)calloc(mesh->nharbored, sizeof(dnode_t));
+  if (mesh->dnodeTable == NULL && mesh->nharbored > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating dnode table");
+  }
+
+  mesh->ldnnum = 0;
+  for (i = 0; i < mesh->nharbored; i++) {
+    int32_t h = nodeBuild[i].minEdgeTicks;
+    int oddMask = 0;
+
+    if (h <= 0) {
+      h = 1;
+    }
+
+    if ((((int64_t)mesh->nodeTable[i].x / h) & 1LL) != 0) {
+      oddMask |= 1;
+    }
+    if ((((int64_t)mesh->nodeTable[i].y / h) & 1LL) != 0) {
+      oddMask |= 2;
+    }
+    if ((((int64_t)mesh->nodeTable[i].z / h) & 1LL) != 0) {
+      oddMask |= 4;
+    }
+
+    mesh->nodeTable[i].isanchored = (oddMask == 0) ? 1 : 0;
+  }
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    int32_t h;
+    int oddMask;
+    int axis[3];
+    int axisCount;
+    int combos;
+    int32_t parents[8];
+    int32_t parentCount = 0;
+    int c;
+
+    if (!mesh->nodeTable[i].ismine || mesh->nodeTable[i].isanchored) {
+      continue;
+    }
+
+    h = nodeBuild[i].minEdgeTicks;
+    if (h <= 0) {
+      h = 1;
+    }
+
+    oddMask = 0;
+    if ((((int64_t)mesh->nodeTable[i].x / h) & 1LL) != 0) {
+      oddMask |= 1;
+    }
+    if ((((int64_t)mesh->nodeTable[i].y / h) & 1LL) != 0) {
+      oddMask |= 2;
+    }
+    if ((((int64_t)mesh->nodeTable[i].z / h) & 1LL) != 0) {
+      oddMask |= 4;
+    }
+
+    axisCount = 0;
+    if (oddMask & 1) axis[axisCount++] = 0;
+    if (oddMask & 2) axis[axisCount++] = 1;
+    if (oddMask & 4) axis[axisCount++] = 2;
+
+    combos = 1 << axisCount;
+    for (c = 0; c < combos; c++) {
+      tick_t px = mesh->nodeTable[i].x;
+      tick_t py = mesh->nodeTable[i].y;
+      tick_t pz = mesh->nodeTable[i].z;
+      int a;
+
+      for (a = 0; a < axisCount; a++) {
+        tick_t delta = ((c >> a) & 1) ? h : -h;
+        if (axis[a] == 0) {
+          px += delta;
+        } else if (axis[a] == 1) {
+          py += delta;
+        } else {
+          pz += delta;
+        }
+      }
+
+      int32_t plnid = mesh_find_lnid_by_coord(coordIndex, mesh->nharbored, px,
+                                              py, pz);
+      if (plnid >= 0 && mesh->nodeTable[plnid].isanchored) {
+        int found = 0;
+        int k;
+        for (k = 0; k < parentCount; k++) {
+          if (parents[k] == plnid) {
+            found = 1;
+            break;
+          }
+        }
+        if (!found && parentCount < 8) {
+          parents[parentCount++] = plnid;
+        }
+      }
+    }
+
+    if (parentCount == 0) {
+      mesh->nodeTable[i].isanchored = 1;
+      continue;
+    }
+
+    {
+      dnode_t* dnode = &mesh->dnodeTable[mesh->ldnnum++];
+      int32link_t* first = NULL;
+      int32link_t* tail = NULL;
+
+      dnode->ldnid = i;
+      dnode->deps = (uint32_t)parentCount;
+
+      for (c = 0; c < parentCount; c++) {
+        int32link_t* link = (int32link_t*)malloc(sizeof(int32link_t));
+        if (link == NULL) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "out of memory allocating dnode dependency list");
+        }
+
+        link->id = parents[c];
+        link->next = NULL;
+
+        if (first == NULL) {
+          first = link;
+          tail = link;
+        } else {
+          tail->next = link;
+          tail = link;
+        }
+      }
+
+      dnode->lanid = first;
+    }
+  }
+
+  if (mesh->ldnnum == 0) {
+    free(mesh->dnodeTable);
+    mesh->dnodeTable = NULL;
+  } else {
+    dnode_t* shrunk =
+        (dnode_t*)realloc(mesh->dnodeTable, sizeof(dnode_t) * mesh->ldnnum);
+    if (shrunk != NULL) {
+      mesh->dnodeTable = shrunk;
+    }
+  }
+
+  etree_close(mep);
+
+  free(localElems);
+  free(nodeRaw);
+  free(nodeBuild);
+  free(coordIndex);
+  free(nodeUsers);
+
+  Global.myMesh = mesh;
+  Global.meshLoadedFromEtree = 1;
 }
 
 /** Enumeration of the counters used in the mesh statistics */
@@ -11501,7 +12174,48 @@ int main(int argc, char** argv) {
   Timer_Reduce("Global Init", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
   /* Generate, partition and output unstructured octree mesh */
-  mesh_generate();
+  Global.meshLoadedFromEtree = 0;
+  if (Param.theMeshFromEtreeFlag) {
+    MPI_Barrier(comm_solver);
+    Timer_Start("Octor Newtree");
+    Global.myOctree = octor_newtree(
+        Param.theDomainX, Param.theDomainY, Param.theDomainZ, sizeof(edata_t),
+        Global.myID, Global.theGroupSize, comm_solver, get_surface_shift());
+    if (Global.myOctree == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "mesh_from_etree: failed to create octree context");
+    }
+    MPI_Barrier(comm_solver);
+    Timer_Stop("Octor Newtree");
+
+    Timer_Start("Octor Refinetree");
+    Timer_Stop("Octor Refinetree");
+    Timer_Start("Octor Balancetree");
+    Timer_Stop("Octor Balancetree");
+    Timer_Start("Octor Partitiontree");
+    Timer_Stop("Octor Partitiontree");
+
+    MPI_Barrier(comm_solver);
+    Timer_Start("Octor Extractmesh");
+    mesh_load_from_etree();
+    MPI_Barrier(comm_solver);
+    Timer_Stop("Octor Extractmesh");
+
+    Timer_Start("Mesh correct properties");
+    mesh_correct_properties(Global.theCVMEp);
+    MPI_Barrier(comm_solver);
+    Timer_Stop("Mesh correct properties");
+
+#ifdef USECVMDB
+    if (Param.useProfile == NO) {
+      etree_close(Global.theCVMEp);
+    }
+#else
+    free(Global.theCVMRecord);
+#endif
+  } else {
+    mesh_generate();
+  }
 
   if (Param.includeBuildings == YES) {
     if (get_fixedbase_flag() == YES) {
