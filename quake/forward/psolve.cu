@@ -101,6 +101,7 @@ static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
 static int32_t g_adjustSmallDepsFastPath = -1;
+static int32_t g_sharingWaitsomePath = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -7354,6 +7355,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   MPI_Request* isendreqs;
   MPI_Status* isendstats;
   int32_t waitStage = wait_recv_stage_from_msgtag(msgtag);
+  int32_t useWaitsome = 0;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7381,6 +7383,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
+
+  if (g_sharingWaitsomePath < 0) {
+    const char* envWaitsome = getenv("HERC_SHARING_WAITSOME");
+    g_sharingWaitsomePath =
+        (envWaitsome == NULL || atoi(envWaitsome) != 0) ? 1 : 0;
+  }
+  useWaitsome = (direction == SHARING && g_sharingWaitsomePath) ? 1 : 0;
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -7475,27 +7484,65 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   if (irecvcount != 0) {
     int32_t remaining = irecvcount;
     double waitRecvStart = 0.0;
+    int* doneidxs = NULL;
     if (waitStage >= 0) {
       waitRecvStart = MPI_Wtime();
     }
 
-    while (remaining > 0) {
-      int doneidx;
-      MPI_Status status;
-
-      Timer_Start("Schedule Wait Recv");
-      MPI_Waitany(irecvcount, irecvreqs, &doneidx, &status);
-      Timer_Stop("Schedule Wait Recv");
-
-      if (doneidx == MPI_UNDEFINED) {
-        break;
+    if (useWaitsome) {
+      doneidxs = (int*)malloc(sizeof(int) * irecvcount);
+      if (doneidxs == NULL) {
+        fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
       }
+    }
 
-      Timer_Start("Schedule Unpack Incoming");
-      schedule_unpack_incoming_message(recv_order[doneidx], valuetable,
-                                       itemsperentry, direction);
-      Timer_Stop("Schedule Unpack Incoming");
-      remaining--;
+    while (remaining > 0) {
+      if (useWaitsome) {
+        int outcount;
+        int i;
+
+        Timer_Start("Schedule Wait Recv");
+        MPI_Waitsome(irecvcount, irecvreqs, &outcount, doneidxs, irecvstats);
+        Timer_Stop("Schedule Wait Recv");
+
+        if (outcount == MPI_UNDEFINED) {
+          break;
+        }
+
+        Timer_Start("Schedule Unpack Incoming");
+        for (i = 0; i < outcount; i++) {
+          int doneidx = doneidxs[i];
+          schedule_unpack_incoming_message(recv_order[doneidx], valuetable,
+                                           itemsperentry, direction);
+        }
+        Timer_Stop("Schedule Unpack Incoming");
+        remaining -= outcount;
+      } else {
+        int doneidx;
+        MPI_Status status;
+
+        Timer_Start("Schedule Wait Recv");
+        MPI_Waitany(irecvcount, irecvreqs, &doneidx, &status);
+        Timer_Stop("Schedule Wait Recv");
+
+        if (doneidx == MPI_UNDEFINED) {
+          break;
+        }
+
+        Timer_Start("Schedule Unpack Incoming");
+        schedule_unpack_incoming_message(recv_order[doneidx], valuetable,
+                                         itemsperentry, direction);
+        Timer_Stop("Schedule Unpack Incoming");
+        remaining--;
+      }
+    }
+
+    if (doneidxs != NULL) {
+      free(doneidxs);
+      doneidxs = NULL;
     }
 
     if (waitStage >= 0) {
@@ -8701,68 +8748,29 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
-        if (g_adjustSmallDepsFastPath) {
-          switch (deps) {
-            case 1: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              p0[0] += d0;
-              p0[1] += d1;
-              p0[2] += d2;
-              break;
-            }
-            case 2: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              p0[0] += d0;
-              p0[1] += d1;
-              p0[2] += d2;
-              p1[0] += d0;
-              p1[1] += d1;
-              p1[2] += d2;
-              break;
-            }
-            case 3: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-              p0[0] += d0;
-              p0[1] += d1;
-              p0[2] += d2;
-              p1[0] += d0;
-              p1[1] += d1;
-              p1[2] += d2;
-              p2[0] += d0;
-              p2[1] += d1;
-              p2[2] += d2;
-              break;
-            }
-            case 4: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-              solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-              p0[0] += d0;
-              p0[1] += d1;
-              p0[2] += d2;
-              p1[0] += d0;
-              p1[1] += d1;
-              p1[2] += d2;
-              p2[0] += d0;
-              p2[1] += d1;
-              p2[2] += d2;
-              p3[0] += d0;
-              p3[1] += d1;
-              p3[2] += d2;
-              break;
-            }
-            default:
-              for (int32_t p = start; p < end; p++) {
-                solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-                parentvalue[0] += d0;
-                parentvalue[1] += d1;
-                parentvalue[2] += d2;
-              }
-              break;
+        if (g_adjustSmallDepsFastPath && deps <= 4) {
+          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          p0[0] += d0;
+          p0[1] += d1;
+          p0[2] += d2;
+
+          if (deps >= 2) {
+            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            p1[0] += d0;
+            p1[1] += d1;
+            p1[2] += d2;
+          }
+          if (deps >= 3) {
+            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            p2[0] += d0;
+            p2[1] += d1;
+            p2[2] += d2;
+          }
+          if (deps == 4) {
+            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            p3[0] += d0;
+            p3[1] += d1;
+            p3[2] += d2;
           }
         } else {
           for (int32_t p = start; p < end; p++) {
@@ -8786,50 +8794,29 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         solver_float s1 = 0;
         solver_float s2 = 0;
 
-        if (g_adjustSmallDepsFastPath) {
-          switch (deps) {
-            case 1: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              s0 = p0[0];
-              s1 = p0[1];
-              s2 = p0[2];
-              break;
-            }
-            case 2: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              s0 = p0[0] + p1[0];
-              s1 = p0[1] + p1[1];
-              s2 = p0[2] + p1[2];
-              break;
-            }
-            case 3: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-              s0 = p0[0] + p1[0] + p2[0];
-              s1 = p0[1] + p1[1] + p2[1];
-              s2 = p0[2] + p1[2] + p2[2];
-              break;
-            }
-            case 4: {
-              solver_float* p0 = vtable + g_adjustParentBase3[start];
-              solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-              solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-              solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-              s0 = p0[0] + p1[0] + p2[0] + p3[0];
-              s1 = p0[1] + p1[1] + p2[1] + p3[1];
-              s2 = p0[2] + p1[2] + p2[2] + p3[2];
-              break;
-            }
-            default:
-              for (int32_t p = start; p < end; p++) {
-                solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-                s0 += parentvalue[0];
-                s1 += parentvalue[1];
-                s2 += parentvalue[2];
-              }
-              break;
+        if (g_adjustSmallDepsFastPath && deps <= 4) {
+          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          s0 = p0[0];
+          s1 = p0[1];
+          s2 = p0[2];
+
+          if (deps >= 2) {
+            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            s0 += p1[0];
+            s1 += p1[1];
+            s2 += p1[2];
+          }
+          if (deps >= 3) {
+            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            s0 += p2[0];
+            s1 += p2[1];
+            s2 += p2[2];
+          }
+          if (deps == 4) {
+            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            s0 += p3[0];
+            s1 += p3[1];
+            s2 += p3[2];
           }
         } else {
           for (int32_t p = start; p < end; p++) {
