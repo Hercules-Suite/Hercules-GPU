@@ -3078,9 +3078,9 @@ static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
     exit(1);
   }
 
-  if (hit_addr.level != leaf->level) {
+  if (hit_addr.level < leaf->level) {
     fprintf(stderr,
-            "Thread %d: setrec_mesh_etree: leaf level mismatch (%d != %d)\n",
+            "Thread %d: setrec_mesh_etree: invalid containing level (%d < %d)\n",
             Global.myID, hit_addr.level, leaf->level);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
