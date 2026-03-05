@@ -100,12 +100,25 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
-static int64_t g_dnDiagSendBytes = 0;
-static int64_t g_dnDiagRecvBytes = 0;
-static int64_t g_dnDiagSendMsgs = 0;
-static int64_t g_dnDiagRecvMsgs = 0;
-static double g_dnDiagWaitRecvSec = 0.0;
-static int32_t g_dnDiagSteps = 0;
+
+#define DN_DIAG_METRIC_COUNT 9
+enum {
+  DN_DIAG_SEND_BYTES = 0,
+  DN_DIAG_RECV_BYTES,
+  DN_DIAG_SEND_NODES,
+  DN_DIAG_RECV_NODES,
+  DN_DIAG_SEND_MSGS,
+  DN_DIAG_RECV_MSGS,
+  DN_DIAG_ADJUST_NODES,
+  DN_DIAG_ADJUST_DEPS,
+  DN_DIAG_STEPS
+};
+
+static double g_dnDiagLocal[DN_DIAG_METRIC_COUNT] = {0.0};
+static double g_dnDiagMin[DN_DIAG_METRIC_COUNT] = {0.0};
+static double g_dnDiagMax[DN_DIAG_METRIC_COUNT] = {0.0};
+static double g_dnDiagAvg[DN_DIAG_METRIC_COUNT] = {0.0};
+static int32_t g_dnDiagReady = 0;
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -234,8 +247,9 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
 static void compute_adjust_cache_free(void);
-static void solver_reset_dangling_comm_diag(void);
-static void solver_report_dangling_comm_diag(mysolver_t* solver);
+static void solver_diag_reset(void);
+static void solver_diag_prepare_local(mesh_t* mesh);
+static void solver_diag_reduce(void);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -5140,142 +5154,6 @@ static void solver_printstat_to_stream(mysolver_t* solver, FILE* out) {
   return;
 }
 
-static void solver_reset_dangling_comm_diag(void) {
-  g_dnDiagSendBytes = 0;
-  g_dnDiagRecvBytes = 0;
-  g_dnDiagSendMsgs = 0;
-  g_dnDiagRecvMsgs = 0;
-  g_dnDiagWaitRecvSec = 0.0;
-  g_dnDiagSteps = 0;
-}
-
-static void solver_report_dangling_comm_diag(mysolver_t* solver) {
-  enum dn_diag_idx_t {
-    I_DN_SEND_BYTES,
-    I_DN_RECV_BYTES,
-    I_DN_SEND_MSGS,
-    I_DN_RECV_MSGS,
-    I_DN_SEND_NODES,
-    I_DN_RECV_NODES,
-    I_DN_SEND_PEERS,
-    I_DN_RECV_PEERS,
-    I_DN_LAST
-  };
-
-  int64_t local_diag[I_DN_LAST];
-  int64_t* gathered_diag = NULL;
-  double* gathered_wait = NULL;
-
-  local_diag[I_DN_SEND_BYTES] = g_dnDiagSendBytes;
-  local_diag[I_DN_RECV_BYTES] = g_dnDiagRecvBytes;
-  local_diag[I_DN_SEND_MSGS] = g_dnDiagSendMsgs;
-  local_diag[I_DN_RECV_MSGS] = g_dnDiagRecvMsgs;
-  local_diag[I_DN_SEND_NODES] = messenger_countnodes(solver->dn_sched->first_c);
-  local_diag[I_DN_RECV_NODES] = messenger_countnodes(solver->dn_sched->first_s);
-  local_diag[I_DN_SEND_PEERS] = solver->dn_sched->c_count;
-  local_diag[I_DN_RECV_PEERS] = solver->dn_sched->s_count;
-
-  if (Global.myID == 0) {
-    XMALLOC_VAR_N(gathered_diag, int64_t, (size_t)I_DN_LAST * Global.theGroupSize);
-    XMALLOC_VAR_N(gathered_wait, double, Global.theGroupSize);
-  }
-
-  MPI_Gather(local_diag, I_DN_LAST, MPI_LONG_LONG, gathered_diag, I_DN_LAST,
-             MPI_LONG_LONG, 0, comm_solver);
-  MPI_Gather(&g_dnDiagWaitRecvSec, 1, MPI_DOUBLE, gathered_wait, 1, MPI_DOUBLE,
-             0, comm_solver);
-
-  if (Global.myID == 0) {
-    int pe;
-    int max_bytes_rank = 0;
-    int max_wait_rank = 0;
-    int min_bytes_rank = 0;
-    int min_wait_rank = 0;
-    double sum_bytes_step = 0.0;
-    double sum_wait = 0.0;
-    double min_bytes_step = DBL_MAX;
-    double max_bytes_step = -DBL_MAX;
-    double min_wait = DBL_MAX;
-    double max_wait = -DBL_MAX;
-    double mean_bytes_step;
-    double mean_wait;
-    double var_bytes = 0.0;
-    double var_wait = 0.0;
-    double cov_bw = 0.0;
-    double corr_bw = 0.0;
-    double steps = (g_dnDiagSteps > 0) ? (double)g_dnDiagSteps : 1.0;
-
-    for (pe = 0; pe < Global.theGroupSize; pe++) {
-      const int64_t* row = gathered_diag + ((size_t)pe * I_DN_LAST);
-      double bytes_step =
-          ((double)(row[I_DN_SEND_BYTES] + row[I_DN_RECV_BYTES])) / steps;
-      double wait_sec = gathered_wait[pe];
-
-      sum_bytes_step += bytes_step;
-      sum_wait += wait_sec;
-
-      if (bytes_step < min_bytes_step) {
-        min_bytes_step = bytes_step;
-        min_bytes_rank = pe;
-      }
-      if (bytes_step > max_bytes_step) {
-        max_bytes_step = bytes_step;
-        max_bytes_rank = pe;
-      }
-      if (wait_sec < min_wait) {
-        min_wait = wait_sec;
-        min_wait_rank = pe;
-      }
-      if (wait_sec > max_wait) {
-        max_wait = wait_sec;
-        max_wait_rank = pe;
-      }
-    }
-
-    mean_bytes_step = sum_bytes_step / (double)Global.theGroupSize;
-    mean_wait = sum_wait / (double)Global.theGroupSize;
-
-    for (pe = 0; pe < Global.theGroupSize; pe++) {
-      const int64_t* row = gathered_diag + ((size_t)pe * I_DN_LAST);
-      double bytes_step =
-          ((double)(row[I_DN_SEND_BYTES] + row[I_DN_RECV_BYTES])) / steps;
-      double wait_sec = gathered_wait[pe];
-      double db = bytes_step - mean_bytes_step;
-      double dw = wait_sec - mean_wait;
-      var_bytes += db * db;
-      var_wait += dw * dw;
-      cov_bw += db * dw;
-    }
-
-    if (var_bytes > 0.0 && var_wait > 0.0) {
-      corr_bw = cov_bw / sqrt(var_bytes * var_wait);
-    }
-
-    monitor_print("Dangling comm imbalance diagnostics:\n");
-    monitor_print("  Steps analyzed:                    %11d\n", g_dnDiagSteps);
-    monitor_print("  Avg dn bytes/rank/step:            %11.3f MB\n",
-                mean_bytes_step / (1024.0 * 1024.0));
-    monitor_print("  Max dn bytes/rank/step:            %11.3f MB (rank %d)\n",
-                max_bytes_step / (1024.0 * 1024.0), max_bytes_rank);
-    monitor_print("  Min dn bytes/rank/step:            %11.3f MB (rank %d)\n",
-                min_bytes_step / (1024.0 * 1024.0), min_bytes_rank);
-    monitor_print("  DN volume skew (max/avg):          %11.3f x\n",
-                (mean_bytes_step > 0.0) ? (max_bytes_step / mean_bytes_step)
-                                        : 0.0);
-    monitor_print("  Avg cumulative wait recv:          %11.3f s\n", mean_wait);
-    monitor_print("  Max cumulative wait recv:          %11.3f s (rank %d)\n",
-                max_wait, max_wait_rank);
-    monitor_print("  Min cumulative wait recv:          %11.3f s (rank %d)\n",
-                min_wait, min_wait_rank);
-    monitor_print("  Wait recv skew (max/avg):          %11.3f x\n",
-                (mean_wait > 0.0) ? (max_wait / mean_wait) : 0.0);
-    monitor_print("  Corr(wait_recv, dn_bytes_step):    %11.3f\n\n", corr_bw);
-
-    free(gathered_diag);
-    free(gathered_wait);
-  }
-}
-
 /**
  * Print the communication schedule of each processor to the given output
  * stream.
@@ -6654,6 +6532,8 @@ static void solver_run_collect_timers(void) {
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
   Timer_Reduce("Communication", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+
+  solver_diag_reduce();
 }
 
 /**
@@ -6663,7 +6543,8 @@ static void solver_run() {
   int32_t step, startingStep;
 
   solver_run_init_comm(Global.mySolver);
-  solver_reset_dangling_comm_diag();
+  solver_diag_reset();
+  solver_diag_prepare_local(Global.myMesh);
 
   /* sets new starting step if loading checkpoint */
   if (Param.theUseCheckPoint == 1) {
@@ -6684,7 +6565,6 @@ static void solver_run() {
   }
 
   MPI_Barrier(comm_solver);
-  g_dnDiagSteps = Param.theTotalSteps - startingStep;
 
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
@@ -6804,6 +6684,7 @@ static void solver_run() {
     Timer_Stop("Communication");
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
+    g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
 
   solver_drm_close();
@@ -7418,15 +7299,16 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   messenger_t *send_head, *recv_head;
   int32_t irecvcount, irecvnum, bytesize;
   int32_t isendcount, isendnum;
+  double callSendBytes = 0.0;
+  double callRecvBytes = 0.0;
+  double callSendNodes = 0.0;
+  double callRecvNodes = 0.0;
+  double callSendMsgs = 0.0;
+  double callRecvMsgs = 0.0;
   MPI_Request* irecvreqs;
   MPI_Status* irecvstats;
   MPI_Request* isendreqs;
   MPI_Status* isendstats;
-  int is_dn_sched = 0;
-  int64_t dn_send_bytes_call = 0;
-  int64_t dn_recv_bytes_call = 0;
-  int32_t dn_send_msgs_call = 0;
-  int32_t dn_recv_msgs_call = 0;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7455,10 +7337,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   send_head = send_messenger;
   recv_head = recv_messenger;
 
-  if (Global.mySolver != NULL && sched == Global.mySolver->dn_sched) {
-    is_dn_sched = 1;
-  }
-
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
 
@@ -7467,10 +7345,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   irecvnum = 0;
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
-    if (is_dn_sched) {
-      dn_recv_bytes_call += bytesize;
-      dn_recv_msgs_call++;
-    }
+    callRecvBytes += (double)bytesize;
+    callRecvNodes += (double)recv_messenger->nodecount;
+    callRecvMsgs += 1.0;
     MPI_Irecv(recv_messenger->indata, bytesize, MPI_CHAR,
               recv_messenger->procid, msgtag, comm_solver,
               &irecvreqs[irecvnum]);
@@ -7528,10 +7405,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   isendnum = 0;
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
-    if (is_dn_sched) {
-      dn_send_bytes_call += bytesize;
-      dn_send_msgs_call++;
-    }
+    callSendBytes += (double)bytesize;
+    callSendNodes += (double)send_messenger->nodecount;
+    callSendMsgs += 1.0;
     MPI_Isend(send_messenger->outdata, bytesize, MPI_CHAR,
               send_messenger->procid, msgtag, comm_solver,
               &isendreqs[isendnum]);
@@ -7542,16 +7418,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
-    double wait_recv_start = 0.0;
-    if (is_dn_sched) {
-      wait_recv_start = MPI_Wtime();
-    }
     Timer_Start("Schedule Wait Recv");
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
     Timer_Stop("Schedule Wait Recv");
-    if (is_dn_sched) {
-      g_dnDiagWaitRecvSec += (MPI_Wtime() - wait_recv_start);
-    }
   }
 
   if (isendcount != 0) {
@@ -7611,16 +7480,57 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
   Timer_Stop("Schedule Unpack Incoming");
 
-  if (is_dn_sched) {
-    g_dnDiagSendBytes += dn_send_bytes_call;
-    g_dnDiagRecvBytes += dn_recv_bytes_call;
-    g_dnDiagSendMsgs += dn_send_msgs_call;
-    g_dnDiagRecvMsgs += dn_recv_msgs_call;
+  if (msgtag == DN_FORCE_MSG || msgtag == DN_DISP_MSG) {
+    g_dnDiagLocal[DN_DIAG_SEND_BYTES] += callSendBytes;
+    g_dnDiagLocal[DN_DIAG_RECV_BYTES] += callRecvBytes;
+    g_dnDiagLocal[DN_DIAG_SEND_NODES] += callSendNodes;
+    g_dnDiagLocal[DN_DIAG_RECV_NODES] += callRecvNodes;
+    g_dnDiagLocal[DN_DIAG_SEND_MSGS] += callSendMsgs;
+    g_dnDiagLocal[DN_DIAG_RECV_MSGS] += callRecvMsgs;
   }
 
   /* MPI_Barrier(comm_solver);  */
 
   return;
+}
+
+static void solver_diag_reset(void) {
+  memset(g_dnDiagLocal, 0, sizeof(g_dnDiagLocal));
+  g_dnDiagReady = 0;
+}
+
+static void solver_diag_prepare_local(mesh_t* mesh) {
+  int32_t dnindex;
+  double depsTotal = 0.0;
+
+  if (mesh == NULL || mesh->dnodeTable == NULL) {
+    g_dnDiagLocal[DN_DIAG_ADJUST_NODES] = 0.0;
+    g_dnDiagLocal[DN_DIAG_ADJUST_DEPS] = 0.0;
+    return;
+  }
+
+  g_dnDiagLocal[DN_DIAG_ADJUST_NODES] = (double)mesh->ldnnum;
+  for (dnindex = 0; dnindex < mesh->ldnnum; dnindex++) {
+    depsTotal += (double)mesh->dnodeTable[dnindex].deps;
+  }
+  g_dnDiagLocal[DN_DIAG_ADJUST_DEPS] = depsTotal;
+}
+
+static void solver_diag_reduce(void) {
+  MPI_Reduce(g_dnDiagLocal, g_dnDiagMin, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
+             MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_dnDiagLocal, g_dnDiagMax, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
+             MPI_MAX, 0, comm_solver);
+  MPI_Reduce(g_dnDiagLocal, g_dnDiagAvg, DN_DIAG_METRIC_COUNT, MPI_DOUBLE,
+             MPI_SUM, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    int i;
+    for (i = 0; i < DN_DIAG_METRIC_COUNT; i++) {
+      g_dnDiagAvg[i] /= (double)Global.theGroupSize;
+    }
+    g_dnDiagReady = 1;
+  }
 }
 
 /**
@@ -9384,6 +9294,69 @@ static void print_timing_stat() {
           Timer_Value("Schedule Unpack Incoming", MAX),
           Timer_Value("Schedule Unpack Incoming", MIN));
     }
+      if (g_dnDiagReady && g_dnDiagAvg[DN_DIAG_STEPS] > 0.0) {
+        const double gib = 1024.0 * 1024.0 * 1024.0;
+        const double mib = 1024.0 * 1024.0;
+        const double avgSteps = g_dnDiagAvg[DN_DIAG_STEPS];
+        const double sendGiBAvg = g_dnDiagAvg[DN_DIAG_SEND_BYTES] / gib;
+        const double sendGiBMax = g_dnDiagMax[DN_DIAG_SEND_BYTES] / gib;
+        const double sendGiBMin = g_dnDiagMin[DN_DIAG_SEND_BYTES] / gib;
+        const double recvGiBAvg = g_dnDiagAvg[DN_DIAG_RECV_BYTES] / gib;
+        const double recvGiBMax = g_dnDiagMax[DN_DIAG_RECV_BYTES] / gib;
+        const double recvGiBMin = g_dnDiagMin[DN_DIAG_RECV_BYTES] / gib;
+        const double sendSkew =
+          (g_dnDiagAvg[DN_DIAG_SEND_BYTES] > 0.0)
+            ? (g_dnDiagMax[DN_DIAG_SEND_BYTES] /
+             g_dnDiagAvg[DN_DIAG_SEND_BYTES])
+            : 0.0;
+        const double recvSkew =
+          (g_dnDiagAvg[DN_DIAG_RECV_BYTES] > 0.0)
+            ? (g_dnDiagMax[DN_DIAG_RECV_BYTES] /
+             g_dnDiagAvg[DN_DIAG_RECV_BYTES])
+            : 0.0;
+        const double depsSkew =
+          (g_dnDiagAvg[DN_DIAG_ADJUST_DEPS] > 0.0)
+            ? (g_dnDiagMax[DN_DIAG_ADJUST_DEPS] /
+             g_dnDiagAvg[DN_DIAG_ADJUST_DEPS])
+            : 0.0;
+
+        printf("    Dangling comm/load diagnostics (solver loop cumulative)\n");
+        printf(
+          "      DN Send Volume                : %.3f (Average)   %.3f (Max) %.3f "
+          "(Min) GiB  [skew %.2f]\n",
+          sendGiBAvg, sendGiBMax, sendGiBMin, sendSkew);
+        printf(
+          "      DN Recv Volume                : %.3f (Average)   %.3f (Max) %.3f "
+          "(Min) GiB  [skew %.2f]\n",
+          recvGiBAvg, recvGiBMax, recvGiBMin, recvSkew);
+        printf(
+          "      DN Send Msg Count             : %.1f (Average)   %.1f (Max) %.1f "
+          "(Min)\n",
+          g_dnDiagAvg[DN_DIAG_SEND_MSGS], g_dnDiagMax[DN_DIAG_SEND_MSGS],
+          g_dnDiagMin[DN_DIAG_SEND_MSGS]);
+        printf(
+          "      DN Recv Msg Count             : %.1f (Average)   %.1f (Max) %.1f "
+          "(Min)\n",
+          g_dnDiagAvg[DN_DIAG_RECV_MSGS], g_dnDiagMax[DN_DIAG_RECV_MSGS],
+          g_dnDiagMin[DN_DIAG_RECV_MSGS]);
+        printf(
+          "      DN Send Per Step              : %.3f MiB/rank (Average)\n",
+          (g_dnDiagAvg[DN_DIAG_SEND_BYTES] / avgSteps) / mib);
+        printf(
+          "      DN Recv Per Step              : %.3f MiB/rank (Average)\n",
+          (g_dnDiagAvg[DN_DIAG_RECV_BYTES] / avgSteps) / mib);
+        printf(
+          "      DN Adjust Deps                : %.1f (Average)   %.1f (Max) %.1f "
+          "(Min)  [skew %.2f]\n",
+          g_dnDiagAvg[DN_DIAG_ADJUST_DEPS], g_dnDiagMax[DN_DIAG_ADJUST_DEPS],
+          g_dnDiagMin[DN_DIAG_ADJUST_DEPS], depsSkew);
+        printf(
+          "      DN Node Count                 : %.1f (Average)   %.1f (Max) %.1f "
+          "(Min)\n",
+          g_dnDiagAvg[DN_DIAG_ADJUST_NODES],
+          g_dnDiagMax[DN_DIAG_ADJUST_NODES],
+          g_dnDiagMin[DN_DIAG_ADJUST_NODES]);
+      }
   }
   if (Timer_Exists("Adjust Cache Build") ||
       Timer_Exists("Adjust Distribution Core") ||
@@ -11416,7 +11389,6 @@ int main(int argc, char** argv) {
   Timer_Stop("Phase Sync/Coordination");
   Timer_Start("Solver");
   solver_run();
-  solver_report_dangling_comm_diag(Global.mySolver);
   Timer_Stop("Solver");
   Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(comm_solver);
