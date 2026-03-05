@@ -3575,6 +3575,7 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
         int32_t k;
         dnode_t* dnode = &mesh->dnodeTable[mesh->ldnnum++];
         int32link_t* first = NULL;
+        int32link_t* tail = NULL;
 
         dnode->ldnid = lnid;
         dnode->deps = records[i].dep_count;
@@ -3593,8 +3594,14 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
                          "out of memory creating snapshot dnode links");
           }
           link->id = plnid;
-          link->next = first;
-          first = link;
+          link->next = NULL;
+          if (first == NULL) {
+            first = link;
+            tail = link;
+          } else {
+            tail->next = link;
+            tail = link;
+          }
         }
         dnode->lanid = first;
       }
@@ -4191,7 +4198,7 @@ static void mesh_load_from_etree() {
       if (owner == Global.myID || owner < 0 || owner >= pcount) {
         mesh->nodeTable[i].ismine = 1;
         mesh->nodeTable[i].proc.share = NULL;
-        mesh->ldnnum++;
+        mesh->lnnum++;
       }
     }
 
