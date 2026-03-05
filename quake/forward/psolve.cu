@@ -6897,10 +6897,6 @@ static void solver_run() {
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Compute Physics");
 
-    Timer_Start("GPU Memory Copy");
-    solver_reset_gpu(Global.mySolver, Global.myMesh);
-    Timer_Stop("GPU Memory Copy");
-
     Timer_Start("Communication");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_displacement_anchored(Global.mySolver);
@@ -6908,6 +6904,10 @@ static void solver_run() {
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_displacement_dangling(Global.mySolver);
     Timer_Stop("Communication");
+
+    Timer_Start("GPU Memory Copy");
+    solver_reset_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Memory Copy");
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
   } /* for (step = ....): all steps */
