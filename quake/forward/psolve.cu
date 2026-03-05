@@ -116,6 +116,16 @@ static double g_schedSendBytesAvg = 0.0;
 static double g_schedRecvBytesMin = 0.0;
 static double g_schedRecvBytesMax = 0.0;
 static double g_schedRecvBytesAvg = 0.0;
+static double g_waitRecvMin = 0.0;
+static double g_waitRecvMax = 0.0;
+static double g_waitRecvAvg = 0.0;
+static double g_adjustTotalMin = 0.0;
+static double g_adjustTotalMax = 0.0;
+static double g_adjustTotalAvg = 0.0;
+static int g_waitRecvTopRanks[3] = {-1, -1, -1};
+static double g_waitRecvTopVals[3] = {0.0, 0.0, 0.0};
+static int g_adjustTopRanks[3] = {-1, -1, -1};
+static double g_adjustTopVals[3] = {0.0, 0.0, 0.0};
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -6438,13 +6448,19 @@ static void schedule_accumulate_comm_bytes(const schedule_t* sched,
 static void solver_collect_imbalance_stats(void) {
   int32_t dnindex;
   int32_t nranks = Global.theGroupSize;
-  double localVals[5];
-  double minVals[5];
-  double maxVals[5];
-  double sumVals[5];
+  int32_t rank;
+  int top;
+  double localVals[7];
+  double minVals[7];
+  double maxVals[7];
+  double sumVals[7];
+  double localTopVals[2];
+  double* gatheredTopVals = NULL;
   double depsTotal = 0.0;
   double sendBytes = 0.0;
   double recvBytes = 0.0;
+  double waitRecvTime = 0.0;
+  double adjustTotalTime = 0.0;
 
   if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
@@ -6472,10 +6488,37 @@ static void solver_collect_imbalance_stats(void) {
                      : 0.0;
   localVals[3] = sendBytes;
   localVals[4] = recvBytes;
+  if (Timer_Exists("Schedule Wait Recv")) {
+    waitRecvTime = Timer_Value("Schedule Wait Recv", (TimerKind)0);
+  }
+  if (Timer_Exists("1st compute adjust (distribution)")) {
+    adjustTotalTime +=
+        Timer_Value("1st compute adjust (distribution)", (TimerKind)0);
+  }
+  if (Timer_Exists("2nd compute adjust (assignment)")) {
+    adjustTotalTime +=
+        Timer_Value("2nd compute adjust (assignment)", (TimerKind)0);
+  }
+  localVals[5] = waitRecvTime;
+  localVals[6] = adjustTotalTime;
 
-  MPI_Reduce(localVals, minVals, 5, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-  MPI_Reduce(localVals, maxVals, 5, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
-  MPI_Reduce(localVals, sumVals, 5, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  localTopVals[0] = waitRecvTime;
+  localTopVals[1] = adjustTotalTime;
+  if (Global.myID == 0) {
+    gatheredTopVals = (double*)malloc(sizeof(double) * nranks * 2);
+    if (gatheredTopVals == NULL) {
+      fprintf(stderr, "Thread %d: solver_collect_imbalance_stats: out of memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  MPI_Reduce(localVals, minVals, 7, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(localVals, maxVals, 7, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(localVals, sumVals, 7, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  MPI_Gather(localTopVals, 2, MPI_DOUBLE, gatheredTopVals, 2, MPI_DOUBLE, 0,
+             comm_solver);
 
   if (Global.myID == 0) {
     if (nranks <= 0) {
@@ -6501,6 +6544,54 @@ static void solver_collect_imbalance_stats(void) {
     g_schedRecvBytesMin = minVals[4];
     g_schedRecvBytesMax = maxVals[4];
     g_schedRecvBytesAvg = sumVals[4] / nranks;
+
+    g_waitRecvMin = minVals[5];
+    g_waitRecvMax = maxVals[5];
+    g_waitRecvAvg = sumVals[5] / nranks;
+
+    g_adjustTotalMin = minVals[6];
+    g_adjustTotalMax = maxVals[6];
+    g_adjustTotalAvg = sumVals[6] / nranks;
+
+    for (top = 0; top < 3; top++) {
+      g_waitRecvTopRanks[top] = -1;
+      g_waitRecvTopVals[top] = -1.0;
+      g_adjustTopRanks[top] = -1;
+      g_adjustTopVals[top] = -1.0;
+    }
+
+    for (rank = 0; rank < nranks; rank++) {
+      double waitVal = gatheredTopVals[rank * 2 + 0];
+      double adjustVal = gatheredTopVals[rank * 2 + 1];
+
+      for (top = 0; top < 3; top++) {
+        if (waitVal > g_waitRecvTopVals[top]) {
+          int shift;
+          for (shift = 2; shift > top; shift--) {
+            g_waitRecvTopVals[shift] = g_waitRecvTopVals[shift - 1];
+            g_waitRecvTopRanks[shift] = g_waitRecvTopRanks[shift - 1];
+          }
+          g_waitRecvTopVals[top] = waitVal;
+          g_waitRecvTopRanks[top] = rank;
+          break;
+        }
+      }
+
+      for (top = 0; top < 3; top++) {
+        if (adjustVal > g_adjustTopVals[top]) {
+          int shift;
+          for (shift = 2; shift > top; shift--) {
+            g_adjustTopVals[shift] = g_adjustTopVals[shift - 1];
+            g_adjustTopRanks[shift] = g_adjustTopRanks[shift - 1];
+          }
+          g_adjustTopVals[top] = adjustVal;
+          g_adjustTopRanks[top] = rank;
+          break;
+        }
+      }
+    }
+
+    free(gatheredTopVals);
 
     g_imbalanceStatsReady = 1;
   }
@@ -8905,6 +8996,10 @@ static void print_timing_stat() {
     double recvSkew =
       (g_schedRecvBytesAvg > 0.0) ? (g_schedRecvBytesMax / g_schedRecvBytesAvg)
                     : 0.0;
+    double waitRecvSkew =
+      (g_waitRecvAvg > 0.0) ? (g_waitRecvMax / g_waitRecvAvg) : 0.0;
+    double adjustSkew =
+      (g_adjustTotalAvg > 0.0) ? (g_adjustTotalMax / g_adjustTotalAvg) : 0.0;
     const double bytesToMiB = 1.0 / (1024.0 * 1024.0);
 
     printf("\n_________Rank Skew Diagnostics (per step static load)_________\n");
@@ -8929,6 +9024,22 @@ static void print_timing_stat() {
       "[%.2fx skew]\n",
       g_schedRecvBytesAvg * bytesToMiB, g_schedRecvBytesMin * bytesToMiB,
       g_schedRecvBytesMax * bytesToMiB, recvSkew);
+    printf(
+      "Schedule Wait Recv time/rank : %.2f (Avg) %.2f (Min) %.2f (Max) s "
+      "[%.2fx skew]\n",
+      g_waitRecvAvg, g_waitRecvMin, g_waitRecvMax, waitRecvSkew);
+    printf(
+      "Compute adjust total/rank    : %.2f (Avg) %.2f (Min) %.2f (Max) s "
+      "[%.2fx skew]\n",
+      g_adjustTotalAvg, g_adjustTotalMin, g_adjustTotalMax, adjustSkew);
+    printf(
+      "Top Wait Recv ranks          : #%d(%.2fs), #%d(%.2fs), #%d(%.2fs)\n",
+      g_waitRecvTopRanks[0], g_waitRecvTopVals[0], g_waitRecvTopRanks[1],
+      g_waitRecvTopVals[1], g_waitRecvTopRanks[2], g_waitRecvTopVals[2]);
+    printf(
+      "Top Adjust ranks             : #%d(%.2fs), #%d(%.2fs), #%d(%.2fs)\n",
+      g_adjustTopRanks[0], g_adjustTopVals[0], g_adjustTopRanks[1],
+      g_adjustTopVals[1], g_adjustTopRanks[2], g_adjustTopVals[2]);
     printf("\n");
     }
 
