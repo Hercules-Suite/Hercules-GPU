@@ -494,6 +494,7 @@ static struct Param_t {
   noyesflag_t storeMeshCoordinatesForMatlab;
   double the4DOutSize;
   int theMeshOutFlag;
+  int theMeshOnlyFlag;
   char theCVMFlatFile[128];
   output_parameters_t theOutputParameters;
   double theRegionLong;
@@ -551,6 +552,7 @@ static struct Param_t {
            .theUseCheckPoint = 0,
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
+           .theMeshOnlyFlag = 0,
            .useProfile = NO,
            .theNumberOfLayers = 0};
 
@@ -687,7 +689,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  31 /* Must adjust this if adding int params */
+  32 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -793,6 +795,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[28] = (int)Param.basinYCount;
   int_message[29] = (int)Param.basinZCount;
   int_message[30] = (int)Param.threeDVelocityModel;
+  int_message[31] = Param.theMeshOnlyFlag;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -828,6 +831,7 @@ static void read_parameters(int argc, char** argv) {
   Param.basinYCount = int_message[28];
   Param.basinZCount = int_message[29];
   Param.threeDVelocityModel = (noyesflag_t)int_message[30];
+  Param.theMeshOnlyFlag = int_message[31];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1275,6 +1279,7 @@ static int32_t parse_parameters(const char* numericalin) {
                         &Param.theSchedulePrintErrorCheckFlag);
   hu_config_get_int_opt(fp, "schedule_print_stdout",
                         &Param.theSchedulePrintToStdout);
+  hu_config_get_int_opt(fp, "mesh_only", &Param.theMeshOnlyFlag);
 
   size_t schedule_stat_len = 0;
   hu_config_get_string_def(fp, "stat_schedule_filename",
@@ -1375,6 +1380,11 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if (checkpointing_rate < 0) {
     fprintf(stderr, "Illegal checkpointing rate %d\n", use_checkpoint);
+    return -1;
+  }
+
+  if ((Param.theMeshOnlyFlag < 0) || (Param.theMeshOnlyFlag > 1)) {
+    fprintf(stderr, "Illegal mesh_only flag %d\n", Param.theMeshOnlyFlag);
     return -1;
   }
 
@@ -1689,6 +1699,8 @@ static int32_t parse_parameters(const char* numericalin) {
                 print_station_accelerations);
   monitor_print("Mesh Coordinates For Matlab:        %s\n",
                 mesh_coordinates_for_matlab);
+  monitor_print("Mesh-only mode:                    %d\n",
+                Param.theMeshOnlyFlag);
   monitor_print("cvmdb_input_file:                   %s\n",
                 Param.cvmdb_input_file);
   monitor_print("Implement drm:                      %s\n", implement_drm);
@@ -11557,6 +11569,64 @@ int main(int argc, char** argv) {
                   Global.theGroupSize, Param.theMeshStatFilename);
   Timer_Stop("Mesh Stats Print");
   Timer_Reduce("Mesh Stats Print", (TimerKind)(MAX | MIN), comm_solver);
+
+  if (Param.theMeshOnlyFlag) {
+    local_finalize();
+
+    Timer_Stop("Total Wall Clock");
+    Timer_Reduce("Total Wall Clock", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Newtree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Refinetree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Partitiontree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Extractmesh", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    if (Timer_Exists("Slice CVM")) {
+      Timer_Reduce("Slice CVM", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Mesh Out")) {
+      Timer_Reduce("Mesh Out", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+    }
+    if (Timer_Exists("Carve Buildings")) {
+      Timer_Reduce("Carve Buildings", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+
+    if (Global.myID == 0) {
+      printf("\nMesh-only mode: meshing completed, solver skipped.\n");
+      printf("Total Wall Clock (MAX): %.2f seconds\n",
+             Timer_Value("Total Wall Clock", MAX));
+      printf("Meshing total (MAX basis): %.2f seconds\n",
+             Timer_Value("Octor Newtree", MAX) +
+                 Timer_Value("Octor Refinetree", MAX) +
+                 Timer_Value("Octor Balancetree", MAX) +
+                 Timer_Value("Octor Partitiontree", MAX) +
+                 Timer_Value("Octor Extractmesh", MAX) +
+                 Timer_Value("Mesh correct properties", MAX) +
+                 Timer_Value("Mesh Stats Print", MAX) +
+                 (Timer_Exists("Slice CVM") ? Timer_Value("Slice CVM", MAX)
+                                             : 0.0) +
+                 (Timer_Exists("Mesh Out") ? Timer_Value("Mesh Out", MAX)
+                                            : 0.0) +
+                 (Timer_Exists("Carve Buildings")
+                      ? Timer_Value("Carve Buildings", MAX)
+                      : 0.0));
+    }
+
+    if (Param.theNumberOfPlanes != 0) {
+      planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
+    }
+
+    goto IO_PES_REJOIN;
+  }
 
   Timer_Start("Pre Solver Setup");
 
