@@ -8460,6 +8460,12 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 static void print_timing_stat() {
   double TotalMeshingTime;
   double OtherPhasesTime = 0.0;
+  double TotalMeshingTimeMax;
+  double OtherPhasesTimeMax = 0.0;
+  double SourceInitMax;
+  double SolverMax;
+  double AccountedMax;
+  double UnaccountedMax;
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
                      Timer_Value("Octor Refinetree", (TimerKind)0) +
                      Timer_Value("Octor Balancetree", (TimerKind)0) +
@@ -8472,15 +8478,35 @@ static void print_timing_stat() {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
   }
 
+  TotalMeshingTimeMax = Timer_Value("Octor Newtree", MAX) +
+                        Timer_Value("Octor Refinetree", MAX) +
+                        Timer_Value("Octor Balancetree", MAX) +
+                        Timer_Value("Octor Partitiontree", MAX) +
+                        Timer_Value("Octor Extractmesh", MAX) +
+                        Timer_Value("Mesh correct properties", MAX) +
+                        Timer_Value("Mesh Stats Print", MAX);
+  if (Param.includeBuildings == YES && Timer_Exists("Carve Buildings")) {
+    TotalMeshingTimeMax += Timer_Value("Carve Buildings", MAX);
+  }
+
   if (Timer_Exists("Global Init")) {
     OtherPhasesTime += Timer_Value("Global Init", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Global Init", MAX);
   }
   if (Timer_Exists("Pre Solver Setup")) {
     OtherPhasesTime += Timer_Value("Pre Solver Setup", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Pre Solver Setup", MAX);
   }
   if (Timer_Exists("Post Solver Finalize")) {
     OtherPhasesTime += Timer_Value("Post Solver Finalize", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Post Solver Finalize", MAX);
   }
+
+  SourceInitMax = Timer_Value("Source Init", MAX);
+  SolverMax = Timer_Value("Solver", MAX);
+  AccountedMax =
+      TotalMeshingTimeMax + SourceInitMax + SolverMax + OtherPhasesTimeMax;
+  UnaccountedMax = Timer_Value("Total Wall Clock", (TimerKind)0) - AccountedMax;
 
   printf(
       "\n\n__________________________Raw Timers__________________________\n\n");
@@ -8502,6 +8528,9 @@ static void print_timing_stat() {
   printf("Total steps               : %d\n", Param.theTotalSteps);
   printf("DeltaT used               : %.6f seconds\n", Param.theDeltaT);
   printf("Critical deltaT           : %.6f seconds\n", Global.theCriticalT);
+  printf("\n");
+  printf("Accounted (MAX basis)     : %.2f seconds\n", AccountedMax);
+  printf("Unaccounted vs wall clock : %.2f seconds\n", UnaccountedMax);
   printf("\n");
   printf("Total Wall Clock          : %.2f seconds\n",
          Timer_Value("Total Wall Clock", (TimerKind)0));
@@ -10724,6 +10753,24 @@ int main(int argc, char** argv) {
 
   MPI_Barrier(comm_solver);
   Timer_Stop("Total Wall Clock");
+
+  Timer_Reduce("Octor Newtree", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Octor Refinetree", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Octor Partitiontree", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Octor Extractmesh", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
+  Timer_Reduce("Solver", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  if (Timer_Exists("Carve Buildings")) {
+    Timer_Reduce("Carve Buildings", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
 
   /* Print out the timing stat */
   if (Global.myID == 0) {
