@@ -206,6 +206,8 @@ static void messenger_delete(messenger_t* messenger);
 static void messenger_set(messenger_t* messenger, int32_t outsize,
                           int32_t insize);
 static int32_t messenger_countnodes(messenger_t* first);
+static void messenger_prepare_offsets(messenger_t* first,
+                                      int32_t itemsperentry);
 
 static void compute_K(void);
 static void constract_Quality_Factor_Table(void);
@@ -7265,6 +7267,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
                               int32_t msgtag) {
   messenger_t *send_messenger, *recv_messenger;
+  messenger_t *send_head, *recv_head;
   int32_t irecvcount, irecvnum, bytesize;
   int32_t isendcount, isendnum;
   MPI_Request* irecvreqs;
@@ -7296,6 +7299,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendstats = sched->isendstats_s;
   }
 
+  send_head = send_messenger;
+  recv_head = recv_messenger;
+
+  messenger_prepare_offsets(send_head, itemsperentry);
+  messenger_prepare_offsets(recv_head, itemsperentry);
+
   /* Post receives */
   Timer_Start("Schedule Post Recv");
   irecvnum = 0;
@@ -7318,12 +7327,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     solver_float* out;
 
     for (idx = 0; idx < send_messenger->nidx; idx++) {
-      lnid = send_messenger->mapping[idx];
+    lnid = send_messenger->mapping[idx];
 
       out = (solver_float*)((char*)send_messenger->outdata +
                             send_messenger->outsize * idx);
 
-      dvalue = (solver_float*)valuetable + itemsperentry * lnid;
+    dvalue = (solver_float*)valuetable + send_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         out[0] = dvalue[0];
         out[1] = dvalue[1];
@@ -7391,7 +7400,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       in = (solver_float*)((char*)recv_messenger->indata +
                            recv_messenger->insize * idx);
 
-      dvalue = (solver_float*)valuetable + itemsperentry * lnid;
+      dvalue = (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         if (direction == CONTRIBUTION) {
           dvalue[0] += in[0];
@@ -7694,6 +7703,8 @@ static void messenger_delete(messenger_t* messenger) {
 
   if (messenger->indata != NULL) free(messenger->indata);
 
+  if (messenger->mapping_itemoffset != NULL) free(messenger->mapping_itemoffset);
+
   free(messenger->mapping);
 
   free(messenger);
@@ -7741,6 +7752,41 @@ static void messenger_set(messenger_t* messenger, int32_t outsize,
   }
 
   return;
+}
+
+static void messenger_prepare_offsets(messenger_t* first,
+                                      int32_t itemsperentry) {
+  messenger_t* messenger = first;
+  while (messenger != NULL) {
+    if ((messenger->mapping_itemoffset == NULL) ||
+        (messenger->mapping_itemsperentry != itemsperentry)) {
+      int32_t idx;
+      if (messenger->mapping_itemoffset != NULL) {
+        free(messenger->mapping_itemoffset);
+        messenger->mapping_itemoffset = NULL;
+      }
+
+      if (messenger->nodecount > 0) {
+        messenger->mapping_itemoffset =
+            (int32_t*)malloc(sizeof(int32_t) * messenger->nodecount);
+        if (messenger->mapping_itemoffset == NULL) {
+          fprintf(stderr, "Thread %d: messenger_prepare_offsets: out of memory\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+
+        for (idx = 0; idx < messenger->nodecount; idx++) {
+          messenger->mapping_itemoffset[idx] =
+              messenger->mapping[idx] * itemsperentry;
+        }
+      }
+
+      messenger->mapping_itemsperentry = itemsperentry;
+    }
+
+    messenger = messenger->next;
+  }
 }
 
 /**
