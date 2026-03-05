@@ -97,7 +97,6 @@ static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
 static int32_t* g_adjustParentBase3 = NULL;
 static int32_t* g_adjustDanglingBase3 = NULL;
-static int32_t* g_adjustParentDeps = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
@@ -8602,7 +8601,6 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustDanglingLnid);
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
-  free(g_adjustParentDeps);
   free(g_adjustInvDeps);
 
   g_adjustParentOffsets = NULL;
@@ -8610,7 +8608,6 @@ static void compute_adjust_cache_free(void) {
   g_adjustDanglingLnid = NULL;
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
-  g_adjustParentDeps = NULL;
   g_adjustInvDeps = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
@@ -8638,12 +8635,10 @@ static void compute_adjust_cache_build(void) {
   g_adjustDanglingLnid = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
   g_adjustDanglingBase3 =
       (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
-  g_adjustParentDeps = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
   g_adjustInvDeps = (solver_float*)malloc(sizeof(solver_float) * g_adjustDnCount);
 
   if ((g_adjustParentOffsets == NULL) || (g_adjustDanglingLnid == NULL) ||
-      (g_adjustDanglingBase3 == NULL) || (g_adjustParentDeps == NULL) ||
-      (g_adjustInvDeps == NULL)) {
+      (g_adjustDanglingBase3 == NULL) || (g_adjustInvDeps == NULL)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Failed allocating compute_adjust cache arrays");
   }
@@ -8658,7 +8653,6 @@ static void compute_adjust_cache_build(void) {
     }
     g_adjustDanglingLnid[dnindex] = dnode->ldnid;
     g_adjustDanglingBase3[dnindex] = dnode->ldnid * 3;
-    g_adjustParentDeps[dnindex] = deps;
     g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
     totalParents += deps;
     g_adjustParentOffsets[dnindex + 1] = totalParents;
@@ -8732,7 +8726,8 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Distribution Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t deps = g_adjustParentDeps[dnindex];
+        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t deps = end - start;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
@@ -8764,7 +8759,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             p3[2] += d2;
           }
         } else {
-          int32_t end = start + deps;
           for (int32_t p = start; p < end; p++) {
             solver_float* parentvalue = vtable + g_adjustParentBase3[p];
             parentvalue[0] += d0;
@@ -8778,7 +8772,8 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Assignment Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t deps = g_adjustParentDeps[dnindex];
+        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t deps = end - start;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         solver_float s0 = 0;
@@ -8810,7 +8805,6 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
             s2 += p3[2];
           }
         } else {
-          int32_t end = start + deps;
           for (int32_t p = start; p < end; p++) {
             solver_float* parentvalue = vtable + g_adjustParentBase3[p];
             s0 += parentvalue[0];
