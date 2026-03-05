@@ -261,6 +261,8 @@ static int schedule_print_detail(schedule_t* sched, char type, FILE* out);
 static int schedule_print_messenger_list(schedule_t* sched, messenger_t* msg,
                                          int count, char type, char cs,
                                          FILE* out);
+static void schedule_validate_pair_counts(schedule_t* sched,
+                                          const char* sched_name);
 
 static messenger_t* messenger_new(int32_t procid);
 static void messenger_delete(messenger_t* messenger);
@@ -3463,6 +3465,7 @@ static void mesh_load_from_etree() {
     if (hit.type == ETREE_LEAF) {
       int32_t owner =
           mesh_owner_rank_for_element(geid, totalElems, Global.theGroupSize);
+      int32_t edgeTicks = 1 << (PIXELLEVEL - hit.level);
       int32_t c;
 
       for (c = 0; c < 8; c++) {
@@ -3470,6 +3473,9 @@ static void mesh_load_from_etree() {
             mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, payload.nid[c]);
         if (lnid >= 0) {
           nodeUsers[lnid * Global.theGroupSize + owner] = 1;
+          if (edgeTicks > nodeBuild[lnid].maxEdgeTicks) {
+            nodeBuild[lnid].maxEdgeTicks = edgeTicks;
+          }
         }
       }
       geid++;
@@ -3808,8 +3814,31 @@ static void mesh_printstat_imp(const mesh_t* mesh, int my_id, int group_size,
 static void mesh_print_stat(const octree_t* oct, const mesh_t* mesh, int my_id,
                             int group_size, const char* fname) {
   /* collective function calls */
-  int32_t gmin = octor_getminleaflevel(oct, GLOBAL);
-  int32_t gmax = octor_getmaxleaflevel(oct, GLOBAL);
+  int32_t gmin;
+  int32_t gmax;
+
+  if (Global.meshLoadedFromEtree) {
+    int32_t lmin = INT32_MAX;
+    int32_t lmax = INT32_MIN;
+    int32_t eindex;
+
+    for (eindex = 0; eindex < mesh->lenum; eindex++) {
+      int32_t level = mesh->elemTable[eindex].level;
+      if (level < lmin) lmin = level;
+      if (level > lmax) lmax = level;
+    }
+
+    if (mesh->lenum == 0) {
+      lmin = 0;
+      lmax = 0;
+    }
+
+    MPI_Allreduce(&lmin, &gmin, 1, MPI_INT, MPI_MIN, comm_solver);
+    MPI_Allreduce(&lmax, &gmax, 1, MPI_INT, MPI_MAX, comm_solver);
+  } else {
+    gmin = octor_getminleaflevel(oct, GLOBAL);
+    gmax = octor_getmaxleaflevel(oct, GLOBAL);
+  }
 
   mesh_printstat_imp(mesh, my_id, group_size, fname);
 
@@ -7938,7 +7967,83 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
+  schedule_validate_pair_counts(dnsched, "DN");
+  schedule_validate_pair_counts(ansched, "AN");
+
   return;
+}
+
+static void schedule_validate_pair_counts(schedule_t* sched,
+                                          const char* sched_name) {
+  int32_t* my_recv_from_remote;
+  int32_t* my_send_to_remote;
+  int32_t* remote_recv_from_me;
+  int32_t* remote_send_to_me;
+  int32_t r;
+
+  my_recv_from_remote = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+  my_send_to_remote = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+  remote_recv_from_me =
+      (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+  remote_send_to_me = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+
+  if ((my_recv_from_remote == NULL) || (my_send_to_remote == NULL) ||
+      (remote_recv_from_me == NULL) || (remote_send_to_me == NULL)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Out of memory in schedule validation (%s)", sched_name);
+  }
+
+  {
+    messenger_t* msg = sched->first_c;
+    while (msg != NULL) {
+      my_recv_from_remote[msg->procid] = msg->nodecount;
+      msg = msg->next;
+    }
+  }
+
+  {
+    messenger_t* msg = sched->first_s;
+    while (msg != NULL) {
+      my_send_to_remote[msg->procid] = msg->nodecount;
+      msg = msg->next;
+    }
+  }
+
+  MPI_Alltoall(my_recv_from_remote, 1, MPI_INT, remote_recv_from_me, 1,
+               MPI_INT, comm_solver);
+  MPI_Alltoall(my_send_to_remote, 1, MPI_INT, remote_send_to_me, 1, MPI_INT,
+               comm_solver);
+
+  for (r = 0; r < Global.theGroupSize; r++) {
+    if (r == Global.myID) {
+      continue;
+    }
+
+    if (my_send_to_remote[r] != remote_recv_from_me[r]) {
+      fprintf(stderr,
+              "Thread %d: %s schedule mismatch send->recv with rank %d "
+              "(my_send=%d remote_recv=%d)\n",
+              Global.myID, sched_name, r, my_send_to_remote[r],
+              remote_recv_from_me[r]);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    if (my_recv_from_remote[r] != remote_send_to_me[r]) {
+      fprintf(stderr,
+              "Thread %d: %s schedule mismatch recv<-send with rank %d "
+              "(my_recv=%d remote_send=%d)\n",
+              Global.myID, sched_name, r, my_recv_from_remote[r],
+              remote_send_to_me[r]);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  free(my_recv_from_remote);
+  free(my_send_to_remote);
+  free(remote_recv_from_me);
+  free(remote_send_to_me);
 }
 
 /**
