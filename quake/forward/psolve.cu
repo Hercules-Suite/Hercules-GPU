@@ -8722,48 +8722,53 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
     compute_adjust_cache_build();
     Timer_Stop("Adjust Cache Build");
 
+    int32_t* parentOffsets = g_adjustParentOffsets;
+    int32_t* parentBase3All = g_adjustParentBase3;
+    int32_t* danglingBase3 = g_adjustDanglingBase3;
+    solver_float* invDeps = g_adjustInvDeps;
+
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
-        int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t start = parentOffsets[dnindex];
+        int32_t end = parentOffsets[dnindex + 1];
         int32_t deps = end - start;
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
+        solver_float* myvalue = vtable + danglingBase3[dnindex];
+        const solver_float invdeps = invDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
         const solver_float d1 = myvalue[1] * invdeps;
         const solver_float d2 = myvalue[2] * invdeps;
 
         if (deps <= 4) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          solver_float* p0 = vtable + parentBase3All[start];
           p0[0] += d0;
           p0[1] += d1;
           p0[2] += d2;
 
           if (deps >= 2) {
-            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            solver_float* p1 = vtable + parentBase3All[start + 1];
             p1[0] += d0;
             p1[1] += d1;
             p1[2] += d2;
           }
           if (deps >= 3) {
-            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            solver_float* p2 = vtable + parentBase3All[start + 2];
             p2[0] += d0;
             p2[1] += d1;
             p2[2] += d2;
           }
           if (deps == 4) {
-            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            solver_float* p3 = vtable + parentBase3All[start + 3];
             p3[0] += d0;
             p3[1] += d1;
             p3[2] += d2;
           }
         } else if (deps == 5) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
+          solver_float* p0 = vtable + parentBase3All[start];
+          solver_float* p1 = vtable + parentBase3All[start + 1];
+          solver_float* p2 = vtable + parentBase3All[start + 2];
+          solver_float* p3 = vtable + parentBase3All[start + 3];
+          solver_float* p4 = vtable + parentBase3All[start + 4];
           p0[0] += d0;
           p0[1] += d1;
           p0[2] += d2;
@@ -8780,12 +8785,12 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
           p4[1] += d1;
           p4[2] += d2;
         } else if (deps == 6) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
-          solver_float* p5 = vtable + g_adjustParentBase3[start + 5];
+          solver_float* p0 = vtable + parentBase3All[start];
+          solver_float* p1 = vtable + parentBase3All[start + 1];
+          solver_float* p2 = vtable + parentBase3All[start + 2];
+          solver_float* p3 = vtable + parentBase3All[start + 3];
+          solver_float* p4 = vtable + parentBase3All[start + 4];
+          solver_float* p5 = vtable + parentBase3All[start + 5];
           p0[0] += d0;
           p0[1] += d1;
           p0[2] += d2;
@@ -8805,7 +8810,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
           p5[1] += d1;
           p5[2] += d2;
         } else {
-          int32_t* parentBase3 = g_adjustParentBase3 + start;
+          int32_t* parentBase3 = parentBase3All + start;
           int32_t parentCount = end - start;
           for (int32_t p = 0; p < parentCount; p++) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -8824,60 +8829,60 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
     } else {
       Timer_Start("Adjust Assignment Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
-        int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t end = g_adjustParentOffsets[dnindex + 1];
+        int32_t start = parentOffsets[dnindex];
+        int32_t end = parentOffsets[dnindex + 1];
         int32_t deps = end - start;
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
+        solver_float* myvalue = vtable + danglingBase3[dnindex];
+        const solver_float invdeps = invDeps[dnindex];
         solver_float s0 = 0;
         solver_float s1 = 0;
         solver_float s2 = 0;
 
         if (deps <= 4) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
+          solver_float* p0 = vtable + parentBase3All[start];
           s0 = p0[0];
           s1 = p0[1];
           s2 = p0[2];
 
           if (deps >= 2) {
-            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
+            solver_float* p1 = vtable + parentBase3All[start + 1];
             s0 += p1[0];
             s1 += p1[1];
             s2 += p1[2];
           }
           if (deps >= 3) {
-            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
+            solver_float* p2 = vtable + parentBase3All[start + 2];
             s0 += p2[0];
             s1 += p2[1];
             s2 += p2[2];
           }
           if (deps == 4) {
-            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
+            solver_float* p3 = vtable + parentBase3All[start + 3];
             s0 += p3[0];
             s1 += p3[1];
             s2 += p3[2];
           }
         } else if (deps == 5) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
+          solver_float* p0 = vtable + parentBase3All[start];
+          solver_float* p1 = vtable + parentBase3All[start + 1];
+          solver_float* p2 = vtable + parentBase3All[start + 2];
+          solver_float* p3 = vtable + parentBase3All[start + 3];
+          solver_float* p4 = vtable + parentBase3All[start + 4];
           s0 = p0[0] + p1[0] + p2[0] + p3[0] + p4[0];
           s1 = p0[1] + p1[1] + p2[1] + p3[1] + p4[1];
           s2 = p0[2] + p1[2] + p2[2] + p3[2] + p4[2];
         } else if (deps == 6) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
-          solver_float* p5 = vtable + g_adjustParentBase3[start + 5];
+          solver_float* p0 = vtable + parentBase3All[start];
+          solver_float* p1 = vtable + parentBase3All[start + 1];
+          solver_float* p2 = vtable + parentBase3All[start + 2];
+          solver_float* p3 = vtable + parentBase3All[start + 3];
+          solver_float* p4 = vtable + parentBase3All[start + 4];
+          solver_float* p5 = vtable + parentBase3All[start + 5];
           s0 = p0[0] + p1[0] + p2[0] + p3[0] + p4[0] + p5[0];
           s1 = p0[1] + p1[1] + p2[1] + p3[1] + p4[1] + p5[1];
           s2 = p0[2] + p1[2] + p2[2] + p3[2] + p4[2] + p5[2];
         } else {
-          int32_t* parentBase3 = g_adjustParentBase3 + start;
+          int32_t* parentBase3 = parentBase3All + start;
           int32_t parentCount = end - start;
           for (int32_t p = 0; p < parentCount; p++) {
 #if defined(__GNUC__) || defined(__clang__)
