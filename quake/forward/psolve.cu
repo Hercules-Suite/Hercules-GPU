@@ -8464,6 +8464,7 @@ static void print_timing_stat() {
   double OtherPhasesTimeMax = 0.0;
   double SourceInitMax;
   double SolverMax;
+  double TotalWallClockMax;
   double AccountedMax;
   double UnaccountedMax;
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
@@ -8541,9 +8542,10 @@ static void print_timing_stat() {
 
   SourceInitMax = Timer_Value("Source Init", MAX);
   SolverMax = Timer_Value("Solver", MAX);
+  TotalWallClockMax = Timer_Value("Total Wall Clock", MAX);
   AccountedMax =
       TotalMeshingTimeMax + SourceInitMax + SolverMax + OtherPhasesTimeMax;
-  UnaccountedMax = Timer_Value("Total Wall Clock", (TimerKind)0) - AccountedMax;
+  UnaccountedMax = TotalWallClockMax - AccountedMax;
 
   printf(
       "\n\n__________________________Raw Timers__________________________\n\n");
@@ -8567,10 +8569,12 @@ static void print_timing_stat() {
   printf("Critical deltaT           : %.6f seconds\n", Global.theCriticalT);
   printf("\n");
   printf("Accounted (MAX basis)     : %.2f seconds\n", AccountedMax);
-  printf("Unaccounted vs wall clock : %.2f seconds\n", UnaccountedMax);
+    printf("Unaccounted vs wall clock (MAX basis): %.2f seconds\n",
+      UnaccountedMax);
   printf("\n");
   printf("Total Wall Clock          : %.2f seconds\n",
          Timer_Value("Total Wall Clock", (TimerKind)0));
+    printf("Total Wall Clock (MAX)    : %.2f seconds\n", TotalWallClockMax);
   printf("Time/step                 : %.6f seconds\n",
          Timer_Value("Solver", (TimerKind)0) / Param.theTotalSteps);
   printf("Time/step/(elem/PE)       : %.6f millisec\n",
@@ -10837,6 +10841,9 @@ int main(int argc, char** argv) {
   MPI_Barrier(comm_solver);
   Timer_Stop("Phase Sync/Coordination");
   Timer_Stop("Total Wall Clock");
+
+  Timer_Reduce("Total Wall Clock", (TimerKind)(MAX | MIN | AVERAGE),
+               comm_solver);
 
   Timer_Reduce("Octor Newtree", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
