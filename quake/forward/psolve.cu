@@ -246,6 +246,11 @@ static void mesh_loaded_deallocate(mesh_t* mesh);
 static void mesh_loaded_build_search_index(const mesh_t* mesh);
 static int32_t mesh_loaded_find_element(tick_t xTick, tick_t yTick,
                                         tick_t zTick);
+typedef struct mesh_node_build_t mesh_node_build_t;
+static void mesh_topology_snapshot_write(const char* fname);
+static void mesh_topology_snapshot_apply(mesh_t* mesh,
+                                         const mesh_node_build_t* nodeBuild,
+                                         const char* fname);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -449,6 +454,7 @@ static struct Param_t {
   char parameters_input_file[256];
   char cvmdb_input_file[256];
   char mesh_etree_output_file[256];
+  char mesh_topology_snapshot_file[256];
   char planes_input_file[256];
   char basin_input_file[256];
   char thePlaneDirOut[256];
@@ -865,6 +871,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(Param.FourDOutFile, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.cvmdb_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.mesh_etree_output_file, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(Param.mesh_topology_snapshot_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.planes_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.basin_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.thePlaneDirOut, 256, MPI_CHAR, 0, comm_solver);
@@ -1257,6 +1264,8 @@ static int32_t parse_parameters(const char* numericalin) {
   }
   /* Optional parameters */
   parsetext(fp, "mesh_etree_output_file", 's', &Param.mesh_etree_output_file);
+  parsetext(fp, "mesh_topology_snapshot_file", 's',
+            &Param.mesh_topology_snapshot_file);
   parsetext(fp, "simulation_output_rate", 'i', &rate);
   parsetext(fp, "checkpoint_path", 's', &checkpoint_path);
   /* If no plane input file specified, the plane input file is numercalin itself
@@ -1428,6 +1437,13 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.theMeshFromEtreeFlag && (Param.mesh_etree_output_file[0] == '\0')) {
     fprintf(stderr,
             "mesh_from_etree requires mesh_etree_output_file in input file\n");
+    return -1;
+  }
+
+  if (Param.theMeshFromEtreeFlag &&
+      (Param.mesh_topology_snapshot_file[0] == '\0')) {
+    fprintf(stderr,
+            "mesh_from_etree exact-topology mode requires mesh_topology_snapshot_file\n");
     return -1;
   }
 
@@ -3123,6 +3139,13 @@ typedef struct mesh_owner_rsp_t {
   int32_t owner;
 } mesh_owner_rsp_t;
 
+typedef struct mesh_topo_node_record_t {
+  int64_t gnid;
+  int32_t isanchored;
+  int32_t dep_count;
+  int64_t dep_offset;
+} mesh_topo_node_record_t;
+
 static int mesh_cmp_node_raw_gnid(const void* a, const void* b) {
   const mesh_node_raw_t* lhs = (const mesh_node_raw_t*)a;
   const mesh_node_raw_t* rhs = (const mesh_node_raw_t*)b;
@@ -3162,6 +3185,15 @@ static int mesh_cmp_owner_req(const void* a, const void* b) {
   if (lhs->gnid > rhs->gnid) return 1;
   if (lhs->rank < rhs->rank) return -1;
   if (lhs->rank > rhs->rank) return 1;
+  return 0;
+}
+
+static int mesh_cmp_topo_gnid(const void* a, const void* b) {
+  const mesh_topo_node_record_t* lhs = (const mesh_topo_node_record_t*)a;
+  const mesh_topo_node_record_t* rhs = (const mesh_topo_node_record_t*)b;
+
+  if (lhs->gnid < rhs->gnid) return -1;
+  if (lhs->gnid > rhs->gnid) return 1;
   return 0;
 }
 
@@ -3258,6 +3290,329 @@ static int32_t mesh_loaded_find_element(tick_t xTick, tick_t yTick,
   }
 
   return -1;
+}
+
+static void mesh_topology_snapshot_write(const char* fname) {
+  mesh_t* mesh = Global.myMesh;
+  int32_t i;
+  int32_t ownedCount = 0;
+  int64_t depTotal = 0;
+  int32_t* dnodeIndexByLnid;
+  mesh_topo_node_record_t* localRecords;
+  int64_t* localDeps;
+  int64_t depCursor = 0;
+
+  int32_t* allOwnedCounts = NULL;
+  int64_t* allDepCounts = NULL;
+
+  if (fname == NULL || fname[0] == '\0' || mesh == NULL) {
+    return;
+  }
+
+  dnodeIndexByLnid = (int32_t*)malloc(sizeof(int32_t) * mesh->nharbored);
+  if (dnodeIndexByLnid == NULL && mesh->nharbored > 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating dnode index map");
+  }
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    dnodeIndexByLnid[i] = -1;
+  }
+
+  for (i = 0; i < mesh->ldnnum; i++) {
+    int32_t lnid = mesh->dnodeTable[i].ldnid;
+    if (lnid >= 0 && lnid < mesh->nharbored && mesh->nodeTable[lnid].ismine) {
+      dnodeIndexByLnid[lnid] = i;
+      depTotal += mesh->dnodeTable[i].deps;
+    }
+  }
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    if (mesh->nodeTable[i].ismine) {
+      ownedCount++;
+    }
+  }
+
+  localRecords =
+      (mesh_topo_node_record_t*)calloc(ownedCount, sizeof(mesh_topo_node_record_t));
+  localDeps = (int64_t*)calloc(depTotal, sizeof(int64_t));
+  if ((localRecords == NULL && ownedCount > 0) ||
+      (localDeps == NULL && depTotal > 0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating local topology snapshot buffers");
+  }
+
+  {
+    int32_t recIdx = 0;
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (mesh->nodeTable[i].ismine) {
+        mesh_topo_node_record_t* rec = &localRecords[recIdx++];
+        int32_t didx = dnodeIndexByLnid[i];
+
+        rec->gnid = mesh->nodeTable[i].gnid;
+        rec->isanchored = mesh->nodeTable[i].isanchored;
+        rec->dep_count = (didx >= 0) ? (int32_t)mesh->dnodeTable[didx].deps : 0;
+        rec->dep_offset = depCursor;
+
+        if (didx >= 0) {
+          int32link_t* link = mesh->dnodeTable[didx].lanid;
+          int32_t count = 0;
+
+          while (link != NULL) {
+            int32_t plnid = link->id;
+            if (plnid < 0 || plnid >= mesh->nharbored) {
+              solver_abort(__FUNCTION_NAME, NULL,
+                           "invalid parent lnid in topology snapshot write");
+            }
+            localDeps[depCursor++] = mesh->nodeTable[plnid].gnid;
+            count++;
+            link = link->next;
+          }
+
+          if (count != rec->dep_count) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "dependency count mismatch while writing topology snapshot");
+          }
+        }
+      }
+    }
+  }
+
+  if (Global.myID == 0) {
+    allOwnedCounts = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    allDepCounts = (int64_t*)calloc(Global.theGroupSize, sizeof(int64_t));
+  }
+
+  MPI_Gather(&ownedCount, 1, MPI_INT, allOwnedCounts, 1, MPI_INT, 0,
+             comm_solver);
+  MPI_Gather(&depTotal, 1, MPI_LONG_LONG_INT, allDepCounts, 1,
+             MPI_LONG_LONG_INT, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    int32_t* recCounts = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recDispls = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recCountsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recDisplsBytes =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* depCounts = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* depDispls = (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int64_t totalRecCount = 0;
+    int64_t totalDepCount = 0;
+    mesh_topo_node_record_t* allRecords;
+    int64_t* allDeps;
+    FILE* fp;
+
+    if ((recCounts == NULL) || (recDispls == NULL) || (recCountsBytes == NULL) ||
+        (recDisplsBytes == NULL) || (depCounts == NULL) ||
+        (depDispls == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating topology gather tables");
+    }
+
+    for (i = 0; i < Global.theGroupSize; i++) {
+      recCounts[i] = allOwnedCounts[i];
+      recDispls[i] = (int32_t)totalRecCount;
+      recCountsBytes[i] = recCounts[i] * (int32_t)sizeof(mesh_topo_node_record_t);
+      recDisplsBytes[i] = recDispls[i] * (int32_t)sizeof(mesh_topo_node_record_t);
+
+      depCounts[i] = (int32_t)allDepCounts[i];
+      depDispls[i] = (int32_t)totalDepCount;
+
+      totalRecCount += recCounts[i];
+      totalDepCount += depCounts[i];
+    }
+
+    allRecords = (mesh_topo_node_record_t*)calloc(totalRecCount,
+                                                  sizeof(mesh_topo_node_record_t));
+    allDeps = (int64_t*)calloc(totalDepCount, sizeof(int64_t));
+    if ((allRecords == NULL && totalRecCount > 0) ||
+        (allDeps == NULL && totalDepCount > 0)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating topology gather buffers");
+    }
+
+    MPI_Gatherv(localRecords, ownedCount * (int32_t)sizeof(mesh_topo_node_record_t),
+                MPI_BYTE, allRecords, recCountsBytes, recDisplsBytes, MPI_BYTE,
+                0, comm_solver);
+
+    MPI_Gatherv(localDeps, (int32_t)depTotal, MPI_LONG_LONG_INT, allDeps,
+          depCounts, depDispls, MPI_LONG_LONG_INT, 0, comm_solver);
+
+    {
+      int32_t r;
+      for (r = 0; r < Global.theGroupSize; r++) {
+        int32_t j;
+        int64_t localCursor = 0;
+        for (j = 0; j < recCounts[r]; j++) {
+          int32_t ridx = recDispls[r] + j;
+          allRecords[ridx].dep_offset = depDispls[r] + localCursor;
+          localCursor += allRecords[ridx].dep_count;
+        }
+      }
+    }
+
+    qsort(allRecords, totalRecCount, sizeof(mesh_topo_node_record_t),
+          mesh_cmp_topo_gnid);
+
+    fp = fopen(fname, "wb");
+    if (fp == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "cannot open topology snapshot file for write: %s", fname);
+    }
+
+    {
+      const char magic[8] = {'H', 'E', 'R', 'T', 'O', 'P', '1', '\0'};
+      int32_t version = 1;
+      int32_t reserved = 0;
+      int32_t meshGroupSize = Global.theGroupSize;
+      fwrite(magic, sizeof(char), 8, fp);
+      fwrite(&version, sizeof(int32_t), 1, fp);
+      fwrite(&reserved, sizeof(int32_t), 1, fp);
+      fwrite(&totalRecCount, sizeof(int64_t), 1, fp);
+      fwrite(&totalDepCount, sizeof(int64_t), 1, fp);
+      fwrite(&meshGroupSize, sizeof(int32_t), 1, fp);
+    }
+
+    if (totalRecCount > 0) {
+      fwrite(allRecords, sizeof(mesh_topo_node_record_t), totalRecCount, fp);
+    }
+    if (totalDepCount > 0) {
+      fwrite(allDeps, sizeof(int64_t), totalDepCount, fp);
+    }
+
+    fclose(fp);
+
+    free(recCounts);
+    free(recDispls);
+    free(recCountsBytes);
+    free(recDisplsBytes);
+    free(depCounts);
+    free(depDispls);
+    free(allRecords);
+    free(allDeps);
+  } else {
+    MPI_Gatherv(localRecords, ownedCount * (int32_t)sizeof(mesh_topo_node_record_t),
+                MPI_BYTE, NULL, NULL, NULL, MPI_BYTE, 0, comm_solver);
+    MPI_Gatherv(localDeps, (int32_t)depTotal, MPI_LONG_LONG_INT, NULL, NULL,
+          NULL, MPI_LONG_LONG_INT, 0, comm_solver);
+  }
+
+  free(allOwnedCounts);
+  free(allDepCounts);
+  free(dnodeIndexByLnid);
+  free(localRecords);
+  free(localDeps);
+}
+
+static void mesh_topology_snapshot_apply(mesh_t* mesh,
+                                         const mesh_node_build_t* nodeBuild,
+                                         const char* fname) {
+  FILE* fp;
+  char magic[8];
+  int32_t version;
+  int32_t reserved;
+  int64_t recCount;
+  int64_t depCount;
+  int32_t meshGroupSize;
+  mesh_topo_node_record_t* records;
+  int64_t* deps;
+  int32_t i;
+
+  if (fname == NULL || fname[0] == '\0') {
+    return;
+  }
+
+  fp = fopen(fname, "rb");
+  if (fp == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "cannot open topology snapshot file for read: %s", fname);
+  }
+
+  fread(magic, sizeof(char), 8, fp);
+  fread(&version, sizeof(int32_t), 1, fp);
+  fread(&reserved, sizeof(int32_t), 1, fp);
+  fread(&recCount, sizeof(int64_t), 1, fp);
+  fread(&depCount, sizeof(int64_t), 1, fp);
+  fread(&meshGroupSize, sizeof(int32_t), 1, fp);
+
+  if (strncmp(magic, "HERTOP1", 7) != 0 || version != 1) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "invalid topology snapshot format in %s", fname);
+  }
+
+  records = (mesh_topo_node_record_t*)calloc(recCount, sizeof(mesh_topo_node_record_t));
+  deps = (int64_t*)calloc(depCount, sizeof(int64_t));
+  if ((records == NULL && recCount > 0) || (deps == NULL && depCount > 0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory reading topology snapshot");
+  }
+
+  if (recCount > 0) {
+    fread(records, sizeof(mesh_topo_node_record_t), recCount, fp);
+  }
+  if (depCount > 0) {
+    fread(deps, sizeof(int64_t), depCount, fp);
+  }
+
+  fclose(fp);
+
+  for (i = 0; i < mesh->nharbored; i++) {
+    mesh->nodeTable[i].isanchored = 1;
+  }
+
+  mesh->ldnnum = 0;
+  for (i = 0; i < recCount; i++) {
+    int32_t lnid = mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, records[i].gnid);
+    if (lnid >= 0) {
+      mesh->nodeTable[lnid].isanchored = records[i].isanchored;
+
+      if (!records[i].isanchored && records[i].dep_count > 0 &&
+          mesh->nodeTable[lnid].ismine) {
+        int64_t off = records[i].dep_offset;
+        int32_t k;
+        dnode_t* dnode = &mesh->dnodeTable[mesh->ldnnum++];
+        int32link_t* first = NULL;
+
+        dnode->ldnid = lnid;
+        dnode->deps = records[i].dep_count;
+
+        for (k = 0; k < records[i].dep_count; k++) {
+          int32_t plnid =
+              mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, deps[off + k]);
+          int32link_t* link;
+          if (plnid < 0) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "topology snapshot parent gnid not found locally");
+          }
+          link = (int32link_t*)malloc(sizeof(int32link_t));
+          if (link == NULL) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "out of memory creating snapshot dnode links");
+          }
+          link->id = plnid;
+          link->next = first;
+          first = link;
+        }
+        dnode->lanid = first;
+      }
+    }
+  }
+
+  if (mesh->ldnnum == 0) {
+    free(mesh->dnodeTable);
+    mesh->dnodeTable = NULL;
+  } else {
+    dnode_t* shrunk =
+        (dnode_t*)realloc(mesh->dnodeTable, sizeof(dnode_t) * mesh->ldnnum);
+    if (shrunk != NULL) {
+      mesh->dnodeTable = shrunk;
+    }
+  }
+  }
+
+  free(records);
+  free(deps);
 }
 
 static int32_t mesh_owner_rank_for_element(int64_t geid, int64_t totalElems,
@@ -4000,7 +4355,11 @@ static void mesh_load_from_etree() {
                  "out of memory allocating dnode table");
   }
 
-  mesh->ldnnum = 0;
+  if (Param.mesh_topology_snapshot_file[0] != '\0') {
+    mesh_topology_snapshot_apply(mesh, nodeBuild,
+                                 Param.mesh_topology_snapshot_file);
+  } else {
+    mesh->ldnnum = 0;
   for (i = 0; i < mesh->nharbored; i++) {
     int32_t h = nodeBuild[i].maxEdgeTicks;
 
@@ -4125,6 +4484,8 @@ static void mesh_load_from_etree() {
     free(sendCursor);
     free(sendBuf);
     free(recvBuf);
+  }
+
   }
 
   for (i = 0; i < mesh->nharbored; i++) {
@@ -12962,6 +13323,16 @@ int main(int argc, char** argv) {
                   Global.theGroupSize, Param.theMeshStatFilename);
   Timer_Stop("Mesh Stats Print");
   Timer_Reduce("Mesh Stats Print", (TimerKind)(MAX | MIN), comm_solver);
+
+  if (!Param.theMeshFromEtreeFlag &&
+      Param.mesh_topology_snapshot_file[0] != '\0') {
+    Timer_Start("Mesh Topology Snapshot");
+    mesh_topology_snapshot_write(Param.mesh_topology_snapshot_file);
+    MPI_Barrier(comm_solver);
+    Timer_Stop("Mesh Topology Snapshot");
+    Timer_Reduce("Mesh Topology Snapshot", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
 
   if (Param.theMeshOnlyFlag) {
     local_finalize();
