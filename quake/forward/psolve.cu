@@ -9090,6 +9090,7 @@ static void print_timing_stat() {
   printf("Total steps               : %d\n", Param.theTotalSteps);
   printf("DeltaT used               : %.6f seconds\n", Param.theDeltaT);
   printf("Critical deltaT           : %.6f seconds\n", Global.theCriticalT);
+  printf("Timing barriers enabled   : %d\n", Param.theTimingBarriersFlag);
   printf("\n");
   printf("Accounted (MAX basis)     : %.2f seconds\n", AccountedMax);
     printf("Unaccounted vs wall clock (MAX basis): %.2f seconds\n",
