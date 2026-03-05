@@ -3188,6 +3188,35 @@ static int32_t mesh_find_lnid_by_coord(const mesh_coord_index_t* index,
   return -1;
 }
 
+static int mesh_payload_is_valid(const mdata_t* payload) {
+  int i;
+  int all_same;
+
+  if (payload == NULL) {
+    return 0;
+  }
+
+  if (!(payload->edgesize > 0.0f) || !isfinite(payload->edgesize) ||
+      !isfinite(payload->Vp) || !isfinite(payload->Vs) ||
+      !isfinite(payload->rho)) {
+    return 0;
+  }
+
+  all_same = 1;
+  for (i = 1; i < 8; i++) {
+    if (payload->nid[i] != payload->nid[0]) {
+      all_same = 0;
+      break;
+    }
+  }
+
+  if (all_same) {
+    return 0;
+  }
+
+  return 1;
+}
+
 static int64_t mesh_count_elements_in_etree(etree_t* mep) {
   etree_addr_t addr = {0, 0, 0, 0, 0, ETREE_LEAF};
   etree_addr_t hit;
@@ -3200,7 +3229,7 @@ static int64_t mesh_count_elements_in_etree(etree_t* mep) {
   }
 
   while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
-    if (hit.type == ETREE_LEAF) {
+    if (hit.type == ETREE_LEAF && mesh_payload_is_valid(&payload)) {
       count++;
     }
 
@@ -3314,7 +3343,7 @@ static void mesh_load_from_etree() {
 
   geid = 0;
   while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
-    if (hit.type == ETREE_LEAF) {
+    if (hit.type == ETREE_LEAF && mesh_payload_is_valid(&payload)) {
       if (geid >= localBegin && geid < localEnd) {
         int64_t idx = geid - localBegin;
         localElems[idx].addr = hit;
@@ -3462,7 +3491,7 @@ static void mesh_load_from_etree() {
 
   geid = 0;
   while (etree_getcursor(mep, &hit, NULL, &payload) == 0) {
-    if (hit.type == ETREE_LEAF) {
+    if (hit.type == ETREE_LEAF && mesh_payload_is_valid(&payload)) {
       int32_t owner =
           mesh_owner_rank_for_element(geid, totalElems, Global.theGroupSize);
       int32_t edgeTicks = 1 << (PIXELLEVEL - hit.level);
