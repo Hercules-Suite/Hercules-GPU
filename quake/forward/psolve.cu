@@ -100,6 +100,18 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int64_t g_adjustDepsHistDistLocal[5] = {0, 0, 0, 0, 0};
+static int64_t g_adjustDepsHistAssignLocal[5] = {0, 0, 0, 0, 0};
+static int64_t g_adjustDepsHistDistGlobal[5] = {0, 0, 0, 0, 0};
+static int64_t g_adjustDepsHistAssignGlobal[5] = {0, 0, 0, 0, 0};
+
+static int adjust_deps_bucket(int32_t deps) {
+  if (deps <= 1) return 0;
+  if (deps == 2) return 1;
+  if (deps == 3) return 2;
+  if (deps == 4) return 3;
+  return 4;
+}
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -6504,6 +6516,11 @@ static void solver_run_collect_timers(void) {
                  comm_solver);
   }
 
+  MPI_Allreduce(g_adjustDepsHistDistLocal, g_adjustDepsHistDistGlobal, 5,
+                MPI_LONG_LONG, MPI_SUM, comm_solver);
+  MPI_Allreduce(g_adjustDepsHistAssignLocal, g_adjustDepsHistAssignGlobal, 5,
+                MPI_LONG_LONG, MPI_SUM, comm_solver);
+
   Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
@@ -6515,6 +6532,11 @@ static void solver_run_collect_timers(void) {
  */
 static void solver_run() {
   int32_t step, startingStep;
+
+  memset(g_adjustDepsHistDistLocal, 0, sizeof(g_adjustDepsHistDistLocal));
+  memset(g_adjustDepsHistAssignLocal, 0, sizeof(g_adjustDepsHistAssignLocal));
+  memset(g_adjustDepsHistDistGlobal, 0, sizeof(g_adjustDepsHistDistGlobal));
+  memset(g_adjustDepsHistAssignGlobal, 0, sizeof(g_adjustDepsHistAssignGlobal));
 
   solver_run_init_comm(Global.mySolver);
 
@@ -8420,6 +8442,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
+        g_adjustDepsHistDistLocal[adjust_deps_bucket(deps)]++;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
         const solver_float d0 = myvalue[0] * invdeps;
@@ -8487,6 +8510,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
+        g_adjustDepsHistAssignLocal[adjust_deps_bucket(deps)]++;
         solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
         const solver_float invdeps = g_adjustInvDeps[dnindex];
 
@@ -9209,6 +9233,14 @@ static void print_timing_stat() {
   if (Timer_Exists("Adjust Cache Build") ||
       Timer_Exists("Adjust Distribution Core") ||
       Timer_Exists("Adjust Assignment Core")) {
+    int64_t distTotal = g_adjustDepsHistDistGlobal[0] + g_adjustDepsHistDistGlobal[1] +
+                        g_adjustDepsHistDistGlobal[2] + g_adjustDepsHistDistGlobal[3] +
+                        g_adjustDepsHistDistGlobal[4];
+    int64_t assignTotal = g_adjustDepsHistAssignGlobal[0] +
+                          g_adjustDepsHistAssignGlobal[1] +
+                          g_adjustDepsHistAssignGlobal[2] +
+                          g_adjustDepsHistAssignGlobal[3] +
+                          g_adjustDepsHistAssignGlobal[4];
     printf("    Compute adjust internals\n");
     if (Timer_Exists("Adjust Cache Build")) {
       printf(
@@ -9233,6 +9265,18 @@ static void print_timing_stat() {
           Timer_Value("Adjust Assignment Core", AVERAGE),
           Timer_Value("Adjust Assignment Core", MAX),
           Timer_Value("Adjust Assignment Core", MIN));
+    }
+    if ((distTotal > 0) || (assignTotal > 0)) {
+      printf(
+          "      Deps Histogram Dist (1,2,3,4,5+): %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT "\n",
+          g_adjustDepsHistDistGlobal[0], g_adjustDepsHistDistGlobal[1],
+          g_adjustDepsHistDistGlobal[2], g_adjustDepsHistDistGlobal[3],
+          g_adjustDepsHistDistGlobal[4]);
+      printf(
+          "      Deps Histogram Asgn (1,2,3,4,5+): %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT " %" INT64_FMT "\n",
+          g_adjustDepsHistAssignGlobal[0], g_adjustDepsHistAssignGlobal[1],
+          g_adjustDepsHistAssignGlobal[2], g_adjustDepsHistAssignGlobal[3],
+          g_adjustDepsHistAssignGlobal[4]);
     }
   }
   printf("    IO\n");
