@@ -6526,6 +6526,7 @@ static int imbalance_pick_top_desc(const double* values, int32_t count,
 static void solver_collect_imbalance_stats(void) {
   int32_t dnindex;
   int32_t nranks = 1;
+  int32_t solverRank = -1;
   double localVals[5];
   double minVals[5];
   double maxVals[5];
@@ -6541,6 +6542,7 @@ static void solver_collect_imbalance_stats(void) {
   double* recvRecvBytes = dummyRecv;
 
   MPI_Comm_size(comm_solver, &nranks);
+  MPI_Comm_rank(comm_solver, &solverRank);
   if (nranks <= 0) {
     nranks = 1;
   }
@@ -6580,7 +6582,7 @@ static void solver_collect_imbalance_stats(void) {
   MPI_Reduce(localVals, maxVals, 5, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
   MPI_Reduce(localVals, sumVals, 5, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
 
-  if (Global.myID == 0) {
+  if (solverRank == 0) {
     if (!imbalance_rank_buffers_ensure(nranks)) {
       fprintf(stderr,
               "Thread 0: solver_collect_imbalance_stats: out of memory\n");
@@ -6603,7 +6605,7 @@ static void solver_collect_imbalance_stats(void) {
   MPI_Gather(&localRankVals[3], 1, MPI_DOUBLE, recvRecvBytes, 1, MPI_DOUBLE,
              0, comm_solver);
 
-  if (Global.myID == 0) {
+  if (solverRank == 0) {
     if (nranks <= 0) {
       nranks = 1;
     }
