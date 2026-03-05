@@ -1156,6 +1156,36 @@ int topo_crossings ( double xo, double yo, double zo, double esize ) {
    if ( thebase_zcoord == 0 ) /* If no topography   */
            return -1;
 
+    {
+        const double x1 = xo + esize;
+        const double y1 = yo + esize;
+        const double z1 = zo + esize;
+        int hasAirCorner = 0;
+        int hasMatCorner = 0;
+
+        const double cornerDist[8] = {
+            point_PlaneDist(xo, yo, zo),
+            point_PlaneDist(x1, yo, zo),
+            point_PlaneDist(xo, y1, zo),
+            point_PlaneDist(x1, y1, zo),
+            point_PlaneDist(xo, yo, z1),
+            point_PlaneDist(x1, yo, z1),
+            point_PlaneDist(xo, y1, z1),
+            point_PlaneDist(x1, y1, z1)
+        };
+
+        for (i = 0; i < 8; ++i) {
+            if (cornerDist[i] > 0.0) {
+                hasAirCorner = 1;
+            } else if (cornerDist[i] < 0.0) {
+                hasMatCorner = 1;
+            }
+            if (hasAirCorner && hasMatCorner) {
+                return 1;
+            }
+        }
+    }
+
     /* 1) Elevation check. np^2 points check */
     for ( i = 0; i < np; ++i ) {
         xp = xo + Del * i;
