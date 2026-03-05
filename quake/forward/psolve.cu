@@ -225,6 +225,10 @@ typedef struct mrecord_t {
 static int32_t toexpand(octant_t* leaf, double ticksize, const void* data);
 static void setrec(octant_t* leaf, double ticksize, void* data);
 static void mesh_generate(void);
+static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
+                                   const void* data);
+static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data);
+static void mesh_generate_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
 static void mesh_correct_properties(etree_t* cvm);
@@ -493,6 +497,7 @@ static struct Param_t {
   char theCheckPointingDirOut[256];
   noyesflag_t storeMeshCoordinatesForMatlab;
   int theMeshOnlyMode;
+  int theMeshInputMode;
   double the4DOutSize;
   int theMeshOutFlag;
   char theCVMFlatFile[128];
@@ -551,6 +556,7 @@ static struct Param_t {
            .theStationsDirOut = "outputfiles/stations",
            .theUseCheckPoint = 0,
            .theMeshOnlyMode = 0,
+           .theMeshInputMode = 0,
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .useProfile = NO,
@@ -583,6 +589,7 @@ static struct Global_t {
   vector3D_t* myForces;
   FILE* fpsource;
   etree_t* theCVMEp;
+  etree_t* theMeshInputEp;
   int32_t theCVMQueryStage;
   double theXForMeshOrigin;
   double theYForMeshOrigin;
@@ -689,7 +696,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  32 /* Must adjust this if adding int params */
+  33 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -796,6 +803,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[29] = (int)Param.basinZCount;
   int_message[30] = (int)Param.threeDVelocityModel;
   int_message[31] = Param.theMeshOnlyMode;
+  int_message[32] = Param.theMeshInputMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -832,6 +840,7 @@ static void read_parameters(int argc, char** argv) {
   Param.basinZCount = int_message[29];
   Param.threeDVelocityModel = (noyesflag_t)int_message[30];
   Param.theMeshOnlyMode = int_message[31];
+  Param.theMeshInputMode = int_message[32];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1270,6 +1279,7 @@ static int32_t parse_parameters(const char* numericalin) {
 
   hu_config_get_int_opt(fp, "output_mesh", &Param.theMeshOutFlag);
   hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
+  hu_config_get_int_opt(fp, "mesh_input_mode", &Param.theMeshInputMode);
   hu_config_get_int_opt(fp, "enable_timing_barriers",
                         &Param.theTimingBarriersFlag);
   hu_config_get_int_opt(fp, "forces_buffer_size", &theForcesBufferSize);
@@ -3007,6 +3017,217 @@ static int32_t toexpand(octant_t* leaf, double ticksize, const void* data) {
   }
 
   return vsrule(edata, Param.theFactor);
+}
+
+static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
+                                 mdata_t* hit_data) {
+  tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
+  etree_addr_t search_addr;
+
+  search_addr.x = leaf->lx + edge_ticks / 2;
+  search_addr.y = leaf->ly + edge_ticks / 2;
+  search_addr.z = leaf->lz + edge_ticks / 2;
+  search_addr.level = ETREE_MAXLEVEL;
+  search_addr.type = ETREE_LEAF;
+
+  if (etree_search(Global.theMeshInputEp, search_addr, hit_addr, NULL,
+                   hit_data) != 0) {
+    return -1;
+  }
+
+  return 0;
+}
+
+static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
+                                   const void* data) {
+  etree_addr_t hit_addr;
+  mdata_t hit_data;
+
+  (void)ticksize;
+  (void)data;
+
+  if (mesh_etree_lookup(leaf, &hit_addr, &hit_data) != 0) {
+    fprintf(stderr, "Thread %d: toexpand_mesh_etree: cannot query mesh etree\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (hit_addr.level < leaf->level) {
+    fprintf(stderr,
+            "Thread %d: toexpand_mesh_etree: inconsistent mesh level (%d < %d)\n",
+            Global.myID, hit_addr.level, leaf->level);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  return (hit_addr.level > leaf->level) ? 1 : 0;
+}
+
+static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
+  etree_addr_t hit_addr;
+  mdata_t hit_data;
+  edata_t* edata = (edata_t*)data;
+
+  (void)ticksize;
+
+  if (mesh_etree_lookup(leaf, &hit_addr, &hit_data) != 0) {
+    fprintf(stderr, "Thread %d: setrec_mesh_etree: cannot query mesh etree\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (hit_addr.level != leaf->level) {
+    fprintf(stderr,
+            "Thread %d: setrec_mesh_etree: leaf level mismatch (%d != %d)\n",
+            Global.myID, hit_addr.level, leaf->level);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
+}
+
+static void mesh_generate_from_etree(void) {
+  int32_t pass;
+  int converged = 0;
+  int64_t prev_total = -1;
+  int64_t tote, mine, maxe;
+
+  if (Global.myID == 0) {
+    monitor_print("Meshing: Import from existing mesh etree\n\n");
+    monitor_print("Stage %14s Min %7s Max %5s Total    Time(s)\n\n", "", "",
+                  "");
+  }
+
+  MPI_Barrier(comm_solver);
+  Timer_Start("Octor Newtree");
+  if (Global.myID == 0) {
+    monitor_print("New tree %41s", "");
+  }
+  Global.myOctree = octor_newtree(
+      Param.theDomainX, Param.theDomainY, Param.theDomainZ, sizeof(edata_t),
+      Global.myID, Global.theGroupSize, comm_solver, get_surface_shift());
+  if (Global.myOctree == NULL) {
+    fprintf(stderr,
+            "Thread %d: mesh_generate_from_etree: fail to create octree\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Octor Newtree");
+  if (Global.myID == 0) {
+    monitor_print("%9.2f\n", Timer_Value("Octor Newtree", (TimerKind)0));
+  }
+
+  if (Param.drmImplement == YES) {
+    drm_fix_coordinates(Global.myOctree->ticksize);
+  }
+
+  Global.theMeshInputEp =
+      etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
+  if (Global.theMeshInputEp == NULL) {
+    fprintf(stderr,
+            "Thread %d: mesh_generate_from_etree: cannot open mesh etree %s\n",
+            Global.myID, Param.mesh_etree_output_file);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  Timer_Start("Octor Refinetree");
+  for (pass = 0; pass < PIXELLEVEL + 2; pass++) {
+    if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
+                         setrec_mesh_etree) != 0) {
+      fprintf(stderr,
+              "Thread %d: mesh_generate_from_etree: fail to refine octree\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    MPI_Barrier(comm_solver);
+    tote = octor_getleavescount(Global.myOctree, GLOBAL);
+    mine = octor_getminleavescount(Global.myOctree, GLOBAL);
+    maxe = octor_getmaxleavescount(Global.myOctree, GLOBAL);
+
+    if (Global.myID == 0) {
+      monitor_print("Refining     %11" INT64_FMT " %11" INT64_FMT
+                    " %11" INT64_FMT " %11.2f\n",
+                    mine, maxe, tote,
+                    Timer_Value("Octor Refinetree", (TimerKind)0));
+      fflush(stdout);
+    }
+
+    if (tote == prev_total) {
+      converged = 1;
+      break;
+    }
+
+    prev_total = tote;
+  }
+  Timer_Stop("Octor Refinetree");
+
+  if (!converged) {
+    fprintf(stderr,
+            "Thread %d: mesh_generate_from_etree: refinement did not converge\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  Timer_Start("Octor Partitiontree");
+  if (Global.myID == 0) {
+    monitor_print("Partitioning ");
+    fflush(stdout);
+  }
+  if (octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
+                          pushdowns_nodesearch) != 0) {
+    fprintf(stderr,
+            "Thread %d: mesh_generate_from_etree: fail to partition tree\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Octor Partitiontree");
+  tote = octor_getleavescount(Global.myOctree, GLOBAL);
+  mine = octor_getminleavescount(Global.myOctree, GLOBAL);
+  maxe = octor_getmaxleavescount(Global.myOctree, GLOBAL);
+  if (Global.myID == 0) {
+    monitor_print("%11" INT64_FMT " %11" INT64_FMT " %11" INT64_FMT
+                  " %11.2f\n\n",
+                  mine, maxe, tote,
+                  Timer_Value("Octor Partitiontree", (TimerKind)0));
+    fflush(stdout);
+  }
+
+  Timer_Start("Octor Extractmesh");
+  if (Global.myID == 0) {
+    monitor_print("Extracting the mesh %30s", "");
+    fflush(stdout);
+  }
+  Global.myMesh =
+      octor_extractmesh(Global.myOctree, bldgs_nodesearch, pushdowns_nodesearch,
+                        bldgs_nodesearch_com, find_topoAirOct, topo_nodesearch);
+  if (Global.myMesh == NULL) {
+    fprintf(stderr,
+            "Thread %d: mesh_generate_from_etree: fail to extract mesh\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Octor Extractmesh");
+  if (Global.myID == 0) {
+    monitor_print("%9.2f\n\n",
+                  Timer_Value("Octor Extractmesh", (TimerKind)0));
+    fflush(stdout);
+  }
+
+  etree_close(Global.theMeshInputEp);
+  Global.theMeshInputEp = NULL;
 }
 
 /**
@@ -9008,18 +9229,31 @@ static void print_timing_stat() {
   double OtherPhasesTime = 0.0;
   double TotalMeshingTimeMax;
   double OtherPhasesTimeMax = 0.0;
+  double BalanceTime = 0.0;
+  double BalanceTimeMax = 0.0;
+  double CorrectPropsTime = 0.0;
+  double CorrectPropsTimeMax = 0.0;
   double SourceInitMax;
   double SourceInitForAccounting;
   double SolverMax;
   double TotalWallClockMax;
   double AccountedMax;
   double UnaccountedMax;
+  if (Timer_Exists("Octor Balancetree")) {
+    BalanceTime = Timer_Value("Octor Balancetree", (TimerKind)0);
+    BalanceTimeMax = Timer_Value("Octor Balancetree", MAX);
+  }
+  if (Timer_Exists("Mesh correct properties")) {
+    CorrectPropsTime = Timer_Value("Mesh correct properties", (TimerKind)0);
+    CorrectPropsTimeMax = Timer_Value("Mesh correct properties", MAX);
+  }
+
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
                      Timer_Value("Octor Refinetree", (TimerKind)0) +
-                     Timer_Value("Octor Balancetree", (TimerKind)0) +
+                     BalanceTime +
                      Timer_Value("Octor Partitiontree", (TimerKind)0) +
                      Timer_Value("Octor Extractmesh", (TimerKind)0) +
-                     Timer_Value("Mesh correct properties", (TimerKind)0) +
+                     CorrectPropsTime +
                      Timer_Value("Mesh Stats Print", (TimerKind)0);
 
   if (Timer_Exists("Slice CVM")) {
@@ -9036,10 +9270,10 @@ static void print_timing_stat() {
 
   TotalMeshingTimeMax = Timer_Value("Octor Newtree", MAX) +
                         Timer_Value("Octor Refinetree", MAX) +
-                        Timer_Value("Octor Balancetree", MAX) +
+                        BalanceTimeMax +
                         Timer_Value("Octor Partitiontree", MAX) +
                         Timer_Value("Octor Extractmesh", MAX) +
-                        Timer_Value("Mesh correct properties", MAX) +
+                        CorrectPropsTimeMax +
                         Timer_Value("Mesh Stats Print", MAX);
 
   if (Timer_Exists("Slice CVM")) {
@@ -9148,8 +9382,10 @@ static void print_timing_stat() {
          Timer_Value("Octor Newtree", (TimerKind)0));
   printf("    Octor Refinetree                : %.2f seconds\n",
          Timer_Value("Octor Refinetree", (TimerKind)0));
-  printf("    Octor Balancetree               : %.2f seconds\n",
-         Timer_Value("Octor Balancetree", (TimerKind)0));
+    if (Timer_Exists("Octor Balancetree")) {
+      printf("    Octor Balancetree               : %.2f seconds\n",
+        Timer_Value("Octor Balancetree", (TimerKind)0));
+    }
   if (Timer_Exists("Carve Buildings"))
     printf("    Octor Carve Buildings           : %.2f seconds\n",
            Timer_Value("Carve Buildings", (TimerKind)0));
@@ -9160,8 +9396,10 @@ static void print_timing_stat() {
     if (Timer_Exists("Slice CVM"))
       printf("    Slice CVM                       : %.2f seconds\n",
         Timer_Value("Slice CVM", (TimerKind)0));
-  printf("    Mesh correct properties         : %.2f seconds\n",
-         Timer_Value("Mesh correct properties", (TimerKind)0));
+  if (Timer_Exists("Mesh correct properties")) {
+    printf("    Mesh correct properties         : %.2f seconds\n",
+           Timer_Value("Mesh correct properties", (TimerKind)0));
+  }
     if (Timer_Exists("Mesh Out"))
       printf("    Mesh Out                        : %.2f seconds\n",
         Timer_Value("Mesh Out", (TimerKind)0));
@@ -11433,12 +11671,14 @@ int main(int argc, char** argv) {
   Timer_Start("Global Init");
   read_parameters(argc, argv);
 
-  if (Param.useProfile == YES) {
-    /* Read profile to memory */
-    load_profile(Param.parameters_input_file);
-  } else {
-    /* Create and open database */
-    open_cvmdb();
+  if (Param.theMeshInputMode == 0) {
+    if (Param.useProfile == YES) {
+      /* Read profile to memory */
+      load_profile(Param.parameters_input_file);
+    } else {
+      /* Create and open database */
+      open_cvmdb();
+    }
   }
 
   /* Initialize Istanbul velocity model */
@@ -11494,7 +11734,11 @@ int main(int argc, char** argv) {
   Timer_Reduce("Global Init", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
   /* Generate, partition and output unstructured octree mesh */
-  mesh_generate();
+  if (Param.theMeshInputMode != 0) {
+    mesh_generate_from_etree();
+  } else {
+    mesh_generate();
+  }
 
   if (Param.includeBuildings == YES) {
     if (get_fixedbase_flag() == YES) {
@@ -11575,14 +11819,18 @@ int main(int argc, char** argv) {
                  comm_solver);
     Timer_Reduce("Octor Refinetree", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
-    Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
+    if (Timer_Exists("Octor Balancetree")) {
+      Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
     Timer_Reduce("Octor Partitiontree", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
     Timer_Reduce("Octor Extractmesh", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
-    Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
+    if (Timer_Exists("Mesh correct properties")) {
+      Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
 
     if (Timer_Exists("Global Init")) {
       Timer_Reduce("Global Init", (TimerKind)(MAX | MIN | AVERAGE),
@@ -11810,14 +12058,18 @@ int main(int argc, char** argv) {
                comm_solver);
   Timer_Reduce("Octor Refinetree", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
-  Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
+  if (Timer_Exists("Octor Balancetree")) {
+    Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   Timer_Reduce("Octor Partitiontree", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
   Timer_Reduce("Octor Extractmesh", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
-  Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
+  if (Timer_Exists("Mesh correct properties")) {
+    Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   Timer_Reduce("Solver", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   if (Timer_Exists("Phase Sync/Coordination")) {
     Timer_Reduce("Phase Sync/Coordination", (TimerKind)(MAX | MIN | AVERAGE),
