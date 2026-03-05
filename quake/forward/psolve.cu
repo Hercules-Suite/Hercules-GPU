@@ -8463,6 +8463,7 @@ static void print_timing_stat() {
   double TotalMeshingTimeMax;
   double OtherPhasesTimeMax = 0.0;
   double SourceInitMax;
+  double SourceInitForAccounting;
   double SolverMax;
   double TotalWallClockMax;
   double AccountedMax;
@@ -8541,10 +8542,15 @@ static void print_timing_stat() {
   }
 
   SourceInitMax = Timer_Value("Source Init", MAX);
+  SourceInitForAccounting = SourceInitMax;
+  if (Timer_Exists("Pre Solver Setup")) {
+    SourceInitForAccounting = 0.0;
+  }
   SolverMax = Timer_Value("Solver", MAX);
   TotalWallClockMax = Timer_Value("Total Wall Clock", MAX);
   AccountedMax =
-      TotalMeshingTimeMax + SourceInitMax + SolverMax + OtherPhasesTimeMax;
+      TotalMeshingTimeMax + SourceInitForAccounting + SolverMax +
+      OtherPhasesTimeMax;
   UnaccountedMax = TotalWallClockMax - AccountedMax;
 
   printf(
