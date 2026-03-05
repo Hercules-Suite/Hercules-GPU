@@ -8770,6 +8770,13 @@ static void print_timing_stat() {
                Timer_Value("Pre Setup Output Init", MAX),
                Timer_Value("Pre Setup Output Init", MIN));
       }
+      if (Timer_Exists("Pre Setup Source Init")) {
+        printf("      Pre Setup Source Init       : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Source Init", AVERAGE),
+               Timer_Value("Pre Setup Source Init", MAX),
+               Timer_Value("Pre Setup Source Init", MIN));
+      }
     }
     if (Timer_Exists("Post Solver Finalize")) {
       printf("    Post Solver Finalize           : %.2f (Average)   %.2f (Max) %.2f "
@@ -10887,7 +10894,9 @@ int main(int argc, char** argv) {
   }
 
   Timer_Start("Source Init");
+  Timer_Start("Pre Setup Source Init");
   source_init(Param.parameters_input_file);
+  Timer_Stop("Pre Setup Source Init");
   Timer_Stop("Source Init");
   Timer_Reduce("Source Init", (TimerKind)(MAX | MIN), comm_solver);
 
@@ -10952,6 +10961,10 @@ int main(int argc, char** argv) {
   }
   if (Timer_Exists("Pre Setup Output Init")) {
     Timer_Reduce("Pre Setup Output Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Source Init")) {
+    Timer_Reduce("Pre Setup Source Init", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
 

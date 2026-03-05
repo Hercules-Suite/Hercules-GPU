@@ -1491,15 +1491,14 @@ compute_point_source_strike_srfh (ptsrc_t* ps, int32_t iSrc, UTMZone_t* utmZone)
  *
  *
  */
-static void update_point_source_srfh (ptsrc_t *pointSource, int32_t isource, UTMZone_t* utmZone){
+static void update_point_source_srfh (ptsrc_t *pointSource, int32_t isource,
+                                                                            double precomputedStrike){
   int iTime;
 
   for(iTime=0; iTime < theNumberOfTimeSteps; iTime++)
     pointSource->displacement[iTime]=0.;
 
-  pointSource->strike =  theSourceStrikeArray[isource];
-
-  compute_point_source_strike_srfh(pointSource,isource,utmZone);
+    pointSource->strike = precomputedStrike;
 
 
   pointSource->dip    =  theSourceDipArray[isource];
@@ -3456,6 +3455,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     int32_t activeSourceCount = 0;
     int32_t* activeSourceList = NULL;
         int32_t* activeSourceElementIndex = NULL;
+    double* activeSourceStrike = NULL;
     octant_t** activeSourceOctant = NULL;
     vector3D_t* activeSourceDomainCoords = NULL;
         int32_t* cycleNodeCounts = NULL;
@@ -3503,12 +3503,15 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   activeSourceList = (int32_t*)malloc(sizeof(int32_t) * theNumberOfPointSources);
   activeSourceElementIndex =
       (int32_t*)malloc(sizeof(int32_t) * theNumberOfPointSources);
+  activeSourceStrike =
+      (double*)malloc(sizeof(double) * theNumberOfPointSources);
   activeSourceOctant =
       (octant_t**)malloc(sizeof(octant_t*) * theNumberOfPointSources);
   activeSourceDomainCoords =
       (vector3D_t*)malloc(sizeof(vector3D_t) * theNumberOfPointSources);
 
   if ((activeSourceList == NULL) || (activeSourceElementIndex == NULL) ||
+      (activeSourceStrike == NULL) ||
       (activeSourceOctant == NULL) ||
       (activeSourceDomainCoords == NULL)) {
       fprintf(stdout, "Err allocating active source cache\n");
@@ -3543,6 +3546,12 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     }
     activeSourceOctant[activeSourceCount] = octant;
     activeSourceDomainCoords[activeSourceCount] = pntSrc.domainCoords;
+        {
+            ptsrc_t strikeSrc;
+            strikeSrc.strike = theSourceStrikeArray[iSrc];
+            compute_point_source_strike_srfh(&strikeSrc, iSrc, utmZone);
+            activeSourceStrike[activeSourceCount] = strikeSrc.strike;
+        }
     activeSourceCount++;
     }
     iForce+=1;
@@ -3679,7 +3688,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
       octant = activeSourceOctant[iActive];
       pntSrc.domainCoords = activeSourceDomainCoords[iActive];
 
-      update_point_source_srfh(&pntSrc, iSrc, utmZone);
+    update_point_source_srfh(&pntSrc, iSrc, activeSourceStrike[iActive]);
 
       load_myForces_with_point_source(octant, &pntSrc,
                       is_force_in_processor, iCycle,
@@ -3735,6 +3744,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
     free(activeSourceList);
     free(activeSourceElementIndex);
+    free(activeSourceStrike);
     free(activeSourceOctant);
     free(activeSourceDomainCoords);
     free(cycleNodeCounts);
