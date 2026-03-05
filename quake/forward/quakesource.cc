@@ -3461,13 +3461,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
         int32_t* cycleNodeOffsets = NULL;
         int32_t* cycleNodeCursor = NULL;
         int32_t* cycleNodeList = NULL;
-        double sourcePrepassTime = 0.0;
-        double sourceUpdateTime = 0.0;
-        double sourceLoadTime = 0.0;
-        double sourceFillTime = 0.0;
-        double sourceFilterTime = 0.0;
-        double sourceWriteTime = 0.0;
-        double sourceFreeTime = 0.0;
 
   numStepsNecessary = theNumberOfTimeSteps;
 
@@ -3522,8 +3515,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   iForce=0;
   myNumberOfForces=0;
 
-    sourcePrepassTime = -MPI_Wtime();
-
   /* Go through the fault */
   for ( iSrc = 0; iSrc <theNumberOfPointSources ; iSrc++){
 
@@ -3547,7 +3538,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   }
 
   WAIT;
-    sourcePrepassTime += MPI_Wtime();
 
   if(myID == 0) fprintf(stdout, "\nTotal forces = %d ", iForce);
 
@@ -3675,56 +3665,42 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   for ( iCycle = 0; iCycle < myNumberOfCycles; iCycle++){
       for (iActive = 0; iActive < activeSourceCount; iActive++) {
       iSrc = activeSourceList[iActive];
-      if (is_forceinprocessor(iSrc, is_force_in_processor) == 1) {
-          octant = activeSourceOctant[iActive];
-          pntSrc.domainCoords = activeSourceDomainCoords[iActive];
+      octant = activeSourceOctant[iActive];
+      pntSrc.domainCoords = activeSourceDomainCoords[iActive];
 
-          sourceUpdateTime -= MPI_Wtime();
-          update_point_source_srfh(&pntSrc, iSrc, utmZone);
-          sourceUpdateTime += MPI_Wtime();
+      update_point_source_srfh(&pntSrc, iSrc, utmZone);
 
-          sourceLoadTime -= MPI_Wtime();
-          load_myForces_with_point_source(octant, &pntSrc,
-                          is_force_in_processor, iCycle,
-                          iSrc,
-                          -1);
-          sourceLoadTime += MPI_Wtime();
+      load_myForces_with_point_source(octant, &pntSrc,
+                      is_force_in_processor, iCycle,
+                      iSrc,
+                      -1);
 
-          if (myID == 0 && iCycle == 0) {
-          fprintf(fpdsrc, "%f %f %f %f %f %f %f %f\n",
-              pntSrc.domainCoords.x[0], pntSrc.domainCoords.x[1],
-              pntSrc.domainCoords.x[2], pntSrc.strike,
-              pntSrc.dip, pntSrc.rake, pntSrc.maxSlip,
-              pntSrc.delayTime);
-          }
+      if (myID == 0 && iCycle == 0) {
+      fprintf(fpdsrc, "%f %f %f %f %f %f %f %f\n",
+          pntSrc.domainCoords.x[0], pntSrc.domainCoords.x[1],
+          pntSrc.domainCoords.x[2], pntSrc.strike,
+          pntSrc.dip, pntSrc.rake, pntSrc.maxSlip,
+          pntSrc.delayTime);
       }
       }
 
-    sourceFillTime -= MPI_Wtime();
     fill_myForces_cycle(iCycle);
-    sourceFillTime += MPI_Wtime();
 
     if (theSourceIsFiltered == 1) {
-	sourceFilterTime -= MPI_Wtime();
 	filter_myForce();
-	sourceFilterTime += MPI_Wtime();
     }
 
     if(ActivePE){
     const int32_t* cycleNodes = cycleNodeList + cycleNodeOffsets[iCycle];
     int32_t cycleNodeOffset = cycleNodeOffsets[iCycle];
     int32_t cycleNodeCount = cycleNodeCounts[iCycle];
-	sourceWriteTime -= MPI_Wtime();
     write_myForces_cycle_direct(fptmpsrc, sourceDataStartOffset,
                                 totalLoadedNodeCount, cycleNodeOffset,
                                 cycleNodes, cycleNodeCount,
                                 cycleWriteBuffer);
-	sourceWriteTime += MPI_Wtime();
     }
 
-    sourceFreeTime -= MPI_Wtime();
     free_myForces();
-    sourceFreeTime += MPI_Wtime();
   }
 
   if (myID == 0) {	/* PE 0: close source description file */
@@ -3736,9 +3712,6 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   if (myID == 0) {
       printf( "done...%.2f s", theForceGenerationTime );
-      printf("\n SRFH breakdown: prepass=%.2f s update=%.2f s load=%.2f s fill=%.2f s filter=%.2f s write=%.2f s free=%.2f s",
-          sourcePrepassTime, sourceUpdateTime, sourceLoadTime,
-          sourceFillTime, sourceFilterTime, sourceWriteTime, sourceFreeTime);
       printf( "\n Concatenation process..." );
   }
 
