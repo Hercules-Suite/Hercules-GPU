@@ -7381,7 +7381,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
-  useWaitsome = (direction == SHARING || msgtag == AN_FORCE_MSG) ? 1 : 0;
+  useWaitsome = (direction == SHARING) ? 1 : 0;
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
