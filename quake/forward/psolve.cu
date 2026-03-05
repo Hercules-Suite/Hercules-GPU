@@ -92,6 +92,11 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+static int32_t* g_sparseResetStarts = NULL;
+static int32_t* g_sparseResetLengths = NULL;
+static int32_t g_sparseResetRangeCount = 0;
+static int32_t g_sparseResetTotalNodes = 0;
+static int32_t g_sparseResetSourceRangeCount = -1;
 static int32_t* g_adjustParentOffsets = NULL;
 static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
@@ -5300,7 +5305,18 @@ static void solver_delete() {
     free(g_sparseForcesHost);
     g_sparseForcesHost = NULL;
   }
+  if (g_sparseResetStarts != NULL) {
+    free(g_sparseResetStarts);
+    g_sparseResetStarts = NULL;
+  }
+  if (g_sparseResetLengths != NULL) {
+    free(g_sparseResetLengths);
+    g_sparseResetLengths = NULL;
+  }
   g_sparseNodeCapacity = 0;
+  g_sparseResetRangeCount = 0;
+  g_sparseResetTotalNodes = 0;
+  g_sparseResetSourceRangeCount = -1;
 
   compute_adjust_cache_free();
 
@@ -6247,13 +6263,121 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  int32_t rangeCount = topo_get_node_range_count();
-  const int32_t* rangeStarts = topo_get_node_range_starts();
-  const int32_t* rangeLengths = topo_get_node_range_lengths();
+  const int32_t fullResetNodeThreshold =
+      (int32_t)(0.35 * (double)Global.myMesh->nharbored);
+  const int32_t fullResetRangeThreshold = 2048;
 
-  for (int32_t i = 0; i < rangeCount; i++) {
-    int32_t start = rangeStarts[i];
-    int32_t len = rangeLengths[i];
+  int32_t srcCount = topo_get_node_range_count();
+  const int32_t* srcStarts = topo_get_node_range_starts();
+  const int32_t* srcLengths = topo_get_node_range_lengths();
+
+  if ((srcCount != g_sparseResetSourceRangeCount) ||
+      ((srcCount > 0) &&
+       ((g_sparseResetStarts == NULL) || (g_sparseResetLengths == NULL)))) {
+    int32_t* mergedStarts = NULL;
+    int32_t* mergedLengths = NULL;
+    int32_t mergedCount = 0;
+    int32_t mergedTotal = 0;
+
+    if (g_sparseResetStarts != NULL) {
+      free(g_sparseResetStarts);
+      g_sparseResetStarts = NULL;
+    }
+    if (g_sparseResetLengths != NULL) {
+      free(g_sparseResetLengths);
+      g_sparseResetLengths = NULL;
+    }
+    g_sparseResetRangeCount = 0;
+    g_sparseResetTotalNodes = 0;
+    g_sparseResetSourceRangeCount = srcCount;
+
+    if (srcCount > 0) {
+      mergedStarts = (int32_t*)malloc(sizeof(int32_t) * srcCount);
+      mergedLengths = (int32_t*)malloc(sizeof(int32_t) * srcCount);
+      if ((mergedStarts == NULL) || (mergedLengths == NULL)) {
+        free(mergedStarts);
+        free(mergedLengths);
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Failed allocating sparse reset plan arrays");
+      }
+
+      for (int32_t i = 0; i < srcCount; i++) {
+        int32_t start = srcStarts[i];
+        int32_t len = srcLengths[i];
+        int32_t end;
+
+        if (len <= 0) {
+          continue;
+        }
+
+        end = start + len;
+        if (mergedCount == 0) {
+          mergedStarts[0] = start;
+          mergedLengths[0] = len;
+          mergedCount = 1;
+          continue;
+        }
+
+        {
+          int32_t prevStart = mergedStarts[mergedCount - 1];
+          int32_t prevEnd = prevStart + mergedLengths[mergedCount - 1];
+          if (start <= prevEnd) {
+            if (end > prevEnd) {
+              mergedLengths[mergedCount - 1] = end - prevStart;
+            }
+          } else {
+            mergedStarts[mergedCount] = start;
+            mergedLengths[mergedCount] = len;
+            mergedCount++;
+          }
+        }
+      }
+
+      if (mergedCount > 0) {
+        g_sparseResetStarts = (int32_t*)malloc(sizeof(int32_t) * mergedCount);
+        g_sparseResetLengths = (int32_t*)malloc(sizeof(int32_t) * mergedCount);
+        if ((g_sparseResetStarts == NULL) || (g_sparseResetLengths == NULL)) {
+          free(mergedStarts);
+          free(mergedLengths);
+          free(g_sparseResetStarts);
+          free(g_sparseResetLengths);
+          g_sparseResetStarts = NULL;
+          g_sparseResetLengths = NULL;
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "Failed allocating sparse reset plan cache");
+        }
+
+        memcpy(g_sparseResetStarts, mergedStarts,
+               sizeof(int32_t) * mergedCount);
+        memcpy(g_sparseResetLengths, mergedLengths,
+               sizeof(int32_t) * mergedCount);
+        g_sparseResetRangeCount = mergedCount;
+
+        for (int32_t i = 0; i < mergedCount; i++) {
+          mergedTotal += g_sparseResetLengths[i];
+        }
+        g_sparseResetTotalNodes = mergedTotal;
+      }
+
+      free(mergedStarts);
+      free(mergedLengths);
+    }
+  }
+
+  if (g_sparseResetRangeCount <= 0) {
+    return;
+  }
+
+  if ((g_sparseResetTotalNodes >= fullResetNodeThreshold) ||
+      (g_sparseResetRangeCount >= fullResetRangeThreshold)) {
+    memset(solver->force, 0,
+           (size_t)Global.myMesh->nharbored * sizeof(fvector_t));
+    return;
+  }
+
+  for (int32_t i = 0; i < g_sparseResetRangeCount; i++) {
+    int32_t start = g_sparseResetStarts[i];
+    int32_t len = g_sparseResetLengths[i];
     memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
   }
 }
