@@ -8707,6 +8707,69 @@ static void print_timing_stat() {
              Timer_Value("Pre Solver Setup", AVERAGE),
              Timer_Value("Pre Solver Setup", MAX),
              Timer_Value("Pre Solver Setup", MIN));
+      if (Timer_Exists("Pre Setup Stations Init")) {
+        printf("      Pre Setup Stations Init     : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Stations Init", AVERAGE),
+               Timer_Value("Pre Setup Stations Init", MAX),
+               Timer_Value("Pre Setup Stations Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Topo Stations Init")) {
+        printf("      Pre Setup Topo Stations Init: %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Topo Stations Init", AVERAGE),
+               Timer_Value("Pre Setup Topo Stations Init", MAX),
+               Timer_Value("Pre Setup Topo Stations Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Planes Init")) {
+        printf("      Pre Setup Planes Init       : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Planes Init", AVERAGE),
+               Timer_Value("Pre Setup Planes Init", MAX),
+               Timer_Value("Pre Setup Planes Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Solver Init")) {
+        printf("      Pre Setup Solver Init       : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Solver Init", AVERAGE),
+               Timer_Value("Pre Setup Solver Init", MAX),
+               Timer_Value("Pre Setup Solver Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Nonlinear Init")) {
+        printf("      Pre Setup Nonlinear Init    : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Nonlinear Init", AVERAGE),
+               Timer_Value("Pre Setup Nonlinear Init", MAX),
+               Timer_Value("Pre Setup Nonlinear Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Topo Stats")) {
+        printf("      Pre Setup Topo Stats        : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Topo Stats", AVERAGE),
+               Timer_Value("Pre Setup Topo Stats", MAX),
+               Timer_Value("Pre Setup Topo Stats", MIN));
+      }
+      if (Timer_Exists("Pre Setup PlaneWaves Init")) {
+        printf("      Pre Setup PlaneWaves Init   : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup PlaneWaves Init", AVERAGE),
+               Timer_Value("Pre Setup PlaneWaves Init", MAX),
+               Timer_Value("Pre Setup PlaneWaves Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Damping/Stiffness Init")) {
+        printf("      Pre Setup Damping/Stiffness : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Damping/Stiffness Init", AVERAGE),
+               Timer_Value("Pre Setup Damping/Stiffness Init", MAX),
+               Timer_Value("Pre Setup Damping/Stiffness Init", MIN));
+      }
+      if (Timer_Exists("Pre Setup Output Init")) {
+        printf("      Pre Setup Output Init       : %.2f (Average)   %.2f (Max) %.2f "
+               "(Min) seconds\n",
+               Timer_Value("Pre Setup Output Init", AVERAGE),
+               Timer_Value("Pre Setup Output Init", MAX),
+               Timer_Value("Pre Setup Output Init", MIN));
+      }
     }
     if (Timer_Exists("Post Solver Finalize")) {
       printf("    Post Solver Finalize           : %.2f (Average)   %.2f (Max) %.2f "
@@ -10763,27 +10826,37 @@ int main(int argc, char** argv) {
   Timer_Start("Pre Solver Setup");
 
   if (Param.theNumberOfStations != 0) {
+    Timer_Start("Pre Setup Stations Init");
     output_stations_init(Param.parameters_input_file);
+    Timer_Stop("Pre Setup Stations Init");
   }
 
   /* include additional info for topo stations */
 
   if ((Param.includeTopography == YES) && (Param.theNumberOfStations != 0))
+    Timer_Start("Pre Setup Topo Stations Init");
+  if ((Param.includeTopography == YES) && (Param.theNumberOfStations != 0)) {
     topography_stations_init(Global.myMesh, Param.myStations,
                              Param.myNumberOfStations);
+    Timer_Stop("Pre Setup Topo Stations Init");
+  }
 
   /* Initialize the output planes */
   if (Param.theNumberOfPlanes != 0) {
+    Timer_Start("Pre Setup Planes Init");
     planes_setup(Global.myID, &Param.thePlanePrintRate, Param.thePlaneDirOut,
                  Param.IO_pool_pe_count, Param.theNumberOfPlanes,
                  Param.parameters_input_file, get_surface_shift(),
                  Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
                  Param.theDomainX, Param.theDomainY, Param.theDomainZ,
                  Param.planes_input_file, &Param.utmZone);
+    Timer_Stop("Pre Setup Planes Init");
   }
 
   /* Initialize the solver, source and output structures */
+  Timer_Start("Pre Setup Solver Init");
   solver_init();
+  Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");
   solver_printstat(Global.mySolver);
   Timer_Stop("Solver Stats Print");
@@ -10791,20 +10864,27 @@ int main(int argc, char** argv) {
 
   /* Initialize nonlinear solver analysis structures */
   if (Param.includeNonlinearAnalysis == YES) {
+    Timer_Start("Pre Setup Nonlinear Init");
     nonlinear_solver_init(Global.myID, Global.myMesh, Param.theDomainZ);
     if (Param.theNumberOfStations != 0) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,
                               Param.myNumberOfStations);
     }
     nonlinear_stats(Global.myID, Global.theGroupSize);
+    Timer_Stop("Pre Setup Nonlinear Init");
   }
 
   /* include additional info for topo stations */
-  if (Param.includeTopography == YES)
+  if (Param.includeTopography == YES) {
+    Timer_Start("Pre Setup Topo Stats");
     topo_stats(Global.myID, Global.theGroupSize, Param.theTopoStatFilename);
+    Timer_Stop("Pre Setup Topo Stats");
+  }
 
   if (Param.includeIncidentPlaneWaves == YES) {
+    Timer_Start("Pre Setup PlaneWaves Init");
     PlaneWaves_solver_init(Global.myID, Global.myMesh, Global.mySolver);
+    Timer_Stop("Pre Setup PlaneWaves Init");
   }
 
   Timer_Start("Source Init");
@@ -10817,22 +10897,65 @@ int main(int argc, char** argv) {
    * \TODO a more clever way should be possible
    */
   if (Param.theTypeOfDamping < BKT)
+    Timer_Start("Pre Setup Damping/Stiffness Init");
+  if (Param.theTypeOfDamping < BKT) {
     stiffness_init(
         Global.myID,
         Global.myMesh,
         Global.mySolver);
+  }
   // initialize linear elements only for Rayleigh damping
-  else
+  else {
     damp_init(Global.myID, Global.myMesh);
+  }
+  Timer_Stop("Pre Setup Damping/Stiffness Init");
 
   /* this is a little too late to check for output parameters,
    * but let's do this in the mean time
    */
+  Timer_Start("Pre Setup Output Init");
   output_init(Param.parameters_input_file, &Param.theOutputParameters);
+  Timer_Stop("Pre Setup Output Init");
 
   Timer_Stop("Pre Solver Setup");
   Timer_Reduce("Pre Solver Setup", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
+  if (Timer_Exists("Pre Setup Stations Init")) {
+    Timer_Reduce("Pre Setup Stations Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Topo Stations Init")) {
+    Timer_Reduce("Pre Setup Topo Stations Init",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Planes Init")) {
+    Timer_Reduce("Pre Setup Planes Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Solver Init")) {
+    Timer_Reduce("Pre Setup Solver Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Nonlinear Init")) {
+    Timer_Reduce("Pre Setup Nonlinear Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Topo Stats")) {
+    Timer_Reduce("Pre Setup Topo Stats", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup PlaneWaves Init")) {
+    Timer_Reduce("Pre Setup PlaneWaves Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Damping/Stiffness Init")) {
+    Timer_Reduce("Pre Setup Damping/Stiffness Init",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Pre Setup Output Init")) {
+    Timer_Reduce("Pre Setup Output Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
 
   /* Run the solver and output the results */
   Timer_Start("Phase Sync/Coordination");
