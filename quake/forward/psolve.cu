@@ -92,6 +92,19 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+typedef struct mesh_elem_index_entry_t {
+  int8_t level;
+  tick_t lx;
+  tick_t ly;
+  tick_t lz;
+  int32_t eindex;
+} mesh_elem_index_entry_t;
+
+static mesh_elem_index_entry_t* g_loadedElemIndex = NULL;
+static int32_t g_loadedElemIndexCount = 0;
+static int32_t g_loadedElemMinLevel = PIXELLEVEL;
+static int32_t g_loadedElemMaxLevel = 0;
+
 static int32_t* g_adjustParentOffsets = NULL;
 static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
@@ -230,6 +243,9 @@ static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
 static void mesh_correct_properties(etree_t* cvm);
 static void mesh_loaded_deallocate(mesh_t* mesh);
+static void mesh_loaded_build_search_index(const mesh_t* mesh);
+static int32_t mesh_loaded_find_element(tick_t xTick, tick_t yTick,
+                                        tick_t zTick);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -3149,6 +3165,101 @@ static int mesh_cmp_owner_req(const void* a, const void* b) {
   return 0;
 }
 
+static int mesh_cmp_elem_index_entry(const void* a, const void* b) {
+  const mesh_elem_index_entry_t* lhs = (const mesh_elem_index_entry_t*)a;
+  const mesh_elem_index_entry_t* rhs = (const mesh_elem_index_entry_t*)b;
+
+  if (lhs->level < rhs->level) return -1;
+  if (lhs->level > rhs->level) return 1;
+  if (lhs->lx < rhs->lx) return -1;
+  if (lhs->lx > rhs->lx) return 1;
+  if (lhs->ly < rhs->ly) return -1;
+  if (lhs->ly > rhs->ly) return 1;
+  if (lhs->lz < rhs->lz) return -1;
+  if (lhs->lz > rhs->lz) return 1;
+  return 0;
+}
+
+static void mesh_loaded_build_search_index(const mesh_t* mesh) {
+  int32_t eindex;
+
+  free(g_loadedElemIndex);
+  g_loadedElemIndex = NULL;
+  g_loadedElemIndexCount = 0;
+  g_loadedElemMinLevel = PIXELLEVEL;
+  g_loadedElemMaxLevel = 0;
+
+  if (mesh == NULL || mesh->lenum <= 0) {
+    return;
+  }
+
+  g_loadedElemIndex =
+      (mesh_elem_index_entry_t*)calloc(mesh->lenum, sizeof(mesh_elem_index_entry_t));
+  if (g_loadedElemIndex == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "out of memory allocating loaded mesh search index");
+  }
+
+  g_loadedElemIndexCount = mesh->lenum;
+  for (eindex = 0; eindex < mesh->lenum; eindex++) {
+    int32_t lnid0 = mesh->elemTable[eindex].lnid[0];
+    mesh_elem_index_entry_t* ent = &g_loadedElemIndex[eindex];
+
+    ent->level = mesh->elemTable[eindex].level;
+    ent->lx = mesh->nodeTable[lnid0].x;
+    ent->ly = mesh->nodeTable[lnid0].y;
+    ent->lz = mesh->nodeTable[lnid0].z;
+    ent->eindex = eindex;
+
+    if (ent->level < g_loadedElemMinLevel) g_loadedElemMinLevel = ent->level;
+    if (ent->level > g_loadedElemMaxLevel) g_loadedElemMaxLevel = ent->level;
+  }
+
+  qsort(g_loadedElemIndex, g_loadedElemIndexCount, sizeof(mesh_elem_index_entry_t),
+        mesh_cmp_elem_index_entry);
+}
+
+static int32_t mesh_loaded_find_element(tick_t xTick, tick_t yTick,
+                                        tick_t zTick) {
+  int32_t level;
+
+  if (g_loadedElemIndex == NULL || g_loadedElemIndexCount <= 0) {
+    return -1;
+  }
+
+  for (level = g_loadedElemMaxLevel; level >= g_loadedElemMinLevel; level--) {
+    int32_t lo = 0;
+    int32_t hi = g_loadedElemIndexCount - 1;
+    tick_t edge = (tick_t)1 << (PIXELLEVEL - level);
+    tick_t lx = (xTick / edge) * edge;
+    tick_t ly = (yTick / edge) * edge;
+    tick_t lz = (zTick / edge) * edge;
+
+    while (lo <= hi) {
+      int32_t mid = lo + (hi - lo) / 2;
+      const mesh_elem_index_entry_t* ent = &g_loadedElemIndex[mid];
+
+      if (ent->level < level ||
+          (ent->level == level &&
+           (ent->lx < lx || (ent->lx == lx &&
+                             (ent->ly < ly ||
+                              (ent->ly == ly && ent->lz < lz)))))) {
+        lo = mid + 1;
+      } else if (ent->level > level ||
+                 (ent->level == level &&
+                  (ent->lx > lx || (ent->lx == lx &&
+                                    (ent->ly > ly ||
+                                     (ent->ly == ly && ent->lz > lz)))))) {
+        hi = mid - 1;
+      } else {
+        return ent->eindex;
+      }
+    }
+  }
+
+  return -1;
+}
+
 static int32_t mesh_owner_rank_for_element(int64_t geid, int64_t totalElems,
                                            int32_t groupSize) {
   int64_t owner;
@@ -3279,6 +3390,10 @@ static void mesh_loaded_deallocate(mesh_t* mesh) {
   if (mesh == NULL) {
     return;
   }
+
+  free(g_loadedElemIndex);
+  g_loadedElemIndex = NULL;
+  g_loadedElemIndexCount = 0;
 
   if (mesh->elemTable != NULL) {
     for (i = 0; i < mesh->lenum; i++) {
@@ -4137,6 +4252,7 @@ static void mesh_load_from_etree() {
   free(nodeUsers);
 
   Global.myMesh = mesh;
+  mesh_loaded_build_search_index(mesh);
   Global.meshLoadedFromEtree = 1;
 }
 
@@ -11083,27 +11199,24 @@ int32_t search_point(vector3D_t point, octant_t** octant) {
     yTick = point.x[1] / Global.myMesh->ticksize;
     zTick = point.x[2] / Global.myMesh->ticksize;
 
-    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    eindex = mesh_loaded_find_element(xTick, yTick, zTick);
+    if (eindex >= 0) {
       int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
       tick_t lx = Global.myMesh->nodeTable[lnid0].x;
       tick_t ly = Global.myMesh->nodeTable[lnid0].y;
       tick_t lz = Global.myMesh->nodeTable[lnid0].z;
-      tick_t edge = (tick_t)1 << (PIXELLEVEL - Global.myMesh->elemTable[eindex].level);
 
-      if (xTick >= lx && xTick <= lx + edge && yTick >= ly && yTick <= ly + edge &&
-          zTick >= lz && zTick <= lz + edge) {
-        loaded_octant.type = LEAF;
-        loaded_octant.where = LOCAL;
-        loaded_octant.which = 0;
-        loaded_octant.level = Global.myMesh->elemTable[eindex].level;
-        loaded_octant.lx = lx;
-        loaded_octant.ly = ly;
-        loaded_octant.lz = lz;
-        loaded_octant.parent = NULL;
-        loaded_octant.appdata = NULL;
-        *octant = &loaded_octant;
-        return 1;
-      }
+      loaded_octant.type = LEAF;
+      loaded_octant.where = LOCAL;
+      loaded_octant.which = 0;
+      loaded_octant.level = Global.myMesh->elemTable[eindex].level;
+      loaded_octant.lx = lx;
+      loaded_octant.ly = ly;
+      loaded_octant.lz = lz;
+      loaded_octant.parent = NULL;
+      loaded_octant.appdata = NULL;
+      *octant = &loaded_octant;
+      return 1;
     }
 
     return 0;
