@@ -3542,38 +3542,124 @@ static void mesh_load_from_etree() {
     }
 
     if (owner == Global.myID) {
-      int32link_t* first = NULL;
-      int32link_t* tail = NULL;
-
       mesh->nodeTable[i].ismine = 1;
       mesh->lnnum++;
-
-      for (r = 0; r < Global.theGroupSize; r++) {
-        if (r == Global.myID) {
-          continue;
-        }
-        if (nodeUsers[i * Global.theGroupSize + r]) {
-          int32link_t* link = (int32link_t*)malloc(sizeof(int32link_t));
-          if (link == NULL) {
-            solver_abort(__FUNCTION_NAME, NULL,
-                         "out of memory allocating share list");
-          }
-          link->id = r;
-          link->next = NULL;
-          if (first == NULL) {
-            first = link;
-            tail = link;
-          } else {
-            tail->next = link;
-            tail = link;
-          }
-        }
-      }
-      mesh->nodeTable[i].proc.share = first;
+      mesh->nodeTable[i].proc.share = NULL;
     } else {
       mesh->nodeTable[i].ismine = 0;
       mesh->nodeTable[i].proc.ownerid = owner;
     }
+  }
+
+  {
+    int32_t* sendCounts =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvCounts =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendDispls =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* recvDispls =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t* sendCursor =
+        (int32_t*)calloc(Global.theGroupSize, sizeof(int32_t));
+    int32_t sendTotal = 0;
+    int32_t recvTotal = 0;
+    int64_t* sendBuf;
+    int64_t* recvBuf;
+    int32_t r;
+
+    if ((sendCounts == NULL) || (recvCounts == NULL) || (sendDispls == NULL) ||
+        (recvDispls == NULL) || (sendCursor == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating owner-share exchange tables");
+    }
+
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (!mesh->nodeTable[i].ismine) {
+        int32_t owner = mesh->nodeTable[i].proc.ownerid;
+        if (owner >= 0 && owner < Global.theGroupSize) {
+          sendCounts[owner]++;
+        }
+      }
+    }
+
+    MPI_Alltoall(sendCounts, 1, MPI_INT, recvCounts, 1, MPI_INT, comm_solver);
+
+    for (r = 0; r < Global.theGroupSize; r++) {
+      sendDispls[r] = sendTotal;
+      recvDispls[r] = recvTotal;
+      sendTotal += sendCounts[r];
+      recvTotal += recvCounts[r];
+    }
+
+    sendBuf = (int64_t*)calloc(sendTotal, sizeof(int64_t));
+    recvBuf = (int64_t*)calloc(recvTotal, sizeof(int64_t));
+    if ((sendBuf == NULL && sendTotal > 0) || (recvBuf == NULL && recvTotal > 0)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "out of memory allocating owner-share exchange buffers");
+    }
+
+    memcpy(sendCursor, sendDispls, sizeof(int32_t) * Global.theGroupSize);
+
+    for (i = 0; i < mesh->nharbored; i++) {
+      if (!mesh->nodeTable[i].ismine) {
+        int32_t owner = mesh->nodeTable[i].proc.ownerid;
+        int32_t idx = sendCursor[owner]++;
+        sendBuf[idx] = mesh->nodeTable[i].gnid;
+      }
+    }
+
+    MPI_Alltoallv(sendBuf, sendCounts, sendDispls, MPI_LONG_LONG_INT, recvBuf,
+                  recvCounts, recvDispls, MPI_LONG_LONG_INT, comm_solver);
+
+    for (r = 0; r < Global.theGroupSize; r++) {
+      int32_t start = recvDispls[r];
+      int32_t end = start + recvCounts[r];
+      int32_t idx;
+
+      for (idx = start; idx < end; idx++) {
+        int32_t lnid =
+            mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, recvBuf[idx]);
+
+        if (lnid < 0 || !mesh->nodeTable[lnid].ismine) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "owner-share registration for unknown/non-owned gnid=%" INT64_FMT
+                       " from rank %d",
+                       recvBuf[idx], r);
+        }
+
+        {
+          int32link_t* p = mesh->nodeTable[lnid].proc.share;
+          int found = 0;
+          while (p != NULL) {
+            if (p->id == r) {
+              found = 1;
+              break;
+            }
+            p = p->next;
+          }
+
+          if (!found) {
+            int32link_t* link = (int32link_t*)malloc(sizeof(int32link_t));
+            if (link == NULL) {
+              solver_abort(__FUNCTION_NAME, NULL,
+                           "out of memory allocating owner share link");
+            }
+            link->id = r;
+            link->next = mesh->nodeTable[lnid].proc.share;
+            mesh->nodeTable[lnid].proc.share = link;
+          }
+        }
+      }
+    }
+
+    free(sendCounts);
+    free(recvCounts);
+    free(sendDispls);
+    free(recvDispls);
+    free(sendCursor);
+    free(sendBuf);
+    free(recvBuf);
   }
 
   coordIndex = (mesh_coord_index_t*)calloc(mesh->nharbored,
