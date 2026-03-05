@@ -1142,6 +1142,7 @@ int topo_crossings ( double xo, double yo, double zo, double esize ) {
 
     int i,j,k, np=5, air_flag=0, mat_flag=0, cnt_top=0, cnt_bott=0;
     double xp, yp, zp, dist;
+    double surfElev[5][5];
 
 
     if ( esize == 0 ) {
@@ -1193,6 +1194,7 @@ int topo_crossings ( double xo, double yo, double zo, double esize ) {
         for ( j = 0; j < np; ++j ) {
             yp = yo + Del * j;
             zp = point_elevation ( xp, yp );
+            surfElev[i][j] = zp;
 
             if ( ( zp > zo ) && ( zp < (zo + esize) ) ) {
                 return 1; /* crossing found it */
@@ -1218,12 +1220,8 @@ int topo_crossings ( double xo, double yo, double zo, double esize ) {
         zp = zo + Del * i;
 
         for ( j = 0; j < np; ++j ) {
-            xp = xo + Del * j;
-
             for ( k = 0; k < np; ++k ) {
-                yp = yo + Del * k;
-
-                dist = point_PlaneDist( xp, yp, zp );
+                dist = surfElev[j][k] - zp;
 
                 if ( ( dist > 0 ) && air_flag == 0 ) {
                     air_flag = 1;
@@ -1831,6 +1829,8 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     double *cachedTetraVol = NULL;
     int32_t *cachedCubePart = NULL;
     char *isTopoNode;
+    const double domainLongNs = theDomainLong_ns;
+    const double domainLongEw = theDomainLong_ew;
 
     if (myTopoElementsMapping != NULL) {
         free(myTopoElementsMapping);
@@ -1884,9 +1884,10 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
             zo = (node0dat->z) * (myMesh->ticksize);
             esize = edata->edgesize;
 
-            if ((Vp != -1) && (topo_crossings(xo, yo, zo, esize) == 1) &&
-                (xo != 0.0) && (xo + esize != theDomainLong_ns) &&
-                (yo != 0.0) && (yo + esize != theDomainLong_ew)) {
+            if ((Vp != -1) &&
+                (xo != 0.0) && (xo + esize != domainLongNs) &&
+                (yo != 0.0) && (yo + esize != domainLongEw) &&
+                (topo_crossings(xo, yo, zo, esize) == 1)) {
                 if (theTopoMethod == VT) {
                     TetraHVol_2(xo, yo, zo, esize, aux_vol, &aux_int);
                     if ((aux_vol[0] == 0.0) && (aux_vol[1] == 0.0) &&
