@@ -137,7 +137,15 @@ typedef struct corner_ref_t corner_ref_t;
  */
 struct mdata_t {
     int64_t nid[8];
-    float edgesize, Vp, Vs, rho;
+    float edgesize, Vp, Vs, rho,
+          a0_shear, a1_shear, a2_shear,
+          a0_kappa, a1_kappa, a2_kappa,
+          g0_shear, g1_shear, g2_shear,
+          g0_kappa, g1_kappa, g2_kappa,
+          b_shear, b_kappa, sigma_0;
+    int   topoBkt;
+    int32_t topo_eindex;
+    double nl_id;
 };
 
 typedef struct mdata_t mdata_t;

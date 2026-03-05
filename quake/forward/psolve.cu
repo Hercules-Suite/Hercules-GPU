@@ -492,6 +492,7 @@ static struct Param_t {
   int theUseCheckPoint;
   char theCheckPointingDirOut[256];
   noyesflag_t storeMeshCoordinatesForMatlab;
+  int theMeshOnlyMode;
   double the4DOutSize;
   int theMeshOutFlag;
   char theCVMFlatFile[128];
@@ -549,6 +550,7 @@ static struct Param_t {
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
            .theUseCheckPoint = 0,
+           .theMeshOnlyMode = 0,
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .useProfile = NO,
@@ -687,7 +689,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  31 /* Must adjust this if adding int params */
+  32 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -793,6 +795,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[28] = (int)Param.basinYCount;
   int_message[29] = (int)Param.basinZCount;
   int_message[30] = (int)Param.threeDVelocityModel;
+  int_message[31] = Param.theMeshOnlyMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -828,6 +831,7 @@ static void read_parameters(int argc, char** argv) {
   Param.basinYCount = int_message[28];
   Param.basinZCount = int_message[29];
   Param.threeDVelocityModel = (noyesflag_t)int_message[30];
+  Param.theMeshOnlyMode = int_message[31];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1265,6 +1269,7 @@ static int32_t parse_parameters(const char* numericalin) {
             &stiffness_calculation_method);
 
   hu_config_get_int_opt(fp, "output_mesh", &Param.theMeshOutFlag);
+  hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
   hu_config_get_int_opt(fp, "enable_timing_barriers",
                         &Param.theTimingBarriersFlag);
   hu_config_get_int_opt(fp, "forces_buffer_size", &theForcesBufferSize);
@@ -11557,6 +11562,61 @@ int main(int argc, char** argv) {
                   Global.theGroupSize, Param.theMeshStatFilename);
   Timer_Stop("Mesh Stats Print");
   Timer_Reduce("Mesh Stats Print", (TimerKind)(MAX | MIN), comm_solver);
+
+  if (Param.theMeshOnlyMode != 0) {
+    if (Global.myID == 0) {
+      printf("Mesh-only mode enabled: skipping solver phase after meshing.\n");
+    }
+
+    Timer_Stop("Total Wall Clock");
+    Timer_Reduce("Total Wall Clock", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Newtree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Refinetree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Balancetree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Partitiontree", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Octor Extractmesh", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+    Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+
+    if (Timer_Exists("Global Init")) {
+      Timer_Reduce("Global Init", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Drm Init")) {
+      Timer_Reduce("Drm Init", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Topography Solver Init")) {
+      Timer_Reduce("Topography Solver Init", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+    if (Timer_Exists("Mesh Out")) {
+      Timer_Reduce("Mesh Out", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+    }
+
+    if (Global.myID == 0) {
+      printf("Mesh-only mode complete.\n");
+    }
+
+    if (Global.myOctree != NULL) {
+      octor_deletetree(Global.myOctree);
+      Global.myOctree = NULL;
+    }
+    if (Global.myMesh != NULL) {
+      octor_deletemesh(Global.myMesh);
+      Global.myMesh = NULL;
+    }
+
+    MPI_Finalize();
+    return 0;
+  }
 
   Timer_Start("Pre Solver Setup");
 
