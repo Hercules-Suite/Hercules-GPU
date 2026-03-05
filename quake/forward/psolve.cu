@@ -10833,9 +10833,8 @@ int main(int argc, char** argv) {
 
   /* include additional info for topo stations */
 
-  if ((Param.includeTopography == YES) && (Param.theNumberOfStations != 0))
-    Timer_Start("Pre Setup Topo Stations Init");
   if ((Param.includeTopography == YES) && (Param.theNumberOfStations != 0)) {
+    Timer_Start("Pre Setup Topo Stations Init");
     topography_stations_init(Global.myMesh, Param.myStations,
                              Param.myNumberOfStations);
     Timer_Stop("Pre Setup Topo Stations Init");
@@ -10896,8 +10895,7 @@ int main(int argc, char** argv) {
    * This is for compatibility with nonlinear
    * \TODO a more clever way should be possible
    */
-  if (Param.theTypeOfDamping < BKT)
-    Timer_Start("Pre Setup Damping/Stiffness Init");
+  Timer_Start("Pre Setup Damping/Stiffness Init");
   if (Param.theTypeOfDamping < BKT) {
     stiffness_init(
         Global.myID,
