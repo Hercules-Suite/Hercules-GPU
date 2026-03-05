@@ -251,6 +251,8 @@ static void mesh_topology_snapshot_write(const char* fname);
 static void mesh_topology_snapshot_apply(mesh_t* mesh,
                                          const mesh_node_build_t* nodeBuild,
                                          const char* fname);
+static int32_t mesh_find_lnid_by_gnid(const mesh_node_build_t* nodes,
+                                      int32_t nodeCount, int64_t gnid);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -3608,7 +3610,6 @@ static void mesh_topology_snapshot_apply(mesh_t* mesh,
     if (shrunk != NULL) {
       mesh->dnodeTable = shrunk;
     }
-  }
   }
 
   free(records);
