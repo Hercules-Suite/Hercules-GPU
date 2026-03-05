@@ -150,6 +150,12 @@ static double g_recvMsgsAnDispAvg = 0.0;
 static double g_recvMsgsDnDispMin = 0.0;
 static double g_recvMsgsDnDispMax = 0.0;
 static double g_recvMsgsDnDispAvg = 0.0;
+static double g_dispComputeMin = 0.0;
+static double g_dispComputeMax = 0.0;
+static double g_dispComputeAvg = 0.0;
+static double g_fixedbaseLoadMin = 0.0;
+static double g_fixedbaseLoadMax = 0.0;
+static double g_fixedbaseLoadAvg = 0.0;
 static int g_waitRecvTopRanks[3] = {-1, -1, -1};
 static double g_waitRecvTopVals[3] = {0.0, 0.0, 0.0};
 static int g_adjustTopRanks[3] = {-1, -1, -1};
@@ -6478,10 +6484,10 @@ static void solver_collect_imbalance_stats(void) {
   int32_t nranks = Global.theGroupSize;
   int32_t rank;
   int top;
-  double localVals[15];
-  double minVals[15];
-  double maxVals[15];
-  double sumVals[15];
+  double localVals[17];
+  double minVals[17];
+  double maxVals[17];
+  double sumVals[17];
   double localTopVals[2];
   double* gatheredTopVals = NULL;
   double depsTotal = 0.0;
@@ -6493,6 +6499,8 @@ static void solver_collect_imbalance_stats(void) {
   double recvMsgsAnForce = 0.0;
   double recvMsgsAnDisp = 0.0;
   double recvMsgsDnDisp = 0.0;
+  double dispComputeTime = 0.0;
+  double fixedbaseLoadTime = 0.0;
 
   if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
@@ -6528,6 +6536,13 @@ static void solver_collect_imbalance_stats(void) {
   if (Timer_Exists("Schedule Wait Recv")) {
     waitRecvTime = Timer_Value("Schedule Wait Recv", (TimerKind)0);
   }
+  if (Timer_Exists("Compute new displacement")) {
+    dispComputeTime = Timer_Value("Compute new displacement", (TimerKind)0);
+  }
+  if (Timer_Exists("Load fixedbase displacements")) {
+    fixedbaseLoadTime =
+        Timer_Value("Load fixedbase displacements", (TimerKind)0);
+  }
   if (Timer_Exists("1st compute adjust (distribution)")) {
     adjustTotalTime +=
         Timer_Value("1st compute adjust (distribution)", (TimerKind)0);
@@ -6546,6 +6561,8 @@ static void solver_collect_imbalance_stats(void) {
   localVals[12] = recvMsgsAnForce;
   localVals[13] = recvMsgsAnDisp;
   localVals[14] = recvMsgsDnDisp;
+  localVals[15] = dispComputeTime;
+  localVals[16] = fixedbaseLoadTime;
 
   localTopVals[0] = waitRecvTime;
   localTopVals[1] = adjustTotalTime;
@@ -6559,9 +6576,9 @@ static void solver_collect_imbalance_stats(void) {
     }
   }
 
-  MPI_Reduce(localVals, minVals, 15, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-  MPI_Reduce(localVals, maxVals, 15, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
-  MPI_Reduce(localVals, sumVals, 15, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(localVals, minVals, 17, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(localVals, maxVals, 17, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(localVals, sumVals, 17, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
   MPI_Gather(localTopVals, 2, MPI_DOUBLE, gatheredTopVals, 2, MPI_DOUBLE, 0,
              comm_solver);
 
@@ -6629,6 +6646,14 @@ static void solver_collect_imbalance_stats(void) {
     g_recvMsgsDnDispMin = minVals[14];
     g_recvMsgsDnDispMax = maxVals[14];
     g_recvMsgsDnDispAvg = sumVals[14] / nranks;
+
+    g_dispComputeMin = minVals[15];
+    g_dispComputeMax = maxVals[15];
+    g_dispComputeAvg = sumVals[15] / nranks;
+
+    g_fixedbaseLoadMin = minVals[16];
+    g_fixedbaseLoadMax = maxVals[16];
+    g_fixedbaseLoadAvg = sumVals[16] / nranks;
 
     for (top = 0; top < 3; top++) {
       g_waitRecvTopRanks[top] = -1;
@@ -6749,6 +6774,10 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Disp postcopy sync wait")) {
     Timer_Reduce("Disp postcopy sync wait", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+  if (Timer_Exists("Load fixedbase displacements")) {
+    Timer_Reduce("Load fixedbase displacements",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
@@ -6935,7 +6964,9 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
     solver_geostatic_fix(step);
+    Timer_Start("Load fixedbase displacements");
     solver_load_fixedbase_displacements(Global.mySolver, step);
+    Timer_Stop("Load fixedbase displacements");
     Timer_Stop("Compute Physics");
 
     Timer_Start("Communication");
@@ -9147,6 +9178,12 @@ static void print_timing_stat() {
     printf(
       "  Recv msgs DN disp          : %.1f (Avg) %.1f (Min) %.1f (Max)\n",
       g_recvMsgsDnDispAvg, g_recvMsgsDnDispMin, g_recvMsgsDnDispMax);
+    printf(
+      "Pre-comm Compute disp/rank   : %.2f (Avg) %.2f (Min) %.2f (Max) s\n",
+      g_dispComputeAvg, g_dispComputeMin, g_dispComputeMax);
+    printf(
+      "Pre-comm Fixedbase load/rank : %.2f (Avg) %.2f (Min) %.2f (Max) s\n",
+      g_fixedbaseLoadAvg, g_fixedbaseLoadMin, g_fixedbaseLoadMax);
     printf(
       "Compute adjust total/rank    : %.2f (Avg) %.2f (Min) %.2f (Max) s "
       "[%.2fx skew]\n",
