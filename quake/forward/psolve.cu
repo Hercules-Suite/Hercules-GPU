@@ -8519,6 +8519,11 @@ static void print_timing_stat() {
     OtherPhasesTimeMax += Timer_Value("Post Solver Finalize", MAX);
   }
 
+  if (Timer_Exists("Phase Sync/Coordination")) {
+    OtherPhasesTime += Timer_Value("Phase Sync/Coordination", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Phase Sync/Coordination", MAX);
+  }
+
   if (Timer_Exists("Init Drm Parameters")) {
     OtherPhasesTime += Timer_Value("Init Drm Parameters", (TimerKind)0);
     OtherPhasesTimeMax += Timer_Value("Init Drm Parameters", MAX);
@@ -8693,6 +8698,13 @@ static void print_timing_stat() {
              Timer_Value("Post Solver Finalize", AVERAGE),
              Timer_Value("Post Solver Finalize", MAX),
              Timer_Value("Post Solver Finalize", MIN));
+    }
+    if (Timer_Exists("Phase Sync/Coordination")) {
+      printf("    Phase Sync/Coordination        : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Phase Sync/Coordination", AVERAGE),
+             Timer_Value("Phase Sync/Coordination", MAX),
+             Timer_Value("Phase Sync/Coordination", MIN));
     }
     if (Timer_Exists("Init Drm Parameters")) {
       printf("    Init Drm Parameters            : %.2f (Average)   %.2f (Max) %.2f "
@@ -10519,7 +10531,9 @@ int main(int argc, char** argv) {
   /* MPI initialization */
   MPI_Init(&argc, &argv);
   Timer_Start("Total Wall Clock");
+  Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(MPI_COMM_WORLD);
+  Timer_Stop("Phase Sync/Coordination");
   MPI_Comm_rank(MPI_COMM_WORLD, &Global.myID);
   MPI_Comm_size(MPI_COMM_WORLD, &Global.theGroupSize);
 
@@ -10760,11 +10774,15 @@ int main(int argc, char** argv) {
                comm_solver);
 
   /* Run the solver and output the results */
+  Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(comm_solver);
+  Timer_Stop("Phase Sync/Coordination");
   Timer_Start("Solver");
   solver_run();
   Timer_Stop("Solver");
+  Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(comm_solver);
+  Timer_Stop("Phase Sync/Coordination");
 
   Timer_Start("Post Solver Finalize");
 
@@ -10797,7 +10815,9 @@ int main(int argc, char** argv) {
   Timer_Reduce("Post Solver Finalize", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
 
+  Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(comm_solver);
+  Timer_Stop("Phase Sync/Coordination");
   Timer_Stop("Total Wall Clock");
 
   Timer_Reduce("Octor Newtree", (TimerKind)(MAX | MIN | AVERAGE),
@@ -10813,6 +10833,10 @@ int main(int argc, char** argv) {
   Timer_Reduce("Mesh correct properties", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
   Timer_Reduce("Solver", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  if (Timer_Exists("Phase Sync/Coordination")) {
+    Timer_Reduce("Phase Sync/Coordination", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   if (Timer_Exists("Carve Buildings")) {
     Timer_Reduce("Carve Buildings", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
