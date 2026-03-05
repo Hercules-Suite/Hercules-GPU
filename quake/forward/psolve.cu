@@ -7478,7 +7478,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       waitRecvStart = MPI_Wtime();
     }
 
-    Timer_Start("Schedule Unpack Incoming");
     while (remaining > 0) {
       int doneidx;
       MPI_Status status;
@@ -7491,11 +7490,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         break;
       }
 
+      Timer_Start("Schedule Unpack Incoming");
       schedule_unpack_incoming_message(recv_order[doneidx], valuetable,
                                        itemsperentry, direction);
+      Timer_Stop("Schedule Unpack Incoming");
       remaining--;
     }
-    Timer_Stop("Schedule Unpack Incoming");
 
     if (waitStage >= 0) {
       g_waitRecvStageLocal[waitStage] += (MPI_Wtime() - waitRecvStart);
