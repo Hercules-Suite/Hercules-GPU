@@ -194,8 +194,7 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
                              int32_t s_insize);
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
-                              int32_t msgtag,
-                              int32_t overlap_local_adjust_how);
+                              int32_t msgtag);
 static int schedule_print(schedule_t* sched, char type, FILE* out);
 static int schedule_print_detail(schedule_t* sched, char type, FILE* out);
 static int schedule_print_messenger_list(schedule_t* sched, messenger_t* msg,
@@ -4363,7 +4362,7 @@ static void solver_init() {
   /* Send mass information of dangling nodes to their owners */
   schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->nTable,
                     sizeof(n_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_MASS_MSG, 0);
+                    DN_MASS_MSG);
 
   /* Distribute the mass from dangling nodes to anchored nodes. (local) */
   compute_adjust(Global.mySolver->nTable, sizeof(n_t) / sizeof(solver_float),
@@ -4372,7 +4371,7 @@ static void solver_init() {
   /* Send mass information of anchored nodes to their owner processors*/
   schedule_senddata(Global.mySolver->an_sched, Global.mySolver->nTable,
                     sizeof(n_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_MASS_MSG, 0);
+                    AN_MASS_MSG);
 
   if (Global.myID == 0) {
     fprintf(stdout, "GPU device memory allocation: start\n");
@@ -5717,17 +5716,6 @@ static int use_sparse_force_upload_topo(void) {
   return 1;
 }
 
-static int use_force_adjust_overlap(void) {
-  static int initialized = 0;
-  static int enabled = 0;
-  if (!initialized) {
-    const char* env = getenv("HERC_OVERLAP_DN_FORCE_ADJUST");
-    enabled = (env != NULL && atoi(env) != 0) ? 1 : 0;
-    initialized = 1;
-  }
-  return enabled;
-}
-
 static void solver_compute_force_source_gpu(int32_t step) {
   int32_t count = Global.theNodesLoaded;
   mysolver_t* solver = Global.mySolver;
@@ -5975,15 +5963,11 @@ static void solver_send_force_dangling(mysolver_t* solver) {
   Timer_Start("1st schedule send data (contribution)");
   schedule_senddata(solver->dn_sched, solver->force,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_FORCE_MSG,
-                    use_force_adjust_overlap() ? DISTRIBUTION : 0);
+                    DN_FORCE_MSG);
   Timer_Stop("1st schedule send data (contribution)");
 }
 
 static void solver_adjust_forces(mysolver_t* solver) {
-  if (use_force_adjust_overlap()) {
-    return;
-  }
   Timer_Start("1st compute adjust (distribution)");
   /* Distribute the forces to LOCAL anchored nodes */
   compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
@@ -5998,7 +5982,7 @@ static void solver_send_force_anchored(mysolver_t* solver) {
   /* Send the forces on anchored nodes to their owner processors */
   schedule_senddata(solver->an_sched, solver->force,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_FORCE_MSG, 0);
+                    AN_FORCE_MSG);
   Timer_Stop("2nd schedule send data (contribution)");
 }
 
@@ -6363,7 +6347,7 @@ static void solver_send_displacement_anchored(mysolver_t* solver) {
   Timer_Start("3rd schedule send data (sharing)");
   schedule_senddata(Global.mySolver->an_sched, Global.mySolver->tm2,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_DISP_MSG, 0);
+                    AN_DISP_MSG);
   Timer_Stop("3rd schedule send data (sharing)");
 }
 
@@ -6382,7 +6366,7 @@ static void solver_send_displacement_dangling(mysolver_t* solver) {
   Timer_Start("4th schedule send data (sharing)");
   schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->tm2,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_DISP_MSG, 0);
+                    DN_DISP_MSG);
   Timer_Stop("4th schedule send data (sharing)");
 }
 
@@ -6508,10 +6492,6 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Schedule Unpack Incoming")) {
     Timer_Reduce("Schedule Unpack Incoming", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
-  }
-  if (Timer_Exists("Schedule Overlap Local Adjust")) {
-    Timer_Reduce("Schedule Overlap Local Adjust",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   if (Timer_Exists("Adjust Cache Build")) {
     Timer_Reduce("Adjust Cache Build", (TimerKind)(MAX | MIN | AVERAGE),
@@ -7287,8 +7267,7 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
  */
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
-                              int32_t msgtag,
-                              int32_t overlap_local_adjust_how) {
+                              int32_t msgtag) {
   messenger_t *send_messenger, *recv_messenger;
   messenger_t *send_head, *recv_head;
   int32_t irecvcount, irecvnum, bytesize;
@@ -7397,12 +7376,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     send_messenger = send_messenger->next;
   }
   Timer_Stop("Schedule Post Send");
-
-  if ((direction == CONTRIBUTION) && (overlap_local_adjust_how != 0)) {
-    Timer_Start("Schedule Overlap Local Adjust");
-    compute_adjust(valuetable, itemsperentry, overlap_local_adjust_how);
-    Timer_Stop("Schedule Overlap Local Adjust");
-  }
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
@@ -9103,21 +9076,12 @@ static void print_timing_stat() {
       Timer_Value("1st schedule send data (contribution)", AVERAGE),
       Timer_Value("1st schedule send data (contribution)", MAX),
       Timer_Value("1st schedule send data (contribution)", MIN));
-  if (Timer_Exists("1st compute adjust (distribution)")) {
-    printf(
-        "    1st compute adjust              : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("1st compute adjust (distribution)", AVERAGE),
-        Timer_Value("1st compute adjust (distribution)", MAX),
-        Timer_Value("1st compute adjust (distribution)", MIN));
-  } else if (Timer_Exists("Schedule Overlap Local Adjust")) {
-    printf(
-        "    1st compute adjust (overlap)    : %.2f (Average)   %.2f (Max) %.2f "
-        "(Min) seconds\n",
-        Timer_Value("Schedule Overlap Local Adjust", AVERAGE),
-        Timer_Value("Schedule Overlap Local Adjust", MAX),
-        Timer_Value("Schedule Overlap Local Adjust", MIN));
-  }
+  printf(
+      "    1st compute adjust              : %.2f (Average)   %.2f (Max) %.2f "
+      "(Min) seconds\n",
+      Timer_Value("1st compute adjust (distribution)", AVERAGE),
+      Timer_Value("1st compute adjust (distribution)", MAX),
+      Timer_Value("1st compute adjust (distribution)", MIN));
   printf(
       "    2nd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
@@ -9193,8 +9157,7 @@ static void print_timing_stat() {
       Timer_Exists("Schedule Post Send") ||
       Timer_Exists("Schedule Wait Recv") ||
       Timer_Exists("Schedule Wait Send") ||
-      Timer_Exists("Schedule Unpack Incoming") ||
-      Timer_Exists("Schedule Overlap Local Adjust")) {
+      Timer_Exists("Schedule Unpack Incoming")) {
     printf("    Schedule internals (all send phases)\n");
     if (Timer_Exists("Schedule Post Recv")) {
       printf(
@@ -9243,14 +9206,6 @@ static void print_timing_stat() {
           Timer_Value("Schedule Unpack Incoming", AVERAGE),
           Timer_Value("Schedule Unpack Incoming", MAX),
           Timer_Value("Schedule Unpack Incoming", MIN));
-    }
-    if (Timer_Exists("Schedule Overlap Local Adjust")) {
-      printf(
-          "      Overlap Local Adjust          : %.2f (Average)   %.2f (Max) %.2f "
-          "(Min) seconds\n",
-          Timer_Value("Schedule Overlap Local Adjust", AVERAGE),
-          Timer_Value("Schedule Overlap Local Adjust", MAX),
-          Timer_Value("Schedule Overlap Local Adjust", MIN));
     }
   }
   if (Timer_Exists("Adjust Cache Build") ||
