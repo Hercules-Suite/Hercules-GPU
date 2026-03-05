@@ -6465,6 +6465,43 @@ static void solver_run_collect_timers(void) {
   Timer_Reduce("4th schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
+  if (Timer_Exists("Schedule Post Recv")) {
+    Timer_Reduce("Schedule Post Recv", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Schedule Pack Outgoing")) {
+    Timer_Reduce("Schedule Pack Outgoing", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Schedule Post Send")) {
+    Timer_Reduce("Schedule Post Send", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Schedule Wait Recv")) {
+    Timer_Reduce("Schedule Wait Recv", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Schedule Wait Send")) {
+    Timer_Reduce("Schedule Wait Send", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Schedule Unpack Incoming")) {
+    Timer_Reduce("Schedule Unpack Incoming", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Adjust Cache Build")) {
+    Timer_Reduce("Adjust Cache Build", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Adjust Distribution Core")) {
+    Timer_Reduce("Adjust Distribution Core", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Adjust Assignment Core")) {
+    Timer_Reduce("Adjust Assignment Core", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+
   Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
                comm_solver);
@@ -7260,6 +7297,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* Post receives */
+  Timer_Start("Schedule Post Recv");
   irecvnum = 0;
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
@@ -7270,8 +7308,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvnum++;
     recv_messenger = recv_messenger->next;
   }
+  Timer_Stop("Schedule Post Recv");
 
   /* Asssemble outgoing messages */
+  Timer_Start("Schedule Pack Outgoing");
   while (send_messenger != NULL) {
     int32_t lnid, idx, entry;
     solver_float* dvalue;
@@ -7302,6 +7342,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     send_messenger = send_messenger->next;
   }
+  Timer_Stop("Schedule Pack Outgoing");
 
   /* Revisit messengers */
   if (direction == CONTRIBUTION) {
@@ -7313,6 +7354,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   /* Send the data */
+  Timer_Start("Schedule Post Send");
   isendnum = 0;
   while (send_messenger != NULL) {
     bytesize = send_messenger->nodecount * send_messenger->outsize;
@@ -7322,16 +7364,22 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendnum++;
     send_messenger = send_messenger->next;
   }
+  Timer_Stop("Schedule Post Send");
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
+    Timer_Start("Schedule Wait Recv");
     MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+    Timer_Stop("Schedule Wait Recv");
   }
 
   if (isendcount != 0) {
+    Timer_Start("Schedule Wait Send");
     MPI_Waitall(isendnum, isendreqs, isendstats);
+    Timer_Stop("Schedule Wait Send");
   }
 
+  Timer_Start("Schedule Unpack Incoming");
   while (recv_messenger != NULL) {
     int32_t lnid, idx, entry;
     solver_float* dvalue;
@@ -7380,6 +7428,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     recv_messenger = recv_messenger->next;
   }
+  Timer_Stop("Schedule Unpack Incoming");
 
   /* MPI_Barrier(comm_solver);  */
 
@@ -8315,9 +8364,12 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   int32_t dnindex;
 
   if (itemsperentry == 3) {
+    Timer_Start("Adjust Cache Build");
     compute_adjust_cache_build();
+    Timer_Stop("Adjust Cache Build");
 
     if (how == DISTRIBUTION) {
+      Timer_Start("Adjust Distribution Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
@@ -8335,7 +8387,9 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
           parentvalue[2] += d2;
         }
       }
+      Timer_Stop("Adjust Distribution Core");
     } else {
+      Timer_Start("Adjust Assignment Core");
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
@@ -8347,15 +8401,16 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
         int32_t p;
         for (p = start; p < end; p++) {
           solver_float* parentvalue = vtable + g_adjustParentBase3[p];
-          s0 += parentvalue[0] * invdeps;
-          s1 += parentvalue[1] * invdeps;
-          s2 += parentvalue[2] * invdeps;
+          s0 += parentvalue[0];
+          s1 += parentvalue[1];
+          s2 += parentvalue[2];
         }
 
-        myvalue[0] = s0;
-        myvalue[1] = s1;
-        myvalue[2] = s2;
+        myvalue[0] = s0 * invdeps;
+        myvalue[1] = s1 * invdeps;
+        myvalue[2] = s2 * invdeps;
       }
+      Timer_Stop("Adjust Assignment Core");
     }
 
     return;
@@ -8972,6 +9027,91 @@ static void print_timing_stat() {
       Timer_Value("4th schedule send data (sharing)", AVERAGE),
       Timer_Value("4th schedule send data (sharing)", MAX),
       Timer_Value("4th schedule send data (sharing)", MIN));
+  if (Timer_Exists("Schedule Post Recv") ||
+      Timer_Exists("Schedule Pack Outgoing") ||
+      Timer_Exists("Schedule Post Send") ||
+      Timer_Exists("Schedule Wait Recv") ||
+      Timer_Exists("Schedule Wait Send") ||
+      Timer_Exists("Schedule Unpack Incoming")) {
+    printf("    Schedule internals (all send phases)\n");
+    if (Timer_Exists("Schedule Post Recv")) {
+      printf(
+          "      Post Recv                     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Post Recv", AVERAGE),
+          Timer_Value("Schedule Post Recv", MAX),
+          Timer_Value("Schedule Post Recv", MIN));
+    }
+    if (Timer_Exists("Schedule Pack Outgoing")) {
+      printf(
+          "      Pack Outgoing                 : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Pack Outgoing", AVERAGE),
+          Timer_Value("Schedule Pack Outgoing", MAX),
+          Timer_Value("Schedule Pack Outgoing", MIN));
+    }
+    if (Timer_Exists("Schedule Post Send")) {
+      printf(
+          "      Post Send                     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Post Send", AVERAGE),
+          Timer_Value("Schedule Post Send", MAX),
+          Timer_Value("Schedule Post Send", MIN));
+    }
+    if (Timer_Exists("Schedule Wait Recv")) {
+      printf(
+          "      Wait Recv                     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Wait Recv", AVERAGE),
+          Timer_Value("Schedule Wait Recv", MAX),
+          Timer_Value("Schedule Wait Recv", MIN));
+    }
+    if (Timer_Exists("Schedule Wait Send")) {
+      printf(
+          "      Wait Send                     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Wait Send", AVERAGE),
+          Timer_Value("Schedule Wait Send", MAX),
+          Timer_Value("Schedule Wait Send", MIN));
+    }
+    if (Timer_Exists("Schedule Unpack Incoming")) {
+      printf(
+          "      Unpack Incoming               : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Schedule Unpack Incoming", AVERAGE),
+          Timer_Value("Schedule Unpack Incoming", MAX),
+          Timer_Value("Schedule Unpack Incoming", MIN));
+    }
+  }
+  if (Timer_Exists("Adjust Cache Build") ||
+      Timer_Exists("Adjust Distribution Core") ||
+      Timer_Exists("Adjust Assignment Core")) {
+    printf("    Compute adjust internals\n");
+    if (Timer_Exists("Adjust Cache Build")) {
+      printf(
+          "      Cache Build                   : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Adjust Cache Build", AVERAGE),
+          Timer_Value("Adjust Cache Build", MAX),
+          Timer_Value("Adjust Cache Build", MIN));
+    }
+    if (Timer_Exists("Adjust Distribution Core")) {
+      printf(
+          "      Distribution Core             : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Adjust Distribution Core", AVERAGE),
+          Timer_Value("Adjust Distribution Core", MAX),
+          Timer_Value("Adjust Distribution Core", MIN));
+    }
+    if (Timer_Exists("Adjust Assignment Core")) {
+      printf(
+          "      Assignment Core               : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Adjust Assignment Core", AVERAGE),
+          Timer_Value("Adjust Assignment Core", MAX),
+          Timer_Value("Adjust Assignment Core", MIN));
+    }
+  }
   printf("    IO\n");
 
   if (Timer_Exists("Solver drm output")) {
