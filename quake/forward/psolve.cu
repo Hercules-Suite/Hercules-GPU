@@ -141,6 +141,21 @@ static double g_waitRecvStageAvg[WAIT_RECV_STAGE_COUNT] = {0.0};
 static int32_t g_waitRecvStageMaxRank[WAIT_RECV_STAGE_COUNT] = {-1, -1, -1,
                                                                  -1};
 
+#define STAGE_COMM_METRIC_COUNT (WAIT_RECV_STAGE_COUNT * 6)
+enum {
+  STAGE_COMM_SEND_BYTES = 0,
+  STAGE_COMM_RECV_BYTES,
+  STAGE_COMM_SEND_MSGS,
+  STAGE_COMM_RECV_MSGS,
+  STAGE_COMM_SEND_NODES,
+  STAGE_COMM_RECV_NODES
+};
+
+static double g_stageCommLocal[STAGE_COMM_METRIC_COUNT] = {0.0};
+static double g_stageCommMin[STAGE_COMM_METRIC_COUNT] = {0.0};
+static double g_stageCommMax[STAGE_COMM_METRIC_COUNT] = {0.0};
+static double g_stageCommAvg[STAGE_COMM_METRIC_COUNT] = {0.0};
+
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
 #endif
@@ -272,6 +287,7 @@ static void solver_diag_reset(void);
 static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
+static int32_t stage_comm_index(int32_t stage, int32_t metric);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -7519,6 +7535,21 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     g_dnDiagLocal[DN_DIAG_RECV_MSGS] += callRecvMsgs;
   }
 
+    if (waitStage >= 0) {
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_SEND_BYTES)] +=
+      callSendBytes;
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_RECV_BYTES)] +=
+      callRecvBytes;
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_SEND_MSGS)] +=
+      callSendMsgs;
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_RECV_MSGS)] +=
+      callRecvMsgs;
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_SEND_NODES)] +=
+      callSendNodes;
+    g_stageCommLocal[stage_comm_index(waitStage, STAGE_COMM_RECV_NODES)] +=
+      callRecvNodes;
+    }
+
   /* MPI_Barrier(comm_solver);  */
 
   return;
@@ -7530,6 +7561,10 @@ static void solver_diag_reset(void) {
   memset(g_waitRecvStageMin, 0, sizeof(g_waitRecvStageMin));
   memset(g_waitRecvStageMax, 0, sizeof(g_waitRecvStageMax));
   memset(g_waitRecvStageAvg, 0, sizeof(g_waitRecvStageAvg));
+  memset(g_stageCommLocal, 0, sizeof(g_stageCommLocal));
+  memset(g_stageCommMin, 0, sizeof(g_stageCommMin));
+  memset(g_stageCommMax, 0, sizeof(g_stageCommMax));
+  memset(g_stageCommAvg, 0, sizeof(g_stageCommAvg));
   g_waitRecvStageMaxRank[0] = -1;
   g_waitRecvStageMaxRank[1] = -1;
   g_waitRecvStageMaxRank[2] = -1;
@@ -7571,6 +7606,13 @@ static void solver_diag_reduce(void) {
   MPI_Reduce(g_waitRecvStageLocal, g_waitRecvStageAvg, WAIT_RECV_STAGE_COUNT,
              MPI_DOUBLE, MPI_SUM, 0, comm_solver);
 
+  MPI_Reduce(g_stageCommLocal, g_stageCommMin, STAGE_COMM_METRIC_COUNT,
+             MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_stageCommLocal, g_stageCommMax, STAGE_COMM_METRIC_COUNT,
+             MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(g_stageCommLocal, g_stageCommAvg, STAGE_COMM_METRIC_COUNT,
+             MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+
   if (Global.myID == 0) {
     gatheredStage =
         (double*)malloc(sizeof(double) * WAIT_RECV_STAGE_COUNT *
@@ -7600,9 +7642,17 @@ static void solver_diag_reduce(void) {
       }
     }
 
+    for (i = 0; i < STAGE_COMM_METRIC_COUNT; i++) {
+      g_stageCommAvg[i] /= (double)Global.theGroupSize;
+    }
+
     free(gatheredStage);
     g_dnDiagReady = 1;
   }
+}
+
+static int32_t stage_comm_index(int32_t stage, int32_t metric) {
+  return (stage * 6) + metric;
 }
 
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
@@ -9453,6 +9503,35 @@ static void print_timing_stat() {
             g_waitRecvStageMax[i], g_waitRecvStageMaxRank[i],
             g_waitRecvStageMin[i]);
           }
+
+            printf("    Per-stage comm volume/message diagnostics\n");
+            for (int i = 0; i < WAIT_RECV_STAGE_COUNT; i++) {
+            const int32_t sendBytesI = stage_comm_index(i, STAGE_COMM_SEND_BYTES);
+            const int32_t recvBytesI = stage_comm_index(i, STAGE_COMM_RECV_BYTES);
+            const int32_t sendMsgsI = stage_comm_index(i, STAGE_COMM_SEND_MSGS);
+            const int32_t recvMsgsI = stage_comm_index(i, STAGE_COMM_RECV_MSGS);
+            const int32_t sendNodesI = stage_comm_index(i, STAGE_COMM_SEND_NODES);
+            const int32_t recvNodesI = stage_comm_index(i, STAGE_COMM_RECV_NODES);
+            const double mib = 1024.0 * 1024.0;
+            const double steps = g_dnDiagAvg[DN_DIAG_STEPS] > 0.0
+                         ? g_dnDiagAvg[DN_DIAG_STEPS]
+                         : 1.0;
+            printf(
+              "      %-29s : send %.3f MiB/step, recv %.3f MiB/step, msgs %.1f/%.1f per step\n",
+              g_waitRecvStageNames[i],
+              (g_stageCommAvg[sendBytesI] / steps) / mib,
+              (g_stageCommAvg[recvBytesI] / steps) / mib,
+              g_stageCommAvg[sendMsgsI] / steps, g_stageCommAvg[recvMsgsI] / steps);
+            printf(
+              "                                 nodes %.1f/%.1f per step, send skew %.2f, recv skew %.2f\n",
+              g_stageCommAvg[sendNodesI] / steps, g_stageCommAvg[recvNodesI] / steps,
+              g_stageCommAvg[sendBytesI] > 0.0
+                ? (g_stageCommMax[sendBytesI] / g_stageCommAvg[sendBytesI])
+                : 0.0,
+              g_stageCommAvg[recvBytesI] > 0.0
+                ? (g_stageCommMax[recvBytesI] / g_stageCommAvg[recvBytesI])
+                : 0.0);
+            }
       }
   }
   if (Timer_Exists("Adjust Cache Build") ||
