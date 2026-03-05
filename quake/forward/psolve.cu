@@ -8534,6 +8534,11 @@ static void print_timing_stat() {
     OtherPhasesTimeMax += Timer_Value("Drm Init", MAX);
   }
 
+  if (Timer_Exists("Topography Solver Init")) {
+    OtherPhasesTime += Timer_Value("Topography Solver Init", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Topography Solver Init", MAX);
+  }
+
   SourceInitMax = Timer_Value("Source Init", MAX);
   SolverMax = Timer_Value("Solver", MAX);
   AccountedMax =
@@ -8676,7 +8681,8 @@ static void print_timing_stat() {
       "SOURCE INITIALIZATION               : %.2f (Max) %.2f (Min) seconds\n",
       Timer_Value("Source Init", MAX), Timer_Value("Source Init", MIN));
   if (Timer_Exists("Global Init") || Timer_Exists("Pre Solver Setup") ||
-      Timer_Exists("Post Solver Finalize")) {
+      Timer_Exists("Post Solver Finalize") ||
+      Timer_Exists("Topography Solver Init")) {
     printf("OTHER PHASES (outside mesh/solver/source): %.2f seconds\n",
            OtherPhasesTime);
     if (Timer_Exists("Global Init")) {
@@ -8698,6 +8704,13 @@ static void print_timing_stat() {
              Timer_Value("Post Solver Finalize", AVERAGE),
              Timer_Value("Post Solver Finalize", MAX),
              Timer_Value("Post Solver Finalize", MIN));
+    }
+    if (Timer_Exists("Topography Solver Init")) {
+      printf("    Topography Solver Init         : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Topography Solver Init", AVERAGE),
+             Timer_Value("Topography Solver Init", MAX),
+             Timer_Value("Topography Solver Init", MIN));
     }
     if (Timer_Exists("Phase Sync/Coordination")) {
       printf("    Phase Sync/Coordination        : %.2f (Average)   %.2f (Max) %.2f "
@@ -10677,8 +10690,13 @@ int main(int argc, char** argv) {
 
   /* Initialize topography solver analysis structures */
   /* must be before solver_init() for proper treatment of the nodal mass */
-  if (Param.includeTopography == YES)
+  if (Param.includeTopography == YES) {
+    Timer_Start("Topography Solver Init");
     topo_solver_init(Global.myID, Global.myMesh);
+    Timer_Stop("Topography Solver Init");
+    Timer_Reduce("Topography Solver Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
 
   if (Param.theMeshOutFlag && DO_OUTPUT) {
     mesh_output();
