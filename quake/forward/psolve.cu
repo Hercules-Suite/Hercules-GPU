@@ -160,6 +160,8 @@ static int g_waitRecvTopRanks[3] = {-1, -1, -1};
 static double g_waitRecvTopVals[3] = {0.0, 0.0, 0.0};
 static int g_adjustTopRanks[3] = {-1, -1, -1};
 static double g_adjustTopVals[3] = {0.0, 0.0, 0.0};
+static char g_waitRecvTopHosts[3][MPI_MAX_PROCESSOR_NAME] = {{0}};
+static char g_adjustTopHosts[3][MPI_MAX_PROCESSOR_NAME] = {{0}};
 
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
@@ -6484,12 +6486,15 @@ static void solver_collect_imbalance_stats(void) {
   int32_t nranks = Global.theGroupSize;
   int32_t rank;
   int top;
+  int hostlen = 0;
   double localVals[17];
   double minVals[17];
   double maxVals[17];
   double sumVals[17];
   double localTopVals[2];
   double* gatheredTopVals = NULL;
+  char localHost[MPI_MAX_PROCESSOR_NAME];
+  char* gatheredHosts = NULL;
   double depsTotal = 0.0;
   double sendBytes = 0.0;
   double recvBytes = 0.0;
@@ -6566,9 +6571,27 @@ static void solver_collect_imbalance_stats(void) {
 
   localTopVals[0] = waitRecvTime;
   localTopVals[1] = adjustTotalTime;
+  MPI_Get_processor_name(localHost, &hostlen);
+  if (hostlen < 0) {
+    hostlen = 0;
+  }
+  if (hostlen >= MPI_MAX_PROCESSOR_NAME) {
+    hostlen = MPI_MAX_PROCESSOR_NAME - 1;
+  }
+  localHost[hostlen] = '\0';
+
   if (Global.myID == 0) {
     gatheredTopVals = (double*)malloc(sizeof(double) * nranks * 2);
     if (gatheredTopVals == NULL) {
+      fprintf(stderr, "Thread %d: solver_collect_imbalance_stats: out of memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    gatheredHosts =
+        (char*)malloc((size_t)nranks * (size_t)MPI_MAX_PROCESSOR_NAME);
+    if (gatheredHosts == NULL) {
       fprintf(stderr, "Thread %d: solver_collect_imbalance_stats: out of memory\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6581,6 +6604,8 @@ static void solver_collect_imbalance_stats(void) {
   MPI_Reduce(localVals, sumVals, 17, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
   MPI_Gather(localTopVals, 2, MPI_DOUBLE, gatheredTopVals, 2, MPI_DOUBLE, 0,
              comm_solver);
+  MPI_Gather(localHost, MPI_MAX_PROCESSOR_NAME, MPI_CHAR, gatheredHosts,
+             MPI_MAX_PROCESSOR_NAME, MPI_CHAR, 0, comm_solver);
 
   if (Global.myID == 0) {
     if (nranks <= 0) {
@@ -6660,11 +6685,14 @@ static void solver_collect_imbalance_stats(void) {
       g_waitRecvTopVals[top] = -1.0;
       g_adjustTopRanks[top] = -1;
       g_adjustTopVals[top] = -1.0;
+      g_waitRecvTopHosts[top][0] = '\0';
+      g_adjustTopHosts[top][0] = '\0';
     }
 
     for (rank = 0; rank < nranks; rank++) {
       double waitVal = gatheredTopVals[rank * 2 + 0];
       double adjustVal = gatheredTopVals[rank * 2 + 1];
+      const char* hostName = gatheredHosts + (size_t)rank * MPI_MAX_PROCESSOR_NAME;
 
       for (top = 0; top < 3; top++) {
         if (waitVal > g_waitRecvTopVals[top]) {
@@ -6672,9 +6700,14 @@ static void solver_collect_imbalance_stats(void) {
           for (shift = 2; shift > top; shift--) {
             g_waitRecvTopVals[shift] = g_waitRecvTopVals[shift - 1];
             g_waitRecvTopRanks[shift] = g_waitRecvTopRanks[shift - 1];
+            strncpy(g_waitRecvTopHosts[shift], g_waitRecvTopHosts[shift - 1],
+                    MPI_MAX_PROCESSOR_NAME - 1);
+            g_waitRecvTopHosts[shift][MPI_MAX_PROCESSOR_NAME - 1] = '\0';
           }
           g_waitRecvTopVals[top] = waitVal;
           g_waitRecvTopRanks[top] = rank;
+          strncpy(g_waitRecvTopHosts[top], hostName, MPI_MAX_PROCESSOR_NAME - 1);
+          g_waitRecvTopHosts[top][MPI_MAX_PROCESSOR_NAME - 1] = '\0';
           break;
         }
       }
@@ -6685,15 +6718,21 @@ static void solver_collect_imbalance_stats(void) {
           for (shift = 2; shift > top; shift--) {
             g_adjustTopVals[shift] = g_adjustTopVals[shift - 1];
             g_adjustTopRanks[shift] = g_adjustTopRanks[shift - 1];
+            strncpy(g_adjustTopHosts[shift], g_adjustTopHosts[shift - 1],
+                    MPI_MAX_PROCESSOR_NAME - 1);
+            g_adjustTopHosts[shift][MPI_MAX_PROCESSOR_NAME - 1] = '\0';
           }
           g_adjustTopVals[top] = adjustVal;
           g_adjustTopRanks[top] = rank;
+          strncpy(g_adjustTopHosts[top], hostName, MPI_MAX_PROCESSOR_NAME - 1);
+          g_adjustTopHosts[top][MPI_MAX_PROCESSOR_NAME - 1] = '\0';
           break;
         }
       }
     }
 
     free(gatheredTopVals);
+    free(gatheredHosts);
 
     g_imbalanceStatsReady = 1;
   }
@@ -9190,13 +9229,15 @@ static void print_timing_stat() {
       "[%.2fx skew]\n",
       g_adjustTotalAvg, g_adjustTotalMin, g_adjustTotalMax, adjustSkew);
     printf(
-      "Top Wait Recv ranks          : #%d(%.2fs), #%d(%.2fs), #%d(%.2fs)\n",
-      g_waitRecvTopRanks[0], g_waitRecvTopVals[0], g_waitRecvTopRanks[1],
-      g_waitRecvTopVals[1], g_waitRecvTopRanks[2], g_waitRecvTopVals[2]);
+      "Top Wait Recv ranks          : #%d@%s(%.2fs), #%d@%s(%.2fs), #%d@%s(%.2fs)\n",
+      g_waitRecvTopRanks[0], g_waitRecvTopHosts[0], g_waitRecvTopVals[0],
+      g_waitRecvTopRanks[1], g_waitRecvTopHosts[1], g_waitRecvTopVals[1],
+      g_waitRecvTopRanks[2], g_waitRecvTopHosts[2], g_waitRecvTopVals[2]);
     printf(
-      "Top Adjust ranks             : #%d(%.2fs), #%d(%.2fs), #%d(%.2fs)\n",
-      g_adjustTopRanks[0], g_adjustTopVals[0], g_adjustTopRanks[1],
-      g_adjustTopVals[1], g_adjustTopRanks[2], g_adjustTopVals[2]);
+      "Top Adjust ranks             : #%d@%s(%.2fs), #%d@%s(%.2fs), #%d@%s(%.2fs)\n",
+      g_adjustTopRanks[0], g_adjustTopHosts[0], g_adjustTopVals[0],
+      g_adjustTopRanks[1], g_adjustTopHosts[1], g_adjustTopVals[1],
+      g_adjustTopRanks[2], g_adjustTopHosts[2], g_adjustTopVals[2]);
     printf("\n");
     }
 
