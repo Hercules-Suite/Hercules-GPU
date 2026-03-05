@@ -138,6 +138,18 @@ static double g_waitRecvAnDispAvg = 0.0;
 static double g_waitRecvDnDispMin = 0.0;
 static double g_waitRecvDnDispMax = 0.0;
 static double g_waitRecvDnDispAvg = 0.0;
+static double g_recvMsgsDnForceMin = 0.0;
+static double g_recvMsgsDnForceMax = 0.0;
+static double g_recvMsgsDnForceAvg = 0.0;
+static double g_recvMsgsAnForceMin = 0.0;
+static double g_recvMsgsAnForceMax = 0.0;
+static double g_recvMsgsAnForceAvg = 0.0;
+static double g_recvMsgsAnDispMin = 0.0;
+static double g_recvMsgsAnDispMax = 0.0;
+static double g_recvMsgsAnDispAvg = 0.0;
+static double g_recvMsgsDnDispMin = 0.0;
+static double g_recvMsgsDnDispMax = 0.0;
+static double g_recvMsgsDnDispAvg = 0.0;
 static int g_waitRecvTopRanks[3] = {-1, -1, -1};
 static double g_waitRecvTopVals[3] = {0.0, 0.0, 0.0};
 static int g_adjustTopRanks[3] = {-1, -1, -1};
@@ -6466,10 +6478,10 @@ static void solver_collect_imbalance_stats(void) {
   int32_t nranks = Global.theGroupSize;
   int32_t rank;
   int top;
-  double localVals[11];
-  double minVals[11];
-  double maxVals[11];
-  double sumVals[11];
+  double localVals[15];
+  double minVals[15];
+  double maxVals[15];
+  double sumVals[15];
   double localTopVals[2];
   double* gatheredTopVals = NULL;
   double depsTotal = 0.0;
@@ -6477,6 +6489,10 @@ static void solver_collect_imbalance_stats(void) {
   double recvBytes = 0.0;
   double waitRecvTime = 0.0;
   double adjustTotalTime = 0.0;
+  double recvMsgsDnForce = 0.0;
+  double recvMsgsAnForce = 0.0;
+  double recvMsgsAnDisp = 0.0;
+  double recvMsgsDnDisp = 0.0;
 
   if ((Global.myMesh != NULL) && (Global.myMesh->dnodeTable != NULL)) {
     for (dnindex = 0; dnindex < Global.myMesh->ldnnum; dnindex++) {
@@ -6494,6 +6510,11 @@ static void solver_collect_imbalance_stats(void) {
                                    &sendBytes, &recvBytes);
     schedule_accumulate_comm_bytes(Global.mySolver->dn_sched, SHARING,
                                    &sendBytes, &recvBytes);
+
+    recvMsgsDnForce = (double)Global.mySolver->dn_sched->s_count;
+    recvMsgsAnForce = (double)Global.mySolver->an_sched->s_count;
+    recvMsgsAnDisp = (double)Global.mySolver->an_sched->c_count;
+    recvMsgsDnDisp = (double)Global.mySolver->dn_sched->c_count;
   }
 
   localVals[0] =
@@ -6521,6 +6542,10 @@ static void solver_collect_imbalance_stats(void) {
   localVals[8] = g_waitRecvAnForceLocal;
   localVals[9] = g_waitRecvAnDispLocal;
   localVals[10] = g_waitRecvDnDispLocal;
+  localVals[11] = recvMsgsDnForce;
+  localVals[12] = recvMsgsAnForce;
+  localVals[13] = recvMsgsAnDisp;
+  localVals[14] = recvMsgsDnDisp;
 
   localTopVals[0] = waitRecvTime;
   localTopVals[1] = adjustTotalTime;
@@ -6534,9 +6559,9 @@ static void solver_collect_imbalance_stats(void) {
     }
   }
 
-  MPI_Reduce(localVals, minVals, 11, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-  MPI_Reduce(localVals, maxVals, 11, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
-  MPI_Reduce(localVals, sumVals, 11, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(localVals, minVals, 15, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(localVals, maxVals, 15, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(localVals, sumVals, 15, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
   MPI_Gather(localTopVals, 2, MPI_DOUBLE, gatheredTopVals, 2, MPI_DOUBLE, 0,
              comm_solver);
 
@@ -6588,6 +6613,22 @@ static void solver_collect_imbalance_stats(void) {
     g_waitRecvDnDispMin = minVals[10];
     g_waitRecvDnDispMax = maxVals[10];
     g_waitRecvDnDispAvg = sumVals[10] / nranks;
+
+    g_recvMsgsDnForceMin = minVals[11];
+    g_recvMsgsDnForceMax = maxVals[11];
+    g_recvMsgsDnForceAvg = sumVals[11] / nranks;
+
+    g_recvMsgsAnForceMin = minVals[12];
+    g_recvMsgsAnForceMax = maxVals[12];
+    g_recvMsgsAnForceAvg = sumVals[12] / nranks;
+
+    g_recvMsgsAnDispMin = minVals[13];
+    g_recvMsgsAnDispMax = maxVals[13];
+    g_recvMsgsAnDispAvg = sumVals[13] / nranks;
+
+    g_recvMsgsDnDispMin = minVals[14];
+    g_recvMsgsDnDispMax = maxVals[14];
+    g_recvMsgsDnDispAvg = sumVals[14] / nranks;
 
     for (top = 0; top < 3; top++) {
       g_waitRecvTopRanks[top] = -1;
@@ -9094,6 +9135,18 @@ static void print_timing_stat() {
     printf(
       "  Wait Recv DN disp          : %.2f (Avg) %.2f (Min) %.2f (Max) s\n",
       g_waitRecvDnDispAvg, g_waitRecvDnDispMin, g_waitRecvDnDispMax);
+    printf(
+      "  Recv msgs DN force         : %.1f (Avg) %.1f (Min) %.1f (Max)\n",
+      g_recvMsgsDnForceAvg, g_recvMsgsDnForceMin, g_recvMsgsDnForceMax);
+    printf(
+      "  Recv msgs AN force         : %.1f (Avg) %.1f (Min) %.1f (Max)\n",
+      g_recvMsgsAnForceAvg, g_recvMsgsAnForceMin, g_recvMsgsAnForceMax);
+    printf(
+      "  Recv msgs AN disp          : %.1f (Avg) %.1f (Min) %.1f (Max)\n",
+      g_recvMsgsAnDispAvg, g_recvMsgsAnDispMin, g_recvMsgsAnDispMax);
+    printf(
+      "  Recv msgs DN disp          : %.1f (Avg) %.1f (Min) %.1f (Max)\n",
+      g_recvMsgsDnDispAvg, g_recvMsgsDnDispMin, g_recvMsgsDnDispMax);
     printf(
       "Compute adjust total/rank    : %.2f (Avg) %.2f (Min) %.2f (Max) s "
       "[%.2fx skew]\n",
