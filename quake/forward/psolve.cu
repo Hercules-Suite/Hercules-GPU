@@ -8474,6 +8474,14 @@ static void print_timing_stat() {
                      Timer_Value("Mesh correct properties", (TimerKind)0) +
                      Timer_Value("Mesh Stats Print", (TimerKind)0);
 
+  if (Timer_Exists("Slice CVM")) {
+    TotalMeshingTime += Timer_Value("Slice CVM", (TimerKind)0);
+  }
+
+  if (Timer_Exists("Mesh Out")) {
+    TotalMeshingTime += Timer_Value("Mesh Out", (TimerKind)0);
+  }
+
   if (Param.includeBuildings == YES) {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
   }
@@ -8485,6 +8493,15 @@ static void print_timing_stat() {
                         Timer_Value("Octor Extractmesh", MAX) +
                         Timer_Value("Mesh correct properties", MAX) +
                         Timer_Value("Mesh Stats Print", MAX);
+
+  if (Timer_Exists("Slice CVM")) {
+    TotalMeshingTimeMax += Timer_Value("Slice CVM", MAX);
+  }
+
+  if (Timer_Exists("Mesh Out")) {
+    TotalMeshingTimeMax += Timer_Value("Mesh Out", MAX);
+  }
+
   if (Param.includeBuildings == YES && Timer_Exists("Carve Buildings")) {
     TotalMeshingTimeMax += Timer_Value("Carve Buildings", MAX);
   }
@@ -8500,6 +8517,16 @@ static void print_timing_stat() {
   if (Timer_Exists("Post Solver Finalize")) {
     OtherPhasesTime += Timer_Value("Post Solver Finalize", (TimerKind)0);
     OtherPhasesTimeMax += Timer_Value("Post Solver Finalize", MAX);
+  }
+
+  if (Timer_Exists("Init Drm Parameters")) {
+    OtherPhasesTime += Timer_Value("Init Drm Parameters", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Init Drm Parameters", MAX);
+  }
+
+  if (Timer_Exists("Drm Init")) {
+    OtherPhasesTime += Timer_Value("Drm Init", (TimerKind)0);
+    OtherPhasesTimeMax += Timer_Value("Drm Init", MAX);
   }
 
   SourceInitMax = Timer_Value("Source Init", MAX);
@@ -8564,8 +8591,14 @@ static void print_timing_stat() {
          Timer_Value("Octor Partitiontree", (TimerKind)0));
   printf("    Octor Extractmesh               : %.2f seconds\n",
          Timer_Value("Octor Extractmesh", (TimerKind)0));
+    if (Timer_Exists("Slice CVM"))
+      printf("    Slice CVM                       : %.2f seconds\n",
+        Timer_Value("Slice CVM", (TimerKind)0));
   printf("    Mesh correct properties         : %.2f seconds\n",
          Timer_Value("Mesh correct properties", (TimerKind)0));
+    if (Timer_Exists("Mesh Out"))
+      printf("    Mesh Out                        : %.2f seconds\n",
+        Timer_Value("Mesh Out", (TimerKind)0));
   printf("    Mesh Stats Print                : %.2f seconds\n",
          Timer_Value("Mesh Stats Print", (TimerKind)0));
   printf("\n");
@@ -8660,6 +8693,19 @@ static void print_timing_stat() {
              Timer_Value("Post Solver Finalize", AVERAGE),
              Timer_Value("Post Solver Finalize", MAX),
              Timer_Value("Post Solver Finalize", MIN));
+    }
+    if (Timer_Exists("Init Drm Parameters")) {
+      printf("    Init Drm Parameters            : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Init Drm Parameters", AVERAGE),
+             Timer_Value("Init Drm Parameters", MAX),
+             Timer_Value("Init Drm Parameters", MIN));
+    }
+    if (Timer_Exists("Drm Init")) {
+      printf("    Drm Init                       : %.2f (Average)   %.2f (Max) %.2f "
+             "(Min) seconds\n",
+             Timer_Value("Drm Init", AVERAGE),
+             Timer_Value("Drm Init", MAX), Timer_Value("Drm Init", MIN));
     }
   }
   printf("\n");
