@@ -3621,11 +3621,22 @@ static void mesh_load_from_etree() {
         int32_t lnid =
             mesh_find_lnid_by_gnid(nodeBuild, mesh->nharbored, recvBuf[idx]);
 
-        if (lnid < 0 || !mesh->nodeTable[lnid].ismine) {
+        if (lnid < 0) {
           solver_abort(__FUNCTION_NAME, NULL,
-                       "owner-share registration for unknown/non-owned gnid=%" INT64_FMT
+                       "owner-share registration for unknown gnid=%" INT64_FMT
                        " from rank %d",
                        recvBuf[idx], r);
+        }
+
+        if (!mesh->nodeTable[lnid].ismine) {
+          mesh->nodeTable[lnid].ismine = 1;
+          mesh->nodeTable[lnid].proc.share = NULL;
+          mesh->lnnum++;
+
+          monitor_print(
+              "mesh_from_etree: ownership cycle resolved for gnid=%" INT64_FMT
+              " (promoted owner on rank %d, sender rank %d)\n",
+              recvBuf[idx], Global.myID, r);
         }
 
         {
