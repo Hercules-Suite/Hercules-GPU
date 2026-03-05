@@ -3080,7 +3080,7 @@ typedef struct mesh_node_build_t {
   tick_t x;
   tick_t y;
   tick_t z;
-  int32_t minEdgeTicks;
+  int32_t maxEdgeTicks;
 } mesh_node_build_t;
 
 typedef struct mesh_coord_index_t {
@@ -3367,7 +3367,7 @@ static void mesh_load_from_etree() {
       nodeBuild[localNodeCount].x = nodeRaw[i].x;
       nodeBuild[localNodeCount].y = nodeRaw[i].y;
       nodeBuild[localNodeCount].z = nodeRaw[i].z;
-      nodeBuild[localNodeCount].minEdgeTicks = nodeRaw[i].edgeTicks;
+      nodeBuild[localNodeCount].maxEdgeTicks = nodeRaw[i].edgeTicks;
       localNodeCount++;
     } else {
       mesh_node_build_t* prior = &nodeBuild[localNodeCount - 1];
@@ -3379,8 +3379,8 @@ static void mesh_load_from_etree() {
                      nodeRaw[i].gnid);
       }
 
-      if (nodeRaw[i].edgeTicks < prior->minEdgeTicks) {
-        prior->minEdgeTicks = nodeRaw[i].edgeTicks;
+      if (nodeRaw[i].edgeTicks > prior->maxEdgeTicks) {
+        prior->maxEdgeTicks = nodeRaw[i].edgeTicks;
       }
     }
   }
@@ -3560,29 +3560,22 @@ static void mesh_load_from_etree() {
 
   mesh->ldnnum = 0;
   for (i = 0; i < mesh->nharbored; i++) {
-    int32_t h = nodeBuild[i].minEdgeTicks;
-    int oddMask = 0;
+    int32_t h = nodeBuild[i].maxEdgeTicks;
 
     if (h <= 0) {
       h = 1;
     }
 
-    if ((((int64_t)mesh->nodeTable[i].x / h) & 1LL) != 0) {
-      oddMask |= 1;
-    }
-    if ((((int64_t)mesh->nodeTable[i].y / h) & 1LL) != 0) {
-      oddMask |= 2;
-    }
-    if ((((int64_t)mesh->nodeTable[i].z / h) & 1LL) != 0) {
-      oddMask |= 4;
-    }
-
-    mesh->nodeTable[i].isanchored = (oddMask == 0) ? 1 : 0;
+    mesh->nodeTable[i].isanchored =
+        ((mesh->nodeTable[i].x % h) == 0 && (mesh->nodeTable[i].y % h) == 0 &&
+         (mesh->nodeTable[i].z % h) == 0)
+            ? 1
+            : 0;
   }
 
   for (i = 0; i < mesh->nharbored; i++) {
     int32_t h;
-    int oddMask;
+    int32_t rem[3];
     int axis[3];
     int axisCount;
     int combos;
@@ -3594,26 +3587,18 @@ static void mesh_load_from_etree() {
       continue;
     }
 
-    h = nodeBuild[i].minEdgeTicks;
+    h = nodeBuild[i].maxEdgeTicks;
     if (h <= 0) {
       h = 1;
     }
 
-    oddMask = 0;
-    if ((((int64_t)mesh->nodeTable[i].x / h) & 1LL) != 0) {
-      oddMask |= 1;
-    }
-    if ((((int64_t)mesh->nodeTable[i].y / h) & 1LL) != 0) {
-      oddMask |= 2;
-    }
-    if ((((int64_t)mesh->nodeTable[i].z / h) & 1LL) != 0) {
-      oddMask |= 4;
-    }
-
     axisCount = 0;
-    if (oddMask & 1) axis[axisCount++] = 0;
-    if (oddMask & 2) axis[axisCount++] = 1;
-    if (oddMask & 4) axis[axisCount++] = 2;
+    rem[0] = mesh->nodeTable[i].x % h;
+    rem[1] = mesh->nodeTable[i].y % h;
+    rem[2] = mesh->nodeTable[i].z % h;
+    if (rem[0] != 0) axis[axisCount++] = 0;
+    if (rem[1] != 0) axis[axisCount++] = 1;
+    if (rem[2] != 0) axis[axisCount++] = 2;
 
     combos = 1 << axisCount;
     for (c = 0; c < combos; c++) {
@@ -3623,10 +3608,17 @@ static void mesh_load_from_etree() {
       int a;
 
       for (a = 0; a < axisCount; a++) {
-        tick_t delta = ((c >> a) & 1) ? h : -h;
-        if (axis[a] == 0) {
+        tick_t delta;
+        int ax = axis[a];
+
+        if ((c >> a) & 1) {
+          delta = h - rem[ax];
+        } else {
+          delta = -rem[ax];
+        }
+        if (ax == 0) {
           px += delta;
-        } else if (axis[a] == 1) {
+        } else if (ax == 1) {
           py += delta;
         } else {
           pz += delta;
@@ -10543,6 +10535,42 @@ static void source_init(const char* physicsin) {
  *  output: 0 fail 1 success
  */
 int32_t search_point(vector3D_t point, octant_t** octant) {
+  static octant_t loaded_octant;
+
+  if (Global.meshLoadedFromEtree) {
+    tick_t xTick, yTick, zTick;
+    int32_t eindex;
+
+    xTick = point.x[0] / Global.myMesh->ticksize;
+    yTick = point.x[1] / Global.myMesh->ticksize;
+    zTick = point.x[2] / Global.myMesh->ticksize;
+
+    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+      tick_t lx = Global.myMesh->nodeTable[lnid0].x;
+      tick_t ly = Global.myMesh->nodeTable[lnid0].y;
+      tick_t lz = Global.myMesh->nodeTable[lnid0].z;
+      tick_t edge = (tick_t)1 << (PIXELLEVEL - Global.myMesh->elemTable[eindex].level);
+
+      if (xTick >= lx && xTick <= lx + edge && yTick >= ly && yTick <= ly + edge &&
+          zTick >= lz && zTick <= lz + edge) {
+        loaded_octant.type = LEAF;
+        loaded_octant.where = LOCAL;
+        loaded_octant.which = 0;
+        loaded_octant.level = Global.myMesh->elemTable[eindex].level;
+        loaded_octant.lx = lx;
+        loaded_octant.ly = ly;
+        loaded_octant.lz = lz;
+        loaded_octant.parent = NULL;
+        loaded_octant.appdata = NULL;
+        *octant = &loaded_octant;
+        return 1;
+      }
+    }
+
+    return 0;
+  }
+
   tick_t xTick, yTick, zTick;
 
   xTick = point.x[0] / Global.myMesh->ticksize;
