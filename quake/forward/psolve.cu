@@ -9103,12 +9103,21 @@ static void print_timing_stat() {
       Timer_Value("1st schedule send data (contribution)", AVERAGE),
       Timer_Value("1st schedule send data (contribution)", MAX),
       Timer_Value("1st schedule send data (contribution)", MIN));
-  printf(
-      "    1st compute adjust              : %.2f (Average)   %.2f (Max) %.2f "
-      "(Min) seconds\n",
-      Timer_Value("1st compute adjust (distribution)", AVERAGE),
-      Timer_Value("1st compute adjust (distribution)", MAX),
-      Timer_Value("1st compute adjust (distribution)", MIN));
+  if (Timer_Exists("1st compute adjust (distribution)")) {
+    printf(
+        "    1st compute adjust              : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("1st compute adjust (distribution)", AVERAGE),
+        Timer_Value("1st compute adjust (distribution)", MAX),
+        Timer_Value("1st compute adjust (distribution)", MIN));
+  } else if (Timer_Exists("Schedule Overlap Local Adjust")) {
+    printf(
+        "    1st compute adjust (overlap)    : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Schedule Overlap Local Adjust", AVERAGE),
+        Timer_Value("Schedule Overlap Local Adjust", MAX),
+        Timer_Value("Schedule Overlap Local Adjust", MIN));
+  }
   printf(
       "    2nd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
