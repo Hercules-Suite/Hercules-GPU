@@ -69,3 +69,15 @@ Typical two-phase settings:
 	`output_mesh=1`, `mesh_only_mode=1`, `mesh_input_mode=0`
 - Phase B (import mesh and solve):
 	`output_mesh=0`, `mesh_only_mode=0`, `mesh_input_mode=1`
+
+Large output configuration note:
+
+- Very large `number_output_stations` and/or `number_output_planes` can make
+	startup (`Pre Setup Stations Init` / `Pre Setup Planes Init`) look like a
+	hang because many output files are opened/created before time stepping.
+- For plane output, use an I/O pool by setting `IO_PES` (environment variable)
+	to a small positive value smaller than MPI ranks, for example:
+	`export IO_PES=4`
+- To reduce metadata pressure on shared filesystems, prefer fewer stations,
+	higher `output_stations_print_rate`, and writing into node-local or
+	high-throughput output directories when possible.
