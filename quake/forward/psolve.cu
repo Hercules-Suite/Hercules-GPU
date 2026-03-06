@@ -6550,6 +6550,9 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   const int32_t* rangeStarts = topo_get_node_range_starts();
   const int32_t* rangeLengths = topo_get_node_range_lengths();
 
+#ifdef _OPENMP
+#pragma omp parallel for if(rangeCount > 1) schedule(static)
+#endif
   for (int32_t i = 0; i < rangeCount; i++) {
     int32_t start = rangeStarts[i];
     int32_t len = rangeLengths[i];
