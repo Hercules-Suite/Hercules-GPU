@@ -5349,9 +5349,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     double t_vertex = 0.0;
     double t_indirect = 0.0;
     double t_node = 0.0;
-    double t_node_build = 0.0;
-    double t_node_sortalloc = 0.0;
-    double t_node_gnid = 0.0;
     double t_elem = 0.0;
     double t_dnode = 0.0;
     double t_cleanup = 0.0;
@@ -5360,9 +5357,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     double t_vertex_max = 0.0;
     double t_indirect_max = 0.0;
     double t_node_max = 0.0;
-    double t_node_build_max = 0.0;
-    double t_node_sortalloc_max = 0.0;
-    double t_node_gnid_max = 0.0;
     double t_elem_max = 0.0;
     double t_dnode_max = 0.0;
     double t_cleanup_max = 0.0;
@@ -6406,7 +6400,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     } /* for all the hash table entries */
 
     if (extract_profile) {
-        t_node_build += MPI_Wtime() - t_stage_start;
         t_stage_start = MPI_Wtime();
     }
 
@@ -6447,7 +6440,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
 
     if (extract_profile) {
-        t_node_sortalloc += MPI_Wtime() - t_stage_start;
         t_stage_start = MPI_Wtime();
     }
 
@@ -6695,7 +6687,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 #endif /* DEBUG */
 
     if (extract_profile) {
-        t_node_gnid += MPI_Wtime() - t_stage_start;
         t_node += MPI_Wtime() - t_node_start;
     }
 
@@ -6896,12 +6887,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    tree->comm_tree);
         MPI_Reduce(&t_node, &t_node_max, 1, MPI_DOUBLE, MPI_MAX, 0,
                    tree->comm_tree);
-        MPI_Reduce(&t_node_build, &t_node_build_max, 1, MPI_DOUBLE, MPI_MAX,
-               0, tree->comm_tree);
-        MPI_Reduce(&t_node_sortalloc, &t_node_sortalloc_max, 1, MPI_DOUBLE,
-               MPI_MAX, 0, tree->comm_tree);
-        MPI_Reduce(&t_node_gnid, &t_node_gnid_max, 1, MPI_DOUBLE, MPI_MAX, 0,
-               tree->comm_tree);
         MPI_Reduce(&t_elem, &t_elem_max, 1, MPI_DOUBLE, MPI_MAX, 0,
                    tree->comm_tree);
         MPI_Reduce(&t_dnode, &t_dnode_max, 1, MPI_DOUBLE, MPI_MAX, 0,
@@ -6917,9 +6902,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    "dnode %.3fs, cleanup %.3fs, total %.3fs\n",
                    t_setcom_max, t_vertex_max, t_indirect_max, t_node_max,
                    t_elem_max, t_dnode_max, t_cleanup_max, t_total_max);
-                 printf("  OCTOR Extractmesh Node Detail (MAX ranks): build %.3fs, "
-                     "sort_alloc %.3fs, gnid %.3fs\n",
-                     t_node_build_max, t_node_sortalloc_max, t_node_gnid_max);
             fflush(stdout);
         }
     }
