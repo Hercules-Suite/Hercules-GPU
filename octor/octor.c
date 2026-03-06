@@ -5329,6 +5329,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     int64_t ldnnum;
     int32_t eindex, nindex, dnindex;
     elem_t *elemTable;
+    vertex_t **elemVertexRef;
     node_t *nodeTable, *node;
     dnode_t *dnodeTable;
     link_t **vertexHashTable, *link;
@@ -5414,6 +5415,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     /* Allocate memory for temporary data structures and int32link pool */
     elemTable = (elem_t *)malloc(sizeof(elem_t) * ecount);
+    elemVertexRef = (vertex_t **)malloc(sizeof(vertex_t *) * ecount * 8);
     vertexHashTable = (link_t **)calloc(ecount, sizeof(link_t *));
 
     vertexpool = (mem_t *)mem_new(sizeof(vertex_t), (int32_t)(ecount * 1.4));
@@ -5422,7 +5424,8 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     mess->int32linkpool = mem_new(sizeof(int32link_t),
                                   (int32_t)(ecount * 0.1));
 
-    if ((elemTable == NULL) || (vertexHashTable == NULL) ||
+    if ((elemTable == NULL) || (elemVertexRef == NULL) ||
+        (vertexHashTable == NULL) ||
         (vertexpool == NULL) || (linkpool == NULL) ||
         (mess->int32linkpool == NULL)) {
         fprintf(stderr, "Thread %d: %s %d: out of memory\n",
@@ -5433,6 +5436,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         exit(1);
     } else {
         theAllocatedMemSum += sizeof(elem_t) * ecount +
+            sizeof(vertex_t *) * ecount * 8 +
             ecount * sizeof(link_t *) +
             sizeof(vertex_t) * (int32_t)(ecount * 1.4) +
             sizeof(link_t) * (int32_t)(ecount * 1.4);
@@ -5482,6 +5486,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         tick_t edgesize;
         point_t pt;
         int32_t i, j, k;
+        int32_t whichchild;
         tick_t  xadjust, yadjust, incrementx, incrementy;
 
         if (oct == NULL) {
@@ -5498,6 +5503,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         elemTable[eindex].geid = geid;
         elemTable[eindex].level = oct->level;
         elemTable[eindex].data = oct->payload.leaf->data;
+        whichchild = 0;
 
         /* Produce eight mesh nodes, some of which may have been
            produced already. */
@@ -5677,6 +5683,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                         vertex->level = (vertex->level < oct->level) ?
                             vertex->level : oct->level;
                     }
+
+                    elemVertexRef[eindex * 8 + whichchild] = vertex;
+                    whichchild++;
                 } /* i */
             } /* j */
         } /* k */
@@ -6667,58 +6676,21 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
 
     /* Correlate the element table to the node table */
-    oct = oct_getleftmost(tree->root);
-
     for (eindex = 0; eindex < ecount; eindex++) {
-        tick_t edgesize;
-        point_t pt;
-        int32_t i, j, k;
         int32_t whichchild;
 
-        edgesize = (tick_t)1 << (PIXELLEVEL - oct->level);
+        for (whichchild = 0; whichchild < 8; whichchild++) {
+            vertex_t *ev = elemVertexRef[eindex * 8 + whichchild];
 
-        whichchild = 0;
-        for (k = 0; k < 2; k++) {
-            pt.z = oct->lz + k * edgesize;
+            if ((ev == NULL) || (ev->lnid < 0)) {
+                fprintf(stderr, "Thread %d: %s %d: internal error\n",
+                        tree->procid, __FILE__, __LINE__);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
+            }
 
-            for (j = 0; j < 2; j++) {
-                pt.y = oct->ly + j * edgesize;
-
-                for (i = 0; i < 2; i++) {
-
-                    pt.x = oct->lx + i * edgesize;
-
-                    hashentry = math_hashuint32(&pt, 3) % ecount;
-                    link = vertexHashTable[hashentry];
-
-                    while (link != NULL) {
-                        vertex = (vertex_t *)link->record;
-                        if ((vertex->x == pt.x) &&
-                            (vertex->y == pt.y) &&
-                            (vertex->z == pt.z)) {
-
-                            elemTable[eindex].lnid[whichchild] =
-                                vertex->lnid;
-                            whichchild++;
-                            break;
-                        }
-
-                        link = link->next;
-                    }
-
-                    if (link == NULL) {
-                        fprintf(stderr, "Thread %d: %s %d: internal error\n",
-                                tree->procid, __FILE__, __LINE__);
-                        MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-                        exit(1);
-                    }
-
-                } /* i */
-            } /* j */
-        } /* k */
-
-        oct = oct_getnextleaf(oct);
-
+            elemTable[eindex].lnid[whichchild] = ev->lnid;
+        }
     } /* for all the local octants */
 
     if (extract_profile) {
@@ -6861,6 +6833,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         free(nodeStartTable);
     }
     free(vertexHashTable);
+    free(elemVertexRef);
     mem_delete(vertexpool);
     mem_delete(linkpool);
 
