@@ -106,6 +106,11 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t* g_adjustDnOrder = NULL;
 static int32_t* g_adjustDnSortKey = NULL;
+static int32_t* g_adjustDistEdgeDn = NULL;
+static int32_t* g_adjustDistEdgeParentBase3 = NULL;
+static int32_t* g_adjustDistRunParentBase3 = NULL;
+static int32_t* g_adjustDistRunOffsets = NULL;
+static int32_t g_adjustDistRunCount = 0;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
 static int32_t g_adjustAssignmentOmpMode = -1;
@@ -309,6 +314,7 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_assignment_use_omp(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
+static int compare_adjust_dist_edge(const void* a, const void* b);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -8894,6 +8900,10 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustInvDeps);
   free(g_adjustDnOrder);
   free(g_adjustDnSortKey);
+  free(g_adjustDistEdgeDn);
+  free(g_adjustDistEdgeParentBase3);
+  free(g_adjustDistRunParentBase3);
+  free(g_adjustDistRunOffsets);
 
   g_adjustParentOffsets = NULL;
   g_adjustParentIds = NULL;
@@ -8903,6 +8913,11 @@ static void compute_adjust_cache_free(void) {
   g_adjustInvDeps = NULL;
   g_adjustDnOrder = NULL;
   g_adjustDnSortKey = NULL;
+  g_adjustDistEdgeDn = NULL;
+  g_adjustDistEdgeParentBase3 = NULL;
+  g_adjustDistRunParentBase3 = NULL;
+  g_adjustDistRunOffsets = NULL;
+  g_adjustDistRunCount = 0;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
 }
@@ -8912,6 +8927,26 @@ static int compare_adjust_dn_order(const void* a, const void* b) {
   int32_t ib = *(const int32_t*)b;
   int32_t ka = g_adjustDnSortKey[ia];
   int32_t kb = g_adjustDnSortKey[ib];
+  if (ka < kb) {
+    return -1;
+  }
+  if (ka > kb) {
+    return 1;
+  }
+  if (ia < ib) {
+    return -1;
+  }
+  if (ia > ib) {
+    return 1;
+  }
+  return 0;
+}
+
+static int compare_adjust_dist_edge(const void* a, const void* b) {
+  int32_t ia = *(const int32_t*)a;
+  int32_t ib = *(const int32_t*)b;
+  int32_t ka = g_adjustDistEdgeParentBase3[ia];
+  int32_t kb = g_adjustDistEdgeParentBase3[ib];
   if (ka < kb) {
     return -1;
   }
@@ -8978,8 +9013,12 @@ static void compute_adjust_cache_build(void) {
 
   g_adjustParentIds = (int32_t*)malloc(sizeof(int32_t) * totalParents);
   g_adjustParentBase3 = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+  g_adjustDistEdgeDn = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+  g_adjustDistEdgeParentBase3 = (int32_t*)malloc(sizeof(int32_t) * totalParents);
   if ((totalParents > 0) &&
-      ((g_adjustParentIds == NULL) || (g_adjustParentBase3 == NULL))) {
+      ((g_adjustParentIds == NULL) || (g_adjustParentBase3 == NULL) ||
+       (g_adjustDistEdgeDn == NULL) ||
+       (g_adjustDistEdgeParentBase3 == NULL))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Failed allocating compute_adjust parent id array");
   }
@@ -9004,6 +9043,7 @@ static void compute_adjust_cache_build(void) {
 
   for (cursor = 0; cursor < totalParents; cursor++) {
     g_adjustParentBase3[cursor] = g_adjustParentIds[cursor] * 3;
+    g_adjustDistEdgeParentBase3[cursor] = g_adjustParentBase3[cursor];
   }
 
   for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
@@ -9030,6 +9070,94 @@ static void compute_adjust_cache_build(void) {
   qsort(g_adjustDnOrder, g_adjustDnCount, sizeof(int32_t),
         compare_adjust_dn_order);
 
+  if (totalParents > 0) {
+    int32_t edgeCursor = 0;
+    int32_t runCount = 0;
+
+    for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+      int32_t start = g_adjustParentOffsets[dnindex];
+      int32_t end = g_adjustParentOffsets[dnindex + 1];
+      for (int32_t i = start; i < end; i++) {
+        g_adjustDistEdgeDn[edgeCursor++] = dnindex;
+      }
+    }
+
+    if (edgeCursor != totalParents) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "compute_adjust cache mismatch: edge cursor=%d total=%d",
+                   edgeCursor, totalParents);
+    }
+
+    {
+      int32_t* edgeOrder = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+      int32_t* sortedEdgeDn = (int32_t*)malloc(sizeof(int32_t) * totalParents);
+      int32_t* sortedEdgeParent =
+          (int32_t*)malloc(sizeof(int32_t) * totalParents);
+      if ((edgeOrder == NULL) || (sortedEdgeDn == NULL) ||
+          (sortedEdgeParent == NULL)) {
+        free(edgeOrder);
+        free(sortedEdgeDn);
+        free(sortedEdgeParent);
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Failed allocating compute_adjust distribution edge sort"
+                     " arrays");
+      }
+
+      for (int32_t i = 0; i < totalParents; i++) {
+        edgeOrder[i] = i;
+      }
+
+      qsort(edgeOrder, totalParents, sizeof(int32_t), compare_adjust_dist_edge);
+
+      for (int32_t i = 0; i < totalParents; i++) {
+        int32_t src = edgeOrder[i];
+        sortedEdgeDn[i] = g_adjustDistEdgeDn[src];
+        sortedEdgeParent[i] = g_adjustDistEdgeParentBase3[src];
+      }
+
+      memcpy(g_adjustDistEdgeDn, sortedEdgeDn, sizeof(int32_t) * totalParents);
+      memcpy(g_adjustDistEdgeParentBase3, sortedEdgeParent,
+             sizeof(int32_t) * totalParents);
+
+      free(edgeOrder);
+      free(sortedEdgeDn);
+      free(sortedEdgeParent);
+    }
+
+    runCount = 0;
+    for (int32_t i = 0; i < totalParents; i++) {
+      if ((i == 0) ||
+          (g_adjustDistEdgeParentBase3[i] != g_adjustDistEdgeParentBase3[i - 1])) {
+        runCount++;
+      }
+    }
+
+    g_adjustDistRunParentBase3 = (int32_t*)malloc(sizeof(int32_t) * runCount);
+    g_adjustDistRunOffsets = (int32_t*)malloc(sizeof(int32_t) * (runCount + 1));
+    if ((g_adjustDistRunParentBase3 == NULL) || (g_adjustDistRunOffsets == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating compute_adjust distribution run arrays");
+    }
+
+    {
+      int32_t run = 0;
+      g_adjustDistRunOffsets[0] = 0;
+      for (int32_t i = 0; i < totalParents; i++) {
+        if ((i == 0) ||
+            (g_adjustDistEdgeParentBase3[i] !=
+             g_adjustDistEdgeParentBase3[i - 1])) {
+          if (run > 0) {
+            g_adjustDistRunOffsets[run] = i;
+          }
+          g_adjustDistRunParentBase3[run] = g_adjustDistEdgeParentBase3[i];
+          run++;
+        }
+      }
+      g_adjustDistRunOffsets[run] = totalParents;
+      g_adjustDistRunCount = run;
+    }
+  }
+
   g_adjustParentCount = totalParents;
 }
 
@@ -9051,101 +9179,28 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
-      for (int32_t d = 0; d < g_adjustDnCount; d++) {
-        dnindex = g_adjustDnOrder[d];
-        int32_t start = g_adjustParentOffsets[dnindex];
-        int32_t end = g_adjustParentOffsets[dnindex + 1];
-        int32_t deps = end - start;
-        solver_float* myvalue = vtable + g_adjustDanglingBase3[dnindex];
-        const solver_float invdeps = g_adjustInvDeps[dnindex];
-        const solver_float d0 = myvalue[0] * invdeps;
-        const solver_float d1 = myvalue[1] * invdeps;
-        const solver_float d2 = myvalue[2] * invdeps;
+      for (int32_t run = 0; run < g_adjustDistRunCount; run++) {
+        int32_t start = g_adjustDistRunOffsets[run];
+        int32_t end = g_adjustDistRunOffsets[run + 1];
+        int32_t parentBase3 = g_adjustDistRunParentBase3[run];
+        solver_float s0 = 0;
+        solver_float s1 = 0;
+        solver_float s2 = 0;
 
-        if (deps <= 4) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          p0[0] += d0;
-          p0[1] += d1;
-          p0[2] += d2;
+        for (int32_t e = start; e < end; e++) {
+          int32_t d = g_adjustDistEdgeDn[e];
+          solver_float* myvalue = vtable + g_adjustDanglingBase3[d];
+          solver_float invdeps = g_adjustInvDeps[d];
+          s0 += myvalue[0] * invdeps;
+          s1 += myvalue[1] * invdeps;
+          s2 += myvalue[2] * invdeps;
+        }
 
-          if (deps >= 2) {
-            solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-            p1[0] += d0;
-            p1[1] += d1;
-            p1[2] += d2;
-          }
-          if (deps >= 3) {
-            solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-            p2[0] += d0;
-            p2[1] += d1;
-            p2[2] += d2;
-          }
-          if (deps == 4) {
-            solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-            p3[0] += d0;
-            p3[1] += d1;
-            p3[2] += d2;
-          }
-        } else if (deps == 5) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
-          p0[0] += d0;
-          p0[1] += d1;
-          p0[2] += d2;
-          p1[0] += d0;
-          p1[1] += d1;
-          p1[2] += d2;
-          p2[0] += d0;
-          p2[1] += d1;
-          p2[2] += d2;
-          p3[0] += d0;
-          p3[1] += d1;
-          p3[2] += d2;
-          p4[0] += d0;
-          p4[1] += d1;
-          p4[2] += d2;
-        } else if (deps == 6) {
-          solver_float* p0 = vtable + g_adjustParentBase3[start];
-          solver_float* p1 = vtable + g_adjustParentBase3[start + 1];
-          solver_float* p2 = vtable + g_adjustParentBase3[start + 2];
-          solver_float* p3 = vtable + g_adjustParentBase3[start + 3];
-          solver_float* p4 = vtable + g_adjustParentBase3[start + 4];
-          solver_float* p5 = vtable + g_adjustParentBase3[start + 5];
-          p0[0] += d0;
-          p0[1] += d1;
-          p0[2] += d2;
-          p1[0] += d0;
-          p1[1] += d1;
-          p1[2] += d2;
-          p2[0] += d0;
-          p2[1] += d1;
-          p2[2] += d2;
-          p3[0] += d0;
-          p3[1] += d1;
-          p3[2] += d2;
-          p4[0] += d0;
-          p4[1] += d1;
-          p4[2] += d2;
-          p5[0] += d0;
-          p5[1] += d1;
-          p5[2] += d2;
-        } else {
-          int32_t* parentBase3 = g_adjustParentBase3 + start;
-          int32_t parentCount = end - start;
-          for (int32_t p = 0; p < parentCount; p++) {
-#if defined(__GNUC__) || defined(__clang__)
-            if (p + 1 < parentCount) {
-              __builtin_prefetch(vtable + parentBase3[p + 1], 1, 1);
-            }
-#endif
-            solver_float* parentvalue = vtable + parentBase3[p];
-            parentvalue[0] += d0;
-            parentvalue[1] += d1;
-            parentvalue[2] += d2;
-          }
+        {
+          solver_float* parentvalue = vtable + parentBase3;
+          parentvalue[0] += s0;
+          parentvalue[1] += s1;
+          parentvalue[2] += s2;
         }
       }
       Timer_Stop("Adjust Distribution Core");
