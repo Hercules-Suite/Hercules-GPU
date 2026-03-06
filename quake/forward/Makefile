@@ -15,6 +15,11 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
+ifeq ($(USE_OPENMP),1)
+	CFLAGS += -fopenmp
+	LDFLAGS += -fopenmp
+endif
+
 ifeq ($(filter -O%,$(CXXFLAGS)),)
 	CXXFLAGS += -O3
 endif

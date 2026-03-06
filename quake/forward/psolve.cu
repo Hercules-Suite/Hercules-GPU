@@ -40,6 +40,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "util.h"
 #include "commutil.h"
 #include "timers.h"
@@ -102,6 +106,8 @@ static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int32_t g_adjustAssignmentOmpMode = -1;
+static int32_t g_adjustAssignmentOmpReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -299,6 +305,7 @@ static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
+static int32_t adjust_assignment_use_omp(void);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -9103,6 +9110,10 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Stop("Adjust Distribution Core");
     } else {
       Timer_Start("Adjust Assignment Core");
+      const int32_t useOmp = adjust_assignment_use_omp();
+#ifdef _OPENMP
+#pragma omp parallel for if(useOmp) schedule(static)
+#endif
       for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
@@ -9276,6 +9287,39 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   }
 
   return;
+}
+
+static int32_t adjust_assignment_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (g_adjustAssignmentOmpMode < 0) {
+    const char* env = getenv("HERCULES_ADJUST_ASSIGN_OMP");
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_adjustAssignmentOmpMode = 0;
+      } else {
+        g_adjustAssignmentOmpMode = 1;
+      }
+    } else {
+      int maxThreads = omp_get_max_threads();
+      g_adjustAssignmentOmpMode =
+          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+    }
+
+    if ((g_adjustAssignmentOmpMode == 1) &&
+        (Global.myID == 0) &&
+        (g_adjustAssignmentOmpReported == 0)) {
+      monitor_print(
+          "compute_adjust assignment OpenMP: enabled (threads=%d)\n",
+          omp_get_max_threads());
+      g_adjustAssignmentOmpReported = 1;
+    }
+  }
+
+  return g_adjustAssignmentOmpMode;
+#endif
 }
 
 static void print_timing_stat() {
