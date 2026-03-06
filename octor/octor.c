@@ -5327,6 +5327,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     int64_t *nodeStartTable;
     int64_t ecount, ncount, harborcount, startgeid, startgnid, geid, gnid;
     int64_t ldnnum;
+    int64_t vertexHashSize;
     int32_t eindex, nindex, dnindex;
     elem_t *elemTable;
     vertex_t **elemVertexRef;
@@ -5412,11 +5413,12 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     
     /* How many elements I have */
     ecount = tree_countleaves(tree);
+    vertexHashSize = ecount * 2 + 1;
 
     /* Allocate memory for temporary data structures and int32link pool */
     elemTable = (elem_t *)malloc(sizeof(elem_t) * ecount);
     elemVertexRef = (vertex_t **)malloc(sizeof(vertex_t *) * ecount * 8);
-    vertexHashTable = (link_t **)calloc(ecount, sizeof(link_t *));
+    vertexHashTable = (link_t **)calloc(vertexHashSize, sizeof(link_t *));
 
     vertexpool = (mem_t *)mem_new(sizeof(vertex_t), (int32_t)(ecount * 1.4));
     linkpool = (mem_t *)mem_new(sizeof(link_t), (int32_t)(ecount * 1.4));
@@ -5437,7 +5439,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     } else {
         theAllocatedMemSum += sizeof(elem_t) * ecount +
             sizeof(vertex_t *) * ecount * 8 +
-            ecount * sizeof(link_t *) +
+            vertexHashSize * sizeof(link_t *) +
             sizeof(vertex_t) * (int32_t)(ecount * 1.4) +
             sizeof(link_t) * (int32_t)(ecount * 1.4);
     }
@@ -5520,7 +5522,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
                     pt.x = oct->lx + i * edgesize;
 
-                    hashentry = math_hashuint32(&pt, 3) % ecount;
+                    hashentry = math_hashuint32(&pt, 3) % vertexHashSize;
                     link = vertexHashTable[hashentry];
 
                     while (link != NULL) {
@@ -5719,7 +5721,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         com_resetpctl(tree->com, sizeof(vertex_info_t));
 
         /* Visit all my vertices */
-        for (hashentry = 0; hashentry < ecount; hashentry++) {
+        for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
 
             link = vertexHashTable[hashentry];
 
@@ -5922,7 +5924,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     (vertex_info_t *)mem_getcursor(frompctl->rcvmem))
                    != NULL) {
 
-                hashentry = math_hashuint32(&invertex->x, 3) % ecount;
+                hashentry = math_hashuint32(&invertex->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -6052,7 +6054,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     } /* if groupsize > 1 */
 
 
-    for (hashentry = 0; hashentry < ecount; hashentry++) {
+    for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
         int dep;
         tick_t smalloctsize;
 
@@ -6101,7 +6103,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                         ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount, bldgs_nodesearch_com,
                     			pushdowns_nodesearch, find_topoAirOct );
@@ -6121,7 +6123,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                         ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount,bldgs_nodesearch_com,
                     			pushdowns_nodesearch,find_topoAirOct);
@@ -6140,7 +6142,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                         ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount,bldgs_nodesearch_com,
                     			pushdowns_nodesearch, find_topoAirOct);
@@ -6158,7 +6160,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     pt.z = vertex->z;
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount,bldgs_nodesearch_com,
                     			pushdowns_nodesearch, find_topoAirOct);
@@ -6176,7 +6178,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     pt.z = vertex->z;
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount,bldgs_nodesearch_com,
                     			pushdowns_nodesearch, find_topoAirOct);
@@ -6195,7 +6197,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     pt.y = vertex->y;
 
                     if (tree->groupsize > 1) {
-                    	node_harboranchored(tree, vertexHashTable, ecount,
+                    	node_harboranchored(tree, vertexHashTable, vertexHashSize,
                     			linkpool, vertexpool, allcom,
                     			pt, &harborcount,bldgs_nodesearch_com,
                     			pushdowns_nodesearch, find_topoAirOct);
@@ -6234,7 +6236,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             while ((anchored = (point_t *)mem_getcursor(frompctl->rcvmem))
                    != NULL) {
 
-                hashentry = math_hashuint32(&anchored->x, 3) % ecount;
+                hashentry = math_hashuint32(&anchored->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -6314,7 +6316,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     nindex = 0;
 
     /* Visit all the vertices I have harbored */
-    for (hashentry = 0; hashentry < ecount; hashentry++) {
+    for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
 
         link = vertexHashTable[hashentry];
 
@@ -6563,7 +6565,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             }
         } /* I don't own this node */
 
-        hashentry = math_hashuint32(&nodeTable[nindex], 3) % ecount;
+        hashentry = math_hashuint32(&nodeTable[nindex], 3) % vertexHashSize;
         link = vertexHashTable[hashentry];
 
         while (link != NULL) {
@@ -6609,7 +6611,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 int32_t lnid;
 
                 /* Find the vertex in my hashtable */
-                hashentry = math_hashuint32(&in_gnid_info->x, 3) % ecount;
+                hashentry = math_hashuint32(&in_gnid_info->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -6729,7 +6731,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.z = nodeTable[ldnid].z +
                     ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
@@ -6746,7 +6748,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.z = nodeTable[ldnid].z +
                     ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
@@ -6763,7 +6765,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.y = nodeTable[ldnid].y +
                     ((dep & 0x2) ? smalloctsize : -smalloctsize);
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
@@ -6779,7 +6781,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.y = nodeTable[ldnid].y;
                 pt.z = nodeTable[ldnid].z;
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
@@ -6795,7 +6797,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.x = nodeTable[ldnid].x;
                 pt.z = nodeTable[ldnid].z;
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
@@ -6812,7 +6814,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 pt.x = nodeTable[ldnid].x;
                 pt.y = nodeTable[ldnid].y;
 
-                dnode_correlate(tree, mess, vertexHashTable, ecount,
+                dnode_correlate(tree, mess, vertexHashTable, vertexHashSize,
                                 dnodeTable, dnindex, pt);
             }
             break;
