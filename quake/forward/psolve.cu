@@ -96,6 +96,8 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+static int32_t g_sparseClearMode = -1;
+static int32_t g_sparseClearModeReported = 0;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -305,6 +307,7 @@ static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
+static int32_t solver_sparse_clear_mode(void);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
@@ -6546,15 +6549,51 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  int32_t rangeCount = topo_get_node_range_count();
-  const int32_t* rangeStarts = topo_get_node_range_starts();
-  const int32_t* rangeLengths = topo_get_node_range_lengths();
+  if (solver_sparse_clear_mode() == 1) {
+    int32_t topoCount = topo_get_nodes_count();
+    const int32_t* topoNodes = topo_get_nodes_list();
 
-  for (int32_t i = 0; i < rangeCount; i++) {
-    int32_t start = rangeStarts[i];
-    int32_t len = rangeLengths[i];
-    memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(topoCount > 100000)
+#endif
+    for (int32_t i = 0; i < topoCount; i++) {
+      int32_t lnid = topoNodes[i];
+      solver->force[lnid].f[0] = 0;
+      solver->force[lnid].f[1] = 0;
+      solver->force[lnid].f[2] = 0;
+    }
+  } else {
+    int32_t rangeCount = topo_get_node_range_count();
+    const int32_t* rangeStarts = topo_get_node_range_starts();
+    const int32_t* rangeLengths = topo_get_node_range_lengths();
+
+    for (int32_t i = 0; i < rangeCount; i++) {
+      int32_t start = rangeStarts[i];
+      int32_t len = rangeLengths[i];
+      memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
+    }
   }
+}
+
+static int32_t solver_sparse_clear_mode(void) {
+  if (g_sparseClearMode < 0) {
+    const char* env = getenv("HERCULES_SPARSE_CLEAR_MODE");
+    /* 0: range memset (default), 1: node-list clear */
+    if (env != NULL &&
+        (strcasecmp(env, "nodes") == 0 || strcmp(env, "1") == 0)) {
+      g_sparseClearMode = 1;
+    } else {
+      g_sparseClearMode = 0;
+    }
+
+    if (Global.myID == 0 && g_sparseClearModeReported == 0) {
+      monitor_print("Sparse host force reset mode: %s\n",
+                    (g_sparseClearMode == 1) ? "nodes" : "ranges");
+      g_sparseClearModeReported = 1;
+    }
+  }
+
+  return g_sparseClearMode;
 }
 
 static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
