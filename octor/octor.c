@@ -5313,6 +5313,31 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     vertex_t *vertex = NULL;
     mess_t *mess = NULL;
     com_t *allcom = NULL, *partcom = NULL;
+    int extract_profile = 0;
+    const char *extract_profile_env = getenv("OCTOR_EXTRACT_PROFILE");
+    double t_extract_start = 0.0;
+    double t_stage_start = 0.0;
+    double t_setcom = 0.0;
+    double t_vertex = 0.0;
+    double t_indirect = 0.0;
+    double t_node = 0.0;
+    double t_elem = 0.0;
+    double t_dnode = 0.0;
+    double t_cleanup = 0.0;
+    double t_total = 0.0;
+    double t_setcom_max = 0.0;
+    double t_vertex_max = 0.0;
+    double t_indirect_max = 0.0;
+    double t_node_max = 0.0;
+    double t_elem_max = 0.0;
+    double t_dnode_max = 0.0;
+    double t_cleanup_max = 0.0;
+    double t_total_max = 0.0;
+
+    if ((extract_profile_env != NULL) && (atoi(extract_profile_env) != 0)) {
+        extract_profile = 1;
+        t_extract_start = MPI_Wtime();
+    }
 
     /*---------------- Initialize various data structure ----------------*/
 
@@ -5332,6 +5357,10 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         theAllocatedMemSum += sizeof(mess_t);
     }
 
+    if (extract_profile) {
+        t_stage_start = MPI_Wtime();
+    }
+
     /* Note by Ricardo:
      * This block has been moved from the end of octor_partitiontree
      * to here (at the beginning of octor_extractmesh).
@@ -5348,6 +5377,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     		MPI_Abort(MPI_COMM_WORLD, COMM_ERR);
     		exit(1);
     	}
+
+        if (extract_profile) {
+            t_setcom += MPI_Wtime() - t_stage_start;
+            t_stage_start = MPI_Wtime();
+        }
     }
     
     /* How many elements I have */
@@ -5937,6 +5971,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     } /* Update vertex touches in a multi-processor environment */
 
 
+    if (extract_profile) {
+        t_vertex += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
+    }
+
     /*-----Indirect sharing: share via anchored vertices  -------------*/
 
     /* Go through the vertices I have harbored. Set the node
@@ -6210,6 +6249,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     if (tree->groupsize > 1) {
         /* Release the allcom */
         com_delete(allcom);
+    }
+
+    if (extract_profile) {
+        t_indirect += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
     }
 
 
@@ -6592,6 +6636,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
 #endif /* DEBUG */
 
+    if (extract_profile) {
+        t_node += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
+    }
+
     /* Correlate the element table to the node table */
     oct = oct_getleftmost(tree->root);
 
@@ -6646,6 +6695,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         oct = oct_getnextleaf(oct);
 
     } /* for all the local octants */
+
+    if (extract_profile) {
+        t_elem += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
+    }
 
     /* Correlate the dangling node to anchored nodes */
     for (dnindex = 0; dnindex < ldnnum; dnindex++) {
@@ -6769,6 +6823,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     } /* for all DANGLING nodes owned by me */
 
 
+    if (extract_profile) {
+        t_dnode += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
+    }
+
     /* Free temporary data structures */
     if (tree->groupsize > 1) {
         free(octCountTable);
@@ -6798,6 +6857,37 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 #ifdef MESH_VERBOSE
     mess_showstat(mess, DETAILS, "octor_extractmesh");
 #endif /* TREE_VERBOSE */
+
+    if (extract_profile) {
+        t_cleanup += MPI_Wtime() - t_stage_start;
+        t_total = MPI_Wtime() - t_extract_start;
+
+        MPI_Reduce(&t_setcom, &t_setcom_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_vertex, &t_vertex_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_indirect, &t_indirect_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_node, &t_node_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_elem, &t_elem_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_dnode, &t_dnode_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_cleanup, &t_cleanup_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+        MPI_Reduce(&t_total, &t_total_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+                   tree->comm_tree);
+
+        if (tree->procid == 0) {
+            printf("OCTOR Extractmesh Profile (MAX ranks): setcom %.3fs, "
+                   "vertex %.3fs, indirect %.3fs, node %.3fs, elem %.3fs, "
+                   "dnode %.3fs, cleanup %.3fs, total %.3fs\n",
+                   t_setcom_max, t_vertex_max, t_indirect_max, t_node_max,
+                   t_elem_max, t_dnode_max, t_cleanup_max, t_total_max);
+            fflush(stdout);
+        }
+    }
 
     return (mesh_t *)mess;
 }
