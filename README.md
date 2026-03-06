@@ -50,3 +50,22 @@ Notes:
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs
 	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
+
+Mesh mode input flags (`numerical.in`):
+
+- `output_mesh`
+	`1` writes the generated mesh etree (`mesh_etree_output_file`) to disk.
+	`0` skips mesh etree output.
+- `mesh_only_mode`
+	`1` runs meshing/setup and exits before time-stepping solver iterations.
+	`0` runs the full solver after setup.
+- `mesh_input_mode`
+	`1` builds mesh from an existing mesh etree (import path).
+	`0` builds mesh from the velocity/topography models (normal meshing path).
+
+Typical two-phase settings:
+
+- Phase A (generate mesh database):
+	`output_mesh=1`, `mesh_only_mode=1`, `mesh_input_mode=0`
+- Phase B (import mesh and solve):
+	`output_mesh=0`, `mesh_only_mode=0`, `mesh_input_mode=1`
