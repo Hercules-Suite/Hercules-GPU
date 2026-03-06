@@ -60,6 +60,28 @@ static topometh_t         theTopoMethod;
 static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
 static int32_t            myNumberOfTopoNonLinElements = 0;
+
+static void topo_get_element_min_corner(mesh_t *myMesh, elem_t *elemp,
+                                        double *xo, double *yo, double *zo) {
+    int i;
+    double minx, miny, minz;
+
+    node_t *n0 = &myMesh->nodeTable[elemp->lnid[0]];
+    minx = (double)n0->x;
+    miny = (double)n0->y;
+    minz = (double)n0->z;
+
+    for (i = 1; i < 8; i++) {
+        node_t *ni = &myMesh->nodeTable[elemp->lnid[i]];
+        if ((double)ni->x < minx) minx = (double)ni->x;
+        if ((double)ni->y < miny) miny = (double)ni->y;
+        if ((double)ni->z < minz) minz = (double)ni->z;
+    }
+
+    *xo = minx * myMesh->ticksize;
+    *yo = miny * myMesh->ticksize;
+    *zo = minz * myMesh->ticksize;
+}
 static noyesflag_t        theNonlinTopo_flag  = NO;
 static noyesflag_t        theTopoBKT_flag  = NO;
 
@@ -1703,24 +1725,18 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
 
         elem_t     *elemp;
         edata_t    *edata;
-        node_t     *node0dat;
         double      Vp, xo, yo, zo, esize;
         // double      Vol;
         double      aux_vol[5] = { 0 };
-        int32_t     node0, aux_int=0;
+        int32_t     aux_int=0;
 
         elemp    = &myMesh->elemTable[eindex]; //Takes the information of the "eindex" element
         edata    = (edata_t *)elemp->data;
-        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
-        node0dat = &myMesh->nodeTable[node0];
-
         /* get element Vp */
         Vp       = (double)edata->Vp;
 
         /* get coordinates of element zero node */
-        xo = (node0dat->x)*(myMesh->ticksize);
-        yo = (node0dat->y)*(myMesh->ticksize);
-        zo = (node0dat->z)*(myMesh->ticksize);
+        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
 
         /* get element size */
         esize = edata->edgesize;
@@ -1771,23 +1787,16 @@ void topography_elements_mapping(int32_t myID, mesh_t *myMesh) {
 
         elem_t     *elemp;
         edata_t    *edata;
-        node_t     *node0dat;
         double      Vp, xo, yo, zo, esize;
         // double      Vol;
-        int32_t     node0;
 
         elemp    = &myMesh->elemTable[eindex]; //Takes the information of the "eindex" element
         edata    = (edata_t *)elemp->data;
-        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
-        node0dat = &myMesh->nodeTable[node0];
-
         /* get element Vp */
         Vp       = (double)edata->Vp;
 
         /* get coordinates of element zero node */
-        xo = (node0dat->x)*(myMesh->ticksize);
-        yo = (node0dat->y)*(myMesh->ticksize);
-        zo = (node0dat->z)*(myMesh->ticksize);
+        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
 
 
         /* get element size */
@@ -1866,22 +1875,16 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         for (eindex = 0; eindex < myMesh->lenum; eindex++) {
             elem_t *elemp;
             edata_t *edata;
-            node_t *node0dat;
             double Vp, xo, yo, zo, esize;
-            int32_t node0;
             noyesflag_t includeElem = NO;
             double aux_vol[5] = {0};
             int32_t aux_int = 0;
 
             elemp = &myMesh->elemTable[eindex];
             edata = (edata_t *)elemp->data;
-            node0 = elemp->lnid[0];
-            node0dat = &myMesh->nodeTable[node0];
 
             Vp = (double)edata->Vp;
-            xo = (node0dat->x) * (myMesh->ticksize);
-            yo = (node0dat->y) * (myMesh->ticksize);
-            zo = (node0dat->z) * (myMesh->ticksize);
+            topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
             esize = edata->edgesize;
 
             if ((Vp != -1) &&
@@ -2124,8 +2127,6 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         elem_t           *elemp;
         edata_t          *edata;
         topoconstants_t  *ecp;
-        node_t           *node0dat;
-        int32_t           node0;
         double            xo, yo, zo, esize;
         double            mu, lambda;
 
@@ -2134,13 +2135,8 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         edata  = (edata_t *)elemp->data;
         ecp    = myTopoSolver->topoconstants + topo_eindex;
 
-        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
-        node0dat = &myMesh->nodeTable[node0];
-
-        /* get coordinates of element zero node */
-        xo = (node0dat->x)*(myMesh->ticksize);
-        yo = (node0dat->y)*(myMesh->ticksize);
-        zo = (node0dat->z)*(myMesh->ticksize);
+        /* get geometric minimum corner coordinates */
+        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
 
         /* get full element volume */
         esize      = edata->edgesize;
