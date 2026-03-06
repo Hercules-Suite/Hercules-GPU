@@ -2292,6 +2292,9 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
     for (i_y = 0; i_y < n_points; i_y++) {
       y_m = Global.theYForMeshOrigin +
             (leaf->ly + points[i_y] * halfticks) * ticksize;
+    const int use_sqd_topo =
+        (Param.includeTopography == YES) && (get_theetree_type() == SQD);
+    const double topo_elev = use_sqd_topo ? point_elevation(x_m, y_m) : 0.0;
 
       for (i_z = 0; i_z < n_points; i_z++) {
         z_m = Global.theZForMeshOrigin +
@@ -2310,8 +2313,8 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
         // }
 
         /* Shift the domain if topography with squashed etree is considered */
-        if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
-          z_m -= point_elevation(x_m, y_m);
+        if (use_sqd_topo) {
+          z_m -= topo_elev;
           if (z_m < 0) /* get air properties */
           {
             edata_t* airedata = (edata_t*)data;
@@ -6550,9 +6553,6 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   const int32_t* rangeStarts = topo_get_node_range_starts();
   const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(rangeCount > 32)
-#endif
   for (int32_t i = 0; i < rangeCount; i++) {
     int32_t start = rangeStarts[i];
     int32_t len = rangeLengths[i];
@@ -11324,6 +11324,10 @@ static void mesh_correct_properties(etree_t* cvm) {
         east_m = ((Global.myMesh->ticksize) *
                       (double)Global.myMesh->nodeTable[lnid0].y +
                   edata->edgesize * points[iEast] + Global.theYForMeshOrigin);
+        const int use_sqd_topo =
+            (Param.includeTopography == YES) && (get_theetree_type() == SQD);
+        const double topo_elev =
+            use_sqd_topo ? point_elevation(north_m, east_m) : 0.0;
 
         for (iDepth = 0; iDepth < numPoints; iDepth++) {
           cvmpayload_t g_props; /* ground properties record */
@@ -11339,9 +11343,8 @@ static void mesh_correct_properties(etree_t* cvm) {
             depth_m -= get_surface_shift();
           }
 
-          if ((Param.includeTopography == YES) &&
-              (get_theetree_type() == SQD)) {
-            depth_m -= point_elevation(north_m, east_m);
+          if (use_sqd_topo) {
+            depth_m -= topo_elev;
             if (depth_m < 0) continue;
 
             if (depth_m > Param.theDomainZ)
