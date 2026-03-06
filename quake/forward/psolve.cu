@@ -104,6 +104,8 @@ static int32_t* g_adjustDanglingLnid = NULL;
 static int32_t* g_adjustParentBase3 = NULL;
 static int32_t* g_adjustDanglingBase3 = NULL;
 static solver_float* g_adjustInvDeps = NULL;
+static int32_t* g_adjustDnOrder = NULL;
+static int32_t* g_adjustDnSortKey = NULL;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
 static int32_t g_adjustAssignmentOmpMode = -1;
@@ -306,6 +308,7 @@ static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_assignment_use_omp(void);
+static int compare_adjust_dn_order(const void* a, const void* b);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -8889,6 +8892,8 @@ static void compute_adjust_cache_free(void) {
   free(g_adjustParentBase3);
   free(g_adjustDanglingBase3);
   free(g_adjustInvDeps);
+  free(g_adjustDnOrder);
+  free(g_adjustDnSortKey);
 
   g_adjustParentOffsets = NULL;
   g_adjustParentIds = NULL;
@@ -8896,8 +8901,30 @@ static void compute_adjust_cache_free(void) {
   g_adjustParentBase3 = NULL;
   g_adjustDanglingBase3 = NULL;
   g_adjustInvDeps = NULL;
+  g_adjustDnOrder = NULL;
+  g_adjustDnSortKey = NULL;
   g_adjustDnCount = 0;
   g_adjustParentCount = 0;
+}
+
+static int compare_adjust_dn_order(const void* a, const void* b) {
+  int32_t ia = *(const int32_t*)a;
+  int32_t ib = *(const int32_t*)b;
+  int32_t ka = g_adjustDnSortKey[ia];
+  int32_t kb = g_adjustDnSortKey[ib];
+  if (ka < kb) {
+    return -1;
+  }
+  if (ka > kb) {
+    return 1;
+  }
+  if (ia < ib) {
+    return -1;
+  }
+  if (ia > ib) {
+    return 1;
+  }
+  return 0;
 }
 
 static void compute_adjust_cache_build(void) {
@@ -8923,9 +8950,12 @@ static void compute_adjust_cache_build(void) {
   g_adjustDanglingBase3 =
       (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
   g_adjustInvDeps = (solver_float*)malloc(sizeof(solver_float) * g_adjustDnCount);
+  g_adjustDnOrder = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
+  g_adjustDnSortKey = (int32_t*)malloc(sizeof(int32_t) * g_adjustDnCount);
 
   if ((g_adjustParentOffsets == NULL) || (g_adjustDanglingLnid == NULL) ||
-      (g_adjustDanglingBase3 == NULL) || (g_adjustInvDeps == NULL)) {
+      (g_adjustDanglingBase3 == NULL) || (g_adjustInvDeps == NULL) ||
+      (g_adjustDnOrder == NULL) || (g_adjustDnSortKey == NULL)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Failed allocating compute_adjust cache arrays");
   }
@@ -8941,6 +8971,7 @@ static void compute_adjust_cache_build(void) {
     g_adjustDanglingLnid[dnindex] = dnode->ldnid;
     g_adjustDanglingBase3[dnindex] = dnode->ldnid * 3;
     g_adjustInvDeps[dnindex] = (deps > 0) ? ((solver_float)1.0 / deps) : 0;
+    g_adjustDnOrder[dnindex] = dnindex;
     totalParents += deps;
     g_adjustParentOffsets[dnindex + 1] = totalParents;
   }
@@ -8988,7 +9019,16 @@ static void compute_adjust_cache_build(void) {
       }
       g_adjustParentBase3[j + 1] = key;
     }
+
+    if (start < end) {
+      g_adjustDnSortKey[dnindex] = g_adjustParentBase3[start];
+    } else {
+      g_adjustDnSortKey[dnindex] = g_adjustDanglingBase3[dnindex];
+    }
   }
+
+  qsort(g_adjustDnOrder, g_adjustDnCount, sizeof(int32_t),
+        compare_adjust_dn_order);
 
   g_adjustParentCount = totalParents;
 }
@@ -9011,7 +9051,8 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
-      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+      for (int32_t d = 0; d < g_adjustDnCount; d++) {
+        dnindex = g_adjustDnOrder[d];
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
@@ -9114,7 +9155,8 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 #ifdef _OPENMP
 #pragma omp parallel for if(useOmp) schedule(static)
 #endif
-      for (dnindex = 0; dnindex < g_adjustDnCount; dnindex++) {
+      for (int32_t d = 0; d < g_adjustDnCount; d++) {
+        dnindex = g_adjustDnOrder[d];
         int32_t start = g_adjustParentOffsets[dnindex];
         int32_t end = g_adjustParentOffsets[dnindex + 1];
         int32_t deps = end - start;
