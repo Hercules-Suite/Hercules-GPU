@@ -6575,10 +6575,15 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
+  /* Ensure displacement kernel has completed before starting D2H copy on a
+   * separate stream, so copy and subsequent main-stream work can overlap. */
+  cudaStreamWaitEvent(solver->streams[CUDA_STREAM_SECONDARY],
+                      solver->events[CUDA_EVENT_DISP_KERNEL_DONE], 0);
+
   /* Copy updated tm2 displacements from device */
   cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
                   mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
-                  solver->streams[CUDA_STREAM_MAIN]);
+                  solver->streams[CUDA_STREAM_SECONDARY]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
   /* Uncomment for timing tests */
@@ -6626,13 +6631,9 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Compute new displacement");
 
-  Timer_Start("Disp kernel wait only");
-  cudaEventSynchronize(solver->events[CUDA_EVENT_DISP_KERNEL_DONE]);
-  Timer_Stop("Disp kernel wait only");
-
   Timer_Start("Disp postcopy sync wait");
   Timer_Start("Disp kernel sync wait");
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_SECONDARY]);
   Timer_Stop("Disp kernel sync wait");
   Timer_Stop("Disp postcopy sync wait");
 
@@ -7006,15 +7007,15 @@ static void solver_run() {
     solver_unload_disp_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Memory Copy");
 
+    Timer_Start("GPU Memory Copy");
+    solver_reset_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Memory Copy");
+
     Timer_Start("Compute Physics");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Compute Physics");
-
-    Timer_Start("GPU Memory Copy");
-    solver_reset_gpu(Global.mySolver, Global.myMesh);
-    Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Communication");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
