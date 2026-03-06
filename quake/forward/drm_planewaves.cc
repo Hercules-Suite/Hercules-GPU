@@ -1329,6 +1329,43 @@ static double   *Soil_Vs_data;
 static double   *Soil_rho_data;
 static double   *Soil_depth_data;
 static double   *Soil_NL_data;
+static double   *Istanbul_surface_z = NULL;
+static double   Istanbul_surface_swx = NAN;
+static double   Istanbul_surface_swy = NAN;
+
+static int Istanbul_update_surface_cache(double DRM_southwest_x,
+                                         double DRM_southwest_y) {
+    const int x_nodes = 106;
+    const int y_nodes = 43;
+    const int node_count = x_nodes * y_nodes;
+    const double thebase_zcoord = get_thebase_topo();
+
+    if (Istanbul_surface_z == NULL) {
+        Istanbul_surface_z = (double*)malloc(sizeof(double) * node_count);
+        if (Istanbul_surface_z == NULL) {
+            fprintf(stderr, "Istanbul surface cache allocation failed\n");
+            return -1;
+        }
+    }
+
+    if ((fabs(Istanbul_surface_swx - DRM_southwest_x) < 1e-12) &&
+        (fabs(Istanbul_surface_swy - DRM_southwest_y) < 1e-12)) {
+        return 0;
+    }
+
+    for (int y = 0; y < y_nodes; y++) {
+        for (int x = 0; x < x_nodes; x++) {
+            int node_id = y * x_nodes + x;
+            double xo = y * 250.0 + DRM_southwest_y;
+            double yo = x * 250.0 + DRM_southwest_x;
+            Istanbul_surface_z[node_id] = thebase_zcoord - point_elevation(xo, yo);
+        }
+    }
+
+    Istanbul_surface_swx = DRM_southwest_x;
+    Istanbul_surface_swy = DRM_southwest_y;
+    return 0;
+}
 
 int material_property_relative_V10_local(double x_input, double y_input, double z_input, double output[4], double DRM_southwest_x, double DRM_southwest_y ) {
 
@@ -1408,10 +1445,15 @@ int material_property_relative_V10_local(double x_input, double y_input, double 
         y_coord[2] = y_coord[0]+250.0;
         y_coord[3] = y_coord[0]+250.0;
 
-        z_coord[0] = thebase_zcoord-point_elevation((y_grid_ID-1)*250.0+DRM_southwest_y, (x_grid_ID-1)*250.0+DRM_southwest_x);
-        z_coord[1] = thebase_zcoord-point_elevation((y_grid_ID-1)*250.0+DRM_southwest_y, (x_grid_ID-1)*250.0+250.0+DRM_southwest_x);
-        z_coord[2] = thebase_zcoord-point_elevation((y_grid_ID-1)*250.0+250.0+DRM_southwest_y, (x_grid_ID-1)*250.0+250.0+DRM_southwest_x);
-        z_coord[3] = thebase_zcoord-point_elevation((y_grid_ID-1)*250.0+250.0+DRM_southwest_y, (x_grid_ID-1)*250.0+DRM_southwest_x);
+        if (Istanbul_update_surface_cache(DRM_southwest_x, DRM_southwest_y) != 0) {
+            output[3] = 0.0;
+            return -1;
+        }
+
+        z_coord[0] = Istanbul_surface_z[Rec_node_ID[0]];
+        z_coord[1] = Istanbul_surface_z[Rec_node_ID[1]];
+        z_coord[2] = Istanbul_surface_z[Rec_node_ID[2]];
+        z_coord[3] = Istanbul_surface_z[Rec_node_ID[3]];
 
         xi  = (x_input - x_coord[0])/250.0*2.0 - 1.0;
         eta = (y_input - y_coord[0])/250.0*2.0 - 1.0;
