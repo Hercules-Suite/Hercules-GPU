@@ -6550,10 +6550,61 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   const int32_t* rangeStarts = topo_get_node_range_starts();
   const int32_t* rangeLengths = topo_get_node_range_lengths();
 
+  if (rangeCount <= 0) {
+    return;
+  }
+
+  size_t totalLen = 0;
+  for (int32_t i = 0; i < rangeCount; i++) {
+    if (rangeLengths[i] > 0) {
+      totalLen += (size_t)rangeLengths[i];
+    }
+  }
+
+  size_t nharbored = (Global.myMesh != NULL) ? (size_t)Global.myMesh->nharbored : 0;
+
+  /* If coverage is broad or range list is highly fragmented, one full clear
+   * is typically cheaper than thousands of tiny memset calls. */
+  if (nharbored > 0 &&
+      (totalLen >= (nharbored / 3) || rangeCount > 2048)) {
+    memset(solver->force, 0, nharbored * sizeof(fvector_t));
+    return;
+  }
+
+  /* Merge adjacent/overlapping ranges to reduce memset call count. */
+  int32_t mergedStart = -1;
+  int32_t mergedEnd = -1;
+
   for (int32_t i = 0; i < rangeCount; i++) {
     int32_t start = rangeStarts[i];
     int32_t len = rangeLengths[i];
-    memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
+    if (len <= 0) {
+      continue;
+    }
+
+    int32_t end = start + len;
+    if (mergedStart < 0) {
+      mergedStart = start;
+      mergedEnd = end;
+      continue;
+    }
+
+    if (start <= mergedEnd) {
+      if (end > mergedEnd) {
+        mergedEnd = end;
+      }
+      continue;
+    }
+
+    memset(solver->force + mergedStart, 0,
+           (size_t)(mergedEnd - mergedStart) * sizeof(fvector_t));
+    mergedStart = start;
+    mergedEnd = end;
+  }
+
+  if (mergedStart >= 0 && mergedEnd > mergedStart) {
+    memset(solver->force + mergedStart, 0,
+           (size_t)(mergedEnd - mergedStart) * sizeof(fvector_t));
   }
 }
 
