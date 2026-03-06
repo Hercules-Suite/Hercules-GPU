@@ -6550,61 +6550,10 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   const int32_t* rangeStarts = topo_get_node_range_starts();
   const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-  if (rangeCount <= 0) {
-    return;
-  }
-
-  size_t totalLen = 0;
-  for (int32_t i = 0; i < rangeCount; i++) {
-    if (rangeLengths[i] > 0) {
-      totalLen += (size_t)rangeLengths[i];
-    }
-  }
-
-  size_t nharbored = (Global.myMesh != NULL) ? (size_t)Global.myMesh->nharbored : 0;
-
-  /* If coverage is broad or range list is highly fragmented, one full clear
-   * is typically cheaper than thousands of tiny memset calls. */
-  if (nharbored > 0 &&
-      (totalLen >= (nharbored / 3) || rangeCount > 2048)) {
-    memset(solver->force, 0, nharbored * sizeof(fvector_t));
-    return;
-  }
-
-  /* Merge adjacent/overlapping ranges to reduce memset call count. */
-  int32_t mergedStart = -1;
-  int32_t mergedEnd = -1;
-
   for (int32_t i = 0; i < rangeCount; i++) {
     int32_t start = rangeStarts[i];
     int32_t len = rangeLengths[i];
-    if (len <= 0) {
-      continue;
-    }
-
-    int32_t end = start + len;
-    if (mergedStart < 0) {
-      mergedStart = start;
-      mergedEnd = end;
-      continue;
-    }
-
-    if (start <= mergedEnd) {
-      if (end > mergedEnd) {
-        mergedEnd = end;
-      }
-      continue;
-    }
-
-    memset(solver->force + mergedStart, 0,
-           (size_t)(mergedEnd - mergedStart) * sizeof(fvector_t));
-    mergedStart = start;
-    mergedEnd = end;
-  }
-
-  if (mergedStart >= 0 && mergedEnd > mergedStart) {
-    memset(solver->force + mergedStart, 0,
-           (size_t)(mergedEnd - mergedStart) * sizeof(fvector_t));
+    memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
   }
 }
 
@@ -10378,7 +10327,6 @@ static void source_init(const char* physicsin) {
       }
     }
   }
-
 }
 
 /**
@@ -11968,35 +11916,27 @@ int main(int argc, char** argv) {
     g_hasIstanbulVelModelOrigin = 0;
   }
 
-  if (Param.useProfile == YES) {
-    if (Param.theMeshInputMode == 0) {
+  if (Param.theMeshInputMode == 0) {
+    if (Param.useProfile == YES) {
       /* Read profile to memory */
       load_profile(Param.parameters_input_file);
-    }
-  } else {
-    /* In mesh-input mode, CVM is still needed as a fallback for basin/3D
-     * model queries (e.g., source setup points outside model coverage). */
-    if ((Param.theMeshInputMode == 0) ||
-        (Param.basinVelocityModel == YES) ||
-        (Param.threeDVelocityModel == YES)) {
+    } else {
+      /* Create and open database */
       open_cvmdb();
     }
   }
 
-  /* Istanbul model is only needed on the meshing query path. */
+  /* Initialize velocity models only when they will be queried during meshing */
   if (Param.theMeshInputMode == 0) {
     if (Param.IstanbulVelocityModel == YES) {
       Istanbul_init(Global.myID);
+    } else if (Param.threeDVelocityModel == YES) {
+      /* Initialize 3D velocity model */
+      general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
     }
-  } else if ((Param.IstanbulVelocityModel == YES) && (Global.myID == 0)) {
+  } else if (Global.myID == 0) {
     monitor_print(
-        "Mesh input mode: skipping Istanbul velocity model initialization.\n");
-  }
-
-  /* 3D velocity model can still be used later (e.g., source/solver setup),
-   * so initialize it regardless of mesh input mode when enabled. */
-  if (Param.threeDVelocityModel == YES) {
-    general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
+        "Mesh input mode: skipping Istanbul/3D velocity model initialization.\n");
   }
 
   /* Initialize nonlinear parameters */
