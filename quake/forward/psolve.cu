@@ -11926,17 +11926,20 @@ int main(int argc, char** argv) {
     }
   }
 
-  /* Initialize velocity models only when they will be queried during meshing */
+  /* Istanbul model is only needed on the meshing query path. */
   if (Param.theMeshInputMode == 0) {
     if (Param.IstanbulVelocityModel == YES) {
       Istanbul_init(Global.myID);
-    } else if (Param.threeDVelocityModel == YES) {
-      /* Initialize 3D velocity model */
-      general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
     }
-  } else if (Global.myID == 0) {
+  } else if ((Param.IstanbulVelocityModel == YES) && (Global.myID == 0)) {
     monitor_print(
-        "Mesh input mode: skipping Istanbul/3D velocity model initialization.\n");
+        "Mesh input mode: skipping Istanbul velocity model initialization.\n");
+  }
+
+  /* 3D velocity model can still be used later (e.g., source/solver setup),
+   * so initialize it regardless of mesh input mode when enabled. */
+  if (Param.threeDVelocityModel == YES) {
+    general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
   }
 
   /* Initialize nonlinear parameters */
