@@ -353,6 +353,24 @@ __global__ static void kernelSparseForceScatter(int32_t count,
   forceDevice[lnid] = srcForces[idx];
 }
 
+__global__ static void kernelSparseForceAccumulate(int32_t count,
+                                                   const int32_t* lnidList,
+                                                   const fvector_t* srcForces,
+                                                   fvector_t* forceDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  int32_t lnid = lnidList[idx];
+  fvector_t dst = forceDevice[lnid];
+  const fvector_t src = srcForces[idx];
+  dst.f[0] += src.f[0];
+  dst.f[1] += src.f[1];
+  dst.f[2] += src.f[2];
+  forceDevice[lnid] = dst;
+}
+
 double** malloc2dDouble(int n, int m) {
   /* NOTE: To MPI_Bcast a 2D array, the pre-allocated memory blocks have to be
   continuous. That's why this function should be used to do the pre-allocation.
@@ -6058,12 +6076,24 @@ static int use_gpu_source_fastpath(void) {
     return 0;
   }
   if (Param.includeTopography == YES) {
-    return 0;
+    const char* env = getenv("HERCULES_GPU_SOURCE_WITH_TOPO");
+    if ((env == NULL) || (strcmp(env, "0") == 0) ||
+        (strcasecmp(env, "no") == 0) ||
+        (strcasecmp(env, "false") == 0)) {
+      return 0;
+    }
   }
   if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
     return 0;
   }
   return 1;
+}
+
+static int use_gpu_source_with_topography(void) {
+  if (Param.includeTopography != YES) {
+    return 0;
+  }
+  return use_gpu_source_fastpath();
 }
 
 static int use_sparse_force_upload_topo(void) {
@@ -6443,17 +6473,25 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
-  int32_t sourceCount = Global.theNodesLoaded;
+  int32_t sourceCount = 0;
   int32_t topoCount = topo_get_nodes_count();
   const int32_t* topoNodes = topo_get_nodes_list();
-  int32_t totalCount = sourceCount + topoCount;
+  int32_t totalCount = topoCount;
   int32_t idx;
   int blocksize;
   int gridsize;
+  int topoOnlyAccumulate = use_gpu_source_with_topography();
 
-  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
-                  mesh->nharbored * sizeof(fvector_t),
-                  solver->streams[CUDA_STREAM_MAIN]);
+  if (!topoOnlyAccumulate) {
+    sourceCount = Global.theNodesLoaded;
+    totalCount = sourceCount + topoCount;
+  }
+
+  if (!topoOnlyAccumulate) {
+    cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                    mesh->nharbored * sizeof(fvector_t),
+                    solver->streams[CUDA_STREAM_MAIN]);
+  }
 
   if (totalCount <= 0) {
     return;
@@ -6531,10 +6569,17 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   blocksize = 256;
   gridsize = (totalCount + blocksize - 1) / blocksize;
-  kernelSparseForceScatter<<<gridsize, blocksize, 0,
-                             solver->streams[CUDA_STREAM_MAIN]>>>(
-      totalCount, g_sparseNodeListDevice, g_sparseForcesDevice,
-      solver->gpuData->forceDevice);
+  if (topoOnlyAccumulate) {
+    kernelSparseForceAccumulate<<<gridsize, blocksize, 0,
+                                  solver->streams[CUDA_STREAM_MAIN]>>>(
+        totalCount, g_sparseNodeListDevice, g_sparseForcesDevice,
+        solver->gpuData->forceDevice);
+  } else {
+    kernelSparseForceScatter<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+        totalCount, g_sparseNodeListDevice, g_sparseForcesDevice,
+        solver->gpuData->forceDevice);
+  }
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
