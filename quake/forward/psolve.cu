@@ -2087,8 +2087,7 @@ int getIstanbulMaterial(cvmpayload_t* g_props, vector3D_t IstVelModel_origin,
   int res = material_property_relative_V10_local(y_rel, x_rel, -z_m, output,
                                                  IstVelModel_origin.x[1],
                                                  IstVelModel_origin.x[0]);
-  g_props->Qs =
-      7.17 + output[0] * 0.0276;  // Same simple expression as in la Habra runs
+  g_props->Qs = output[0] * 0.1;  // Same simple expression as in la Habra runs
   g_props->Qp = 2.0 * g_props->Qs;
 
   if (res != 0) {
@@ -11746,12 +11745,17 @@ int main(int argc, char** argv) {
     }
   }
 
-  /* Initialize Istanbul velocity model */
-  if (Param.IstanbulVelocityModel == YES) {
-    Istanbul_init(Global.myID);
-  } else if (Param.threeDVelocityModel == YES) {
-    /* Initialize 3D velocity model */
-    general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
+  /* Initialize velocity models only when they will be queried during meshing */
+  if (Param.theMeshInputMode == 0) {
+    if (Param.IstanbulVelocityModel == YES) {
+      Istanbul_init(Global.myID);
+    } else if (Param.threeDVelocityModel == YES) {
+      /* Initialize 3D velocity model */
+      general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
+    }
+  } else if (Global.myID == 0) {
+    monitor_print(
+        "Mesh input mode: skipping Istanbul/3D velocity model initialization.\n");
   }
 
   /* Initialize nonlinear parameters */
