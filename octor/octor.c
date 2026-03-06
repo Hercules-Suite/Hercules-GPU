@@ -2236,6 +2236,8 @@ static int32_t
 tree_setcom(octree_t *octree, tree_t *tree, int32_t msgsize, bldgs_nodesearch_com_t *bldgs_nodesearch_com,
 		pushdowns_nodesearch_t *pushdowns_nodesearch, find_topoAirOct_t *find_topoAirOct)
 {
+    const char *all2all_env;
+
     /* Allocate a communication manager */
     tree->com = com_new(tree->procid, tree->groupsize);
     if (tree->com == NULL)
@@ -2245,6 +2247,29 @@ tree_setcom(octree_t *octree, tree_t *tree, int32_t msgsize, bldgs_nodesearch_co
     MPI_Allgather(&tree->firstleaf->lx, sizeof(point_t), MPI_CHAR,
                   tree->com->interval, sizeof(point_t), MPI_CHAR,
                   tree->comm_tree);
+
+    all2all_env = getenv("OCTOR_SETCOM_ALL2ALL");
+    if ((all2all_env != NULL) && (atoi(all2all_env) != 0) &&
+        (tree->groupsize > 1)) {
+        int32_t procid;
+
+        for (procid = tree->groupsize - 1; procid >= 0; procid--) {
+            if (procid == tree->procid) {
+                continue;
+            }
+
+            tree->com->pctltab[procid] = pctl_new(procid, msgsize);
+            if (tree->com->pctltab[procid] == NULL) {
+                return -1;
+            }
+
+            tree->com->pctltab[procid]->next = tree->com->firstpctl;
+            tree->com->firstpctl = tree->com->pctltab[procid];
+            tree->com->nbrcnt++;
+        }
+
+        return 0;
+    }
 
     /*
        LOCAL op: check neighbors for each LOCAL leaf oct. This routine
