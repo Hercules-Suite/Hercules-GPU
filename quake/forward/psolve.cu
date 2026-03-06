@@ -2085,8 +2085,7 @@ int getIstanbulMaterial(cvmpayload_t* g_props, vector3D_t IstVelModel_origin,
   int res = material_property_relative_V10_local(y_rel, x_rel, -z_m, output,
                                                  IstVelModel_origin.x[1],
                                                  IstVelModel_origin.x[0]);
-  g_props->Qs =
-      7.17 + output[0] * 0.0276;  // Same simple expression as in la Habra runs
+  g_props->Qs = output[0] * 0.1;  // Same simple expression as in la Habra runs
   g_props->Qp = 2.0 * g_props->Qs;
 
   if (res != 0) {
