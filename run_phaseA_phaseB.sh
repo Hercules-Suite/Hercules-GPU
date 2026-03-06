@@ -22,6 +22,10 @@ PHASE_B_IN="${PHASE_B_IN:-${PHASE_B_DEFAULT_IN}}"
 PHASE_A_MPI_ARGS="${PHASE_A_MPI_ARGS:-}"
 PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
 
+if [[ $# -ge 3 ]]; then
+  BASE_IN="$3"
+fi
+
 if [[ -n "${PSOLVE_BIN:-}" ]]; then
   PSOLVE_BIN="${PSOLVE_BIN}"
 elif [[ -x "${SCRIPT_DIR}/quake/forward/psolve" ]]; then
