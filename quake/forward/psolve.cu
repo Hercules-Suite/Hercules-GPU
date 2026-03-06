@@ -3043,9 +3043,16 @@ static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
                                    const void* data) {
   etree_addr_t hit_addr;
   mdata_t hit_data;
+  const int32_t* target_level_ptr = (const int32_t*)data;
 
   (void)ticksize;
-  (void)data;
+
+  if (target_level_ptr != NULL) {
+    int32_t target_level = *target_level_ptr;
+    if ((target_level >= leaf->level) && (target_level <= PIXELLEVEL)) {
+      return (target_level > leaf->level) ? 1 : 0;
+    }
+  }
 
   if (mesh_etree_lookup(leaf, &hit_addr, &hit_data) != 0) {
     fprintf(stderr, "Thread %d: toexpand_mesh_etree: cannot query mesh etree\n",
@@ -3066,9 +3073,28 @@ static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
 }
 
 static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
-  (void)leaf;
+  etree_addr_t hit_addr;
+  mdata_t hit_data;
+  int32_t* target_level_ptr = (int32_t*)data;
+
   (void)ticksize;
-  (void)data;
+
+  if (mesh_etree_lookup(leaf, &hit_addr, &hit_data) != 0) {
+    fprintf(stderr, "Thread %d: setrec_mesh_etree: cannot query mesh etree\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (hit_addr.level < leaf->level) {
+    fprintf(stderr,
+            "Thread %d: setrec_mesh_etree: invalid containing level (%d < %d)\n",
+            Global.myID, hit_addr.level, leaf->level);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  *target_level_ptr = hit_addr.level;
 }
 
 static void mesh_import_apply_properties(void) {
