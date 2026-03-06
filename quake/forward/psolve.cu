@@ -92,6 +92,8 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+static vector3D_t g_istanbulVelModelOrigin;
+static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
 static int32_t* g_adjustParentIds = NULL;
 static int32_t* g_adjustDanglingLnid = NULL;
@@ -2203,38 +2205,6 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
   return res;
 }
 
-static int velocityModelOriginsInitialized = 0;
-static vector3D_t cachedIstanbulVelModel_origin;
-static vector3D_t cachedBasinVelModel_origin;
-static vector3D_t cachedThreeDVelModel_origin;
-
-static void ensure_velocity_model_origins_initialized(void) {
-  if (velocityModelOriginsInitialized) {
-    return;
-  }
-
-  if (Param.IstanbulVelocityModel == YES) {
-    cachedIstanbulVelModel_origin = compute_domain_coords_linearinterp(
-        28.675, 40.9565, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.basinVelocityModel == YES) {
-    cachedBasinVelModel_origin = compute_domain_coords_linearinterp(
-        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.threeDVelocityModel == YES) {
-    cachedThreeDVelModel_origin = compute_domain_coords_linearinterp(
-        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-        Param.theDomainY, Param.theDomainX, &Param.utmZone);
-  }
-
-  velocityModelOriginsInitialized = 1;
-}
-
 /**
  * Assign values (material properties) to a leaf octant specified by
  * octleaf.  In order to refine the mesh, select the minimum Vs of 27
@@ -2245,7 +2215,6 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
   tick_t halfticks;
   cvmpayload_t g_props;     /* cvm record with ground properties */
   cvmpayload_t g_props_min; /* cvm record with the min Vs found */
-  vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
 
@@ -2262,10 +2231,22 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
   halfticks = (tick_t)1 << (PIXELLEVEL - leaf->level - 1);
   edata->edgesize = ticksize * halfticks * 2;
 
-  ensure_velocity_model_origins_initialized();
-  IstVelModel_origin = cachedIstanbulVelModel_origin;
-  basinVelModel_origin = cachedBasinVelModel_origin;
-  threeDVelModel_origin = cachedThreeDVelModel_origin;
+  if (Param.IstanbulVelocityModel == YES && g_hasIstanbulVelModelOrigin == 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Istanbul origin not initialized before meshing\n");
+  }
+  if (Param.basinVelocityModel == YES) {
+    basinVelModel_origin = compute_domain_coords_linearinterp(
+        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.threeDVelocityModel == YES) {
+    threeDVelModel_origin = compute_domain_coords_linearinterp(
+        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+        Param.theDomainY, Param.theDomainX, &Param.utmZone);
+  }
 
   /* Check for buildings and proceed according to the buildings setrec */
   if ((Param.includeBuildings == YES) && (Param.useProfile == NO)) {
@@ -2339,8 +2320,8 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
         if (belongs2hmgHalfspace(y_m, x_m, z_m))
           res = get_halfspaceproperties(&g_props);
         else if (Param.IstanbulVelocityModel == YES) {
-          res =
-              getIstanbulMaterial(&g_props, IstVelModel_origin, x_m, y_m, z_m);
+          res = getIstanbulMaterial(&g_props, g_istanbulVelModelOrigin, x_m,
+                                    y_m, z_m);
         } else if (Param.basinVelocityModel == YES) {
           res = getBasinMaterial(&g_props, basinVelModel_origin, x_m, y_m, z_m);
         } else if (Param.threeDVelocityModel == YES) {
@@ -11101,10 +11082,24 @@ static void mesh_correct_properties(etree_t* cvm) {
   points[1] = 0.5;
   points[2] = 0.995;
 
-  ensure_velocity_model_origins_initialized();
-  IstVelModel_origin = cachedIstanbulVelModel_origin;
-  basinVelModel_origin = cachedBasinVelModel_origin;
-  threeDVelModel_origin = cachedThreeDVelModel_origin;
+  if (Param.IstanbulVelocityModel == YES) {
+    IstVelModel_origin = compute_domain_coords_linearinterp(
+        28.675, 40.9565, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.basinVelocityModel == YES) {
+    basinVelModel_origin = compute_domain_coords_linearinterp(
+        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.threeDVelocityModel == YES) {
+    threeDVelModel_origin = compute_domain_coords_linearinterp(
+        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+        Param.theDomainY, Param.theDomainX, &Param.utmZone);
+  }
 
   if (Global.myID == 0) {
     monitor_print("mesh_correct_properties  ... ");
@@ -11730,6 +11725,16 @@ int main(int argc, char** argv) {
   /* Read input parameters from file */
   Timer_Start("Global Init");
   read_parameters(argc, argv);
+
+  if (Param.IstanbulVelocityModel == YES) {
+    g_istanbulVelModelOrigin = compute_domain_coords_linearinterp(
+        28.675, 40.9565, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+    g_hasIstanbulVelModelOrigin = 1;
+  } else {
+    g_hasIstanbulVelModelOrigin = 0;
+  }
 
   if (Param.theMeshInputMode == 0) {
     if (Param.useProfile == YES) {
