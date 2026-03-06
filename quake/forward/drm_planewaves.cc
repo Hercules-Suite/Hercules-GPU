@@ -1654,6 +1654,10 @@ static double *Soil_Vp_data;
 static double *Soil_point_x;
 static double *Soil_point_y;
 static double *Soil_point_z;
+static double *Soil_surface_z = NULL;
+static int Soil_surface_count = 0;
+static double Soil_surface_swx = NAN;
+static double Soil_surface_swy = NAN;
 static struct Params_soil_t {
     int numLayerID;
     int numPointX;
@@ -1662,6 +1666,49 @@ static struct Params_soil_t {
     double minPointZ;
     double maxPointZ;
 } Params_soil;
+
+static int update_3d_surface_cache(double DRM_southwest_x,
+                                   double DRM_southwest_y) {
+    int node_count;
+    double thebase_zcoord = get_thebase_topo();
+
+    if ((Soil_point_x == NULL) || (Soil_point_y == NULL) ||
+        (Params_soil.numPointX <= 0) || (Params_soil.numPointY <= 0)) {
+        return -1;
+    }
+
+    node_count = Params_soil.numPointX * Params_soil.numPointY;
+    if ((Soil_surface_z == NULL) || (Soil_surface_count != node_count)) {
+        free(Soil_surface_z);
+        Soil_surface_z = (double*)malloc(sizeof(double) * node_count);
+        if (Soil_surface_z == NULL) {
+            fprintf(stderr, "3D surface cache allocation failed\n");
+            Soil_surface_count = 0;
+            return -1;
+        }
+        Soil_surface_count = node_count;
+        Soil_surface_swx = NAN;
+        Soil_surface_swy = NAN;
+    }
+
+    if ((fabs(Soil_surface_swx - DRM_southwest_x) < 1e-12) &&
+        (fabs(Soil_surface_swy - DRM_southwest_y) < 1e-12)) {
+        return 0;
+    }
+
+    for (int y = 0; y < Params_soil.numPointY; y++) {
+        for (int x = 0; x < Params_soil.numPointX; x++) {
+            int node_id = y * Params_soil.numPointX + x;
+            Soil_surface_z[node_id] =
+                thebase_zcoord - point_elevation(Soil_point_x[x] + DRM_southwest_x,
+                                                 Soil_point_y[y] + DRM_southwest_y);
+        }
+    }
+
+    Soil_surface_swx = DRM_southwest_x;
+    Soil_surface_swy = DRM_southwest_y;
+    return 0;
+}
 
 double max(double arr[], int size) {
     double max = arr[0];
@@ -1737,11 +1784,15 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input, double z_inpu
     // printf("DRM_southwest_x: %lf, DRM_southwest_y: %lf\n", DRM_southwest_x, DRM_southwest_y);
     // printf("x_coord[0]: %lf, y_coord[0]: %lf\n", x_coord[0], y_coord[0]);
     // printf("x: %lf, y: %lf\n", x_coord[0] + DRM_southwest_x, y_coord[0] + DRM_southwest_y);
-    z_elevation[0] = thebase_zcoord - point_elevation(x_coord[0] + DRM_southwest_x, y_coord[0] + DRM_southwest_y);
+    if (update_3d_surface_cache(DRM_southwest_x, DRM_southwest_y) != 0) {
+        return -1;
+    }
+
+    z_elevation[0] = Soil_surface_z[Rec_node_ID[0]];
     // printf("z_elevation[0]: %lf\n", z_elevation[0]);
-    z_elevation[1] = thebase_zcoord - point_elevation(x_coord[1] + DRM_southwest_x, y_coord[1] + DRM_southwest_y);
-    z_elevation[2] = thebase_zcoord - point_elevation(x_coord[2] + DRM_southwest_x, y_coord[2] + DRM_southwest_y);
-    z_elevation[3] = thebase_zcoord - point_elevation(x_coord[3] + DRM_southwest_x, y_coord[3] + DRM_southwest_y);
+    z_elevation[1] = Soil_surface_z[Rec_node_ID[1]];
+    z_elevation[2] = Soil_surface_z[Rec_node_ID[2]];
+    z_elevation[3] = Soil_surface_z[Rec_node_ID[3]];
 
     xi  = (x_input - x_coord[0])/x_spacing*2.0 - 1.0;
     eta = (y_input - y_coord[0])/y_spacing*2.0 - 1.0;
