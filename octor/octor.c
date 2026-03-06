@@ -3348,6 +3348,20 @@ math_hashuint32(const void *start, int32_t length)
 /* Mesh manipulation       */
 /***************************/
 
+typedef struct node_vertex_pair_t {
+    node_t node;
+    vertex_t *vertex;
+} node_vertex_pair_t;
+
+static int32_t
+node_vertex_pair_zcompare(const void *p1, const void *p2)
+{
+    const node_vertex_pair_t *a = (const node_vertex_pair_t *)p1;
+    const node_vertex_pair_t *b = (const node_vertex_pair_t *)p2;
+
+    return octor_zcompare(&a->node, &b->node);
+}
+
 /**
  * node_setproperty: Set the property and whereabout of a vertex.
  *
@@ -5331,6 +5345,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     int32_t eindex, nindex, dnindex;
     elem_t *elemTable;
     vertex_t **elemVertexRef;
+    node_vertex_pair_t *nodePairTable;
     node_t *nodeTable, *node;
     dnode_t *dnodeTable;
     link_t **vertexHashTable, *link;
@@ -5344,10 +5359,14 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     const char *extract_profile_env = getenv("OCTOR_EXTRACT_PROFILE");
     double t_extract_start = 0.0;
     double t_stage_start = 0.0;
+    double t_node_start = 0.0;
     double t_setcom = 0.0;
     double t_vertex = 0.0;
     double t_indirect = 0.0;
     double t_node = 0.0;
+    double t_node_build = 0.0;
+    double t_node_sortalloc = 0.0;
+    double t_node_gnid = 0.0;
     double t_elem = 0.0;
     double t_dnode = 0.0;
     double t_cleanup = 0.0;
@@ -5356,6 +5375,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     double t_vertex_max = 0.0;
     double t_indirect_max = 0.0;
     double t_node_max = 0.0;
+    double t_node_build_max = 0.0;
+    double t_node_sortalloc_max = 0.0;
+    double t_node_gnid_max = 0.0;
     double t_elem_max = 0.0;
     double t_dnode_max = 0.0;
     double t_cleanup_max = 0.0;
@@ -5385,6 +5407,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
 
     if (extract_profile) {
+        t_node_start = MPI_Wtime();
         t_stage_start = MPI_Wtime();
     }
 
@@ -6300,7 +6323,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
        processor will have to harbor */
 
     nodeTable = (node_t *)malloc(sizeof(node_t) * harborcount);
-    if (nodeTable == NULL) {
+    nodePairTable = (node_vertex_pair_t *)malloc(sizeof(node_vertex_pair_t) *
+                                                 harborcount);
+    if ((nodeTable == NULL) || (nodePairTable == NULL)) {
         fprintf(stderr, "Thread %d: %s %d: out of memory\n",
                 tree->procid, __FILE__, __LINE__);
         fprintf(stderr, "Total memory allocated by Octor : %d bytes\n",
@@ -6308,12 +6333,17 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
         exit(1);
     } else {
-        theAllocatedMemSum += sizeof(node_t) * harborcount;
+        theAllocatedMemSum += sizeof(node_t) * harborcount +
+            sizeof(node_vertex_pair_t) * harborcount;
     }
 
     ncount = 0; /* Number of nodes owned by this processor */
     ldnnum = 0; /* Number of dangling nodes owned by this processor */
     nindex = 0;
+
+    if (extract_profile) {
+        t_stage_start = MPI_Wtime();
+    }
 
     /* Visit all the vertices I have harbored */
     for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
@@ -6325,7 +6355,8 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
             /* Install the node data into the nodeTable. */
 
-            node = &nodeTable[nindex];
+            node = &nodePairTable[nindex].node;
+            nodePairTable[nindex].vertex = vertex;
 
             /* Adjust the node coordinate for ordering purpose. We
                shall reverse the coordinate at later stage */
@@ -6393,11 +6424,21 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     } /* for all the hash table entries */
 
+    if (extract_profile) {
+        t_node_build += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
+    }
+
     /* Sort all the nodes I've harbored in ascending Z-order */
     /* Yigit says --  Nodes on the building boundaries are not adjusted.
      * But not sure if that is necessary */
 
-    qsort(nodeTable, harborcount, sizeof(node_t), octor_zcompare);
+    qsort(nodePairTable, harborcount, sizeof(node_vertex_pair_t),
+          node_vertex_pair_zcompare);
+
+    for (nindex = 0; nindex < harborcount; nindex++) {
+        nodeTable[nindex] = nodePairTable[nindex].node;
+    }
 
     /* Set up the nodeCountTable and nodeStartTable, in a similar
        way as for the elements */
@@ -6427,6 +6468,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         } else {
             theAllocatedMemSum += sizeof(dnode_t) * ldnnum;
         }
+    }
+
+    if (extract_profile) {
+        t_node_sortalloc += MPI_Wtime() - t_stage_start;
+        t_stage_start = MPI_Wtime();
     }
 
     /* Assign the global node id to nodes owned by me and fill the
@@ -6565,28 +6611,14 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             }
         } /* I don't own this node */
 
-        hashentry = math_hashuint32(&nodeTable[nindex], 3) % vertexHashSize;
-        link = vertexHashTable[hashentry];
-
-        while (link != NULL) {
-            vertex = (vertex_t *)link->record;
-
-            if ((vertex->x == nodeTable[nindex].x) &&
-                (vertex->y == nodeTable[nindex].y) &&
-                (vertex->z == nodeTable[nindex].z)) {
-                /* Hit */
-                vertex->lnid = nindex;
-                break;
-            }
-            link = link->next;
-        }
-
-        if (link == NULL) {
+        vertex = nodePairTable[nindex].vertex;
+        if (vertex == NULL) {
             fprintf(stderr, "Thread %d: %s %d: internal error\n",
                     tree->procid, __FILE__, __LINE__);
             MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
             exit(1);
         }
+        vertex->lnid = nindex;
     } /* for all the harbored nodes */
 
 
@@ -6673,7 +6705,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 #endif /* DEBUG */
 
     if (extract_profile) {
-        t_node += MPI_Wtime() - t_stage_start;
+        t_node_gnid += MPI_Wtime() - t_stage_start;
+        t_node += MPI_Wtime() - t_node_start;
+    }
+
+    if (extract_profile) {
         t_stage_start = MPI_Wtime();
     }
 
@@ -6836,6 +6872,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
     free(vertexHashTable);
     free(elemVertexRef);
+    free(nodePairTable);
     mem_delete(vertexpool);
     mem_delete(linkpool);
 
@@ -6870,6 +6907,12 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    tree->comm_tree);
         MPI_Reduce(&t_node, &t_node_max, 1, MPI_DOUBLE, MPI_MAX, 0,
                    tree->comm_tree);
+        MPI_Reduce(&t_node_build, &t_node_build_max, 1, MPI_DOUBLE, MPI_MAX,
+               0, tree->comm_tree);
+        MPI_Reduce(&t_node_sortalloc, &t_node_sortalloc_max, 1, MPI_DOUBLE,
+               MPI_MAX, 0, tree->comm_tree);
+        MPI_Reduce(&t_node_gnid, &t_node_gnid_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+               tree->comm_tree);
         MPI_Reduce(&t_elem, &t_elem_max, 1, MPI_DOUBLE, MPI_MAX, 0,
                    tree->comm_tree);
         MPI_Reduce(&t_dnode, &t_dnode_max, 1, MPI_DOUBLE, MPI_MAX, 0,
@@ -6885,6 +6928,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    "dnode %.3fs, cleanup %.3fs, total %.3fs\n",
                    t_setcom_max, t_vertex_max, t_indirect_max, t_node_max,
                    t_elem_max, t_dnode_max, t_cleanup_max, t_total_max);
+                 printf("  OCTOR Extractmesh Node Detail (MAX ranks): build %.3fs, "
+                     "sort_alloc %.3fs, gnid %.3fs\n",
+                     t_node_build_max, t_node_sortalloc_max, t_node_gnid_max);
             fflush(stdout);
         }
     }
