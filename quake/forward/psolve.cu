@@ -96,14 +96,6 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
-typedef struct clear_range_t {
-  int32_t start;
-  int32_t end;
-} clear_range_t;
-static int32_t* g_sparseClearRangeStarts = NULL;
-static int32_t* g_sparseClearRangeLengths = NULL;
-static int32_t g_sparseClearRangeCount = 0;
-static int32_t g_sparseClearSourceRangeCount = -1;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -322,8 +314,6 @@ static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
-static int compare_clear_range_start(const void* a, const void* b);
-static void solver_build_sparse_clear_ranges(void);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
@@ -5609,16 +5599,6 @@ static void solver_delete() {
     free(g_sparseForcesHost);
     g_sparseForcesHost = NULL;
   }
-  if (g_sparseClearRangeStarts != NULL) {
-    free(g_sparseClearRangeStarts);
-    g_sparseClearRangeStarts = NULL;
-  }
-  if (g_sparseClearRangeLengths != NULL) {
-    free(g_sparseClearRangeLengths);
-    g_sparseClearRangeLengths = NULL;
-  }
-  g_sparseClearRangeCount = 0;
-  g_sparseClearSourceRangeCount = -1;
   g_sparseNodeCapacity = 0;
 
   compute_adjust_cache_free();
@@ -6566,11 +6546,13 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  solver_build_sparse_clear_ranges();
+  int32_t rangeCount = topo_get_node_range_count();
+  const int32_t* rangeStarts = topo_get_node_range_starts();
+  const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-  for (int32_t i = 0; i < g_sparseClearRangeCount; i++) {
-    int32_t start = g_sparseClearRangeStarts[i];
-    int32_t len = g_sparseClearRangeLengths[i];
+  for (int32_t i = 0; i < rangeCount; i++) {
+    int32_t start = rangeStarts[i];
+    int32_t len = rangeLengths[i];
     memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
   }
 }
@@ -8052,108 +8034,6 @@ static void solver_diag_reduce(void) {
 
 static int32_t stage_comm_index(int32_t stage, int32_t metric) {
   return (stage * 6) + metric;
-}
-
-static int compare_clear_range_start(const void* a, const void* b) {
-  const clear_range_t* ra = (const clear_range_t*)a;
-  const clear_range_t* rb = (const clear_range_t*)b;
-  if (ra->start < rb->start) {
-    return -1;
-  }
-  if (ra->start > rb->start) {
-    return 1;
-  }
-  if (ra->end < rb->end) {
-    return -1;
-  }
-  if (ra->end > rb->end) {
-    return 1;
-  }
-  return 0;
-}
-
-static void solver_build_sparse_clear_ranges(void) {
-  int32_t rangeCount = topo_get_node_range_count();
-  const int32_t* rangeStarts = topo_get_node_range_starts();
-  const int32_t* rangeLengths = topo_get_node_range_lengths();
-
-  if ((g_sparseClearRangeStarts != NULL) &&
-      (g_sparseClearSourceRangeCount == rangeCount)) {
-    return;
-  }
-
-  free(g_sparseClearRangeStarts);
-  free(g_sparseClearRangeLengths);
-  g_sparseClearRangeStarts = NULL;
-  g_sparseClearRangeLengths = NULL;
-  g_sparseClearRangeCount = 0;
-  g_sparseClearSourceRangeCount = rangeCount;
-
-  if ((rangeCount <= 0) || (rangeStarts == NULL) || (rangeLengths == NULL)) {
-    return;
-  }
-
-  clear_range_t* tmp = (clear_range_t*)malloc(sizeof(clear_range_t) * rangeCount);
-  if (tmp == NULL) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating sparse clear temporary ranges");
-  }
-
-  int32_t validCount = 0;
-  for (int32_t i = 0; i < rangeCount; i++) {
-    int32_t start = rangeStarts[i];
-    int32_t len = rangeLengths[i];
-    if (len <= 0) {
-      continue;
-    }
-    int32_t end = start + len;
-    if (end <= start) {
-      continue;
-    }
-    tmp[validCount].start = start;
-    tmp[validCount].end = end;
-    validCount++;
-  }
-
-  if (validCount == 0) {
-    free(tmp);
-    return;
-  }
-
-  qsort(tmp, validCount, sizeof(clear_range_t), compare_clear_range_start);
-
-  g_sparseClearRangeStarts = (int32_t*)malloc(sizeof(int32_t) * validCount);
-  g_sparseClearRangeLengths = (int32_t*)malloc(sizeof(int32_t) * validCount);
-  if ((g_sparseClearRangeStarts == NULL) || (g_sparseClearRangeLengths == NULL)) {
-    free(tmp);
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating sparse clear merged ranges");
-  }
-
-  int32_t out = 0;
-  int32_t curStart = tmp[0].start;
-  int32_t curEnd = tmp[0].end;
-  for (int32_t i = 1; i < validCount; i++) {
-    if (tmp[i].start <= curEnd) {
-      if (tmp[i].end > curEnd) {
-        curEnd = tmp[i].end;
-      }
-    } else {
-      g_sparseClearRangeStarts[out] = curStart;
-      g_sparseClearRangeLengths[out] = curEnd - curStart;
-      out++;
-      curStart = tmp[i].start;
-      curEnd = tmp[i].end;
-    }
-  }
-
-  g_sparseClearRangeStarts[out] = curStart;
-  g_sparseClearRangeLengths[out] = curEnd - curStart;
-  out++;
-
-  g_sparseClearRangeCount = out;
-
-  free(tmp);
 }
 
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
