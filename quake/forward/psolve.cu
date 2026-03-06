@@ -2203,6 +2203,38 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
   return res;
 }
 
+static int velocityModelOriginsInitialized = 0;
+static vector3D_t cachedIstanbulVelModel_origin;
+static vector3D_t cachedBasinVelModel_origin;
+static vector3D_t cachedThreeDVelModel_origin;
+
+static void ensure_velocity_model_origins_initialized(void) {
+  if (velocityModelOriginsInitialized) {
+    return;
+  }
+
+  if (Param.IstanbulVelocityModel == YES) {
+    cachedIstanbulVelModel_origin = compute_domain_coords_linearinterp(
+        28.675, 40.9565, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.basinVelocityModel == YES) {
+    cachedBasinVelModel_origin = compute_domain_coords_linearinterp(
+        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.threeDVelocityModel == YES) {
+    cachedThreeDVelModel_origin = compute_domain_coords_linearinterp(
+        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+        Param.theDomainY, Param.theDomainX, &Param.utmZone);
+  }
+
+  velocityModelOriginsInitialized = 1;
+}
+
 /**
  * Assign values (material properties) to a leaf octant specified by
  * octleaf.  In order to refine the mesh, select the minimum Vs of 27
@@ -2230,24 +2262,10 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
   halfticks = (tick_t)1 << (PIXELLEVEL - leaf->level - 1);
   edata->edgesize = ticksize * halfticks * 2;
 
-  if (Param.IstanbulVelocityModel == YES) {
-    IstVelModel_origin = compute_domain_coords_linearinterp(
-        28.675, 40.9565, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.basinVelocityModel == YES) {
-    basinVelModel_origin = compute_domain_coords_linearinterp(
-        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.threeDVelocityModel == YES) {
-    threeDVelModel_origin = compute_domain_coords_linearinterp(
-        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-        Param.theDomainY, Param.theDomainX, &Param.utmZone);
-  }
+  ensure_velocity_model_origins_initialized();
+  IstVelModel_origin = cachedIstanbulVelModel_origin;
+  basinVelModel_origin = cachedBasinVelModel_origin;
+  threeDVelModel_origin = cachedThreeDVelModel_origin;
 
   /* Check for buildings and proceed according to the buildings setrec */
   if ((Param.includeBuildings == YES) && (Param.useProfile == NO)) {
@@ -11083,24 +11101,10 @@ static void mesh_correct_properties(etree_t* cvm) {
   points[1] = 0.5;
   points[2] = 0.995;
 
-  if (Param.IstanbulVelocityModel == YES) {
-    IstVelModel_origin = compute_domain_coords_linearinterp(
-        28.675, 40.9565, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.basinVelocityModel == YES) {
-    basinVelModel_origin = compute_domain_coords_linearinterp(
-        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-        &Param.utmZone);
-  }
-  if (Param.threeDVelocityModel == YES) {
-    threeDVelModel_origin = compute_domain_coords_linearinterp(
-        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-        Param.theDomainY, Param.theDomainX, &Param.utmZone);
-  }
+  ensure_velocity_model_origins_initialized();
+  IstVelModel_origin = cachedIstanbulVelModel_origin;
+  basinVelModel_origin = cachedBasinVelModel_origin;
+  threeDVelModel_origin = cachedThreeDVelModel_origin;
 
   if (Global.myID == 0) {
     monitor_print("mesh_correct_properties  ... ");
