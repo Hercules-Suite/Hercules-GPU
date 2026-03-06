@@ -228,6 +228,7 @@ static void mesh_generate(void);
 static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
                                    const void* data);
 static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data);
+static void mesh_import_apply_properties(void);
 static void mesh_generate_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
@@ -3065,28 +3066,48 @@ static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
 }
 
 static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
-  etree_addr_t hit_addr;
-  mdata_t hit_data;
-  edata_t* edata = (edata_t*)data;
-
+  (void)leaf;
   (void)ticksize;
+  (void)data;
+}
 
-  if (mesh_etree_lookup(leaf, &hit_addr, &hit_data) != 0) {
-    fprintf(stderr, "Thread %d: setrec_mesh_etree: cannot query mesh etree\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+static void mesh_import_apply_properties(void) {
+  int32_t eindex;
+
+  for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    elem_t* elemp = &Global.myMesh->elemTable[eindex];
+    edata_t* edata = (edata_t*)elemp->data;
+    int32_t lnid0 = elemp->lnid[0];
+    tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - elemp->level);
+    etree_addr_t search_addr;
+    etree_addr_t hit_addr;
+    mdata_t hit_data;
+
+    search_addr.x = Global.myMesh->nodeTable[lnid0].x + edge_ticks / 2;
+    search_addr.y = Global.myMesh->nodeTable[lnid0].y + edge_ticks / 2;
+    search_addr.z = Global.myMesh->nodeTable[lnid0].z + edge_ticks / 2;
+    search_addr.level = ETREE_MAXLEVEL;
+    search_addr.type = ETREE_LEAF;
+
+    if (etree_search(Global.theMeshInputEp, search_addr, &hit_addr, NULL,
+                     &hit_data) != 0) {
+      fprintf(stderr,
+              "Thread %d: mesh_import_apply_properties: etree_search failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    if (hit_addr.level != elemp->level) {
+      fprintf(stderr,
+              "Thread %d: mesh_import_apply_properties: level mismatch (%d != %d)\n",
+              Global.myID, hit_addr.level, elemp->level);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
   }
-
-  if (hit_addr.level < leaf->level) {
-    fprintf(stderr,
-            "Thread %d: setrec_mesh_etree: invalid containing level (%d < %d)\n",
-            Global.myID, hit_addr.level, leaf->level);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
 }
 
 static void mesh_generate_from_etree(void) {
@@ -3225,6 +3246,11 @@ static void mesh_generate_from_etree(void) {
                   Timer_Value("Octor Extractmesh", (TimerKind)0));
     fflush(stdout);
   }
+
+  Timer_Start("Mesh correct properties");
+  mesh_import_apply_properties();
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Mesh correct properties");
 
   etree_close(Global.theMeshInputEp);
   Global.theMeshInputEp = NULL;
