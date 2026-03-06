@@ -1834,147 +1834,16 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     int32_t eindex, topo_eindex;
     int32_t nodeIdx;
     size_t topoNodesCapacity = 0;
-    size_t topoElementsCapacity = 0;
-    double *cachedTetraVol = NULL;
-    int32_t *cachedCubePart = NULL;
     char *isTopoNode;
-    const double domainLongNs = theDomainLong_ns;
-    const double domainLongEw = theDomainLong_ew;
 
     if (myTopoElementsMapping != NULL) {
         free(myTopoElementsMapping);
         myTopoElementsMapping = NULL;
     }
 
-    myTopoElementsCount = 0;
-
     Timer_Start("Topo Init Select Elements");
-    if (myMesh->lenum > 0) {
-        size_t lenum = (size_t)myMesh->lenum;
-        topoElementsCapacity = (lenum < 65536u) ? lenum : 65536u;
-
-        myTopoElementsMapping = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
-        if (myTopoElementsMapping == NULL) {
-            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR);
-            exit(1);
-        }
-
-        if (theTopoMethod == VT) {
-            cachedTetraVol = (double *)malloc(sizeof(double) * 5u * topoElementsCapacity);
-            cachedCubePart = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
-            if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
-                free(cachedTetraVol);
-                free(cachedCubePart);
-                fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                MPI_Abort(MPI_COMM_WORLD, ERROR);
-                exit(1);
-            }
-        }
-
-        for (eindex = 0; eindex < myMesh->lenum; eindex++) {
-            elem_t *elemp;
-            edata_t *edata;
-            double Vp, xo, yo, zo, esize;
-            noyesflag_t includeElem = NO;
-            double aux_vol[5] = {0};
-            int32_t aux_int = 0;
-
-            elemp = &myMesh->elemTable[eindex];
-            edata = (edata_t *)elemp->data;
-
-            Vp = (double)edata->Vp;
-            topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
-            esize = edata->edgesize;
-
-            if ((Vp != -1) &&
-                (xo != 0.0) && (xo + esize != domainLongNs) &&
-                (yo != 0.0) && (yo + esize != domainLongEw) &&
-                (topo_crossings(xo, yo, zo, esize) == 1)) {
-                if (theTopoMethod == VT) {
-                    TetraHVol_2(xo, yo, zo, esize, aux_vol, &aux_int);
-                    if ((aux_vol[0] == 0.0) && (aux_vol[1] == 0.0) &&
-                        (aux_vol[2] == 0.0) && (aux_vol[3] == 0.0) &&
-                        (aux_vol[4] == 0.0)) {
-                        get_airprops_topo(edata);
-                    } else {
-                        includeElem = YES;
-                    }
-                } else {
-                    includeElem = YES;
-                }
-            }
-
-            if (includeElem == YES) {
-                if ((size_t)myTopoElementsCount >= topoElementsCapacity) {
-                    size_t lenumMax = (size_t)myMesh->lenum;
-                    size_t newCapacity = topoElementsCapacity * 2u;
-                    if (newCapacity > lenumMax) {
-                        newCapacity = lenumMax;
-                    }
-                    if (newCapacity <= topoElementsCapacity) {
-                        fprintf(stderr, "Thread %d: topography_init: topo element buffer overflow\n", myID);
-                        MPI_Abort(MPI_COMM_WORLD, ERROR);
-                        exit(1);
-                    }
-
-                    myTopoElementsMapping = (int32_t *)realloc(
-                        myTopoElementsMapping, sizeof(int32_t) * newCapacity);
-                    if (myTopoElementsMapping == NULL) {
-                        fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                        MPI_Abort(MPI_COMM_WORLD, ERROR);
-                        exit(1);
-                    }
-
-                    if (theTopoMethod == VT) {
-                        cachedTetraVol = (double *)realloc(
-                            cachedTetraVol, sizeof(double) * 5u * newCapacity);
-                        cachedCubePart = (int32_t *)realloc(
-                            cachedCubePart, sizeof(int32_t) * newCapacity);
-                        if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
-                            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                            MPI_Abort(MPI_COMM_WORLD, ERROR);
-                            exit(1);
-                        }
-                    }
-
-                    topoElementsCapacity = newCapacity;
-                }
-
-                myTopoElementsMapping[myTopoElementsCount] = eindex;
-                if (theTopoMethod == VT) {
-                    memcpy(&cachedTetraVol[(size_t)myTopoElementsCount * 5u], aux_vol,
-                           sizeof(double) * 5u);
-                    cachedCubePart[myTopoElementsCount] = aux_int;
-                }
-                myTopoElementsCount++;
-            }
-        }
-
-        if (myTopoElementsCount == 0) {
-            free(myTopoElementsMapping);
-            myTopoElementsMapping = NULL;
-            topoElementsCapacity = 0;
-        } else if ((size_t)myTopoElementsCount < topoElementsCapacity) {
-            int32_t *shrinkMap = (int32_t *)realloc(
-                myTopoElementsMapping, sizeof(int32_t) * (size_t)myTopoElementsCount);
-            if (shrinkMap != NULL) {
-                myTopoElementsMapping = shrinkMap;
-            }
-            if (theTopoMethod == VT) {
-                double *shrinkVol = (double *)realloc(
-                    cachedTetraVol, sizeof(double) * 5u * (size_t)myTopoElementsCount);
-                int32_t *shrinkPart = (int32_t *)realloc(
-                    cachedCubePart, sizeof(int32_t) * (size_t)myTopoElementsCount);
-                if (shrinkVol != NULL) {
-                    cachedTetraVol = shrinkVol;
-                }
-                if (shrinkPart != NULL) {
-                    cachedCubePart = shrinkPart;
-                }
-            }
-        }
-    }
+    topography_elements_count(myID, myMesh);
+    topography_elements_mapping(myID, myMesh);
     Timer_Stop("Topo Init Select Elements");
 
     Timer_Start("Topo Init Build Node Sets");
@@ -2150,14 +2019,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
         /* get Tetrahedra volumes using Shunn and Ham quadrature rule */
         if ( theTopoMethod == VT ) {
-            if ((cachedTetraVol != NULL) && (cachedCubePart != NULL)) {
-                memcpy(ecp->tetraVol,
-                       &cachedTetraVol[(size_t)topo_eindex * 5u],
-                       sizeof(double) * 5u);
-                ecp->cube_part = cachedCubePart[topo_eindex];
-            } else {
-                TetraHVol_2( xo, yo, zo, esize, ecp->tetraVol, &ecp->cube_part );
-            }
+            TetraHVol_2( xo, yo, zo, esize, ecp->tetraVol, &ecp->cube_part );
         }
 
      //   fprintf( TopoElements, "%11d          %8.4f            %8.4f               %8.4f            %8.4f            %8.4f            %8.4f            %8.4f            %8.4f            %8.4f\n",
@@ -2171,8 +2033,6 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 //  if ( myTopoElementsCount != 0  )
 //      hu_fclosep( &TopoElements );
 
-    free(cachedTetraVol);
-    free(cachedCubePart);
     Timer_Stop("Topo Init Build Constants");
 
 }
