@@ -113,7 +113,9 @@ static int32_t* g_adjustDistRunOffsets = NULL;
 static int32_t g_adjustDistRunCount = 0;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
+static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
+static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
@@ -312,6 +314,7 @@ static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
+static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
@@ -9179,6 +9182,10 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
 
     if (how == DISTRIBUTION) {
       Timer_Start("Adjust Distribution Core");
+#ifdef _OPENMP
+      const int32_t useOmp = adjust_distribution_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static)
+#endif
       for (int32_t run = 0; run < g_adjustDistRunCount; run++) {
         int32_t start = g_adjustDistRunOffsets[run];
         int32_t end = g_adjustDistRunOffsets[run + 1];
@@ -9384,6 +9391,39 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
   }
 
   return;
+}
+
+static int32_t adjust_distribution_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (g_adjustDistributionOmpMode < 0) {
+    const char* env = getenv("HERCULES_ADJUST_DIST_OMP");
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_adjustDistributionOmpMode = 0;
+      } else {
+        g_adjustDistributionOmpMode = 1;
+      }
+    } else {
+      int maxThreads = omp_get_max_threads();
+      g_adjustDistributionOmpMode =
+          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+    }
+
+    if ((g_adjustDistributionOmpMode == 1) &&
+        (Global.myID == 0) &&
+        (g_adjustDistributionOmpReported == 0)) {
+      monitor_print(
+          "compute_adjust distribution OpenMP: enabled (threads=%d)\n",
+          omp_get_max_threads());
+      g_adjustDistributionOmpReported = 1;
+    }
+  }
+
+  return g_adjustDistributionOmpMode;
+#endif
 }
 
 static int32_t adjust_assignment_use_omp(void) {
