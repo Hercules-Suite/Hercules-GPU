@@ -11916,12 +11916,17 @@ int main(int argc, char** argv) {
     g_hasIstanbulVelModelOrigin = 0;
   }
 
-  if (Param.theMeshInputMode == 0) {
-    if (Param.useProfile == YES) {
+  if (Param.useProfile == YES) {
+    if (Param.theMeshInputMode == 0) {
       /* Read profile to memory */
       load_profile(Param.parameters_input_file);
-    } else {
-      /* Create and open database */
+    }
+  } else {
+    /* In mesh-input mode, CVM is still needed as a fallback for basin/3D
+     * model queries (e.g., source setup points outside model coverage). */
+    if ((Param.theMeshInputMode == 0) ||
+        (Param.basinVelocityModel == YES) ||
+        (Param.threeDVelocityModel == YES)) {
       open_cvmdb();
     }
   }
