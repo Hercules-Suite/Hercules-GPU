@@ -194,9 +194,9 @@ echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
-  echo "[Phase A] mpirun -np ${PHASE_A_NP} psolve Test_A.in"
+  echo "[Phase A] ${MPI_RUN} -np ${PHASE_A_NP} ${PSOLVE_BIN} ${PHASE_A_IN}"
 else
-  echo "[Phase A] mpirun psolve Test_A.in"
+  echo "[Phase A] ${MPI_RUN} ${PSOLVE_BIN} ${PHASE_A_IN}"
 fi
 if [[ -n "${PHASE_A_MPI_ARGS}" ]]; then
   # shellcheck disable=SC2206
@@ -211,7 +211,7 @@ else
 fi
 
 echo
-echo "[Phase B] mpirun -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node psolve Test_B.in"
+echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_B_IN}"
 if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
   # shellcheck disable=SC2206
   B_ARGS=(${PHASE_B_MPI_ARGS})
