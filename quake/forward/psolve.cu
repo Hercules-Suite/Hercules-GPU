@@ -1705,7 +1705,7 @@ static int32_t parse_parameters(const char* numericalin) {
                 print_station_accelerations);
   monitor_print("Mesh Coordinates For Matlab:        %s\n",
                 mesh_coordinates_for_matlab);
-  monitor_print("Mesh-Mode Only:                    %s\n",
+  monitor_print("Mesh-Mode Only:                     %s\n",
                 (Param.theMeshOnlyMode != 0) ? "yes" : "no");
   monitor_print("cvmdb_input_file:                   %s\n",
                 Param.cvmdb_input_file);
