@@ -11906,6 +11906,8 @@ int main(int argc, char** argv) {
     }
 
     if (Global.myID == 0) {
+      printf("TOTAL WALL CLOCK                    : %.2f seconds\n",
+             Timer_Value("Total Wall Clock", MAX));
       printf("Mesh-only mode complete.\n");
     }
 
