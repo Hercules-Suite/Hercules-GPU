@@ -111,6 +111,9 @@ static int32_t* g_adjustDistEdgeParentBase3 = NULL;
 static int32_t* g_adjustDistRunParentBase3 = NULL;
 static int32_t* g_adjustDistRunOffsets = NULL;
 static int32_t g_adjustDistRunCount = 0;
+static int32_t* g_topoResetStarts = NULL;
+static int32_t* g_topoResetLengths = NULL;
+static int32_t g_topoResetCount = -1;
 static int32_t g_adjustDnCount = 0;
 static int32_t g_adjustParentCount = 0;
 static int32_t g_adjustDistributionOmpMode = -1;
@@ -318,6 +321,8 @@ static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
+static void topo_reset_cache_free(void);
+static void topo_reset_cache_build(void);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -970,6 +975,9 @@ static void local_finalize() {
 
   /* Free memory associated with the solver */
   solver_delete();
+
+  /* Free cached topography reset ranges */
+  topo_reset_cache_free();
 
   return;
 }
@@ -6591,13 +6599,11 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  int32_t rangeCount = topo_get_node_range_count();
-  const int32_t* rangeStarts = topo_get_node_range_starts();
-  const int32_t* rangeLengths = topo_get_node_range_lengths();
+  topo_reset_cache_build();
 
-  for (int32_t i = 0; i < rangeCount; i++) {
-    int32_t start = rangeStarts[i];
-    int32_t len = rangeLengths[i];
+  for (int32_t i = 0; i < g_topoResetCount; i++) {
+    int32_t start = g_topoResetStarts[i];
+    int32_t len = g_topoResetLengths[i];
     memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
   }
 }
@@ -9008,6 +9014,98 @@ static int compare_adjust_dist_edge(const void* a, const void* b) {
     return 1;
   }
   return 0;
+}
+
+typedef struct topo_range_t {
+  int32_t start;
+  int32_t len;
+} topo_range_t;
+
+static int compare_topo_range_start(const void* a, const void* b) {
+  const topo_range_t* ra = (const topo_range_t*)a;
+  const topo_range_t* rb = (const topo_range_t*)b;
+  if (ra->start < rb->start) {
+    return -1;
+  }
+  if (ra->start > rb->start) {
+    return 1;
+  }
+  return 0;
+}
+
+static void topo_reset_cache_free(void) {
+  free(g_topoResetStarts);
+  free(g_topoResetLengths);
+  g_topoResetStarts = NULL;
+  g_topoResetLengths = NULL;
+  g_topoResetCount = -1;
+}
+
+static void topo_reset_cache_build(void) {
+  int32_t rangeCount;
+  const int32_t* rangeStarts;
+  const int32_t* rangeLengths;
+
+  if (g_topoResetCount >= 0) {
+    return;
+  }
+
+  rangeCount = topo_get_node_range_count();
+  rangeStarts = topo_get_node_range_starts();
+  rangeLengths = topo_get_node_range_lengths();
+
+  if (rangeCount <= 0) {
+    g_topoResetCount = 0;
+    return;
+  }
+
+  topo_range_t* ranges = (topo_range_t*)malloc(sizeof(topo_range_t) * rangeCount);
+  if (ranges == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating topo reset range cache");
+  }
+
+  for (int32_t i = 0; i < rangeCount; i++) {
+    ranges[i].start = rangeStarts[i];
+    ranges[i].len = rangeLengths[i];
+  }
+
+  qsort(ranges, rangeCount, sizeof(topo_range_t), compare_topo_range_start);
+
+  g_topoResetStarts = (int32_t*)malloc(sizeof(int32_t) * rangeCount);
+  g_topoResetLengths = (int32_t*)malloc(sizeof(int32_t) * rangeCount);
+  if ((g_topoResetStarts == NULL) || (g_topoResetLengths == NULL)) {
+    free(ranges);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating topo reset merged range cache");
+  }
+
+  int32_t merged = 0;
+  int64_t curStart = ranges[0].start;
+  int64_t curEnd = (int64_t)ranges[0].start + ranges[0].len;
+
+  for (int32_t i = 1; i < rangeCount; i++) {
+    int64_t s = ranges[i].start;
+    int64_t e = (int64_t)ranges[i].start + ranges[i].len;
+    if (s <= curEnd) {
+      if (e > curEnd) {
+        curEnd = e;
+      }
+    } else {
+      g_topoResetStarts[merged] = (int32_t)curStart;
+      g_topoResetLengths[merged] = (int32_t)(curEnd - curStart);
+      merged++;
+      curStart = s;
+      curEnd = e;
+    }
+  }
+
+  g_topoResetStarts[merged] = (int32_t)curStart;
+  g_topoResetLengths[merged] = (int32_t)(curEnd - curStart);
+  merged++;
+
+  g_topoResetCount = merged;
+  free(ranges);
 }
 
 static void compute_adjust_cache_build(void) {
