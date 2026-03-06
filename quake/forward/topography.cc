@@ -60,37 +60,6 @@ static topometh_t         theTopoMethod;
 static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
 static int32_t            myNumberOfTopoNonLinElements = 0;
-
-static int topo_diag_enabled(void) {
-    const char *env = getenv("HERCULES_TOPO_DIAG");
-    if (env == NULL || env[0] == '\0') return 0;
-    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' ||
-        env[0] == 'f' || env[0] == 'F')
-        return 0;
-    return 1;
-}
-
-static void topo_get_element_min_corner(mesh_t *myMesh, elem_t *elemp,
-                                        double *xo, double *yo, double *zo) {
-    int i;
-    double minx, miny, minz;
-
-    node_t *n0 = &myMesh->nodeTable[elemp->lnid[0]];
-    minx = (double)n0->x;
-    miny = (double)n0->y;
-    minz = (double)n0->z;
-
-    for (i = 1; i < 8; i++) {
-        node_t *ni = &myMesh->nodeTable[elemp->lnid[i]];
-        if ((double)ni->x < minx) minx = (double)ni->x;
-        if ((double)ni->y < miny) miny = (double)ni->y;
-        if ((double)ni->z < minz) minz = (double)ni->z;
-    }
-
-    *xo = minx * myMesh->ticksize;
-    *yo = miny * myMesh->ticksize;
-    *zo = minz * myMesh->ticksize;
-}
 static noyesflag_t        theNonlinTopo_flag  = NO;
 static noyesflag_t        theTopoBKT_flag  = NO;
 
@@ -1729,83 +1698,51 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
 
     int32_t eindex;
     int32_t count         = 0;
-    int diag_enabled = topo_diag_enabled();
-    int64_t diag_local_total = 0;
-    int64_t diag_local_vp_air = 0;
-    int64_t diag_local_boundary = 0;
-    int64_t diag_local_crossing_miss = 0;
-    int64_t diag_local_zero_vol = 0;
-    int64_t diag_local_selected = 0;
 
     for (eindex = 0; eindex < myMesh->lenum; eindex++) {
 
         elem_t     *elemp;
         edata_t    *edata;
+        node_t     *node0dat;
         double      Vp, xo, yo, zo, esize;
         // double      Vol;
         double      aux_vol[5] = { 0 };
-        int32_t     aux_int=0;
+        int32_t     node0, aux_int=0;
 
         elemp    = &myMesh->elemTable[eindex]; //Takes the information of the "eindex" element
         edata    = (edata_t *)elemp->data;
+        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
+        node0dat = &myMesh->nodeTable[node0];
+
         /* get element Vp */
         Vp       = (double)edata->Vp;
 
         /* get coordinates of element zero node */
-        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
+        xo = (node0dat->x)*(myMesh->ticksize);
+        yo = (node0dat->y)*(myMesh->ticksize);
+        zo = (node0dat->z)*(myMesh->ticksize);
 
         /* get element size */
         esize = edata->edgesize;
         // Vol   = esize * esize *esize;
 
-        if (diag_enabled) {
-            diag_local_total++;
-        }
+        if ( ( Vp != -1 ) && ( topo_crossings ( xo, yo, zo, esize ) == 1 )  && (
+                ( xo != 0.0 ) &&
+                ( xo + esize != theDomainLong_ns ) &&
+                ( yo != 0.0 ) &&
+                ( yo + esize != theDomainLong_ew ) ) ) {
+            /* Check for enclosed volume   */
+            if (theTopoMethod == VT) {
 
-        if (Vp == -1) {
-            if (diag_enabled) {
-                diag_local_vp_air++;
-            }
-            continue;
-        }
+                //TetraHVol ( xo, yo, zo, esize, aux_vol );
+                TetraHVol_2 ( xo, yo, zo, esize, aux_vol, &aux_int );
 
-        if ((xo == 0.0) || (xo + esize == theDomainLong_ns) ||
-            (yo == 0.0) || (yo + esize == theDomainLong_ew)) {
-            if (diag_enabled) {
-                diag_local_boundary++;
-            }
-            continue;
-        }
-
-        if (topo_crossings ( xo, yo, zo, esize ) != 1) {
-            if (diag_enabled) {
-                diag_local_crossing_miss++;
-            }
-            continue;
-        }
-
-        /* Check for enclosed volume   */
-        if (theTopoMethod == VT) {
-
-            //TetraHVol ( xo, yo, zo, esize, aux_vol );
-            TetraHVol_2 ( xo, yo, zo, esize, aux_vol, &aux_int );
-
-            if ( ( aux_vol[0]==0 ) && ( aux_vol[1]==0 ) && ( aux_vol[2]==0 ) && ( aux_vol[3]==0 ) && ( aux_vol[4]==0 ) ) { /* small enclosed volume */
-                get_airprops_topo( edata );  /* consider the element as an  air element */
-                if (diag_enabled) {
-                    diag_local_zero_vol++;
-                }
-            } else {
+                if ( ( aux_vol[0]==0 ) && ( aux_vol[1]==0 ) && ( aux_vol[2]==0 ) && ( aux_vol[3]==0 ) && ( aux_vol[4]==0 ) )  /* small enclosed volume */
+                    get_airprops_topo( edata );  /* consider the element as an  air element */
+                else
+                    count++;
+            } else
                 count++;
-                if (diag_enabled) {
-                    diag_local_selected++;
-                }
-            }
-        } else {
-            count++;
-            if (diag_enabled) {
-                diag_local_selected++;
-            }
         }
     }
 
@@ -1817,33 +1754,6 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
     }
 
     myTopoElementsCount          = count;
-
-    if (diag_enabled) {
-        int64_t local_stats[6], global_stats[6];
-        local_stats[0] = diag_local_total;
-        local_stats[1] = diag_local_selected;
-        local_stats[2] = diag_local_vp_air;
-        local_stats[3] = diag_local_boundary;
-        local_stats[4] = diag_local_crossing_miss;
-        local_stats[5] = diag_local_zero_vol;
-
-        MPI_Reduce(local_stats, global_stats, 6, MPI_LONG_LONG_INT, MPI_SUM, 0,
-                   comm_solver);
-
-        if (myID == 0) {
-            fprintf(stdout,
-                    "\nTOPO DIAG (HERCULES_TOPO_DIAG=1)\n"
-                    "  total considered          : %15" INT64_FMT "\n"
-                    "  selected topo elements    : %15" INT64_FMT "\n"
-                    "  excluded Vp==-1 (air)     : %15" INT64_FMT "\n"
-                    "  excluded boundary-touch   : %15" INT64_FMT "\n"
-                    "  excluded no crossing      : %15" INT64_FMT "\n"
-                    "  excluded zero-volume VT   : %15" INT64_FMT "\n\n",
-                    global_stats[0], global_stats[1], global_stats[2],
-                    global_stats[3], global_stats[4], global_stats[5]);
-            fflush(stdout);
-        }
-    }
 
     return;
 
@@ -1861,16 +1771,23 @@ void topography_elements_mapping(int32_t myID, mesh_t *myMesh) {
 
         elem_t     *elemp;
         edata_t    *edata;
+        node_t     *node0dat;
         double      Vp, xo, yo, zo, esize;
         // double      Vol;
+        int32_t     node0;
 
         elemp    = &myMesh->elemTable[eindex]; //Takes the information of the "eindex" element
         edata    = (edata_t *)elemp->data;
+        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
+        node0dat = &myMesh->nodeTable[node0];
+
         /* get element Vp */
         Vp       = (double)edata->Vp;
 
         /* get coordinates of element zero node */
-        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
+        xo = (node0dat->x)*(myMesh->ticksize);
+        yo = (node0dat->y)*(myMesh->ticksize);
+        zo = (node0dat->z)*(myMesh->ticksize);
 
 
         /* get element size */
@@ -1908,16 +1825,153 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     int32_t eindex, topo_eindex;
     int32_t nodeIdx;
     size_t topoNodesCapacity = 0;
+    size_t topoElementsCapacity = 0;
+    double *cachedTetraVol = NULL;
+    int32_t *cachedCubePart = NULL;
     char *isTopoNode;
+    const double domainLongNs = theDomainLong_ns;
+    const double domainLongEw = theDomainLong_ew;
 
     if (myTopoElementsMapping != NULL) {
         free(myTopoElementsMapping);
         myTopoElementsMapping = NULL;
     }
 
+    myTopoElementsCount = 0;
+
     Timer_Start("Topo Init Select Elements");
-    topography_elements_count(myID, myMesh);
-    topography_elements_mapping(myID, myMesh);
+    if (myMesh->lenum > 0) {
+        size_t lenum = (size_t)myMesh->lenum;
+        topoElementsCapacity = (lenum < 65536u) ? lenum : 65536u;
+
+        myTopoElementsMapping = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
+        if (myTopoElementsMapping == NULL) {
+            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+
+        if (theTopoMethod == VT) {
+            cachedTetraVol = (double *)malloc(sizeof(double) * 5u * topoElementsCapacity);
+            cachedCubePart = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
+            if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
+                free(cachedTetraVol);
+                free(cachedCubePart);
+                fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+        }
+
+        for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+            elem_t *elemp;
+            edata_t *edata;
+            node_t *node0dat;
+            double Vp, xo, yo, zo, esize;
+            int32_t node0;
+            noyesflag_t includeElem = NO;
+            double aux_vol[5] = {0};
+            int32_t aux_int = 0;
+
+            elemp = &myMesh->elemTable[eindex];
+            edata = (edata_t *)elemp->data;
+            node0 = elemp->lnid[0];
+            node0dat = &myMesh->nodeTable[node0];
+
+            Vp = (double)edata->Vp;
+            xo = (node0dat->x) * (myMesh->ticksize);
+            yo = (node0dat->y) * (myMesh->ticksize);
+            zo = (node0dat->z) * (myMesh->ticksize);
+            esize = edata->edgesize;
+
+            if ((Vp != -1) &&
+                (xo != 0.0) && (xo + esize != domainLongNs) &&
+                (yo != 0.0) && (yo + esize != domainLongEw) &&
+                (topo_crossings(xo, yo, zo, esize) == 1)) {
+                if (theTopoMethod == VT) {
+                    TetraHVol_2(xo, yo, zo, esize, aux_vol, &aux_int);
+                    if ((aux_vol[0] == 0.0) && (aux_vol[1] == 0.0) &&
+                        (aux_vol[2] == 0.0) && (aux_vol[3] == 0.0) &&
+                        (aux_vol[4] == 0.0)) {
+                        get_airprops_topo(edata);
+                    } else {
+                        includeElem = YES;
+                    }
+                } else {
+                    includeElem = YES;
+                }
+            }
+
+            if (includeElem == YES) {
+                if ((size_t)myTopoElementsCount >= topoElementsCapacity) {
+                    size_t lenumMax = (size_t)myMesh->lenum;
+                    size_t newCapacity = topoElementsCapacity * 2u;
+                    if (newCapacity > lenumMax) {
+                        newCapacity = lenumMax;
+                    }
+                    if (newCapacity <= topoElementsCapacity) {
+                        fprintf(stderr, "Thread %d: topography_init: topo element buffer overflow\n", myID);
+                        MPI_Abort(MPI_COMM_WORLD, ERROR);
+                        exit(1);
+                    }
+
+                    myTopoElementsMapping = (int32_t *)realloc(
+                        myTopoElementsMapping, sizeof(int32_t) * newCapacity);
+                    if (myTopoElementsMapping == NULL) {
+                        fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+                        MPI_Abort(MPI_COMM_WORLD, ERROR);
+                        exit(1);
+                    }
+
+                    if (theTopoMethod == VT) {
+                        cachedTetraVol = (double *)realloc(
+                            cachedTetraVol, sizeof(double) * 5u * newCapacity);
+                        cachedCubePart = (int32_t *)realloc(
+                            cachedCubePart, sizeof(int32_t) * newCapacity);
+                        if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
+                            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+                            MPI_Abort(MPI_COMM_WORLD, ERROR);
+                            exit(1);
+                        }
+                    }
+
+                    topoElementsCapacity = newCapacity;
+                }
+
+                myTopoElementsMapping[myTopoElementsCount] = eindex;
+                if (theTopoMethod == VT) {
+                    memcpy(&cachedTetraVol[(size_t)myTopoElementsCount * 5u], aux_vol,
+                           sizeof(double) * 5u);
+                    cachedCubePart[myTopoElementsCount] = aux_int;
+                }
+                myTopoElementsCount++;
+            }
+        }
+
+        if (myTopoElementsCount == 0) {
+            free(myTopoElementsMapping);
+            myTopoElementsMapping = NULL;
+            topoElementsCapacity = 0;
+        } else if ((size_t)myTopoElementsCount < topoElementsCapacity) {
+            int32_t *shrinkMap = (int32_t *)realloc(
+                myTopoElementsMapping, sizeof(int32_t) * (size_t)myTopoElementsCount);
+            if (shrinkMap != NULL) {
+                myTopoElementsMapping = shrinkMap;
+            }
+            if (theTopoMethod == VT) {
+                double *shrinkVol = (double *)realloc(
+                    cachedTetraVol, sizeof(double) * 5u * (size_t)myTopoElementsCount);
+                int32_t *shrinkPart = (int32_t *)realloc(
+                    cachedCubePart, sizeof(int32_t) * (size_t)myTopoElementsCount);
+                if (shrinkVol != NULL) {
+                    cachedTetraVol = shrinkVol;
+                }
+                if (shrinkPart != NULL) {
+                    cachedCubePart = shrinkPart;
+                }
+            }
+        }
+    }
     Timer_Stop("Topo Init Select Elements");
 
     Timer_Start("Topo Init Build Node Sets");
@@ -2070,6 +2124,8 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         elem_t           *elemp;
         edata_t          *edata;
         topoconstants_t  *ecp;
+        node_t           *node0dat;
+        int32_t           node0;
         double            xo, yo, zo, esize;
         double            mu, lambda;
 
@@ -2078,8 +2134,13 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         edata  = (edata_t *)elemp->data;
         ecp    = myTopoSolver->topoconstants + topo_eindex;
 
-        /* get geometric minimum corner coordinates */
-        topo_get_element_min_corner(myMesh, elemp, &xo, &yo, &zo);
+        node0    = elemp->lnid[0];             //Takes the ID for the zero node in element eindex
+        node0dat = &myMesh->nodeTable[node0];
+
+        /* get coordinates of element zero node */
+        xo = (node0dat->x)*(myMesh->ticksize);
+        yo = (node0dat->y)*(myMesh->ticksize);
+        zo = (node0dat->z)*(myMesh->ticksize);
 
         /* get full element volume */
         esize      = edata->edgesize;
@@ -2093,7 +2154,14 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 
         /* get Tetrahedra volumes using Shunn and Ham quadrature rule */
         if ( theTopoMethod == VT ) {
-            TetraHVol_2( xo, yo, zo, esize, ecp->tetraVol, &ecp->cube_part );
+            if ((cachedTetraVol != NULL) && (cachedCubePart != NULL)) {
+                memcpy(ecp->tetraVol,
+                       &cachedTetraVol[(size_t)topo_eindex * 5u],
+                       sizeof(double) * 5u);
+                ecp->cube_part = cachedCubePart[topo_eindex];
+            } else {
+                TetraHVol_2( xo, yo, zo, esize, ecp->tetraVol, &ecp->cube_part );
+            }
         }
 
      //   fprintf( TopoElements, "%11d          %8.4f            %8.4f               %8.4f            %8.4f            %8.4f            %8.4f            %8.4f            %8.4f            %8.4f\n",
@@ -2107,6 +2175,8 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
 //  if ( myTopoElementsCount != 0  )
 //      hu_fclosep( &TopoElements );
 
+    free(cachedTetraVol);
+    free(cachedCubePart);
     Timer_Stop("Topo Init Build Constants");
 
 }
