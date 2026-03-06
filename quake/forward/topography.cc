@@ -61,6 +61,15 @@ static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
 static int32_t            myNumberOfTopoNonLinElements = 0;
 
+static int topo_diag_enabled(void) {
+    const char *env = getenv("HERCULES_TOPO_DIAG");
+    if (env == NULL || env[0] == '\0') return 0;
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' ||
+        env[0] == 'f' || env[0] == 'F')
+        return 0;
+    return 1;
+}
+
 static void topo_get_element_min_corner(mesh_t *myMesh, elem_t *elemp,
                                         double *xo, double *yo, double *zo) {
     int i;
@@ -1720,6 +1729,13 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
 
     int32_t eindex;
     int32_t count         = 0;
+    int diag_enabled = topo_diag_enabled();
+    int64_t diag_local_total = 0;
+    int64_t diag_local_vp_air = 0;
+    int64_t diag_local_boundary = 0;
+    int64_t diag_local_crossing_miss = 0;
+    int64_t diag_local_zero_vol = 0;
+    int64_t diag_local_selected = 0;
 
     for (eindex = 0; eindex < myMesh->lenum; eindex++) {
 
@@ -1742,23 +1758,54 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
         esize = edata->edgesize;
         // Vol   = esize * esize *esize;
 
-        if ( ( Vp != -1 ) && ( topo_crossings ( xo, yo, zo, esize ) == 1 )  && (
-                ( xo != 0.0 ) &&
-                ( xo + esize != theDomainLong_ns ) &&
-                ( yo != 0.0 ) &&
-                ( yo + esize != theDomainLong_ew ) ) ) {
-            /* Check for enclosed volume   */
-            if (theTopoMethod == VT) {
+        if (diag_enabled) {
+            diag_local_total++;
+        }
 
-                //TetraHVol ( xo, yo, zo, esize, aux_vol );
-                TetraHVol_2 ( xo, yo, zo, esize, aux_vol, &aux_int );
+        if (Vp == -1) {
+            if (diag_enabled) {
+                diag_local_vp_air++;
+            }
+            continue;
+        }
 
-                if ( ( aux_vol[0]==0 ) && ( aux_vol[1]==0 ) && ( aux_vol[2]==0 ) && ( aux_vol[3]==0 ) && ( aux_vol[4]==0 ) )  /* small enclosed volume */
-                    get_airprops_topo( edata );  /* consider the element as an  air element */
-                else
-                    count++;
-            } else
+        if ((xo == 0.0) || (xo + esize == theDomainLong_ns) ||
+            (yo == 0.0) || (yo + esize == theDomainLong_ew)) {
+            if (diag_enabled) {
+                diag_local_boundary++;
+            }
+            continue;
+        }
+
+        if (topo_crossings ( xo, yo, zo, esize ) != 1) {
+            if (diag_enabled) {
+                diag_local_crossing_miss++;
+            }
+            continue;
+        }
+
+        /* Check for enclosed volume   */
+        if (theTopoMethod == VT) {
+
+            //TetraHVol ( xo, yo, zo, esize, aux_vol );
+            TetraHVol_2 ( xo, yo, zo, esize, aux_vol, &aux_int );
+
+            if ( ( aux_vol[0]==0 ) && ( aux_vol[1]==0 ) && ( aux_vol[2]==0 ) && ( aux_vol[3]==0 ) && ( aux_vol[4]==0 ) ) { /* small enclosed volume */
+                get_airprops_topo( edata );  /* consider the element as an  air element */
+                if (diag_enabled) {
+                    diag_local_zero_vol++;
+                }
+            } else {
                 count++;
+                if (diag_enabled) {
+                    diag_local_selected++;
+                }
+            }
+        } else {
+            count++;
+            if (diag_enabled) {
+                diag_local_selected++;
+            }
         }
     }
 
@@ -1770,6 +1817,33 @@ void topography_elements_count(int32_t myID, mesh_t *myMesh ) {
     }
 
     myTopoElementsCount          = count;
+
+    if (diag_enabled) {
+        int64_t local_stats[6], global_stats[6];
+        local_stats[0] = diag_local_total;
+        local_stats[1] = diag_local_selected;
+        local_stats[2] = diag_local_vp_air;
+        local_stats[3] = diag_local_boundary;
+        local_stats[4] = diag_local_crossing_miss;
+        local_stats[5] = diag_local_zero_vol;
+
+        MPI_Reduce(local_stats, global_stats, 6, MPI_LONG_LONG_INT, MPI_SUM, 0,
+                   comm_solver);
+
+        if (myID == 0) {
+            fprintf(stdout,
+                    "\nTOPO DIAG (HERCULES_TOPO_DIAG=1)\n"
+                    "  total considered          : %15" INT64_FMT "\n"
+                    "  selected topo elements    : %15" INT64_FMT "\n"
+                    "  excluded Vp==-1 (air)     : %15" INT64_FMT "\n"
+                    "  excluded boundary-touch   : %15" INT64_FMT "\n"
+                    "  excluded no crossing      : %15" INT64_FMT "\n"
+                    "  excluded zero-volume VT   : %15" INT64_FMT "\n\n",
+                    global_stats[0], global_stats[1], global_stats[2],
+                    global_stats[3], global_stats[4], global_stats[5]);
+            fflush(stdout);
+        }
+    }
 
     return;
 
