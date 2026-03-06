@@ -3116,6 +3116,8 @@ static void mesh_generate_from_etree(void) {
   int64_t prev_total = -1;
   int64_t tote, mine, maxe;
 
+  setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
+
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
     monitor_print("Stage %14s Min %7s Max %5s Total    Time(s)\n\n", "", "",
