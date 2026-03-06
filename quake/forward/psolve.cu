@@ -97,6 +97,8 @@ static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
 static int32_t g_sparseLastCount = 0;
+static int32_t g_sparseLastTopoStart = 0;
+static int32_t g_sparseLastTopoCount = 0;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -6521,6 +6523,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   g_sparseLastCount = totalCount;
+  g_sparseLastTopoStart = sourceCount;
+  g_sparseLastTopoCount = topoCount;
 
   cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
                   totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
@@ -6549,12 +6553,12 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  if ((g_sparseLastCount > 0) && (g_sparseNodeListHost != NULL)) {
+  if ((g_sparseLastTopoCount > 0) && (g_sparseNodeListHost != NULL)) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-    for (int32_t i = 0; i < g_sparseLastCount; i++) {
-      int32_t lnid = g_sparseNodeListHost[i];
+    for (int32_t i = 0; i < g_sparseLastTopoCount; i++) {
+      int32_t lnid = g_sparseNodeListHost[g_sparseLastTopoStart + i];
       solver->force[lnid].f[0] = 0;
       solver->force[lnid].f[1] = 0;
       solver->force[lnid].f[2] = 0;
