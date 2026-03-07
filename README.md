@@ -26,6 +26,9 @@ Runtime performance toggles (no source edits needed):
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
 	interpolation and per-station file writes. Default is `0` (disabled).
+- `HERCULES_PLANE_IO_OMP=1|0`
+	Enables or disables OpenMP parallelization for per-strip plane
+	interpolation before MPI send/write. Default is `0` (disabled).
 
 Build note:
 
@@ -48,6 +51,7 @@ export HERCULES_ADJUST_ASSIGN_OMP=1
 export HERCULES_ADJUST_DIST_OMP=1
 export HERCULES_SPARSE_CLEAR_MODE=auto
 export HERCULES_STATION_IO_OMP=1
+export HERCULES_PLANE_IO_OMP=1
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
