@@ -7846,7 +7846,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
-  useWaitsome = (direction == SHARING) ? 1 : 0;
+  useWaitsome = (irecvcount > 1) ? 1 : 0;
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -7884,7 +7884,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(send_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) if(send_messenger->nidx > 200000)
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8064,7 +8064,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(recv_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) if(recv_messenger->nidx > 200000)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
