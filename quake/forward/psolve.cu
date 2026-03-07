@@ -6624,6 +6624,8 @@ static int32_t solver_sparse_clear_mode(void) {
     int32_t requestedMode = 2;
     int32_t topoCount = topo_get_nodes_count();
     int32_t rangeCount = topo_get_node_range_count();
+    int64_t totalRangeSpan = 0;
+    const int32_t* rangeLengths = topo_get_node_range_lengths();
 
     /* 0: range memset, 1: node-list clear, 2: auto-select */
     if (env != NULL) {
@@ -6637,9 +6639,15 @@ static int32_t solver_sparse_clear_mode(void) {
       }
     }
 
+    for (int32_t i = 0; i < rangeCount; i++) {
+      totalRangeSpan += (int64_t)rangeLengths[i];
+    }
+
     if (requestedMode == 2) {
-      /* Prefer node-list clears when ranges are highly fragmented. */
-      if (topoCount > 0 && rangeCount > (topoCount / 8)) {
+      /* Prefer node-list clears when range memset would touch much more data.
+       */
+      if ((topoCount > 0 && totalRangeSpan > ((int64_t)topoCount * 2)) ||
+          (topoCount > 0 && rangeCount > (topoCount / 8))) {
         g_sparseClearMode = 1;
       } else {
         g_sparseClearMode = 0;
@@ -6649,11 +6657,11 @@ static int32_t solver_sparse_clear_mode(void) {
     }
 
     if (Global.myID == 0 && g_sparseClearModeReported == 0) {
-      monitor_print("Sparse host force reset mode: %s (request=%s, topo=%d, ranges=%d)\n",
+      monitor_print("Sparse host force reset mode: %s (request=%s, topo=%d, ranges=%d, span=%lld)\n",
                     (g_sparseClearMode == 1) ? "nodes" : "ranges",
                     (requestedMode == 2) ? "auto"
                     : ((requestedMode == 1) ? "nodes" : "ranges"),
-                    topoCount, rangeCount);
+                    topoCount, rangeCount, (long long)totalRangeSpan);
       g_sparseClearModeReported = 1;
     }
   }
