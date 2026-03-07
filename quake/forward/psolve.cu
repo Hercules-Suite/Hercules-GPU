@@ -88,7 +88,6 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
-static int32_t g_dampingGpuLaunchReported = 0;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
@@ -6214,20 +6213,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   }
 
   int blocksize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].blocksize;
-  int gridsize =
-      (g_dampingElemCountGPU + blocksize - 1) / blocksize;
+  int gridsize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].gridsize;
   int sharedmem = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].sharedmem;
-
-  if (gridsize < 1) {
-    gridsize = 1;
-  }
-
-  if (myID == 0 && g_dampingGpuLaunchReported == 0) {
-    monitor_print(
-        "Damping GPU launch config: active elements=%d block=%d grid=%d\n",
-        g_dampingElemCountGPU, blocksize, gridsize);
-    g_dampingGpuLaunchReported = 1;
-  }
 
   cudaGetLastError();
   kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,
@@ -6250,12 +6237,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
       kernel_mem_per_thread(FLOP_CALCCONV_KERNEL) * g_dampingElemCountGPU;
 
   blocksize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].blocksize;
-  gridsize = (g_dampingElemCountGPU + blocksize - 1) / blocksize;
+  gridsize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].gridsize;
   sharedmem = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].sharedmem;
-
-  if (gridsize < 1) {
-    gridsize = 1;
-  }
 
   cudaGetLastError();
   kernelDampingCalcLocal<<<gridsize, blocksize, sharedmem,
