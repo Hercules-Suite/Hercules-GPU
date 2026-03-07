@@ -70,6 +70,13 @@ Notes:
 	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
 	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
 	Disable this substep with `PHASE_SOURCE_PREP=0` if needed.
+- Host pinning for stable source reuse:
+	By default (`PHASE_PIN_HOSTS=1`), the script pins Source Prep and
+	Phase B to a deterministic host list (from `PBS_NODEFILE` or Slurm
+	`SLURM_NODELIST`) so rank-to-host mapping stays stable across both
+	`mpirun` launches.
+	Set `PHASE_PIN_HOSTS=0` to disable auto pinning.
+	Set `PHASE_HOSTFILE=/path/to/hosts` to force an explicit hostfile.
 
 Mesh mode input flags (`numerical.in`):
 

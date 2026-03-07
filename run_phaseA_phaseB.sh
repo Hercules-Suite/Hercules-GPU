@@ -26,6 +26,8 @@ PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
 PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
 PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-1}"
 PHASE_SOURCE_PREP_MPI_ARGS="${PHASE_SOURCE_PREP_MPI_ARGS:-}"
+PHASE_PIN_HOSTS="${PHASE_PIN_HOSTS:-1}"
+PHASE_HOSTFILE="${PHASE_HOSTFILE:-}"
 
 if [[ $# -ge 3 ]]; then
   BASE_IN="$3"
@@ -45,6 +47,7 @@ fi
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
 TMP_PHASE_PREP_IN=""
+TMP_PHASE_HOSTFILE=""
 
 make_phase_input() {
   local src="$1"
@@ -103,6 +106,7 @@ if [[ -n "${BASE_IN}" ]]; then
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
     [[ -n "${TMP_PHASE_PREP_IN}" ]] && rm -f "${TMP_PHASE_PREP_IN}"
+    [[ -n "${TMP_PHASE_HOSTFILE}" ]] && rm -f "${TMP_PHASE_HOSTFILE}"
   }
   trap cleanup_tmp_inputs EXIT
 
@@ -121,6 +125,7 @@ else
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
     [[ -n "${TMP_PHASE_PREP_IN}" ]] && rm -f "${TMP_PHASE_PREP_IN}"
+    [[ -n "${TMP_PHASE_HOSTFILE}" ]] && rm -f "${TMP_PHASE_HOSTFILE}"
   }
   trap cleanup_tmp_inputs EXIT
 
@@ -149,6 +154,31 @@ detect_alloc_nodes() {
 }
 
 ALLOC_NODES="$(detect_alloc_nodes)"
+
+HOSTFILE_ARGS=()
+if [[ -n "${PHASE_HOSTFILE}" ]]; then
+  if [[ ! -f "${PHASE_HOSTFILE}" ]]; then
+    echo "ERROR: PHASE_HOSTFILE not found: ${PHASE_HOSTFILE}" >&2
+    exit 1
+  fi
+  HOSTFILE_ARGS=(--hostfile "${PHASE_HOSTFILE}")
+elif [[ "${PHASE_PIN_HOSTS}" == "1" ]]; then
+  TMPDIR_ROOT="${TMPDIR:-/tmp}"
+  TMP_PHASE_HOSTFILE="$(mktemp "${TMPDIR_ROOT}/hercules_phase_hosts.XXXXXX")"
+
+  if [[ -n "${PBS_NODEFILE:-}" && -f "${PBS_NODEFILE}" ]]; then
+    awk '!seen[$0]++ { print $0 }' "${PBS_NODEFILE}" >"${TMP_PHASE_HOSTFILE}"
+  elif [[ -n "${SLURM_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+    scontrol show hostnames "${SLURM_NODELIST}" >"${TMP_PHASE_HOSTFILE}"
+  fi
+
+  if [[ -s "${TMP_PHASE_HOSTFILE}" ]]; then
+    HOSTFILE_ARGS=(--hostfile "${TMP_PHASE_HOSTFILE}")
+  else
+    rm -f "${TMP_PHASE_HOSTFILE}"
+    TMP_PHASE_HOSTFILE=""
+  fi
+fi
 
 if [[ $# -ge 1 ]]; then
   PHASE_A_NP="$1"
@@ -218,6 +248,11 @@ echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}
 echo "Source-prep substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
+if [[ ${#HOSTFILE_ARGS[@]} -gt 0 ]]; then
+  echo "Pinned hostfile: ${HOSTFILE_ARGS[1]}"
+else
+  echo "Pinned hostfile: disabled"
+fi
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -242,7 +277,7 @@ else
 fi
 
 echo
-echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_B_IN}"
+echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_B_IN}"
 if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
   # shellcheck disable=SC2206
   B_ARGS=(${PHASE_B_MPI_ARGS})
@@ -252,7 +287,7 @@ fi
 
 if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
   echo
-  echo "[Source Prep] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_PREP_IN}"
+  echo "[Source Prep] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
   if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
     # shellcheck disable=SC2206
     P_ARGS=(${PHASE_SOURCE_PREP_MPI_ARGS})
@@ -262,11 +297,11 @@ if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
 
   HERCULES_MESH_ONLY_PREP_SOURCE=1 \
   HERCULES_REUSE_SOURCE_FILES=0 \
-  "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
+  "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${HOSTFILE_ARGS[@]}" "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
 fi
 
 HERCULES_REUSE_SOURCE_FILES="${PHASE_B_SOURCE_REUSE}" \
-"${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
+"${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${HOSTFILE_ARGS[@]}" "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 
 echo
 echo "Two-phase run completed."
