@@ -3641,15 +3641,15 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   /* PE 0: open source description file */
   FILE* fpdsrc = open_source_description_file_0();
 
-  /* If has active nodes, write node information to the local forces file */
-  FILE* fptmpsrc;
+  /* Always create a local force file, even for zero-node ranks. */
+  FILE* fptmpsrc = source_open_forces_file( "w" );
+  print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
+
   if(myNumberOfNodesLoaded==0){
       ActivePE=0;
   }
   else{
       ActivePE=1;
-      fptmpsrc = source_open_forces_file( "w" );
-      print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
       totalLoadedNodeCount = myNumberOfNodesLoaded;
       sourceDataStartOffset =
           (int64_t)sizeof(int32_t) +
@@ -3737,8 +3737,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   theConcatTime = -MPI_Wtime();
 
-  if(ActivePE){
-      close_file( &fptmpsrc );
+  close_file( &fptmpsrc );
+  if(cycleWriteBuffer != NULL){
       free(cycleWriteBuffer);
   }
 
