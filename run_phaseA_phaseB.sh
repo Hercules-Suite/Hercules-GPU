@@ -26,8 +26,8 @@ PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
 PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
 PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-1}"
 PHASE_SOURCE_PREP_MPI_ARGS="${PHASE_SOURCE_PREP_MPI_ARGS:-}"
-PHASE_SOURCE_MODE="${PHASE_SOURCE_MODE:-prep}"
 PHASE_VERIFY_SOURCE_FILES="${PHASE_VERIFY_SOURCE_FILES:-1}"
+PHASE_SOURCE_PREP_IF_MISSING="${PHASE_SOURCE_PREP_IF_MISSING:-1}"
 PHASE_PIN_HOSTS="${PHASE_PIN_HOSTS:-1}"
 PHASE_HOSTFILE="${PHASE_HOSTFILE:-}"
 
@@ -44,16 +44,6 @@ elif [[ -x "${SCRIPT_DIR}/psolve" ]]; then
 else
   echo "ERROR: could not find psolve binary. Set PSOLVE_BIN=/path/to/psolve" >&2
   exit 1
-fi
-
-if [[ "${PHASE_SOURCE_MODE}" != "prep" && "${PHASE_SOURCE_MODE}" != "inline" ]]; then
-  echo "ERROR: invalid PHASE_SOURCE_MODE='${PHASE_SOURCE_MODE}' (expected prep|inline)" >&2
-  exit 1
-fi
-
-if [[ "${PHASE_SOURCE_MODE}" == "inline" ]]; then
-  PHASE_SOURCE_PREP=0
-  PHASE_B_SOURCE_REUSE=0
 fi
 
 TMP_PHASE_A_IN=""
@@ -178,6 +168,36 @@ verify_source_files() {
   fi
 
   echo "Source file verification: ${present_count}/${rank_count} files present (${active_count} with force payload, ${rank_count} total ranks)"
+  return 0
+}
+
+source_files_complete() {
+  local input_file="$1"
+  local rank_count="$2"
+  local src_dir_raw=""
+  local src_dir=""
+  local r f
+
+  src_dir_raw="$(extract_config_value "${input_file}" "source_directory_output")"
+  if [[ -z "${src_dir_raw}" ]]; then
+    return 1
+  fi
+
+  if [[ "${src_dir_raw}" = /* ]]; then
+    src_dir="${src_dir_raw}"
+  elif [[ -d "${src_dir_raw}" ]]; then
+    src_dir="${src_dir_raw}"
+  else
+    src_dir="${CASE_DIR}/${src_dir_raw}"
+  fi
+
+  [[ -d "${src_dir}" ]] || return 1
+
+  for ((r = 0; r < rank_count; r++)); do
+    f="${src_dir}/force_process.${r}"
+    [[ -f "${f}" ]] || return 1
+  done
+
   return 0
 }
 
@@ -333,15 +353,12 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
-echo "Source mode:    ${PHASE_SOURCE_MODE}"
 echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
 echo "Phase B prep source substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
+echo "Phase B prep source if missing: ${PHASE_SOURCE_PREP_IF_MISSING}"
 echo "Source file verification: ${PHASE_VERIFY_SOURCE_FILES}"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
-if [[ "${PHASE_SOURCE_MODE}" == "inline" ]]; then
-  echo "Inline source mode: source files are generated during real Phase B setup (no separate prep launch)"
-fi
 if [[ ${#HOSTFILE_ARGS[@]} -gt 0 ]]; then
   echo "Pinned hostfile: ${HOSTFILE_ARGS[1]}"
 else
@@ -380,18 +397,27 @@ else
 fi
 
 if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
-  echo
-  echo "[Phase B Prep: Source] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
-  if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
-    # shellcheck disable=SC2206
-    P_ARGS=(${PHASE_SOURCE_PREP_MPI_ARGS})
-  else
-    P_ARGS=()
+  skip_source_prep=0
+  if [[ "${PHASE_SOURCE_PREP_IF_MISSING}" == "1" ]] && source_files_complete "${PHASE_PREP_IN}" "${PHASE_B_NP}"; then
+    skip_source_prep=1
+    echo
+    echo "[Phase B Prep: Source] skipped (required force_process files already exist for ${PHASE_B_NP} ranks)"
   fi
 
-  HERCULES_MESH_ONLY_PREP_SOURCE=1 \
-  HERCULES_REUSE_SOURCE_FILES=0 \
-  "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${HOSTFILE_ARGS[@]}" "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
+  if [[ "${skip_source_prep}" == "0" ]]; then
+    echo
+    echo "[Phase B Prep: Source] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
+    if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
+      # shellcheck disable=SC2206
+      P_ARGS=(${PHASE_SOURCE_PREP_MPI_ARGS})
+    else
+      P_ARGS=()
+    fi
+
+    HERCULES_MESH_ONLY_PREP_SOURCE=1 \
+    HERCULES_REUSE_SOURCE_FILES=0 \
+    "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${HOSTFILE_ARGS[@]}" "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
+  fi
 
   if [[ "${PHASE_VERIFY_SOURCE_FILES}" == "1" ]]; then
     verify_source_files "${PHASE_PREP_IN}" "${PHASE_B_NP}"

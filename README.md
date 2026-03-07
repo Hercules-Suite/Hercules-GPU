@@ -64,18 +64,15 @@ Notes:
 	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
 - Script defaults for source files:
-	`PHASE_SOURCE_MODE=prep|inline` controls source generation strategy.
-	`prep` (default) runs a dedicated Phase B prep source substep and then
-	reuses files in Phase B.
-	`inline` disables the separate prep launch and generates sources during
-	real Phase B setup (`PHASE_SOURCE_PREP=0`, `PHASE_B_SOURCE_REUSE=0`),
-	which avoids duplicate mesh extraction in separate runs.
 	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=0` by default.
 	Script runs a dedicated Phase B prep source substep with Phase B rank layout
 	(`mesh_input_mode=1`, `mesh_only_mode=1`) and
 	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
 	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
 	Disable this Phase B prep source substep with `PHASE_SOURCE_PREP=0` if needed.
+	By default (`PHASE_SOURCE_PREP_IF_MISSING=1`), this substep is skipped if
+	the required `force_process.0..(PHASE_B_NP-1)` files already exist.
+	Set `PHASE_SOURCE_PREP_IF_MISSING=0` to force rerunning source prep.
 - Host pinning for stable source reuse:
 	By default (`PHASE_PIN_HOSTS=1`), the script pins Source Prep and
 	Phase B to a deterministic host list (from `PBS_NODEFILE` or Slurm
