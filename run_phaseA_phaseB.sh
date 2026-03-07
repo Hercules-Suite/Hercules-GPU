@@ -323,7 +323,7 @@ else
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
 echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
-echo "Source-prep substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
+echo "Phase B prep source substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
 echo "Source file verification: ${PHASE_VERIFY_SOURCE_FILES}"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
@@ -366,7 +366,7 @@ fi
 
 if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
   echo
-  echo "[Source Prep] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
+  echo "[Phase B Prep: Source] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
   if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
     # shellcheck disable=SC2206
     P_ARGS=(${PHASE_SOURCE_PREP_MPI_ARGS})

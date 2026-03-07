@@ -50,7 +50,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export HERCULES_ADJUST_ASSIGN_OMP=1
 export HERCULES_ADJUST_DIST_OMP=1
-export HERCULES_SPARSE_CLEAR_MODE=nodes
+export HERCULES_SPARSE_CLEAR_MODE=auto
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
@@ -65,11 +65,11 @@ Notes:
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
 - Script defaults for source files:
 	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=0` by default.
-	Script runs a dedicated source-prep substep with Phase B rank layout
+	Script runs a dedicated Phase B prep source substep with Phase B rank layout
 	(`mesh_input_mode=1`, `mesh_only_mode=1`) and
 	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
 	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
-	Disable this substep with `PHASE_SOURCE_PREP=0` if needed.
+	Disable this Phase B prep source substep with `PHASE_SOURCE_PREP=0` if needed.
 - Host pinning for stable source reuse:
 	By default (`PHASE_PIN_HOSTS=1`), the script pins Source Prep and
 	Phase B to a deterministic host list (from `PBS_NODEFILE` or Slurm
@@ -79,7 +79,8 @@ Notes:
 	Set `PHASE_HOSTFILE=/path/to/hosts` to force an explicit hostfile.
 - Source file completeness check:
 	By default (`PHASE_VERIFY_SOURCE_FILES=1`), the script verifies after
-	Source Prep that `force_process.0..(PHASE_B_NP-1)` all exist under
+	the Phase B prep source substep that
+	`force_process.0..(PHASE_B_NP-1)` all exist under
 	`source_directory_output`. This protects mixed-rank runs (for example,
 	`PHASE_A_NP=288`, `PHASE_B_NP=4`) from partial source file sets.
 	Set `PHASE_VERIFY_SOURCE_FILES=0` to disable this check.
