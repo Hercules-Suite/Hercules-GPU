@@ -96,6 +96,7 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+static int32_t g_sparseHostPinned = 0;
 static int32_t g_sparseNodeListReady = 0;
 static int32_t g_sparseSourceCountCached = -1;
 static int32_t g_sparseTopoCountCached = -1;
@@ -5600,13 +5601,22 @@ static void solver_delete() {
     g_sparseForcesDevice = NULL;
   }
   if (g_sparseNodeListHost != NULL) {
-    free(g_sparseNodeListHost);
+    if (g_sparseHostPinned) {
+      cudaFreeHost(g_sparseNodeListHost);
+    } else {
+      free(g_sparseNodeListHost);
+    }
     g_sparseNodeListHost = NULL;
   }
   if (g_sparseForcesHost != NULL) {
-    free(g_sparseForcesHost);
+    if (g_sparseHostPinned) {
+      cudaFreeHost(g_sparseForcesHost);
+    } else {
+      free(g_sparseForcesHost);
+    }
     g_sparseForcesHost = NULL;
   }
+  g_sparseHostPinned = 0;
   g_sparseNodeCapacity = 0;
   g_sparseNodeListReady = 0;
   g_sparseSourceCountCached = -1;
@@ -6482,13 +6492,22 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
       g_sparseForcesDevice = NULL;
     }
     if (g_sparseNodeListHost != NULL) {
-      free(g_sparseNodeListHost);
+      if (g_sparseHostPinned) {
+        cudaFreeHost(g_sparseNodeListHost);
+      } else {
+        free(g_sparseNodeListHost);
+      }
       g_sparseNodeListHost = NULL;
     }
     if (g_sparseForcesHost != NULL) {
-      free(g_sparseForcesHost);
+      if (g_sparseHostPinned) {
+        cudaFreeHost(g_sparseForcesHost);
+      } else {
+        free(g_sparseForcesHost);
+      }
       g_sparseForcesHost = NULL;
     }
+    g_sparseHostPinned = 0;
 
     if (cudaMalloc((void**)&g_sparseNodeListDevice,
                    totalCount * sizeof(int32_t)) != cudaSuccess) {
@@ -6505,8 +6524,28 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
       exit(1);
     }
 
-    g_sparseNodeListHost = (int32_t*)malloc(totalCount * sizeof(int32_t));
-    g_sparseForcesHost = (fvector_t*)malloc(totalCount * sizeof(fvector_t));
+    if (cudaHostAlloc((void**)&g_sparseNodeListHost,
+                      totalCount * sizeof(int32_t), cudaHostAllocDefault) ==
+            cudaSuccess &&
+        cudaHostAlloc((void**)&g_sparseForcesHost,
+                      totalCount * sizeof(fvector_t),
+                      cudaHostAllocDefault) == cudaSuccess) {
+      g_sparseHostPinned = 1;
+    } else {
+      if (g_sparseNodeListHost != NULL) {
+        cudaFreeHost(g_sparseNodeListHost);
+        g_sparseNodeListHost = NULL;
+      }
+      if (g_sparseForcesHost != NULL) {
+        cudaFreeHost(g_sparseForcesHost);
+        g_sparseForcesHost = NULL;
+      }
+
+      g_sparseNodeListHost = (int32_t*)malloc(totalCount * sizeof(int32_t));
+      g_sparseForcesHost = (fvector_t*)malloc(totalCount * sizeof(fvector_t));
+      g_sparseHostPinned = 0;
+    }
+
     if ((g_sparseNodeListHost == NULL) || (g_sparseForcesHost == NULL)) {
       fprintf(stderr, "Thread %d: sparse force host alloc failed\n",
               Global.myID);
