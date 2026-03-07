@@ -18,9 +18,11 @@ Runtime performance toggles (no source edits needed):
 - `HERCULES_ADJUST_DIST_OMP=1|0`
 	Enables or disables OpenMP parallelization in parent-centric distribution
 	adjust core.
-- `HERCULES_SPARSE_CLEAR_MODE=range|nodes` (or `0|1`)
+- `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
-	`range`/`0` is default; `nodes`/`1` can be faster for some 3D model cases.
+	`auto`/`2` is default and picks mode based on sparse-node fragmentation.
+	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
+	fragmented 3D model cases.
 
 Build note:
 

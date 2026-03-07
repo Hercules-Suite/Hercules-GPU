@@ -6621,17 +6621,39 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
 static int32_t solver_sparse_clear_mode(void) {
   if (g_sparseClearMode < 0) {
     const char* env = getenv("HERCULES_SPARSE_CLEAR_MODE");
-    /* 0: range memset (default), 1: node-list clear */
-    if (env != NULL &&
-        (strcasecmp(env, "nodes") == 0 || strcmp(env, "1") == 0)) {
-      g_sparseClearMode = 1;
+    int32_t requestedMode = 2;
+    int32_t topoCount = topo_get_nodes_count();
+    int32_t rangeCount = topo_get_node_range_count();
+
+    /* 0: range memset, 1: node-list clear, 2: auto-select */
+    if (env != NULL) {
+      if (strcasecmp(env, "nodes") == 0 || strcmp(env, "1") == 0) {
+        requestedMode = 1;
+      } else if (strcasecmp(env, "range") == 0 ||
+                 strcasecmp(env, "ranges") == 0 || strcmp(env, "0") == 0) {
+        requestedMode = 0;
+      } else if (strcasecmp(env, "auto") == 0 || strcmp(env, "2") == 0) {
+        requestedMode = 2;
+      }
+    }
+
+    if (requestedMode == 2) {
+      /* Prefer node-list clears when ranges are highly fragmented. */
+      if (topoCount > 0 && rangeCount > (topoCount / 8)) {
+        g_sparseClearMode = 1;
+      } else {
+        g_sparseClearMode = 0;
+      }
     } else {
-      g_sparseClearMode = 0;
+      g_sparseClearMode = requestedMode;
     }
 
     if (Global.myID == 0 && g_sparseClearModeReported == 0) {
-      monitor_print("Sparse host force reset mode: %s\n",
-                    (g_sparseClearMode == 1) ? "nodes" : "ranges");
+      monitor_print("Sparse host force reset mode: %s (request=%s, topo=%d, ranges=%d)\n",
+                    (g_sparseClearMode == 1) ? "nodes" : "ranges",
+                    (requestedMode == 2) ? "auto"
+                    : ((requestedMode == 1) ? "nodes" : "ranges"),
+                    topoCount, rangeCount);
       g_sparseClearModeReported = 1;
     }
   }
