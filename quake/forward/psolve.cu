@@ -97,6 +97,11 @@ static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
 static int32_t g_sparseHostPinned = 0;
+static int32_t* g_sparseClearRunStarts = NULL;
+static int32_t* g_sparseClearRunLengths = NULL;
+static int32_t g_sparseClearRunCapacity = 0;
+static int32_t g_sparseClearRunCount = 0;
+static int32_t g_sparseClearTopoCountCached = -1;
 static int32_t g_sparseNodeListReady = 0;
 static int32_t g_sparseSourceCountCached = -1;
 static int32_t g_sparseTopoCountCached = -1;
@@ -5616,7 +5621,18 @@ static void solver_delete() {
     }
     g_sparseForcesHost = NULL;
   }
+  if (g_sparseClearRunStarts != NULL) {
+    free(g_sparseClearRunStarts);
+    g_sparseClearRunStarts = NULL;
+  }
+  if (g_sparseClearRunLengths != NULL) {
+    free(g_sparseClearRunLengths);
+    g_sparseClearRunLengths = NULL;
+  }
   g_sparseHostPinned = 0;
+  g_sparseClearRunCapacity = 0;
+  g_sparseClearRunCount = 0;
+  g_sparseClearTopoCountCached = -1;
   g_sparseNodeCapacity = 0;
   g_sparseNodeListReady = 0;
   g_sparseSourceCountCached = -1;
@@ -6635,14 +6651,72 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     int32_t topoCount = topo_get_nodes_count();
     const int32_t* topoNodes = topo_get_nodes_list();
 
+    if (topoCount <= 0) {
+      return;
+    }
+
+    if ((g_sparseClearRunStarts == NULL) || (g_sparseClearRunLengths == NULL) ||
+        (g_sparseClearRunCapacity < topoCount)) {
+      int32_t* newStarts = (int32_t*)malloc((size_t)topoCount * sizeof(int32_t));
+      int32_t* newLengths = (int32_t*)malloc((size_t)topoCount * sizeof(int32_t));
+      if ((newStarts == NULL) || (newLengths == NULL)) {
+        if (newStarts != NULL) free(newStarts);
+        if (newLengths != NULL) free(newLengths);
+
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if(topoCount > 100000)
 #endif
-    for (int32_t i = 0; i < topoCount; i++) {
-      int32_t lnid = topoNodes[i];
-      solver->force[lnid].f[0] = 0;
-      solver->force[lnid].f[1] = 0;
-      solver->force[lnid].f[2] = 0;
+        for (int32_t i = 0; i < topoCount; i++) {
+          int32_t lnid = topoNodes[i];
+          solver->force[lnid].f[0] = 0;
+          solver->force[lnid].f[1] = 0;
+          solver->force[lnid].f[2] = 0;
+        }
+        return;
+      }
+
+      if (g_sparseClearRunStarts != NULL) free(g_sparseClearRunStarts);
+      if (g_sparseClearRunLengths != NULL) free(g_sparseClearRunLengths);
+      g_sparseClearRunStarts = newStarts;
+      g_sparseClearRunLengths = newLengths;
+      g_sparseClearRunCapacity = topoCount;
+      g_sparseClearTopoCountCached = -1;
+    }
+
+    if (g_sparseClearTopoCountCached != topoCount) {
+      int32_t runCount = 0;
+      int32_t runStart = topoNodes[0];
+      int32_t runLen = 1;
+
+      for (int32_t i = 1; i < topoCount; i++) {
+        int32_t cur = topoNodes[i];
+        int32_t prev = topoNodes[i - 1];
+        if (cur == prev + 1) {
+          runLen++;
+        } else {
+          g_sparseClearRunStarts[runCount] = runStart;
+          g_sparseClearRunLengths[runCount] = runLen;
+          runCount++;
+          runStart = cur;
+          runLen = 1;
+        }
+      }
+
+      g_sparseClearRunStarts[runCount] = runStart;
+      g_sparseClearRunLengths[runCount] = runLen;
+      runCount++;
+
+      g_sparseClearRunCount = runCount;
+      g_sparseClearTopoCountCached = topoCount;
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_sparseClearRunCount > 10000)
+#endif
+    for (int32_t i = 0; i < g_sparseClearRunCount; i++) {
+      int32_t start = g_sparseClearRunStarts[i];
+      int32_t len = g_sparseClearRunLengths[i];
+      memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
     }
   } else {
     int32_t rangeCount = topo_get_node_range_count();
