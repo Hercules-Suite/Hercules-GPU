@@ -104,6 +104,7 @@ static int32_t g_sparseCopiedSourceCount = -1;
 static int32_t g_sparseCopiedTopoCount = -1;
 static int32_t g_sparseClearMode = -1;
 static int32_t g_sparseClearModeReported = 0;
+static int32_t g_forceDeviceZeroReady = 0;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -5949,6 +5950,7 @@ static void solver_reset_gpu(mysolver_t* solver, mesh_t* mesh) {
   cudaMemsetAsync(Global.gpuData.forceDevice, 0,
                   Global.myMesh->nharbored * sizeof(fvector_t),
                   solver->streams[CUDA_STREAM_MAIN]);
+  g_forceDeviceZeroReady = 1;
 
   /* Pre-calculate data for next time step */
   // solver_precalc_gpu(solver, mesh);
@@ -6113,9 +6115,12 @@ static void solver_compute_force_source_gpu(int32_t step) {
 
   Timer_Start("Compute addforces s");
 
-  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
-                  mesh->nharbored * sizeof(fvector_t),
-                  solver->streams[CUDA_STREAM_MAIN]);
+  if (!g_forceDeviceZeroReady) {
+    cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                    mesh->nharbored * sizeof(fvector_t),
+                    solver->streams[CUDA_STREAM_MAIN]);
+    g_forceDeviceZeroReady = 1;
+  }
 
   if (count <= 0) {
     Timer_Stop("Compute addforces s");
@@ -6474,9 +6479,12 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int blocksize;
   int gridsize;
 
-  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
-                  mesh->nharbored * sizeof(fvector_t),
-                  solver->streams[CUDA_STREAM_MAIN]);
+  if (!g_forceDeviceZeroReady) {
+    cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                    mesh->nharbored * sizeof(fvector_t),
+                    solver->streams[CUDA_STREAM_MAIN]);
+    g_forceDeviceZeroReady = 1;
+  }
 
   if (totalCount <= 0) {
     return;
