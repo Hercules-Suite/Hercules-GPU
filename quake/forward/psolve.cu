@@ -336,6 +336,7 @@ static int32_t mesh_only_source_prep_mode(void);
 static int32_t source_load_local_forces_from_fp(FILE* fp);
 static void source_release_loaded_forces(void);
 static int32_t source_detect_frame_count(FILE* fp, int32_t node_count);
+static void source_report_frame_coverage(const char* modeLabel);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -5722,7 +5723,15 @@ static int read_myForces(int32_t timestep, double dt) {
 
     interval = floor(T / source_dt);
     if (interval >= g_sourceFrameCount - 1) {
-      interval = g_sourceFrameCount - 2;
+      if (g_sourceFrameClampReported == 0) {
+        monitor_print(
+            "Source force timeline shorter than requested; zeroing remaining SRFH force steps\n");
+        g_sourceFrameClampReported = 1;
+      }
+      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
+      free(aux1);
+      free(aux2);
+      return 0;
     }
     if (interval < 0) {
       interval = 0;
@@ -5761,13 +5770,13 @@ static int read_myForces(int32_t timestep, double dt) {
   } else {  // Todo: Doriam says: Optimize other source types (POINT, PLANE,
             // PLANEWITHKINKS) as we did for SRFH if we plan to keep them
     if (g_sourceFrameCount > 0 && timestep >= g_sourceFrameCount) {
-      timestep = g_sourceFrameCount - 1;
       if (g_sourceFrameClampReported == 0) {
         monitor_print(
-            "Source force timeline shorter than requested; clamping to last frame (%d)\n",
-            g_sourceFrameCount - 1);
+            "Source force timeline shorter than requested; zeroing remaining force steps\n");
         g_sourceFrameClampReported = 1;
       }
+      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
+      return 0;
     }
 
     whereToRead = ((off_t)sizeof(int32_t)) +
@@ -10601,6 +10610,7 @@ static void source_init(const char* physicsin) {
                 "Source init: reused existing local force files from %s\n",
                 Param.theSourceOutputDir);
           }
+          source_report_frame_coverage("reused");
         } else {
           if (Global.myID == 0) {
             monitor_print(
@@ -10656,6 +10666,8 @@ static void source_init(const char* physicsin) {
                        "Could not read nodal force file");
         }
       }
+
+      source_report_frame_coverage("generated");
 
       Timer_Stop("Source Regenerate");
     }
@@ -10800,6 +10812,30 @@ static int32_t source_detect_frame_count(FILE* fp, int32_t node_count) {
   }
 
   return (int32_t)(payload_bytes / frame_bytes);
+}
+
+static void source_report_frame_coverage(const char* modeLabel) {
+  int32_t localActive = (Global.theNodesLoaded > 0 && g_sourceFrameCount > 0) ? 1 : 0;
+  int32_t activeRanks = 0;
+  int32_t localMin = localActive ? g_sourceFrameCount : 2147483647;
+  int32_t localMax = localActive ? g_sourceFrameCount : 0;
+  int32_t minFrames = 0;
+  int32_t maxFrames = 0;
+
+  MPI_Allreduce(&localActive, &activeRanks, 1, MPI_INT, MPI_SUM, comm_solver);
+  MPI_Allreduce(&localMin, &minFrames, 1, MPI_INT, MPI_MIN, comm_solver);
+  MPI_Allreduce(&localMax, &maxFrames, 1, MPI_INT, MPI_MAX, comm_solver);
+
+  if (Global.myID == 0) {
+    if (activeRanks == 0) {
+      monitor_print("Source init (%s): no active source ranks\n", modeLabel);
+    } else {
+      monitor_print(
+          "Source init (%s): frame coverage on active ranks %d/%d -> min=%d max=%d requested_steps=%d\n",
+          modeLabel, activeRanks, Global.theGroupSize, minFrames, maxFrames,
+          Param.theTotalSteps);
+    }
+  }
 }
 
 static void source_release_loaded_forces(void) {
