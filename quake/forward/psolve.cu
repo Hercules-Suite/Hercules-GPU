@@ -6644,14 +6644,17 @@ static int32_t solver_sparse_clear_mode(void) {
     }
 
     if (requestedMode == 2) {
-      /* Prefer node-list clears when range memset would touch much more data.
-       */
-      if ((topoCount > 0 && totalRangeSpan > ((int64_t)topoCount * 2)) ||
-          (topoCount > 0 && rangeCount > (topoCount / 8))) {
-        g_sparseClearMode = 1;
-      } else {
-        g_sparseClearMode = 0;
+      int useRanges = 0;
+
+      /* Auto policy: default to node-list clear, only use ranges when the
+       * covered span is compact and the range list is small. */
+      if (topoCount > 0 &&
+          totalRangeSpan <= ((int64_t)topoCount * 12) / 10 &&
+          rangeCount <= 128) {
+        useRanges = 1;
       }
+
+      g_sparseClearMode = useRanges ? 0 : 1;
     } else {
       g_sparseClearMode = requestedMode;
     }

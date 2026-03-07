@@ -20,7 +20,7 @@ Runtime performance toggles (no source edits needed):
 	adjust core.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
-	`auto`/`2` is default and picks mode based on sparse-node fragmentation.
+	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
 
