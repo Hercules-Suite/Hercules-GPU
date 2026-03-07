@@ -70,9 +70,9 @@ Notes:
 	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
 	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
 	Disable this Phase B prep source substep with `PHASE_SOURCE_PREP=0` if needed.
-	By default (`PHASE_SOURCE_PREP_IF_MISSING=1`), this substep is skipped if
-	the required `force_process.0..(PHASE_B_NP-1)` files already exist.
-	Set `PHASE_SOURCE_PREP_IF_MISSING=0` to force rerunning source prep.
+	By default (`PHASE_SOURCE_PREP_IF_MISSING=0`), this substep always runs.
+	Set `PHASE_SOURCE_PREP_IF_MISSING=1` to skip it only when
+	`force_process.0..(PHASE_B_NP-1)` files already exist.
 - Host pinning for stable source reuse:
 	By default (`PHASE_PIN_HOSTS=1`), the script pins Source Prep and
 	Phase B to a deterministic host list (from `PBS_NODEFILE` or Slurm
