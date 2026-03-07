@@ -77,8 +77,12 @@ Notes:
 	`mpirun` launches.
 	Set `PHASE_PIN_HOSTS=0` to disable auto pinning.
 	Set `PHASE_HOSTFILE=/path/to/hosts` to force an explicit hostfile.
-
-Mesh mode input flags (`numerical.in`):
+- Source file completeness check:
+	By default (`PHASE_VERIFY_SOURCE_FILES=1`), the script verifies after
+	Source Prep that `force_process.0..(PHASE_B_NP-1)` all exist under
+	`source_directory_output`. This protects mixed-rank runs (for example,
+	`PHASE_A_NP=288`, `PHASE_B_NP=4`) from partial source file sets.
+	Set `PHASE_VERIFY_SOURCE_FILES=0` to disable this check.
 
 - `output_mesh`
 	`1` writes the generated mesh etree (`mesh_etree_output_file`) to disk.

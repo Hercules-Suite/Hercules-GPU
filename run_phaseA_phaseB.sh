@@ -26,6 +26,7 @@ PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
 PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
 PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-1}"
 PHASE_SOURCE_PREP_MPI_ARGS="${PHASE_SOURCE_PREP_MPI_ARGS:-}"
+PHASE_VERIFY_SOURCE_FILES="${PHASE_VERIFY_SOURCE_FILES:-1}"
 PHASE_PIN_HOSTS="${PHASE_PIN_HOSTS:-1}"
 PHASE_HOSTFILE="${PHASE_HOSTFILE:-}"
 
@@ -90,6 +91,83 @@ make_phase_input() {
       }
     }
   ' "${src}" >"${dst}"
+}
+
+extract_config_value() {
+  local src="$1"
+  local key="$2"
+
+  awk -F'=' -v key="${key}" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      val = $2;
+      sub(/[[:space:]]*#.*/, "", val);
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val);
+      found = val;
+    }
+    END {
+      if (found != "") {
+        print found;
+      }
+    }
+  ' "${src}"
+}
+
+verify_source_files() {
+  local input_file="$1"
+  local rank_count="$2"
+  local src_dir_raw=""
+  local src_dir=""
+  local missing_count=0
+  local present_count=0
+  local active_count=0
+  local missing_list=""
+  local r f sz
+
+  src_dir_raw="$(extract_config_value "${input_file}" "source_directory_output")"
+  if [[ -z "${src_dir_raw}" ]]; then
+    echo "WARNING: could not parse source_directory_output from ${input_file}; skipping source file verification" >&2
+    return 0
+  fi
+
+  if [[ "${src_dir_raw}" = /* ]]; then
+    src_dir="${src_dir_raw}"
+  elif [[ -d "${src_dir_raw}" ]]; then
+    src_dir="${src_dir_raw}"
+  else
+    src_dir="${CASE_DIR}/${src_dir_raw}"
+  fi
+
+  if [[ ! -d "${src_dir}" ]]; then
+    echo "ERROR: source_directory_output does not exist: ${src_dir}" >&2
+    return 1
+  fi
+
+  for ((r = 0; r < rank_count; r++)); do
+    f="${src_dir}/force_process.${r}"
+    if [[ -f "${f}" ]]; then
+      present_count=$((present_count + 1))
+      sz="$(wc -c < "${f}" | tr -d ' ')"
+      if [[ "${sz}" =~ ^[0-9]+$ ]] && [[ "${sz}" -gt 4 ]]; then
+        active_count=$((active_count + 1))
+      fi
+    else
+      missing_count=$((missing_count + 1))
+      if [[ -z "${missing_list}" ]]; then
+        missing_list="${r}"
+      elif [[ $(echo "${missing_list}" | awk -F',' '{print NF}') -lt 8 ]]; then
+        missing_list="${missing_list},${r}"
+      fi
+    fi
+  done
+
+  if [[ "${missing_count}" -gt 0 ]]; then
+    echo "ERROR: Source Prep produced ${present_count}/${rank_count} force files in ${src_dir}" >&2
+    echo "       Missing ranks: ${missing_list}" >&2
+    return 1
+  fi
+
+  echo "Source file verification: ${present_count}/${rank_count} files present (${active_count} with force payload, ${rank_count} total ranks)"
+  return 0
 }
 
 if [[ -n "${BASE_IN}" ]]; then
@@ -246,6 +324,7 @@ fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
 echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
 echo "Source-prep substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
+echo "Source file verification: ${PHASE_VERIFY_SOURCE_FILES}"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
 if [[ ${#HOSTFILE_ARGS[@]} -gt 0 ]]; then
@@ -298,6 +377,10 @@ if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
   HERCULES_MESH_ONLY_PREP_SOURCE=1 \
   HERCULES_REUSE_SOURCE_FILES=0 \
   "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${HOSTFILE_ARGS[@]}" "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
+
+  if [[ "${PHASE_VERIFY_SOURCE_FILES}" == "1" ]]; then
+    verify_source_files "${PHASE_PREP_IN}" "${PHASE_B_NP}"
+  fi
 fi
 
 HERCULES_REUSE_SOURCE_FILES="${PHASE_B_SOURCE_REUSE}" \
