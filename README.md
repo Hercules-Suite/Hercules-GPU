@@ -23,6 +23,9 @@ Runtime performance toggles (no source edits needed):
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
+- `HERCULES_STATION_IO_OMP=1|0`
+	Enables or disables OpenMP parallelization for station displacement
+	interpolation and per-station file writes. Default is `0` (disabled).
 
 Build note:
 
@@ -44,6 +47,7 @@ export OMP_PLACES=cores
 export HERCULES_ADJUST_ASSIGN_OMP=1
 export HERCULES_ADJUST_DIST_OMP=1
 export HERCULES_SPARSE_CLEAR_MODE=auto
+export HERCULES_STATION_IO_OMP=1
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \

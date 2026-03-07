@@ -125,6 +125,8 @@ static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
 static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
+static int32_t g_stationOutputOmpMode = -1;
+static int32_t g_stationOutputOmpReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -325,6 +327,7 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
+static int32_t station_output_use_omp(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -10915,6 +10918,12 @@ static int interpolate_station_displacements(int32_t step) {
   ;
   vector3D_t localCoords; /* convenient renaming */
 
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static) \
+    private(iPhi, nodesToInterpolate, localCoords, phi, dis_x, dis_y, dis_z, \
+            vel_x, vel_y, vel_z, acc_x, acc_y, acc_z)
+#endif
   for (iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
     localCoords = Param.myStations[iStation].localcoords;
 
@@ -11051,6 +11060,37 @@ static int interpolate_station_displacements(int32_t step) {
   }
 
   return 1;
+}
+
+static int32_t station_output_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (g_stationOutputOmpMode < 0) {
+    const char* env = getenv("HERCULES_STATION_IO_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_stationOutputOmpMode = 0;
+      } else {
+        g_stationOutputOmpMode = 1;
+      }
+    } else {
+      /* Default to off to preserve legacy behavior unless explicitly enabled. */
+      g_stationOutputOmpMode = 0;
+    }
+
+    if ((g_stationOutputOmpMode == 1) && (Global.myID == 0) &&
+        (g_stationOutputOmpReported == 0)) {
+      monitor_print("Station output OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_stationOutputOmpReported = 1;
+    }
+  }
+
+  return g_stationOutputOmpMode;
+#endif
 }
 
 /**
