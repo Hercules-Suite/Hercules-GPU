@@ -7464,14 +7464,10 @@ static schedule_t* schedule_new() {
   sched->irecvstats_c = NULL;
   sched->isendreqs_c = NULL;
   sched->isendstats_c = NULL;
-  sched->recv_order_c = NULL;
-  sched->doneidxs_c = NULL;
   sched->irecvreqs_s = NULL;
   sched->irecvstats_s = NULL;
   sched->isendreqs_s = NULL;
   sched->isendstats_s = NULL;
-  sched->recv_order_s = NULL;
-  sched->doneidxs_s = NULL;
 
   return sched;
 }
@@ -7531,13 +7527,9 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
     sched->isendstats_c =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
-    sched->recv_order_c =
-      (messenger_t**)malloc(sizeof(messenger_t*) * sched->c_count);
-    sched->doneidxs_c = (int*)malloc(sizeof(int) * sched->c_count);
 
     if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL) ||
-      (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL) ||
-      (sched->recv_order_c == NULL) || (sched->doneidxs_c == NULL)) {
+        (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -7548,8 +7540,6 @@ static void schedule_allocMPIctl(schedule_t* sched) {
     sched->irecvstats_c = NULL;
     sched->isendreqs_c = NULL;
     sched->isendstats_c = NULL;
-    sched->recv_order_c = NULL;
-    sched->doneidxs_c = NULL;
   }
 
   if (sched->s_count != 0) {
@@ -7561,13 +7551,9 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
     sched->isendstats_s =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
-    sched->recv_order_s =
-      (messenger_t**)malloc(sizeof(messenger_t*) * sched->s_count);
-    sched->doneidxs_s = (int*)malloc(sizeof(int) * sched->s_count);
 
     if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL) ||
-      (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL) ||
-      (sched->recv_order_s == NULL) || (sched->doneidxs_s == NULL)) {
+        (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -7578,8 +7564,6 @@ static void schedule_allocMPIctl(schedule_t* sched) {
     sched->irecvstats_s = NULL;
     sched->isendreqs_s = NULL;
     sched->isendstats_s = NULL;
-    sched->recv_order_s = NULL;
-    sched->doneidxs_s = NULL;
   }
 
   return;
@@ -7774,16 +7758,12 @@ static void schedule_delete(schedule_t* sched) {
   if (sched->irecvstats_c != NULL) free(sched->irecvstats_c);
   if (sched->isendreqs_c != NULL) free(sched->isendreqs_c);
   if (sched->isendstats_c != NULL) free(sched->isendstats_c);
-  if (sched->recv_order_c != NULL) free(sched->recv_order_c);
-  if (sched->doneidxs_c != NULL) free(sched->doneidxs_c);
   free(sched->messenger_c);
 
   if (sched->irecvreqs_s != NULL) free(sched->irecvreqs_s);
   if (sched->irecvstats_s != NULL) free(sched->irecvstats_s);
   if (sched->isendreqs_s != NULL) free(sched->isendreqs_s);
   if (sched->isendstats_s != NULL) free(sched->isendstats_s);
-  if (sched->recv_order_s != NULL) free(sched->recv_order_s);
-  if (sched->doneidxs_s != NULL) free(sched->doneidxs_s);
   free(sched->messenger_s);
 
   free(sched);
@@ -7840,7 +7820,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   MPI_Status* isendstats;
   int32_t waitStage = wait_recv_stage_from_msgtag(msgtag);
   int32_t useWaitsome = 0;
-  int* doneidxs = NULL;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -7855,8 +7834,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvstats = sched->irecvstats_s;
     isendreqs = sched->isendreqs_c;
     isendstats = sched->isendstats_c;
-    recv_order = sched->recv_order_s;
-    doneidxs = sched->doneidxs_s;
   } else {
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
@@ -7866,8 +7843,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     irecvstats = sched->irecvstats_c;
     isendreqs = sched->isendreqs_s;
     isendstats = sched->isendstats_s;
-    recv_order = sched->recv_order_c;
-    doneidxs = sched->doneidxs_c;
   }
 
   send_head = send_messenger;
@@ -7880,11 +7855,14 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   /* Post receives */
   Timer_Start("Schedule Post Recv");
   irecvnum = 0;
-  if (irecvcount > 0 && recv_order == NULL) {
-    fprintf(stderr, "Thread %d: schedule_senddata: recv order scratch missing\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  if (irecvcount > 0) {
+    recv_order = (messenger_t**)malloc(sizeof(messenger_t*) * irecvcount);
+    if (recv_order == NULL) {
+      fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
   while (recv_messenger != NULL) {
     bytesize = recv_messenger->nodecount * recv_messenger->insize;
@@ -7970,15 +7948,19 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   if (irecvcount != 0) {
     int32_t remaining = irecvcount;
     double waitRecvStart = 0.0;
+    int* doneidxs = NULL;
     if (waitStage >= 0) {
       waitRecvStart = MPI_Wtime();
     }
 
-    if (useWaitsome && doneidxs == NULL) {
-      fprintf(stderr, "Thread %d: schedule_senddata: waitsome scratch missing\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
+    if (useWaitsome) {
+      doneidxs = (int*)malloc(sizeof(int) * irecvcount);
+      if (doneidxs == NULL) {
+        fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
     }
 
     while (remaining > 0) {
@@ -8022,6 +8004,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       }
     }
 
+    if (doneidxs != NULL) {
+      free(doneidxs);
+      doneidxs = NULL;
+    }
+
     if (waitStage >= 0) {
       g_waitRecvStageLocal[waitStage] += (MPI_Wtime() - waitRecvStart);
     }
@@ -8034,6 +8021,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     Timer_Start("Schedule Wait Send");
     MPI_Waitall(isendnum, isendreqs, isendstats);
     Timer_Stop("Schedule Wait Send");
+  }
+
+  if (recv_order != NULL) {
+    free(recv_order);
+    recv_order = NULL;
   }
 
   if (msgtag == DN_FORCE_MSG || msgtag == DN_DISP_MSG) {
@@ -9439,7 +9431,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Assignment Core");
       const int32_t useOmp = adjust_assignment_use_omp();
 #ifdef _OPENMP
-#pragma omp parallel for if(useOmp) schedule(guided, 64)
+#pragma omp parallel for if(useOmp) schedule(static)
 #endif
       for (int32_t d = 0; d < g_adjustDnCount; d++) {
         dnindex = g_adjustDnOrder[d];

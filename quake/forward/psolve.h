@@ -335,8 +335,6 @@ struct schedule_t {
     MPI_Status*   irecvstats_c;
     MPI_Request*  isendreqs_c;  /**< control for non-blocking sends.    */
     MPI_Status*   isendstats_c;
-    messenger_t** recv_order_c; /**< Scratch: completion index -> messenger. */
-    int*          doneidxs_c;   /**< Scratch indices for MPI_Waitsome. */
 
     /** Number of processors who share nodes owned by me. */
     int32_t       s_count;
@@ -346,8 +344,6 @@ struct schedule_t {
     MPI_Status*   irecvstats_s;
     MPI_Request*  isendreqs_s;  /* controls for non-blocking MPI sends.    */
     MPI_Status*   isendstats_s;
-    messenger_t** recv_order_s; /* Scratch: completion index -> messenger. */
-    int*          doneidxs_s;   /* Scratch indices for MPI_Waitsome. */
 };
 
 typedef struct schedule_t schedule_t;
