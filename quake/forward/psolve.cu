@@ -7596,7 +7596,7 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
 
     if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL) ||
-      (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
+        (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -7620,7 +7620,7 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
 
     if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL) ||
-      (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
+        (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
       MPI_Abort(MPI_COMM_WORLD, ERROR);

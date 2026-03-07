@@ -24,8 +24,9 @@ PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
 PHASE_A_PREP_SOURCE="${PHASE_A_PREP_SOURCE:-0}"
 PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
 PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
-PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-auto}"
+PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-1}"
 PHASE_SOURCE_PREP_MPI_ARGS="${PHASE_SOURCE_PREP_MPI_ARGS:-}"
+PHASE_SOURCE_MODE="${PHASE_SOURCE_MODE:-prep}"
 PHASE_VERIFY_SOURCE_FILES="${PHASE_VERIFY_SOURCE_FILES:-1}"
 PHASE_PIN_HOSTS="${PHASE_PIN_HOSTS:-1}"
 PHASE_HOSTFILE="${PHASE_HOSTFILE:-}"
@@ -43,6 +44,16 @@ elif [[ -x "${SCRIPT_DIR}/psolve" ]]; then
 else
   echo "ERROR: could not find psolve binary. Set PSOLVE_BIN=/path/to/psolve" >&2
   exit 1
+fi
+
+if [[ "${PHASE_SOURCE_MODE}" != "prep" && "${PHASE_SOURCE_MODE}" != "inline" ]]; then
+  echo "ERROR: invalid PHASE_SOURCE_MODE='${PHASE_SOURCE_MODE}' (expected prep|inline)" >&2
+  exit 1
+fi
+
+if [[ "${PHASE_SOURCE_MODE}" == "inline" ]]; then
+  PHASE_SOURCE_PREP=0
+  PHASE_B_SOURCE_REUSE=0
 fi
 
 TMP_PHASE_A_IN=""
@@ -167,39 +178,6 @@ verify_source_files() {
   fi
 
   echo "Source file verification: ${present_count}/${rank_count} files present (${active_count} with force payload, ${rank_count} total ranks)"
-  return 0
-}
-
-source_files_complete() {
-  local input_file="$1"
-  local rank_count="$2"
-  local src_dir_raw=""
-  local src_dir=""
-  local r
-
-  src_dir_raw="$(extract_config_value "${input_file}" "source_directory_output")"
-  if [[ -z "${src_dir_raw}" ]]; then
-    return 1
-  fi
-
-  if [[ "${src_dir_raw}" = /* ]]; then
-    src_dir="${src_dir_raw}"
-  elif [[ -d "${src_dir_raw}" ]]; then
-    src_dir="${src_dir_raw}"
-  else
-    src_dir="${CASE_DIR}/${src_dir_raw}"
-  fi
-
-  if [[ ! -d "${src_dir}" ]]; then
-    return 1
-  fi
-
-  for ((r = 0; r < rank_count; r++)); do
-    if [[ ! -f "${src_dir}/force_process.${r}" ]]; then
-      return 1
-    fi
-  done
-
   return 0
 }
 
@@ -355,11 +333,15 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
+echo "Source mode:    ${PHASE_SOURCE_MODE}"
 echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
 echo "Phase B prep source substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
 echo "Source file verification: ${PHASE_VERIFY_SOURCE_FILES}"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
+if [[ "${PHASE_SOURCE_MODE}" == "inline" ]]; then
+  echo "Inline source mode: source files are generated during real Phase B setup (no separate prep launch)"
+fi
 if [[ ${#HOSTFILE_ARGS[@]} -gt 0 ]]; then
   echo "Pinned hostfile: ${HOSTFILE_ARGS[1]}"
 else
@@ -397,27 +379,7 @@ else
   B_ARGS=()
 fi
 
-RUN_PHASE_B_PREP_SOURCE=0
-case "${PHASE_SOURCE_PREP}" in
-  1|on|true|yes)
-    RUN_PHASE_B_PREP_SOURCE=1
-    ;;
-  0|off|false|no)
-    RUN_PHASE_B_PREP_SOURCE=0
-    ;;
-  auto|AUTO|Auto)
-    if [[ "${PHASE_B_SOURCE_REUSE}" == "1" ]] && \
-       ! source_files_complete "${PHASE_B_IN}" "${PHASE_B_NP}"; then
-      RUN_PHASE_B_PREP_SOURCE=1
-    fi
-    ;;
-  *)
-    echo "ERROR: invalid PHASE_SOURCE_PREP value '${PHASE_SOURCE_PREP}' (use 0, 1, or auto)" >&2
-    exit 1
-    ;;
-esac
-
-if [[ "${RUN_PHASE_B_PREP_SOURCE}" == "1" ]]; then
+if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
   echo
   echo "[Phase B Prep: Source] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${HOSTFILE_ARGS[*]} ${PSOLVE_BIN} ${PHASE_PREP_IN}"
   if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
@@ -434,9 +396,6 @@ if [[ "${RUN_PHASE_B_PREP_SOURCE}" == "1" ]]; then
   if [[ "${PHASE_VERIFY_SOURCE_FILES}" == "1" ]]; then
     verify_source_files "${PHASE_PREP_IN}" "${PHASE_B_NP}"
   fi
-elif [[ "${PHASE_SOURCE_PREP}" == "auto" || "${PHASE_SOURCE_PREP}" == "AUTO" || "${PHASE_SOURCE_PREP}" == "Auto" ]]; then
-  echo
-  echo "[Phase B Prep: Source] skipped (existing force_process files already cover Phase B ranks)"
 fi
 
 HERCULES_REUSE_SOURCE_FILES="${PHASE_B_SOURCE_REUSE}" \
