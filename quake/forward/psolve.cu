@@ -10545,6 +10545,8 @@ static void source_init(const char* physicsin) {
     int32_t localLoadOk = 0;
     int32_t allLoadOk = 0;
     int32_t reuseLoadOkRankCount = 0;
+    int32_t localMetaOk = 0;
+    int32_t allMetaOk = 0;
     FILE* fpReuse = NULL;
 
     /* Load to Global.theMPIInformation */
@@ -10604,13 +10606,38 @@ static void source_init(const char* physicsin) {
                       comm_solver);
 
         if (allLoadOk) {
-          sourceLoadedFromCache = 1;
-          if (Global.myID == 0) {
-            monitor_print(
-                "Source init: reused existing local force files from %s\n",
-                Param.theSourceOutputDir);
+          if (source_init_metadata_only(
+                  physicsin, Param.theSourceOutputDir,
+                  Global.theNumericsInformation, Global.theMPIInformation,
+                  globalDelayT, surfaceShift, &Param.utmZone) == 0) {
+            localMetaOk = 1;
           }
-          source_report_frame_coverage("reused");
+
+          MPI_Allreduce(&localMetaOk, &allMetaOk, 1, MPI_INT, MPI_MIN,
+                        comm_solver);
+
+          if (allMetaOk) {
+            sourceLoadedFromCache = 1;
+            if (Global.myID == 0) {
+              monitor_print(
+                  "Source init: reused existing local force files from %s\n",
+                  Param.theSourceOutputDir);
+            }
+            source_report_frame_coverage("reused");
+          } else {
+            if (Global.myID == 0) {
+              monitor_print(
+                  "Source init: reuse fallback (metadata init failed); regenerating\n");
+            }
+
+            if (localLoadOk) {
+              source_release_loaded_forces();
+            }
+            if (fpReuse != NULL) {
+              fclose(fpReuse);
+              fpReuse = NULL;
+            }
+          }
         } else {
           if (Global.myID == 0) {
             monitor_print(
