@@ -96,6 +96,11 @@ static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
+static int32_t g_sparseNodeListReady = 0;
+static int32_t g_sparseSourceCountCached = -1;
+static int32_t g_sparseTopoCountCached = -1;
+static int32_t g_sparseCopiedSourceCount = -1;
+static int32_t g_sparseCopiedTopoCount = -1;
 static int32_t g_sparseClearMode = -1;
 static int32_t g_sparseClearModeReported = 0;
 static vector3D_t g_istanbulVelModelOrigin;
@@ -5603,6 +5608,11 @@ static void solver_delete() {
     g_sparseForcesHost = NULL;
   }
   g_sparseNodeCapacity = 0;
+  g_sparseNodeListReady = 0;
+  g_sparseSourceCountCached = -1;
+  g_sparseTopoCountCached = -1;
+  g_sparseCopiedSourceCount = -1;
+  g_sparseCopiedTopoCount = -1;
 
   compute_adjust_cache_free();
 
@@ -6505,30 +6515,57 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     }
 
     g_sparseNodeCapacity = totalCount;
+    g_sparseNodeListReady = 0;
+    g_sparseSourceCountCached = -1;
+    g_sparseTopoCountCached = -1;
+    g_sparseCopiedSourceCount = -1;
+    g_sparseCopiedTopoCount = -1;
   }
 
   Timer_Start("Sparse force upload build");
-  idx = 0;
-  for (int32_t i = 0; i < sourceCount; i++) {
-    int32_t lnid = Global.theNodesLoadedList[i];
-    g_sparseNodeListHost[idx] = lnid;
-    g_sparseForcesHost[idx] = solver->force[lnid];
-    idx++;
+  if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
+      (g_sparseTopoCountCached != topoCount)) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(sourceCount > 100000)
+#endif
+    for (int32_t i = 0; i < sourceCount; i++) {
+      g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(topoCount > 100000)
+#endif
+    for (int32_t i = 0; i < topoCount; i++) {
+      g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
+    }
+
+    g_sparseNodeListReady = 1;
+    g_sparseSourceCountCached = sourceCount;
+    g_sparseTopoCountCached = topoCount;
   }
 
-  for (int32_t i = 0; i < topoCount; i++) {
-    int32_t lnid = topoNodes[i];
-    g_sparseNodeListHost[idx] = lnid;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(totalCount > 100000)
+#endif
+  for (idx = 0; idx < totalCount; idx++) {
+    int32_t lnid = g_sparseNodeListHost[idx];
     g_sparseForcesHost[idx] = solver->force[lnid];
-    idx++;
   }
   Timer_Stop("Sparse force upload build");
 
   Timer_Start("Sparse force upload memcpy");
-  cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
-                  totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
-                  solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci += totalCount * sizeof(int32_t);
+  if ((g_sparseSourceCountCached == sourceCount) &&
+      (g_sparseTopoCountCached == topoCount) && g_sparseNodeListReady) {
+    if ((g_sparseCopiedSourceCount != sourceCount) ||
+        (g_sparseCopiedTopoCount != topoCount)) {
+      cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
+                      totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
+                      solver->streams[CUDA_STREAM_MAIN]);
+      solver->gpu_spec->numbytespci += totalCount * sizeof(int32_t);
+      g_sparseCopiedSourceCount = sourceCount;
+      g_sparseCopiedTopoCount = topoCount;
+    }
+  }
 
   cudaMemcpyAsync(g_sparseForcesDevice, g_sparseForcesHost,
                   totalCount * sizeof(fvector_t), cudaMemcpyHostToDevice,
