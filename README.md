@@ -23,6 +23,10 @@ Runtime performance toggles (no source edits needed):
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
+- `HERCULES_EXPERIMENTAL_DISP_OVERLAP=1|0`
+	Experimental path (default `0`) that moves displacement D2H copy to the
+	secondary CUDA stream and queues GPU reset earlier to test overlap.
+	Use only for A/B benchmarking.
 
 Build note:
 

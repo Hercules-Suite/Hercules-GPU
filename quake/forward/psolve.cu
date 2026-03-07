@@ -125,6 +125,8 @@ static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
 static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
+static int32_t g_expDispOverlapMode = -1;
+static int32_t g_expDispOverlapReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -325,6 +327,7 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
+static int32_t experimental_disp_overlap_mode(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -6729,10 +6732,24 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  /* Copy updated tm2 displacements from device */
-  cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
-                  mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
-                  solver->streams[CUDA_STREAM_MAIN]);
+  if (experimental_disp_overlap_mode()) {
+    /* Experimental mode: copy tm2 on secondary stream so reset work can be
+     * queued on main stream in parallel with D2H traffic. */
+    cudaStreamWaitEvent(solver->streams[CUDA_STREAM_SECONDARY],
+                        solver->events[CUDA_EVENT_DISP_KERNEL_DONE], 0);
+    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
+                    mesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyDeviceToHost,
+                    solver->streams[CUDA_STREAM_SECONDARY]);
+    cudaEventRecord(solver->events[CUDA_EVENT_FORCE_WAIT],
+                    solver->streams[CUDA_STREAM_SECONDARY]);
+  } else {
+    /* Copy updated tm2 displacements from device */
+    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
+                    mesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  }
+
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
   /* Uncomment for timing tests */
@@ -6786,7 +6803,11 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   Timer_Start("Disp postcopy sync wait");
   Timer_Start("Disp kernel sync wait");
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  if (experimental_disp_overlap_mode()) {
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
+  } else {
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
   Timer_Stop("Disp kernel sync wait");
   Timer_Stop("Disp postcopy sync wait");
 
@@ -6855,6 +6876,27 @@ static void solver_geostatic_fix(int step) {
     }
     Timer_Stop("Compute addforces gravity");
   }
+}
+
+static int32_t experimental_disp_overlap_mode(void) {
+  if (g_expDispOverlapMode < 0) {
+    const char* env = getenv("HERCULES_EXPERIMENTAL_DISP_OVERLAP");
+    if (env != NULL &&
+        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
+         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
+      g_expDispOverlapMode = 1;
+    } else {
+      g_expDispOverlapMode = 0;
+    }
+
+    if (Global.myID == 0 && g_expDispOverlapReported == 0) {
+      monitor_print("Experimental displacement overlap mode: %s\n",
+                    g_expDispOverlapMode ? "enabled" : "disabled");
+      g_expDispOverlapReported = 1;
+    }
+  }
+
+  return g_expDispOverlapMode;
 }
 
 /** Share the displacement of anchored nodes with other processors. */
@@ -7172,15 +7214,27 @@ static void solver_run() {
     solver_unload_disp_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Memory Copy");
 
-    Timer_Start("Compute Physics");
-    solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-    solver_geostatic_fix(step);
-    solver_load_fixedbase_displacements(Global.mySolver, step);
-    Timer_Stop("Compute Physics");
+    if (experimental_disp_overlap_mode()) {
+      Timer_Start("GPU Memory Copy");
+      solver_reset_gpu(Global.mySolver, Global.myMesh);
+      Timer_Stop("GPU Memory Copy");
 
-    Timer_Start("GPU Memory Copy");
-    solver_reset_gpu(Global.mySolver, Global.myMesh);
-    Timer_Stop("GPU Memory Copy");
+      Timer_Start("Compute Physics");
+      solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
+      solver_geostatic_fix(step);
+      solver_load_fixedbase_displacements(Global.mySolver, step);
+      Timer_Stop("Compute Physics");
+    } else {
+      Timer_Start("Compute Physics");
+      solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
+      solver_geostatic_fix(step);
+      solver_load_fixedbase_displacements(Global.mySolver, step);
+      Timer_Stop("Compute Physics");
+
+      Timer_Start("GPU Memory Copy");
+      solver_reset_gpu(Global.mySolver, Global.myMesh);
+      Timer_Stop("GPU Memory Copy");
+    }
 
     Timer_Start("Communication");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
