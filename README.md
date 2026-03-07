@@ -25,10 +25,12 @@ Runtime performance toggles (no source edits needed):
 	fragmented 3D model cases.
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
-	interpolation and per-station file writes. Default is `0` (disabled).
+	interpolation and per-station file writes. Solver default is `0`
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
-	interpolation before MPI send/write. Default is `0` (disabled).
+	interpolation before MPI send/write. Solver default is `0`
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 
 Build note:
 
@@ -57,13 +59,14 @@ Example (cluster case directory + external GPU binary):
 cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
 
 export OMP_NUM_THREADS=64
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export HERCULES_ADJUST_ASSIGN_OMP=1
-export HERCULES_ADJUST_DIST_OMP=1
-export HERCULES_SPARSE_CLEAR_MODE=auto
-export HERCULES_STATION_IO_OMP=1
-export HERCULES_PLANE_IO_OMP=1
+# Optional: override script defaults when needed
+# export OMP_PROC_BIND=spread
+# export OMP_PLACES=threads
+# export HERCULES_ADJUST_ASSIGN_OMP=0
+# export HERCULES_ADJUST_DIST_OMP=0
+# export HERCULES_SPARSE_CLEAR_MODE=nodes
+# export HERCULES_STATION_IO_OMP=0
+# export HERCULES_PLANE_IO_OMP=0
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
