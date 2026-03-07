@@ -6507,6 +6507,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     g_sparseNodeCapacity = totalCount;
   }
 
+  Timer_Start("Sparse force upload build");
   idx = 0;
   for (int32_t i = 0; i < sourceCount; i++) {
     int32_t lnid = Global.theNodesLoadedList[i];
@@ -6521,7 +6522,9 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     g_sparseForcesHost[idx] = solver->force[lnid];
     idx++;
   }
+  Timer_Stop("Sparse force upload build");
 
+  Timer_Start("Sparse force upload memcpy");
   cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
                   totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
@@ -6531,7 +6534,9 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
                   totalCount * sizeof(fvector_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += totalCount * sizeof(fvector_t);
+  Timer_Stop("Sparse force upload memcpy");
 
+  Timer_Start("Sparse force upload scatter");
   blocksize = 256;
   gridsize = (totalCount + blocksize - 1) / blocksize;
   kernelSparseForceScatter<<<gridsize, blocksize, 0,
@@ -6546,6 +6551,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  Timer_Stop("Sparse force upload scatter");
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
@@ -6825,6 +6831,18 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Solver drm force compute")) {
     Timer_Reduce("Solver drm force compute", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+  if (Timer_Exists("Sparse force upload build")) {
+    Timer_Reduce("Sparse force upload build", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Sparse force upload memcpy")) {
+    Timer_Reduce("Sparse force upload memcpy", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Sparse force upload scatter")) {
+    Timer_Reduce("Sparse force upload scatter",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
 
   Timer_Reduce("Read My Forces", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
