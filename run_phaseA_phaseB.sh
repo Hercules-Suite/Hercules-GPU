@@ -21,6 +21,9 @@ PHASE_A_IN="${PHASE_A_IN:-${PHASE_A_DEFAULT_IN}}"
 PHASE_B_IN="${PHASE_B_IN:-${PHASE_B_DEFAULT_IN}}"
 PHASE_A_MPI_ARGS="${PHASE_A_MPI_ARGS:-}"
 PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
+PHASE_A_PREP_SOURCE="${PHASE_A_PREP_SOURCE:-1}"
+PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
+PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
 
 if [[ $# -ge 3 ]]; then
   BASE_IN="$3"
@@ -191,6 +194,9 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
+echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
+echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
+echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -205,8 +211,12 @@ else
   A_ARGS=()
 fi
 if [[ -n "${PHASE_A_NP}" ]]; then
+  HERCULES_MESH_ONLY_PREP_SOURCE="${PHASE_A_PREP_SOURCE}" \
+  HERCULES_REUSE_SOURCE_FILES="${PHASE_A_SOURCE_REUSE}" \
   "${MPI_RUN}" -np "${PHASE_A_NP}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
 else
+  HERCULES_MESH_ONLY_PREP_SOURCE="${PHASE_A_PREP_SOURCE}" \
+  HERCULES_REUSE_SOURCE_FILES="${PHASE_A_SOURCE_REUSE}" \
   "${MPI_RUN}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
 fi
 
@@ -218,6 +228,7 @@ if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
 else
   B_ARGS=()
 fi
+HERCULES_REUSE_SOURCE_FILES="${PHASE_B_SOURCE_REUSE}" \
 "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 
 echo

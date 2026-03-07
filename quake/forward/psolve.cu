@@ -125,8 +125,10 @@ static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
 static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
-static int32_t g_expDispOverlapMode = -1;
-static int32_t g_expDispOverlapReported = 0;
+static int32_t g_sourceReuseMode = -1;
+static int32_t g_sourceReuseReported = 0;
+static int32_t g_meshOnlySourcePrepMode = -1;
+static int32_t g_meshOnlySourcePrepReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -327,7 +329,10 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
-static int32_t experimental_disp_overlap_mode(void);
+static int32_t source_reuse_mode(void);
+static int32_t mesh_only_source_prep_mode(void);
+static int32_t source_load_local_forces_from_fp(FILE* fp);
+static void source_release_loaded_forces(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -6732,23 +6737,10 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  if (experimental_disp_overlap_mode()) {
-    /* Experimental mode: copy tm2 on secondary stream so reset work can be
-     * queued on main stream in parallel with D2H traffic. */
-    cudaStreamWaitEvent(solver->streams[CUDA_STREAM_SECONDARY],
-                        solver->events[CUDA_EVENT_DISP_KERNEL_DONE], 0);
-    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
-                    mesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyDeviceToHost,
-                    solver->streams[CUDA_STREAM_SECONDARY]);
-    cudaEventRecord(solver->events[CUDA_EVENT_FORCE_WAIT],
-                    solver->streams[CUDA_STREAM_SECONDARY]);
-  } else {
-    /* Copy updated tm2 displacements from device */
-    cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
-                    mesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  }
+  /* Copy updated tm2 displacements from device */
+  cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
+                  mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
+                  solver->streams[CUDA_STREAM_MAIN]);
 
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
@@ -6803,11 +6795,7 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   Timer_Start("Disp postcopy sync wait");
   Timer_Start("Disp kernel sync wait");
-  if (experimental_disp_overlap_mode()) {
-    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_WAIT]);
-  } else {
-    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-  }
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Disp kernel sync wait");
   Timer_Stop("Disp postcopy sync wait");
 
@@ -6876,27 +6864,6 @@ static void solver_geostatic_fix(int step) {
     }
     Timer_Stop("Compute addforces gravity");
   }
-}
-
-static int32_t experimental_disp_overlap_mode(void) {
-  if (g_expDispOverlapMode < 0) {
-    const char* env = getenv("HERCULES_EXPERIMENTAL_DISP_OVERLAP");
-    if (env != NULL &&
-        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
-         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
-      g_expDispOverlapMode = 1;
-    } else {
-      g_expDispOverlapMode = 0;
-    }
-
-    if (Global.myID == 0 && g_expDispOverlapReported == 0) {
-      monitor_print("Experimental displacement overlap mode: %s\n",
-                    g_expDispOverlapMode ? "enabled" : "disabled");
-      g_expDispOverlapReported = 1;
-    }
-  }
-
-  return g_expDispOverlapMode;
 }
 
 /** Share the displacement of anchored nodes with other processors. */
@@ -7214,27 +7181,15 @@ static void solver_run() {
     solver_unload_disp_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Memory Copy");
 
-    if (experimental_disp_overlap_mode()) {
-      Timer_Start("GPU Memory Copy");
-      solver_reset_gpu(Global.mySolver, Global.myMesh);
-      Timer_Stop("GPU Memory Copy");
+    Timer_Start("Compute Physics");
+    solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
+    solver_geostatic_fix(step);
+    solver_load_fixedbase_displacements(Global.mySolver, step);
+    Timer_Stop("Compute Physics");
 
-      Timer_Start("Compute Physics");
-      solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-      solver_geostatic_fix(step);
-      solver_load_fixedbase_displacements(Global.mySolver, step);
-      Timer_Stop("Compute Physics");
-    } else {
-      Timer_Start("Compute Physics");
-      solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-      solver_geostatic_fix(step);
-      solver_load_fixedbase_displacements(Global.mySolver, step);
-      Timer_Stop("Compute Physics");
-
-      Timer_Start("GPU Memory Copy");
-      solver_reset_gpu(Global.mySolver, Global.myMesh);
-      Timer_Stop("GPU Memory Copy");
-    }
+    Timer_Start("GPU Memory Copy");
+    solver_reset_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Communication");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
@@ -10524,6 +10479,7 @@ static void source_init(const char* physicsin) {
       (Param.drmImplement == YES && Param.theDrmPart == PART1)) {
     double globalDelayT = 0;
     double surfaceShift = 0;
+    int32_t sourceLoadedFromCache = 0;
 
     /* Load to Global.theMPIInformation */
     Global.theMPIInformation.myid = Global.myID;
@@ -10553,49 +10509,168 @@ static void source_init(const char* physicsin) {
     //      surfaceShift = get_thebase_topo();
     //  }
 
-    /* it will create the files to be read each time step to
-   load (force) the mesh */
-    if (compute_print_source(
-            physicsin, Param.theSourceOutputDir, Global.myOctree, Global.myMesh,
-            Global.theNumericsInformation, Global.theMPIInformation,
-            globalDelayT, surfaceShift, &Param.utmZone)) {
-      monitor_print("Err:cannot create source forces");
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
+    if (source_reuse_mode()) {
+      char forcePath[512];
+      FILE* fpReuse;
+
+      snprintf(forcePath, sizeof(forcePath), "%s/force_process.%d",
+               Param.theSourceOutputDir, Global.myID);
+      fpReuse = fopen(forcePath, "rb");
+      if (fpReuse != NULL) {
+        if (source_load_local_forces_from_fp(fpReuse) == 0) {
+          sourceLoadedFromCache = 1;
+          if (Global.myID == 0) {
+            monitor_print("Source init: reused existing local force files from %s\n",
+                          Param.theSourceOutputDir);
+          }
+        } else {
+          fclose(fpReuse);
+        }
+      }
     }
 
-    Global.theNodesLoaded = source_get_local_loaded_nodes_count();
-
-    if (Global.theNodesLoaded != 0) {
-      size_t ret;
-      int32_t node_count;
-
-      Global.fpsource = source_open_forces_file("r");
-
-      hu_fread(&node_count, sizeof(int32_t), 1, Global.fpsource);
-
-      /* \todo add assertion for node_count == Global.theNodesLoaded */
-
-      Global.theNodesLoadedList =
-          (int32_t*)malloc(sizeof(int32_t) * Global.theNodesLoaded);
-      Global.myForces =
-          (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
-
-      if (Global.myForces == NULL || Global.theNodesLoadedList == NULL) {
-        solver_abort("source_init", "memory allocation failed",
-                     "Cannot allocate memory for Global.myForces or "
-                     "loaded nodes list arrays\n");
+    if (!sourceLoadedFromCache) {
+      /* Generate source files to be read each time step to load mesh forces.
+       */
+      if (compute_print_source(
+              physicsin, Param.theSourceOutputDir, Global.myOctree,
+              Global.myMesh, Global.theNumericsInformation,
+              Global.theMPIInformation, globalDelayT, surfaceShift,
+              &Param.utmZone)) {
+        monitor_print("Err:cannot create source forces");
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
       }
 
-      ret = hu_fread(Global.theNodesLoadedList, sizeof(int32_t),
-                     Global.theNodesLoaded, Global.fpsource);
-
-      if (ret != Global.theNodesLoaded) {
-        solver_abort("source_init(", "fread failed",
-                     "Could not read nodal force file");
+      Global.theNodesLoaded = source_get_local_loaded_nodes_count();
+      if (Global.theNodesLoaded != 0) {
+        FILE* fp = source_open_forces_file("r");
+        if (source_load_local_forces_from_fp(fp) != 0) {
+          fclose(fp);
+          solver_abort("source_init(", "fread failed",
+                       "Could not read nodal force file");
+        }
       }
     }
   }
+}
+
+static int32_t source_reuse_mode(void) {
+  if (g_sourceReuseMode < 0) {
+    const char* env = getenv("HERCULES_REUSE_SOURCE_FILES");
+    if (env != NULL &&
+        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
+         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
+      g_sourceReuseMode = 1;
+    } else {
+      g_sourceReuseMode = 0;
+    }
+
+    if (Global.myID == 0 && g_sourceReuseReported == 0) {
+      monitor_print("Source file reuse mode: %s\n",
+                    g_sourceReuseMode ? "enabled" : "disabled");
+      g_sourceReuseReported = 1;
+    }
+  }
+
+  return g_sourceReuseMode;
+}
+
+static int32_t mesh_only_source_prep_mode(void) {
+  if (g_meshOnlySourcePrepMode < 0) {
+    const char* env = getenv("HERCULES_MESH_ONLY_PREP_SOURCE");
+    if (env != NULL &&
+        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
+         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
+      g_meshOnlySourcePrepMode = 1;
+    } else {
+      g_meshOnlySourcePrepMode = 0;
+    }
+
+    if (Global.myID == 0 && g_meshOnlySourcePrepReported == 0) {
+      monitor_print("Mesh-only source prep mode: %s\n",
+                    g_meshOnlySourcePrepMode ? "enabled" : "disabled");
+      g_meshOnlySourcePrepReported = 1;
+    }
+  }
+
+  return g_meshOnlySourcePrepMode;
+}
+
+static int32_t source_load_local_forces_from_fp(FILE* fp) {
+  int32_t node_count = 0;
+
+  if (fp == NULL) {
+    return -1;
+  }
+
+  if (hu_fread(&node_count, sizeof(int32_t), 1, fp) != 1) {
+    return -1;
+  }
+
+  if (node_count < 0 || node_count > Global.myMesh->nharbored) {
+    return -1;
+  }
+
+  Global.theNodesLoaded = node_count;
+
+  if (Global.theNodesLoaded == 0) {
+    fclose(fp);
+    Global.fpsource = NULL;
+    return 0;
+  }
+
+  Global.fpsource = fp;
+
+  Global.theNodesLoadedList =
+      (int32_t*)malloc(sizeof(int32_t) * Global.theNodesLoaded);
+  Global.myForces =
+      (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
+
+  if (Global.myForces == NULL || Global.theNodesLoadedList == NULL) {
+    if (Global.theNodesLoadedList != NULL) {
+      free(Global.theNodesLoadedList);
+      Global.theNodesLoadedList = NULL;
+    }
+    if (Global.myForces != NULL) {
+      free(Global.myForces);
+      Global.myForces = NULL;
+    }
+    Global.fpsource = NULL;
+    return -1;
+  }
+
+  if (hu_fread(Global.theNodesLoadedList, sizeof(int32_t), Global.theNodesLoaded,
+               Global.fpsource) != (size_t)Global.theNodesLoaded) {
+    free(Global.theNodesLoadedList);
+    Global.theNodesLoadedList = NULL;
+    free(Global.myForces);
+    Global.myForces = NULL;
+    Global.theNodesLoaded = 0;
+    Global.fpsource = NULL;
+    return -1;
+  }
+
+  return 0;
+}
+
+static void source_release_loaded_forces(void) {
+  if (Global.fpsource != NULL) {
+    fclose(Global.fpsource);
+    Global.fpsource = NULL;
+  }
+
+  if (Global.theNodesLoadedList != NULL) {
+    free(Global.theNodesLoadedList);
+    Global.theNodesLoadedList = NULL;
+  }
+
+  if (Global.myForces != NULL) {
+    free(Global.myForces);
+    Global.myForces = NULL;
+  }
+
+  Global.theNodesLoaded = 0;
 }
 
 /**
@@ -12329,6 +12404,21 @@ int main(int argc, char** argv) {
   if (Param.theMeshOnlyMode != 0) {
     if (Global.myID == 0) {
       printf("Mesh-only mode enabled: skipping solver phase after meshing.\n");
+    }
+
+    if (mesh_only_source_prep_mode()) {
+      if (Global.myID == 0) {
+        printf("Mesh-only source prep enabled: generating source force files.\n");
+      }
+
+      Timer_Start("Mesh-only Source Prep");
+      source_init(Param.parameters_input_file);
+      Timer_Stop("Mesh-only Source Prep");
+      Timer_Reduce("Mesh-only Source Prep", (TimerKind)(MAX | MIN | AVERAGE),
+                   comm_solver);
+
+      /* Mesh-only phase exits before solver setup; release source buffers. */
+      source_release_loaded_forces();
     }
 
     Timer_Stop("Total Wall Clock");

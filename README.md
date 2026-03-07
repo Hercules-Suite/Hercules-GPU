@@ -23,10 +23,13 @@ Runtime performance toggles (no source edits needed):
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
-- `HERCULES_EXPERIMENTAL_DISP_OVERLAP=1|0`
-	Experimental path (default `0`) that moves displacement D2H copy to the
-	secondary CUDA stream and queues GPU reset earlier to test overlap.
-	Use only for A/B benchmarking.
+- `HERCULES_REUSE_SOURCE_FILES=1|0`
+	When `1`, reuse existing `force_process.<rank>` files from
+	`source_directory_output` instead of regenerating source forces.
+	Use this for repeated runs with unchanged mesh/source inputs.
+- `HERCULES_MESH_ONLY_PREP_SOURCE=1|0`
+	When `1` and `mesh_only_mode=1`, run source generation during mesh-only
+	phase (Phase A) before exiting.
 
 Build note:
 
@@ -60,6 +63,10 @@ Notes:
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs
 	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
+- Script defaults for source files:
+	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=1` and
+	`HERCULES_REUSE_SOURCE_FILES=0` (always generate source files).
+	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
 
 Mesh mode input flags (`numerical.in`):
 
