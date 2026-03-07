@@ -6781,10 +6781,6 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Compute new displacement");
 
-  Timer_Start("Disp kernel wait only");
-  cudaEventSynchronize(solver->events[CUDA_EVENT_DISP_KERNEL_DONE]);
-  Timer_Stop("Disp kernel wait only");
-
   Timer_Start("Disp postcopy sync wait");
   Timer_Start("Disp kernel sync wait");
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
@@ -6822,8 +6818,6 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
     exit(1);
   }
 
-  cudaEventRecord(solver->events[CUDA_EVENT_DISP_KERNEL_DONE],
-                  solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Disp kernel enqueue");
 
   solver->gpu_spec->numflops +=
