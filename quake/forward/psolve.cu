@@ -129,6 +129,8 @@ static int32_t g_sourceReuseMode = -1;
 static int32_t g_sourceReuseReported = 0;
 static int32_t g_meshOnlySourcePrepMode = -1;
 static int32_t g_meshOnlySourcePrepReported = 0;
+static int32_t g_sourceFrameCount = -1;
+static int32_t g_sourceFrameClampReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -333,6 +335,7 @@ static int32_t source_reuse_mode(void);
 static int32_t mesh_only_source_prep_mode(void);
 static int32_t source_load_local_forces_from_fp(FILE* fp);
 static void source_release_loaded_forces(void);
+static int32_t source_detect_frame_count(FILE* fp, int32_t node_count);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -5678,6 +5681,20 @@ static int read_myForces(int32_t timestep, double dt) {
   if (get_sourceType() == SRFH) {
     double source_dt = get_srfhdt();
     double T = dt * timestep;
+    double alpha;
+
+    if (source_dt <= 0.0) {
+      if (g_sourceFrameClampReported == 0) {
+        monitor_print(
+            "Invalid SRFH source_dt=%g while reading cached source forces; falling back to nearest-frame reads\n",
+            source_dt);
+        g_sourceFrameClampReported = 1;
+      }
+      source_dt = dt;
+      if (source_dt <= 0.0) {
+        source_dt = 1.0;
+      }
+    }
 
     vector3D_t* aux1 =
         (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
@@ -5690,7 +5707,26 @@ static int read_myForces(int32_t timestep, double dt) {
           "Cannot allocate memory for Global.myForces interpolation \n");
     }
 
+    if (g_sourceFrameCount <= 1) {
+      if (g_sourceFrameClampReported == 0) {
+        monitor_print(
+            "Source force timeline too short for SRFH interpolation (frames=%d)\n",
+            g_sourceFrameCount);
+        g_sourceFrameClampReported = 1;
+      }
+      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
+      free(aux1);
+      free(aux2);
+      return 0;
+    }
+
     interval = floor(T / source_dt);
+    if (interval >= g_sourceFrameCount - 1) {
+      interval = g_sourceFrameCount - 2;
+    }
+    if (interval < 0) {
+      interval = 0;
+    }
 
     /* read first interval */
     whereToRead = ((off_t)sizeof(int32_t)) +
@@ -5705,21 +5741,35 @@ static int read_myForces(int32_t timestep, double dt) {
     hu_fread(aux1, sizeof(double), to_read, Global.fpsource);
     hu_fread(aux2, sizeof(double), to_read, Global.fpsource);
 
+    alpha = (T - interval * source_dt) / source_dt;
+    if (alpha < 0.0) {
+      alpha = 0.0;
+    } else if (alpha > 1.0) {
+      alpha = 1.0;
+    }
+
     for (i = 0; i < Global.theNodesLoaded; i++) {
-      Global.myForces[i].x[0] = aux1[i].x[0] + (aux2[i].x[0] - aux1[i].x[0]) /
-                                                   source_dt *
-                                                   (T - interval * source_dt);
-      Global.myForces[i].x[1] = aux1[i].x[1] + (aux2[i].x[1] - aux1[i].x[1]) /
-                                                   source_dt *
-                                                   (T - interval * source_dt);
-      Global.myForces[i].x[2] = aux1[i].x[2] + (aux2[i].x[2] - aux1[i].x[2]) /
-                                                   source_dt *
-                                                   (T - interval * source_dt);
+      Global.myForces[i].x[0] = aux1[i].x[0] +
+                                (aux2[i].x[0] - aux1[i].x[0]) * alpha;
+      Global.myForces[i].x[1] = aux1[i].x[1] +
+                                (aux2[i].x[1] - aux1[i].x[1]) * alpha;
+      Global.myForces[i].x[2] = aux1[i].x[2] +
+                                (aux2[i].x[2] - aux1[i].x[2]) * alpha;
     }
     free(aux1);
     free(aux2);
   } else {  // Todo: Doriam says: Optimize other source types (POINT, PLANE,
             // PLANEWITHKINKS) as we did for SRFH if we plan to keep them
+    if (g_sourceFrameCount > 0 && timestep >= g_sourceFrameCount) {
+      timestep = g_sourceFrameCount - 1;
+      if (g_sourceFrameClampReported == 0) {
+        monitor_print(
+            "Source force timeline shorter than requested; clamping to last frame (%d)\n",
+            g_sourceFrameCount - 1);
+        g_sourceFrameClampReported = 1;
+      }
+    }
+
     whereToRead = ((off_t)sizeof(int32_t)) +
                   Global.theNodesLoaded * sizeof(int32_t) +
                   Global.theNodesLoaded * timestep * sizeof(double) * 3;
@@ -10656,6 +10706,7 @@ static int32_t mesh_only_source_prep_mode(void) {
 
 static int32_t source_load_local_forces_from_fp(FILE* fp) {
   int32_t node_count = 0;
+  int32_t frame_count = 0;
 
   if (fp == NULL) {
     return -1;
@@ -10670,6 +10721,8 @@ static int32_t source_load_local_forces_from_fp(FILE* fp) {
   }
 
   Global.theNodesLoaded = node_count;
+  g_sourceFrameCount = 0;
+  g_sourceFrameClampReported = 0;
 
   if (Global.theNodesLoaded == 0) {
     fclose(fp);
@@ -10708,7 +10761,45 @@ static int32_t source_load_local_forces_from_fp(FILE* fp) {
     return -1;
   }
 
+  frame_count = source_detect_frame_count(Global.fpsource, Global.theNodesLoaded);
+  if (frame_count <= 0) {
+    free(Global.theNodesLoadedList);
+    Global.theNodesLoadedList = NULL;
+    free(Global.myForces);
+    Global.myForces = NULL;
+    Global.theNodesLoaded = 0;
+    fclose(Global.fpsource);
+    Global.fpsource = NULL;
+    return -1;
+  }
+  g_sourceFrameCount = frame_count;
+
   return 0;
+}
+
+static int32_t source_detect_frame_count(FILE* fp, int32_t node_count) {
+  off_t payload_start;
+  off_t payload_end;
+  off_t payload_bytes;
+  off_t frame_bytes;
+
+  if (fp == NULL || node_count <= 0) {
+    return 0;
+  }
+
+  payload_start = hu_ftello(fp);
+  hu_fseeko(fp, 0, SEEK_END);
+  payload_end = hu_ftello(fp);
+  hu_fseeko(fp, payload_start, SEEK_SET);
+
+  payload_bytes = payload_end - payload_start;
+  frame_bytes = (off_t)node_count * (off_t)(3 * (int32_t)sizeof(double));
+
+  if (payload_bytes <= 0 || frame_bytes <= 0) {
+    return 0;
+  }
+
+  return (int32_t)(payload_bytes / frame_bytes);
 }
 
 static void source_release_loaded_forces(void) {
@@ -10728,6 +10819,8 @@ static void source_release_loaded_forces(void) {
   }
 
   Global.theNodesLoaded = 0;
+  g_sourceFrameCount = -1;
+  g_sourceFrameClampReported = 0;
 }
 
 /**
