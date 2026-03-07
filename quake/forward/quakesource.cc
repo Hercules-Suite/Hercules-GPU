@@ -3641,15 +3641,15 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
   /* PE 0: open source description file */
   FILE* fpdsrc = open_source_description_file_0();
 
-  /* Always create a local force file, even for zero-node ranks. */
-  FILE* fptmpsrc = source_open_forces_file( "w" );
-  print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
-
+  /* If has active nodes, write node information to the local forces file */
+  FILE* fptmpsrc;
   if(myNumberOfNodesLoaded==0){
       ActivePE=0;
   }
   else{
       ActivePE=1;
+      fptmpsrc = source_open_forces_file( "w" );
+      print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
       totalLoadedNodeCount = myNumberOfNodesLoaded;
       sourceDataStartOffset =
           (int64_t)sizeof(int32_t) +
@@ -3737,8 +3737,8 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
 
   theConcatTime = -MPI_Wtime();
 
-  close_file( &fptmpsrc );
-  if(cycleWriteBuffer != NULL){
+  if(ActivePE){
+      close_file( &fptmpsrc );
       free(cycleWriteBuffer);
   }
 
@@ -4342,62 +4342,6 @@ int compute_print_source(const char *physicsin, const char *source_directory_out
     source_compute_print_stat();
 
     MPI_Barrier( comm_solver );
-
-    return 0;
-}
-
-int source_init_metadata_only(const char *physicsin,
-    const char *source_directory_output, numerics_info_t numericsinformation,
-    mpi_info_t mpiinformation, double globalDelayT, double surfaceShift,
-    UTMZone_t* utmZone)
-{
-    int32_t init_ok = 1;
-    const char* old_skip_cleanup = NULL;
-    char* old_skip_cleanup_copy = NULL;
-
-    /*MPI Related*/
-    myID         = mpiinformation.myid;
-    theGroupSize = mpiinformation.groupsize;
-
-    /*Numerics related*/
-    theDeltaT             = numericsinformation.deltat;
-    theNumberOfTimeSteps  = numericsinformation.numberoftimesteps;
-    theValidFreq          = numericsinformation.validfrequency;
-    theMinimumEdge        = numericsinformation.minimumh;
-    theEndT               = numericsinformation.endT;
-    theStartT             = numericsinformation.startT;
-
-    theDomainX = numericsinformation.xlength;
-    theDomainY = numericsinformation.ylength;
-    theDomainZ = numericsinformation.zlength;
-
-    if (myID == 0) {
-        old_skip_cleanup = getenv("HERCULES_SKIP_SOURCE_CLEANUP");
-        if (old_skip_cleanup != NULL) {
-            old_skip_cleanup_copy = strdup(old_skip_cleanup);
-        }
-
-        setenv("HERCULES_SKIP_SOURCE_CLEANUP", "1", 1);
-
-        if (source_init_parameters(physicsin, source_directory_output,
-                globalDelayT, surfaceShift, utmZone) == -1) {
-            init_ok = 0;
-        }
-
-        if (old_skip_cleanup_copy != NULL) {
-            setenv("HERCULES_SKIP_SOURCE_CLEANUP", old_skip_cleanup_copy, 1);
-            free(old_skip_cleanup_copy);
-        } else {
-            unsetenv("HERCULES_SKIP_SOURCE_CLEANUP");
-        }
-    }
-
-    MPI_Bcast(&init_ok, 1, MPI_INT, 0, comm_solver);
-    if (!init_ok) {
-        return -1;
-    }
-
-    source_broadcast_parameters();
 
     return 0;
 }

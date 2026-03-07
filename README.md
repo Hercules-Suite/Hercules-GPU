@@ -23,13 +23,6 @@ Runtime performance toggles (no source edits needed):
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
-- `HERCULES_REUSE_SOURCE_FILES=1|0`
-	When `1`, reuse existing `force_process.<rank>` files from
-	`source_directory_output` instead of regenerating source forces.
-	Use this for repeated runs with unchanged mesh/source inputs.
-- `HERCULES_MESH_ONLY_PREP_SOURCE=1|0`
-	When `1` and `mesh_only_mode=1`, run source generation during mesh-only
-	phase (Phase A) before exiting.
 
 Build note:
 
@@ -50,7 +43,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export HERCULES_ADJUST_ASSIGN_OMP=1
 export HERCULES_ADJUST_DIST_OMP=1
-export HERCULES_SPARSE_CLEAR_MODE=auto
+export HERCULES_SPARSE_CLEAR_MODE=nodes
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
@@ -63,30 +56,8 @@ Notes:
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs
 	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
-- Script defaults for source files:
-	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=0` by default.
-	Script runs a dedicated Phase B prep source substep with Phase B rank layout
-	(`mesh_input_mode=1`, `mesh_only_mode=1`) and
-	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
-	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
-	Disable this Phase B prep source substep with `PHASE_SOURCE_PREP=0` if needed.
-	By default (`PHASE_SOURCE_PREP_IF_MISSING=0`), this substep always runs.
-	Set `PHASE_SOURCE_PREP_IF_MISSING=1` to skip it only when
-	`force_process.0..(PHASE_B_NP-1)` files already exist.
-- Host pinning for stable source reuse:
-	By default (`PHASE_PIN_HOSTS=1`), the script pins Source Prep and
-	Phase B to a deterministic host list (from `PBS_NODEFILE` or Slurm
-	`SLURM_NODELIST`) so rank-to-host mapping stays stable across both
-	`mpirun` launches.
-	Set `PHASE_PIN_HOSTS=0` to disable auto pinning.
-	Set `PHASE_HOSTFILE=/path/to/hosts` to force an explicit hostfile.
-- Source file completeness check:
-	By default (`PHASE_VERIFY_SOURCE_FILES=1`), the script verifies after
-	the Phase B prep source substep that
-	`force_process.0..(PHASE_B_NP-1)` all exist under
-	`source_directory_output`. This protects mixed-rank runs (for example,
-	`PHASE_A_NP=288`, `PHASE_B_NP=4`) from partial source file sets.
-	Set `PHASE_VERIFY_SOURCE_FILES=0` to disable this check.
+
+Mesh mode input flags (`numerical.in`):
 
 - `output_mesh`
 	`1` writes the generated mesh etree (`mesh_etree_output_file`) to disk.

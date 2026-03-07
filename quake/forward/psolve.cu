@@ -125,12 +125,6 @@ static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
 static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
-static int32_t g_sourceReuseMode = -1;
-static int32_t g_sourceReuseReported = 0;
-static int32_t g_meshOnlySourcePrepMode = -1;
-static int32_t g_meshOnlySourcePrepReported = 0;
-static int32_t g_sourceFrameCount = -1;
-static int32_t g_sourceFrameClampReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -331,12 +325,6 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
-static int32_t source_reuse_mode(void);
-static int32_t mesh_only_source_prep_mode(void);
-static int32_t source_load_local_forces_from_fp(FILE* fp);
-static void source_release_loaded_forces(void);
-static int32_t source_detect_frame_count(FILE* fp, int32_t node_count);
-static void source_report_frame_coverage(const char* modeLabel);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -5682,20 +5670,6 @@ static int read_myForces(int32_t timestep, double dt) {
   if (get_sourceType() == SRFH) {
     double source_dt = get_srfhdt();
     double T = dt * timestep;
-    double alpha;
-
-    if (source_dt <= 0.0) {
-      if (g_sourceFrameClampReported == 0) {
-        monitor_print(
-            "Invalid SRFH source_dt=%g while reading cached source forces; falling back to nearest-frame reads\n",
-            source_dt);
-        g_sourceFrameClampReported = 1;
-      }
-      source_dt = dt;
-      if (source_dt <= 0.0) {
-        source_dt = 1.0;
-      }
-    }
 
     vector3D_t* aux1 =
         (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
@@ -5708,34 +5682,7 @@ static int read_myForces(int32_t timestep, double dt) {
           "Cannot allocate memory for Global.myForces interpolation \n");
     }
 
-    if (g_sourceFrameCount <= 1) {
-      if (g_sourceFrameClampReported == 0) {
-        monitor_print(
-            "Source force timeline too short for SRFH interpolation (frames=%d)\n",
-            g_sourceFrameCount);
-        g_sourceFrameClampReported = 1;
-      }
-      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
-      free(aux1);
-      free(aux2);
-      return 0;
-    }
-
     interval = floor(T / source_dt);
-    if (interval >= g_sourceFrameCount - 1) {
-      if (g_sourceFrameClampReported == 0) {
-        monitor_print(
-            "Source force timeline shorter than requested; zeroing remaining SRFH force steps\n");
-        g_sourceFrameClampReported = 1;
-      }
-      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
-      free(aux1);
-      free(aux2);
-      return 0;
-    }
-    if (interval < 0) {
-      interval = 0;
-    }
 
     /* read first interval */
     whereToRead = ((off_t)sizeof(int32_t)) +
@@ -5750,35 +5697,21 @@ static int read_myForces(int32_t timestep, double dt) {
     hu_fread(aux1, sizeof(double), to_read, Global.fpsource);
     hu_fread(aux2, sizeof(double), to_read, Global.fpsource);
 
-    alpha = (T - interval * source_dt) / source_dt;
-    if (alpha < 0.0) {
-      alpha = 0.0;
-    } else if (alpha > 1.0) {
-      alpha = 1.0;
-    }
-
     for (i = 0; i < Global.theNodesLoaded; i++) {
-      Global.myForces[i].x[0] = aux1[i].x[0] +
-                                (aux2[i].x[0] - aux1[i].x[0]) * alpha;
-      Global.myForces[i].x[1] = aux1[i].x[1] +
-                                (aux2[i].x[1] - aux1[i].x[1]) * alpha;
-      Global.myForces[i].x[2] = aux1[i].x[2] +
-                                (aux2[i].x[2] - aux1[i].x[2]) * alpha;
+      Global.myForces[i].x[0] = aux1[i].x[0] + (aux2[i].x[0] - aux1[i].x[0]) /
+                                                   source_dt *
+                                                   (T - interval * source_dt);
+      Global.myForces[i].x[1] = aux1[i].x[1] + (aux2[i].x[1] - aux1[i].x[1]) /
+                                                   source_dt *
+                                                   (T - interval * source_dt);
+      Global.myForces[i].x[2] = aux1[i].x[2] + (aux2[i].x[2] - aux1[i].x[2]) /
+                                                   source_dt *
+                                                   (T - interval * source_dt);
     }
     free(aux1);
     free(aux2);
   } else {  // Todo: Doriam says: Optimize other source types (POINT, PLANE,
             // PLANEWITHKINKS) as we did for SRFH if we plan to keep them
-    if (g_sourceFrameCount > 0 && timestep >= g_sourceFrameCount) {
-      if (g_sourceFrameClampReported == 0) {
-        monitor_print(
-            "Source force timeline shorter than requested; zeroing remaining force steps\n");
-        g_sourceFrameClampReported = 1;
-      }
-      memset(Global.myForces, 0, sizeof(vector3D_t) * Global.theNodesLoaded);
-      return 0;
-    }
-
     whereToRead = ((off_t)sizeof(int32_t)) +
                   Global.theNodesLoaded * sizeof(int32_t) +
                   Global.theNodesLoaded * timestep * sizeof(double) * 3;
@@ -10538,16 +10471,6 @@ static void source_init(const char* physicsin) {
       (Param.drmImplement == YES && Param.theDrmPart == PART1)) {
     double globalDelayT = 0;
     double surfaceShift = 0;
-    int32_t sourceLoadedFromCache = 0;
-    int32_t localHasReuse = 0;
-    int32_t allHaveReuse = 0;
-    int32_t reuseReadyRankCount = 0;
-    int32_t localLoadOk = 0;
-    int32_t allLoadOk = 0;
-    int32_t reuseLoadOkRankCount = 0;
-    int32_t localMetaOk = 0;
-    int32_t allMetaOk = 0;
-    FILE* fpReuse = NULL;
 
     /* Load to Global.theMPIInformation */
     Global.theMPIInformation.myid = Global.myID;
@@ -10577,313 +10500,49 @@ static void source_init(const char* physicsin) {
     //      surfaceShift = get_thebase_topo();
     //  }
 
-    if (source_reuse_mode()) {
-      char forcePath[512];
+    /* it will create the files to be read each time step to
+   load (force) the mesh */
+    if (compute_print_source(
+            physicsin, Param.theSourceOutputDir, Global.myOctree, Global.myMesh,
+            Global.theNumericsInformation, Global.theMPIInformation,
+            globalDelayT, surfaceShift, &Param.utmZone)) {
+      monitor_print("Err:cannot create source forces");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
 
-      Timer_Start("Source Reuse Probe/Load");
+    Global.theNodesLoaded = source_get_local_loaded_nodes_count();
 
-      snprintf(forcePath, sizeof(forcePath), "%s/force_process.%d",
-               Param.theSourceOutputDir, Global.myID);
-      fpReuse = fopen(forcePath, "rb");
-      if (fpReuse != NULL) {
-        localHasReuse = 1;
+    if (Global.theNodesLoaded != 0) {
+      size_t ret;
+      int32_t node_count;
+
+      Global.fpsource = source_open_forces_file("r");
+
+      hu_fread(&node_count, sizeof(int32_t), 1, Global.fpsource);
+
+      /* \todo add assertion for node_count == Global.theNodesLoaded */
+
+      Global.theNodesLoadedList =
+          (int32_t*)malloc(sizeof(int32_t) * Global.theNodesLoaded);
+      Global.myForces =
+          (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
+
+      if (Global.myForces == NULL || Global.theNodesLoadedList == NULL) {
+        solver_abort("source_init", "memory allocation failed",
+                     "Cannot allocate memory for Global.myForces or "
+                     "loaded nodes list arrays\n");
       }
 
-      /* Reuse must be consistent across all ranks to avoid MPI divergence. */
-      MPI_Allreduce(&localHasReuse, &allHaveReuse, 1, MPI_INT, MPI_MIN,
-                    comm_solver);
-      MPI_Allreduce(&localHasReuse, &reuseReadyRankCount, 1, MPI_INT, MPI_SUM,
-                    comm_solver);
+      ret = hu_fread(Global.theNodesLoadedList, sizeof(int32_t),
+                     Global.theNodesLoaded, Global.fpsource);
 
-      if (allHaveReuse) {
-        if (source_load_local_forces_from_fp(fpReuse) == 0) {
-          localLoadOk = 1;
-        }
-
-        MPI_Allreduce(&localLoadOk, &allLoadOk, 1, MPI_INT, MPI_MIN,
-                      comm_solver);
-        MPI_Allreduce(&localLoadOk, &reuseLoadOkRankCount, 1, MPI_INT, MPI_SUM,
-                      comm_solver);
-
-        if (allLoadOk) {
-          if (source_init_metadata_only(
-                  physicsin, Param.theSourceOutputDir,
-                  Global.theNumericsInformation, Global.theMPIInformation,
-                  globalDelayT, surfaceShift, &Param.utmZone) == 0) {
-            localMetaOk = 1;
-          }
-
-          MPI_Allreduce(&localMetaOk, &allMetaOk, 1, MPI_INT, MPI_MIN,
-                        comm_solver);
-
-          if (allMetaOk) {
-            sourceLoadedFromCache = 1;
-            if (Global.myID == 0) {
-              monitor_print(
-                  "Source init: reused existing local force files from %s\n",
-                  Param.theSourceOutputDir);
-            }
-            source_report_frame_coverage("reused");
-          } else {
-            if (Global.myID == 0) {
-              monitor_print(
-                  "Source init: reuse fallback (metadata init failed); regenerating\n");
-            }
-
-            if (localLoadOk) {
-              source_release_loaded_forces();
-            }
-            if (fpReuse != NULL) {
-              fclose(fpReuse);
-              fpReuse = NULL;
-            }
-          }
-        } else {
-          if (Global.myID == 0) {
-            monitor_print(
-                "Source init: reuse fallback (loaded files on %d/%d ranks); regenerating\n",
-                reuseLoadOkRankCount, Global.theGroupSize);
-          }
-
-          if (localLoadOk) {
-            source_release_loaded_forces();
-          }
-          if (fpReuse != NULL) {
-            fclose(fpReuse);
-            fpReuse = NULL;
-          }
-        }
-      } else {
-        if (Global.myID == 0) {
-          monitor_print(
-              "Source init: reuse fallback (found files on %d/%d ranks); regenerating\n",
-              reuseReadyRankCount, Global.theGroupSize);
-        }
-
-        if (fpReuse != NULL) {
-          fclose(fpReuse);
-          fpReuse = NULL;
-        }
+      if (ret != Global.theNodesLoaded) {
+        solver_abort("source_init(", "fread failed",
+                     "Could not read nodal force file");
       }
-
-      Timer_Stop("Source Reuse Probe/Load");
-    }
-
-    if (!sourceLoadedFromCache) {
-      Timer_Start("Source Regenerate");
-
-      /* Generate source files to be read each time step to load mesh forces.
-       */
-      if (compute_print_source(
-              physicsin, Param.theSourceOutputDir, Global.myOctree,
-              Global.myMesh, Global.theNumericsInformation,
-              Global.theMPIInformation, globalDelayT, surfaceShift,
-              &Param.utmZone)) {
-        monitor_print("Err:cannot create source forces");
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-
-      Global.theNodesLoaded = source_get_local_loaded_nodes_count();
-      if (Global.theNodesLoaded != 0) {
-        FILE* fp = source_open_forces_file("r");
-        if (source_load_local_forces_from_fp(fp) != 0) {
-          fclose(fp);
-          solver_abort("source_init(", "fread failed",
-                       "Could not read nodal force file");
-        }
-      }
-
-      source_report_frame_coverage("generated");
-
-      Timer_Stop("Source Regenerate");
     }
   }
-}
-
-static int32_t source_reuse_mode(void) {
-  if (g_sourceReuseMode < 0) {
-    const char* env = getenv("HERCULES_REUSE_SOURCE_FILES");
-    if (env != NULL &&
-        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
-         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
-      g_sourceReuseMode = 1;
-    } else {
-      g_sourceReuseMode = 0;
-    }
-
-    if (Global.myID == 0 && g_sourceReuseReported == 0) {
-      monitor_print("Source file reuse mode: %s\n",
-                    g_sourceReuseMode ? "enabled" : "disabled");
-      g_sourceReuseReported = 1;
-    }
-  }
-
-  return g_sourceReuseMode;
-}
-
-static int32_t mesh_only_source_prep_mode(void) {
-  if (g_meshOnlySourcePrepMode < 0) {
-    const char* env = getenv("HERCULES_MESH_ONLY_PREP_SOURCE");
-    if (env != NULL &&
-        (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 ||
-         strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)) {
-      g_meshOnlySourcePrepMode = 1;
-    } else {
-      g_meshOnlySourcePrepMode = 0;
-    }
-
-    if (Global.myID == 0 && g_meshOnlySourcePrepReported == 0) {
-      monitor_print("Mesh-only source prep mode: %s\n",
-                    g_meshOnlySourcePrepMode ? "enabled" : "disabled");
-      g_meshOnlySourcePrepReported = 1;
-    }
-  }
-
-  return g_meshOnlySourcePrepMode;
-}
-
-static int32_t source_load_local_forces_from_fp(FILE* fp) {
-  int32_t node_count = 0;
-  int32_t frame_count = 0;
-
-  if (fp == NULL) {
-    return -1;
-  }
-
-  if (hu_fread(&node_count, sizeof(int32_t), 1, fp) != 1) {
-    return -1;
-  }
-
-  if (node_count < 0 || node_count > Global.myMesh->nharbored) {
-    return -1;
-  }
-
-  Global.theNodesLoaded = node_count;
-  g_sourceFrameCount = 0;
-  g_sourceFrameClampReported = 0;
-
-  if (Global.theNodesLoaded == 0) {
-    fclose(fp);
-    Global.fpsource = NULL;
-    return 0;
-  }
-
-  Global.fpsource = fp;
-
-  Global.theNodesLoadedList =
-      (int32_t*)malloc(sizeof(int32_t) * Global.theNodesLoaded);
-  Global.myForces =
-      (vector3D_t*)calloc(Global.theNodesLoaded, sizeof(vector3D_t));
-
-  if (Global.myForces == NULL || Global.theNodesLoadedList == NULL) {
-    if (Global.theNodesLoadedList != NULL) {
-      free(Global.theNodesLoadedList);
-      Global.theNodesLoadedList = NULL;
-    }
-    if (Global.myForces != NULL) {
-      free(Global.myForces);
-      Global.myForces = NULL;
-    }
-    Global.fpsource = NULL;
-    return -1;
-  }
-
-  if (hu_fread(Global.theNodesLoadedList, sizeof(int32_t), Global.theNodesLoaded,
-               Global.fpsource) != (size_t)Global.theNodesLoaded) {
-    free(Global.theNodesLoadedList);
-    Global.theNodesLoadedList = NULL;
-    free(Global.myForces);
-    Global.myForces = NULL;
-    Global.theNodesLoaded = 0;
-    Global.fpsource = NULL;
-    return -1;
-  }
-
-  frame_count = source_detect_frame_count(Global.fpsource, Global.theNodesLoaded);
-  if (frame_count <= 0) {
-    free(Global.theNodesLoadedList);
-    Global.theNodesLoadedList = NULL;
-    free(Global.myForces);
-    Global.myForces = NULL;
-    Global.theNodesLoaded = 0;
-    fclose(Global.fpsource);
-    Global.fpsource = NULL;
-    return -1;
-  }
-  g_sourceFrameCount = frame_count;
-
-  return 0;
-}
-
-static int32_t source_detect_frame_count(FILE* fp, int32_t node_count) {
-  off_t payload_start;
-  off_t payload_end;
-  off_t payload_bytes;
-  off_t frame_bytes;
-
-  if (fp == NULL || node_count <= 0) {
-    return 0;
-  }
-
-  payload_start = hu_ftello(fp);
-  hu_fseeko(fp, 0, SEEK_END);
-  payload_end = hu_ftello(fp);
-  hu_fseeko(fp, payload_start, SEEK_SET);
-
-  payload_bytes = payload_end - payload_start;
-  frame_bytes = (off_t)node_count * (off_t)(3 * (int32_t)sizeof(double));
-
-  if (payload_bytes <= 0 || frame_bytes <= 0) {
-    return 0;
-  }
-
-  return (int32_t)(payload_bytes / frame_bytes);
-}
-
-static void source_report_frame_coverage(const char* modeLabel) {
-  int32_t localActive = (Global.theNodesLoaded > 0 && g_sourceFrameCount > 0) ? 1 : 0;
-  int32_t activeRanks = 0;
-  int32_t localMin = localActive ? g_sourceFrameCount : 2147483647;
-  int32_t localMax = localActive ? g_sourceFrameCount : 0;
-  int32_t minFrames = 0;
-  int32_t maxFrames = 0;
-
-  MPI_Allreduce(&localActive, &activeRanks, 1, MPI_INT, MPI_SUM, comm_solver);
-  MPI_Allreduce(&localMin, &minFrames, 1, MPI_INT, MPI_MIN, comm_solver);
-  MPI_Allreduce(&localMax, &maxFrames, 1, MPI_INT, MPI_MAX, comm_solver);
-
-  if (Global.myID == 0) {
-    if (activeRanks == 0) {
-      monitor_print("Source init (%s): no active source ranks\n", modeLabel);
-    } else {
-      monitor_print(
-          "Source init (%s): frame coverage on active ranks %d/%d -> min=%d max=%d requested_steps=%d\n",
-          modeLabel, activeRanks, Global.theGroupSize, minFrames, maxFrames,
-          Param.theTotalSteps);
-    }
-  }
-}
-
-static void source_release_loaded_forces(void) {
-  if (Global.fpsource != NULL) {
-    fclose(Global.fpsource);
-    Global.fpsource = NULL;
-  }
-
-  if (Global.theNodesLoadedList != NULL) {
-    free(Global.theNodesLoadedList);
-    Global.theNodesLoadedList = NULL;
-  }
-
-  if (Global.myForces != NULL) {
-    free(Global.myForces);
-    Global.myForces = NULL;
-  }
-
-  Global.theNodesLoaded = 0;
-  g_sourceFrameCount = -1;
-  g_sourceFrameClampReported = 0;
 }
 
 /**
@@ -12617,21 +12276,6 @@ int main(int argc, char** argv) {
   if (Param.theMeshOnlyMode != 0) {
     if (Global.myID == 0) {
       printf("Mesh-only mode enabled: skipping solver phase after meshing.\n");
-    }
-
-    if (mesh_only_source_prep_mode()) {
-      if (Global.myID == 0) {
-        printf("Mesh-only source prep enabled: generating source force files.\n");
-      }
-
-      Timer_Start("Mesh-only Source Prep");
-      source_init(Param.parameters_input_file);
-      Timer_Stop("Mesh-only Source Prep");
-      Timer_Reduce("Mesh-only Source Prep", (TimerKind)(MAX | MIN | AVERAGE),
-                   comm_solver);
-
-      /* Mesh-only phase exits before solver setup; release source buffers. */
-      source_release_loaded_forces();
     }
 
     Timer_Stop("Total Wall Clock");
