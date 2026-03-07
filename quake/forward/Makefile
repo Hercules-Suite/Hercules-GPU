@@ -15,6 +15,9 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
+# Enable OpenMP by default; users can still override with USE_OPENMP=0.
+USE_OPENMP ?= 1
+
 ifeq ($(USE_OPENMP),1)
 	CFLAGS += -fopenmp
 	LDFLAGS += -fopenmp

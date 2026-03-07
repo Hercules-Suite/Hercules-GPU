@@ -32,7 +32,19 @@ Runtime performance toggles (no source edits needed):
 
 Build note:
 
-- Compile with `USE_OPENMP=1` to enable OpenMP code paths.
+- `USE_OPENMP` now defaults to `1` in `quake/forward/Makefile`.
+	Use `USE_OPENMP=0` only if you want to disable OpenMP explicitly.
+	Examples: `make` (OpenMP on by default) or `make USE_OPENMP=0`.
+
+Two-phase script defaults:
+
+- `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
+	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
+	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
+	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
+	`HERCULES_PLANE_IO_OMP=1`.
+- You can still override any of these by exporting your own value before
+	running the script.
 
 Two-phase job run (Phase A then Phase B):
 

@@ -5,6 +5,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CASE_DIR="${CASE_DIR:-$PWD}"
 
+# Default runtime tuning knobs (can still be overridden by user env).
+: "${OMP_PROC_BIND:=close}"
+: "${OMP_PLACES:=cores}"
+: "${HERCULES_ADJUST_ASSIGN_OMP:=1}"
+: "${HERCULES_ADJUST_DIST_OMP:=1}"
+: "${HERCULES_SPARSE_CLEAR_MODE:=auto}"
+: "${HERCULES_STATION_IO_OMP:=1}"
+: "${HERCULES_PLANE_IO_OMP:=1}"
+export OMP_PROC_BIND OMP_PLACES
+export HERCULES_ADJUST_ASSIGN_OMP HERCULES_ADJUST_DIST_OMP
+export HERCULES_SPARSE_CLEAR_MODE HERCULES_STATION_IO_OMP HERCULES_PLANE_IO_OMP
+
 MPI_RUN="${MPI_RUN:-mpirun}"
 BASE_IN="${BASE_IN:-}"
 if [[ -f "${CASE_DIR}/inputfiles/Test_A.in" ]]; then
