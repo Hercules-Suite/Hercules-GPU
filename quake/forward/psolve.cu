@@ -10482,8 +10482,10 @@ static void source_init(const char* physicsin) {
     int32_t sourceLoadedFromCache = 0;
     int32_t localHasReuse = 0;
     int32_t allHaveReuse = 0;
+    int32_t reuseReadyRankCount = 0;
     int32_t localLoadOk = 0;
     int32_t allLoadOk = 0;
+    int32_t reuseLoadOkRankCount = 0;
     FILE* fpReuse = NULL;
 
     /* Load to Global.theMPIInformation */
@@ -10517,6 +10519,8 @@ static void source_init(const char* physicsin) {
     if (source_reuse_mode()) {
       char forcePath[512];
 
+      Timer_Start("Source Reuse Probe/Load");
+
       snprintf(forcePath, sizeof(forcePath), "%s/force_process.%d",
                Param.theSourceOutputDir, Global.myID);
       fpReuse = fopen(forcePath, "rb");
@@ -10527,6 +10531,8 @@ static void source_init(const char* physicsin) {
       /* Reuse must be consistent across all ranks to avoid MPI divergence. */
       MPI_Allreduce(&localHasReuse, &allHaveReuse, 1, MPI_INT, MPI_MIN,
                     comm_solver);
+      MPI_Allreduce(&localHasReuse, &reuseReadyRankCount, 1, MPI_INT, MPI_SUM,
+                    comm_solver);
 
       if (allHaveReuse) {
         if (source_load_local_forces_from_fp(fpReuse) == 0) {
@@ -10534,6 +10540,8 @@ static void source_init(const char* physicsin) {
         }
 
         MPI_Allreduce(&localLoadOk, &allLoadOk, 1, MPI_INT, MPI_MIN,
+                      comm_solver);
+        MPI_Allreduce(&localLoadOk, &reuseLoadOkRankCount, 1, MPI_INT, MPI_SUM,
                       comm_solver);
 
         if (allLoadOk) {
@@ -10544,6 +10552,12 @@ static void source_init(const char* physicsin) {
                 Param.theSourceOutputDir);
           }
         } else {
+          if (Global.myID == 0) {
+            monitor_print(
+                "Source init: reuse fallback (loaded files on %d/%d ranks); regenerating\n",
+                reuseLoadOkRankCount, Global.theGroupSize);
+          }
+
           if (localLoadOk) {
             source_release_loaded_forces();
           }
@@ -10553,14 +10567,24 @@ static void source_init(const char* physicsin) {
           }
         }
       } else {
+        if (Global.myID == 0) {
+          monitor_print(
+              "Source init: reuse fallback (found files on %d/%d ranks); regenerating\n",
+              reuseReadyRankCount, Global.theGroupSize);
+        }
+
         if (fpReuse != NULL) {
           fclose(fpReuse);
           fpReuse = NULL;
         }
       }
+
+      Timer_Stop("Source Reuse Probe/Load");
     }
 
     if (!sourceLoadedFromCache) {
+      Timer_Start("Source Regenerate");
+
       /* Generate source files to be read each time step to load mesh forces.
        */
       if (compute_print_source(
@@ -10582,6 +10606,8 @@ static void source_init(const char* physicsin) {
                        "Could not read nodal force file");
         }
       }
+
+      Timer_Stop("Source Regenerate");
     }
   }
 }
