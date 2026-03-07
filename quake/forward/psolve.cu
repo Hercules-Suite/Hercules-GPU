@@ -7881,17 +7881,23 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   /* Asssemble outgoing messages */
   Timer_Start("Schedule Pack Outgoing");
   while (send_messenger != NULL) {
-    int32_t lnid, idx, entry;
-    solver_float* dvalue;
-    solver_float* out;
+    int32_t idx;
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(send_messenger->nidx > 10000)
+#endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
-    lnid = send_messenger->mapping[idx];
+      int32_t lnid, entry;
+      solver_float* dvalue;
+      solver_float* out;
+
+      lnid = send_messenger->mapping[idx];
 
       out = (solver_float*)((char*)send_messenger->outdata +
                             send_messenger->outsize * idx);
 
-    dvalue = (solver_float*)valuetable + send_messenger->mapping_itemoffset[idx];
+      dvalue =
+          (solver_float*)valuetable + send_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         out[0] = dvalue[0];
         out[1] = dvalue[1];
@@ -8055,6 +8061,49 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
                                              int32_t itemsperentry,
                                              int32_t direction) {
   int32_t idx;
+
+  if (direction == SHARING) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(recv_messenger->nidx > 10000)
+#endif
+    for (idx = 0; idx < recv_messenger->nidx; idx++) {
+      int32_t lnid, entry;
+      solver_float* dvalue;
+      solver_float* in;
+
+      lnid = recv_messenger->mapping[idx];
+      in = (solver_float*)((char*)recv_messenger->indata +
+                           recv_messenger->insize * idx);
+
+      dvalue =
+          (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
+      if (itemsperentry == 3) {
+        dvalue[0] = in[0];
+        dvalue[1] = in[1];
+        dvalue[2] = in[2];
+      } else {
+        for (entry = 0; entry < itemsperentry; entry++) {
+          *(dvalue + entry) = *(in + entry);
+        }
+      }
+
+#ifdef DEBUG
+      {
+        int64_t* gnidp;
+        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+
+        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
+#endif /* DEBUG */
+    }
+
+    return;
+  }
 
   for (idx = 0; idx < recv_messenger->nidx; idx++) {
     int32_t lnid, entry;
