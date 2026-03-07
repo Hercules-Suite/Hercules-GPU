@@ -43,7 +43,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export HERCULES_ADJUST_ASSIGN_OMP=1
 export HERCULES_ADJUST_DIST_OMP=1
-export HERCULES_SPARSE_CLEAR_MODE=nodes
+export HERCULES_SPARSE_CLEAR_MODE=auto
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
