@@ -21,9 +21,11 @@ PHASE_A_IN="${PHASE_A_IN:-${PHASE_A_DEFAULT_IN}}"
 PHASE_B_IN="${PHASE_B_IN:-${PHASE_B_DEFAULT_IN}}"
 PHASE_A_MPI_ARGS="${PHASE_A_MPI_ARGS:-}"
 PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
-PHASE_A_PREP_SOURCE="${PHASE_A_PREP_SOURCE:-1}"
+PHASE_A_PREP_SOURCE="${PHASE_A_PREP_SOURCE:-0}"
 PHASE_A_SOURCE_REUSE="${PHASE_A_SOURCE_REUSE:-0}"
 PHASE_B_SOURCE_REUSE="${PHASE_B_SOURCE_REUSE:-1}"
+PHASE_SOURCE_PREP="${PHASE_SOURCE_PREP:-1}"
+PHASE_SOURCE_PREP_MPI_ARGS="${PHASE_SOURCE_PREP_MPI_ARGS:-}"
 
 if [[ $# -ge 3 ]]; then
   BASE_IN="$3"
@@ -42,6 +44,7 @@ fi
 
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
+TMP_PHASE_PREP_IN=""
 
 make_phase_input() {
   local src="$1"
@@ -99,13 +102,30 @@ if [[ -n "${BASE_IN}" ]]; then
   cleanup_tmp_inputs() {
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
+    [[ -n "${TMP_PHASE_PREP_IN}" ]] && rm -f "${TMP_PHASE_PREP_IN}"
   }
   trap cleanup_tmp_inputs EXIT
 
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
+  TMP_PHASE_PREP_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phasePrep.XXXXXX.in")"
+  make_phase_input "${BASE_IN}" "${TMP_PHASE_PREP_IN}" 0 1 1
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
+  PHASE_PREP_IN="${TMP_PHASE_PREP_IN}"
+else
+  TMPDIR_ROOT="${TMPDIR:-/tmp}"
+  TMP_PHASE_PREP_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phasePrep.XXXXXX.in")"
+
+  cleanup_tmp_inputs() {
+    [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
+    [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
+    [[ -n "${TMP_PHASE_PREP_IN}" ]] && rm -f "${TMP_PHASE_PREP_IN}"
+  }
+  trap cleanup_tmp_inputs EXIT
+
+  make_phase_input "${PHASE_B_IN}" "${TMP_PHASE_PREP_IN}" 0 1 1
+  PHASE_PREP_IN="${TMP_PHASE_PREP_IN}"
 fi
 
 detect_alloc_nodes() {
@@ -195,6 +215,7 @@ else
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
 echo "Phase A source prep: HERCULES_MESH_ONLY_PREP_SOURCE=${PHASE_A_PREP_SOURCE}"
+echo "Source-prep substep: ${PHASE_SOURCE_PREP} (uses Phase B ranks/layout)"
 echo "Phase A source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_A_SOURCE_REUSE}"
 echo "Phase B source reuse: HERCULES_REUSE_SOURCE_FILES=${PHASE_B_SOURCE_REUSE}"
 echo
@@ -228,6 +249,22 @@ if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
 else
   B_ARGS=()
 fi
+
+if [[ "${PHASE_SOURCE_PREP}" == "1" ]]; then
+  echo
+  echo "[Source Prep] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_PREP_IN}"
+  if [[ -n "${PHASE_SOURCE_PREP_MPI_ARGS}" ]]; then
+    # shellcheck disable=SC2206
+    P_ARGS=(${PHASE_SOURCE_PREP_MPI_ARGS})
+  else
+    P_ARGS=()
+  fi
+
+  HERCULES_MESH_ONLY_PREP_SOURCE=1 \
+  HERCULES_REUSE_SOURCE_FILES=0 \
+  "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${P_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_PREP_IN}"
+fi
+
 HERCULES_REUSE_SOURCE_FILES="${PHASE_B_SOURCE_REUSE}" \
 "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 

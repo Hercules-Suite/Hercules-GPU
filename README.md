@@ -64,9 +64,12 @@ Notes:
 	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
 - Script defaults for source files:
-	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=1` and
-	`HERCULES_REUSE_SOURCE_FILES=0` (always generate source files).
+	Phase A sets `HERCULES_MESH_ONLY_PREP_SOURCE=0` by default.
+	Script runs a dedicated source-prep substep with Phase B rank layout
+	(`mesh_input_mode=1`, `mesh_only_mode=1`) and
+	`HERCULES_MESH_ONLY_PREP_SOURCE=1`, `HERCULES_REUSE_SOURCE_FILES=0`.
 	Phase B sets `HERCULES_REUSE_SOURCE_FILES=1` (reuse files from Phase A).
+	Disable this substep with `PHASE_SOURCE_PREP=0` if needed.
 
 Mesh mode input flags (`numerical.in`):
 
