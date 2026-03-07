@@ -10480,6 +10480,11 @@ static void source_init(const char* physicsin) {
     double globalDelayT = 0;
     double surfaceShift = 0;
     int32_t sourceLoadedFromCache = 0;
+    int32_t localHasReuse = 0;
+    int32_t allHaveReuse = 0;
+    int32_t localLoadOk = 0;
+    int32_t allLoadOk = 0;
+    FILE* fpReuse = NULL;
 
     /* Load to Global.theMPIInformation */
     Global.theMPIInformation.myid = Global.myID;
@@ -10511,20 +10516,46 @@ static void source_init(const char* physicsin) {
 
     if (source_reuse_mode()) {
       char forcePath[512];
-      FILE* fpReuse;
 
       snprintf(forcePath, sizeof(forcePath), "%s/force_process.%d",
                Param.theSourceOutputDir, Global.myID);
       fpReuse = fopen(forcePath, "rb");
       if (fpReuse != NULL) {
+        localHasReuse = 1;
+      }
+
+      /* Reuse must be consistent across all ranks to avoid MPI divergence. */
+      MPI_Allreduce(&localHasReuse, &allHaveReuse, 1, MPI_INT, MPI_MIN,
+                    comm_solver);
+
+      if (allHaveReuse) {
         if (source_load_local_forces_from_fp(fpReuse) == 0) {
+          localLoadOk = 1;
+        }
+
+        MPI_Allreduce(&localLoadOk, &allLoadOk, 1, MPI_INT, MPI_MIN,
+                      comm_solver);
+
+        if (allLoadOk) {
           sourceLoadedFromCache = 1;
           if (Global.myID == 0) {
-            monitor_print("Source init: reused existing local force files from %s\n",
-                          Param.theSourceOutputDir);
+            monitor_print(
+                "Source init: reused existing local force files from %s\n",
+                Param.theSourceOutputDir);
           }
         } else {
+          if (localLoadOk) {
+            source_release_loaded_forces();
+          }
+          if (fpReuse != NULL) {
+            fclose(fpReuse);
+            fpReuse = NULL;
+          }
+        }
+      } else {
+        if (fpReuse != NULL) {
           fclose(fpReuse);
+          fpReuse = NULL;
         }
       }
     }
