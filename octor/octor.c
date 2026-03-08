@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #include "octor.h"
 
@@ -62,6 +63,19 @@ typedef struct edata_t {
 /****************************/
 
 static size_t theAllocatedMemSum = 0;
+static int32_t theOctorChunkDiag = -1;
+
+static int32_t octor_chunk_diag_enabled(void) {
+    if (theOctorChunkDiag < 0) {
+        const char *env = getenv("HERCULES_OCTOR_CHUNK_DIAG");
+        if ((env == NULL) || (strcmp(env, "0") == 0)) {
+            theOctorChunkDiag = 0;
+        } else {
+            theOctorChunkDiag = 1;
+        }
+    }
+    return theOctorChunkDiag;
+}
 
 
 typedef struct hdr_t hdr_t;
@@ -4965,8 +4979,15 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
     MPI_Request *irecvreqs = NULL;
     MPI_Status *irecvstats = NULL;
     void **rcvleafoct_pool_list = NULL;
+    size_t *rcvbytesize_list = NULL;
     int32_t irecvcount, irecvnum;
+    int32_t irecvreqcount = 0;
+    int32_t irecvreqnum = 0;
     int32_t irecv;
+    size_t max_rcvbytesize = 0;
+    size_t max_sndbytesize = 0;
+    int32_t max_rcvchunks = 0;
+    int32_t max_sndchunks = 0;
 
 
     /* leafoctsize is the size of a serialized leaf octant */
@@ -5009,14 +5030,60 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
     	}
     }
 
-    /* Create MPI request and stat objects */
+    /* Count how many MPI receive requests are needed after chunking. */
+    bin_procid = start_procid;
+    due = target_high - target_low + 1;
+    while (due > 0) {
+        size_t rcvbytesize;
+        int32_t chunks;
+
+        bin_low = starttable[bin_procid];
+        bin_high = starttable[bin_procid] + counttable[bin_procid] - 1;
+
+        maxlow = (bin_low < target_low) ? target_low : bin_low;
+        minhigh = (bin_high > target_high) ? target_high : bin_high;
+        intersectcount = minhigh - maxlow + 1;
+
+        if (bin_procid != tree->procid && counttable[bin_procid] != 0) {
+            if ((intersectcount < 0) ||
+                ((size_t)intersectcount > (SIZE_MAX / (size_t)leafoctsize))) {
+                fprintf(stderr,
+                        "PE %d: %s %d: receive size overflow\n"
+                        "Elements=%"PRId64" leafoctsize=%d\n",
+                        tree->procid, __FILE__, __LINE__,
+                        intersectcount, leafoctsize);
+                MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+                exit(1);
+            }
+
+            rcvbytesize = (size_t)leafoctsize * (size_t)intersectcount;
+            chunks = (int32_t)((rcvbytesize + (size_t)INT_MAX - 1) /
+                               (size_t)INT_MAX);
+
+            if ((chunks <= 0) || (irecvreqcount > INT_MAX - chunks)) {
+                fprintf(stderr,
+                        "PE %d: %s %d: too many receive chunks (%d + %d)\n",
+                        tree->procid, __FILE__, __LINE__,
+                        irecvreqcount, chunks);
+                MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+                exit(1);
+            }
+            irecvreqcount += chunks;
+        }
+
+        due -= intersectcount;
+        bin_procid++;
+    }
+
+    /* Create MPI request/stat objects and receive metadata. */
     if (irecvcount != 0) {
-        irecvreqs = (MPI_Request *)malloc(irecvcount * sizeof(MPI_Request));
-        irecvstats = (MPI_Status *)malloc(irecvcount * sizeof(MPI_Status));
-        rcvleafoct_pool_list = (void **)malloc(irecvcount * sizeof(void *));
+        irecvreqs = (MPI_Request *)malloc((size_t)irecvreqcount * sizeof(MPI_Request));
+        irecvstats = (MPI_Status *)malloc((size_t)irecvreqcount * sizeof(MPI_Status));
+        rcvleafoct_pool_list = (void **)malloc((size_t)irecvcount * sizeof(void *));
+        rcvbytesize_list = (size_t *)malloc((size_t)irecvcount * sizeof(size_t));
 
         if ((irecvreqs == NULL) || (irecvstats == NULL) ||
-            (rcvleafoct_pool_list == NULL )) {
+            (rcvleafoct_pool_list == NULL) || (rcvbytesize_list == NULL)) {
             fprintf(stderr, "Thread %d: %s %d : out of memory\n",
                     tree->procid, __FILE__, __LINE__);
             fprintf(stderr, "Total memory allocated by Octor : %d bytes\n",
@@ -5024,15 +5091,19 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
             MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
             exit(1);
         } else {
-            theAllocatedMemSum += irecvcount *
-                (sizeof(MPI_Request) + sizeof(MPI_Status) + sizeof(void *));
+            theAllocatedMemSum += (size_t)irecvreqcount *
+                (sizeof(MPI_Request) + sizeof(MPI_Status));
+            theAllocatedMemSum += (size_t)irecvcount *
+                (sizeof(void *) + sizeof(size_t));
         }
     }
 
     /* Go through the count table and start table to post receives */
 
+    due = target_high - target_low + 1;
     bin_procid = start_procid;
     irecvnum = 0;
+    irecvreqnum = 0;
     while (due > 0) {
         /* get the bounds of the current bin */
         bin_low = starttable[bin_procid];
@@ -5045,10 +5116,23 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
         //after bldgs module-- yigit
         if (bin_procid != tree->procid && counttable[bin_procid] != 0) {
         	void *rcvleafoct_pool;
-        	int32_t rcvbytesize;
+	        size_t rcvbytesize;
+	        int32_t chunks;
+	        size_t offset;
 
         	/* allocate receive buffer */
-        	rcvbytesize = leafoctsize * intersectcount;
+	        if ((intersectcount < 0) ||
+	            ((size_t)intersectcount > (SIZE_MAX / (size_t)leafoctsize))) {
+	            fprintf(stderr,
+	                    "PE %d: %s %d: receive size overflow\n"
+	                    "Elements=%"PRId64" leafoctsize=%d\n",
+	                    tree->procid, __FILE__, __LINE__,
+	                    intersectcount, leafoctsize);
+	            MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+	            exit(1);
+	        }
+
+	        rcvbytesize = (size_t)leafoctsize * (size_t)intersectcount;
         	rcvleafoct_pool_list[irecvnum] = malloc(rcvbytesize);
         	rcvleafoct_pool = rcvleafoct_pool_list[irecvnum];
 
@@ -5056,7 +5140,7 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
         		/* Out of memory */
         		fprintf( stderr,
                          "PE %d: %s %d: out of memory\n"
-                         "Allocating %d bytes for %"PRId64" elements\n"
+                         "Allocating %zu bytes for %"PRId64" elements\n"
                          "Total memory allocated by Octor : %d bytes\n",
                          tree->procid, __FILE__, __LINE__,
                          rcvbytesize, intersectcount,
@@ -5067,9 +5151,32 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
                 theAllocatedMemSum += rcvbytesize;
             }
 
-            /* Post receive */
-            MPI_Irecv(rcvleafoct_pool, rcvbytesize, MPI_CHAR, bin_procid,
-                      OCT_MSG, tree->comm_tree, &irecvreqs[irecvnum]);
+            chunks = (int32_t)((rcvbytesize + (size_t)INT_MAX - 1) /
+                               (size_t)INT_MAX);
+            rcvbytesize_list[irecvnum] = rcvbytesize;
+
+            if (rcvbytesize > max_rcvbytesize) {
+                max_rcvbytesize = rcvbytesize;
+            }
+            if (chunks > max_rcvchunks) {
+                max_rcvchunks = chunks;
+            }
+
+            /* Post receives in chunks (MPI count is int). */
+            offset = 0;
+            while (offset < rcvbytesize) {
+                size_t chunk_bytes = rcvbytesize - offset;
+                if (chunk_bytes > (size_t)INT_MAX) {
+                    chunk_bytes = (size_t)INT_MAX;
+                }
+
+                MPI_Irecv((char *)rcvleafoct_pool + offset,
+                          (int)chunk_bytes, MPI_CHAR, bin_procid,
+                          OCT_MSG, tree->comm_tree,
+                          &irecvreqs[irecvreqnum]);
+                irecvreqnum++;
+                offset += chunk_bytes;
+            }
 
             /* Increment the irecv count */
             irecvnum++;
@@ -5085,6 +5192,13 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
 #ifdef DEBUG
     if (irecvnum != irecvcount) {
         fprintf(stderr, "Thread %d: %s %d: internal error: unmatched irecvs\n",
+                tree->procid, __FILE__, __LINE__);
+        MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+        exit(1);
+    }
+
+    if (irecvreqnum != irecvreqcount) {
+        fprintf(stderr, "Thread %d: %s %d: internal error: unmatched irecv chunks\n",
                 tree->procid, __FILE__, __LINE__);
         MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
         exit(1);
@@ -5117,12 +5231,23 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
         intersectcount = minhigh - maxlow + 1;
 
         if (bin_procid != tree->procid) {
-            int32_t sndbytesize, index;
+            size_t sndbytesize;
+            int32_t index;
             void *sndleafoct_pool;
             char *ptr;
 
             /* allocate send buffer */
-            sndbytesize = leafoctsize * intersectcount;
+            if ((intersectcount < 0) ||
+                ((size_t)intersectcount > (SIZE_MAX / (size_t)leafoctsize))) {
+                fprintf(stderr,
+                        "PE %d: %s %d: send size overflow\n"
+                        "Elements=%"PRId64" leafoctsize=%d\n",
+                        tree->procid, __FILE__, __LINE__,
+                        intersectcount, leafoctsize);
+                MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+                exit(1);
+            }
+            sndbytesize = (size_t)leafoctsize * (size_t)intersectcount;
             sndleafoct_pool = malloc(sndbytesize);
 
             if (sndleafoct_pool == NULL) {
@@ -5185,9 +5310,30 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
                 cutindex++;
             }
 
-            /* Send the octants to the processor who is receiving */
-            MPI_Send(sndleafoct_pool, sndbytesize, MPI_CHAR, bin_procid,
-                     OCT_MSG, tree->comm_tree);
+            /* Send octants in chunks (MPI count is int). */
+            {
+                int32_t sndchunks = (int32_t)((sndbytesize + (size_t)INT_MAX - 1) /
+                                              (size_t)INT_MAX);
+                size_t offset = 0;
+
+                if (sndbytesize > max_sndbytesize) {
+                    max_sndbytesize = sndbytesize;
+                }
+                if (sndchunks > max_sndchunks) {
+                    max_sndchunks = sndchunks;
+                }
+
+                while (offset < sndbytesize) {
+                    size_t chunk_bytes = sndbytesize - offset;
+                    if (chunk_bytes > (size_t)INT_MAX) {
+                        chunk_bytes = (size_t)INT_MAX;
+                    }
+                    MPI_Send((char *)sndleafoct_pool + offset,
+                             (int)chunk_bytes, MPI_CHAR, bin_procid,
+                             OCT_MSG, tree->comm_tree);
+                    offset += chunk_bytes;
+                }
+            }
 
             /* Release and recover memory */
             free(sndleafoct_pool);
@@ -5201,18 +5347,47 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
         bin_procid++;
     } /* while I have more elements to share */
 
+    if (octor_chunk_diag_enabled()) {
+        unsigned long long local_max_rcv_bytes =
+            (unsigned long long)max_rcvbytesize;
+        unsigned long long local_max_snd_bytes =
+            (unsigned long long)max_sndbytesize;
+        unsigned long long global_max_rcv_bytes = 0;
+        unsigned long long global_max_snd_bytes = 0;
+        int32_t global_max_rcv_chunks = 0;
+        int32_t global_max_snd_chunks = 0;
+
+        MPI_Reduce(&local_max_rcv_bytes, &global_max_rcv_bytes, 1,
+                   MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, tree->comm_tree);
+        MPI_Reduce(&local_max_snd_bytes, &global_max_snd_bytes, 1,
+                   MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, tree->comm_tree);
+        MPI_Reduce(&max_rcvchunks, &global_max_rcv_chunks, 1, MPI_INT,
+                   MPI_MAX, 0, tree->comm_tree);
+        MPI_Reduce(&max_sndchunks, &global_max_snd_chunks, 1, MPI_INT,
+                   MPI_MAX, 0, tree->comm_tree);
+
+        if (tree->procid == 0) {
+            fprintf(stderr,
+                    "Octor partition chunk diagnostics: "
+                    "max_recv_bytes=%llu max_recv_chunks=%d "
+                    "max_send_bytes=%llu max_send_chunks=%d\n",
+                    global_max_rcv_bytes, global_max_rcv_chunks,
+                    global_max_snd_bytes, global_max_snd_chunks);
+        }
+    }
+
     /* Wait till I receive all the data I want */
-    if (irecvcount != 0) {
-        MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+    if (irecvreqcount != 0) {
+        MPI_Waitall(irecvreqcount, irecvreqs, irecvstats);
     }
 
     for (irecvnum = 0; irecvnum < irecvcount; irecvnum++) {
         int32_t received, index;
-        int32_t rcvbytesize;
+        size_t rcvbytesize;
         char *ptr;
 
-        MPI_Get_count(&irecvstats[irecvnum], MPI_CHAR, &rcvbytesize);
-        received = rcvbytesize / leafoctsize;
+        rcvbytesize = rcvbytesize_list[irecvnum];
+        received = (int32_t)(rcvbytesize / (size_t)leafoctsize);
 
         ptr = (char *)rcvleafoct_pool_list[irecvnum];
         for (index = 0; index < received; index++) {
@@ -5273,6 +5448,7 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
 
     /* Release memory */
     if (irecvcount != 0) {
+        free(rcvbytesize_list);
         free(rcvleafoct_pool_list);
         free(irecvreqs);
         free(irecvstats);

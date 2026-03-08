@@ -31,6 +31,9 @@ Runtime performance toggles (no source edits needed):
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
+- `HERCULES_OCTOR_CHUNK_DIAG=1|0`
+	Enables one-line partition diagnostics for Octor chunked transfers
+	(max chunk counts and bytes). Default is `0` (disabled).
 
 Build note:
 
