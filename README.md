@@ -33,7 +33,8 @@ Runtime performance toggles (no source edits needed):
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_OCTOR_CHUNK_DIAG=1|0`
 	Enables one-line partition diagnostics for Octor chunked transfers
-	(max chunk counts and bytes). Default is `0` (disabled).
+	(max chunk counts and bytes). Solver default is `0` (disabled);
+	`run_phaseA_phaseB.sh` defaults this to `1`.
 
 Build note:
 
@@ -47,7 +48,7 @@ Two-phase script defaults:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
-	`HERCULES_PLANE_IO_OMP=1`.
+	`HERCULES_PLANE_IO_OMP=1`, `HERCULES_OCTOR_CHUNK_DIAG=1`.
 - You can still override any of these by exporting your own value before
 	running the script.
 
@@ -70,6 +71,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_SPARSE_CLEAR_MODE=nodes
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_OCTOR_CHUNK_DIAG=0
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
