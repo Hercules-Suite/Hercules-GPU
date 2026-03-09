@@ -11142,10 +11142,10 @@ void output_stations_init(const char* numericalin) {
   }
 
   broadcast_stations_info();
-  localStationCount = Param.myNumberOfStations;
   localSetupTime = MPI_Wtime();
   setup_stations_data();
   localSetupTime = MPI_Wtime() - localSetupTime;
+  localStationCount = Param.myNumberOfStations;
 
   if (Global.myID == 0) {
     monitor_print("Stations init: waiting for all ranks to complete local setup...\n");
@@ -12476,7 +12476,10 @@ int main(int argc, char** argv) {
   /* Initialize the output planes */
   if (Param.theNumberOfPlanes != 0) {
     if (Global.myID == 0) {
-      monitor_print("Pre Setup: Planes init start\n");
+      monitor_print(
+          "Pre Setup: Planes init start (count=%d, io_pool=%d, dir=%s)\n",
+          Param.theNumberOfPlanes, Param.IO_pool_pe_count,
+          Param.thePlaneDirOut);
     }
     Timer_Start("Pre Setup Planes Init");
     planes_setup(Global.myID, &Param.thePlanePrintRate, Param.thePlaneDirOut,
