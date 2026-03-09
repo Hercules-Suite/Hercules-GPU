@@ -367,8 +367,12 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
     int        largestplanesize;
     FILE*      fp;
     FILE*      fp_planes;
+	double stageT0 = MPI_Wtime();
 
     if (myID == 0) {
+	fprintf(stderr,
+		"Planes setup(old): rank0 parsing parameters and plane definitions...\n");
+	fflush(stderr);
 
 	/* obtain the general planes specifications in parameter file */
 	if ( (fp = fopen ( numericalin, "r")) == NULL ) {
@@ -472,16 +476,29 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
                     // fp1 = hu_fopen (planecoordsfile, "w");
                     // thePlanes[iPlane].fpplanecoordsfile = fp1;
 		} /* for */
+		fprintf(stderr,
+			"Planes setup(old): rank0 parsed %d plane(s), largest plane points=%d\n",
+			theNumberOfPlanes, largestplanesize);
+		fflush(stderr);
 	    } /* if ( (name != NULL) ... ) */
 	} /* while */
 
 	fclose(fp_planes);
+	fprintf(stderr,
+		"Planes setup(old): rank0 parse stage done in %.2f s\n",
+		MPI_Wtime() - stageT0);
+	fflush(stderr);
 
 
 
     } /* if (myID == 0) */
 
     /* broadcast plane info */
+	if (myID == 0) {
+	fprintf(stderr,
+		"Planes setup(old): broadcasting shared plane metadata to solver ranks...\n");
+	fflush(stderr);
+	}
     MPI_Bcast( &theNumberOfPlanes, 1, MPI_INT, 0, comm_solver );
     MPI_Bcast( thePlanePrintRate, 1, MPI_INT, 0, comm_solver );
 
@@ -506,7 +523,27 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 	MPI_Barrier(comm_solver);
     }
 
+    if (myID == 0) {
+	fprintf(stderr,
+		"Planes setup(old): metadata broadcast/barrier phase done in %.2f s\n",
+		MPI_Wtime() - stageT0);
+	fflush(stderr);
+    }
+
+    if (myID == 0) {
+	fprintf(stderr,
+		"Planes setup(old): starting strip construction...\n");
+	fflush(stderr);
+    }
+
     Old_output_planes_construct_strips(myID, theNumberOfPlanes);
+
+    if (myID == 0) {
+	fprintf(stderr,
+		"Planes setup(old): strip construction done in %.2f s\n",
+		MPI_Wtime() - stageT0);
+	fflush(stderr);
+    }
 
     /* master allocates largest plane */
     if (myID == 0) {
