@@ -11128,14 +11128,52 @@ static int32_t station_output_use_omp(void) {
  * Init stations info and data structures
  */
 void output_stations_init(const char* numericalin) {
+  double localSetupTime = 0.0;
+  double maxSetupTime = 0.0;
+  double minSetupTime = 0.0;
+  double sumSetupTime = 0.0;
+  int32_t localStationCount = 0;
+  int32_t maxStationCount = 0;
+  int32_t minStationCount = 0;
+  int32_t sumStationCount = 0;
+
   if (Global.myID == 0) {
     read_stations_info(numericalin);
   }
 
   broadcast_stations_info();
+  localStationCount = Param.myNumberOfStations;
+  localSetupTime = MPI_Wtime();
   setup_stations_data();
+  localSetupTime = MPI_Wtime() - localSetupTime;
+
+  if (Global.myID == 0) {
+    monitor_print("Stations init: waiting for all ranks to complete local setup...\n");
+  }
 
   MPI_Barrier(comm_solver);
+
+  MPI_Reduce(&localSetupTime, &maxSetupTime, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&localSetupTime, &minSetupTime, 1, MPI_DOUBLE, MPI_MIN, 0,
+             comm_solver);
+  MPI_Reduce(&localSetupTime, &sumSetupTime, 1, MPI_DOUBLE, MPI_SUM, 0,
+             comm_solver);
+  MPI_Reduce(&localStationCount, &maxStationCount, 1, MPI_INT, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&localStationCount, &minStationCount, 1, MPI_INT, MPI_MIN, 0,
+             comm_solver);
+  MPI_Reduce(&localStationCount, &sumStationCount, 1, MPI_INT, MPI_SUM, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    monitor_print(
+        "Stations init: setup time min/avg/max = %.2f / %.2f / %.2f s, local stations min/avg/max = %d / %.1f / %d\n",
+        minSetupTime, sumSetupTime / Global.theGroupSize, maxSetupTime,
+        minStationCount,
+        (double)sumStationCount / (double)Global.theGroupSize,
+        maxStationCount);
+  }
 
   return;
 }
@@ -12437,6 +12475,9 @@ int main(int argc, char** argv) {
 
   /* Initialize the output planes */
   if (Param.theNumberOfPlanes != 0) {
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Planes init start\n");
+    }
     Timer_Start("Pre Setup Planes Init");
     planes_setup(Global.myID, &Param.thePlanePrintRate, Param.thePlaneDirOut,
                  Param.IO_pool_pe_count, Param.theNumberOfPlanes,
@@ -12445,15 +12486,30 @@ int main(int argc, char** argv) {
                  Param.theDomainX, Param.theDomainY, Param.theDomainZ,
                  Param.planes_input_file, &Param.utmZone);
     Timer_Stop("Pre Setup Planes Init");
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Planes init done\n");
+    }
   }
 
   /* Initialize the solver, source and output structures */
+  if (Global.myID == 0) {
+    monitor_print("Pre Setup: Solver init start\n");
+  }
   Timer_Start("Pre Setup Solver Init");
   solver_init();
   Timer_Stop("Pre Setup Solver Init");
+  if (Global.myID == 0) {
+    monitor_print("Pre Setup: Solver init done\n");
+  }
   Timer_Start("Solver Stats Print");
+  if (Global.myID == 0) {
+    monitor_print("Pre Setup: Solver stats print start\n");
+  }
   solver_printstat(Global.mySolver);
   Timer_Stop("Solver Stats Print");
+  if (Global.myID == 0) {
+    monitor_print("Pre Setup: Solver stats print done\n");
+  }
   Timer_Reduce("Solver Stats Print", (TimerKind)(MAX | MIN), comm_solver);
 
   /* Initialize nonlinear solver analysis structures */
