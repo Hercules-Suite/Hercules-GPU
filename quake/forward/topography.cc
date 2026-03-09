@@ -63,6 +63,28 @@ static int32_t            myNumberOfTopoNonLinElements = 0;
 static noyesflag_t        theNonlinTopo_flag  = NO;
 static noyesflag_t        theTopoBKT_flag  = NO;
 
+typedef struct topo_station_lookup_entry_t {
+    tick_t x;
+    tick_t y;
+    tick_t z;
+    int32_t topo_eindex;
+} topo_station_lookup_entry_t;
+
+static int topo_station_lookup_cmp(const void *lhs, const void *rhs) {
+    const topo_station_lookup_entry_t *a =
+        (const topo_station_lookup_entry_t *)lhs;
+    const topo_station_lookup_entry_t *b =
+        (const topo_station_lookup_entry_t *)rhs;
+
+    if (a->x < b->x) return -1;
+    if (a->x > b->x) return 1;
+    if (a->y < b->y) return -1;
+    if (a->y > b->y) return 1;
+    if (a->z < b->z) return -1;
+    if (a->z > b->z) return 1;
+    return 0;
+}
+
 /*static double The_hypocenter_lat_deg = 0;
 static double The_hypocenter_long_deg = 0;
 static double The_hypocenter_deep = 0;*/
@@ -2950,9 +2972,9 @@ void topography_stations_init( mesh_t    *myMesh,
     int32_t     eindex, topo_eindex;
     int32_t     iStation=0;
     vector3D_t  point;
-    octant_t   *octant;
     int32_t     lnid0;
     elem_t     *elemp;
+    topo_station_lookup_entry_t *lookup = NULL;
 
     // int topoStations_count = 0;
 
@@ -2977,67 +2999,72 @@ void topography_stations_init( mesh_t    *myMesh,
     }
 
 
-    for (iStation = 0; iStation < myNumberOfStations; iStation++) {
-
-        /* capture the stations coordinates */
-        point = myStations[iStation].coords;
-
-        /* search the octant */
-        if ( search_point(point, &octant) != 1 ) {
-            fprintf(stderr,
-                    "topography_stations_init: "
-                    "No octant with station coords\n");
+    if (myTopoElementsCount > 0) {
+        lookup = (topo_station_lookup_entry_t *)malloc(
+            sizeof(topo_station_lookup_entry_t) * (size_t)myTopoElementsCount);
+        if (lookup == NULL) {
+            fprintf(stderr, "topography_stations_init: out of memory for lookup table\n");
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
 
-        for ( topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++ ) {
-
+        for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
             eindex = myTopoElementsMapping[topo_eindex];
+            lnid0 = myMesh->elemTable[eindex].lnid[0];
+            lookup[topo_eindex].x = myMesh->nodeTable[lnid0].x;
+            lookup[topo_eindex].y = myMesh->nodeTable[lnid0].y;
+            lookup[topo_eindex].z = myMesh->nodeTable[lnid0].z;
+            lookup[topo_eindex].topo_eindex = topo_eindex;
+        }
 
+        qsort(lookup, (size_t)myTopoElementsCount,
+              sizeof(topo_station_lookup_entry_t), topo_station_lookup_cmp);
+    }
+
+    for (iStation = 0; iStation < myNumberOfStations; iStation++) {
+        topo_station_lookup_entry_t key;
+        topo_station_lookup_entry_t *found;
+
+        point = myStations[iStation].coords;
+
+        /* Use station's host element node-0 coordinates as lookup key. */
+        lnid0 = myStations[iStation].nodestointerpolate[0];
+        key.x = myMesh->nodeTable[lnid0].x;
+        key.y = myMesh->nodeTable[lnid0].y;
+        key.z = myMesh->nodeTable[lnid0].z;
+        key.topo_eindex = -1;
+
+        found = (topo_station_lookup_entry_t *)bsearch(
+            &key, lookup, (size_t)myTopoElementsCount,
+            sizeof(topo_station_lookup_entry_t), topo_station_lookup_cmp);
+
+        if (found != NULL) {
+            topo_eindex = found->topo_eindex;
+            eindex = myTopoElementsMapping[topo_eindex];
             lnid0 = myMesh->elemTable[eindex].lnid[0];
 
-            if ( (myMesh->nodeTable[lnid0].x == octant->lx) &&
-                 (myMesh->nodeTable[lnid0].y == octant->ly) &&
-                 (myMesh->nodeTable[lnid0].z == octant->lz) ) {
+            myTopoStations[iStation].TopoStation  = 1; /* station belongs to topography */
 
-                /* I have a match for the element's origin */
+            /* zero node coordinates */
+            double xo = myMesh->nodeTable[lnid0].x * (myMesh->ticksize);
+            double yo = myMesh->nodeTable[lnid0].y * (myMesh->ticksize);
+            double zo = myMesh->nodeTable[lnid0].z * (myMesh->ticksize);
 
-                /* Now, perform level sanity check */
-                if (myMesh->elemTable[eindex].level != octant->level) {
-                    fprintf(stderr,
-                            "topo_stations_init: First pass: "
-                            "Wrong level of octant\n");
-                    MPI_Abort(MPI_COMM_WORLD, ERROR);
-                    exit(1);
-                }
+            elemp  = &myMesh->elemTable[eindex];
 
-                myTopoStations[iStation].TopoStation  = 1; /*  Station belongs to topography */
-                // topoStations_count += 1;
+            topoconstants_t  *ecp;
+            ecp    = myTopoSolver->topoconstants + topo_eindex;
 
-                /* zero node coordinates */
-                double xo = myMesh->nodeTable[lnid0].x * (myMesh->ticksize);
-                double yo = myMesh->nodeTable[lnid0].y * (myMesh->ticksize);
-                double zo = myMesh->nodeTable[lnid0].z * (myMesh->ticksize);
+            compute_tetra_localcoord ( point, elemp,
+                                       myTopoStations[iStation].nodes_to_interpolate,
+                                       myTopoStations[iStation].local_coord,
+                                       xo, yo, zo, ecp->h, ecp->cube_part );
 
-                elemp  = &myMesh->elemTable[eindex];
+            myNumberOfTopoStations++;
+        }
+    }
 
-                topoconstants_t  *ecp;
-                ecp    = myTopoSolver->topoconstants + topo_eindex;
-
-                compute_tetra_localcoord ( point, elemp,
-                                           myTopoStations[iStation].nodes_to_interpolate,
-                                           myTopoStations[iStation].local_coord,
-                                           xo, yo, zo, ecp->h, ecp->cube_part );
-
-                myNumberOfTopoStations++;
-
-                break;
-            }
-
-        } /* for all my elements */
-
-    } /* for all my stations */
+    free(lookup);
 
 
     //fprintf(stdout,"Topographic Stations count = %d",count);

@@ -10789,8 +10789,25 @@ void setup_stations_data() {
   static char stationFile[256];
 
   int32_t iStation, iLCStation = 0; /* LC local count */
+  int32_t* localStationIds = NULL;
+  octant_t** stationOctants = NULL;
+  double t0 = MPI_Wtime();
   vector3D_t stationCoords;
   octant_t* octant;
+
+  if (Global.myID == 0) {
+    monitor_print("Stations init: scanning %d stations for local ownership...\n",
+                  Param.theNumberOfStations);
+  }
+
+  if (Param.theNumberOfStations > 0) {
+    localStationIds = (int32_t*)malloc(sizeof(int32_t) * Param.theNumberOfStations);
+    stationOctants = (octant_t**)malloc(sizeof(octant_t*) * Param.theNumberOfStations);
+    if ((localStationIds == NULL) || (stationOctants == NULL)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Error allocating station ownership scratch arrays");
+    }
+  }
 
   /* look for the stations in the domain each processor has */
   for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
@@ -10799,8 +10816,15 @@ void setup_stations_data() {
     stationCoords.x[2] = Param.theStationZ[iStation];
 
     if (search_point(stationCoords, &octant) == 1) {
+      localStationIds[Param.myNumberOfStations] = iStation;
+      stationOctants[Param.myNumberOfStations] = octant;
       Param.myNumberOfStations++;
     }
+  }
+
+  if (Global.myID == 0) {
+    monitor_print("Stations init: ownership scan completed in %.2f s\n",
+                  MPI_Wtime() - t0);
   }
 
   /* allocate memory if necessary and generate the list of stations per
@@ -10813,12 +10837,14 @@ void setup_stations_data() {
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
   }
 
-  for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
+  t0 = MPI_Wtime();
+  for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
+    iStation = localStationIds[iLCStation];
+    octant = stationOctants[iLCStation];
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
 
-    if (search_point(stationCoords, &octant) == 1) {
       Param.myStations[iLCStation].id = iStation;
       Param.myStations[iLCStation].coords = stationCoords;
       sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
@@ -10889,10 +10915,15 @@ void setup_stations_data() {
 
             Param.myStations[iLCStation].fpoutputfile);
       }
-
-      iLCStation += 1;
-    }
   }
+
+  if (Global.myID == 0) {
+    monitor_print("Stations init: local station files/metadata setup completed in %.2f s\n",
+                  MPI_Wtime() - t0);
+  }
+
+  free(localStationIds);
+  free(stationOctants);
 
   free(Param.theStationX);
   free(Param.theStationY);
@@ -12377,18 +12408,31 @@ int main(int argc, char** argv) {
   Timer_Start("Pre Solver Setup");
 
   if (Param.theNumberOfStations != 0) {
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Station init start (total stations=%d)\n",
+                    Param.theNumberOfStations);
+    }
     Timer_Start("Pre Setup Stations Init");
     output_stations_init(Param.parameters_input_file);
     Timer_Stop("Pre Setup Stations Init");
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Station init done\n");
+    }
   }
 
   /* include additional info for topo stations */
 
   if ((Param.includeTopography == YES) && (Param.theNumberOfStations != 0)) {
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Topo station init start\n");
+    }
     Timer_Start("Pre Setup Topo Stations Init");
     topography_stations_init(Global.myMesh, Param.myStations,
                              Param.myNumberOfStations);
     Timer_Stop("Pre Setup Topo Stations Init");
+    if (Global.myID == 0) {
+      monitor_print("Pre Setup: Topo station init done\n");
+    }
   }
 
   /* Initialize the output planes */

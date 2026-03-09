@@ -116,7 +116,7 @@ static double* planes_stripMPIRecvBuffer;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 
-static int32_t plane_output_use_omp(void) {
+static int32_t plane_output_use_omp(int32_t myID) {
 #ifndef _OPENMP
 	return 0;
 #else
@@ -131,7 +131,8 @@ static int32_t plane_output_use_omp(void) {
 			g_planeOutputOmpMode = 0;
 		}
 
-		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0)) {
+		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0) &&
+		    (myID == 0)) {
 			fprintf(stderr,
 					"Plane output OpenMP: enabled (threads=%d)\n",
 					omp_get_max_threads());
@@ -205,7 +206,7 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
 #ifdef _OPENMP
-	const int32_t useOmp = plane_output_use_omp();
+	const int32_t useOmp = plane_output_use_omp(myID);
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
@@ -1157,7 +1158,7 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
     double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
 #ifdef _OPENMP
-    const int32_t useOmp = plane_output_use_omp();
+	const int32_t useOmp = plane_output_use_omp(PENum);
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
