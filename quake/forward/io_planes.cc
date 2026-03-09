@@ -960,7 +960,8 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
     planes_LocalLargestStripCount = 0;
 
-    for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
+	for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
+		double stageT0 = MPI_Wtime();
 	thePlanes[ iPlane ].numberofstripsthisplane = 0;
 	/* Compute the coordinates of the nodes of the plane */
 	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
@@ -1040,6 +1041,37 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
             thePlanes[ iPlane ].numberofstripsthisplane++;
 	}
 
+	/* Report strip-discovery cost before collective strip-count reduction. */
+	double scanElapsed = MPI_Wtime() - stageT0;
+	double scanMin = 0.0, scanMax = 0.0, scanSum = 0.0;
+	int stripMin = 0, stripMax = 0, stripSum = 0;
+	MPI_Reduce(&scanElapsed, &scanMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+	MPI_Reduce(&scanElapsed, &scanMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+	MPI_Reduce(&scanElapsed, &scanSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+	MPI_Reduce(&thePlanes[iPlane].numberofstripsthisplane, &stripMin, 1, MPI_INT,
+			   MPI_MIN, 0, comm_solver);
+	MPI_Reduce(&thePlanes[iPlane].numberofstripsthisplane, &stripMax, 1, MPI_INT,
+			   MPI_MAX, 0, comm_solver);
+	MPI_Reduce(&thePlanes[iPlane].numberofstripsthisplane, &stripSum, 1, MPI_INT,
+			   MPI_SUM, 0, comm_solver);
+	if (myID == 0) {
+		int commSize = 1;
+		MPI_Comm_size(comm_solver, &commSize);
+		const long long totalPoints =
+			(long long)thePlanes[iPlane].numberofstepsalongstrike *
+			(long long)thePlanes[iPlane].numberofstepsdowndip;
+		fprintf(stderr,
+				"Planes setup[%d]: point ownership scan done (points=%lld), time min/avg/max = %.2f / %.2f / %.2f s, local strips min/avg/max = %d / %.1f / %d\n",
+				iPlane, totalPoints,
+				scanMin,
+				scanSum / (double)commSize,
+				scanMax,
+				stripMin,
+				(double)stripSum / (double)commSize,
+				stripMax);
+		fflush(stderr);
+	}
+
 	/* get strip counts to IO PEs */
 	MPI_Reduce( &thePlanes[ iPlane ].numberofstripsthisplane,
 		    &thePlanes[iPlane].globalnumberofstripsthisplane,
@@ -1074,11 +1106,30 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	    }
 
 	/* fill strips */
+	stageT0 = MPI_Wtime();
 	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
 	origin.x[1] = thePlanes[ iPlane ].origincoords.x[1];
 	origin.x[2] = thePlanes[ iPlane ].origincoords.x[2];
 
 	int elemnum;
+
+	/* Report interpolation-metadata fill stage cost (2nd search pass). */
+	double fillElapsed = MPI_Wtime() - stageT0;
+	double fillMin = 0.0, fillMax = 0.0, fillSum = 0.0;
+	MPI_Reduce(&fillElapsed, &fillMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+	MPI_Reduce(&fillElapsed, &fillMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+	MPI_Reduce(&fillElapsed, &fillSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+	if (myID == 0) {
+		int commSize = 1;
+		MPI_Comm_size(comm_solver, &commSize);
+		fprintf(stderr,
+				"Planes setup[%d]: strip metadata fill done, time min/avg/max = %.2f / %.2f / %.2f s\n",
+				iPlane,
+				fillMin,
+				fillSum / (double)commSize,
+				fillMax);
+		fflush(stderr);
+	}
 	for (stripnum = 0;
 	     stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
 	     stripnum++)
