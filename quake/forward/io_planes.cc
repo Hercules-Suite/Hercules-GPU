@@ -1112,24 +1112,6 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	origin.x[2] = thePlanes[ iPlane ].origincoords.x[2];
 
 	int elemnum;
-
-	/* Report interpolation-metadata fill stage cost (2nd search pass). */
-	double fillElapsed = MPI_Wtime() - stageT0;
-	double fillMin = 0.0, fillMax = 0.0, fillSum = 0.0;
-	MPI_Reduce(&fillElapsed, &fillMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-	MPI_Reduce(&fillElapsed, &fillMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
-	MPI_Reduce(&fillElapsed, &fillSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
-	if (myID == 0) {
-		int commSize = 1;
-		MPI_Comm_size(comm_solver, &commSize);
-		fprintf(stderr,
-				"Planes setup[%d]: strip metadata fill done, time min/avg/max = %.2f / %.2f / %.2f s\n",
-				iPlane,
-				fillMin,
-				fillSum / (double)commSize,
-				fillMax);
-		fflush(stderr);
-	}
 	for (stripnum = 0;
 	     stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
 	     stripnum++)
@@ -1170,6 +1152,24 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
 			}
 		    }
+
+		/* Report interpolation-metadata fill stage cost (2nd search pass). */
+		double fillElapsed = MPI_Wtime() - stageT0;
+		double fillMin = 0.0, fillMax = 0.0, fillSum = 0.0;
+		MPI_Reduce(&fillElapsed, &fillMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+		MPI_Reduce(&fillElapsed, &fillMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+		MPI_Reduce(&fillElapsed, &fillSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+		if (myID == 0) {
+			int commSize = 1;
+			MPI_Comm_size(comm_solver, &commSize);
+			fprintf(stderr,
+					"Planes setup[%d]: strip metadata fill done, time min/avg/max = %.2f / %.2f / %.2f s\n",
+					iPlane,
+					fillMin,
+					fillSum / (double)commSize,
+					fillMax);
+			fflush(stderr);
+		}
 	    }
     } /* end of plane loop: for (stripnum = 0; ...) */
 
