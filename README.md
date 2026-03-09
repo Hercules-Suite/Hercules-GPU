@@ -51,6 +51,10 @@ Two-phase script defaults:
 	`HERCULES_PLANE_IO_OMP=1`, `HERCULES_OCTOR_CHUNK_DIAG=1`.
 - You can still override any of these by exporting your own value before
 	running the script.
+- Phase B rank mapping control:
+	`PHASE_B_ONE_RANK_PER_NODE=1` (default) enforces `--map-by ppr:1:node`.
+	Set `PHASE_B_ONE_RANK_PER_NODE=0` to use launcher/default mapping, which
+	can speed up MPI-heavy pre-setup stages (e.g., plane strip construction).
 
 Two-phase job run (Phase A then Phase B):
 
