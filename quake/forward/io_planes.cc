@@ -266,6 +266,9 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     MPI_Status  status;
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
