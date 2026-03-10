@@ -52,6 +52,8 @@ fi
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
 KEEP_PHASE_INPUTS="${KEEP_PHASE_INPUTS:-0}"
+FORCE_MESH_REBUILD="${FORCE_MESH_REBUILD:-1}"
+MESH_MTIME_BEFORE=""
 
 trim_ws() {
   local s="$1"
@@ -334,6 +336,13 @@ fi
 
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
   mkdir -p -- "$(dirname -- "${EFFECTIVE_MESH_ETREE_PATH}")"
+  if [[ -e "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
+    MESH_MTIME_BEFORE="$(stat -c %Y "${EFFECTIVE_MESH_ETREE_PATH}" 2>/dev/null || stat -f %m "${EFFECTIVE_MESH_ETREE_PATH}")"
+    if [[ "${FORCE_MESH_REBUILD}" == "1" ]]; then
+      rm -f -- "${EFFECTIVE_MESH_ETREE_PATH}"
+      echo "Removed pre-existing mesh etree before Phase A: ${EFFECTIVE_MESH_ETREE_PATH}"
+    fi
+  fi
 fi
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -345,6 +354,15 @@ fi
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
   echo "ERROR: Phase A did not produce a readable mesh etree file: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
   exit 1
+fi
+
+if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ -n "${MESH_MTIME_BEFORE}" ]]; then
+  MESH_MTIME_AFTER="$(stat -c %Y "${EFFECTIVE_MESH_ETREE_PATH}" 2>/dev/null || stat -f %m "${EFFECTIVE_MESH_ETREE_PATH}")"
+  if [[ "${MESH_MTIME_AFTER}" -le "${MESH_MTIME_BEFORE}" ]]; then
+    echo "ERROR: mesh etree timestamp did not advance after Phase A: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
+    echo "       This indicates Phase A did not rewrite the expected mesh file." >&2
+    exit 1
+  fi
 fi
 
 echo
