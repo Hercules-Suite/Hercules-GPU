@@ -11139,6 +11139,15 @@ static int32_t station_output_use_omp(void) {
     }
   }
 
+  if ((g_stationOutputOmpMode == 1) && (Param.includeTopography == YES)) {
+    if ((Global.myID == 0) && (g_stationOutputOmpReported == 0)) {
+      monitor_print(
+          "Station output OpenMP: disabled for topography path (thread-safety safeguard)\n");
+      g_stationOutputOmpReported = 1;
+    }
+    return 0;
+  }
+
   return g_stationOutputOmpMode;
 #endif
 }
