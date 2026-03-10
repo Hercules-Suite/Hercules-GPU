@@ -10786,19 +10786,44 @@ void broadcast_stations_info() {
  * Prepare all the info every station needs once it is located in a processor
  */
 void setup_stations_data() {
-  static char stationFile[256];
-
   int32_t iStation, iLCStation = 0; /* LC local count */
+  int32_t localCapacity = 0;
+  int32_t* localStationIds = NULL;
+  octant_t** localStationOctants = NULL;
   vector3D_t stationCoords;
   octant_t* octant;
 
-  /* look for the stations in the domain each processor has */
+  /* Locate stations once, cache their owning octants, and reuse that for
+   * per-station setup to avoid a second full search pass. */
   for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
 
     if (search_point(stationCoords, &octant) == 1) {
+      if (Param.myNumberOfStations == localCapacity) {
+        int32_t newCapacity = (localCapacity == 0) ? 1024 : localCapacity * 2;
+        int32_t* newIds =
+            (int32_t*)realloc(localStationIds, sizeof(int32_t) * newCapacity);
+        octant_t** newOctants = (octant_t**)realloc(
+            localStationOctants, sizeof(octant_t*) * newCapacity);
+
+        if ((newIds == NULL) || (newOctants == NULL)) {
+          free(newIds);
+          free(newOctants);
+          free(localStationIds);
+          free(localStationOctants);
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "Error allocating local station setup buffers");
+        }
+
+        localStationIds = newIds;
+        localStationOctants = newOctants;
+        localCapacity = newCapacity;
+      }
+
+      localStationIds[Param.myNumberOfStations] = iStation;
+      localStationOctants[Param.myNumberOfStations] = octant;
       Param.myNumberOfStations++;
     }
   }
@@ -10813,86 +10838,92 @@ void setup_stations_data() {
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
   }
 
-  for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
+#endif
+  for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
+    char stationFile[256];
+
+    iStation = localStationIds[iLCStation];
+    octant = localStationOctants[iLCStation];
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
 
-    if (search_point(stationCoords, &octant) == 1) {
-      Param.myStations[iLCStation].id = iStation;
-      Param.myStations[iLCStation].coords = stationCoords;
-      sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
-      Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
-      compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
-                            &(Param.myStations[iLCStation].localcoords),
-                            Param.myStations[iLCStation].nodestointerpolate);
+    Param.myStations[iLCStation].id = iStation;
+    Param.myStations[iLCStation].coords = stationCoords;
+    sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
+    Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+    compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
+                          &(Param.myStations[iLCStation].localcoords),
+                          Param.myStations[iLCStation].nodestointerpolate);
 
-      /*
-       * This section now enclosed in a DEBUG def because its information
-       * is only useful for debugging purposes and otherwise it just
-       * introduce noise to the post-processing.
-       */
+    /*
+     * This section now enclosed in a DEBUG def because its information
+     * is only useful for debugging purposes and otherwise it just
+     * introduce noise to the post-processing.
+     */
 #ifdef DEBUG
+    fprintf(Param.myStations[iLCStation].fpoutputfile,
+            "# Node identifiers:\n");
+
+    int iNode;
+
+    for (iNode = 0; iNode < 8; iNode++) {
       fprintf(Param.myStations[iLCStation].fpoutputfile,
-              "# Node identifiers:\n");
-
-      int iNode;
-
-      for (iNode = 0; iNode < 8; iNode++) {
-        fprintf(Param.myStations[iLCStation].fpoutputfile,
-                "#  %13" INT64_FMT "\n",
-                Global.myMesh
-                    ->nodeTable[Param.myStations[iLCStation]
-                                    .nodestointerpolate[iNode]]
-                    .gnid);
-      }
+              "#  %13" INT64_FMT "\n",
+              Global.myMesh
+                  ->nodeTable[Param.myStations[iLCStation]
+                                  .nodestointerpolate[iNode]]
+                  .gnid);
+    }
 #endif /* DEBUG */
 
-      /*
-       * This is a one line heading for the station files. Spacing is
-       * such that it aligns with data.
-       *
-       * The lines after X and Y represent the actual orientation of the
-       * axes if one looks at the domain's surface on a screen. Zeta's dot
-       * means the Z axis goes in(+) and out(-) of the screen.
-       */
+    /*
+     * This is a one line heading for the station files. Spacing is
+     * such that it aligns with data.
+     *
+     * The lines after X and Y represent the actual orientation of the
+     * axes if one looks at the domain's surface on a screen. Zeta's dot
+     * means the Z axis goes in(+) and out(-) of the screen.
+     */
 
-      fputs("#  Time(s)         X|(m)         Y-(m)         Z.(m)",
+    fputs("#  Time(s)         X|(m)         Y-(m)         Z.(m)",
+          Param.myStations[iLCStation].fpoutputfile);
+
+    if ((Param.printStationVelocities == YES) ||
+        (Param.printStationAccelerations == YES)) {
+      fputs("       X|(m/s)       Y-(m/s)       Z.(m/s)",
             Param.myStations[iLCStation].fpoutputfile);
+    }
 
-      if ((Param.printStationVelocities == YES) ||
-          (Param.printStationAccelerations == YES)) {
-        fputs("       X|(m/s)       Y-(m/s)       Z.(m/s)",
-              Param.myStations[iLCStation].fpoutputfile);
-      }
-
-      if (Param.printStationAccelerations == YES) {
-        fputs("      X|(m/s2)      Y-(m/s2)      Z.(m/s2)",
-              Param.myStations[iLCStation].fpoutputfile);
-      }
-
-      /*
-       * Additional headings for nonlinear data.
-       */
-      if (Param.includeNonlinearAnalysis == YES) {
-        fputs(
-            "    Epsilon_XX      Sigma_XX"
-            "    Epsilon_YY      Sigma_YY"
-            "    Epsilon_ZZ      Sigma_ZZ"
-            "    Epsilon_KK      Sigma_KK"
-            "    Epsilon_XY      Sigma_XY"
-            "    Epsilon_YZ      Sigma_YZ"
-            "    Epsilon_XZ      Sigma_XZ"
-            "            Fs         Kappa"
-            "       Gamma1d         Tao1d"
-            "         GGmax",
-
+    if (Param.printStationAccelerations == YES) {
+      fputs("      X|(m/s2)      Y-(m/s2)      Z.(m/s2)",
             Param.myStations[iLCStation].fpoutputfile);
-      }
+    }
 
-      iLCStation += 1;
+    /*
+     * Additional headings for nonlinear data.
+     */
+    if (Param.includeNonlinearAnalysis == YES) {
+      fputs(
+          "    Epsilon_XX      Sigma_XX"
+          "    Epsilon_YY      Sigma_YY"
+          "    Epsilon_ZZ      Sigma_ZZ"
+          "    Epsilon_KK      Sigma_KK"
+          "    Epsilon_XY      Sigma_XY"
+          "    Epsilon_YZ      Sigma_YZ"
+          "    Epsilon_XZ      Sigma_XZ"
+          "            Fs         Kappa"
+          "       Gamma1d         Tao1d"
+          "         GGmax",
+          Param.myStations[iLCStation].fpoutputfile);
     }
   }
+
+  free(localStationIds);
+  free(localStationOctants);
 
   free(Param.theStationX);
   free(Param.theStationY);
@@ -11097,12 +11128,32 @@ static int32_t station_output_use_omp(void) {
  * Init stations info and data structures
  */
 void output_stations_init(const char* numericalin) {
+  double t0, t1, setupSeconds, setupSecondsMax;
+  int32_t localStations = 0;
+  int32_t totalStations = 0;
+
+  t0 = MPI_Wtime();
+
   if (Global.myID == 0) {
     read_stations_info(numericalin);
   }
 
   broadcast_stations_info();
   setup_stations_data();
+
+  t1 = MPI_Wtime();
+  setupSeconds = t1 - t0;
+  localStations = Param.myNumberOfStations;
+  MPI_Reduce(&setupSeconds, &setupSecondsMax, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&localStations, &totalStations, 1, MPI_INT, MPI_SUM, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    monitor_print(
+        "Station setup complete: total=%d max-rank-time=%.2fs\n",
+        totalStations, setupSecondsMax);
+  }
 
   MPI_Barrier(comm_solver);
 
