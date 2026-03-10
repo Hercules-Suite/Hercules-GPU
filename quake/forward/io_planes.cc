@@ -198,7 +198,7 @@ void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
  */
 int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 {
-    int iPlane, iPhi;
+	int iPlane, iPhi;
     int stripLength;
     int iStrip, elemnum, rStrip;
     /* Auxiliar array to handle shapefunctions in a loop */
@@ -206,7 +206,6 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
 		       {-1, -1, -1, -1,  1,  1,  1, 1} };
 
-    double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
     //    int32_t     howManyDisplacements, iDisplacement;
     //    vector3D_t* localCoords; /* convinient renaming */
@@ -233,7 +232,7 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    /* interpolate points directly into send buffer for this strip */
 	#ifdef _OPENMP
 	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	    private(iPhi, displacementsX, displacementsY, displacementsZ)
 	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
@@ -288,18 +287,18 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	} else {
 	    		for (iPhi = 0; iPhi < 8; iPhi++){
-	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
+	    			double phii = ( 1 + (xi[0][iPhi]) *
 	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
 	    					* ( 1 + (xi[1][iPhi]) *
 	    							(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) )
 	    							* ( 1 + (xi[2][iPhi]) *
 	    									(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) ) /8;
 
-	    			displacementsX += phi[iPhi]*
+	    			displacementsX += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[0]);
-	    			displacementsY += phi[iPhi]*
+	    			displacementsY += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[1]);
-	    			displacementsZ += phi[iPhi]*
+	    			displacementsZ += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[2]);
 	    		}
 	    	}
@@ -1234,7 +1233,6 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
 		       {-1, -1, -1, -1,  1,  1,  1, 1} };
 
-    double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
 #ifdef _OPENMP
     const int32_t useOmp = plane_output_use_omp();
@@ -1249,7 +1247,7 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	    /* interpolate points directly into send buffer for this strip */
 	#ifdef _OPENMP
 	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	    private(iPhi, displacementsX, displacementsY, displacementsZ)
 	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++){
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
@@ -1303,18 +1301,18 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	} else {
 	    		for (iPhi = 0; iPhi < 8; iPhi++){
-	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
+	    			double phii = ( 1 + (xi[0][iPhi]) *
 	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
 	    					* ( 1 + (xi[1][iPhi]) *
 	    							(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) )
 	    							* ( 1 + (xi[2][iPhi]) *
 	    									(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) ) /8;
 
-	    			displacementsX += phi[iPhi]*
+	    			displacementsX += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[0]);
-	    			displacementsY += phi[iPhi]*
+	    			displacementsY += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[1]);
-	    			displacementsZ += phi[iPhi]*
+	    			displacementsZ += phii*
 	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[2]);
 	    		}
 	    	}
