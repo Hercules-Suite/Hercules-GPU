@@ -10838,10 +10838,6 @@ void setup_stations_data() {
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
   }
 
-#ifdef _OPENMP
-  const int32_t useOmp = station_output_use_omp();
-#pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
-#endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
     char stationFile[256];
 
