@@ -128,6 +128,8 @@ static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
 static int32_t g_stationOutputLazyOpenMode = -1;
+static int32_t g_stationSetupOmpMode = -1;
+static int32_t g_stationSetupOmpReported = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -329,6 +331,7 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
+static int32_t station_setup_use_omp(void);
 static int32_t station_output_lazy_open(void);
 static FILE* station_open_output_file(int32_t iStation);
 static int compare_adjust_dn_order(const void* a, const void* b);
@@ -10792,9 +10795,10 @@ void setup_stations_data() {
   int32_t iStation, iLCStation = 0; /* LC local count */
   int32_t* localStationIds = NULL;
   octant_t** stationOctants = NULL;
+  unsigned char* stationOwned = NULL;
+  int32_t stationCount = 0;
   double t0 = MPI_Wtime();
-  vector3D_t stationCoords;
-  octant_t* octant;
+  const int32_t useSetupOmp = station_setup_use_omp();
 
   if (Global.myID == 0) {
     monitor_print("Stations init: scanning %d stations for local ownership...\n",
@@ -10804,22 +10808,42 @@ void setup_stations_data() {
   if (Param.theNumberOfStations > 0) {
     localStationIds = (int32_t*)malloc(sizeof(int32_t) * Param.theNumberOfStations);
     stationOctants = (octant_t**)malloc(sizeof(octant_t*) * Param.theNumberOfStations);
-    if ((localStationIds == NULL) || (stationOctants == NULL)) {
+    stationOwned =
+        (unsigned char*)calloc((size_t)Param.theNumberOfStations, sizeof(unsigned char));
+    if ((localStationIds == NULL) || (stationOctants == NULL) ||
+        (stationOwned == NULL)) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Error allocating station ownership scratch arrays");
     }
   }
 
   /* look for the stations in the domain each processor has */
+#ifdef _OPENMP
+#pragma omp parallel for if(useSetupOmp) schedule(static) reduction(+ : stationCount)
+#endif
   for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
+    vector3D_t stationCoords;
+    octant_t* octant = NULL;
+
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
 
     if (search_point(stationCoords, &octant) == 1) {
-      localStationIds[Param.myNumberOfStations] = iStation;
-      stationOctants[Param.myNumberOfStations] = octant;
-      Param.myNumberOfStations++;
+      stationOwned[iStation] = 1;
+      stationOctants[iStation] = octant;
+      stationCount++;
+    } else {
+      stationOwned[iStation] = 0;
+      stationOctants[iStation] = NULL;
+    }
+  }
+
+  Param.myNumberOfStations = stationCount;
+
+  for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
+    if (stationOwned[iStation] != 0) {
+      localStationIds[iLCStation++] = iStation;
     }
   }
 
@@ -10839,9 +10863,15 @@ void setup_stations_data() {
   }
 
   t0 = MPI_Wtime();
+#ifdef _OPENMP
+#pragma omp parallel for if(useSetupOmp) schedule(static)
+#endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
+    vector3D_t stationCoords;
+    octant_t* octant;
+
     iStation = localStationIds[iLCStation];
-    octant = stationOctants[iLCStation];
+    octant = stationOctants[iStation];
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
@@ -10851,13 +10881,14 @@ void setup_stations_data() {
       compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                 &(Param.myStations[iLCStation].localcoords),
                 Param.myStations[iLCStation].nodestointerpolate);
+      Param.myStations[iLCStation].fpoutputfile = NULL;
+  }
 
-      if (station_output_lazy_open() == 0) {
-        Param.myStations[iLCStation].fpoutputfile =
-        station_open_output_file(iLCStation);
-      } else {
-        Param.myStations[iLCStation].fpoutputfile = NULL;
-      }
+  if (station_output_lazy_open() == 0) {
+    for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
+      Param.myStations[iLCStation].fpoutputfile =
+          station_open_output_file(iLCStation);
+    }
   }
 
   if (Global.myID == 0) {
@@ -10867,6 +10898,7 @@ void setup_stations_data() {
 
   free(localStationIds);
   free(stationOctants);
+  free(stationOwned);
 
   free(Param.theStationX);
   free(Param.theStationY);
@@ -11136,6 +11168,37 @@ static int32_t station_output_use_omp(void) {
   }
 
   return g_stationOutputOmpMode;
+#endif
+}
+
+static int32_t station_setup_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (g_stationSetupOmpMode < 0) {
+    const char* env = getenv("HERCULES_STATION_SETUP_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_stationSetupOmpMode = 0;
+      } else {
+        g_stationSetupOmpMode = 1;
+      }
+    } else {
+      /* Default to off unless explicitly enabled by env/script. */
+      g_stationSetupOmpMode = 0;
+    }
+
+    if ((g_stationSetupOmpMode == 1) && (Global.myID == 0) &&
+        (g_stationSetupOmpReported == 0)) {
+      monitor_print("Station setup OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_stationSetupOmpReported = 1;
+    }
+  }
+
+  return g_stationSetupOmpMode;
 #endif
 }
 
