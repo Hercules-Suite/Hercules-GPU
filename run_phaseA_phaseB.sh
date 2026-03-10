@@ -114,6 +114,34 @@ resolve_path() {
   fi
 }
 
+resolve_mesh_path() {
+  local p="$1"
+  local case_dir="$2"
+  local base_in_dir="$3"
+  local case_path=""
+  local base_path=""
+
+  if [[ -z "${p}" ]]; then
+    return
+  fi
+
+  if [[ "${p}" = /* ]]; then
+    printf '%s' "${p}"
+    return
+  fi
+
+  case_path="${case_dir}/${p}"
+  base_path="${base_in_dir}/${p}"
+
+  # Prefer case-relative resolution for generated two-phase runs.
+  # If only an inputfile-relative file already exists, preserve compatibility.
+  if [[ -e "${base_path}" && ! -e "${case_path}" ]]; then
+    printf '%s' "${base_path}"
+  else
+    printf '%s' "${case_path}"
+  fi
+}
+
 make_phase_input() {
   local src="$1"
   local dst="$2"
@@ -181,10 +209,11 @@ if [[ -n "${BASE_IN}" ]]; then
 
   # Normalize mesh etree path so both phases use the same absolute location.
   BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
+  CASE_DIR_ABS="$(cd -- "${CASE_DIR}" && pwd)"
   MESH_ETREE_RAW="$(extract_config_value "${BASE_IN}" "mesh_etree_output_file")"
   MESH_ETREE_RAW="$(trim_ws "${MESH_ETREE_RAW}")"
   if [[ -n "${MESH_ETREE_RAW}" ]]; then
-    EFFECTIVE_MESH_ETREE_PATH="$(resolve_path "${MESH_ETREE_RAW}" "${BASE_IN_DIR}")"
+    EFFECTIVE_MESH_ETREE_PATH="$(resolve_mesh_path "${MESH_ETREE_RAW}" "${CASE_DIR_ABS}" "${BASE_IN_DIR}")"
     TMP_FIX_A="${TMP_PHASE_A_IN}.fix"
     TMP_FIX_B="${TMP_PHASE_B_IN}.fix"
     set_or_add_param "${TMP_PHASE_A_IN}" "${TMP_FIX_A}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
