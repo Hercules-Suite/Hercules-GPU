@@ -692,6 +692,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				for (int n = 0; n < 8; n++) {
 					thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[n] = 0;
 				}
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
 				thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
 
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1136,6 +1139,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 			for (int n = 0; n < 8; n++) {
 				thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[n] = 0;
 			}
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
 			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
 
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
