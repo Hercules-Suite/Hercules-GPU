@@ -238,6 +238,24 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
+		{
+		    int nodeLimit = -1;
+		    int nodeNeed = (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) ? 4 : 8;
+		    if ((mySolver != NULL) && (mySolver->gpuData != NULL)) {
+			nodeLimit = mySolver->gpuData->nharbored;
+		    }
+		    if (nodeLimit > 0) {
+			for (iPhi = 0; iPhi < nodeNeed; iPhi++) {
+			    int nid = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    if ((nid < 0) || (nid >= nodeLimit)) {
+				solver_abort("Old_planes_print", NULL,
+				             "Error: invalid plane node id %d (limit=%d plane=%d strip=%d elem=%d topo=%d)",
+				             nid, nodeLimit, iPlane, iStrip, elemnum,
+				             thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
+			    }
+			}
+		    }
+		}
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
@@ -685,6 +703,12 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					elemnum < elemCount;
     				elemnum++)
     		{
+				for (int n = 0; n < 8; n++) {
+					thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[n] = 0;
+				}
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+				thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
 				thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 0;
 
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1130,6 +1154,12 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		     elemnum < elemCount;
 		     elemnum++)
 		    {
+			for (int n = 0; n < 8; n++) {
+				thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[n] = 0;
+			}
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+			thePlanes[iPlane].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
 			thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 0;
 
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1223,6 +1253,24 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++){
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
+		{
+		    int nodeLimit = -1;
+		    int nodeNeed = (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) ? 4 : 8;
+		    if ((mySolver != NULL) && (mySolver->gpuData != NULL)) {
+			nodeLimit = mySolver->gpuData->nharbored;
+		    }
+		    if (nodeLimit > 0) {
+			for (iPhi = 0; iPhi < nodeNeed; iPhi++) {
+			    int nid = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    if ((nid < 0) || (nid >= nodeLimit)) {
+				solver_abort("New_planes_print", NULL,
+				             "Error: invalid plane node id %d (limit=%d plane=%d strip=%d elem=%d topo=%d)",
+				             nid, nodeLimit, iPlane, iStrip, elemnum,
+				             thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
+			    }
+			}
+		    }
+		}
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
