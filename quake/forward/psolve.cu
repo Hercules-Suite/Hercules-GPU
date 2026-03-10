@@ -12444,6 +12444,10 @@ int main(int argc, char** argv) {
 
   /* Initialize the output planes */
   if (Param.theNumberOfPlanes != 0) {
+    double planesSetupStart = MPI_Wtime();
+    double planesSetupElapsed;
+    double planesSetupElapsedMax;
+
     Timer_Start("Pre Setup Planes Init");
     planes_setup(Global.myID, &Param.thePlanePrintRate, Param.thePlaneDirOut,
                  Param.IO_pool_pe_count, Param.theNumberOfPlanes,
@@ -12452,6 +12456,15 @@ int main(int argc, char** argv) {
                  Param.theDomainX, Param.theDomainY, Param.theDomainZ,
                  Param.planes_input_file, &Param.utmZone);
     Timer_Stop("Pre Setup Planes Init");
+
+    planesSetupElapsed = MPI_Wtime() - planesSetupStart;
+    MPI_Reduce(&planesSetupElapsed, &planesSetupElapsedMax, 1, MPI_DOUBLE,
+               MPI_MAX, 0, comm_solver);
+    if (Global.myID == 0) {
+      monitor_print(
+          "Plane setup complete: total=%d max-rank-time=%.2fs\n",
+          Param.theNumberOfPlanes, planesSetupElapsedMax);
+    }
   }
 
   /* Initialize the solver, source and output structures */
