@@ -119,6 +119,7 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
+static int32_t g_planeOutputOmpForcedSerialReported = 0;
 
 static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
@@ -145,6 +146,28 @@ static int32_t plane_output_use_omp(void) {
 						omp_get_max_threads());
 			}
 			g_planeOutputOmpReported = 1;
+		}
+	}
+
+	if (g_planeOutputOmpMode == 1) {
+		/*
+		 * Safety-first fallback: plane interpolation has shown severe numeric
+		 * instability at high thread counts on production runs.
+		 */
+		if (omp_get_max_threads() > 1) {
+			if ((g_planeOutputOmpForcedSerialReported == 0)) {
+				if (g_planeOutputRankCached < 0) {
+					MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
+				}
+				if (g_planeOutputRankCached == 0) {
+					fprintf(stderr,
+					        "Plane output OpenMP: forcing serial for correctness "
+					        "(requested threads=%d)\n",
+					        omp_get_max_threads());
+				}
+				g_planeOutputOmpForcedSerialReported = 1;
+			}
+			return 0;
 		}
 	}
 
