@@ -51,6 +51,68 @@ fi
 
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
+KEEP_PHASE_INPUTS="${KEEP_PHASE_INPUTS:-0}"
+
+trim_ws() {
+  local s="$1"
+  # Strip leading/trailing whitespace without external dependencies.
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+extract_config_value() {
+  local file="$1"
+  local key="$2"
+  awk -v k="${key}" '
+    {
+      line = $0
+      sub(/#.*/, "", line)
+      if (line ~ "^[[:space:]]*" k "[[:space:]]*=") {
+        sub("^[[:space:]]*" k "[[:space:]]*=[[:space:]]*", "", line)
+        print line
+        exit
+      }
+    }
+  ' "${file}"
+}
+
+set_or_add_param() {
+  local src="$1"
+  local dst="$2"
+  local key="$3"
+  local value="$4"
+
+  awk -v k="${key}" -v v="${value}" '
+    BEGIN { seen = 0 }
+    {
+      if ($0 ~ "^[[:space:]]*" k "[[:space:]]*=") {
+        printf "%s = %s\n", k, v
+        seen = 1
+      } else {
+        print $0
+      }
+    }
+    END {
+      if (!seen) {
+        printf "%s = %s\n", k, v
+      }
+    }
+  ' "${src}" >"${dst}"
+}
+
+resolve_path() {
+  local p="$1"
+  local base_dir="$2"
+  if [[ -z "${p}" ]]; then
+    return
+  fi
+  if [[ "${p}" = /* ]]; then
+    printf '%s' "${p}"
+  else
+    printf '%s' "${base_dir}/${p}"
+  fi
+}
 
 make_phase_input() {
   local src="$1"
@@ -106,6 +168,9 @@ if [[ -n "${BASE_IN}" ]]; then
   TMP_PHASE_B_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB.XXXXXX.in")"
 
   cleanup_tmp_inputs() {
+    if [[ "${KEEP_PHASE_INPUTS}" == "1" ]]; then
+      return
+    fi
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
   }
@@ -113,6 +178,21 @@ if [[ -n "${BASE_IN}" ]]; then
 
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
+
+  # Normalize mesh etree path so both phases use the same absolute location.
+  BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
+  MESH_ETREE_RAW="$(extract_config_value "${BASE_IN}" "mesh_etree_output_file")"
+  MESH_ETREE_RAW="$(trim_ws "${MESH_ETREE_RAW}")"
+  if [[ -n "${MESH_ETREE_RAW}" ]]; then
+    EFFECTIVE_MESH_ETREE_PATH="$(resolve_path "${MESH_ETREE_RAW}" "${BASE_IN_DIR}")"
+    TMP_FIX_A="${TMP_PHASE_A_IN}.fix"
+    TMP_FIX_B="${TMP_PHASE_B_IN}.fix"
+    set_or_add_param "${TMP_PHASE_A_IN}" "${TMP_FIX_A}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
+    set_or_add_param "${TMP_PHASE_B_IN}" "${TMP_FIX_B}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
+    mv -f "${TMP_FIX_A}" "${TMP_PHASE_A_IN}"
+    mv -f "${TMP_FIX_B}" "${TMP_PHASE_B_IN}"
+  fi
+
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
 fi
@@ -188,6 +268,12 @@ if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
   echo "Phase B input:  ${PHASE_B_IN} (generated)"
+  if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
+    echo "Mesh etree:     ${EFFECTIVE_MESH_ETREE_PATH}"
+  fi
+  if [[ "${KEEP_PHASE_INPUTS}" == "1" ]]; then
+    echo "Keep phase inputs: enabled"
+  fi
 else
   echo "Phase A input:  ${PHASE_A_IN}"
   echo "Phase B input:  ${PHASE_B_IN}"
@@ -216,10 +302,20 @@ if [[ -n "${PHASE_A_MPI_ARGS}" ]]; then
 else
   A_ARGS=()
 fi
+
+if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
+  mkdir -p -- "$(dirname -- "${EFFECTIVE_MESH_ETREE_PATH}")"
+fi
+
 if [[ -n "${PHASE_A_NP}" ]]; then
   "${MPI_RUN}" -np "${PHASE_A_NP}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
 else
   "${MPI_RUN}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
+fi
+
+if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
+  echo "ERROR: Phase A did not produce a readable mesh etree file: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
+  exit 1
 fi
 
 echo

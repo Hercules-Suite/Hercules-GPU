@@ -3064,6 +3064,14 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
 
   if (etree_search(Global.theMeshInputEp, search_addr, hit_addr, NULL,
                    hit_data) != 0) {
+    fprintf(stderr,
+            "Thread %d: mesh_etree_lookup failed: file=%s leaf=(%d,%d,%d,l=%d) "
+            "search=(%d,%d,%d,l=%d,t=%d) edge_ticks=%d\n",
+            Global.myID, Param.mesh_etree_output_file, leaf->lx, leaf->ly,
+            leaf->lz, leaf->level, (int32_t)search_addr.x,
+            (int32_t)search_addr.y, (int32_t)search_addr.z,
+            (int32_t)search_addr.level, (int32_t)search_addr.type,
+            (int32_t)edge_ticks);
     return -1;
   }
 
