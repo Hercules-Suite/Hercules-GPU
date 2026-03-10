@@ -35,7 +35,6 @@ PHASE_A_IN="${PHASE_A_IN:-${PHASE_A_DEFAULT_IN}}"
 PHASE_B_IN="${PHASE_B_IN:-${PHASE_B_DEFAULT_IN}}"
 PHASE_A_MPI_ARGS="${PHASE_A_MPI_ARGS:-}"
 PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
-PHASE_B_ONE_RANK_PER_NODE="${PHASE_B_ONE_RANK_PER_NODE:-1}"
 
 if [[ $# -ge 3 ]]; then
   BASE_IN="$3"
@@ -177,12 +176,7 @@ if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   exit 1
 fi
 
-if ! [[ "${PHASE_B_ONE_RANK_PER_NODE}" =~ ^[01]$ ]]; then
-  echo "ERROR: PHASE_B_ONE_RANK_PER_NODE must be 0 or 1" >&2
-  exit 1
-fi
-
-if [[ "${PHASE_B_ONE_RANK_PER_NODE}" -eq 1 ]] && [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
+if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
   echo "ERROR: requested Phase B ranks (${PHASE_B_NP}) exceed allocated nodes (${ALLOC_NODES})." >&2
   echo "       Use <= allocated node count to guarantee one rank per node." >&2
   exit 1
@@ -210,11 +204,7 @@ if [[ -n "${PHASE_A_NP}" ]]; then
 else
   echo "Phase A ranks:  launcher default"
 fi
-if [[ "${PHASE_B_ONE_RANK_PER_NODE}" -eq 1 ]]; then
-  echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
-else
-  echo "Phase B ranks:  ${PHASE_B_NP} (launcher/default mapping)"
-fi
+echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -235,22 +225,14 @@ else
 fi
 
 echo
-if [[ "${PHASE_B_ONE_RANK_PER_NODE}" -eq 1 ]]; then
-  echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_B_IN}"
-else
-  echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} ${PSOLVE_BIN} ${PHASE_B_IN}"
-fi
+echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_B_IN}"
 if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
   # shellcheck disable=SC2206
   B_ARGS=(${PHASE_B_MPI_ARGS})
 else
   B_ARGS=()
 fi
-if [[ "${PHASE_B_ONE_RANK_PER_NODE}" -eq 1 ]]; then
-  "${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
-else
-  "${MPI_RUN}" -np "${PHASE_B_NP}" "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
-fi
+"${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 
 echo
 echo "Two-phase run completed."
