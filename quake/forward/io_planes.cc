@@ -120,6 +120,39 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
+static int32_t g_planeNodeBoundsWarned = 0;
+
+static int32_t plane_nodes_in_bounds(const mysolver_t* mySolver,
+									 const int32_t* nodes,
+									 int32_t topostrip) {
+	int32_t nmax = -1;
+	int32_t i;
+	int32_t count = topostrip ? 4 : 8;
+
+	if ((mySolver == NULL) || (mySolver->gpuData == NULL)) {
+		return 1;
+	}
+
+	nmax = mySolver->gpuData->nharbored;
+	if (nmax <= 0) {
+		return 1;
+	}
+
+	for (i = 0; i < count; i++) {
+		if ((nodes[i] < 0) || (nodes[i] >= nmax)) {
+			if (!g_planeNodeBoundsWarned) {
+				fprintf(stderr,
+						"Warning: plane output encountered out-of-range node index "
+						"(%d not in [0,%d)); zeroing affected samples.\n",
+						nodes[i], nmax);
+				g_planeNodeBoundsWarned = 1;
+			}
+			return 0;
+		}
+	}
+
+	return 1;
+}
 
 static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
@@ -236,6 +269,10 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	if (!thePlanes[iPlane].strip[iStrip][elemnum].valid) {
 	    	    /* Keep zero displacement for points that failed strip mapping. */
+	    	} else if (!plane_nodes_in_bounds(mySolver,
+	    	        thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate,
+	    	        thePlanes[iPlane].strip[iStrip][elemnum].topostrip)) {
+	    	    /* Keep zero displacement for corrupted node mappings. */
 	    	} else if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
@@ -1230,6 +1267,10 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	if (!thePlanes[iPlane].strip[iStrip][elemnum].valid) {
 	    	    /* Keep zero displacement for points that failed strip mapping. */
+	    	} else if (!plane_nodes_in_bounds(mySolver,
+	    	        thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate,
+	    	        thePlanes[iPlane].strip[iStrip][elemnum].topostrip)) {
+	    	    /* Keep zero displacement for corrupted node mappings. */
 	    	} else if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
