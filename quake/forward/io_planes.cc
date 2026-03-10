@@ -238,6 +238,18 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+			for (iPhi = 0; iPhi < 4; iPhi++) {
+			    int32_t n = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    double vx = mySolver->tm1[n].f[0];
+			    double vy = mySolver->tm1[n].f[1];
+			    double vz = mySolver->tm1[n].f[2];
+			    if (!isfinite(vx) || !isfinite(vy) || !isfinite(vz) ||
+			        fabs(vx) > 1.0e6 || fabs(vy) > 1.0e6 || fabs(vz) > 1.0e6) {
+				solver_abort("Old_planes_print", NULL,
+				           "Invalid tm1 displacement at node=%d val=(%g,%g,%g) plane=%d strip=%d elem=%d",
+				           n, vx, vy, vz, iPlane, iStrip, elemnum);
+			    }
+			}
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
 	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
@@ -268,6 +280,16 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	} else {
 	    		for (iPhi = 0; iPhi < 8; iPhi++){
+			    int32_t n = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    double vx = mySolver->tm1[n].f[0];
+			    double vy = mySolver->tm1[n].f[1];
+			    double vz = mySolver->tm1[n].f[2];
+			    if (!isfinite(vx) || !isfinite(vy) || !isfinite(vz) ||
+			        fabs(vx) > 1.0e6 || fabs(vy) > 1.0e6 || fabs(vz) > 1.0e6) {
+				solver_abort("Old_planes_print", NULL,
+				           "Invalid tm1 displacement at node=%d val=(%g,%g,%g) plane=%d strip=%d elem=%d",
+				           n, vx, vy, vz, iPlane, iStrip, elemnum);
+			    }
 	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
 	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
 	    					* ( 1 + (xi[1][iPhi]) *
@@ -1178,6 +1200,18 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+			for (iPhi = 0; iPhi < 4; iPhi++) {
+			    int32_t n = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    double vx = mySolver->tm1[n].f[0];
+			    double vy = mySolver->tm1[n].f[1];
+			    double vz = mySolver->tm1[n].f[2];
+			    if (!isfinite(vx) || !isfinite(vy) || !isfinite(vz) ||
+			        fabs(vx) > 1.0e6 || fabs(vy) > 1.0e6 || fabs(vz) > 1.0e6) {
+				solver_abort("New_planes_print", NULL,
+				           "Invalid tm1 displacement at node=%d val=(%g,%g,%g) plane=%d strip=%d elem=%d",
+				           n, vx, vy, vz, iPlane, iStrip, elemnum);
+			    }
+			}
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
 	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
@@ -1208,6 +1242,16 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    	} else {
 	    		for (iPhi = 0; iPhi < 8; iPhi++){
+			    int32_t n = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    double vx = mySolver->tm1[n].f[0];
+			    double vy = mySolver->tm1[n].f[1];
+			    double vz = mySolver->tm1[n].f[2];
+			    if (!isfinite(vx) || !isfinite(vy) || !isfinite(vz) ||
+			        fabs(vx) > 1.0e6 || fabs(vy) > 1.0e6 || fabs(vz) > 1.0e6) {
+				solver_abort("New_planes_print", NULL,
+				           "Invalid tm1 displacement at node=%d val=(%g,%g,%g) plane=%d strip=%d elem=%d",
+				           n, vx, vy, vz, iPlane, iStrip, elemnum);
+			    }
 	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
 	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
 	    					* ( 1 + (xi[1][iPhi]) *
