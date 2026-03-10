@@ -277,6 +277,18 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 			    }
 			}
 		    }
+		    {
+			double lc0 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0];
+			double lc1 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1];
+			double lc2 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2];
+			if ((!isfinite(lc0)) || (!isfinite(lc1)) || (!isfinite(lc2)) ||
+			    (fabs(lc0) > 2.0) || (fabs(lc1) > 2.0) || (fabs(lc2) > 2.0)) {
+			    solver_abort("Old_planes_print", NULL,
+			                 "Error: invalid plane localcoords (%e,%e,%e) plane=%d strip=%d elem=%d topo=%d",
+			                 lc0, lc1, lc2, iPlane, iStrip, elemnum,
+			                 thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
+			}
+		    }
 		}
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
@@ -1289,6 +1301,18 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 				             nid, nodeLimit, iPlane, iStrip, elemnum,
 				             thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
 			    }
+			}
+		    }
+		    {
+			double lc0 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0];
+			double lc1 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1];
+			double lc2 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2];
+			if ((!isfinite(lc0)) || (!isfinite(lc1)) || (!isfinite(lc2)) ||
+			    (fabs(lc0) > 2.0) || (fabs(lc1) > 2.0) || (fabs(lc2) > 2.0)) {
+			    solver_abort("New_planes_print", NULL,
+			                 "Error: invalid plane localcoords (%e,%e,%e) plane=%d strip=%d elem=%d topo=%d",
+			                 lc0, lc1, lc2, iPlane, iStrip, elemnum,
+			                 thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
 			}
 		    }
 		}
