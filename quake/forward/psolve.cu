@@ -10795,10 +10795,9 @@ void setup_stations_data() {
   int32_t iStation, iLCStation = 0; /* LC local count */
   int32_t* localStationIds = NULL;
   octant_t** stationOctants = NULL;
-  unsigned char* stationOwned = NULL;
-  int32_t stationCount = 0;
   double t0 = MPI_Wtime();
-  const int32_t useSetupOmp = station_setup_use_omp();
+  vector3D_t stationCoords;
+  octant_t* octant;
 
   if (Global.myID == 0) {
     monitor_print("Stations init: scanning %d stations for local ownership...\n",
@@ -10808,42 +10807,22 @@ void setup_stations_data() {
   if (Param.theNumberOfStations > 0) {
     localStationIds = (int32_t*)malloc(sizeof(int32_t) * Param.theNumberOfStations);
     stationOctants = (octant_t**)malloc(sizeof(octant_t*) * Param.theNumberOfStations);
-    stationOwned =
-        (unsigned char*)calloc((size_t)Param.theNumberOfStations, sizeof(unsigned char));
-    if ((localStationIds == NULL) || (stationOctants == NULL) ||
-        (stationOwned == NULL)) {
+    if ((localStationIds == NULL) || (stationOctants == NULL)) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Error allocating station ownership scratch arrays");
     }
   }
 
   /* look for the stations in the domain each processor has */
-#ifdef _OPENMP
-#pragma omp parallel for if(useSetupOmp) schedule(static) reduction(+ : stationCount)
-#endif
   for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
-    vector3D_t stationCoords;
-    octant_t* octant = NULL;
-
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
 
     if (search_point(stationCoords, &octant) == 1) {
-      stationOwned[iStation] = 1;
-      stationOctants[iStation] = octant;
-      stationCount++;
-    } else {
-      stationOwned[iStation] = 0;
-      stationOctants[iStation] = NULL;
-    }
-  }
-
-  Param.myNumberOfStations = stationCount;
-
-  for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
-    if (stationOwned[iStation] != 0) {
-      localStationIds[iLCStation++] = iStation;
+      localStationIds[Param.myNumberOfStations] = iStation;
+      stationOctants[Param.myNumberOfStations] = octant;
+      Param.myNumberOfStations++;
     }
   }
 
@@ -10863,15 +10842,9 @@ void setup_stations_data() {
   }
 
   t0 = MPI_Wtime();
-#ifdef _OPENMP
-#pragma omp parallel for if(useSetupOmp) schedule(static)
-#endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
-    vector3D_t stationCoords;
-    octant_t* octant;
-
     iStation = localStationIds[iLCStation];
-    octant = stationOctants[iStation];
+    octant = stationOctants[iLCStation];
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
@@ -10898,7 +10871,6 @@ void setup_stations_data() {
 
   free(localStationIds);
   free(stationOctants);
-  free(stationOwned);
 
   free(Param.theStationX);
   free(Param.theStationY);

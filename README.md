@@ -34,7 +34,7 @@ Runtime performance toggles (no source edits needed):
 - `HERCULES_STATION_SETUP_OMP=1|0`
 	Enables or disables OpenMP parallelization in station startup setup
 	(ownership scan + interpolation metadata prep). Solver default is `0`
-	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `0`.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`
@@ -60,7 +60,7 @@ Two-phase script defaults:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
-	`HERCULES_STATION_LAZY_OPEN=1`, `HERCULES_STATION_SETUP_OMP=1`,
+	`HERCULES_STATION_LAZY_OPEN=1`, `HERCULES_STATION_SETUP_OMP=0`,
 	`HERCULES_PLANE_IO_OMP=1`, `HERCULES_PLANE_SETUP_OMP=1`,
 	`HERCULES_OCTOR_CHUNK_DIAG=1`.
 - You can still override any of these by exporting your own value before
@@ -85,7 +85,7 @@ export HERCULES_ADJUST_DIST_OMP=1
 export HERCULES_SPARSE_CLEAR_MODE=auto
 export HERCULES_STATION_IO_OMP=1
 export HERCULES_STATION_LAZY_OPEN=1
-export HERCULES_STATION_SETUP_OMP=1
+export HERCULES_STATION_SETUP_OMP=0
 export HERCULES_PLANE_IO_OMP=1
 export HERCULES_PLANE_SETUP_OMP=1
 export HERCULES_OCTOR_CHUNK_DIAG=1
