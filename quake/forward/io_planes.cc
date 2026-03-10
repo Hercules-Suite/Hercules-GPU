@@ -302,10 +302,6 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     MPI_Status  status;
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
-#ifdef _OPENMP
-	const int32_t useOmp = plane_output_use_omp();
-#endif
-
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
@@ -313,9 +309,6 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	        - thePlanes[iPlane].stripstart[iStrip] + 1;
 
 	    /* interpolate points directly into send buffer for this strip */
-	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static)
-	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
 	    	double displacementsX;
@@ -1241,9 +1234,6 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	int iPlane;
 	int stripLength;
 	int iStrip, elemnum;
-#ifdef _OPENMP
-    const int32_t useOmp = plane_output_use_omp();
-#endif
 
 	(void)PENum;
 
@@ -1254,9 +1244,6 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 				- thePlanes[iPlane].stripstart[iStrip] + 1;
 
 			/* interpolate points directly into send buffer for this strip */
-#ifdef _OPENMP
-#pragma omp parallel for if(useOmp) schedule(static)
-#endif
 			for (elemnum = 0; elemnum < elemCount; elemnum++) {
 				double displacementsX;
 				double displacementsY;
