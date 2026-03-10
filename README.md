@@ -29,7 +29,8 @@ Runtime performance toggles (no source edits needed):
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
-	interpolation before MPI send/write. Solver default is `0`
+	interpolation before MPI send/write. Plane strip construction
+	(search/octant mapping) is kept serial for correctness. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 
 Build note:

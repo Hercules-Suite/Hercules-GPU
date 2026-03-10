@@ -539,216 +539,154 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 
 static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlanes)
 {
+	int iPlane, iStrike, iDownDip;
+	double xLocal, yLocal;
+	vector3D_t origin, pointLocal, pointGlobal;
+	octant_t *octant;
+	int onstrip;
 
-    //    int iNode, iPlane, iStrike, iDownDip;
-    int iPlane, iStrike, iDownDip;
-    double xLocal, yLocal;
-    vector3D_t origin, pointLocal, pointGlobal;
-    octant_t *octant;
-    int onstrip ;
-#ifdef _OPENMP
-	const int32_t useOmp = plane_output_use_omp();
-#endif
-    //    int32_t nodesToInterpolate[8];
+	planes_LocalLargestStripCount = 0;
 
-    planes_LocalLargestStripCount = 0;
+	for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+		thePlanes[iPlane].numberofstripsthisplane = 0;
+		origin.x[0] = thePlanes[iPlane].origincoords.x[0];
+		origin.x[1] = thePlanes[iPlane].origincoords.x[1];
+		origin.x[2] = thePlanes[iPlane].origincoords.x[2];
 
-    for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
-    	thePlanes[ iPlane ].numberofstripsthisplane = 0;
-    	/* Compute the coordinates of the nodes of the plane */
-    	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
-    	origin.x[1] = thePlanes[ iPlane ].origincoords.x[1];
-    	origin.x[2] = thePlanes[ iPlane ].origincoords.x[2];
+		/* Find limits of consecutive strips. */
+		onstrip = 0;
+		for (iStrike = 0; iStrike < thePlanes[iPlane].numberofstepsalongstrike; iStrike++) {
+			xLocal = iStrike * thePlanes[iPlane].stepalongstrike;
+			for (iDownDip = 0; iDownDip < thePlanes[iPlane].numberofstepsdowndip; iDownDip++) {
+				yLocal = iDownDip * thePlanes[iPlane].stepdowndip;
+				pointLocal.x[0] = xLocal;
+				pointLocal.x[1] = yLocal;
+				pointLocal.x[2] = 0;
+				pointGlobal = compute_global_coords(origin, pointLocal,
+												   thePlanes[iPlane].dip, 0,
+												   thePlanes[iPlane].strike);
 
-//    	/*Dorian. sanity check for topo-planes "Only horizontal planes are supported" */
-//    	if ( ( get_thebase_topo() != 0.0  ) &&
-//    			( ( thePlanes[ iPlane ].dip > 0 ) && ( thePlanes[ iPlane ].dip < 180 ) ) ) {
-//    		fprintf(stderr,
-//    				"Old_output_planes_construct_strips: "
-//    				"Topo-plane must be horizontal IPlane=%d, dip %f\n",iPlane, thePlanes[ iPlane ].dip);
-//    		MPI_Abort(MPI_COMM_WORLD, ERROR);
-//    		exit(1);
-//    	}
+				if (get_thebase_topo() != 0.0) {
+					pointGlobal.x[2] += point_elevation(pointGlobal.x[0], pointGlobal.x[1]);
+				}
 
+				if (search_point(pointGlobal, &octant) == 1) {
+					if (!onstrip) {
+						thePlanes[iPlane].stripstart[thePlanes[iPlane].numberofstripsthisplane] =
+							(iStrike * thePlanes[iPlane].numberofstepsdowndip + iDownDip);
+						onstrip = 1;
+					}
+				} else if (onstrip) {
+					onstrip = 0;
+					thePlanes[iPlane].stripend[thePlanes[iPlane].numberofstripsthisplane] =
+						(iStrike * thePlanes[iPlane].numberofstepsdowndip + iDownDip - 1);
+					thePlanes[iPlane].numberofstripsthisplane++;
+					if (thePlanes[iPlane].numberofstripsthisplane > MAX_STRIPS_PER_PLANE) {
+						fprintf(stderr,
+								"Number of strips on plane exceeds MAX_STRIPS_PER_PLANE\n");
+						exit(1);
+					}
+				}
+			}
+		}
 
-    	/*Find limits of consecutive strips*/
-    	onstrip = 0;
-    	for ( iStrike = 0;
-    			iStrike < thePlanes[iPlane].numberofstepsalongstrike;
-    			iStrike++ )
-    	{
-    		xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
-    		for ( iDownDip = 0;
-    				iDownDip < thePlanes[iPlane].numberofstepsdowndip;
-    				iDownDip++ )
-    		{
-    			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
-    			pointLocal.x[0] = xLocal;
-    			pointLocal.x[1] = yLocal;
-    			pointLocal.x[2] = 0;
-    			pointGlobal
-    			= compute_global_coords( origin, pointLocal,
-    					thePlanes[ iPlane ].dip, 0,
-    					thePlanes[ iPlane ].strike );
+		if (onstrip) {
+			thePlanes[iPlane].stripend[thePlanes[iPlane].numberofstripsthisplane] =
+				(thePlanes[iPlane].numberofstepsdowndip * thePlanes[iPlane].numberofstepsalongstrike) - 1;
+			thePlanes[iPlane].numberofstripsthisplane++;
+		}
 
-    			/* Dorian: correct z coordinate if topo-plane */
-    			if ( get_thebase_topo() != 0.0  ) {
-    				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
-    			}
+		MPI_Reduce(&thePlanes[iPlane].numberofstripsthisplane,
+				   &thePlanes[iPlane].globalnumberofstripsthisplane,
+				   1, MPI_INT, MPI_SUM, 0, comm_solver);
 
-    			if (search_point( pointGlobal, &octant ) == 1) {
-    				if (!onstrip) { /* start new strip */
-    					thePlanes[iPlane].stripstart[thePlanes[iPlane].numberofstripsthisplane]
-    					                             = (iStrike * thePlanes[iPlane].numberofstepsdowndip
-    					                            		 + iDownDip);
-    					onstrip = 1;
-    				}
+		int stripnum, stripLength;
+		for (stripnum = 0; stripnum < thePlanes[iPlane].numberofstripsthisplane; stripnum++) {
+			stripLength = thePlanes[iPlane].stripend[stripnum] - thePlanes[iPlane].stripstart[stripnum] + 1;
+			thePlanes[iPlane].strip[stripnum] =
+				(plane_strip_element_t*)malloc(sizeof(plane_strip_element_t) * stripLength);
+			if (thePlanes[iPlane].strip[stripnum] == NULL) {
+				fprintf(stderr,
+						"Error malloc'ing array strips for plane output\n"
+						"PE: %d  Plane: %d  Strip: %d  Size: %zu\n",
+						myID, iPlane, stripnum,
+						sizeof(plane_strip_element_t) * stripLength);
+				exit(1);
+			}
+			if (stripLength > planes_LocalLargestStripCount) {
+				planes_LocalLargestStripCount = stripLength;
+			}
+		}
 
-    			}
+		origin.x[0] = thePlanes[iPlane].origincoords.x[0];
+		origin.x[1] = thePlanes[iPlane].origincoords.x[1];
+		origin.x[2] = thePlanes[iPlane].origincoords.x[2];
 
-    			else {
-    				if (onstrip) { /* close strip */
-    					onstrip = 0;
-    					thePlanes[iPlane].stripend[thePlanes[iPlane]
-    					                                     .numberofstripsthisplane]
-    					                                     = (iStrike * thePlanes[iPlane].numberofstepsdowndip
-    					                                    		 + iDownDip - 1);
-    					thePlanes[ iPlane ].numberofstripsthisplane++;
-    					if (thePlanes[ iPlane ].numberofstripsthisplane
-    							> MAX_STRIPS_PER_PLANE)
-    					{
-    						fprintf( stderr,
-    								"Number of strips on plane exceeds "
-    								"MAX_STRIPS_PER_PLANE\n");
-    						exit(1);
-    					}
-    				}
-    			}
-    		}
-    	}
+		int elemnum;
+		for (stripnum = 0; stripnum < thePlanes[iPlane].numberofstripsthisplane; stripnum++) {
+			int elemCount = thePlanes[iPlane].stripend[stripnum] - thePlanes[iPlane].stripstart[stripnum] + 1;
+			for (elemnum = 0; elemnum < elemCount; elemnum++) {
+				thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
+				memset(thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate,
+					   0,
+					   sizeof(thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate));
 
-    	if (onstrip){  /*if on a strip at end of loop, close strip */
-    		thePlanes[iPlane].stripend[thePlanes[iPlane].numberofstripsthisplane]
-    		                           = (thePlanes[iPlane].numberofstepsdowndip
-    		                        		   * thePlanes[iPlane].numberofstepsalongstrike) - 1;
-    		thePlanes[ iPlane ].numberofstripsthisplane++;
-    	}
+				iStrike = (elemnum + thePlanes[iPlane].stripstart[stripnum]) /
+						  thePlanes[iPlane].numberofstepsdowndip;
+				iDownDip = (elemnum + thePlanes[iPlane].stripstart[stripnum]) %
+						   thePlanes[iPlane].numberofstepsdowndip;
+				xLocal = iStrike * thePlanes[iPlane].stepalongstrike;
+				yLocal = iDownDip * thePlanes[iPlane].stepdowndip;
+				pointLocal.x[0] = xLocal;
+				pointLocal.x[1] = yLocal;
+				pointLocal.x[2] = 0;
+				pointGlobal = compute_global_coords(origin, pointLocal,
+												   thePlanes[iPlane].dip, 0,
+												   thePlanes[iPlane].strike);
 
-    	/* get strip counts to IO PEs */
-    	MPI_Reduce( &thePlanes[ iPlane ].numberofstripsthisplane,
-    			&thePlanes[iPlane].globalnumberofstripsthisplane,
-    			1, MPI_INT, MPI_SUM, 0, comm_solver );
+				if (get_thebase_topo() != 0.0) {
+					pointGlobal.x[2] += point_elevation(pointGlobal.x[0], pointGlobal.x[1]);
+				}
 
-    	/* allocate strips */
-    	int stripnum, stripLength;
+				if (search_point(pointGlobal, &octant) == 1) {
+					compute_csi_eta_dzeta(octant, pointGlobal,
+										  &(thePlanes[iPlane].strip[stripnum][elemnum].localcoords),
+										  thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate);
 
-    	for (stripnum = 0;
-    			stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
-    			stripnum++)
-    	{
-    		stripLength = thePlanes[iPlane].stripend[stripnum]
-    		                                         - thePlanes[iPlane].stripstart[stripnum] + 1;
+					if ((thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[4] == 0) &&
+						(thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[5] == 0) &&
+						(thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[6] == 0) &&
+						(thePlanes[iPlane].strip[stripnum][elemnum].nodestointerpolate[7] == 0)) {
+						thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 1;
+					}
+				} else {
+					solver_abort("Old_output_planes_construct_strips", NULL,
+								 "Error: search_point failed for plane %d strip %d elem %d",
+								 iPlane, stripnum, elemnum);
+				}
+			}
+		}
+	}
 
-    		thePlanes[iPlane].strip[stripnum]
-    		                        = (plane_strip_element_t*)malloc( sizeof(plane_strip_element_t)
-    		                        		* stripLength );
-    		if (thePlanes[ iPlane ].strip[stripnum] == NULL) {
-    			fprintf( stderr,
-    					"Error malloc'ing array strips for plane output\n"
-    					"PE: %d  Plane: %d  Strip: %d  Size: %zu\n",
-    					myID, iPlane, stripnum,
-    					sizeof(plane_strip_element_t) * stripLength );
-    			exit(1);
-    		}
+	MPI_Reduce(&planes_LocalLargestStripCount,
+			   &planes_GlobalLargestStripCount,
+			   1, MPI_INT, MPI_MAX, 0, comm_solver);
 
-    		if (stripLength>planes_LocalLargestStripCount) {
-    			planes_LocalLargestStripCount = stripLength;
-    		}
-    	}
+	if (myID == 0) {
+		int buf_len0 = (3 * planes_GlobalLargestStripCount) + 1;
+		planes_stripMPIRecvBuffer = (double*)malloc(sizeof(double) * buf_len0);
+		if (planes_stripMPIRecvBuffer == NULL) {
+			perror("Error creating MPI master buffer strip for plane output\n");
+			exit(1);
+		}
+	}
 
-    	/* fill strips */
-    	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
-    	origin.x[1] = thePlanes[ iPlane ].origincoords.x[1];
-    	origin.x[2] = thePlanes[ iPlane ].origincoords.x[2];
-
-    	int elemnum;
-    	for (stripnum = 0;
-    			stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
-    			stripnum++)
-    	{
-			int elemCount = thePlanes[iPlane].stripend[stripnum]
-			    - thePlanes[iPlane].stripstart[stripnum] + 1;
-		#ifdef _OPENMP
-		#pragma omp parallel for if(useOmp) schedule(static) \
-		    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
-		#endif
-    		for (elemnum = 0;
-					elemnum < elemCount;
-    				elemnum++)
-    		{
-    			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						/ thePlanes[iPlane].numberofstepsdowndip;
-    			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						% thePlanes[iPlane].numberofstepsdowndip;
-    			xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
-    			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
-    			pointLocal.x[0] = xLocal;
-    			pointLocal.x[1] = yLocal;
-    			pointLocal.x[2] = 0;
-    			pointGlobal
-    			=  compute_global_coords( origin, pointLocal,
-    					thePlanes[ iPlane ].dip, 0,
-    					thePlanes[ iPlane ].strike );
-
-    			/* Dorian: correct z coordinate if topo-plane */
-    			if ( get_thebase_topo() != 0.0 ) {
-    				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
-    			}
-
-    			if (search_point( pointGlobal, &octant) == 1) {
-    				compute_csi_eta_dzeta( octant, pointGlobal,
-    						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
-    						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
-
-    				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
-    					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
-    			}
-    		}
-    	}
-
-    } /* end of plane loop: for (stripnum = 0; ...) */
-
-    MPI_Reduce( &planes_LocalLargestStripCount,
-		&planes_GlobalLargestStripCount,
-		1, MPI_INT, MPI_MAX, 0, comm_solver );
-
-    /* allocate MPI recv buffers for IO PE */
-    if (myID == 0) {
-    	int buf_len0 = (3 * planes_GlobalLargestStripCount) + 1;
-    	planes_stripMPIRecvBuffer = (double*)malloc(sizeof(double) * buf_len0);
-
-    	/* This is large enough for 3 double componants of biggest strip
-	   plus location number */
-    	if (planes_stripMPIRecvBuffer == NULL) {
-    		perror("Error creating MPI master buffer strip for plane output\n");
-    		exit(1);
-    	}
-    }
-
-    /* allocate MPI send buffers for all PEs */
-    int buf_len = (3 * planes_LocalLargestStripCount) + 1;
-    planes_stripMPISendBuffer = (double*)malloc( sizeof(double) * buf_len );
-
-    /* This is large enough for 3 double componants of biggest strip plus
-       location number */
-    if (planes_stripMPISendBuffer == NULL) {
-	fprintf(stderr,
-		"Error creating MPI send buffer strip for plane output\n");
-	exit(1);
-    }
+	int buf_len = (3 * planes_LocalLargestStripCount) + 1;
+	planes_stripMPISendBuffer = (double*)malloc(sizeof(double) * buf_len);
+	if (planes_stripMPISendBuffer == NULL) {
+		fprintf(stderr, "Error creating MPI send buffer strip for plane output\n");
+		exit(1);
+	}
 }
 
 /** Close planes files. */
@@ -993,10 +931,6 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     vector3D_t origin, pointLocal, pointGlobal;
     octant_t *octant;
     int onstrip ;
-#ifdef _OPENMP
-	const int32_t useOmp = plane_output_use_omp();
-#endif
-
     planes_LocalLargestStripCount = 0;
 
     for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
@@ -1124,14 +1058,15 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	    {
 		int elemCount = thePlanes[iPlane].stripend[stripnum]
 		    - thePlanes[iPlane].stripstart[stripnum] + 1;
-	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
-	#endif
 		for (elemnum = 0;
 		     elemnum < elemCount;
 		     elemnum++)
 		    {
+			thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 0;
+			memset(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate,
+			       0,
+			       sizeof(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate));
+
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1161,6 +1096,10 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+			} else {
+				solver_abort("New_output_planes_construct_strips", NULL,
+				             "Error: search_point failed for plane %d strip %d elem %d",
+				             iPlane, stripnum, elemnum);
 			}
 		    }
 	    }
