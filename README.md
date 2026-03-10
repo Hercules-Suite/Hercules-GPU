@@ -26,22 +26,10 @@ Runtime performance toggles (no source edits needed):
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
 	interpolation and per-station file writes. Solver default is `0`
-	(disabled); `run_phaseA_phaseB.sh` defaults this to `0`.
-- `HERCULES_STATION_LAZY_OPEN=1|0`
-	When `1`, station files are opened and headers written on first output
-	write (lazy open) instead of during startup setup. Solver default is `1`.
-	Set to `0` to restore eager station file creation during pre-setup.
-- `HERCULES_STATION_SETUP_OMP=1|0`
-	Enables or disables OpenMP parallelization in station startup setup
-	(ownership scan + interpolation metadata prep). Solver default is `0`
-	(disabled); `run_phaseA_phaseB.sh` defaults this to `0`.
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`
-	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
-- `HERCULES_PLANE_SETUP_OMP=1|0`
-	Enables or disables OpenMP parallelization in plane setup strip
-	construction (`io_pool=0` old path). Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_OCTOR_CHUNK_DIAG=1|0`
 	Enables one-line partition diagnostics for Octor chunked transfers
@@ -59,10 +47,8 @@ Two-phase script defaults:
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
-	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=0`,
-	`HERCULES_STATION_LAZY_OPEN=0`, `HERCULES_STATION_SETUP_OMP=0`,
-	`HERCULES_PLANE_IO_OMP=1`, `HERCULES_PLANE_SETUP_OMP=1`,
-	`HERCULES_OCTOR_CHUNK_DIAG=1`.
+	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
+	`HERCULES_PLANE_IO_OMP=1`, `HERCULES_OCTOR_CHUNK_DIAG=1`.
 - You can still override any of these by exporting your own value before
 	running the script.
 
@@ -78,17 +64,14 @@ cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
 
 export OMP_NUM_THREADS=64
 # Optional: override script defaults when needed
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export HERCULES_ADJUST_ASSIGN_OMP=1
-export HERCULES_ADJUST_DIST_OMP=1
-export HERCULES_SPARSE_CLEAR_MODE=auto
-export HERCULES_STATION_IO_OMP=0
-export HERCULES_STATION_LAZY_OPEN=0
-export HERCULES_STATION_SETUP_OMP=0
-export HERCULES_PLANE_IO_OMP=1
-export HERCULES_PLANE_SETUP_OMP=1
-export HERCULES_OCTOR_CHUNK_DIAG=1
+# export OMP_PROC_BIND=spread
+# export OMP_PLACES=threads
+# export HERCULES_ADJUST_ASSIGN_OMP=0
+# export HERCULES_ADJUST_DIST_OMP=0
+# export HERCULES_SPARSE_CLEAR_MODE=nodes
+# export HERCULES_STATION_IO_OMP=0
+# export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_OCTOR_CHUNK_DIAG=0
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
