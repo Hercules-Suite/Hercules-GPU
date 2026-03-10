@@ -80,6 +80,7 @@ typedef struct plane_strip_element_t {
     int32_t nodestointerpolate[8];
     vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
     int32_t topostrip;
+	int32_t valid;
 
 } plane_strip_element_t;
 
@@ -184,7 +185,9 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    {
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
-	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+	    	if (!thePlanes[iPlane].strip[iStrip][elemnum].valid) {
+	    	    /* Keep zero displacement for points that failed remapping. */
+	    	} else if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
 	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
@@ -629,6 +632,15 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				                                      -thePlanes[iPlane].stripstart[stripnum] + 1);
     				elemnum++)
     		{
+			thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 0;
+			memset(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate,
+			       0,
+			       sizeof(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate));
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
+
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -652,6 +664,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				compute_csi_eta_dzeta( octant, pointGlobal,
     						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
     						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
+					thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 1;
 
     				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
@@ -1048,6 +1061,15 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				-thePlanes[iPlane].stripstart[stripnum] + 1);
 		     elemnum++)
 		    {
+			thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 0;
+			memset(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate,
+			       0,
+			       sizeof(thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate));
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[0] = 0.0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[1] = 0.0;
+			thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords.x[2] = 0.0;
+
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1071,6 +1093,7 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				compute_csi_eta_dzeta( octant, pointGlobal,
 						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
+				thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 1;
 
 				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
@@ -1129,7 +1152,9 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 		 elemnum++){
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
-	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+	    	if (!thePlanes[iPlane].strip[iStrip][elemnum].valid) {
+	    	    /* Keep zero displacement for points that failed remapping. */
+	    	} else if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
 	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
 	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
