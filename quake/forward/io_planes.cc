@@ -219,9 +219,11 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
-	    * thePlanes[iPlane].numberofstepsdowndip;
-	memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	if (myID == 0) {
+	    int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
+		* thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	}
 
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
