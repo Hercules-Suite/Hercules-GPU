@@ -63,19 +63,6 @@ typedef struct edata_t {
 /****************************/
 
 static size_t theAllocatedMemSum = 0;
-static int32_t theOctorChunkDiag = -1;
-
-static int32_t octor_chunk_diag_enabled(void) {
-    if (theOctorChunkDiag < 0) {
-        const char *env = getenv("HERCULES_OCTOR_CHUNK_DIAG");
-        if ((env == NULL) || (strcmp(env, "0") == 0)) {
-            theOctorChunkDiag = 0;
-        } else {
-            theOctorChunkDiag = 1;
-        }
-    }
-    return theOctorChunkDiag;
-}
 
 
 typedef struct hdr_t hdr_t;
@@ -4984,10 +4971,6 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
     int32_t irecvreqcount = 0;
     int32_t irecvreqnum = 0;
     int32_t irecv;
-    size_t max_rcvbytesize = 0;
-    size_t max_sndbytesize = 0;
-    int32_t max_rcvchunks = 0;
-    int32_t max_sndchunks = 0;
 
 
     /* leafoctsize is the size of a serialized leaf octant */
@@ -5155,13 +5138,6 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
                                (size_t)INT_MAX);
             rcvbytesize_list[irecvnum] = rcvbytesize;
 
-            if (rcvbytesize > max_rcvbytesize) {
-                max_rcvbytesize = rcvbytesize;
-            }
-            if (chunks > max_rcvchunks) {
-                max_rcvchunks = chunks;
-            }
-
             /* Post receives in chunks (MPI count is int). */
             offset = 0;
             while (offset < rcvbytesize) {
@@ -5312,17 +5288,7 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
 
             /* Send octants in chunks (MPI count is int). */
             {
-                int32_t sndchunks = (int32_t)((sndbytesize + (size_t)INT_MAX - 1) /
-                                              (size_t)INT_MAX);
                 size_t offset = 0;
-
-                if (sndbytesize > max_sndbytesize) {
-                    max_sndbytesize = sndbytesize;
-                }
-                if (sndchunks > max_sndchunks) {
-                    max_sndchunks = sndchunks;
-                }
-
                 while (offset < sndbytesize) {
                     size_t chunk_bytes = sndbytesize - offset;
                     if (chunk_bytes > (size_t)INT_MAX) {
@@ -5346,35 +5312,6 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
         /* Move to the next bin */
         bin_procid++;
     } /* while I have more elements to share */
-
-    if (octor_chunk_diag_enabled()) {
-        unsigned long long local_max_rcv_bytes =
-            (unsigned long long)max_rcvbytesize;
-        unsigned long long local_max_snd_bytes =
-            (unsigned long long)max_sndbytesize;
-        unsigned long long global_max_rcv_bytes = 0;
-        unsigned long long global_max_snd_bytes = 0;
-        int32_t global_max_rcv_chunks = 0;
-        int32_t global_max_snd_chunks = 0;
-
-        MPI_Reduce(&local_max_rcv_bytes, &global_max_rcv_bytes, 1,
-                   MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, tree->comm_tree);
-        MPI_Reduce(&local_max_snd_bytes, &global_max_snd_bytes, 1,
-                   MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, tree->comm_tree);
-        MPI_Reduce(&max_rcvchunks, &global_max_rcv_chunks, 1, MPI_INT,
-                   MPI_MAX, 0, tree->comm_tree);
-        MPI_Reduce(&max_sndchunks, &global_max_snd_chunks, 1, MPI_INT,
-                   MPI_MAX, 0, tree->comm_tree);
-
-        if (tree->procid == 0) {
-            fprintf(stderr,
-                    "Octor partition chunk diagnostics: "
-                    "max_recv_bytes=%llu max_recv_chunks=%d "
-                    "max_send_bytes=%llu max_send_chunks=%d\n",
-                    global_max_rcv_bytes, global_max_rcv_chunks,
-                    global_max_snd_bytes, global_max_snd_chunks);
-        }
-    }
 
     /* Wait till I receive all the data I want */
     if (irecvreqcount != 0) {
