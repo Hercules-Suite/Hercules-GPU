@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CASE_DIR="${CASE_DIR:-$PWD}"
 
+if [[ ! -d "${CASE_DIR}" ]]; then
+  echo "ERROR: CASE_DIR does not exist: ${CASE_DIR}" >&2
+  exit 1
+fi
+
 # Default runtime tuning knobs (can still be overridden by user env).
 : "${OMP_PROC_BIND:=close}"
 : "${OMP_PLACES:=cores}"
@@ -95,6 +100,53 @@ make_phase_input() {
   ' "${src}" >"${dst}"
 }
 
+set_mesh_etree_path() {
+  local in_file="$1"
+  local out_file="$2"
+  local mesh_path="$3"
+
+  awk -v mpath="${mesh_path}" '
+    BEGIN { seen = 0 }
+    /^[[:space:]]*mesh_etree_output_file[[:space:]]*=/ {
+      print "mesh_etree_output_file       = " mpath
+      seen = 1
+      next
+    }
+    { print }
+    END {
+      if (!seen) {
+        print "mesh_etree_output_file       = " mpath
+      }
+    }
+  ' "${in_file}" > "${out_file}"
+}
+
+get_mesh_etree_path() {
+  local in_file="$1"
+  awk -F'=' '
+    /^[[:space:]]*mesh_etree_output_file[[:space:]]*=/ {
+      v = $2
+      sub(/[[:space:]]*#.*/, "", v)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      gsub(/^"|"$/, "", v)
+      print v
+      exit
+    }
+  ' "${in_file}"
+}
+
+abspath_from_case() {
+  local p="$1"
+  if [[ -z "${p}" ]]; then
+    return
+  fi
+  if [[ "${p}" = /* ]]; then
+    printf '%s\n' "${p}"
+  else
+    printf '%s/%s\n' "${CASE_DIR}" "${p}"
+  fi
+}
+
 if [[ -n "${BASE_IN}" ]]; then
   if [[ ! -f "${BASE_IN}" ]]; then
     echo "ERROR: BASE_IN file not found: ${BASE_IN}" >&2
@@ -113,6 +165,19 @@ if [[ -n "${BASE_IN}" ]]; then
 
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
+
+  # Pin both phases to the exact same absolute mesh etree path.
+  MESH_ETREE_RAW_BASE="$(get_mesh_etree_path "${BASE_IN}")"
+  MESH_ETREE_PATH_BASE="$(abspath_from_case "${MESH_ETREE_RAW_BASE}")"
+  if [[ -n "${MESH_ETREE_PATH_BASE}" ]]; then
+    TMP_PATCH_A="$(mktemp "${TMPDIR_ROOT}/hercules_phaseA_patch.XXXXXX.in")"
+    TMP_PATCH_B="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB_patch.XXXXXX.in")"
+    set_mesh_etree_path "${TMP_PHASE_A_IN}" "${TMP_PATCH_A}" "${MESH_ETREE_PATH_BASE}"
+    set_mesh_etree_path "${TMP_PHASE_B_IN}" "${TMP_PATCH_B}" "${MESH_ETREE_PATH_BASE}"
+    mv "${TMP_PATCH_A}" "${TMP_PHASE_A_IN}"
+    mv "${TMP_PATCH_B}" "${TMP_PHASE_B_IN}"
+  fi
+
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
 fi
@@ -164,6 +229,10 @@ if [[ ! -f "${PHASE_B_IN}" ]]; then
   exit 1
 fi
 
+# Always run from CASE_DIR so relative paths in input files resolve
+# consistently for both phases and all ranks.
+cd "${CASE_DIR}"
+
 if [[ -n "${PHASE_A_NP}" ]] && ( ! [[ "${PHASE_A_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_A_NP}" -lt 1 ]] ); then
   echo "ERROR: invalid Phase A rank count: ${PHASE_A_NP}" >&2
   exit 1
@@ -203,6 +272,11 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
+MESH_ETREE_RAW_PRINT="$(get_mesh_etree_path "${PHASE_B_IN}")"
+MESH_ETREE_PATH_PRINT="$(abspath_from_case "${MESH_ETREE_RAW_PRINT}")"
+if [[ -n "${MESH_ETREE_PATH_PRINT}" ]]; then
+  echo "Mesh etree:     ${MESH_ETREE_PATH_PRINT}"
+fi
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -220,6 +294,14 @@ if [[ -n "${PHASE_A_NP}" ]]; then
   "${MPI_RUN}" -np "${PHASE_A_NP}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
 else
   "${MPI_RUN}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
+fi
+
+MESH_ETREE_RAW="$(get_mesh_etree_path "${PHASE_B_IN}")"
+MESH_ETREE_PATH="$(abspath_from_case "${MESH_ETREE_RAW}")"
+if [[ -n "${MESH_ETREE_PATH}" && ! -f "${MESH_ETREE_PATH}" ]]; then
+  echo "ERROR: mesh etree file not found for Phase B: ${MESH_ETREE_PATH}" >&2
+  echo "       Check mesh_etree_output_file in ${PHASE_B_IN} and CASE_DIR=${CASE_DIR}." >&2
+  exit 1
 fi
 
 echo
