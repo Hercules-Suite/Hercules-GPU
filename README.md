@@ -28,10 +28,9 @@ Runtime performance toggles (no source edits needed):
 	interpolation and per-station file writes. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_PLANE_IO_OMP=1|0`
-	Plane OpenMP path is currently disabled by default for correctness at
-	high thread counts. Keep this as `0` unless you are explicitly testing.
-	Solver default is `0` (disabled); `run_phaseA_phaseB.sh` defaults this
-	to `0`.
+	Plane OpenMP path is currently force-disabled in solver code for
+	correctness at high thread counts. This variable is kept for
+	compatibility but has no effect right now.
 
 Build note:
 

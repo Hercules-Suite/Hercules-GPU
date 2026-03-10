@@ -10641,6 +10641,14 @@ int32_t search_point(vector3D_t point, octant_t** octant) {
   return 1;
 }
 
+/* Exposed for plane I/O validation guards. */
+int32_t get_local_harbored_node_count(void) {
+  if (Global.myMesh == NULL) {
+    return 0;
+  }
+  return Global.myMesh->nharbored;
+}
+
 /**
  * \param octant where the point is located.
  * \param pointcoords coordinates of the point.

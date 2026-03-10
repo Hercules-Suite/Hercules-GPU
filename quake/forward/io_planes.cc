@@ -48,6 +48,7 @@
 
 extern int compute_csi_eta_dzeta( octant_t *octant, vector3D_t pointcoords,
 				  vector3D_t *localcoords, int32_t *localNodeID );
+extern int32_t get_local_harbored_node_count(void);
 
 #define LINESIZE       512
 
@@ -124,31 +125,14 @@ static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
 	return 0;
 #else
+	/*
+	 * Plane OpenMP is force-disabled for correctness. Keep env parsing removed
+	 * to avoid accidental re-enable via stale job environment.
+	 */
 	if (g_planeOutputOmpMode < 0) {
-		const char* env = getenv("HERCULES_PLANE_IO_OMP");
-		if ((env != NULL) && (strcmp(env, "0") == 0)) {
-			g_planeOutputOmpMode = 0;
-		} else if (env != NULL) {
-			g_planeOutputOmpMode = 1;
-		} else {
-			/* Keep legacy behavior unless explicitly enabled. */
-			g_planeOutputOmpMode = 0;
-		}
-
-		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0)) {
-			if (g_planeOutputRankCached < 0) {
-				MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
-			}
-			if (g_planeOutputRankCached == 0) {
-				fprintf(stderr,
-						"Plane output OpenMP: enabled (threads=%d)\n",
-						omp_get_max_threads());
-			}
-			g_planeOutputOmpReported = 1;
-		}
+		g_planeOutputOmpMode = 0;
 	}
-
-	return g_planeOutputOmpMode;
+	return 0;
 #endif
 }
 
@@ -214,6 +198,7 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     MPI_Status  status;
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
+	const int32_t localNodeCount = get_local_harbored_node_count();
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
@@ -224,6 +209,27 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    /* interpolate points directly into send buffer for this strip */
 	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
+		int32_t* nodes = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate;
+		vector3D_t* lc = &(thePlanes[iPlane].strip[iStrip][elemnum].localcoords);
+		int nodeLimit = (thePlanes[iPlane].strip[iStrip][elemnum].topostrip == 1) ? 4 : 8;
+		for (iPhi = 0; iPhi < nodeLimit; iPhi++) {
+		    if ((nodes[iPhi] < 0) || (nodes[iPhi] >= localNodeCount)) {
+			solver_abort("Old_planes_print", NULL,
+			           "Invalid plane node index %d (limit=%d) plane=%d strip=%d elem=%d phi=%d",
+			           nodes[iPhi], localNodeCount, iPlane, iStrip, elemnum, iPhi);
+		    }
+		}
+		if (!isfinite(lc->x[0]) || !isfinite(lc->x[1]) || !isfinite(lc->x[2])) {
+		    solver_abort("Old_planes_print", NULL,
+			       "Non-finite localcoords on plane=%d strip=%d elem=%d",
+			       iPlane, iStrip, elemnum);
+		}
+		if ((fabs(lc->x[0]) > 4.0) || (fabs(lc->x[1]) > 4.0) || (fabs(lc->x[2]) > 4.0)) {
+		    solver_abort("Old_planes_print", NULL,
+			       "Out-of-range localcoords (%g,%g,%g) on plane=%d strip=%d elem=%d",
+			       lc->x[0], lc->x[1], lc->x[2], iPlane, iStrip, elemnum);
+		}
+
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
@@ -1133,6 +1139,7 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
     double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
+	const int32_t localNodeCount = get_local_harbored_node_count();
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
@@ -1142,6 +1149,27 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    /* interpolate points directly into send buffer for this strip */
 	    for (elemnum = 0; elemnum < elemCount; elemnum++){
+		int32_t* nodes = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate;
+		vector3D_t* lc = &(thePlanes[iPlane].strip[iStrip][elemnum].localcoords);
+		int nodeLimit = (thePlanes[iPlane].strip[iStrip][elemnum].topostrip == 1) ? 4 : 8;
+		for (iPhi = 0; iPhi < nodeLimit; iPhi++) {
+		    if ((nodes[iPhi] < 0) || (nodes[iPhi] >= localNodeCount)) {
+			solver_abort("New_planes_print", NULL,
+			           "Invalid plane node index %d (limit=%d) plane=%d strip=%d elem=%d phi=%d",
+			           nodes[iPhi], localNodeCount, iPlane, iStrip, elemnum, iPhi);
+		    }
+		}
+		if (!isfinite(lc->x[0]) || !isfinite(lc->x[1]) || !isfinite(lc->x[2])) {
+		    solver_abort("New_planes_print", NULL,
+			       "Non-finite localcoords on plane=%d strip=%d elem=%d",
+			       iPlane, iStrip, elemnum);
+		}
+		if ((fabs(lc->x[0]) > 4.0) || (fabs(lc->x[1]) > 4.0) || (fabs(lc->x[2]) > 4.0)) {
+		    solver_abort("New_planes_print", NULL,
+			       "Out-of-range localcoords (%g,%g,%g) on plane=%d strip=%d elem=%d",
+			       lc->x[0], lc->x[1], lc->x[2], iPlane, iStrip, elemnum);
+		}
+
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
