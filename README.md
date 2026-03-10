@@ -14,10 +14,13 @@ Some general description of the core components in this directory are given as f
 Runtime performance toggles (no source edits needed):
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
-	Enables or disables OpenMP parallelization in assignment adjust core.
+	Adjust OpenMP path is currently force-disabled in solver code for
+	correctness at high thread counts. This variable is kept for
+	compatibility but has no effect right now.
 - `HERCULES_ADJUST_DIST_OMP=1|0`
-	Enables or disables OpenMP parallelization in parent-centric distribution
-	adjust core.
+	Adjust OpenMP path is currently force-disabled in solver code for
+	correctness at high thread counts. This variable is kept for
+	compatibility but has no effect right now.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.

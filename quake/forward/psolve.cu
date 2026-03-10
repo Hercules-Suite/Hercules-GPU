@@ -9687,31 +9687,9 @@ static int32_t adjust_distribution_use_omp(void) {
   return 0;
 #else
   if (g_adjustDistributionOmpMode < 0) {
-    const char* env = getenv("HERCULES_ADJUST_DIST_OMP");
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0)) {
-        g_adjustDistributionOmpMode = 0;
-      } else {
-        g_adjustDistributionOmpMode = 1;
-      }
-    } else {
-      int maxThreads = omp_get_max_threads();
-      g_adjustDistributionOmpMode =
-          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
-    }
-
-    if ((g_adjustDistributionOmpMode == 1) &&
-        (Global.myID == 0) &&
-        (g_adjustDistributionOmpReported == 0)) {
-      monitor_print(
-          "compute_adjust distribution OpenMP: enabled (threads=%d)\n",
-          omp_get_max_threads());
-      g_adjustDistributionOmpReported = 1;
-    }
+    g_adjustDistributionOmpMode = 0;
   }
-
-  return g_adjustDistributionOmpMode;
+  return 0;
 #endif
 }
 
@@ -9720,31 +9698,9 @@ static int32_t adjust_assignment_use_omp(void) {
   return 0;
 #else
   if (g_adjustAssignmentOmpMode < 0) {
-    const char* env = getenv("HERCULES_ADJUST_ASSIGN_OMP");
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0)) {
-        g_adjustAssignmentOmpMode = 0;
-      } else {
-        g_adjustAssignmentOmpMode = 1;
-      }
-    } else {
-      int maxThreads = omp_get_max_threads();
-      g_adjustAssignmentOmpMode =
-          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
-    }
-
-    if ((g_adjustAssignmentOmpMode == 1) &&
-        (Global.myID == 0) &&
-        (g_adjustAssignmentOmpReported == 0)) {
-      monitor_print(
-          "compute_adjust assignment OpenMP: enabled (threads=%d)\n",
-          omp_get_max_threads());
-      g_adjustAssignmentOmpReported = 1;
-    }
+    g_adjustAssignmentOmpMode = 0;
   }
-
-  return g_adjustAssignmentOmpMode;
+  return 0;
 #endif
 }
 
