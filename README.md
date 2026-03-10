@@ -38,6 +38,10 @@ Runtime performance toggles (no source edits needed):
 	Controls OpenMP in incoming schedule unpack (`SHARING`) path.
 	Default is `0` (serialized) for correctness at high thread counts;
 	set `1` only for speed testing after validating output stability.
+- `HERCULES_SCHEDULE_PACK_OMP=1|0`
+	Controls OpenMP in outgoing schedule pack path.
+	Default is `0` (serialized) for correctness at high thread counts;
+	set `1` only for speed testing after validating output stability.
 
 Build note:
 

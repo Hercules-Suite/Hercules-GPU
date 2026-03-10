@@ -7958,7 +7958,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(send_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) \
+  if(schedule_pack_use_omp() && send_messenger->nidx > 10000)
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8134,6 +8135,19 @@ static int32_t schedule_unpack_use_omp(void) {
   static int32_t mode = -1;
   if (mode < 0) {
     const char* env = getenv("HERCULES_SCHEDULE_UNPACK_OMP");
+    if (env == NULL || *env == '\0') {
+      mode = 0;
+    } else {
+      mode = (atoi(env) != 0) ? 1 : 0;
+    }
+  }
+  return mode;
+}
+
+static int32_t schedule_pack_use_omp(void) {
+  static int32_t mode = -1;
+  if (mode < 0) {
+    const char* env = getenv("HERCULES_SCHEDULE_PACK_OMP");
     if (env == NULL || *env == '\0') {
       mode = 0;
     } else {
