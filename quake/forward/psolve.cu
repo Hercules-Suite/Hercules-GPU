@@ -3051,31 +3051,93 @@ static int32_t toexpand(octant_t* leaf, double ticksize, const void* data) {
   return vsrule(edata, Param.theFactor);
 }
 
-static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
-                                 mdata_t* hit_data) {
-  tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
+static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
+                                     int32_t fx_num, int32_t fy_num,
+                                     int32_t fz_num, int32_t f_den,
+                                     etree_addr_t* hit_addr,
+                                     mdata_t* hit_data,
+                                     etree_addr_t* search_addr_out) {
   etree_addr_t search_addr;
+  int64_t dx = ((int64_t)edge_ticks * (int64_t)fx_num) / (int64_t)f_den;
+  int64_t dy = ((int64_t)edge_ticks * (int64_t)fy_num) / (int64_t)f_den;
+  int64_t dz = ((int64_t)edge_ticks * (int64_t)fz_num) / (int64_t)f_den;
 
-  search_addr.x = leaf->lx + edge_ticks / 2;
-  search_addr.y = leaf->ly + edge_ticks / 2;
-  search_addr.z = leaf->lz + edge_ticks / 2;
+  if (dx <= 0) {
+    dx = 1;
+  }
+  if (dy <= 0) {
+    dy = 1;
+  }
+  if (dz <= 0) {
+    dz = 1;
+  }
+  if (dx >= edge_ticks) {
+    dx = edge_ticks - 1;
+  }
+  if (dy >= edge_ticks) {
+    dy = edge_ticks - 1;
+  }
+  if (dz >= edge_ticks) {
+    dz = edge_ticks - 1;
+  }
+
+  search_addr.x = leaf->lx + (tick_t)dx;
+  search_addr.y = leaf->ly + (tick_t)dy;
+  search_addr.z = leaf->lz + (tick_t)dz;
   search_addr.level = ETREE_MAXLEVEL;
   search_addr.type = ETREE_LEAF;
 
+  if (search_addr_out != NULL) {
+    *search_addr_out = search_addr;
+  }
+
   if (etree_search(Global.theMeshInputEp, search_addr, hit_addr, NULL,
                    hit_data) != 0) {
-    fprintf(stderr,
-            "Thread %d: mesh_etree_lookup failed: file=%s leaf=(%d,%d,%d,l=%d) "
-            "search=(%d,%d,%d,l=%d,t=%d) edge_ticks=%d\n",
-            Global.myID, Param.mesh_etree_output_file, leaf->lx, leaf->ly,
-            leaf->lz, leaf->level, (int32_t)search_addr.x,
-            (int32_t)search_addr.y, (int32_t)search_addr.z,
-            (int32_t)search_addr.level, (int32_t)search_addr.type,
-            (int32_t)edge_ticks);
     return -1;
   }
 
   return 0;
+}
+
+static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
+                                 mdata_t* hit_data) {
+  tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
+  etree_addr_t search_addr;
+  int32_t i;
+
+  /*
+   * Robust lookup for topography-trimmed meshes: center can be in air even
+   * when this cell intersects valid mesh below. Try multiple in-cell samples.
+   */
+  const int32_t sample_fracs[][4] = {
+      {2, 2, 2, 4},  /* center */
+      {2, 2, 1, 4},  /* lower-center */
+      {1, 1, 1, 4},  /* lower corners */
+      {3, 1, 1, 4},
+      {1, 3, 1, 4},
+      {3, 3, 1, 4},
+      {2, 2, 3, 4},  /* upper-center */
+  };
+
+  for (i = 0; i < (int32_t)(sizeof(sample_fracs) / sizeof(sample_fracs[0]));
+       i++) {
+    if (mesh_etree_lookup_try(leaf, edge_ticks, sample_fracs[i][0],
+                              sample_fracs[i][1], sample_fracs[i][2],
+                              sample_fracs[i][3], hit_addr, hit_data,
+                              &search_addr) == 0) {
+      return 0;
+    }
+  }
+
+  fprintf(stderr,
+          "Thread %d: mesh_etree_lookup failed: file=%s leaf=(%d,%d,%d,l=%d) "
+          "last-search=(%d,%d,%d,l=%d,t=%d) edge_ticks=%d\n",
+          Global.myID, Param.mesh_etree_output_file, leaf->lx, leaf->ly,
+          leaf->lz, leaf->level, (int32_t)search_addr.x,
+          (int32_t)search_addr.y, (int32_t)search_addr.z,
+          (int32_t)search_addr.level, (int32_t)search_addr.type,
+          (int32_t)edge_ticks);
+  return -1;
 }
 
 static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
