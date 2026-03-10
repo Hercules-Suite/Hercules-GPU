@@ -119,6 +119,7 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
+static int32_t g_planeInvalidNodeWarned = 0;
 
 static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
@@ -163,25 +164,55 @@ static void plane_interpolate_point(const mysolver_t* mySolver,
 		{-1, -1, -1, -1,  1,  1,  1, 1}
 	};
 	int iPhi;
+	int32_t nodeCount = Global.myMesh->nharbored;
+	int32_t nid[8];
+	int invalidNode = 0;
 	double displacementsX = 0.0;
 	double displacementsY = 0.0;
 	double displacementsZ = 0.0;
 
+	for (iPhi = 0; iPhi < 8; iPhi++) {
+		int32_t id = elem->nodestointerpolate[iPhi];
+		if ((id < 0) || (id >= nodeCount)) {
+			invalidNode = 1;
+			id = 0;
+		}
+		nid[iPhi] = id;
+	}
+
+	if (invalidNode && g_planeInvalidNodeWarned == 0) {
+		int doPrint = 0;
+#ifdef _OPENMP
+#pragma omp critical(plane_invalid_node_warn)
+#endif
+		{
+			if (g_planeInvalidNodeWarned == 0) {
+				g_planeInvalidNodeWarned = 1;
+				doPrint = 1;
+			}
+		}
+		if (doPrint) {
+			fprintf(stderr,
+					"Warning: plane interpolation saw invalid node indices; "
+					"falling back to node 0 for out-of-range entries.\n");
+		}
+	}
+
 	if (elem->topostrip == 1) {
-		double ux_0  = mySolver->tm1[ elem->nodestointerpolate[0] ].f[0];
-		double ux_10 = mySolver->tm1[ elem->nodestointerpolate[1] ].f[0] - ux_0;
-		double ux_20 = mySolver->tm1[ elem->nodestointerpolate[2] ].f[0] - ux_0;
-		double ux_30 = mySolver->tm1[ elem->nodestointerpolate[3] ].f[0] - ux_0;
+		double ux_0  = mySolver->tm1[ nid[0] ].f[0];
+		double ux_10 = mySolver->tm1[ nid[1] ].f[0] - ux_0;
+		double ux_20 = mySolver->tm1[ nid[2] ].f[0] - ux_0;
+		double ux_30 = mySolver->tm1[ nid[3] ].f[0] - ux_0;
 
-		double uy_0  = mySolver->tm1[ elem->nodestointerpolate[0] ].f[1];
-		double uy_10 = mySolver->tm1[ elem->nodestointerpolate[1] ].f[1] - uy_0;
-		double uy_20 = mySolver->tm1[ elem->nodestointerpolate[2] ].f[1] - uy_0;
-		double uy_30 = mySolver->tm1[ elem->nodestointerpolate[3] ].f[1] - uy_0;
+		double uy_0  = mySolver->tm1[ nid[0] ].f[1];
+		double uy_10 = mySolver->tm1[ nid[1] ].f[1] - uy_0;
+		double uy_20 = mySolver->tm1[ nid[2] ].f[1] - uy_0;
+		double uy_30 = mySolver->tm1[ nid[3] ].f[1] - uy_0;
 
-		double uz_0  = mySolver->tm1[ elem->nodestointerpolate[0] ].f[2];
-		double uz_10 = mySolver->tm1[ elem->nodestointerpolate[1] ].f[2] - uz_0;
-		double uz_20 = mySolver->tm1[ elem->nodestointerpolate[2] ].f[2] - uz_0;
-		double uz_30 = mySolver->tm1[ elem->nodestointerpolate[3] ].f[2] - uz_0;
+		double uz_0  = mySolver->tm1[ nid[0] ].f[2];
+		double uz_10 = mySolver->tm1[ nid[1] ].f[2] - uz_0;
+		double uz_20 = mySolver->tm1[ nid[2] ].f[2] - uz_0;
+		double uz_30 = mySolver->tm1[ nid[3] ].f[2] - uz_0;
 
 		displacementsX = ux_0 + (elem->localcoords.x[0]) * ux_20
 							  + (elem->localcoords.x[1]) * ux_10
@@ -200,9 +231,9 @@ static void plane_interpolate_point(const mysolver_t* mySolver,
 					   * (1 + xi[1][iPhi] * elem->localcoords.x[1])
 					   * (1 + xi[2][iPhi] * elem->localcoords.x[2]) / 8;
 
-			displacementsX += phi * (mySolver->tm1[ elem->nodestointerpolate[iPhi] ].f[0]);
-			displacementsY += phi * (mySolver->tm1[ elem->nodestointerpolate[iPhi] ].f[1]);
-			displacementsZ += phi * (mySolver->tm1[ elem->nodestointerpolate[iPhi] ].f[2]);
+			displacementsX += phi * (mySolver->tm1[ nid[iPhi] ].f[0]);
+			displacementsY += phi * (mySolver->tm1[ nid[iPhi] ].f[1]);
+			displacementsZ += phi * (mySolver->tm1[ nid[iPhi] ].f[2]);
 		}
 	}
 
