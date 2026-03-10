@@ -7958,8 +7958,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) \
-  if(schedule_pack_use_omp() && send_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) if(send_messenger->nidx > 10000)
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8131,32 +8130,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   return;
 }
 
-static int32_t schedule_unpack_use_omp(void) {
-  static int32_t mode = -1;
-  if (mode < 0) {
-    const char* env = getenv("HERCULES_SCHEDULE_UNPACK_OMP");
-    if (env == NULL || *env == '\0') {
-      mode = 0;
-    } else {
-      mode = (atoi(env) != 0) ? 1 : 0;
-    }
-  }
-  return mode;
-}
-
-static int32_t schedule_pack_use_omp(void) {
-  static int32_t mode = -1;
-  if (mode < 0) {
-    const char* env = getenv("HERCULES_SCHEDULE_PACK_OMP");
-    if (env == NULL || *env == '\0') {
-      mode = 0;
-    } else {
-      mode = (atoi(env) != 0) ? 1 : 0;
-    }
-  }
-  return mode;
-}
-
 static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
                                              void* valuetable,
                                              int32_t itemsperentry,
@@ -8165,8 +8138,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) \
-    if(schedule_unpack_use_omp() && recv_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) if(recv_messenger->nidx > 10000)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -9715,9 +9687,31 @@ static int32_t adjust_distribution_use_omp(void) {
   return 0;
 #else
   if (g_adjustDistributionOmpMode < 0) {
-    g_adjustDistributionOmpMode = 0;
+    const char* env = getenv("HERCULES_ADJUST_DIST_OMP");
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_adjustDistributionOmpMode = 0;
+      } else {
+        g_adjustDistributionOmpMode = 1;
+      }
+    } else {
+      int maxThreads = omp_get_max_threads();
+      g_adjustDistributionOmpMode =
+          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+    }
+
+    if ((g_adjustDistributionOmpMode == 1) &&
+        (Global.myID == 0) &&
+        (g_adjustDistributionOmpReported == 0)) {
+      monitor_print(
+          "compute_adjust distribution OpenMP: enabled (threads=%d)\n",
+          omp_get_max_threads());
+      g_adjustDistributionOmpReported = 1;
+    }
   }
-  return 0;
+
+  return g_adjustDistributionOmpMode;
 #endif
 }
 
@@ -9726,9 +9720,31 @@ static int32_t adjust_assignment_use_omp(void) {
   return 0;
 #else
   if (g_adjustAssignmentOmpMode < 0) {
-    g_adjustAssignmentOmpMode = 0;
+    const char* env = getenv("HERCULES_ADJUST_ASSIGN_OMP");
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_adjustAssignmentOmpMode = 0;
+      } else {
+        g_adjustAssignmentOmpMode = 1;
+      }
+    } else {
+      int maxThreads = omp_get_max_threads();
+      g_adjustAssignmentOmpMode =
+          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+    }
+
+    if ((g_adjustAssignmentOmpMode == 1) &&
+        (Global.myID == 0) &&
+        (g_adjustAssignmentOmpReported == 0)) {
+      monitor_print(
+          "compute_adjust assignment OpenMP: enabled (threads=%d)\n",
+          omp_get_max_threads());
+      g_adjustAssignmentOmpReported = 1;
+    }
   }
-  return 0;
+
+  return g_adjustAssignmentOmpMode;
 #endif
 }
 
@@ -10623,14 +10639,6 @@ int32_t search_point(vector3D_t point, octant_t** octant) {
   }
 
   return 1;
-}
-
-/* Exposed for plane I/O validation guards. */
-int32_t get_local_harbored_node_count(void) {
-  if (Global.myMesh == NULL) {
-    return 0;
-  }
-  return Global.myMesh->nharbored;
 }
 
 /**

@@ -14,13 +14,10 @@ Some general description of the core components in this directory are given as f
 Runtime performance toggles (no source edits needed):
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
-	Adjust OpenMP path is currently force-disabled in solver code for
-	correctness at high thread counts. This variable is kept for
-	compatibility but has no effect right now.
+	Enables or disables OpenMP parallelization in assignment adjust core.
 - `HERCULES_ADJUST_DIST_OMP=1|0`
-	Adjust OpenMP path is currently force-disabled in solver code for
-	correctness at high thread counts. This variable is kept for
-	compatibility but has no effect right now.
+	Enables or disables OpenMP parallelization in parent-centric distribution
+	adjust core.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
@@ -31,17 +28,9 @@ Runtime performance toggles (no source edits needed):
 	interpolation and per-station file writes. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 - `HERCULES_PLANE_IO_OMP=1|0`
-	Plane OpenMP path is currently force-disabled in solver code for
-	correctness at high thread counts. This variable is kept for
-	compatibility but has no effect right now.
-- `HERCULES_SCHEDULE_UNPACK_OMP=1|0`
-	Controls OpenMP in incoming schedule unpack (`SHARING`) path.
-	Default is `0` (serialized) for correctness at high thread counts;
-	set `1` only for speed testing after validating output stability.
-- `HERCULES_SCHEDULE_PACK_OMP=1|0`
-	Controls OpenMP in outgoing schedule pack path.
-	Default is `0` (serialized) for correctness at high thread counts;
-	set `1` only for speed testing after validating output stability.
+	Enables or disables OpenMP parallelization for per-strip plane
+	interpolation before MPI send/write. Solver default is `0`
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
 
 Build note:
 
@@ -53,9 +42,9 @@ Two-phase script defaults:
 
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
-	`HERCULES_ADJUST_ASSIGN_OMP=0`, `HERCULES_ADJUST_DIST_OMP=0`,
+	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
-	`HERCULES_PLANE_IO_OMP=0`.
+	`HERCULES_PLANE_IO_OMP=1`.
 - You can still override any of these by exporting your own value before
 	running the script.
 
