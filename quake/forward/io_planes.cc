@@ -164,16 +164,21 @@ static void plane_interpolate_point(const mysolver_t* mySolver,
 		{-1, -1, -1, -1,  1,  1,  1, 1}
 	};
 	int iPhi;
-	int32_t nodeCount = Global.myMesh->nharbored;
+	int32_t nodeCount = -1;
 	int32_t nid[8];
 	int invalidNode = 0;
 	double displacementsX = 0.0;
 	double displacementsY = 0.0;
 	double displacementsZ = 0.0;
 
+	if ((mySolver != NULL) && (mySolver->gpuData != NULL) &&
+	    (mySolver->gpuData->nharbored > 0)) {
+		nodeCount = mySolver->gpuData->nharbored;
+	}
+
 	for (iPhi = 0; iPhi < 8; iPhi++) {
 		int32_t id = elem->nodestointerpolate[iPhi];
-		if ((id < 0) || (id >= nodeCount)) {
+		if ((nodeCount > 0) && ((id < 0) || (id >= nodeCount))) {
 			invalidNode = 1;
 			id = 0;
 		}
