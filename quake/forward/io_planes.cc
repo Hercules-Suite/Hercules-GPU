@@ -303,6 +303,10 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	int items_to_write = 3 * thePlanes[iPlane].numberofstepsalongstrike
+	    * thePlanes[iPlane].numberofstepsdowndip;
+	memset(planes_output_buffer, 0, (size_t)items_to_write * sizeof(double));
+
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
@@ -1400,6 +1404,12 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* else pick this plane and fill in first strip */
 	else{
 	    iPlane = status.MPI_TAG;
+	    {
+		int items_to_write = 3 * thePlanes[iPlane].numberofstepsalongstrike
+		    * thePlanes[iPlane].numberofstepsdowndip;
+		memset(planes_output_buffer, 0,
+		       (size_t)items_to_write * sizeof(double));
+	    }
 	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
 	    memcpy( &(planes_output_buffer[StartLocation * 3]),
 		    planes_stripMPIRecvBuffer,
