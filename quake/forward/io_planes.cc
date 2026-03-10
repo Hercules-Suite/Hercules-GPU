@@ -580,6 +580,22 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
     for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
     	thePlanes[ iPlane ].numberofstripsthisplane = 0;
+	const int pointCountAlong = thePlanes[iPlane].numberofstepsalongstrike;
+	const int pointCountDown = thePlanes[iPlane].numberofstepsdowndip;
+	const size_t totalPoints = (size_t)pointCountAlong * (size_t)pointCountDown;
+	unsigned char* pointOwned =
+		(unsigned char*)calloc(totalPoints, sizeof(unsigned char));
+	octant_t** pointOctants =
+		(octant_t**)malloc(totalPoints * sizeof(octant_t*));
+	vector3D_t* pointGlobals =
+		(vector3D_t*)malloc(totalPoints * sizeof(vector3D_t));
+	if ((pointOwned == NULL) || (pointOctants == NULL) ||
+	    (pointGlobals == NULL)) {
+		fprintf(stderr,
+			"Error allocating plane setup caches on PE %d (plane=%d, points=%zu)\n",
+			myID, iPlane, totalPoints);
+		exit(1);
+	}
     	/* Compute the coordinates of the nodes of the plane */
     	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
     	origin.x[1] = thePlanes[ iPlane ].origincoords.x[1];
@@ -607,6 +623,8 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				iDownDip < thePlanes[iPlane].numberofstepsdowndip;
     				iDownDip++ )
     		{
+				size_t pointIdx = (size_t)iStrike * (size_t)pointCountDown
+					+ (size_t)iDownDip;
     			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
     			pointLocal.x[0] = xLocal;
     			pointLocal.x[1] = yLocal;
@@ -620,8 +638,11 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			if ( get_thebase_topo() != 0.0  ) {
     				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
     			}
+				pointGlobals[pointIdx] = pointGlobal;
 
     			if (search_point( pointGlobal, &octant ) == 1) {
+					pointOwned[pointIdx] = 1;
+					pointOctants[pointIdx] = octant;
     				if (!onstrip) { /* start new strip */
     					thePlanes[iPlane].stripstart[thePlanes[iPlane].numberofstripsthisplane]
     					                             = (iStrike * thePlanes[iPlane].numberofstepsdowndip
@@ -632,6 +653,8 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
 
     			else {
+					pointOwned[pointIdx] = 0;
+					pointOctants[pointIdx] = NULL;
     				if (onstrip) { /* close strip */
     					onstrip = 0;
     					thePlanes[iPlane].stripend[thePlanes[iPlane]
@@ -706,27 +729,12 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				                                      -thePlanes[iPlane].stripstart[stripnum] + 1);
     				elemnum++)
     		{
-    			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						/ thePlanes[iPlane].numberofstepsdowndip;
-    			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						% thePlanes[iPlane].numberofstepsdowndip;
-    			xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
-    			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
-    			pointLocal.x[0] = xLocal;
-    			pointLocal.x[1] = yLocal;
-    			pointLocal.x[2] = 0;
-    			pointGlobal
-    			=  compute_global_coords( origin, pointLocal,
-    					thePlanes[ iPlane ].dip, 0,
-    					thePlanes[ iPlane ].strike );
+				const size_t pointIdx =
+					(size_t)(elemnum + thePlanes[iPlane].stripstart[stripnum]);
 
-    			/* Dorian: correct z coordinate if topo-plane */
-    			if ( get_thebase_topo() != 0.0 ) {
-    				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
-    			}
-
-    			if (search_point( pointGlobal, &octant) == 1) {
-    				compute_csi_eta_dzeta( octant, pointGlobal,
+				if (pointOwned[pointIdx] == 1) {
+					compute_csi_eta_dzeta( pointOctants[pointIdx],
+							pointGlobals[pointIdx],
     						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
     						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
 
@@ -738,6 +746,10 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
     		}
     	}
+
+		free(pointOwned);
+		free(pointOctants);
+		free(pointGlobals);
 
     } /* end of plane loop: for (stripnum = 0; ...) */
 
@@ -1196,29 +1208,29 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
 			}
 		    }
-
-		free(pointOwned);
-		free(pointOctants);
-		free(pointGlobals);
-
-		/* Report interpolation-metadata fill stage cost (2nd search pass). */
-		double fillElapsed = MPI_Wtime() - stageT0;
-		double fillMin = 0.0, fillMax = 0.0, fillSum = 0.0;
-		MPI_Reduce(&fillElapsed, &fillMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-		MPI_Reduce(&fillElapsed, &fillMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
-		MPI_Reduce(&fillElapsed, &fillSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
-		if (myID == 0) {
-			int commSize = 1;
-			MPI_Comm_size(comm_solver, &commSize);
-			fprintf(stderr,
-					"Planes setup[%d]: strip metadata fill done, time min/avg/max = %.2f / %.2f / %.2f s\n",
-					iPlane,
-					fillMin,
-					fillSum / (double)commSize,
-					fillMax);
-			fflush(stderr);
-		}
 	    }
+
+	free(pointOwned);
+	free(pointOctants);
+	free(pointGlobals);
+
+	/* Report interpolation-metadata fill stage cost (2nd search pass). */
+	double fillElapsed = MPI_Wtime() - stageT0;
+	double fillMin = 0.0, fillMax = 0.0, fillSum = 0.0;
+	MPI_Reduce(&fillElapsed, &fillMin, 1, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+	MPI_Reduce(&fillElapsed, &fillMax, 1, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+	MPI_Reduce(&fillElapsed, &fillSum, 1, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+	if (myID == 0) {
+		int commSize = 1;
+		MPI_Comm_size(comm_solver, &commSize);
+		fprintf(stderr,
+				"Planes setup[%d]: strip metadata fill done, time min/avg/max = %.2f / %.2f / %.2f s\n",
+				iPlane,
+				fillMin,
+				fillSum / (double)commSize,
+				fillMax);
+		fflush(stderr);
+	}
     } /* end of plane loop: for (stripnum = 0; ...) */
 
     MPI_Reduce( &planes_LocalLargestStripCount,
