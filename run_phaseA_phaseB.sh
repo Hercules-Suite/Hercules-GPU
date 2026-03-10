@@ -51,7 +51,6 @@ fi
 
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
-EFFECTIVE_MESH_ETREE_PATH=""
 
 make_phase_input() {
   local src="$1"
@@ -96,63 +95,6 @@ make_phase_input() {
   ' "${src}" >"${dst}"
 }
 
-get_mesh_etree_path() {
-  local src="$1"
-  awk '
-    {
-      line = $0;
-      sub(/^[[:space:]]+/, "", line);
-      if (line ~ /^#/ || line ~ /^$/) {
-        next;
-      }
-      if (line ~ /^mesh_etree_output_file[[:space:]]*=/) {
-        sub(/^[^=]*=[[:space:]]*/, "", line);
-        sub(/[[:space:]]*#.*/, "", line);
-        sub(/[[:space:]]+$/, "", line);
-        print line;
-        exit;
-      }
-    }
-  ' "${src}"
-}
-
-set_mesh_etree_path() {
-  local src="$1"
-  local dst="$2"
-  local mesh_path="$3"
-
-  awk -v mpath="${mesh_path}" '
-    BEGIN { seen = 0; }
-    /^[[:space:]]*mesh_etree_output_file[[:space:]]*=/ {
-      print "mesh_etree_output_file       = " mpath;
-      seen = 1;
-      next;
-    }
-    { print }
-    END {
-      if (!seen) {
-        print "mesh_etree_output_file       = " mpath;
-      }
-    }
-  ' "${src}" >"${dst}"
-}
-
-resolve_mesh_path() {
-  local raw_path="$1"
-  local anchor_dir="$2"
-
-  if [[ -z "${raw_path}" ]]; then
-    printf "%s\n" "${anchor_dir}/mesh_etree.phaseAB.e"
-    return
-  fi
-
-  if [[ "${raw_path}" == /* ]]; then
-    printf "%s\n" "${raw_path}"
-  else
-    printf "%s\n" "${anchor_dir}/${raw_path}"
-  fi
-}
-
 if [[ -n "${BASE_IN}" ]]; then
   if [[ ! -f "${BASE_IN}" ]]; then
     echo "ERROR: BASE_IN file not found: ${BASE_IN}" >&2
@@ -171,18 +113,6 @@ if [[ -n "${BASE_IN}" ]]; then
 
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
-
-  MESH_ETREE_RAW_BASE="${MESH_ETREE_RAW_BASE:-$(get_mesh_etree_path "${BASE_IN}")}"
-  BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
-  EFFECTIVE_MESH_ETREE_PATH="$(resolve_mesh_path "${MESH_ETREE_RAW_BASE}" "${BASE_IN_DIR}")"
-
-  TMP_PHASE_A_IN_MESH="${TMP_PHASE_A_IN}.mesh"
-  TMP_PHASE_B_IN_MESH="${TMP_PHASE_B_IN}.mesh"
-  set_mesh_etree_path "${TMP_PHASE_A_IN}" "${TMP_PHASE_A_IN_MESH}" "${EFFECTIVE_MESH_ETREE_PATH}"
-  set_mesh_etree_path "${TMP_PHASE_B_IN}" "${TMP_PHASE_B_IN_MESH}" "${EFFECTIVE_MESH_ETREE_PATH}"
-  mv -f "${TMP_PHASE_A_IN_MESH}" "${TMP_PHASE_A_IN}"
-  mv -f "${TMP_PHASE_B_IN_MESH}" "${TMP_PHASE_B_IN}"
-
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
 fi
@@ -258,9 +188,6 @@ if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
   echo "Phase B input:  ${PHASE_B_IN} (generated)"
-  if [[ -n "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
-    echo "Mesh etree:     ${EFFECTIVE_MESH_ETREE_PATH}"
-  fi
 else
   echo "Phase A input:  ${PHASE_A_IN}"
   echo "Phase B input:  ${PHASE_B_IN}"
