@@ -714,6 +714,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				compute_csi_eta_dzeta( octant, pointGlobal,
     						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
     						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
+					thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 1;
 
     				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
@@ -1162,7 +1163,6 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				compute_csi_eta_dzeta( octant, pointGlobal,
 						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
-				thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 1;
 				thePlanes[ iPlane ].strip[stripnum][elemnum].valid = 1;
 
 				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
