@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CASE_DIR="${CASE_DIR:-$PWD}"
+RUN_DIR="${PWD}"
 
 # Default runtime tuning knobs (can still be overridden by user env).
 : "${OMP_PROC_BIND:=close}"
@@ -19,13 +19,13 @@ export HERCULES_SPARSE_CLEAR_MODE HERCULES_STATION_IO_OMP HERCULES_PLANE_IO_OMP
 
 MPI_RUN="${MPI_RUN:-mpirun}"
 BASE_IN="${BASE_IN:-}"
-if [[ -f "${CASE_DIR}/inputfiles/Test_A.in" ]]; then
-  PHASE_A_DEFAULT_IN="${CASE_DIR}/inputfiles/Test_A.in"
+if [[ -f "${RUN_DIR}/inputfiles/Test_A.in" ]]; then
+  PHASE_A_DEFAULT_IN="${RUN_DIR}/inputfiles/Test_A.in"
 else
   PHASE_A_DEFAULT_IN="${ROOT_DIR}/Input/Test_A.in"
 fi
-if [[ -f "${CASE_DIR}/inputfiles/Test_B.in" ]]; then
-  PHASE_B_DEFAULT_IN="${CASE_DIR}/inputfiles/Test_B.in"
+if [[ -f "${RUN_DIR}/inputfiles/Test_B.in" ]]; then
+  PHASE_B_DEFAULT_IN="${RUN_DIR}/inputfiles/Test_B.in"
 else
   PHASE_B_DEFAULT_IN="${ROOT_DIR}/Input/Test_B.in"
 fi
@@ -51,9 +51,6 @@ fi
 
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
-KEEP_PHASE_INPUTS="${KEEP_PHASE_INPUTS:-0}"
-FORCE_MESH_REBUILD="${FORCE_MESH_REBUILD:-1}"
-MESH_MTIME_BEFORE=""
 
 trim_ws() {
   local s="$1"
@@ -103,24 +100,11 @@ set_or_add_param() {
   ' "${src}" >"${dst}"
 }
 
-resolve_path() {
-  local p="$1"
-  local base_dir="$2"
-  if [[ -z "${p}" ]]; then
-    return
-  fi
-  if [[ "${p}" = /* ]]; then
-    printf '%s' "${p}"
-  else
-    printf '%s' "${base_dir}/${p}"
-  fi
-}
-
 resolve_mesh_path() {
   local p="$1"
-  local case_dir="$2"
+  local run_dir="$2"
   local base_in_dir="$3"
-  local case_path=""
+  local run_path=""
   local base_path=""
 
   if [[ -z "${p}" ]]; then
@@ -132,15 +116,15 @@ resolve_mesh_path() {
     return
   fi
 
-  case_path="${case_dir}/${p}"
+  run_path="${run_dir}/${p}"
   base_path="${base_in_dir}/${p}"
 
-  # Prefer case-relative resolution for generated two-phase runs.
+  # Prefer run-directory resolution for generated two-phase runs.
   # If only an inputfile-relative file already exists, preserve compatibility.
-  if [[ -e "${base_path}" && ! -e "${case_path}" ]]; then
+  if [[ -e "${base_path}" && ! -e "${run_path}" ]]; then
     printf '%s' "${base_path}"
   else
-    printf '%s' "${case_path}"
+    printf '%s' "${run_path}"
   fi
 }
 
@@ -198,9 +182,6 @@ if [[ -n "${BASE_IN}" ]]; then
   TMP_PHASE_B_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB.XXXXXX.in")"
 
   cleanup_tmp_inputs() {
-    if [[ "${KEEP_PHASE_INPUTS}" == "1" ]]; then
-      return
-    fi
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
   }
@@ -211,11 +192,11 @@ if [[ -n "${BASE_IN}" ]]; then
 
   # Normalize mesh etree path so both phases use the same absolute location.
   BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
-  CASE_DIR_ABS="$(cd -- "${CASE_DIR}" && pwd)"
+  RUN_DIR_ABS="$(cd -- "${RUN_DIR}" && pwd)"
   MESH_ETREE_RAW="$(extract_config_value "${BASE_IN}" "mesh_etree_output_file")"
   MESH_ETREE_RAW="$(trim_ws "${MESH_ETREE_RAW}")"
   if [[ -n "${MESH_ETREE_RAW}" ]]; then
-    EFFECTIVE_MESH_ETREE_PATH="$(resolve_mesh_path "${MESH_ETREE_RAW}" "${CASE_DIR_ABS}" "${BASE_IN_DIR}")"
+    EFFECTIVE_MESH_ETREE_PATH="$(resolve_mesh_path "${MESH_ETREE_RAW}" "${RUN_DIR_ABS}" "${BASE_IN_DIR}")"
     TMP_FIX_A="${TMP_PHASE_A_IN}.fix"
     TMP_FIX_B="${TMP_PHASE_B_IN}.fix"
     set_or_add_param "${TMP_PHASE_A_IN}" "${TMP_FIX_A}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
@@ -294,16 +275,13 @@ fi
 echo "=== Two-phase run ==="
 echo "MPI launcher:   ${MPI_RUN}"
 echo "psolve binary:  ${PSOLVE_BIN}"
-echo "Case dir:       ${CASE_DIR}"
+echo "Run dir:        ${RUN_DIR}"
 if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
   echo "Phase B input:  ${PHASE_B_IN} (generated)"
   if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
     echo "Mesh etree:     ${EFFECTIVE_MESH_ETREE_PATH}"
-  fi
-  if [[ "${KEEP_PHASE_INPUTS}" == "1" ]]; then
-    echo "Keep phase inputs: enabled"
   fi
 else
   echo "Phase A input:  ${PHASE_A_IN}"
@@ -336,13 +314,6 @@ fi
 
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
   mkdir -p -- "$(dirname -- "${EFFECTIVE_MESH_ETREE_PATH}")"
-  if [[ -e "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
-    MESH_MTIME_BEFORE="$(stat -c %Y "${EFFECTIVE_MESH_ETREE_PATH}" 2>/dev/null || stat -f %m "${EFFECTIVE_MESH_ETREE_PATH}")"
-    if [[ "${FORCE_MESH_REBUILD}" == "1" ]]; then
-      rm -f -- "${EFFECTIVE_MESH_ETREE_PATH}"
-      echo "Removed pre-existing mesh etree before Phase A: ${EFFECTIVE_MESH_ETREE_PATH}"
-    fi
-  fi
 fi
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -354,15 +325,6 @@ fi
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
   echo "ERROR: Phase A did not produce a readable mesh etree file: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
   exit 1
-fi
-
-if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ -n "${MESH_MTIME_BEFORE}" ]]; then
-  MESH_MTIME_AFTER="$(stat -c %Y "${EFFECTIVE_MESH_ETREE_PATH}" 2>/dev/null || stat -f %m "${EFFECTIVE_MESH_ETREE_PATH}")"
-  if [[ "${MESH_MTIME_AFTER}" -le "${MESH_MTIME_BEFORE}" ]]; then
-    echo "ERROR: mesh etree timestamp did not advance after Phase A: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
-    echo "       This indicates Phase A did not rewrite the expected mesh file." >&2
-    exit 1
-  fi
 fi
 
 echo
