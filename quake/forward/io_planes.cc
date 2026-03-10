@@ -542,6 +542,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     vector3D_t origin, pointLocal, pointGlobal;
     octant_t *octant;
     int onstrip ;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
     //    int32_t nodesToInterpolate[8];
 
     planes_LocalLargestStripCount = 0;
@@ -669,9 +672,14 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
     			stripnum++)
     	{
+			int elemCount = thePlanes[iPlane].stripend[stripnum]
+			    - thePlanes[iPlane].stripstart[stripnum] + 1;
+		#ifdef _OPENMP
+		#pragma omp parallel for if(useOmp) schedule(static) \
+		    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
+		#endif
     		for (elemnum = 0;
-    				elemnum < (thePlanes[iPlane].stripend[stripnum]
-    				                                      -thePlanes[iPlane].stripstart[stripnum] + 1);
+					elemnum < elemCount;
     				elemnum++)
     		{
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -962,6 +970,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     vector3D_t origin, pointLocal, pointGlobal;
     octant_t *octant;
     int onstrip ;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
 
     planes_LocalLargestStripCount = 0;
 
@@ -1088,9 +1099,14 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	     stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
 	     stripnum++)
 	    {
+		int elemCount = thePlanes[iPlane].stripend[stripnum]
+		    - thePlanes[iPlane].stripstart[stripnum] + 1;
+	#ifdef _OPENMP
+	#pragma omp parallel for if(useOmp) schedule(static) \
+	    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
+	#endif
 		for (elemnum = 0;
-		     elemnum < (thePlanes[iPlane].stripend[stripnum]
-				-thePlanes[iPlane].stripstart[stripnum] + 1);
+		     elemnum < elemCount;
 		     elemnum++)
 		    {
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
