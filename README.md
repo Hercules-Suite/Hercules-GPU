@@ -25,13 +25,8 @@ Runtime performance toggles (no source edits needed):
 	fragmented 3D model cases.
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
-	interpolation and per-station file writes during time stepping. Solver
-	default is `0`
+	interpolation and per-station file writes. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
-	When topography station interpolation is active, interpolation is
-	automatically forced to serial as a correctness safeguard.
-	Station setup/initialization is intentionally kept serial for
-	deterministic behavior.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`

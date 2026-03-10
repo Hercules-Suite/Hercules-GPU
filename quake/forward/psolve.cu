@@ -10838,6 +10838,10 @@ void setup_stations_data() {
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
   }
 
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
+#endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
     char stationFile[256];
 
@@ -10947,21 +10951,7 @@ static int interpolate_station_displacements(int32_t step) {
 
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
-  int32_t interpolationUseOmp = useOmp;
-
-  if ((interpolationUseOmp == 1) && (Param.includeTopography == YES)) {
-    static int32_t printedTopoFallback = 0;
-    if ((Global.myID == 0) && (printedTopoFallback == 0)) {
-      monitor_print(
-          "Station output OpenMP disabled for topography interpolation path "
-          "(OMP_NUM_THREADS=%d) to preserve deterministic results\n",
-          omp_get_max_threads());
-      printedTopoFallback = 1;
-    }
-    interpolationUseOmp = 0;
-  }
-
-#pragma omp parallel for if(interpolationUseOmp) schedule(static) \
+#pragma omp parallel for if(useOmp) schedule(static) \
     private(iPhi, nodesToInterpolate, localCoords, phi, dis_x, dis_y, dis_z, \
             vel_x, vel_y, vel_z, acc_x, acc_y, acc_z)
 #endif
