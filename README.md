@@ -34,6 +34,10 @@ Runtime performance toggles (no source edits needed):
 	Plane OpenMP path is currently force-disabled in solver code for
 	correctness at high thread counts. This variable is kept for
 	compatibility but has no effect right now.
+- `HERCULES_SCHEDULE_UNPACK_OMP=1|0`
+	Controls OpenMP in incoming schedule unpack (`SHARING`) path.
+	Default is `0` (serialized) for correctness at high thread counts;
+	set `1` only for speed testing after validating output stability.
 
 Build note:
 

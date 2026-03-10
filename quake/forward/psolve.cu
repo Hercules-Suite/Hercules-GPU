@@ -6638,14 +6638,14 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
       (g_sparseTopoCountCached != topoCount)) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) if(sourceCount > 100000)
 #endif
     for (int32_t i = 0; i < sourceCount; i++) {
       g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
     }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) if(topoCount > 100000)
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
@@ -6657,7 +6657,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) if(totalCount > 100000)
 #endif
   for (idx = 0; idx < totalCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
@@ -6709,7 +6709,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* topoNodes = topo_get_nodes_list();
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) if(topoCount > 100000)
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
@@ -7958,7 +7958,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) if(send_messenger->nidx > 10000)
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8130,6 +8130,19 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   return;
 }
 
+static int32_t schedule_unpack_use_omp(void) {
+  static int32_t mode = -1;
+  if (mode < 0) {
+    const char* env = getenv("HERCULES_SCHEDULE_UNPACK_OMP");
+    if (env == NULL || *env == '\0') {
+      mode = 0;
+    } else {
+      mode = (atoi(env) != 0) ? 1 : 0;
+    }
+  }
+  return mode;
+}
+
 static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
                                              void* valuetable,
                                              int32_t itemsperentry,
@@ -8138,7 +8151,8 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(0)
+#pragma omp parallel for schedule(static) \
+    if(schedule_unpack_use_omp() && recv_messenger->nidx > 10000)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
