@@ -167,16 +167,21 @@ if [[ -n "${BASE_IN}" ]]; then
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
 
   # Pin both phases to the exact same absolute mesh etree path.
+  # If base input omits this field, use a stable case-local default.
   MESH_ETREE_RAW_BASE="$(get_mesh_etree_path "${BASE_IN}")"
-  MESH_ETREE_PATH_BASE="$(abspath_from_case "${MESH_ETREE_RAW_BASE}")"
-  if [[ -n "${MESH_ETREE_PATH_BASE}" ]]; then
-    TMP_PATCH_A="$(mktemp "${TMPDIR_ROOT}/hercules_phaseA_patch.XXXXXX.in")"
-    TMP_PATCH_B="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB_patch.XXXXXX.in")"
-    set_mesh_etree_path "${TMP_PHASE_A_IN}" "${TMP_PATCH_A}" "${MESH_ETREE_PATH_BASE}"
-    set_mesh_etree_path "${TMP_PHASE_B_IN}" "${TMP_PATCH_B}" "${MESH_ETREE_PATH_BASE}"
-    mv "${TMP_PATCH_A}" "${TMP_PHASE_A_IN}"
-    mv "${TMP_PATCH_B}" "${TMP_PHASE_B_IN}"
+  if [[ -z "${MESH_ETREE_RAW_BASE}" ]]; then
+    MESH_ETREE_RAW_BASE="outputfiles/mesh.e"
   fi
+  MESH_ETREE_PATH_BASE="$(abspath_from_case "${MESH_ETREE_RAW_BASE}")"
+
+  mkdir -p "$(dirname "${MESH_ETREE_PATH_BASE}")"
+
+  TMP_PATCH_A="$(mktemp "${TMPDIR_ROOT}/hercules_phaseA_patch.XXXXXX.in")"
+  TMP_PATCH_B="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB_patch.XXXXXX.in")"
+  set_mesh_etree_path "${TMP_PHASE_A_IN}" "${TMP_PATCH_A}" "${MESH_ETREE_PATH_BASE}"
+  set_mesh_etree_path "${TMP_PHASE_B_IN}" "${TMP_PATCH_B}" "${MESH_ETREE_PATH_BASE}"
+  mv "${TMP_PATCH_A}" "${TMP_PHASE_A_IN}"
+  mv "${TMP_PATCH_B}" "${TMP_PHASE_B_IN}"
 
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
