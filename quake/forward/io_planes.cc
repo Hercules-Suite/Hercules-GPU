@@ -201,6 +201,11 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	const int32_t localNodeCount = get_local_harbored_node_count();
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	if (myID == 0) {
+	    int planeVals = 3 * thePlanes[iPlane].numberofstepsalongstrike *
+	                    thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, sizeof(double) * planeVals);
+	}
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
@@ -1372,6 +1377,9 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* else pick this plane and fill in first strip */
 	else{
 	    iPlane = status.MPI_TAG;
+	    int planeVals = 3 * thePlanes[iPlane].numberofstepsalongstrike *
+	                   thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, sizeof(double) * planeVals);
 	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
 	    memcpy( &(planes_output_buffer[StartLocation * 3]),
 		    planes_stripMPIRecvBuffer,
