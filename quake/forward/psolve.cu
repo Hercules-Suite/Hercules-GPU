@@ -129,6 +129,8 @@ static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
 static int32_t g_sharingCommOmpMode = -1;
 static int32_t g_sharingCommOmpReported = 0;
+static int32_t g_sparseHostOmpMode = -1;
+static int32_t g_sparseHostOmpReported = 0;
 static int32_t g_reproMode = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
@@ -334,6 +336,7 @@ static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t sharing_comm_use_omp(void);
+static int32_t sparse_host_use_omp(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
@@ -6646,14 +6649,17 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
       (g_sparseTopoCountCached != topoCount)) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((sourceCount > 100000) && !hercules_repro_mode())
+    const int32_t useSparseHostOmp = sparse_host_use_omp();
+#endif
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if((sourceCount > 100000) && useSparseHostOmp)
 #endif
     for (int32_t i = 0; i < sourceCount; i++) {
       g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
     }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && useSparseHostOmp)
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
@@ -6665,7 +6671,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((totalCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((totalCount > 100000) && sparse_host_use_omp())
 #endif
   for (idx = 0; idx < totalCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
@@ -6717,7 +6723,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* topoNodes = topo_get_nodes_list();
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && sparse_host_use_omp())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
@@ -9880,6 +9886,41 @@ static int32_t sharing_comm_use_omp(void) {
   }
 
   return g_sharingCommOmpMode;
+#endif
+}
+
+static int32_t sparse_host_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (hercules_repro_mode()) {
+    return 0;
+  }
+
+  if (g_sparseHostOmpMode < 0) {
+    const char* env = getenv("HERCULES_SPARSE_HOST_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
+        g_sparseHostOmpMode = 0;
+      } else {
+        g_sparseHostOmpMode = 1;
+      }
+    } else {
+      /* Default to serial until the sparse host staging path is proven safe. */
+      g_sparseHostOmpMode = 0;
+    }
+
+    if ((g_sparseHostOmpMode == 1) && (Global.myID == 0) &&
+        (g_sparseHostOmpReported == 0)) {
+      monitor_print("sparse host OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_sparseHostOmpReported = 1;
+    }
+  }
+
+  return g_sparseHostOmpMode;
 #endif
 }
 

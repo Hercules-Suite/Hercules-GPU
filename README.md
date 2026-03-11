@@ -23,6 +23,11 @@ Runtime performance toggles (no source edits needed):
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
 	fragmented 3D model cases.
+- `HERCULES_SPARSE_HOST_OMP=1|0`
+	Enables or disables OpenMP parallelization in sparse host force staging
+	and topography-node clear loops. Solver default is `0` (disabled)
+	because this path remains the strongest candidate for the high-thread
+	correctness issue outside full repro mode.
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
 	interpolation and per-station file writes. Solver default is `0`
@@ -52,8 +57,8 @@ Two-phase script defaults:
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
-	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_STATION_IO_OMP=1`,
-	`HERCULES_PLANE_IO_OMP=1`.
+	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_SPARSE_HOST_OMP=0`,
+	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`.
 - You can still override any of these by exporting your own value before
 	running the script.
 
@@ -74,6 +79,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_ADJUST_ASSIGN_OMP=0
 # export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=nodes
+# export HERCULES_SPARSE_HOST_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SHARING_OMP=0
