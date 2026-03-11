@@ -31,6 +31,15 @@ Runtime performance toggles (no source edits needed):
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`
 	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
+- `HERCULES_SHARING_OMP=1|0`
+	Enables or disables OpenMP parallelization in shared displacement
+	communication pack/unpack paths. Solver default is `0` (disabled)
+	because these paths can still make results depend on `OMP_NUM_THREADS`
+	even when plane/station/adjust OpenMP toggles are off.
+- `HERCULES_REPRO_MODE=1|2`
+	`1` disables remaining OpenMP-sensitive deterministic communication
+	paths and uses deterministic MPI unpack ordering. `2` is stricter and
+	also disables additional CPU OpenMP paths guarded by repro mode.
 
 Build note:
 
@@ -67,6 +76,8 @@ export OMP_NUM_THREADS=64
 # export HERCULES_SPARSE_CLEAR_MODE=nodes
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_SHARING_OMP=0
+# export HERCULES_REPRO_MODE=1
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
