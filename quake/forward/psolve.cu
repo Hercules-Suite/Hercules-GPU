@@ -6641,14 +6641,14 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
       (g_sparseTopoCountCached != topoCount)) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((sourceCount > 100000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((sourceCount > 100000) && !hercules_repro_mode())
 #endif
     for (int32_t i = 0; i < sourceCount; i++) {
       g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
     }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
@@ -6660,7 +6660,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((totalCount > 100000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((totalCount > 100000) && !hercules_repro_mode())
 #endif
   for (idx = 0; idx < totalCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
@@ -6712,7 +6712,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* topoNodes = topo_get_nodes_list();
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
