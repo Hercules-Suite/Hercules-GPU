@@ -193,8 +193,7 @@ static int32_t plane_output_use_omp(void) {
 		} else if (env != NULL) {
 			g_planeOutputOmpMode = 1;
 		} else {
-			/* Keep legacy behavior unless explicitly enabled. */
-			g_planeOutputOmpMode = 0;
+			g_planeOutputOmpMode = 1;
 		}
 
 		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0)) {

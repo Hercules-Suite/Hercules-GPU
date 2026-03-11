@@ -6836,7 +6836,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
 static int32_t solver_sparse_clear_mode(void) {
   if (g_sparseClearMode < 0) {
     const char* env = getenv("HERCULES_SPARSE_CLEAR_MODE");
-    int32_t requestedMode = 2;
+    int32_t requestedMode = 3;
     int32_t harboredCount = Global.myMesh->nharbored;
     int32_t topoCount = topo_get_nodes_count();
     int32_t rangeCount = topo_get_node_range_count();
@@ -9905,7 +9905,7 @@ static int32_t adjust_distribution_use_omp(void) {
         g_adjustDistributionOmpMode = 1;
       }
     } else {
-      g_adjustDistributionOmpMode = 0;
+      g_adjustDistributionOmpMode = 1;
     }
 
     if ((g_adjustDistributionOmpMode == 1) &&
@@ -9940,7 +9940,7 @@ static int32_t adjust_assignment_use_omp(void) {
         g_adjustAssignmentOmpMode = 1;
       }
     } else {
-      g_adjustAssignmentOmpMode = 0;
+      g_adjustAssignmentOmpMode = 1;
     }
 
     if ((g_adjustAssignmentOmpMode == 1) &&
@@ -11527,8 +11527,7 @@ static int32_t station_output_use_omp(void) {
         g_stationOutputOmpMode = 1;
       }
     } else {
-      /* Default to off to preserve legacy behavior unless explicitly enabled. */
-      g_stationOutputOmpMode = 0;
+      g_stationOutputOmpMode = 1;
     }
 
     if ((g_stationOutputOmpMode == 1) && (Global.myID == 0) &&
