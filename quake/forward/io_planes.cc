@@ -33,10 +33,6 @@
 #include <errno.h>
 #include <stdarg.h>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 #include "io_planes.h"
 #include "psolve.h"
 #include "geometrics.h"
@@ -113,35 +109,6 @@ static int planes_LocalLargestStripCount;
 static double* planes_output_buffer;
 static double* planes_stripMPISendBuffer;
 static double* planes_stripMPIRecvBuffer;
-static int32_t g_planeOutputOmpMode = -1;
-static int32_t g_planeOutputOmpReported = 0;
-
-static int32_t plane_output_use_omp(void) {
-#ifndef _OPENMP
-	return 0;
-#else
-	if (g_planeOutputOmpMode < 0) {
-		const char* env = getenv("HERCULES_PLANE_IO_OMP");
-		if ((env != NULL) && (strcmp(env, "0") == 0)) {
-			g_planeOutputOmpMode = 0;
-		} else if (env != NULL) {
-			g_planeOutputOmpMode = 1;
-		} else {
-			/* Keep legacy behavior unless explicitly enabled. */
-			g_planeOutputOmpMode = 0;
-		}
-
-		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0)) {
-			fprintf(stderr,
-					"Plane output OpenMP: enabled (threads=%d)\n",
-					omp_get_max_threads());
-			g_planeOutputOmpReported = 1;
-		}
-	}
-
-	return g_planeOutputOmpMode;
-#endif
-}
 
 /******* Wrapper on routines to maintain backwards compatiblity for single core routines ******/
 
@@ -204,22 +171,16 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     MPI_Status  status;
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
-#ifdef _OPENMP
-	const int32_t useOmp = plane_output_use_omp();
-#endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
-	    int elemCount = thePlanes[iPlane].stripend[iStrip]
-	        - thePlanes[iPlane].stripstart[iStrip] + 1;
 
 	    /* interpolate points directly into send buffer for this strip */
-	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
-	#endif
-	    for (elemnum = 0; elemnum < elemCount; elemnum++)
+	    for (elemnum = 0;
+		 elemnum < (thePlanes[iPlane].stripend[iStrip]
+			    -thePlanes[iPlane].stripstart[iStrip]+1);
+		 elemnum++)
 	    {
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
@@ -1156,22 +1117,16 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
     double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
-#ifdef _OPENMP
-    const int32_t useOmp = plane_output_use_omp();
-#endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
-	    int elemCount = thePlanes[iPlane].stripend[iStrip]
-	        - thePlanes[iPlane].stripstart[iStrip] + 1;
 
 	    /* interpolate points directly into send buffer for this strip */
-	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
-	#endif
-	    for (elemnum = 0; elemnum < elemCount; elemnum++){
+	    for (elemnum = 0;
+		 elemnum < (thePlanes[iPlane].stripend[iStrip]
+			    -thePlanes[iPlane].stripstart[iStrip]+1);
+		 elemnum++){
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
