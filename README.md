@@ -20,18 +20,21 @@ Runtime performance toggles (no source edits needed):
 	Enables or disables OpenMP parallelization in parent-centric distribution
 	adjust core.
 	The two-phase run script defaults this to `1`.
-- `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
+
+- `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes|full` (or `2|0|1|3`)
 	Selects sparse host force reset mode in GPU solver path.
-	`range`/`0` is the two-phase script default and uses exact contiguous
-	ranges built from the topography node set.
-	`auto`/`2` prefers `nodes` unless range layout is compact.
+	`full`/`3` is the two-phase script default and clears the full local
+	host force array with one contiguous `memset`.
+	`range`/`0` uses exact contiguous ranges built from the topography node
+	set.
+	`auto`/`2` prefers `full` when topography touches a large fraction of
+	local nodes, otherwise falls back to `range` or `nodes`.
 	`range`/`0` forces range memset; `nodes`/`1` can be faster for highly
-	fragmented 3D model cases.
+	fragmented 3D model cases. `full`/`3` forces dense full-array clear.
 - `HERCULES_SPARSE_CLEAR_OMP=1|0`
 	Enables or disables OpenMP parallelization only for sparse host force
-	clearing. Solver default is `1` (enabled) because the clear path acts
-	on disjoint sparse nodes or disjoint exact ranges and is expected to be
-	safe while reducing `Disp host force reset` time.
+	clearing. Solver default is `0` (disabled) because enabling this path
+	reintroduced incorrect plane output in testing.
 - `HERCULES_SPARSE_HOST_OMP=1|0`
 	Enables or disables OpenMP parallelization in sparse host force staging
 	and gather/build loops. Solver default is `0` (disabled) because this
@@ -71,7 +74,7 @@ Two-phase script defaults:
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
-	`HERCULES_SPARSE_CLEAR_MODE=range`, `HERCULES_SPARSE_CLEAR_OMP=1`,
+	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_SPARSE_CLEAR_OMP=0`,
 	`HERCULES_SPARSE_HOST_OMP=0`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=0`.
@@ -95,7 +98,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_ADJUST_ASSIGN_OMP=0
 # export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=auto
-# export HERCULES_SPARSE_CLEAR_OMP=1
+# export HERCULES_SPARSE_CLEAR_OMP=0
 # export HERCULES_SPARSE_HOST_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0

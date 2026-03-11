@@ -6781,7 +6781,11 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
-  if (solver_sparse_clear_mode() == 1) {
+  int32_t clearMode = solver_sparse_clear_mode();
+
+  if (clearMode == 3) {
+    memset(solver->force, 0, sizeof(fvector_t) * Global.myMesh->nharbored);
+  } else if (clearMode == 1) {
     int32_t topoCount = topo_get_nodes_count();
     const int32_t* topoNodes = topo_get_nodes_list();
 
@@ -6814,15 +6818,19 @@ static int32_t solver_sparse_clear_mode(void) {
   if (g_sparseClearMode < 0) {
     const char* env = getenv("HERCULES_SPARSE_CLEAR_MODE");
     int32_t requestedMode = 2;
+    int32_t harboredCount = Global.myMesh->nharbored;
     int32_t topoCount = topo_get_nodes_count();
     int32_t rangeCount = topo_get_node_range_count();
     int64_t totalRangeSpan = 0;
     const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-    /* 0: range memset, 1: node-list clear, 2: auto-select */
+    /* 0: range memset, 1: node-list clear, 2: auto-select, 3: full memset */
     if (env != NULL) {
       if (strcasecmp(env, "nodes") == 0 || strcmp(env, "1") == 0) {
         requestedMode = 1;
+      } else if (strcasecmp(env, "full") == 0 ||
+                 strcasecmp(env, "dense") == 0 || strcmp(env, "3") == 0) {
+        requestedMode = 3;
       } else if (strcasecmp(env, "range") == 0 ||
                  strcasecmp(env, "ranges") == 0 || strcmp(env, "0") == 0) {
         requestedMode = 0;
@@ -6880,23 +6888,34 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   return;
 }
-
+        int32_t useFull = 0;
+        int32_t useRanges = 0;
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-  /* Copy updated tm2 displacements from device */
-  cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
-                  mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
+        /* Auto policy: prefer full clear when topography touches a meaningful
+         * fraction of local nodes, otherwise use ranges only when the covered
+         * span is compact and the range list is small. */
+        if ((harboredCount > 0) &&
+            ((topoCount * 4) >= harboredCount)) {
+          useFull = 1;
+        } else if (topoCount > 0 &&
                   solver->streams[CUDA_STREAM_MAIN]);
 
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
   /* Uncomment for timing tests */
-  // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+        if (useFull) {
+          g_sparseClearMode = 3;
+        } else {
+          g_sparseClearMode = useRanges ? 0 : 1;
+        }
 
   return;
 }
 
 static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
-  lnid_t nindex;
+        const char* modeName =
+            (g_sparseClearMode == 0) ? "range" :
+            (g_sparseClearMode == 1) ? "nodes" : "full";
 
   /* Copy tm2 to tm3 for accelerations */
   if (Param.printStationAccelerations == YES) {
@@ -10007,8 +10026,8 @@ static int32_t sparse_clear_use_omp(void) {
         g_sparseClearOmpMode = 1;
       }
     } else {
-      /* Clearing disjoint sparse ranges is safe to parallelize by default. */
-      g_sparseClearOmpMode = 1;
+      /* Keep sparse clear serial by default until this path is proven safe. */
+      g_sparseClearOmpMode = 0;
     }
 
     if ((g_sparseClearOmpMode == 1) && (Global.myID == 0) &&
