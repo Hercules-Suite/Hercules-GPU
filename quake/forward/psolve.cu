@@ -330,6 +330,7 @@ static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t hercules_repro_mode(void);
+static int32_t hercules_repro_strict(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -6640,14 +6641,14 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
       (g_sparseTopoCountCached != topoCount)) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((sourceCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((sourceCount > 100000) && !hercules_repro_strict())
 #endif
     for (int32_t i = 0; i < sourceCount; i++) {
       g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
     }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_strict())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
@@ -6659,7 +6660,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((totalCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((totalCount > 100000) && !hercules_repro_strict())
 #endif
   for (idx = 0; idx < totalCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
@@ -6711,7 +6712,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* topoNodes = topo_get_nodes_list();
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && !hercules_repro_strict())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
@@ -7963,7 +7964,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && !hercules_repro_strict())
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8159,7 +8160,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_strict())
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -9707,7 +9708,7 @@ static int32_t adjust_distribution_use_omp(void) {
 #ifndef _OPENMP
   return 0;
 #else
-  if (hercules_repro_mode()) {
+  if (hercules_repro_strict()) {
     return 0;
   }
 
@@ -9744,7 +9745,7 @@ static int32_t adjust_assignment_use_omp(void) {
 #ifndef _OPENMP
   return 0;
 #else
-  if (hercules_repro_mode()) {
+  if (hercules_repro_strict()) {
     return 0;
   }
 
@@ -11228,8 +11229,14 @@ static int32_t hercules_repro_mode(void) {
     const char* env = getenv("HERCULES_REPRO_MODE");
     if (env != NULL) {
       if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0)) {
+          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
         g_reproMode = 0;
+      } else if ((strcmp(env, "1") == 0) || (strcasecmp(env, "on") == 0) ||
+                 (strcasecmp(env, "true") == 0)) {
+        g_reproMode = 1;
+      } else if ((strcmp(env, "2") == 0) ||
+                 (strcasecmp(env, "strict") == 0)) {
+        g_reproMode = 2;
       } else {
         g_reproMode = 1;
       }
@@ -11237,12 +11244,26 @@ static int32_t hercules_repro_mode(void) {
       g_reproMode = 0;
     }
 
-    if ((g_reproMode == 1) && (Global.myID == 0)) {
-      monitor_print("Repro mode enabled: deterministic MPI unpack path active\n");
+    if ((g_reproMode > 0) && (Global.myID == 0)) {
+      if (g_reproMode >= 2) {
+        monitor_print(
+            "Repro mode strict: deterministic MPI unpack + serial CPU OpenMP paths\n");
+      } else {
+        monitor_print(
+            "Repro mode: deterministic MPI unpack path active\n");
+      }
     }
   }
 
-  return g_reproMode;
+  return (g_reproMode > 0) ? 1 : 0;
+}
+
+static int32_t hercules_repro_strict(void) {
+  if (g_reproMode < 0) {
+    (void)hercules_repro_mode();
+  }
+
+  return (g_reproMode >= 2) ? 1 : 0;
 }
 
 /**
