@@ -7964,7 +7964,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && !hercules_repro_mode())
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8160,7 +8160,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_strict())
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_mode())
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
