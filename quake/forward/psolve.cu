@@ -9708,7 +9708,7 @@ static int32_t adjust_distribution_use_omp(void) {
 #ifndef _OPENMP
   return 0;
 #else
-  if (hercules_repro_strict()) {
+  if (hercules_repro_mode()) {
     return 0;
   }
 
@@ -9745,7 +9745,7 @@ static int32_t adjust_assignment_use_omp(void) {
 #ifndef _OPENMP
   return 0;
 #else
-  if (hercules_repro_strict()) {
+  if (hercules_repro_mode()) {
     return 0;
   }
 
