@@ -15,11 +15,11 @@ Runtime performance toggles (no source edits needed):
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
 	Enables or disables OpenMP parallelization in assignment adjust core.
- 	Solver default is `0` (disabled) unless explicitly enabled.
+	The two-phase run script defaults this to `1`.
 - `HERCULES_ADJUST_DIST_OMP=1|0`
 	Enables or disables OpenMP parallelization in parent-centric distribution
 	adjust core.
-	Solver default is `0` (disabled) unless explicitly enabled.
+	The two-phase run script defaults this to `1`.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
@@ -62,7 +62,7 @@ Two-phase script defaults:
 
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
-	`HERCULES_ADJUST_ASSIGN_OMP=0`, `HERCULES_ADJUST_DIST_OMP=0`,
+	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_SPARSE_HOST_OMP=0`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=0`.
@@ -83,8 +83,8 @@ export OMP_NUM_THREADS=64
 # Optional: override script defaults when needed
 # export OMP_PROC_BIND=spread
 # export OMP_PLACES=threads
-# export HERCULES_ADJUST_ASSIGN_OMP=1
-# export HERCULES_ADJUST_DIST_OMP=1
+# export HERCULES_ADJUST_ASSIGN_OMP=0
+# export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=nodes
 # export HERCULES_SPARSE_HOST_OMP=0
 # export HERCULES_STATION_IO_OMP=0

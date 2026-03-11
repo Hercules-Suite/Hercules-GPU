@@ -94,6 +94,7 @@ static int32_t g_sourceNodeCapacity = 0;
 static int32_t* g_sparseNodeListDevice = NULL;
 static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
+static int32_t g_sparseActiveCount = 0;
 static int32_t* g_sparseNodeListHost = NULL;
 static fvector_t* g_sparseForcesHost = NULL;
 static int32_t g_sparseHostPinned = 0;
@@ -5687,6 +5688,7 @@ static void solver_delete() {
     cudaFree(g_sparseForcesDevice);
     g_sparseForcesDevice = NULL;
   }
+  g_sparseActiveCount = 0;
   if (g_sparseNodeListHost != NULL) {
     if (g_sparseHostPinned) {
       cudaFreeHost(g_sparseNodeListHost);
@@ -6557,6 +6559,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int32_t topoCount = topo_get_nodes_count();
   const int32_t* topoNodes = topo_get_nodes_list();
   int32_t totalCount = sourceCount + topoCount;
+  int32_t activeCount;
   int32_t idx;
   int blocksize;
   int gridsize;
@@ -6651,32 +6654,86 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Sparse force upload build");
   if ((!g_sparseNodeListReady) || (g_sparseSourceCountCached != sourceCount) ||
       (g_sparseTopoCountCached != topoCount)) {
-#ifdef _OPENMP
-    const int32_t useSparseHostOmp = sparse_host_use_omp();
-#endif
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((sourceCount > 100000) && useSparseHostOmp)
-#endif
-    for (int32_t i = 0; i < sourceCount; i++) {
-      g_sparseNodeListHost[i] = Global.theNodesLoadedList[i];
+    int32_t writeIdx = 0;
+    int32_t sourceIdx = 0;
+    int32_t topoIdx = 0;
+    int32_t haveLast = 0;
+    int32_t lastNode = 0;
+    int32_t* sortedSourceNodes = NULL;
+
+    if (sourceCount > 0) {
+      sortedSourceNodes = (int32_t*)malloc((size_t)sourceCount * sizeof(int32_t));
+      if (sortedSourceNodes == NULL) {
+        fprintf(stderr, "Thread %d: sparse source list scratch alloc failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+
+      memcpy(sortedSourceNodes, Global.theNodesLoadedList,
+             (size_t)sourceCount * sizeof(int32_t));
+      qsort(sortedSourceNodes, (size_t)sourceCount, sizeof(int32_t),
+            compare_int32_asc);
     }
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && useSparseHostOmp)
-#endif
-    for (int32_t i = 0; i < topoCount; i++) {
-      g_sparseNodeListHost[sourceCount + i] = topoNodes[i];
+    while ((sourceIdx < sourceCount) || (topoIdx < topoCount)) {
+      int32_t candidate;
+
+      if (topoIdx >= topoCount) {
+        candidate = sortedSourceNodes[sourceIdx++];
+      } else if (sourceIdx >= sourceCount) {
+        candidate = topoNodes[topoIdx++];
+      } else {
+        int32_t sourceNode = sortedSourceNodes[sourceIdx];
+        int32_t topoNode = topoNodes[topoIdx];
+
+        if (sourceNode < topoNode) {
+          candidate = sourceNode;
+          sourceIdx++;
+        } else if (topoNode < sourceNode) {
+          candidate = topoNode;
+          topoIdx++;
+        } else {
+          candidate = sourceNode;
+          sourceIdx++;
+          topoIdx++;
+        }
+      }
+
+      if ((!haveLast) || (candidate != lastNode)) {
+        g_sparseNodeListHost[writeIdx++] = candidate;
+        lastNode = candidate;
+        haveLast = 1;
+      }
+
+      while ((sourceIdx < sourceCount) &&
+             (sortedSourceNodes[sourceIdx] == lastNode)) {
+        sourceIdx++;
+      }
+      while ((topoIdx < topoCount) && (topoNodes[topoIdx] == lastNode)) {
+        topoIdx++;
+      }
     }
 
+    if (sortedSourceNodes != NULL) {
+      free(sortedSourceNodes);
+      sortedSourceNodes = NULL;
+    }
+
+    g_sparseActiveCount = writeIdx;
     g_sparseNodeListReady = 1;
     g_sparseSourceCountCached = sourceCount;
     g_sparseTopoCountCached = topoCount;
+    g_sparseCopiedSourceCount = -1;
+    g_sparseCopiedTopoCount = -1;
   }
 
+  activeCount = g_sparseActiveCount;
+
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((totalCount > 100000) && sparse_host_use_omp())
+#pragma omp parallel for schedule(static) if((activeCount > 100000) && sparse_host_use_omp())
 #endif
-  for (idx = 0; idx < totalCount; idx++) {
+  for (idx = 0; idx < activeCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
     g_sparseForcesHost[idx] = solver->force[lnid];
   }
@@ -6688,26 +6745,26 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     if ((g_sparseCopiedSourceCount != sourceCount) ||
         (g_sparseCopiedTopoCount != topoCount)) {
       cudaMemcpyAsync(g_sparseNodeListDevice, g_sparseNodeListHost,
-                      totalCount * sizeof(int32_t), cudaMemcpyHostToDevice,
+                      activeCount * sizeof(int32_t), cudaMemcpyHostToDevice,
                       solver->streams[CUDA_STREAM_MAIN]);
-      solver->gpu_spec->numbytespci += totalCount * sizeof(int32_t);
+      solver->gpu_spec->numbytespci += activeCount * sizeof(int32_t);
       g_sparseCopiedSourceCount = sourceCount;
       g_sparseCopiedTopoCount = topoCount;
     }
   }
 
   cudaMemcpyAsync(g_sparseForcesDevice, g_sparseForcesHost,
-                  totalCount * sizeof(fvector_t), cudaMemcpyHostToDevice,
+                  activeCount * sizeof(fvector_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci += totalCount * sizeof(fvector_t);
+  solver->gpu_spec->numbytespci += activeCount * sizeof(fvector_t);
   Timer_Stop("Sparse force upload memcpy");
 
   Timer_Start("Sparse force upload scatter");
   blocksize = 256;
-  gridsize = (totalCount + blocksize - 1) / blocksize;
+  gridsize = (activeCount + blocksize - 1) / blocksize;
   kernelSparseForceScatter<<<gridsize, blocksize, 0,
                              solver->streams[CUDA_STREAM_MAIN]>>>(
-      totalCount, g_sparseNodeListDevice, g_sparseForcesDevice,
+      activeCount, g_sparseNodeListDevice, g_sparseForcesDevice,
       solver->gpuData->forceDevice);
 
   cudaError_t cerror = cudaGetLastError();
