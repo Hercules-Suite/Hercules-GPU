@@ -131,6 +131,8 @@ static int32_t g_sharingCommOmpMode = -1;
 static int32_t g_sharingCommOmpReported = 0;
 static int32_t g_sparseHostOmpMode = -1;
 static int32_t g_sparseHostOmpReported = 0;
+static int32_t g_contribPackOmpMode = -1;
+static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
@@ -337,6 +339,7 @@ static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t sharing_comm_use_omp(void);
 static int32_t sparse_host_use_omp(void);
+static int32_t contrib_pack_use_omp(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
@@ -7976,10 +7979,12 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
     if (direction == SHARING) {
       useOmp = sharing_comm_use_omp();
+    } else if (direction == CONTRIBUTION) {
+      useOmp = contrib_pack_use_omp();
     }
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && ((direction == SHARING) ? useOmp : !hercules_repro_mode()))
+#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && useOmp)
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -9797,9 +9802,7 @@ static int32_t adjust_distribution_use_omp(void) {
         g_adjustDistributionOmpMode = 1;
       }
     } else {
-      int maxThreads = omp_get_max_threads();
-      g_adjustDistributionOmpMode =
-          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+      g_adjustDistributionOmpMode = 0;
     }
 
     if ((g_adjustDistributionOmpMode == 1) &&
@@ -9834,9 +9837,7 @@ static int32_t adjust_assignment_use_omp(void) {
         g_adjustAssignmentOmpMode = 1;
       }
     } else {
-      int maxThreads = omp_get_max_threads();
-      g_adjustAssignmentOmpMode =
-          (maxThreads > 1 && Global.theGroupSize <= 8) ? 1 : 0;
+      g_adjustAssignmentOmpMode = 0;
     }
 
     if ((g_adjustAssignmentOmpMode == 1) &&
@@ -9921,6 +9922,40 @@ static int32_t sparse_host_use_omp(void) {
   }
 
   return g_sparseHostOmpMode;
+#endif
+}
+
+static int32_t contrib_pack_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (hercules_repro_mode()) {
+    return 0;
+  }
+
+  if (g_contribPackOmpMode < 0) {
+    const char* env = getenv("HERCULES_CONTRIB_PACK_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
+        g_contribPackOmpMode = 0;
+      } else {
+        g_contribPackOmpMode = 1;
+      }
+    } else {
+      g_contribPackOmpMode = 0;
+    }
+
+    if ((g_contribPackOmpMode == 1) && (Global.myID == 0) &&
+        (g_contribPackOmpReported == 0)) {
+      monitor_print("contribution pack OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_contribPackOmpReported = 1;
+    }
+  }
+
+  return g_contribPackOmpMode;
 #endif
 }
 

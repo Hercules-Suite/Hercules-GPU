@@ -15,9 +15,11 @@ Runtime performance toggles (no source edits needed):
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
 	Enables or disables OpenMP parallelization in assignment adjust core.
+ 	Solver default is `0` (disabled) unless explicitly enabled.
 - `HERCULES_ADJUST_DIST_OMP=1|0`
 	Enables or disables OpenMP parallelization in parent-centric distribution
 	adjust core.
+	Solver default is `0` (disabled) unless explicitly enabled.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes` (or `2|0|1`)
 	Selects sparse host force reset mode in GPU solver path.
 	`auto`/`2` is default and prefers `nodes` unless range layout is compact.
@@ -41,6 +43,10 @@ Runtime performance toggles (no source edits needed):
 	communication pack/unpack paths. Solver default is `0` (disabled)
 	because these paths can still make results depend on `OMP_NUM_THREADS`
 	even when plane/station/adjust OpenMP toggles are off.
+- `HERCULES_CONTRIB_PACK_OMP=1|0`
+	Enables or disables OpenMP parallelization while packing contribution
+	messages for MPI communication. Solver default is `0` (disabled)
+	unless explicitly enabled.
 - `HERCULES_REPRO_MODE=1|2`
 	`1` disables remaining OpenMP-sensitive deterministic communication
 	paths and uses deterministic MPI unpack ordering. `2` is stricter and
@@ -56,9 +62,10 @@ Two-phase script defaults:
 
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
-	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
+	`HERCULES_ADJUST_ASSIGN_OMP=0`, `HERCULES_ADJUST_DIST_OMP=0`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_SPARSE_HOST_OMP=0`,
-	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`.
+	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
+	`HERCULES_CONTRIB_PACK_OMP=0`.
 - You can still override any of these by exporting your own value before
 	running the script.
 
@@ -76,13 +83,14 @@ export OMP_NUM_THREADS=64
 # Optional: override script defaults when needed
 # export OMP_PROC_BIND=spread
 # export OMP_PLACES=threads
-# export HERCULES_ADJUST_ASSIGN_OMP=0
-# export HERCULES_ADJUST_DIST_OMP=0
+# export HERCULES_ADJUST_ASSIGN_OMP=1
+# export HERCULES_ADJUST_DIST_OMP=1
 # export HERCULES_SPARSE_CLEAR_MODE=nodes
 # export HERCULES_SPARSE_HOST_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SHARING_OMP=0
+# export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
