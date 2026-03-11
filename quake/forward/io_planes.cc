@@ -223,30 +223,33 @@ void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
 int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 {
 	int iPlane, iPhi;
-    int stripLength;
-    int iStrip, elemnum, rStrip;
+	int iStrip, elemnum;
     /* Auxiliar array to handle shapefunctions in a loop */
     double  xi[3][8]={ {-1,  1, -1,  1, -1,  1, -1, 1} ,
 		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
 		       {-1, -1, -1, -1,  1,  1,  1, 1} };
 
     double      displacementsX, displacementsY, displacementsZ;
-    //    int32_t     howManyDisplacements, iDisplacement;
-    //    vector3D_t* localCoords; /* convinient renaming */
-    //    int32_t*    nodesToInterpolate[8];
-    MPI_Status  status;
-    //    MPI_Request sendstat;
-    int recvStripCount, StartLocation;
+    double* localPlaneBuffer = NULL;
 #ifdef _OPENMP
 	const int32_t useOmp = plane_output_use_omp();
 #endif
 
+    /* Deterministic correctness path: each rank fills a dense local plane
+       buffer and rank 0 assembles via reduction. */
+
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	if (myID == 0) {
-	    int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
-		* thePlanes[iPlane].numberofstepsdowndip;
-	    memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	int planePoints = thePlanes[iPlane].numberofstepsalongstrike
+	    * thePlanes[iPlane].numberofstepsdowndip;
+	int planeValues = 3 * planePoints;
+
+	localPlaneBuffer = (double*)malloc((size_t)planeValues * sizeof(double));
+	if (localPlaneBuffer == NULL) {
+	    solver_abort("Old_planes_print", NULL,
+	                 "Error: failed allocating local plane buffer (%d values)",
+	                 planeValues);
 	}
+	memset(localPlaneBuffer, 0, (size_t)planeValues * sizeof(double));
 
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
@@ -339,48 +342,21 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	    		}
 	    	}
 
-	    	planes_stripMPISendBuffer[elemnum*3]     = (double) (displacementsX);
-	    	planes_stripMPISendBuffer[elemnum*3 + 1] = (double) (displacementsY);
-	    	planes_stripMPISendBuffer[elemnum*3 + 2] = (double) (displacementsZ);
+	    	{
+		    int globalIndex = thePlanes[iPlane].stripstart[iStrip] + elemnum;
+		    localPlaneBuffer[globalIndex * 3]     = (double)(displacementsX);
+		    localPlaneBuffer[globalIndex * 3 + 1] = (double)(displacementsY);
+		    localPlaneBuffer[globalIndex * 3 + 2] = (double)(displacementsZ);
+		}
 
 	    }
-
-	    /* add start location as last element, add .1 to insure
-	       int-float conversion (yes, bad form)*/
-            stripLength = thePlanes[iPlane].stripend[iStrip]
-		- thePlanes[iPlane].stripstart[iStrip] + 1;
-
-            planes_stripMPISendBuffer[stripLength*3]
-		= (double) (thePlanes[iPlane].stripstart[iStrip] + 0.1);
-
-            if (myID==0) { /* don't try to send to same PE, just memcopy */
-		memcpy( &(planes_output_buffer[ thePlanes[iPlane].stripstart[iStrip]*3 ] ), planes_stripMPISendBuffer,
-			stripLength*3*sizeof(double) );
-            }
-            else {
-		MPI_Send( planes_stripMPISendBuffer, (stripLength*3)+1,
-			  MPI_DOUBLE, 0 , iPlane, comm_solver );
-            }
 	} /*for iStrips*/
 
-	/* IO PE recieves for this plane */
-	if(myID == 0){
-	    /* Recv all strips not directly memory copied above */
-	    for (rStrip = 0;
-		 rStrip < (thePlanes[iPlane].globalnumberofstripsthisplane
-			   - thePlanes[iPlane].numberofstripsthisplane);
-		 rStrip++) {
-
-		MPI_Recv( planes_stripMPIRecvBuffer,
-			  planes_GlobalLargestStripCount * 3 + 1, MPI_DOUBLE,
-			  MPI_ANY_SOURCE, iPlane, comm_solver, &status );
-		MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
-		StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
-		memcpy( &(planes_output_buffer[StartLocation * 3]),
-			planes_stripMPIRecvBuffer,
-			(recvStripCount-1)*sizeof(double) );
-	    }
-	}
+	MPI_Reduce(localPlaneBuffer,
+	          (myID == 0) ? planes_output_buffer : NULL,
+	          planeValues, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+	free(localPlaneBuffer);
+	localPlaneBuffer = NULL;
 
 	/* do print for just this plane */
 	Old_print_plane_displacements(myID, iPlane );
