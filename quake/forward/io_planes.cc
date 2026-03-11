@@ -173,6 +173,12 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     int recvStripCount, StartLocation;
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	if (myID == 0) {
+	    size_t plane_values = (size_t)3 *
+	        (size_t)thePlanes[iPlane].numberofstepsalongstrike *
+	        (size_t)thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, plane_values * sizeof(double));
+	}
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 
@@ -1329,6 +1335,12 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* else pick this plane and fill in first strip */
 	else{
 	    iPlane = status.MPI_TAG;
+	    {
+	        size_t plane_values = (size_t)3 *
+	            (size_t)thePlanes[iPlane].numberofstepsalongstrike *
+	            (size_t)thePlanes[iPlane].numberofstepsdowndip;
+	        memset(planes_output_buffer, 0, plane_values * sizeof(double));
+	    }
 	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
 	    memcpy( &(planes_output_buffer[StartLocation * 3]),
 		    planes_stripMPIRecvBuffer,
