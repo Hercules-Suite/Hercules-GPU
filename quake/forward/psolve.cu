@@ -6844,27 +6844,40 @@ static int32_t solver_sparse_clear_mode(void) {
     }
 
     if (requestedMode == 2) {
-      int useRanges = 0;
+      int32_t useFull = 0;
+      int32_t useRanges = 0;
 
-      /* Auto policy: default to node-list clear, only use ranges when the
-       * covered span is compact and the range list is small. */
-      if (topoCount > 0 &&
-          totalRangeSpan <= ((int64_t)topoCount * 12) / 10 &&
-          rangeCount <= 128) {
+      /* Auto policy: prefer full clear when topography touches a meaningful
+       * fraction of local nodes, otherwise use ranges only when the covered
+       * span is compact and the range list is small. */
+      if ((harboredCount > 0) && ((topoCount * 4) >= harboredCount)) {
+        useFull = 1;
+      } else if (topoCount > 0 &&
+                 totalRangeSpan <= ((int64_t)topoCount * 12) / 10 &&
+                 rangeCount <= 128) {
         useRanges = 1;
       }
 
-      g_sparseClearMode = useRanges ? 0 : 1;
+      if (useFull) {
+        g_sparseClearMode = 3;
+      } else {
+        g_sparseClearMode = useRanges ? 0 : 1;
+      }
     } else {
       g_sparseClearMode = requestedMode;
     }
 
     if (Global.myID == 0 && g_sparseClearModeReported == 0) {
-      monitor_print("Sparse host force reset mode: %s (request=%s, topo=%d, ranges=%d, span=%lld)\n",
-                    (g_sparseClearMode == 1) ? "nodes" : "ranges",
-                    (requestedMode == 2) ? "auto"
-                    : ((requestedMode == 1) ? "nodes" : "ranges"),
-                    topoCount, rangeCount, (long long)totalRangeSpan);
+      const char* modeName =
+          (g_sparseClearMode == 0) ? "range" :
+          (g_sparseClearMode == 1) ? "nodes" : "full";
+      const char* requestName =
+          (requestedMode == 2) ? "auto" :
+          (requestedMode == 0) ? "range" :
+          (requestedMode == 1) ? "nodes" : "full";
+      monitor_print("Sparse host force reset mode: %s (request=%s, topo=%d, ranges=%d, span=%lld, harbored=%d)\n",
+                    modeName, requestName, topoCount, rangeCount,
+                    (long long)totalRangeSpan, harboredCount);
       g_sparseClearModeReported = 1;
     }
   }
@@ -6888,34 +6901,23 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   return;
 }
-        int32_t useFull = 0;
-        int32_t useRanges = 0;
+
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
-        /* Auto policy: prefer full clear when topography touches a meaningful
-         * fraction of local nodes, otherwise use ranges only when the covered
-         * span is compact and the range list is small. */
-        if ((harboredCount > 0) &&
-            ((topoCount * 4) >= harboredCount)) {
-          useFull = 1;
-        } else if (topoCount > 0 &&
+  /* Copy updated tm2 displacements from device */
+  cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
+                  mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
                   solver->streams[CUDA_STREAM_MAIN]);
 
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
 
   /* Uncomment for timing tests */
-        if (useFull) {
-          g_sparseClearMode = 3;
-        } else {
-          g_sparseClearMode = useRanges ? 0 : 1;
-        }
+  // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
   return;
 }
 
 static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
-        const char* modeName =
-            (g_sparseClearMode == 0) ? "range" :
-            (g_sparseClearMode == 1) ? "nodes" : "full";
+  lnid_t nindex;
 
   /* Copy tm2 to tm3 for accelerations */
   if (Param.printStationAccelerations == YES) {
