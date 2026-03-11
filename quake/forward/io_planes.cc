@@ -242,7 +242,6 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	int planeTag = g_planePrintSequence * theNumberOfPlanes + iPlane;
 	if (myID == 0) {
 	    int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
 		* thePlanes[iPlane].numberofstepsdowndip;
@@ -360,7 +359,7 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
             }
             else {
 		MPI_Send( planes_stripMPISendBuffer, (stripLength*3)+1,
-			  MPI_DOUBLE, 0 , planeTag, comm_solver );
+			  MPI_DOUBLE, 0 , iPlane, comm_solver );
             }
 	} /*for iStrips*/
 
@@ -374,7 +373,7 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 
 		MPI_Recv( planes_stripMPIRecvBuffer,
 			  planes_GlobalLargestStripCount * 3 + 1, MPI_DOUBLE,
-			  MPI_ANY_SOURCE, planeTag, comm_solver, &status );
+			  MPI_ANY_SOURCE, iPlane, comm_solver, &status );
 		MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
 		StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
 		memcpy( &(planes_output_buffer[StartLocation * 3]),
@@ -389,8 +388,6 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	/* may not be required */
 	MPI_Barrier( comm_solver );
     } /* for iPlane */
-
-	g_planePrintSequence++;
 
     return 1;
 }
