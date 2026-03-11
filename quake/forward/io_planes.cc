@@ -33,6 +33,10 @@
 #include <errno.h>
 #include <stdarg.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "io_planes.h"
 #include "psolve.h"
 #include "geometrics.h"
@@ -55,6 +59,7 @@ extern int compute_csi_eta_dzeta( octant_t *octant, vector3D_t pointcoords,
 
 int  New_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes);
 void New_planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
+	int io_pool_pe_count,
     int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
@@ -109,6 +114,31 @@ static int planes_LocalLargestStripCount;
 static double* planes_output_buffer;
 static double* planes_stripMPISendBuffer;
 static double* planes_stripMPIRecvBuffer;
+static int32_t g_planeIOServerCount = 1;
+static int32_t g_planeIOServerFirstRank = 0;
+static int32_t g_planeOutputOmpMode = -1;
+static int32_t g_planeOutputOmpReported = 0;
+static int32_t g_planeOutputRankCached = -1;
+static int32_t g_planeOutputForcedSerialReported = 0;
+
+static int32_t plane_output_use_omp(void) {
+#ifndef _OPENMP
+	return 0;
+#else
+	if (g_planeOutputRankCached < 0) {
+		MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
+	}
+
+	if ((g_planeOutputForcedSerialReported == 0) && (g_planeOutputRankCached == 0)) {
+		fprintf(stderr,
+		        "Plane output OpenMP: disabled for correctness; using serial interpolation.\n");
+		g_planeOutputForcedSerialReported = 1;
+	}
+
+	g_planeOutputOmpMode = 0;
+	return 0;
+#endif
+}
 
 /******* Wrapper on routines to maintain backwards compatiblity for single core routines ******/
 
@@ -128,7 +158,8 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
 
 //	IO_pool_pe_count = 1;
     if (IO_pool_pe_count)
-    New_planes_setup(myID, thePlanePrintRate, thePlaneDirOut, 
+	New_planes_setup(myID, thePlanePrintRate, thePlaneDirOut,
+		IO_pool_pe_count,
         theNumberOfPlanes, numericalin, 
         surfaceShift, theSurfaceCornersLong, theSurfaceCornersLat,
         theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone);
@@ -171,22 +202,22 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     MPI_Status  status;
     //    MPI_Request sendstat;
     int recvStripCount, StartLocation;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	if (myID == 0) {
-	    size_t plane_values = (size_t)3 *
-	        (size_t)thePlanes[iPlane].numberofstepsalongstrike *
-	        (size_t)thePlanes[iPlane].numberofstepsdowndip;
-	    memset(planes_output_buffer, 0, plane_values * sizeof(double));
-	}
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
+	    int elemCount = thePlanes[iPlane].stripend[iStrip]
+	        - thePlanes[iPlane].stripstart[iStrip] + 1;
 
 	    /* interpolate points directly into send buffer for this strip */
-	    for (elemnum = 0;
-		 elemnum < (thePlanes[iPlane].stripend[iStrip]
-			    -thePlanes[iPlane].stripstart[iStrip]+1);
-		 elemnum++)
+	#ifdef _OPENMP
+	#pragma omp parallel for if(useOmp) schedule(static) \
+	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	#endif
+	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
@@ -503,6 +534,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     vector3D_t origin, pointLocal, pointGlobal;
     octant_t *octant;
     int onstrip ;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
     //    int32_t nodesToInterpolate[8];
 
     planes_LocalLargestStripCount = 0;
@@ -630,12 +664,16 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
     			stripnum++)
     	{
+			int elemCount = thePlanes[iPlane].stripend[stripnum]
+			    - thePlanes[iPlane].stripstart[stripnum] + 1;
+		#ifdef _OPENMP
+		#pragma omp parallel for if(useOmp) schedule(static) \
+		    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
+		#endif
     		for (elemnum = 0;
-    				elemnum < (thePlanes[iPlane].stripend[stripnum]
-    				                                      -thePlanes[iPlane].stripstart[stripnum] + 1);
+					elemnum < elemCount;
     				elemnum++)
     		{
-	    		thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -665,11 +703,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
     					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
-	    			} else {
-	    				solver_abort("Old_output_planes_construct_strips", NULL,
-	    				            "Point from precomputed strip is not in mesh: plane %d strip %d elem %d",
-	    				            iPlane, stripnum, elemnum);
-	    			}
+    			}
     		}
     	}
 
@@ -763,6 +797,7 @@ void print_planeinfo(int32_t myID, int theNumberOfPlanes)
 
 
 void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneDirOut,
+	int io_pool_pe_count,
     int theNumberOfPlanes, const char *numericalin,
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
@@ -872,11 +907,31 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
 
     } /* if (PENum == 0) */
 
-    /* broadcast plane info to whole IO group */
+	/* Determine IO-server rank range in MPI_COMM_WORLD. */
+	if (PENum == 0) {
+		int world_size;
+		int server_count;
+
+		MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+		server_count = io_pool_pe_count;
+		if (server_count < 1) {
+			server_count = 1;
+		}
+		if (server_count > world_size) {
+			server_count = world_size;
+		}
+
+		g_planeIOServerCount = server_count;
+		g_planeIOServerFirstRank = world_size - server_count;
+	}
+
+	/* broadcast plane info to whole IO group */
     MPI_Bcast( &theNumberOfPlanes, 1, MPI_INT, 0, comm_IO );
     MPI_Bcast( thePlanePrintRate, 1, MPI_INT, 0, comm_IO );
     MPI_Bcast( &largestplanesize, 1, MPI_INT, 0, comm_IO );
     MPI_Bcast( thePlaneDirOut, 256, MPI_CHAR, 0, comm_IO );
+	MPI_Bcast( &g_planeIOServerCount, 1, MPI_INT, 0, comm_IO );
+	MPI_Bcast( &g_planeIOServerFirstRank, 1, MPI_INT, 0, comm_IO );
 
 
     /* initialize the local structures */
@@ -901,12 +956,10 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
 	MPI_Barrier(comm_IO);
     }
 
-    /* Assign IO Server PE to send this plane to */
+    /* Assign IO server rank to each plane (round-robin over IO pool ranks). */
     for ( iPlane = 0; iPlane < theNumberOfPlanes; iPlane++ ) {
-	/* Simplest possible scheme, get more sophisticated later */
-	int IO_Group_Size;
-	MPI_Comm_size(comm_IO, &IO_Group_Size);
-	thePlanes[iPlane].IO_PE_num = IO_Group_Size-1;
+	thePlanes[iPlane].IO_PE_num = g_planeIOServerFirstRank +
+	    (iPlane % g_planeIOServerCount);
     }
 
     New_output_planes_construct_strips(PENum, theNumberOfPlanes);
@@ -928,6 +981,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     vector3D_t origin, pointLocal, pointGlobal;
     octant_t *octant;
     int onstrip ;
+#ifdef _OPENMP
+	const int32_t useOmp = plane_output_use_omp();
+#endif
 
     planes_LocalLargestStripCount = 0;
 
@@ -1054,12 +1110,16 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	     stripnum < thePlanes[ iPlane ].numberofstripsthisplane;
 	     stripnum++)
 	    {
+		int elemCount = thePlanes[iPlane].stripend[stripnum]
+		    - thePlanes[iPlane].stripstart[stripnum] + 1;
+	#ifdef _OPENMP
+	#pragma omp parallel for if(useOmp) schedule(static) \
+	    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
+	#endif
 		for (elemnum = 0;
-		     elemnum < (thePlanes[iPlane].stripend[stripnum]
-				-thePlanes[iPlane].stripstart[stripnum] + 1);
+		     elemnum < elemCount;
 		     elemnum++)
 		    {
-			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1089,10 +1149,6 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
-			} else {
-				solver_abort("New_output_planes_construct_strips", NULL,
-				            "Point from precomputed strip is not in mesh: plane %d strip %d elem %d",
-				            iPlane, stripnum, elemnum);
 			}
 		    }
 	    }
@@ -1133,16 +1189,22 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
     double      phi[8];
     double      displacementsX, displacementsY, displacementsZ;
+#ifdef _OPENMP
+    const int32_t useOmp = plane_output_use_omp();
+#endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
+	    int elemCount = thePlanes[iPlane].stripend[iStrip]
+	        - thePlanes[iPlane].stripstart[iStrip] + 1;
 
 	    /* interpolate points directly into send buffer for this strip */
-	    for (elemnum = 0;
-		 elemnum < (thePlanes[iPlane].stripend[iStrip]
-			    -thePlanes[iPlane].stripstart[iStrip]+1);
-		 elemnum++){
+	#ifdef _OPENMP
+	#pragma omp parallel for if(useOmp) schedule(static) \
+	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	#endif
+	    for (elemnum = 0; elemnum < elemCount; elemnum++){
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
@@ -1223,15 +1285,15 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 /** Close planes files. */
 void New_planes_close(int32_t PEnum, int theNumberOfPlanes){
 
-    int IO_Server_PE, iPlane;
+    int iServer;
 
     if (PEnum==0){
-	/* Simplest possible scheme, do loop for multiple server PEs later */
-	MPI_Comm_size(comm_IO, &IO_Server_PE);
-	IO_Server_PE--;
 	planes_stripMPISendBuffer[0]= (STOP_SERVER + 0.1);
-	for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++)
-	    MPI_Send( planes_stripMPISendBuffer, 1, MPI_DOUBLE, IO_Server_PE, iPlane, comm_IO );
+	for (iServer = 0; iServer < g_planeIOServerCount; iServer++) {
+	    int serverRank = g_planeIOServerFirstRank + iServer;
+	    MPI_Send( planes_stripMPISendBuffer, 1, MPI_DOUBLE,
+	              serverRank, 0, comm_IO );
+	}
     }
 }
 
@@ -1252,6 +1314,8 @@ void planes_IO_PES_main(int32_t PEnum){
     MPI_Bcast( &thePlanePrintRate, 1, MPI_INT, 0, comm_IO );
     MPI_Bcast( &largestplanesize, 1, MPI_INT, 0, comm_IO );
     MPI_Bcast( thePlaneDirOut, 256, MPI_CHAR, 0, comm_IO );
+	MPI_Bcast( &g_planeIOServerCount, 1, MPI_INT, 0, comm_IO );
+	MPI_Bcast( &g_planeIOServerFirstRank, 1, MPI_INT, 0, comm_IO );
 
     if(theNumberOfPlanes==0) return;
 
@@ -1282,9 +1346,12 @@ void planes_IO_PES_main(int32_t PEnum){
     /* Find size of largest strip */
     MPI_Bcast( &planes_GlobalLargestStripCount, 1, MPI_INT, 0, comm_IO );
 
-    /* Idle IO Pool PEs can leave, don't use collectives past here! */
-    MPI_Comm_size(comm_IO, &comm_size);
-    if (PEnum < (comm_size-1)) return;
+	/* Idle IO pool PEs can leave, don't use collectives past here! */
+	MPI_Comm_size(comm_IO, &comm_size);
+	if ((PEnum < g_planeIOServerFirstRank) ||
+		(PEnum >= (g_planeIOServerFirstRank + g_planeIOServerCount))) {
+		return;
+	}
 
     /* Allocate largest required strip recieve buffer */
     int buf_len0 = (3 * planes_GlobalLargestStripCount) + 1;
@@ -1303,9 +1370,14 @@ void planes_IO_PES_main(int32_t PEnum){
 	exit(1);
     }
 
-    /* open displacement output files */
-    /* for multiple IO server PEs, will need to make sure these are handled on each one */
+    /* Open displacement files only for planes owned by this IO server rank. */
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++){
+	if (iPlane % g_planeIOServerCount !=
+	    (PEnum - g_planeIOServerFirstRank)) {
+	    thePlanes[iPlane].fpoutputfile = NULL;
+	    continue;
+	}
+
 	sprintf( planedisplacementsout, "%s/planedisplacements.%d",
 		 thePlaneDirOut, iPlane );
 	fp0 = fopen( planedisplacementsout, "w" );
@@ -1335,12 +1407,6 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* else pick this plane and fill in first strip */
 	else{
 	    iPlane = status.MPI_TAG;
-	    {
-	        size_t plane_values = (size_t)3 *
-	            (size_t)thePlanes[iPlane].numberofstepsalongstrike *
-	            (size_t)thePlanes[iPlane].numberofstepsdowndip;
-	        memset(planes_output_buffer, 0, plane_values * sizeof(double));
-	    }
 	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
 	    memcpy( &(planes_output_buffer[StartLocation * 3]),
 		    planes_stripMPIRecvBuffer,
@@ -1362,6 +1428,11 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* Print just this one plane */
 	int ret, items_to_write;
 	items_to_write = 3 * thePlanes[iPlane].numberofstepsalongstrike * thePlanes[iPlane].numberofstepsdowndip;
+	if (thePlanes[iPlane].fpoutputfile == NULL) {
+	    solver_abort( "IO_Server_Main_Loop", NULL,
+	                 "Error: server rank %d received unassigned plane %d",
+	                 PEnum, iPlane );
+	}
 	ret = fwrite( planes_output_buffer, sizeof(double), items_to_write, thePlanes[iPlane].fpoutputfile );
 	if (ret != items_to_write)
 	    solver_abort( "IO_Server_Main_Loop", NULL, "Error: Unable to output displacement file to disk" );
@@ -1371,7 +1442,9 @@ void planes_IO_PES_main(int32_t PEnum){
     /* Close all planes.  Will need to make sure these are seperated on multiple PEs*/
     // int ret;
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++){
-		fclose( thePlanes[iPlane].fpoutputfile );
+		if (thePlanes[iPlane].fpoutputfile != NULL) {
+			fclose( thePlanes[iPlane].fpoutputfile );
+		}
 		// ret = fclose( thePlanes[iPlane].fpoutputfile );
 		// if (!ret) printf("Error closing plane file %d!!!\n", iPlane);  /* Sort this out later */
     }
