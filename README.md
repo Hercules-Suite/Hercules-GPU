@@ -37,7 +37,7 @@ Runtime performance toggles (no source edits needed):
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Solver default is `0`
-	(disabled); `run_phaseA_phaseB.sh` defaults this to `1`.
+	(disabled); `run_phaseA_phaseB.sh` defaults this to `0`.
 - `HERCULES_SHARING_OMP=1|0`
 	Enables or disables OpenMP parallelization in shared displacement
 	communication pack/unpack paths. Solver default is `0` (disabled)
@@ -64,7 +64,7 @@ Two-phase script defaults:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=0`, `HERCULES_ADJUST_DIST_OMP=0`,
 	`HERCULES_SPARSE_CLEAR_MODE=auto`, `HERCULES_SPARSE_HOST_OMP=0`,
-	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
+	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=0`,
 	`HERCULES_CONTRIB_PACK_OMP=0`.
 - You can still override any of these by exporting your own value before
 	running the script.
