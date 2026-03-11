@@ -119,24 +119,36 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
-static int32_t g_planeOutputForcedSerialReported = 0;
 
 static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
 	return 0;
 #else
-	if (g_planeOutputRankCached < 0) {
-		MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
+	if (g_planeOutputOmpMode < 0) {
+		const char* env = getenv("HERCULES_PLANE_IO_OMP");
+		if ((env != NULL) && (strcmp(env, "0") == 0)) {
+			g_planeOutputOmpMode = 0;
+		} else if (env != NULL) {
+			g_planeOutputOmpMode = 1;
+		} else {
+			/* Keep legacy behavior unless explicitly enabled. */
+			g_planeOutputOmpMode = 0;
+		}
+
+		if ((g_planeOutputOmpMode == 1) && (g_planeOutputOmpReported == 0)) {
+			if (g_planeOutputRankCached < 0) {
+				MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
+			}
+			if (g_planeOutputRankCached == 0) {
+				fprintf(stderr,
+						"Plane output OpenMP: enabled (threads=%d)\n",
+						omp_get_max_threads());
+			}
+			g_planeOutputOmpReported = 1;
+		}
 	}
 
-	if ((g_planeOutputForcedSerialReported == 0) && (g_planeOutputRankCached == 0)) {
-		fprintf(stderr,
-		        "Plane output OpenMP: disabled for correctness; using serial interpolation.\n");
-		g_planeOutputForcedSerialReported = 1;
-	}
-
-	g_planeOutputOmpMode = 0;
-	return 0;
+	return g_planeOutputOmpMode;
 #endif
 }
 
