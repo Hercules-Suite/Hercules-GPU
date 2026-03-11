@@ -132,6 +132,8 @@ static int32_t g_sharingCommOmpMode = -1;
 static int32_t g_sharingCommOmpReported = 0;
 static int32_t g_sparseHostOmpMode = -1;
 static int32_t g_sparseHostOmpReported = 0;
+static int32_t g_sparseClearOmpMode = -1;
+static int32_t g_sparseClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
@@ -340,6 +342,7 @@ static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t sharing_comm_use_omp(void);
 static int32_t sparse_host_use_omp(void);
+static int32_t sparse_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
@@ -6783,7 +6786,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* topoNodes = topo_get_nodes_list();
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && sparse_host_use_omp())
+#pragma omp parallel for schedule(static) if((topoCount > 100000) && sparse_clear_use_omp())
 #endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
@@ -6796,6 +6799,9 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* rangeStarts = topo_get_node_range_starts();
     const int32_t* rangeLengths = topo_get_node_range_lengths();
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if((rangeCount > 256) && sparse_clear_use_omp())
+#endif
     for (int32_t i = 0; i < rangeCount; i++) {
       int32_t start = rangeStarts[i];
       int32_t len = rangeLengths[i];
@@ -9979,6 +9985,41 @@ static int32_t sparse_host_use_omp(void) {
   }
 
   return g_sparseHostOmpMode;
+#endif
+}
+
+static int32_t sparse_clear_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (hercules_repro_mode()) {
+    return 0;
+  }
+
+  if (g_sparseClearOmpMode < 0) {
+    const char* env = getenv("HERCULES_SPARSE_CLEAR_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
+        g_sparseClearOmpMode = 0;
+      } else {
+        g_sparseClearOmpMode = 1;
+      }
+    } else {
+      /* Clearing disjoint sparse ranges is safe to parallelize by default. */
+      g_sparseClearOmpMode = 1;
+    }
+
+    if ((g_sparseClearOmpMode == 1) && (Global.myID == 0) &&
+        (g_sparseClearOmpReported == 0)) {
+      monitor_print("sparse clear OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_sparseClearOmpReported = 1;
+    }
+  }
+
+  return g_sparseClearOmpMode;
 #endif
 }
 

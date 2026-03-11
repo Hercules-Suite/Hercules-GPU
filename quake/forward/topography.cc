@@ -2038,7 +2038,6 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     }
 
     if (myTopoNodesCount > 0) {
-        const int32_t mergeGapThreshold = 256;
         int32_t rangeWrite = 0;
         int32_t currentStart;
         int32_t currentLen;
@@ -2072,28 +2071,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
         myTopoNodeRangeStarts[rangeWrite] = currentStart;
         myTopoNodeRangeLengths[rangeWrite] = currentLen;
         rangeWrite++;
-
-        if (rangeWrite > 0) {
-            int32_t mergeWrite = 0;
-            for (int32_t ridx = 1; ridx < rangeWrite; ridx++) {
-                int32_t prevStart = myTopoNodeRangeStarts[mergeWrite];
-                int32_t prevLen = myTopoNodeRangeLengths[mergeWrite];
-                int32_t prevEnd = prevStart + prevLen;
-                int32_t nextStart = myTopoNodeRangeStarts[ridx];
-                int32_t nextLen = myTopoNodeRangeLengths[ridx];
-                int32_t gap = nextStart - prevEnd;
-
-                if (gap <= mergeGapThreshold) {
-                    myTopoNodeRangeLengths[mergeWrite] =
-                        (nextStart + nextLen) - prevStart;
-                } else {
-                    mergeWrite++;
-                    myTopoNodeRangeStarts[mergeWrite] = nextStart;
-                    myTopoNodeRangeLengths[mergeWrite] = nextLen;
-                }
-            }
-            myTopoNodeRangeCount = mergeWrite + 1;
-        }
+        myTopoNodeRangeCount = rangeWrite;
     }
 
     free(isTopoNode);
