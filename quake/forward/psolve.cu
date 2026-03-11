@@ -300,6 +300,8 @@ static void messenger_set(messenger_t* messenger, int32_t outsize,
 static int32_t messenger_countnodes(messenger_t* first);
 static void messenger_prepare_offsets(messenger_t* first,
                                       int32_t itemsperentry);
+static int compare_int32_asc(const void* a, const void* b);
+static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger);
 
 static void compute_K(void);
 static void constract_Quality_Factor_Table(void);
@@ -8160,7 +8162,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_mode())
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_mode() && !recv_messenger->mapping_has_duplicates)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -8701,10 +8703,68 @@ static void messenger_prepare_offsets(messenger_t* first,
       }
 
       messenger->mapping_itemsperentry = itemsperentry;
+      messenger->mapping_has_duplicates =
+          messenger_detect_duplicate_offsets(messenger);
+      if (messenger->mapping_has_duplicates &&
+          (messenger->mapping_dup_reported == 0) && (Global.myID == 0)) {
+        monitor_print(
+            "Messenger duplicate mapping detected for peer %d; forcing "
+            "serial unpack for safety\n",
+            messenger->procid);
+        messenger->mapping_dup_reported = 1;
+      }
     }
 
     messenger = messenger->next;
   }
+}
+
+static int compare_int32_asc(const void* a, const void* b) {
+  int32_t va = *(const int32_t*)a;
+  int32_t vb = *(const int32_t*)b;
+  if (va < vb) {
+    return -1;
+  }
+  if (va > vb) {
+    return 1;
+  }
+  return 0;
+}
+
+static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger) {
+  int32_t count;
+  int32_t* copy;
+
+  if ((messenger == NULL) || (messenger->mapping_itemoffset == NULL)) {
+    return 0;
+  }
+
+  count = messenger->nodecount;
+  if (count <= 1) {
+    return 0;
+  }
+
+  copy = (int32_t*)malloc(sizeof(int32_t) * count);
+  if (copy == NULL) {
+    fprintf(stderr,
+            "Thread %d: messenger_detect_duplicate_offsets: out of memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  memcpy(copy, messenger->mapping_itemoffset, sizeof(int32_t) * count);
+  qsort(copy, count, sizeof(int32_t), compare_int32_asc);
+
+  for (int32_t i = 1; i < count; i++) {
+    if (copy[i] == copy[i - 1]) {
+      free(copy);
+      return 1;
+    }
+  }
+
+  free(copy);
+  return 0;
 }
 
 /**
