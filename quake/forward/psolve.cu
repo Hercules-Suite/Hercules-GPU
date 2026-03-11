@@ -8057,6 +8057,22 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         }
         Timer_Stop("Schedule Unpack Incoming");
         remaining -= outcount;
+      } else if (direction == CONTRIBUTION) {
+        int i;
+
+        Timer_Start("Schedule Wait Recv");
+        MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+        Timer_Stop("Schedule Wait Recv");
+
+        /* Contribution paths use += accumulation, so unpack in a
+         * deterministic order independent of receive completion timing. */
+        Timer_Start("Schedule Unpack Incoming");
+        for (i = 0; i < irecvcount; i++) {
+          schedule_unpack_incoming_message(recv_order[i], valuetable,
+                                           itemsperentry, direction);
+        }
+        Timer_Stop("Schedule Unpack Incoming");
+        remaining = 0;
       } else {
         int doneidx;
         MPI_Status status;
