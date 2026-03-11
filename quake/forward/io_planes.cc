@@ -236,6 +236,12 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
     int recvStripCount, StartLocation;
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	if (myID == 0) {
+	    int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
+		* thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	}
+
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 
@@ -246,6 +252,36 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 		 elemnum++)
 	    {
 	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
+		{
+		    int nodeLimit = -1;
+		    int nodeNeed = (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) ? 4 : 8;
+		    if ((mySolver != NULL) && (mySolver->gpuData != NULL)) {
+			nodeLimit = mySolver->gpuData->nharbored;
+		    }
+		    if (nodeLimit > 0) {
+			for (iPhi = 0; iPhi < nodeNeed; iPhi++) {
+			    int nid = thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi];
+			    if ((nid < 0) || (nid >= nodeLimit)) {
+				solver_abort("Old_planes_print", NULL,
+				             "Error: invalid plane node id %d (limit=%d plane=%d strip=%d elem=%d topo=%d)",
+				             nid, nodeLimit, iPlane, iStrip, elemnum,
+				             thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
+			    }
+			}
+		    }
+		    {
+			double lc0 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0];
+			double lc1 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1];
+			double lc2 = thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2];
+			if ((!isfinite(lc0)) || (!isfinite(lc1)) || (!isfinite(lc2)) ||
+			    (fabs(lc0) > 2.0) || (fabs(lc1) > 2.0) || (fabs(lc2) > 2.0)) {
+			    solver_abort("Old_planes_print", NULL,
+			                 "Error: invalid plane localcoords (%e,%e,%e) plane=%d strip=%d elem=%d topo=%d",
+			                 lc0, lc1, lc2, iPlane, iStrip, elemnum,
+			                 thePlanes[iPlane].strip[iStrip][elemnum].topostrip);
+			}
+		    }
+		}
 
 	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
 
