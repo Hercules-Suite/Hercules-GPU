@@ -6563,15 +6563,15 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   const int32_t* topoNodes = topo_get_nodes_list();
   int32_t totalCount = sourceCount + topoCount;
   int32_t activeCount;
+  int32_t useDenseUpload = 0;
   int32_t idx;
   int blocksize;
   int gridsize;
 
-  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
-                  mesh->nharbored * sizeof(fvector_t),
-                  solver->streams[CUDA_STREAM_MAIN]);
-
   if (totalCount <= 0) {
+    cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                    mesh->nharbored * sizeof(fvector_t),
+                    solver->streams[CUDA_STREAM_MAIN]);
     return;
   }
 
@@ -6732,6 +6732,25 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   activeCount = g_sparseActiveCount;
+  if ((mesh->nharbored > 0) && ((activeCount * 4) >= mesh->nharbored)) {
+    useDenseUpload = 1;
+  }
+
+  if (useDenseUpload) {
+    Timer_Stop("Sparse force upload build");
+    Timer_Start("Sparse force upload memcpy");
+    cudaMemcpyAsync(solver->gpuData->forceDevice, solver->force,
+                    mesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+    Timer_Stop("Sparse force upload memcpy");
+    return;
+  }
+
+  cudaMemsetAsync(solver->gpuData->forceDevice, 0,
+                  mesh->nharbored * sizeof(fvector_t),
+                  solver->streams[CUDA_STREAM_MAIN]);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((activeCount > 100000) && sparse_host_use_omp())
