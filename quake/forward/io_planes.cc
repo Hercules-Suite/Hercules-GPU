@@ -120,6 +120,68 @@ static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
 
+static void plane_interpolate_point(const mysolver_t* mySolver,
+		const plane_strip_element_t* element,
+		double* outX,
+		double* outY,
+		double* outZ) {
+	int iPhi;
+	int32_t nodesToInterpolate[8];
+	vector3D_t localCoords;
+	double phi[8];
+	static const double xi[3][8] = {
+		{-1,  1, -1,  1, -1,  1, -1, 1},
+		{-1, -1,  1,  1, -1, -1,  1, 1},
+		{-1, -1, -1, -1,  1,  1,  1, 1}
+	};
+	double displacementsX = 0.0;
+	double displacementsY = 0.0;
+	double displacementsZ = 0.0;
+
+	localCoords = element->localcoords;
+	for (iPhi = 0; iPhi < 8; iPhi++) {
+		nodesToInterpolate[iPhi] = element->nodestointerpolate[iPhi];
+	}
+
+	if (element->topostrip == 1) {
+		double ux_0 = mySolver->tm1[nodesToInterpolate[0]].f[0];
+		double ux_10 = mySolver->tm1[nodesToInterpolate[1]].f[0] - ux_0;
+		double ux_20 = mySolver->tm1[nodesToInterpolate[2]].f[0] - ux_0;
+		double ux_30 = mySolver->tm1[nodesToInterpolate[3]].f[0] - ux_0;
+		double uy_0 = mySolver->tm1[nodesToInterpolate[0]].f[1];
+		double uy_10 = mySolver->tm1[nodesToInterpolate[1]].f[1] - uy_0;
+		double uy_20 = mySolver->tm1[nodesToInterpolate[2]].f[1] - uy_0;
+		double uy_30 = mySolver->tm1[nodesToInterpolate[3]].f[1] - uy_0;
+		double uz_0 = mySolver->tm1[nodesToInterpolate[0]].f[2];
+		double uz_10 = mySolver->tm1[nodesToInterpolate[1]].f[2] - uz_0;
+		double uz_20 = mySolver->tm1[nodesToInterpolate[2]].f[2] - uz_0;
+		double uz_30 = mySolver->tm1[nodesToInterpolate[3]].f[2] - uz_0;
+
+		displacementsX = ux_0 + localCoords.x[0] * ux_20
+						  + localCoords.x[1] * ux_10
+						  + localCoords.x[2] * ux_30;
+		displacementsY = uy_0 + localCoords.x[0] * uy_20
+						  + localCoords.x[1] * uy_10
+						  + localCoords.x[2] * uy_30;
+		displacementsZ = uz_0 + localCoords.x[0] * uz_20
+						  + localCoords.x[1] * uz_10
+						  + localCoords.x[2] * uz_30;
+	} else {
+		for (iPhi = 0; iPhi < 8; iPhi++) {
+			phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0])
+					  * (1 + xi[1][iPhi] * localCoords.x[1])
+					  * (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+			displacementsX += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[0];
+			displacementsY += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[1];
+			displacementsZ += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[2];
+		}
+	}
+
+	*outX = displacementsX;
+	*outY = displacementsY;
+	*outZ = displacementsZ;
+}
+
 static int32_t plane_output_use_omp(void) {
 #ifndef _OPENMP
 	return 0;
@@ -198,16 +260,9 @@ void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
  */
 int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 {
-    int iPlane, iPhi;
+	int iPlane;
     int stripLength;
     int iStrip, elemnum, rStrip;
-    /* Auxiliar array to handle shapefunctions in a loop */
-    double  xi[3][8]={ {-1,  1, -1,  1, -1,  1, -1, 1} ,
-		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
-		       {-1, -1, -1, -1,  1,  1,  1, 1} };
-
-    double      phi[8];
-    double      displacementsX, displacementsY, displacementsZ;
     //    int32_t     howManyDisplacements, iDisplacement;
     //    vector3D_t* localCoords; /* convinient renaming */
     //    int32_t*    nodesToInterpolate[8];
@@ -223,66 +278,27 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
 	        - thePlanes[iPlane].stripstart[iStrip] + 1;
+	    double* stripBuffer = planes_stripMPISendBuffer;
 
 	    /* interpolate points directly into send buffer for this strip */
 	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	#pragma omp parallel for if(useOmp) schedule(static)
 	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++)
 	    {
-	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
+	    	double displacementsX;
+	    	double displacementsY;
+	    	double displacementsZ;
 
-	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+	    	plane_interpolate_point(mySolver,
+	    			&(thePlanes[iPlane].strip[iStrip][elemnum]),
+	    			&displacementsX,
+	    			&displacementsY,
+	    			&displacementsZ);
 
-	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
-	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
-	    		double ux_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[0] - ux_0;
-	    		double ux_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[0] - ux_0;
-
-	    		double uy_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[1];
-	    		double uy_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[1] - uy_0;
-	    		double uy_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[1] - uy_0;
-	    		double uy_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[1] - uy_0;
-
-	    		double uz_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[2];
-	    		double uz_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[2] - uz_0;
-	    		double uz_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[2] - uz_0;
-	    		double uz_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[2] - uz_0;
-
-	    		displacementsX = ux_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * ux_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * ux_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * ux_30;
-
-	    		displacementsY = uy_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * uy_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * uy_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * uy_30;
-
-	    		displacementsZ = uz_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * uz_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * uz_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * uz_30;
-
-	    	} else {
-	    		for (iPhi = 0; iPhi < 8; iPhi++){
-	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
-	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
-	    					* ( 1 + (xi[1][iPhi]) *
-	    							(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) )
-	    							* ( 1 + (xi[2][iPhi]) *
-	    									(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) ) /8;
-
-	    			displacementsX += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[0]);
-	    			displacementsY += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[1]);
-	    			displacementsZ += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[2]);
-	    		}
-	    	}
-
-	    	planes_stripMPISendBuffer[elemnum*3]     = (double) (displacementsX);
-	    	planes_stripMPISendBuffer[elemnum*3 + 1] = (double) (displacementsY);
-	    	planes_stripMPISendBuffer[elemnum*3 + 2] = (double) (displacementsZ);
+	    	stripBuffer[elemnum*3] = displacementsX;
+	    	stripBuffer[elemnum*3 + 1] = displacementsY;
+	    	stripBuffer[elemnum*3 + 2] = displacementsZ;
 
 	    }
 
@@ -291,15 +307,15 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
             stripLength = thePlanes[iPlane].stripend[iStrip]
 		- thePlanes[iPlane].stripstart[iStrip] + 1;
 
-            planes_stripMPISendBuffer[stripLength*3]
+		    stripBuffer[stripLength*3]
 		= (double) (thePlanes[iPlane].stripstart[iStrip] + 0.1);
 
             if (myID==0) { /* don't try to send to same PE, just memcopy */
-		memcpy( &(planes_output_buffer[ thePlanes[iPlane].stripstart[iStrip]*3 ] ), planes_stripMPISendBuffer,
+			memcpy( &(planes_output_buffer[ thePlanes[iPlane].stripstart[iStrip]*3 ] ), stripBuffer,
 			stripLength*3*sizeof(double) );
             }
             else {
-		MPI_Send( planes_stripMPISendBuffer, (stripLength*3)+1,
+			MPI_Send( stripBuffer, (stripLength*3)+1,
 			  MPI_DOUBLE, 0 , iPlane, comm_solver );
             }
 	} /*for iStrips*/
@@ -1190,17 +1206,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
  */
 int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 {
-    int iPlane, iPhi;
+	int iPlane;
     int stripLength;
     int iStrip, elemnum;
-
-    /* Auxiliar array to handle shapefunctions in a loop */
-    double  xi[3][8]={ {-1,  1, -1,  1, -1,  1, -1, 1} ,
-		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
-		       {-1, -1, -1, -1,  1,  1,  1, 1} };
-
-    double      phi[8];
-    double      displacementsX, displacementsY, displacementsZ;
 #ifdef _OPENMP
     const int32_t useOmp = plane_output_use_omp();
 #endif
@@ -1210,65 +1218,26 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
 	        - thePlanes[iPlane].stripstart[iStrip] + 1;
+	    double* stripBuffer = planes_stripMPISendBuffer;
 
 	    /* interpolate points directly into send buffer for this strip */
 	#ifdef _OPENMP
-	#pragma omp parallel for if(useOmp) schedule(static) \
-	    private(iPhi, phi, displacementsX, displacementsY, displacementsZ)
+	#pragma omp parallel for if(useOmp) schedule(static)
 	#endif
 	    for (elemnum = 0; elemnum < elemCount; elemnum++){
-	    	displacementsX = 0;displacementsY = 0;displacementsZ = 0;
+	    	double displacementsX;
+	    	double displacementsY;
+	    	double displacementsZ;
 
-	    	if (thePlanes[iPlane].strip[iStrip][elemnum].topostrip==1) {
+	    	plane_interpolate_point(mySolver,
+	    			&(thePlanes[iPlane].strip[iStrip][elemnum]),
+	    			&displacementsX,
+	    			&displacementsY,
+	    			&displacementsZ);
 
-	    		double ux_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[0];
-	    		double ux_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[0] - ux_0;
-	    		double ux_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[0] - ux_0;
-	    		double ux_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[0] - ux_0;
-
-	    		double uy_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[1];
-	    		double uy_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[1] - uy_0;
-	    		double uy_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[1] - uy_0;
-	    		double uy_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[1] - uy_0;
-
-	    		double uz_0  = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[0] ].f[2];
-	    		double uz_10 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[1] ].f[2] - uz_0;
-	    		double uz_20 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[2] ].f[2] - uz_0;
-	    		double uz_30 = mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[3] ].f[2] - uz_0;
-
-	    		displacementsX = ux_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * ux_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * ux_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * ux_30;
-
-	    		displacementsY = uy_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * uy_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * uy_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * uy_30;
-
-	    		displacementsZ = uz_0 + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) * uz_20
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) * uz_10
-	    			                  + (thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) * uz_30;
-
-	    	} else {
-	    		for (iPhi = 0; iPhi < 8; iPhi++){
-	    			phi[iPhi] = ( 1 + (xi[0][iPhi]) *
-	    					(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[0]) )
-	    					* ( 1 + (xi[1][iPhi]) *
-	    							(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[1]) )
-	    							* ( 1 + (xi[2][iPhi]) *
-	    									(thePlanes[iPlane].strip[iStrip][elemnum].localcoords.x[2]) ) /8;
-
-	    			displacementsX += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[0]);
-	    			displacementsY += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[1]);
-	    			displacementsZ += phi[iPhi]*
-	    					(mySolver->tm1[ thePlanes[iPlane].strip[iStrip][elemnum].nodestointerpolate[iPhi] ].f[2]);
-	    		}
-	    	}
-
-	    	planes_stripMPISendBuffer[elemnum*3]     = (double) (displacementsX);
-	    	planes_stripMPISendBuffer[elemnum*3 + 1] = (double) (displacementsY);
-	    	planes_stripMPISendBuffer[elemnum*3 + 2] = (double) (displacementsZ);
+	    	stripBuffer[elemnum*3] = displacementsX;
+	    	stripBuffer[elemnum*3 + 1] = displacementsY;
+	    	stripBuffer[elemnum*3 + 2] = displacementsZ;
 
 	    } /*for elemnum*/
 
@@ -1276,10 +1245,10 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	    stripLength = thePlanes[iPlane].stripend[iStrip]
 		- thePlanes[iPlane].stripstart[iStrip] + 1;
 
-	    planes_stripMPISendBuffer[stripLength*3]
+	    stripBuffer[stripLength*3]
 		= (double) (thePlanes[iPlane].stripstart[iStrip] + 0.1);
 
-	    MPI_Send( planes_stripMPISendBuffer, (stripLength*3)+1,
+	    MPI_Send( stripBuffer, (stripLength*3)+1,
 		      MPI_DOUBLE, thePlanes[iPlane].IO_PE_num, iPlane, comm_IO );
 
 	} /*for iStrips*/
