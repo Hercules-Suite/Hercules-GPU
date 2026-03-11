@@ -629,6 +629,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				                                      -thePlanes[iPlane].stripstart[stripnum] + 1);
     				elemnum++)
     		{
+	    		thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -658,7 +659,11 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
     					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
     					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
-    			}
+	    			} else {
+	    				solver_abort("Old_output_planes_construct_strips", NULL,
+	    				            "Point from precomputed strip is not in mesh: plane %d strip %d elem %d",
+	    				            iPlane, stripnum, elemnum);
+	    			}
     		}
     	}
 
@@ -1048,6 +1053,7 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				-thePlanes[iPlane].stripstart[stripnum] + 1);
 		     elemnum++)
 		    {
+			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1077,6 +1083,10 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+			} else {
+				solver_abort("New_output_planes_construct_strips", NULL,
+				            "Point from precomputed strip is not in mesh: plane %d strip %d elem %d",
+				            iPlane, stripnum, elemnum);
 			}
 		    }
 	    }
