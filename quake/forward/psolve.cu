@@ -127,6 +127,7 @@ static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
+static int32_t g_reproMode = -1;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -328,6 +329,7 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
+static int32_t hercules_repro_mode(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -7921,6 +7923,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   send_head = send_messenger;
   recv_head = recv_messenger;
   useWaitsome = (direction == SHARING) ? 1 : 0;
+  if (hercules_repro_mode()) {
+    useWaitsome = 0;
+  }
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -8057,7 +8062,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         }
         Timer_Stop("Schedule Unpack Incoming");
         remaining -= outcount;
-      } else if (direction == CONTRIBUTION) {
+      } else if ((direction == CONTRIBUTION) || hercules_repro_mode()) {
         int i;
 
         Timer_Start("Schedule Wait Recv");
@@ -8154,7 +8159,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   if (direction == SHARING) {
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(recv_messenger->nidx > 10000)
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && !hercules_repro_mode())
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
@@ -11208,6 +11213,28 @@ static int32_t station_output_use_omp(void) {
 
   return g_stationOutputOmpMode;
 #endif
+}
+
+static int32_t hercules_repro_mode(void) {
+  if (g_reproMode < 0) {
+    const char* env = getenv("HERCULES_REPRO_MODE");
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_reproMode = 0;
+      } else {
+        g_reproMode = 1;
+      }
+    } else {
+      g_reproMode = 0;
+    }
+
+    if ((g_reproMode == 1) && (Global.myID == 0)) {
+      monitor_print("Repro mode enabled: deterministic MPI unpack path active\n");
+    }
+  }
+
+  return g_reproMode;
 }
 
 /**
