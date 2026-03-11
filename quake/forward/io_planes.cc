@@ -222,6 +222,7 @@ void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
  */
 int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 {
+	int iPlane, iPhi;
     int stripLength;
     int iStrip, elemnum, rStrip;
     /* Auxiliar array to handle shapefunctions in a loop */
