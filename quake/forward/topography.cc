@@ -23,6 +23,10 @@
 #include <math.h>
 #include <stdio.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "psolve.h"
 //#include "octor.h"
 #include "util.h"
@@ -62,6 +66,8 @@ static int32_t            myNumberOfTopoStations = 0;
 static int32_t            myNumberOfTopoNonLinElements = 0;
 static noyesflag_t        theNonlinTopo_flag  = NO;
 static noyesflag_t        theTopoBKT_flag  = NO;
+static int32_t            g_topoInitOmpMode = -1;
+static int32_t            g_topoInitOmpReported = 0;
 
 /*static double The_hypocenter_lat_deg = 0;
 static double The_hypocenter_long_deg = 0;
@@ -174,6 +180,37 @@ static int topo_compare_int32_asc(const void *lhs, const void *rhs) {
     const int32_t a = *(const int32_t *)lhs;
     const int32_t b = *(const int32_t *)rhs;
     return (a > b) - (a < b);
+}
+
+static int32_t topo_init_use_omp(int32_t myID) {
+#ifndef _OPENMP
+    (void)myID;
+    return 0;
+#else
+    if (g_topoInitOmpMode < 0) {
+        const char* env = getenv("HERCULES_TOPO_INIT_OMP");
+
+        if (env != NULL) {
+            if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+                (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
+                g_topoInitOmpMode = 0;
+            } else {
+                g_topoInitOmpMode = 1;
+            }
+        } else {
+            g_topoInitOmpMode = 1;
+        }
+
+        if ((g_topoInitOmpMode == 1) && (myID == 0) &&
+            (g_topoInitOmpReported == 0)) {
+            fprintf(stderr, "Topography init OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+            g_topoInitOmpReported = 1;
+        }
+    }
+
+    return g_topoInitOmpMode;
+#endif
 }
 
 double get_thebase_topo() {
@@ -1828,9 +1865,11 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     size_t topoElementsCapacity = 0;
     double *cachedTetraVol = NULL;
     int32_t *cachedCubePart = NULL;
+    char *topoElemFlags = NULL;
     char *isTopoNode;
     const double domainLongNs = theDomainLong_ns;
     const double domainLongEw = theDomainLong_ew;
+    const int32_t useOmp = topo_init_use_omp(myID);
 
     if (myTopoElementsMapping != NULL) {
         free(myTopoElementsMapping);
@@ -1842,7 +1881,7 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     Timer_Start("Topo Init Select Elements");
     if (myMesh->lenum > 0) {
         size_t lenum = (size_t)myMesh->lenum;
-        topoElementsCapacity = (lenum < 65536u) ? lenum : 65536u;
+        topoElementsCapacity = lenum;
 
         myTopoElementsMapping = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
         if (myTopoElementsMapping == NULL) {
@@ -1851,25 +1890,36 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
             exit(1);
         }
 
+        topoElemFlags = (char *)calloc(lenum, sizeof(char));
+        if (topoElemFlags == NULL) {
+            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+
         if (theTopoMethod == VT) {
-            cachedTetraVol = (double *)malloc(sizeof(double) * 5u * topoElementsCapacity);
-            cachedCubePart = (int32_t *)malloc(sizeof(int32_t) * topoElementsCapacity);
+            cachedTetraVol = (double *)malloc(sizeof(double) * 5u * lenum);
+            cachedCubePart = (int32_t *)malloc(sizeof(int32_t) * lenum);
             if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
                 free(cachedTetraVol);
                 free(cachedCubePart);
+                free(topoElemFlags);
                 fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
                 MPI_Abort(MPI_COMM_WORLD, ERROR);
                 exit(1);
             }
         }
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if((myMesh->lenum > 4096) && useOmp)
+#endif
         for (eindex = 0; eindex < myMesh->lenum; eindex++) {
             elem_t *elemp;
             edata_t *edata;
             node_t *node0dat;
             double Vp, xo, yo, zo, esize;
             int32_t node0;
-            noyesflag_t includeElem = NO;
+            int32_t includeElem = 0;
             double aux_vol[5] = {0};
             int32_t aux_int = 0;
 
@@ -1895,58 +1945,39 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
                         (aux_vol[4] == 0.0)) {
                         get_airprops_topo(edata);
                     } else {
-                        includeElem = YES;
+                        includeElem = 1;
                     }
                 } else {
-                    includeElem = YES;
+                    includeElem = 1;
                 }
             }
 
-            if (includeElem == YES) {
-                if ((size_t)myTopoElementsCount >= topoElementsCapacity) {
-                    size_t lenumMax = (size_t)myMesh->lenum;
-                    size_t newCapacity = topoElementsCapacity * 2u;
-                    if (newCapacity > lenumMax) {
-                        newCapacity = lenumMax;
-                    }
-                    if (newCapacity <= topoElementsCapacity) {
-                        fprintf(stderr, "Thread %d: topography_init: topo element buffer overflow\n", myID);
-                        MPI_Abort(MPI_COMM_WORLD, ERROR);
-                        exit(1);
-                    }
-
-                    myTopoElementsMapping = (int32_t *)realloc(
-                        myTopoElementsMapping, sizeof(int32_t) * newCapacity);
-                    if (myTopoElementsMapping == NULL) {
-                        fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                        MPI_Abort(MPI_COMM_WORLD, ERROR);
-                        exit(1);
-                    }
-
-                    if (theTopoMethod == VT) {
-                        cachedTetraVol = (double *)realloc(
-                            cachedTetraVol, sizeof(double) * 5u * newCapacity);
-                        cachedCubePart = (int32_t *)realloc(
-                            cachedCubePart, sizeof(int32_t) * newCapacity);
-                        if ((cachedTetraVol == NULL) || (cachedCubePart == NULL)) {
-                            fprintf(stderr, "Thread %d: topography_init: out of memory\n", myID);
-                            MPI_Abort(MPI_COMM_WORLD, ERROR);
-                            exit(1);
-                        }
-                    }
-
-                    topoElementsCapacity = newCapacity;
-                }
-
-                myTopoElementsMapping[myTopoElementsCount] = eindex;
+            if (includeElem == 1) {
+                topoElemFlags[eindex] = 1;
                 if (theTopoMethod == VT) {
-                    memcpy(&cachedTetraVol[(size_t)myTopoElementsCount * 5u], aux_vol,
+                    memcpy(&cachedTetraVol[(size_t)eindex * 5u], aux_vol,
                            sizeof(double) * 5u);
-                    cachedCubePart[myTopoElementsCount] = aux_int;
+                    cachedCubePart[eindex] = aux_int;
+                }
+            }
+        }
+
+        myTopoElementsCount = 0;
+        for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+            if (topoElemFlags[eindex] != 0) {
+                myTopoElementsMapping[myTopoElementsCount] = eindex;
+                if (theTopoMethod == VT && (size_t)myTopoElementsCount != (size_t)eindex) {
+                    memcpy(&cachedTetraVol[(size_t)myTopoElementsCount * 5u],
+                           &cachedTetraVol[(size_t)eindex * 5u],
+                           sizeof(double) * 5u);
+                    cachedCubePart[myTopoElementsCount] = cachedCubePart[eindex];
                 }
                 myTopoElementsCount++;
             }
         }
+
+        free(topoElemFlags);
+        topoElemFlags = NULL;
 
         if (myTopoElementsCount == 0) {
             free(myTopoElementsMapping);
@@ -2097,6 +2128,9 @@ void topo_solver_init(int32_t myID, mesh_t *myMesh) {
     }
 
     /* Initialization of element constants */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if((myTopoElementsCount > 1024) && useOmp)
+#endif
     for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
 
         elem_t           *elemp;
