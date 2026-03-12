@@ -6799,11 +6799,37 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Stop("Sparse force upload scatter");
 }
 
+static void solver_clear_force_full(mysolver_t* solver, int32_t harboredCount) {
+#ifdef _OPENMP
+  if (harboredCount >= 262144) {
+#pragma omp parallel
+    {
+      int32_t threadCount = omp_get_num_threads();
+      int32_t threadId = omp_get_thread_num();
+      int32_t chunk = (harboredCount + threadCount - 1) / threadCount;
+      int32_t start = threadId * chunk;
+      int32_t end = start + chunk;
+
+      if (end > harboredCount) {
+        end = harboredCount;
+      }
+      if (start < end) {
+        memset(solver->force + start, 0,
+               (size_t)(end - start) * sizeof(fvector_t));
+      }
+    }
+    return;
+  }
+#endif
+
+  memset(solver->force, 0, (size_t)harboredCount * sizeof(fvector_t));
+}
+
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   int32_t clearMode = solver_sparse_clear_mode();
 
   if (clearMode == 3) {
-    memset(solver->force, 0, sizeof(fvector_t) * Global.myMesh->nharbored);
+    solver_clear_force_full(solver, Global.myMesh->nharbored);
   } else if (clearMode == 1) {
     int32_t topoCount = topo_get_nodes_count();
     const int32_t* topoNodes = topo_get_nodes_list();
@@ -7030,7 +7056,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
     solver_clear_sparse_host_forces(solver);
   } else if (!use_gpu_source_fastpath()) {
     /* zero out the force vector for all nodes */
-    memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
+    solver_clear_force_full(solver, mesh->nharbored);
   }
   Timer_Stop("Disp host force reset");
 

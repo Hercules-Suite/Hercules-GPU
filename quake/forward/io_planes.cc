@@ -83,8 +83,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 typedef struct plane_strip_element_t {
 
     int32_t nodestointerpolate[8];
-    vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
-    int32_t topostrip;
+	double interpweights[8];
 
 } plane_strip_element_t;
 
@@ -120,61 +119,61 @@ static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
 
+static void plane_compute_interpweights(plane_strip_element_t* element,
+		const vector3D_t* localCoords) {
+	static const double xi[3][8] = {
+		{-1,  1, -1,  1, -1,  1, -1, 1},
+		{-1, -1,  1,  1, -1, -1,  1, 1},
+		{-1, -1, -1, -1,  1,  1,  1, 1}
+	};
+	int iPhi;
+	int isTopoStrip = 1;
+
+	for (iPhi = 4; iPhi < 8; iPhi++) {
+		if (element->nodestointerpolate[iPhi] != 0) {
+			isTopoStrip = 0;
+			break;
+		}
+	}
+
+	if (isTopoStrip) {
+		for (iPhi = 0; iPhi < 8; iPhi++) {
+			element->interpweights[iPhi] = 0.0;
+		}
+		element->interpweights[0] = 1.0 - localCoords->x[0]
+			- localCoords->x[1] - localCoords->x[2];
+		element->interpweights[1] = localCoords->x[1];
+		element->interpweights[2] = localCoords->x[0];
+		element->interpweights[3] = localCoords->x[2];
+	} else {
+		for (iPhi = 0; iPhi < 8; iPhi++) {
+			element->interpweights[iPhi] =
+				(1 + xi[0][iPhi] * localCoords->x[0]) *
+				(1 + xi[1][iPhi] * localCoords->x[1]) *
+				(1 + xi[2][iPhi] * localCoords->x[2]) / 8.0;
+		}
+	}
+}
+
 static void plane_interpolate_point(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
 		double* outX,
 		double* outY,
 		double* outZ) {
 	int iPhi;
-	int32_t nodesToInterpolate[8];
-	vector3D_t localCoords;
-	double phi[8];
-	static const double xi[3][8] = {
-		{-1,  1, -1,  1, -1,  1, -1, 1},
-		{-1, -1,  1,  1, -1, -1,  1, 1},
-		{-1, -1, -1, -1,  1,  1,  1, 1}
-	};
 	double displacementsX = 0.0;
 	double displacementsY = 0.0;
 	double displacementsZ = 0.0;
 
-	localCoords = element->localcoords;
 	for (iPhi = 0; iPhi < 8; iPhi++) {
-		nodesToInterpolate[iPhi] = element->nodestointerpolate[iPhi];
-	}
-
-	if (element->topostrip == 1) {
-		double ux_0 = mySolver->tm1[nodesToInterpolate[0]].f[0];
-		double ux_10 = mySolver->tm1[nodesToInterpolate[1]].f[0] - ux_0;
-		double ux_20 = mySolver->tm1[nodesToInterpolate[2]].f[0] - ux_0;
-		double ux_30 = mySolver->tm1[nodesToInterpolate[3]].f[0] - ux_0;
-		double uy_0 = mySolver->tm1[nodesToInterpolate[0]].f[1];
-		double uy_10 = mySolver->tm1[nodesToInterpolate[1]].f[1] - uy_0;
-		double uy_20 = mySolver->tm1[nodesToInterpolate[2]].f[1] - uy_0;
-		double uy_30 = mySolver->tm1[nodesToInterpolate[3]].f[1] - uy_0;
-		double uz_0 = mySolver->tm1[nodesToInterpolate[0]].f[2];
-		double uz_10 = mySolver->tm1[nodesToInterpolate[1]].f[2] - uz_0;
-		double uz_20 = mySolver->tm1[nodesToInterpolate[2]].f[2] - uz_0;
-		double uz_30 = mySolver->tm1[nodesToInterpolate[3]].f[2] - uz_0;
-
-		displacementsX = ux_0 + localCoords.x[0] * ux_20
-						  + localCoords.x[1] * ux_10
-						  + localCoords.x[2] * ux_30;
-		displacementsY = uy_0 + localCoords.x[0] * uy_20
-						  + localCoords.x[1] * uy_10
-						  + localCoords.x[2] * uy_30;
-		displacementsZ = uz_0 + localCoords.x[0] * uz_20
-						  + localCoords.x[1] * uz_10
-						  + localCoords.x[2] * uz_30;
-	} else {
-		for (iPhi = 0; iPhi < 8; iPhi++) {
-			phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0])
-					  * (1 + xi[1][iPhi] * localCoords.x[1])
-					  * (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-			displacementsX += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[0];
-			displacementsY += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[1];
-			displacementsZ += phi[iPhi] * mySolver->tm1[nodesToInterpolate[iPhi]].f[2];
+		int32_t lnid = element->nodestointerpolate[iPhi];
+		double weight = element->interpweights[iPhi];
+		if (weight == 0.0) {
+			continue;
 		}
+		displacementsX += weight * mySolver->tm1[lnid].f[0];
+		displacementsY += weight * mySolver->tm1[lnid].f[1];
+		displacementsZ += weight * mySolver->tm1[lnid].f[2];
 	}
 
 	*outX = displacementsX;
@@ -701,6 +700,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					elemnum < elemCount;
     				elemnum++)
     		{
+				vector3D_t localCoords;
+				plane_strip_element_t* element =
+					&(thePlanes[ iPlane ].strip[stripnum][elemnum]);
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -722,14 +724,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
     			if (search_point( pointGlobal, &octant) == 1) {
     				compute_csi_eta_dzeta( octant, pointGlobal,
-    						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
-    						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
-
-    				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
-    					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+							&localCoords,
+							element->nodestointerpolate);
+					plane_compute_interpweights(element, &localCoords);
     			}
     		}
     	}
@@ -1147,6 +1144,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		     elemnum < elemCount;
 		     elemnum++)
 		    {
+			vector3D_t localCoords;
+			plane_strip_element_t* element =
+				&(thePlanes[ iPlane ].strip[stripnum][elemnum]);
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1168,14 +1168,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
 			if (search_point( pointGlobal, &octant) == 1) {
 				compute_csi_eta_dzeta( octant, pointGlobal,
-						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
-						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
-
-				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
-					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
-					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
-					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
-					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+						&localCoords,
+						element->nodestointerpolate);
+				plane_compute_interpweights(element, &localCoords);
 			}
 		    }
 	    }
