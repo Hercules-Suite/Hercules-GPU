@@ -331,6 +331,7 @@ static void solver_activate_force_stage(mysolver_t* solver,
                                         fvector_t** savedForceBuffer);
 static void solver_restore_force_stage(mysolver_t* solver,
                                        fvector_t* savedForceBuffer);
+static int use_sparse_force_upload_topo(void);
 static int32_t solver_sparse_clear_mode(void);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
