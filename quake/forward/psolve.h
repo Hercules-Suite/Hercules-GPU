@@ -315,6 +315,8 @@ struct messenger_t {
     int32_t* mapping;       /**< Array of local ids for involved nodes. */
     int32_t* mapping_itemoffset; /**< Cached mapping * itemsperentry. */
     int32_t  mapping_itemsperentry;
+    int32_t  mapping_has_duplicates;
+    int32_t  mapping_dup_reported;
 
     messenger_t* next;
 };
