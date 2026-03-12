@@ -311,7 +311,6 @@ static void messenger_prepare_offsets(messenger_t* first,
                                       int32_t itemsperentry);
 static int compare_int32_asc(const void* a, const void* b);
 static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger);
-static int32_t schedule_detect_mapping_overlaps(messenger_t* first);
 
 static void compute_K(void);
 static void constract_Quality_Factor_Table(void);
@@ -7647,14 +7646,12 @@ static schedule_t* schedule_new() {
   sched->messenger_c =
       (messenger_t**)calloc(Global.theGroupSize, sizeof(messenger_t*));
   if (sched->messenger_c == NULL) return NULL;
-  sched->recv_mapping_has_overlaps_c = 0;
 
   sched->s_count = 0;
   sched->first_s = NULL;
   sched->messenger_s =
       (messenger_t**)calloc(Global.theGroupSize, sizeof(messenger_t*));
   if (sched->messenger_s == NULL) return NULL;
-  sched->recv_mapping_has_overlaps_s = 0;
 
   sched->irecvreqs_c = NULL;
   sched->irecvstats_c = NULL;
@@ -7923,15 +7920,6 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
-  ansched->recv_mapping_has_overlaps_c =
-      schedule_detect_mapping_overlaps(ansched->first_c);
-  ansched->recv_mapping_has_overlaps_s =
-      schedule_detect_mapping_overlaps(ansched->first_s);
-  dnsched->recv_mapping_has_overlaps_c =
-      schedule_detect_mapping_overlaps(dnsched->first_c);
-  dnsched->recv_mapping_has_overlaps_s =
-      schedule_detect_mapping_overlaps(dnsched->first_s);
-
   return;
 }
 
@@ -8025,7 +8013,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   MPI_Status* isendstats;
   int32_t waitStage = wait_recv_stage_from_msgtag(msgtag);
   int32_t useWaitsome = 0;
-  int32_t recvMappingHasOverlaps = 0;
 
 #ifdef DEBUG
   int64_t* gnidp;
@@ -8034,7 +8021,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   if (direction == CONTRIBUTION) {
     send_messenger = sched->first_c;
     recv_messenger = sched->first_s;
-    recvMappingHasOverlaps = sched->recv_mapping_has_overlaps_s;
     irecvcount = sched->s_count;
     isendcount = sched->c_count;
     irecvreqs = sched->irecvreqs_s;
@@ -8044,7 +8030,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   } else {
     send_messenger = sched->first_s;
     recv_messenger = sched->first_c;
-    recvMappingHasOverlaps = sched->recv_mapping_has_overlaps_c;
     irecvcount = sched->c_count;
     isendcount = sched->s_count;
     irecvreqs = sched->irecvreqs_c;
@@ -8057,8 +8042,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   recv_head = recv_messenger;
   /* Deterministic unpack order avoids timing-dependent overwrites when
    * multiple incoming messengers target overlapping entries. */
-  useWaitsome = ((direction == SHARING) && !hercules_repro_mode() &&
-                 !recvMappingHasOverlaps && (irecvcount > 1));
+  useWaitsome = 0;
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -8202,9 +8186,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         }
         Timer_Stop("Schedule Unpack Incoming");
         remaining -= outcount;
-      } else if ((direction == CONTRIBUTION) ||
-             ((direction == SHARING) && recvMappingHasOverlaps) ||
-             hercules_repro_mode()) {
+      } else if ((direction == CONTRIBUTION) || (direction == SHARING) ||
+                 hercules_repro_mode()) {
         int i;
 
         Timer_Start("Schedule Wait Recv");
@@ -8904,50 +8887,6 @@ static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger) {
   }
 
   free(copy);
-  return 0;
-}
-
-static int32_t schedule_detect_mapping_overlaps(messenger_t* first) {
-  messenger_t* messenger = first;
-  int32_t totalCount = 0;
-  int32_t cursor = 0;
-  int32_t* allMappings;
-
-  while (messenger != NULL) {
-    totalCount += messenger->nodecount;
-    messenger = messenger->next;
-  }
-
-  if (totalCount <= 1) {
-    return 0;
-  }
-
-  allMappings = (int32_t*)malloc(sizeof(int32_t) * totalCount);
-  if (allMappings == NULL) {
-    fprintf(stderr,
-            "Thread %d: schedule_detect_mapping_overlaps: out of memory\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  messenger = first;
-  while (messenger != NULL) {
-    memcpy(allMappings + cursor, messenger->mapping,
-           sizeof(int32_t) * messenger->nodecount);
-    cursor += messenger->nodecount;
-    messenger = messenger->next;
-  }
-
-  qsort(allMappings, totalCount, sizeof(int32_t), compare_int32_asc);
-  for (int32_t i = 1; i < totalCount; i++) {
-    if (allMappings[i] == allMappings[i - 1]) {
-      free(allMappings);
-      return 1;
-    }
-  }
-
-  free(allMappings);
   return 0;
 }
 

@@ -333,7 +333,6 @@ struct schedule_t {
     int32_t       c_count;
     messenger_t*  first_c;
     messenger_t** messenger_c;  /**< Fast lookup table to build c-list. */
-    int32_t       recv_mapping_has_overlaps_c;
     MPI_Request*  irecvreqs_c;  /**< control for non-blocking receives. */
     MPI_Status*   irecvstats_c;
     MPI_Request*  isendreqs_c;  /**< control for non-blocking sends.    */
@@ -343,7 +342,6 @@ struct schedule_t {
     int32_t       s_count;
     messenger_t*  first_s;
     messenger_t** messenger_s;  /* Fast lookup table to build s-list.      */
-    int32_t       recv_mapping_has_overlaps_s;
     MPI_Request*  irecvreqs_s;  /* controls for non-blocking MPI receives. */
     MPI_Status*   irecvstats_s;
     MPI_Request*  isendreqs_s;  /* controls for non-blocking MPI sends.    */
