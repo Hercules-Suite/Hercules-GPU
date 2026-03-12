@@ -603,6 +603,20 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     planes_LocalLargestStripCount = 0;
 
     for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
+        const int strikeCount = thePlanes[iPlane].numberofstepsalongstrike;
+        const int downDipCount = thePlanes[iPlane].numberofstepsdowndip;
+        const size_t planePointCount = (size_t)strikeCount * (size_t)downDipCount;
+        octant_t **pointOctants = NULL;
+
+	if (planePointCount > 0) {
+		pointOctants = (octant_t**)calloc(planePointCount, sizeof(octant_t*));
+		if (pointOctants == NULL) {
+			fprintf(stderr,
+				"Error allocating octant cache for plane setup (Old path)\n");
+			exit(1);
+		}
+	}
+
     	thePlanes[ iPlane ].numberofstripsthisplane = 0;
     	/* Compute the coordinates of the nodes of the plane */
     	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
@@ -623,14 +637,16 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     	/*Find limits of consecutive strips*/
     	onstrip = 0;
     	for ( iStrike = 0;
-    			iStrike < thePlanes[iPlane].numberofstepsalongstrike;
+				iStrike < strikeCount;
     			iStrike++ )
     	{
     		xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
     		for ( iDownDip = 0;
-    				iDownDip < thePlanes[iPlane].numberofstepsdowndip;
+					iDownDip < downDipCount;
     				iDownDip++ )
     		{
+				size_t pointIndex = (size_t)iStrike * (size_t)downDipCount +
+					(size_t)iDownDip;
     			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
     			pointLocal.x[0] = xLocal;
     			pointLocal.x[1] = yLocal;
@@ -646,9 +662,10 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
 
     			if (search_point( pointGlobal, &octant ) == 1) {
+					pointOctants[pointIndex] = octant;
     				if (!onstrip) { /* start new strip */
     					thePlanes[iPlane].stripstart[thePlanes[iPlane].numberofstripsthisplane]
-    					                             = (iStrike * thePlanes[iPlane].numberofstepsdowndip
+						                             = (iStrike * downDipCount
     					                            		 + iDownDip);
     					onstrip = 1;
     				}
@@ -656,11 +673,12 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
 
     			else {
+					pointOctants[pointIndex] = NULL;
     				if (onstrip) { /* close strip */
     					onstrip = 0;
     					thePlanes[iPlane].stripend[thePlanes[iPlane]
     					                                     .numberofstripsthisplane]
-    					                                     = (iStrike * thePlanes[iPlane].numberofstepsdowndip
+						                                     = (iStrike * downDipCount
     					                                    		 + iDownDip - 1);
     					thePlanes[ iPlane ].numberofstripsthisplane++;
     					if (thePlanes[ iPlane ].numberofstripsthisplane
@@ -678,8 +696,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
     	if (onstrip){  /*if on a strip at end of loop, close strip */
     		thePlanes[iPlane].stripend[thePlanes[iPlane].numberofstripsthisplane]
-    		                           = (thePlanes[iPlane].numberofstepsdowndip
-    		                        		   * thePlanes[iPlane].numberofstepsalongstrike) - 1;
+			                           = (downDipCount * strikeCount) - 1;
     		thePlanes[ iPlane ].numberofstripsthisplane++;
     	}
 
@@ -736,9 +753,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				elemnum++)
     		{
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						/ thePlanes[iPlane].numberofstepsdowndip;
+				    						/ downDipCount;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    						% thePlanes[iPlane].numberofstepsdowndip;
+				    						% downDipCount;
     			xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
     			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
     			pointLocal.x[0] = xLocal;
@@ -754,7 +771,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
     			}
 
-    			if (search_point( pointGlobal, &octant) == 1) {
+				octant = pointOctants[(size_t)iStrike * (size_t)downDipCount +
+					(size_t)iDownDip];
+				if (octant != NULL) {
     				compute_csi_eta_dzeta( octant, pointGlobal,
 							&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 							thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
@@ -767,6 +786,11 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
     		}
     	}
+
+		if (pointOctants != NULL) {
+			free(pointOctants);
+			pointOctants = NULL;
+		}
 
     } /* end of plane loop: for (stripnum = 0; ...) */
 
@@ -1050,6 +1074,20 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	planes_LocalLargestPlanePayloadDoubles = 0;
 
     for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
+	const int strikeCount = thePlanes[iPlane].numberofstepsalongstrike;
+	const int downDipCount = thePlanes[iPlane].numberofstepsdowndip;
+	const size_t planePointCount = (size_t)strikeCount * (size_t)downDipCount;
+	octant_t **pointOctants = NULL;
+
+	if (planePointCount > 0) {
+		pointOctants = (octant_t**)calloc(planePointCount, sizeof(octant_t*));
+		if (pointOctants == NULL) {
+			fprintf(stderr,
+				"Error allocating octant cache for plane setup (New path)\n");
+			exit(1);
+		}
+	}
+
 	int localPlanePayloadDoubles = 0;
 	thePlanes[ iPlane ].numberofstripsthisplane = 0;
 	/* Compute the coordinates of the nodes of the plane */
@@ -1070,14 +1108,16 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	/*Find limits of consecutive strips*/
 	onstrip = 0;
 	for ( iStrike = 0;
-	      iStrike < thePlanes[iPlane].numberofstepsalongstrike;
+	      iStrike < strikeCount;
 	      iStrike++ )
 	    {
 		xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
 		for ( iDownDip = 0;
-		      iDownDip < thePlanes[iPlane].numberofstepsdowndip;
+		      iDownDip < downDipCount;
 		      iDownDip++ )
 		    {
+			size_t pointIndex = (size_t)iStrike * (size_t)downDipCount +
+				(size_t)iDownDip;
 			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
 			pointLocal.x[0] = xLocal;
 			pointLocal.x[1] = yLocal;
@@ -1093,9 +1133,10 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 			}
 
 			if (search_point( pointGlobal, &octant ) == 1) {
+				pointOctants[pointIndex] = octant;
 			    if (!onstrip) { /* start new strip */
 				thePlanes[iPlane].stripstart[thePlanes[iPlane].numberofstripsthisplane]
-				    = (iStrike * thePlanes[iPlane].numberofstepsdowndip
+				    = (iStrike * downDipCount
 				       + iDownDip);
 				onstrip = 1;
 			    }
@@ -1103,11 +1144,12 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 			}
 
 			else {
+				pointOctants[pointIndex] = NULL;
 			    if (onstrip) { /* close strip */
 				onstrip = 0;
 				thePlanes[iPlane].stripend[thePlanes[iPlane]
 							   .numberofstripsthisplane]
-				    = (iStrike * thePlanes[iPlane].numberofstepsdowndip
+				    = (iStrike * downDipCount
 				       + iDownDip - 1);
 				thePlanes[ iPlane ].numberofstripsthisplane++;
 				if (thePlanes[ iPlane ].numberofstripsthisplane
@@ -1125,8 +1167,7 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
 	if (onstrip){  /*if on a strip at end of loop, close strip */
             thePlanes[iPlane].stripend[thePlanes[iPlane].numberofstripsthisplane]
-		= (thePlanes[iPlane].numberofstepsdowndip
-		   * thePlanes[iPlane].numberofstepsalongstrike) - 1;
+		= (downDipCount * strikeCount) - 1;
             thePlanes[ iPlane ].numberofstripsthisplane++;
 	}
 
@@ -1197,9 +1238,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		     elemnum++)
 		    {
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    / thePlanes[iPlane].numberofstepsdowndip;
+			    / downDipCount;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
-			    % thePlanes[iPlane].numberofstepsdowndip;
+			    % downDipCount;
 			xLocal = iStrike*thePlanes[iPlane].stepalongstrike;
 			yLocal = iDownDip*thePlanes[ iPlane ].stepdowndip;
 			pointLocal.x[0] = xLocal;
@@ -1215,7 +1256,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 				pointGlobal.x[2] +=  point_elevation ( pointGlobal.x[0], pointGlobal.x[1] );
 			}
 
-			if (search_point( pointGlobal, &octant) == 1) {
+			octant = pointOctants[(size_t)iStrike * (size_t)downDipCount +
+				(size_t)iDownDip];
+			if (octant != NULL) {
 				compute_csi_eta_dzeta( octant, pointGlobal,
 						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
@@ -1228,6 +1271,11 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 			}
 		    }
 	    }
+
+	if (pointOctants != NULL) {
+		free(pointOctants);
+		pointOctants = NULL;
+	}
     } /* end of plane loop: for (stripnum = 0; ...) */
 
     MPI_Reduce( &planes_LocalLargestStripCount,
