@@ -46,8 +46,7 @@ when the corresponding envs are unset.
 	interpolation before MPI send/write. Default is `1` (enabled).
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution
-	messages for MPI communication. Default is `0` (disabled);
-	`run_phaseA_phaseB.sh` defaults this to `1`.
+	messages for MPI communication. Default is `1` (enabled).
 
 Advanced/diagnostic toggles:
 

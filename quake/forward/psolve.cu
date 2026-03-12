@@ -10094,7 +10094,7 @@ static int32_t contrib_pack_use_omp(void) {
         g_contribPackOmpMode = 1;
       }
     } else {
-      g_contribPackOmpMode = 0;
+      g_contribPackOmpMode = 1;
     }
 
     if ((g_contribPackOmpMode == 1) && (Global.myID == 0) &&
