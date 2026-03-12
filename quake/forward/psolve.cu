@@ -3218,6 +3218,100 @@ static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
 static void mesh_import_apply_properties(void) {
   int32_t eindex;
 
+#ifdef _OPENMP
+  if ((Global.myMesh->lenum >= 4096) && (omp_get_max_threads() > 1)) {
+    int32_t hadError = 0;
+    int32_t errorKind = 0;
+    int32_t errorLevel = -1;
+    int32_t errorExpectedLevel = -1;
+
+#pragma omp parallel shared(hadError, errorKind, errorLevel, errorExpectedLevel)
+    {
+      etree_t* localMeshInputEp =
+          etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
+
+      if (localMeshInputEp == NULL) {
+#pragma omp critical
+        {
+          hadError = 1;
+          errorKind = 1;
+        }
+      } else {
+#pragma omp for schedule(static)
+        for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+          elem_t* elemp;
+          edata_t* edata;
+          int32_t lnid0;
+          tick_t edge_ticks;
+          etree_addr_t search_addr;
+          etree_addr_t hit_addr;
+          mdata_t hit_data;
+
+          if (hadError != 0) {
+            continue;
+          }
+
+          elemp = &Global.myMesh->elemTable[eindex];
+          edata = (edata_t*)elemp->data;
+          lnid0 = elemp->lnid[0];
+          edge_ticks = (tick_t)1 << (PIXELLEVEL - elemp->level);
+
+          search_addr.x = Global.myMesh->nodeTable[lnid0].x + edge_ticks / 2;
+          search_addr.y = Global.myMesh->nodeTable[lnid0].y + edge_ticks / 2;
+          search_addr.z = Global.myMesh->nodeTable[lnid0].z + edge_ticks / 2;
+          search_addr.level = ETREE_MAXLEVEL;
+          search_addr.type = ETREE_LEAF;
+
+          if (etree_search(localMeshInputEp, search_addr, &hit_addr, NULL,
+                           &hit_data) != 0) {
+#pragma omp critical
+            {
+              hadError = 1;
+              errorKind = 2;
+            }
+            continue;
+          }
+
+          if (hit_addr.level != elemp->level) {
+#pragma omp critical
+            {
+              hadError = 1;
+              errorKind = 3;
+              errorLevel = hit_addr.level;
+              errorExpectedLevel = elemp->level;
+            }
+            continue;
+          }
+
+          memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
+        }
+
+        etree_close(localMeshInputEp);
+      }
+    }
+
+    if (hadError != 0) {
+      if (errorKind == 1) {
+        fprintf(stderr,
+                "Thread %d: mesh_import_apply_properties: cannot open mesh etree\n",
+                Global.myID);
+      } else if (errorKind == 2) {
+        fprintf(stderr,
+                "Thread %d: mesh_import_apply_properties: etree_search failed\n",
+                Global.myID);
+      } else {
+        fprintf(stderr,
+                "Thread %d: mesh_import_apply_properties: level mismatch (%d != %d)\n",
+                Global.myID, errorLevel, errorExpectedLevel);
+      }
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    return;
+  }
+#endif
+
   for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     elem_t* elemp = &Global.myMesh->elemTable[eindex];
     edata_t* edata = (edata_t*)elemp->data;
