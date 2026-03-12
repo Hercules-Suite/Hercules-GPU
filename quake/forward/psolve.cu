@@ -128,8 +128,6 @@ static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
-static int32_t g_sharingCommOmpMode = -1;
-static int32_t g_sharingCommOmpReported = 0;
 static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
@@ -341,7 +339,6 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
-static int32_t sharing_comm_use_omp(void);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t hercules_repro_mode(void);
@@ -8102,9 +8099,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
     int32_t useOmp = 0;
 
-    if (direction == SHARING) {
-      useOmp = sharing_comm_use_omp();
-    } else if (direction == CONTRIBUTION) {
+    if (direction == CONTRIBUTION) {
       useOmp = contrib_pack_use_omp();
     }
 
@@ -8305,7 +8300,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   int32_t idx;
 
   if (direction == SHARING) {
-    const int32_t useOmp = sharing_comm_use_omp();
+    const int32_t useOmp = 0;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
 #endif
@@ -9976,42 +9971,6 @@ static int32_t adjust_assignment_use_omp(void) {
   }
 
   return g_adjustAssignmentOmpMode;
-#endif
-}
-
-static int32_t sharing_comm_use_omp(void) {
-#ifndef _OPENMP
-  return 0;
-#else
-  if (hercules_repro_mode()) {
-    return 0;
-  }
-
-  if (g_sharingCommOmpMode < 0) {
-    const char* env = getenv("HERCULES_SHARING_OMP");
-
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
-        g_sharingCommOmpMode = 0;
-      } else {
-        g_sharingCommOmpMode = 1;
-      }
-    } else {
-      /* Default to serial for shared displacement communication safety. */
-      g_sharingCommOmpMode = 0;
-    }
-
-    if ((g_sharingCommOmpMode == 1) && (Global.myID == 0) &&
-        (g_sharingCommOmpReported == 0)) {
-      monitor_print(
-          "sharing communication OpenMP: enabled (threads=%d)\n",
-          omp_get_max_threads());
-      g_sharingCommOmpReported = 1;
-    }
-  }
-
-  return g_sharingCommOmpMode;
 #endif
 }
 

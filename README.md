@@ -50,12 +50,6 @@ when the corresponding envs are unset.
 
 Advanced/diagnostic toggles:
 
-- `HERCULES_SHARING_OMP=1|0`
-	Enables or disables OpenMP parallelization in shared displacement
-	communication pack/unpack paths. Solver default is `0` (disabled)
-	because these paths can still make results depend on `OMP_NUM_THREADS`
-	even when plane/station/adjust OpenMP toggles are off;
-	`run_phaseA_phaseB.sh` does not auto-set this env.
 - `HERCULES_REPRO_MODE=0|1|2`
 	`0` disables repro mode. `1` disables remaining OpenMP-sensitive
 	deterministic communication paths and uses deterministic MPI unpack
@@ -102,7 +96,6 @@ export OMP_NUM_THREADS=64
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # Advanced/debug overrides:
-# export HERCULES_SHARING_OMP=0
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
 
