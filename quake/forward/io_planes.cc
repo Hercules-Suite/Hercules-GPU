@@ -83,8 +83,8 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 typedef struct plane_strip_element_t {
 
     int32_t nodestointerpolate[8];
-    vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
-    int32_t topostrip;
+	vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
+	int32_t topostrip;
 
 } plane_strip_element_t;
 
@@ -722,14 +722,14 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 
     			if (search_point( pointGlobal, &octant) == 1) {
     				compute_csi_eta_dzeta( octant, pointGlobal,
-    						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
-    						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
+							&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
+							thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
 
-    				if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
-    					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
-    					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+					if ( ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[4] == 0 ) &&
+						 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[5] == 0 ) &&
+						 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
+						 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
+						thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
     			}
     		}
     	}
