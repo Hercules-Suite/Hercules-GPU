@@ -69,6 +69,7 @@ void planes_IO_PES_main(int32_t myID);
 static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlanes);
 static void output_planes_build_strips_for_plane(int32_t myID, int iPlane,
 	int broadcastToIO);
+static int32_t plane_output_use_omp(void);
 
 static void print_planeinfo(int32_t myID, int theNumberOfPlanes);
 
