@@ -427,6 +427,7 @@ struct mysolver_t {
     fvector_t* tm2;           /* Displacements at time-step t - 2      */
     fvector_t* tm3;           /* Displacements at time-step t - 3      */
     fvector_t* force;         /* Force accumulation at time-step t     */
+    fvector_t* force_stage;   /* Sparse host staging buffer            */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

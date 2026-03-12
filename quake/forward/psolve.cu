@@ -327,6 +327,10 @@ static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
+static void solver_activate_force_stage(mysolver_t* solver,
+                                        fvector_t** savedForceBuffer);
+static void solver_restore_force_stage(mysolver_t* solver,
+                                       fvector_t* savedForceBuffer);
 static int32_t solver_sparse_clear_mode(void);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
@@ -4587,6 +4591,17 @@ static void solver_init() {
   }
   memset(Global.mySolver->force, 0,
          Global.myMesh->nharbored * sizeof(fvector_t));
+  Global.mySolver->force_stage = NULL;
+  if (use_sparse_force_upload_topo()) {
+    Global.mySolver->force_stage =
+        (fvector_t*)calloc(Global.myMesh->nharbored, sizeof(fvector_t));
+    if (Global.mySolver->force_stage == NULL) {
+      fprintf(stderr, "Thread %d: Failed to allocate force stage buffer\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
 
   if (Param.theTypeOfDamping >= BKT) {
     Global.mySolver->conv_shear_1 =
@@ -5734,6 +5749,10 @@ static void solver_delete() {
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
   cudaFreeHost(Global.mySolver->force);
+  if (Global.mySolver->force_stage != NULL) {
+    free(Global.mySolver->force_stage);
+    Global.mySolver->force_stage = NULL;
+  }
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
@@ -6799,6 +6818,26 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Stop("Sparse force upload scatter");
 }
 
+static void solver_activate_force_stage(mysolver_t* solver,
+                                        fvector_t** savedForceBuffer) {
+  if ((solver == NULL) || (savedForceBuffer == NULL) ||
+      (solver->force_stage == NULL)) {
+    return;
+  }
+
+  *savedForceBuffer = solver->force;
+  solver->force = solver->force_stage;
+}
+
+static void solver_restore_force_stage(mysolver_t* solver,
+                                       fvector_t* savedForceBuffer) {
+  if ((solver == NULL) || (savedForceBuffer == NULL)) {
+    return;
+  }
+
+  solver->force = savedForceBuffer;
+}
+
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   int32_t clearMode = solver_sparse_clear_mode();
 
@@ -7027,7 +7066,10 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
 
   Timer_Start("Disp host force reset");
   if (use_sparse_force_upload_topo()) {
-    solver_clear_sparse_host_forces(solver);
+    mysolver_t stageSolver = *solver;
+    stageSolver.force =
+        (solver->force_stage != NULL) ? solver->force_stage : solver->force;
+    solver_clear_sparse_host_forces(&stageSolver);
   } else if (!use_gpu_source_fastpath()) {
     /* zero out the force vector for all nodes */
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
@@ -7296,6 +7338,10 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
 
     Timer_Start("Compute Physics");
+    fvector_t* savedForceBuffer = NULL;
+    if (use_sparse_force_upload_topo()) {
+      solver_activate_force_stage(Global.mySolver, &savedForceBuffer);
+    }
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     if (use_gpu_source_fastpath()) {
@@ -7317,6 +7363,7 @@ static void solver_run() {
      * GPU stiffness/damping accumulation. */
     if (use_sparse_force_upload_topo()) {
       solver_load_forces_sparse_gpu(Global.mySolver, Global.myMesh);
+      solver_restore_force_stage(Global.mySolver, savedForceBuffer);
     } else if (!use_gpu_source_fastpath()) {
       solver_load_forces_gpu(Global.mySolver, Global.myMesh);
     }
