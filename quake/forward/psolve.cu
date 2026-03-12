@@ -308,12 +308,9 @@ static void messenger_delete(messenger_t* messenger);
 static void messenger_set(messenger_t* messenger, int32_t outsize,
                           int32_t insize);
 static int32_t messenger_countnodes(messenger_t* first);
-static void messenger_prepare_vector_offsets(messenger_t* first);
 static void messenger_prepare_offsets(messenger_t* first,
                                       int32_t itemsperentry);
 static int compare_int32_asc(const void* a, const void* b);
-static int32_t messenger_detect_duplicate_offset_array(const int32_t* offsets,
-                                                       int32_t count);
 static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger);
 
 static void compute_K(void);
@@ -7926,11 +7923,6 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
-  messenger_prepare_vector_offsets(ansched->first_c);
-  messenger_prepare_vector_offsets(ansched->first_s);
-  messenger_prepare_vector_offsets(dnsched->first_c);
-  messenger_prepare_vector_offsets(dnsched->first_s);
-
   schedule_build_recv_order(ansched);
   schedule_build_recv_order(dnsched);
 
@@ -8065,7 +8057,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   messenger_t *send_messenger, *recv_messenger;
   messenger_t *send_head, *recv_head;
   messenger_t** recv_order = NULL;
-  const int32_t useVectorOffsets = (itemsperentry == 3);
   int32_t irecvcount, irecvnum, bytesize;
   int32_t isendcount, isendnum;
   double callSendBytes = 0.0;
@@ -8113,10 +8104,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
    * multiple incoming messengers target overlapping entries. */
   useWaitsome = 0;
 
-  if (!useVectorOffsets) {
-    messenger_prepare_offsets(send_head, itemsperentry);
-    messenger_prepare_offsets(recv_head, itemsperentry);
-  }
+  messenger_prepare_offsets(send_head, itemsperentry);
+  messenger_prepare_offsets(recv_head, itemsperentry);
 
   /* Post receives */
   Timer_Start("Schedule Post Recv");
@@ -8154,16 +8143,14 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       int32_t lnid, entry;
       solver_float* dvalue;
       solver_float* out;
-      const int32_t* itemOffsets = useVectorOffsets
-                                       ? send_messenger->mapping_itemoffset3
-                                       : send_messenger->mapping_itemoffset;
 
       lnid = send_messenger->mapping[idx];
 
       out = (solver_float*)((char*)send_messenger->outdata +
                             send_messenger->outsize * idx);
 
-        dvalue = (solver_float*)valuetable + itemOffsets[idx];
+      dvalue =
+          (solver_float*)valuetable + send_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         out[0] = dvalue[0];
         out[1] = dvalue[1];
@@ -8339,9 +8326,6 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
                                              int32_t itemsperentry,
                                              int32_t direction) {
   int32_t idx;
-  const int32_t* itemOffsets = (itemsperentry == 3)
-                                   ? recv_messenger->mapping_itemoffset3
-                                   : recv_messenger->mapping_itemoffset;
 
   if (direction == SHARING) {
     const int32_t useOmp = sharing_comm_use_omp();
@@ -8357,7 +8341,8 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
       in = (solver_float*)((char*)recv_messenger->indata +
                            recv_messenger->insize * idx);
 
-        dvalue = (solver_float*)valuetable + itemOffsets[idx];
+      dvalue =
+          (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         dvalue[0] = in[0];
         dvalue[1] = in[1];
@@ -8395,7 +8380,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
     in = (solver_float*)((char*)recv_messenger->indata +
                          recv_messenger->insize * idx);
 
-    dvalue = (solver_float*)valuetable + itemOffsets[idx];
+    dvalue = (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
     if (itemsperentry == 3) {
       if (direction == CONTRIBUTION) {
         dvalue[0] += in[0];
@@ -8806,8 +8791,6 @@ static void messenger_delete(messenger_t* messenger) {
 
   if (messenger->indata != NULL) free(messenger->indata);
 
-  if (messenger->mapping_itemoffset3 != NULL) free(messenger->mapping_itemoffset3);
-
   if (messenger->mapping_itemoffset != NULL) free(messenger->mapping_itemoffset);
 
   free(messenger->mapping);
@@ -8857,45 +8840,6 @@ static void messenger_set(messenger_t* messenger, int32_t outsize,
   }
 
   return;
-}
-
-static void messenger_prepare_vector_offsets(messenger_t* first) {
-  messenger_t* messenger = first;
-
-  while (messenger != NULL) {
-    if ((messenger->mapping_itemoffset3 == NULL) && (messenger->nodecount > 0)) {
-      int32_t idx;
-      messenger->mapping_itemoffset3 =
-          (int32_t*)malloc(sizeof(int32_t) * messenger->nodecount);
-      if (messenger->mapping_itemoffset3 == NULL) {
-        fprintf(stderr,
-                "Thread %d: messenger_prepare_vector_offsets: out of memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-
-      for (idx = 0; idx < messenger->nodecount; idx++) {
-        messenger->mapping_itemoffset3[idx] = messenger->mapping[idx] * 3;
-      }
-    }
-
-    if (messenger->mapping_itemoffset3 != NULL) {
-      messenger->mapping_has_duplicates =
-          messenger_detect_duplicate_offset_array(messenger->mapping_itemoffset3,
-                                                  messenger->nodecount);
-      if (messenger->mapping_has_duplicates &&
-          (messenger->mapping_dup_reported == 0) && (Global.myID == 0)) {
-        monitor_print(
-            "Messenger duplicate mapping detected for peer %d; forcing "
-            "serial unpack for safety\n",
-            messenger->procid);
-        messenger->mapping_dup_reported = 1;
-      }
-    }
-
-    messenger = messenger->next;
-  }
 }
 
 static void messenger_prepare_offsets(messenger_t* first,
@@ -8955,11 +8899,16 @@ static int compare_int32_asc(const void* a, const void* b) {
   return 0;
 }
 
-static int32_t messenger_detect_duplicate_offset_array(const int32_t* offsets,
-                                                       int32_t count) {
+static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger) {
+  int32_t count;
   int32_t* copy;
 
-  if ((offsets == NULL) || (count <= 1)) {
+  if ((messenger == NULL) || (messenger->mapping_itemoffset == NULL)) {
+    return 0;
+  }
+
+  count = messenger->nodecount;
+  if (count <= 1) {
     return 0;
   }
 
@@ -8972,7 +8921,7 @@ static int32_t messenger_detect_duplicate_offset_array(const int32_t* offsets,
     exit(1);
   }
 
-  memcpy(copy, offsets, sizeof(int32_t) * count);
+  memcpy(copy, messenger->mapping_itemoffset, sizeof(int32_t) * count);
   qsort(copy, count, sizeof(int32_t), compare_int32_asc);
 
   for (int32_t i = 1; i < count; i++) {
@@ -8984,15 +8933,6 @@ static int32_t messenger_detect_duplicate_offset_array(const int32_t* offsets,
 
   free(copy);
   return 0;
-}
-
-static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger) {
-  if (messenger == NULL) {
-    return 0;
-  }
-
-  return messenger_detect_duplicate_offset_array(messenger->mapping_itemoffset,
-                                                 messenger->nodecount);
 }
 
 /**

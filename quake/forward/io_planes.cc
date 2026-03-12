@@ -101,6 +101,7 @@ typedef struct plane_t {
     int IO_PE_num;
     int numberofstripsthisplane;
     int globalnumberofstripsthisplane, globalnumberofstripsthisplane_recieved; /*valid only on output PE's*/
+	int globalnumberofsendersthisplane;
 
     int stripstart[MAX_STRIPS_PER_PLANE];
     int stripend[MAX_STRIPS_PER_PLANE];
@@ -111,6 +112,8 @@ typedef struct plane_t {
 static plane_t* thePlanes;
 static int planes_GlobalLargestStripCount;
 static int planes_LocalLargestStripCount;
+static int planes_GlobalLargestPlanePayloadDoubles;
+static int planes_LocalLargestPlanePayloadDoubles;
 static double* planes_output_buffer;
 static double* planes_stripMPISendBuffer;
 static double* planes_stripMPIRecvBuffer;
@@ -119,6 +122,37 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
+
+static void plane_unpack_message(const double* messageBuffer, int recvCount) {
+	int offset = 0;
+
+	while (offset < recvCount) {
+		int startLocation;
+		int stripLength;
+		int valueCount;
+
+		if ((offset + 2) > recvCount) {
+			solver_abort("plane_unpack_message", NULL,
+					 "Malformed plane message: recvCount=%d offset=%d",
+					 recvCount, offset);
+		}
+
+		startLocation = (int)messageBuffer[offset++];
+		stripLength = (int)messageBuffer[offset++];
+		valueCount = stripLength * 3;
+
+		if ((stripLength < 0) || ((offset + valueCount) > recvCount)) {
+			solver_abort("plane_unpack_message", NULL,
+					 "Malformed plane payload: stripLength=%d recvCount=%d offset=%d",
+					 stripLength, recvCount, offset);
+		}
+
+		memcpy(&(planes_output_buffer[startLocation * 3]),
+		       messageBuffer + offset,
+		       (size_t)valueCount * sizeof(double));
+		offset += valueCount;
+	}
+}
 
 static void plane_interpolate_point(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
@@ -1013,8 +1047,10 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 #endif
 
     planes_LocalLargestStripCount = 0;
+	planes_LocalLargestPlanePayloadDoubles = 0;
 
     for ( iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++ ){
+	int localPlanePayloadDoubles = 0;
 	thePlanes[ iPlane ].numberofstripsthisplane = 0;
 	/* Compute the coordinates of the nodes of the plane */
 	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
@@ -1099,6 +1135,15 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		    &thePlanes[iPlane].globalnumberofstripsthisplane,
 		    1, MPI_INT, MPI_SUM, 0, comm_solver );
 	MPI_Bcast( &thePlanes[iPlane].globalnumberofstripsthisplane, 1, MPI_INT, 0, comm_IO );
+	{
+		int localSenderCount =
+			(thePlanes[iPlane].numberofstripsthisplane > 0) ? 1 : 0;
+		MPI_Reduce(&localSenderCount,
+			   &thePlanes[iPlane].globalnumberofsendersthisplane,
+			   1, MPI_INT, MPI_SUM, 0, comm_solver);
+		MPI_Bcast(&thePlanes[iPlane].globalnumberofsendersthisplane,
+			  1, MPI_INT, 0, comm_IO);
+	}
 
 	/* allocate strips */
 	int stripnum, stripLength;
@@ -1125,7 +1170,11 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		if (stripLength>planes_LocalLargestStripCount) {
 		    planes_LocalLargestStripCount = stripLength;
 		}
+		localPlanePayloadDoubles += (stripLength * 3) + 2;
 	    }
+	if (localPlanePayloadDoubles > planes_LocalLargestPlanePayloadDoubles) {
+		planes_LocalLargestPlanePayloadDoubles = localPlanePayloadDoubles;
+	}
 
 	/* fill strips */
 	origin.x[0] = thePlanes[ iPlane ].origincoords.x[0];
@@ -1185,13 +1234,18 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		&planes_GlobalLargestStripCount,
 		1, MPI_INT, MPI_MAX, 0, comm_solver );
     MPI_Bcast( &planes_GlobalLargestStripCount, 1, MPI_INT, 0, comm_IO );
+	MPI_Reduce(&planes_LocalLargestPlanePayloadDoubles,
+		   &planes_GlobalLargestPlanePayloadDoubles,
+		   1, MPI_INT, MPI_MAX, 0, comm_solver);
+	MPI_Bcast(&planes_GlobalLargestPlanePayloadDoubles, 1, MPI_INT, 0,
+		  comm_IO);
 
     /* allocate MPI send buffers for all PEs */
-    int buf_len = (3 * planes_LocalLargestStripCount) + 1;
+    int buf_len = (planes_LocalLargestPlanePayloadDoubles > 0)
+	? planes_LocalLargestPlanePayloadDoubles : 1;
     planes_stripMPISendBuffer = (double*)malloc( sizeof(double) * buf_len );
 
-    /* This is large enough for 3 double componants of biggest strip plus
-       location number */
+    /* This is large enough for one packed per-plane message from this rank. */
     if (planes_stripMPISendBuffer == NULL) {
 	fprintf(stderr,
 		"Error creating MPI send buffer strip for plane output\n");
@@ -1206,18 +1260,21 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 {
 	int iPlane;
-    int stripLength;
     int iStrip, elemnum;
 #ifdef _OPENMP
     const int32_t useOmp = plane_output_use_omp();
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	int planeOffset = 0;
+	double* planeBuffer = planes_stripMPISendBuffer;
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
 	        - thePlanes[iPlane].stripstart[iStrip] + 1;
-	    double* stripBuffer = planes_stripMPISendBuffer;
+	    int stripStart = thePlanes[iPlane].stripstart[iStrip];
+	    int stripLength = elemCount;
+	    double* stripBuffer = planeBuffer + planeOffset + 2;
 
 	    /* interpolate points directly into send buffer for this strip */
 	#ifdef _OPENMP
@@ -1240,17 +1297,16 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 	    } /*for elemnum*/
 
-	    /* add start location as last element, add .1 to insure int-float conversion (yes, bad form)*/
-	    stripLength = thePlanes[iPlane].stripend[iStrip]
-		- thePlanes[iPlane].stripstart[iStrip] + 1;
-
-	    stripBuffer[stripLength*3]
-		= (double) (thePlanes[iPlane].stripstart[iStrip] + 0.1);
-
-	    MPI_Send( stripBuffer, (stripLength*3)+1,
-		      MPI_DOUBLE, thePlanes[iPlane].IO_PE_num, iPlane, comm_IO );
+	    planeBuffer[planeOffset] = (double)stripStart;
+	    planeBuffer[planeOffset + 1] = (double)stripLength;
+	    planeOffset += (stripLength * 3) + 2;
 
 	} /*for iStrips*/
+
+	if (planeOffset > 0) {
+	    MPI_Send(planeBuffer, planeOffset, MPI_DOUBLE,
+		     thePlanes[iPlane].IO_PE_num, iPlane, comm_IO);
+	}
 
 
 	MPI_Barrier( comm_solver ); /* may not be required */
@@ -1322,9 +1378,12 @@ void planes_IO_PES_main(int32_t PEnum){
     /* Get strip count for each plane */
     for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++)
 	MPI_Bcast( &thePlanes[iPlane].globalnumberofstripsthisplane, 1, MPI_INT, 0, comm_IO );
+	for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++)
+	MPI_Bcast( &thePlanes[iPlane].globalnumberofsendersthisplane, 1, MPI_INT, 0, comm_IO );
 
     /* Find size of largest strip */
     MPI_Bcast( &planes_GlobalLargestStripCount, 1, MPI_INT, 0, comm_IO );
+	MPI_Bcast( &planes_GlobalLargestPlanePayloadDoubles, 1, MPI_INT, 0, comm_IO );
 
 	/* Idle IO pool PEs can leave, don't use collectives past here! */
 	MPI_Comm_size(comm_IO, &comm_size);
@@ -1334,9 +1393,10 @@ void planes_IO_PES_main(int32_t PEnum){
 	}
 
     /* Allocate largest required strip recieve buffer */
-    int buf_len0 = (3 * planes_GlobalLargestStripCount) + 1;
+	int buf_len0 = (planes_GlobalLargestPlanePayloadDoubles > 0)
+	? planes_GlobalLargestPlanePayloadDoubles : 1;
     planes_stripMPIRecvBuffer = (double*)malloc(sizeof(double) * buf_len0);
-    /* large enough for 3 double of biggest strip plus location number */
+	/* large enough for one packed per-plane message from any rank */
     if (planes_stripMPIRecvBuffer == NULL) {
 	perror("Error creating MPI master buffer strip for plane output\n");
 	exit(1);
@@ -1372,10 +1432,10 @@ void planes_IO_PES_main(int32_t PEnum){
 
     while(1){
 
-	int StartLocation, recvStripCount, rStrip;
+	int recvStripCount, rStrip;
 
 	/* Get any message from anywhere */
-	MPI_Recv( planes_stripMPIRecvBuffer, planes_GlobalLargestStripCount * 3 + 1, MPI_DOUBLE,
+	MPI_Recv( planes_stripMPIRecvBuffer, buf_len0, MPI_DOUBLE,
 		  MPI_ANY_SOURCE, MPI_ANY_TAG, comm_IO, &status );
 	MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
 
@@ -1387,22 +1447,16 @@ void planes_IO_PES_main(int32_t PEnum){
 	/* else pick this plane and fill in first strip */
 	else{
 	    iPlane = status.MPI_TAG;
-	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
-	    memcpy( &(planes_output_buffer[StartLocation * 3]),
-		    planes_stripMPIRecvBuffer,
-		    (recvStripCount-1)*sizeof(double) );
+	    plane_unpack_message(planes_stripMPIRecvBuffer, recvStripCount);
 	}
 
 	/* Fill in rest of this plane until full */
-	for (rStrip = 0; rStrip < (thePlanes[iPlane].globalnumberofstripsthisplane - 1); rStrip++) {
+	for (rStrip = 1; rStrip < thePlanes[iPlane].globalnumberofsendersthisplane; rStrip++) {
 	    MPI_Recv( planes_stripMPIRecvBuffer,
-		      planes_GlobalLargestStripCount * 3 + 1, MPI_DOUBLE,
+		      buf_len0, MPI_DOUBLE,
 		      MPI_ANY_SOURCE, iPlane, comm_IO, &status );
 	    MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
-	    StartLocation = (int)planes_stripMPIRecvBuffer[recvStripCount-1];
-	    memcpy( &(planes_output_buffer[StartLocation * 3]),
-		    planes_stripMPIRecvBuffer,
-		    (recvStripCount-1)*sizeof(double) );
+	    plane_unpack_message(planes_stripMPIRecvBuffer, recvStripCount);
 	}
 
 	/* Print just this one plane */
