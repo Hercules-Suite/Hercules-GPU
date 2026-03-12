@@ -313,6 +313,7 @@ struct messenger_t {
     int32_t  nodecount;     /**< Number of mesh nodes involved.         */
     int32_t  nidx;          /**< Current index into the mapping table.  */
     int32_t* mapping;       /**< Array of local ids for involved nodes. */
+    int32_t* mapping_itemoffset3; /**< Cached mapping * 3 for vector paths. */
     int32_t* mapping_itemoffset; /**< Cached mapping * itemsperentry. */
     int32_t  mapping_itemsperentry;
     int32_t  mapping_has_duplicates;
