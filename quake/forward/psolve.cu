@@ -130,13 +130,14 @@ static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
 static int32_t g_sharingCommOmpMode = -1;
 static int32_t g_sharingCommOmpReported = 0;
-static int32_t g_sparseHostOmpMode = -1;
-static int32_t g_sparseHostOmpReported = 0;
-static int32_t g_sparseClearOmpMode = -1;
-static int32_t g_sparseClearOmpReported = 0;
+static int32_t g_fullClearOmpMode = -1;
+static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
+static cudaEvent_t g_forceUploadSourceSafeEvent;
+static int32_t g_forceUploadSourceSafeEventInit = 0;
+static int32_t g_forceUploadSourceSafePending = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -341,11 +342,12 @@ static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t sharing_comm_use_omp(void);
-static int32_t sparse_host_use_omp(void);
-static int32_t sparse_clear_use_omp(void);
+static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
+static void solver_record_force_upload_source_event(mysolver_t* solver);
+static void solver_wait_force_upload_source_event(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 
@@ -6550,6 +6552,7 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
                   mesh->nharbored * sizeof(fvector_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+  solver_record_force_upload_source_event(solver);
 
   /* Uncomment for timing tests */
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
@@ -6569,6 +6572,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int gridsize;
 
   if (totalCount <= 0) {
+    g_forceUploadSourceSafePending = 0;
     cudaMemsetAsync(solver->gpuData->forceDevice, 0,
                     mesh->nharbored * sizeof(fvector_t),
                     solver->streams[CUDA_STREAM_MAIN]);
@@ -6744,17 +6748,17 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
                     cudaMemcpyHostToDevice,
                     solver->streams[CUDA_STREAM_MAIN]);
     solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+    solver_record_force_upload_source_event(solver);
     Timer_Stop("Sparse force upload memcpy");
     return;
   }
+
+  g_forceUploadSourceSafePending = 0;
 
   cudaMemsetAsync(solver->gpuData->forceDevice, 0,
                   mesh->nharbored * sizeof(fvector_t),
                   solver->streams[CUDA_STREAM_MAIN]);
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((activeCount > 100000) && sparse_host_use_omp())
-#endif
   for (idx = 0; idx < activeCount; idx++) {
     int32_t lnid = g_sparseNodeListHost[idx];
     g_sparseForcesHost[idx] = solver->force[lnid];
@@ -6803,14 +6807,35 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   int32_t clearMode = solver_sparse_clear_mode();
 
   if (clearMode == 3) {
-    memset(solver->force, 0, sizeof(fvector_t) * Global.myMesh->nharbored);
+    int32_t fullCount = Global.myMesh->nharbored;
+#ifdef _OPENMP
+    if (full_clear_use_omp() && (fullCount >= 131072)) {
+      solver_wait_force_upload_source_event();
+#pragma omp parallel
+      {
+        int32_t threadCount = omp_get_num_threads();
+        int32_t threadId = omp_get_thread_num();
+        int32_t chunk = (fullCount + threadCount - 1) / threadCount;
+        int32_t start = threadId * chunk;
+        int32_t end = start + chunk;
+
+        if (end > fullCount) {
+          end = fullCount;
+        }
+        if (start < end) {
+          memset(solver->force + start, 0,
+                 (size_t)(end - start) * sizeof(fvector_t));
+        }
+      }
+    } else
+#endif
+    {
+      memset(solver->force, 0, sizeof(fvector_t) * fullCount);
+    }
   } else if (clearMode == 1) {
     int32_t topoCount = topo_get_nodes_count();
     const int32_t* topoNodes = topo_get_nodes_list();
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((topoCount > 100000) && sparse_clear_use_omp())
-#endif
     for (int32_t i = 0; i < topoCount; i++) {
       int32_t lnid = topoNodes[i];
       solver->force[lnid].f[0] = 0;
@@ -6822,9 +6847,6 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
     const int32_t* rangeStarts = topo_get_node_range_starts();
     const int32_t* rangeLengths = topo_get_node_range_lengths();
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((rangeCount > 256) && sparse_clear_use_omp())
-#endif
     for (int32_t i = 0; i < rangeCount; i++) {
       int32_t start = rangeStarts[i];
       int32_t len = rangeLengths[i];
@@ -9993,7 +10015,7 @@ static int32_t sharing_comm_use_omp(void) {
 #endif
 }
 
-static int32_t sparse_host_use_omp(void) {
+static int32_t full_clear_use_omp(void) {
 #ifndef _OPENMP
   return 0;
 #else
@@ -10001,66 +10023,56 @@ static int32_t sparse_host_use_omp(void) {
     return 0;
   }
 
-  if (g_sparseHostOmpMode < 0) {
-    const char* env = getenv("HERCULES_SPARSE_HOST_OMP");
+  if (g_fullClearOmpMode < 0) {
+    const char* env = getenv("HERCULES_FULL_CLEAR_OMP");
 
     if (env != NULL) {
       if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
           (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
-        g_sparseHostOmpMode = 0;
+        g_fullClearOmpMode = 0;
       } else {
-        g_sparseHostOmpMode = 1;
+        g_fullClearOmpMode = 1;
       }
     } else {
-      /* Default to serial until the sparse host staging path is proven safe. */
-      g_sparseHostOmpMode = 0;
+      g_fullClearOmpMode = 1;
     }
 
-    if ((g_sparseHostOmpMode == 1) && (Global.myID == 0) &&
-        (g_sparseHostOmpReported == 0)) {
-      monitor_print("sparse host OpenMP: enabled (threads=%d)\n",
+    if ((g_fullClearOmpMode == 1) && (Global.myID == 0) &&
+        (g_fullClearOmpReported == 0)) {
+      monitor_print("full host force clear OpenMP: enabled (threads=%d)\n",
                     omp_get_max_threads());
-      g_sparseHostOmpReported = 1;
+      g_fullClearOmpReported = 1;
     }
   }
 
-  return g_sparseHostOmpMode;
+  return g_fullClearOmpMode;
 #endif
 }
 
-static int32_t sparse_clear_use_omp(void) {
-#ifndef _OPENMP
-  return 0;
-#else
-  if (hercules_repro_mode()) {
-    return 0;
+static void solver_record_force_upload_source_event(mysolver_t* solver) {
+  if (g_forceUploadSourceSafeEventInit == 0) {
+    if (cudaEventCreateWithFlags(&g_forceUploadSourceSafeEvent,
+                                 cudaEventDisableTiming) != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: force upload source-safe event create failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    g_forceUploadSourceSafeEventInit = 1;
   }
 
-  if (g_sparseClearOmpMode < 0) {
-    const char* env = getenv("HERCULES_SPARSE_CLEAR_OMP");
+  cudaEventRecord(g_forceUploadSourceSafeEvent,
+                  solver->streams[CUDA_STREAM_MAIN]);
+  g_forceUploadSourceSafePending = 1;
+}
 
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
-        g_sparseClearOmpMode = 0;
-      } else {
-        g_sparseClearOmpMode = 1;
-      }
-    } else {
-      /* Keep sparse clear serial by default until this path is proven safe. */
-      g_sparseClearOmpMode = 0;
-    }
-
-    if ((g_sparseClearOmpMode == 1) && (Global.myID == 0) &&
-        (g_sparseClearOmpReported == 0)) {
-      monitor_print("sparse clear OpenMP: enabled (threads=%d)\n",
-                    omp_get_max_threads());
-      g_sparseClearOmpReported = 1;
-    }
+static void solver_wait_force_upload_source_event(void) {
+  if ((g_forceUploadSourceSafeEventInit == 1) &&
+      (g_forceUploadSourceSafePending == 1)) {
+    cudaEventSynchronize(g_forceUploadSourceSafeEvent);
+    g_forceUploadSourceSafePending = 0;
   }
-
-  return g_sparseClearOmpMode;
-#endif
 }
 
 static int32_t contrib_pack_use_omp(void) {

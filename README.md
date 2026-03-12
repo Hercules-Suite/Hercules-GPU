@@ -34,22 +34,20 @@ when the corresponding envs are unset.
 	`nodes`/`1` can be faster for highly fragmented 3D model cases.
 	`full`/`3` clears the full local host force array with one contiguous
 	`memset`.
-- `HERCULES_SPARSE_CLEAR_OMP=1|0`
-	Enables or disables OpenMP parallelization only for sparse host force
-	clearing. Default is `0` (disabled) because enabling this path
-	reintroduced incorrect plane output in testing. `run_phaseA_phaseB.sh`
-	does not auto-set this env.
-- `HERCULES_SPARSE_HOST_OMP=1|0`
-	Enables or disables OpenMP parallelization in sparse host force staging
-	and gather/build loops. Default is `0` (disabled) because this path
-	remains the strongest candidate for the high-thread correctness issue
-	outside full repro mode.
+- `HERCULES_FULL_CLEAR_OMP=1|0`
+	Enables or disables OpenMP parallelization for full-array host force
+	clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
+	(enabled).
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
 	interpolation and per-station file writes. Default is `1` (enabled).
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Default is `1` (enabled).
+- `HERCULES_CONTRIB_PACK_OMP=1|0`
+	Enables or disables OpenMP parallelization while packing contribution
+	messages for MPI communication. Default is `0` (disabled);
+	`run_phaseA_phaseB.sh` defaults this to `1`.
 
 Advanced/diagnostic toggles:
 
@@ -59,11 +57,6 @@ Advanced/diagnostic toggles:
 	because these paths can still make results depend on `OMP_NUM_THREADS`
 	even when plane/station/adjust OpenMP toggles are off;
 	`run_phaseA_phaseB.sh` does not auto-set this env.
-- `HERCULES_CONTRIB_PACK_OMP=1|0`
-	Enables or disables OpenMP parallelization while packing contribution
-	messages for MPI communication. Solver default is `0` (disabled)
-	unless explicitly enabled; `run_phaseA_phaseB.sh` does not auto-set
-	this env.
 - `HERCULES_REPRO_MODE=0|1|2`
 	`0` disables repro mode. `1` disables remaining OpenMP-sensitive
 	deterministic communication paths and uses deterministic MPI unpack
@@ -82,8 +75,9 @@ Two-phase script defaults:
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
-	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_SPARSE_HOST_OMP=0`,
+	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_FULL_CLEAR_OMP=1`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
+	`HERCULES_CONTRIB_PACK_OMP=1`,
 	These are the current recommended runtime defaults.
 - You can still override any of these by exporting your own value before
 	running the script.
@@ -105,7 +99,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_ADJUST_ASSIGN_OMP=0
 # export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=auto
-# export HERCULES_SPARSE_HOST_OMP=0
+# export HERCULES_FULL_CLEAR_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # Advanced/debug overrides:
