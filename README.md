@@ -47,10 +47,6 @@ when the corresponding envs are unset.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution
 	messages for MPI communication. Default is `1` (enabled).
-- `HERCULES_MESH_IMPORT_OMP=1|0`
-	Enables or disables OpenMP parallelization in mesh etree property
-	import during Phase B setup (`mesh_input_mode=1`). Default is `1`
-	(enabled).
 
 Advanced/diagnostic toggles:
 
@@ -97,7 +93,6 @@ export OMP_NUM_THREADS=64
 # export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=auto
 # export HERCULES_FULL_CLEAR_OMP=0
-# export HERCULES_MESH_IMPORT_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # Advanced/debug overrides:

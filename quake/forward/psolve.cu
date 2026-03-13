@@ -128,8 +128,6 @@ static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
-static int32_t g_meshImportOmpMode = -1;
-static int32_t g_meshImportOmpReported = 0;
 static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
@@ -341,7 +339,6 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
-static int32_t mesh_import_use_omp(void);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t hercules_repro_mode(void);
@@ -3219,108 +3216,7 @@ static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
 }
 
 static void mesh_import_apply_properties(void) {
-  const int32_t useOmp = mesh_import_use_omp();
   int32_t eindex;
-
-#ifdef _OPENMP
-  if (useOmp && (Global.myMesh->lenum > 8192)) {
-    int32_t hasError = 0;
-    int32_t errorKind = 0;
-    int32_t errorLevelA = 0;
-    int32_t errorLevelB = 0;
-
-#pragma omp parallel
-    {
-      etree_t* meshInputEpThread =
-          etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
-
-      if (meshInputEpThread == NULL) {
-#pragma omp critical(mesh_import_error)
-        {
-          if (hasError == 0) {
-            hasError = 1;
-            errorKind = 1;
-          }
-        }
-      } else {
-#pragma omp for schedule(static)
-        for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-          elem_t* elemp;
-          edata_t* edata;
-          int32_t lnid0;
-          tick_t edge_ticks;
-          etree_addr_t search_addr;
-          etree_addr_t hit_addr;
-          mdata_t hit_data;
-
-          if (hasError != 0) {
-            continue;
-          }
-
-          elemp = &Global.myMesh->elemTable[eindex];
-          edata = (edata_t*)elemp->data;
-          lnid0 = elemp->lnid[0];
-          edge_ticks = (tick_t)1 << (PIXELLEVEL - elemp->level);
-
-          search_addr.x = Global.myMesh->nodeTable[lnid0].x + edge_ticks / 2;
-          search_addr.y = Global.myMesh->nodeTable[lnid0].y + edge_ticks / 2;
-          search_addr.z = Global.myMesh->nodeTable[lnid0].z + edge_ticks / 2;
-          search_addr.level = ETREE_MAXLEVEL;
-          search_addr.type = ETREE_LEAF;
-
-          if (etree_search(meshInputEpThread, search_addr, &hit_addr, NULL,
-                           &hit_data) != 0) {
-#pragma omp critical(mesh_import_error)
-            {
-              if (hasError == 0) {
-                hasError = 1;
-                errorKind = 2;
-              }
-            }
-            continue;
-          }
-
-          if (hit_addr.level != elemp->level) {
-#pragma omp critical(mesh_import_error)
-            {
-              if (hasError == 0) {
-                hasError = 1;
-                errorKind = 3;
-                errorLevelA = hit_addr.level;
-                errorLevelB = elemp->level;
-              }
-            }
-            continue;
-          }
-
-          memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
-        }
-
-        etree_close(meshInputEpThread);
-      }
-    }
-
-    if (hasError != 0) {
-      if (errorKind == 1) {
-        fprintf(stderr,
-                "Thread %d: mesh_import_apply_properties: cannot open mesh etree %s\n",
-                Global.myID, Param.mesh_etree_output_file);
-      } else if (errorKind == 2) {
-        fprintf(stderr,
-                "Thread %d: mesh_import_apply_properties: etree_search failed\n",
-                Global.myID);
-      } else {
-        fprintf(stderr,
-                "Thread %d: mesh_import_apply_properties: level mismatch (%d != %d)\n",
-                Global.myID, errorLevelA, errorLevelB);
-      }
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    return;
-  }
-#endif
 
   for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     elem_t* elemp = &Global.myMesh->elemTable[eindex];
@@ -3356,35 +3252,6 @@ static void mesh_import_apply_properties(void) {
 
     memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
   }
-}
-
-static int32_t mesh_import_use_omp(void) {
-#ifndef _OPENMP
-  return 0;
-#else
-  if (g_meshImportOmpMode < 0) {
-    const char* env = getenv("HERCULES_MESH_IMPORT_OMP");
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
-        g_meshImportOmpMode = 0;
-      } else {
-        g_meshImportOmpMode = 1;
-      }
-    } else {
-      g_meshImportOmpMode = 1;
-    }
-
-    if ((g_meshImportOmpMode == 1) && (Global.myID == 0) &&
-        (g_meshImportOmpReported == 0)) {
-      monitor_print("mesh import OpenMP: enabled (threads=%d)\n",
-                    omp_get_max_threads());
-      g_meshImportOmpReported = 1;
-    }
-  }
-
-  return g_meshImportOmpMode;
-#endif
 }
 
 static void mesh_generate_from_etree(void) {
