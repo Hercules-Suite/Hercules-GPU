@@ -47,6 +47,12 @@ when the corresponding envs are unset.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution
 	messages for MPI communication. Default is `1` (enabled).
+- `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse` (or `0|1|2`)
+	Selects host-to-device force upload mode for topography sparse upload path.
+	Default is `auto`/`0` (heuristic).
+	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather,
+	often better for large models where `Sparse force upload build` dominates.
+	`sparse`/`2` forces sparse gather + scatter path.
 
 Advanced/diagnostic toggles:
 
@@ -95,6 +101,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_FULL_CLEAR_OMP=0
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_SPARSE_UPLOAD_MODE=dense
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1

@@ -105,6 +105,8 @@ static int32_t g_sparseCopiedSourceCount = -1;
 static int32_t g_sparseCopiedTopoCount = -1;
 static int32_t g_sparseClearMode = -1;
 static int32_t g_sparseClearModeReported = 0;
+static int32_t g_sparseUploadMode = -1;
+static int32_t g_sparseUploadModeReported = 0;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -341,6 +343,7 @@ static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
+static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
@@ -6564,6 +6567,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int32_t totalCount = sourceCount + topoCount;
   int32_t activeCount;
   int32_t useDenseUpload = 0;
+  int32_t uploadMode;
   int32_t idx;
   int blocksize;
   int gridsize;
@@ -6733,7 +6737,12 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   activeCount = g_sparseActiveCount;
-  if ((mesh->nharbored > 0) && ((activeCount * 4) >= mesh->nharbored)) {
+  uploadMode = sparse_force_upload_mode();
+  if (uploadMode == 1) {
+    useDenseUpload = 1;
+  } else if (uploadMode == 2) {
+    useDenseUpload = 0;
+  } else if ((mesh->nharbored > 0) && ((activeCount * 4) >= mesh->nharbored)) {
     useDenseUpload = 1;
   }
 
@@ -10066,6 +10075,35 @@ static int32_t contrib_pack_use_omp(void) {
 
   return g_contribPackOmpMode;
 #endif
+}
+
+static int32_t sparse_force_upload_mode(void) {
+  if (g_sparseUploadMode < 0) {
+    const char* env = getenv("HERCULES_SPARSE_UPLOAD_MODE");
+
+    /* 0: auto heuristic, 1: force dense upload, 2: force sparse upload */
+    g_sparseUploadMode = 0;
+
+    if (env != NULL) {
+      if ((strcasecmp(env, "dense") == 0) || (strcmp(env, "1") == 0)) {
+        g_sparseUploadMode = 1;
+      } else if ((strcasecmp(env, "sparse") == 0) ||
+                 (strcasecmp(env, "scatter") == 0) ||
+                 (strcmp(env, "2") == 0)) {
+        g_sparseUploadMode = 2;
+      }
+    }
+
+    if ((Global.myID == 0) && (g_sparseUploadModeReported == 0)) {
+      const char* modeName =
+          (g_sparseUploadMode == 1) ? "dense" :
+          (g_sparseUploadMode == 2) ? "sparse" : "auto";
+      monitor_print("Sparse force upload mode: %s\n", modeName);
+      g_sparseUploadModeReported = 1;
+    }
+  }
+
+  return g_sparseUploadMode;
 }
 
 static void print_timing_stat() {
