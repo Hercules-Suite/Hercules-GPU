@@ -8068,9 +8068,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
-  /* Deterministic unpack order avoids timing-dependent overwrites when
-   * multiple incoming messengers target overlapping entries. */
-  useWaitsome = 0;
+  /* Contribution messages use += accumulation, so preserve deterministic
+   * unpack order there. Sharing messages are assignments and can stream
+   * unpack with Waitsome unless repro mode requests strict behavior. */
+  useWaitsome = ((direction == SHARING) && !hercules_repro_mode());
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -8212,8 +8213,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         }
         Timer_Stop("Schedule Unpack Incoming");
         remaining -= outcount;
-      } else if ((direction == CONTRIBUTION) || (direction == SHARING) ||
-                 hercules_repro_mode()) {
+      } else if ((direction == CONTRIBUTION) || hercules_repro_mode()) {
         int i;
 
         Timer_Start("Schedule Wait Recv");
