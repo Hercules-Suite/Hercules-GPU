@@ -49,7 +49,8 @@ when the corresponding envs are unset.
 	messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse` (or `0|1|2`)
 	Selects host-to-device force upload mode for topography sparse upload path.
-	Default is `auto`/`0` (heuristic).
+	Default is `auto`/`0` (heuristic); `run_phaseA_phaseB.sh` defaults this
+	to `dense`/`1`.
 	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather,
 	often better for large models where `Sparse force upload build` dominates.
 	`sparse`/`2` forces sparse gather + scatter path.
@@ -76,7 +77,7 @@ Two-phase script defaults:
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_FULL_CLEAR_OMP=1`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
-	`HERCULES_CONTRIB_PACK_OMP=1`,
+	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_SPARSE_UPLOAD_MODE=dense`,
 	These are the current recommended runtime defaults.
 - You can still override any of these by exporting your own value before
 	running the script.
