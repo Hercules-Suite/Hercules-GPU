@@ -8109,7 +8109,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t idx;
     int32_t useOmp = 0;
 
-    if (direction == CONTRIBUTION) {
+    if (direction == SHARING) {
+      useOmp = 1;
+    } else if (direction == CONTRIBUTION) {
       useOmp = contrib_pack_use_omp();
     }
 
@@ -8309,7 +8311,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   int32_t idx;
 
   if (direction == SHARING) {
-    const int32_t useOmp = 0;
+    const int32_t useOmp = 1;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
 #endif
