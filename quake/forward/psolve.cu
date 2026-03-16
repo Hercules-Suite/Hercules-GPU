@@ -7683,10 +7683,12 @@ static schedule_t* schedule_new() {
 
   sched->irecvreqs_c = NULL;
   sched->irecvstats_c = NULL;
+  sched->waitsome_idxs_c = NULL;
   sched->isendreqs_c = NULL;
   sched->isendstats_c = NULL;
   sched->irecvreqs_s = NULL;
   sched->irecvstats_s = NULL;
+  sched->waitsome_idxs_s = NULL;
   sched->isendreqs_s = NULL;
   sched->isendstats_s = NULL;
 
@@ -7744,12 +7746,14 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
     sched->irecvstats_c =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
+    sched->waitsome_idxs_c = (int*)malloc(sizeof(int) * sched->c_count);
     sched->isendreqs_c =
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->c_count);
     sched->isendstats_c =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->c_count);
 
     if ((sched->irecvreqs_c == NULL) || (sched->irecvstats_c == NULL) ||
+      (sched->waitsome_idxs_c == NULL) ||
         (sched->isendreqs_c == NULL) || (sched->isendstats_c == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
@@ -7759,6 +7763,7 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_c = NULL;
     sched->irecvstats_c = NULL;
+    sched->waitsome_idxs_c = NULL;
     sched->isendreqs_c = NULL;
     sched->isendstats_c = NULL;
   }
@@ -7768,12 +7773,14 @@ static void schedule_allocMPIctl(schedule_t* sched) {
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
     sched->irecvstats_s =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
+    sched->waitsome_idxs_s = (int*)malloc(sizeof(int) * sched->s_count);
     sched->isendreqs_s =
         (MPI_Request*)malloc(sizeof(MPI_Request) * sched->s_count);
     sched->isendstats_s =
         (MPI_Status*)malloc(sizeof(MPI_Status) * sched->s_count);
 
     if ((sched->irecvreqs_s == NULL) || (sched->irecvstats_s == NULL) ||
+      (sched->waitsome_idxs_s == NULL) ||
         (sched->isendreqs_s == NULL) || (sched->isendstats_s == NULL)) {
       fprintf(stderr, "Thread %d: schedule_allocMPIctl: ", Global.myID);
       fprintf(stderr, "out of memory\n");
@@ -7783,6 +7790,7 @@ static void schedule_allocMPIctl(schedule_t* sched) {
   } else {
     sched->irecvreqs_s = NULL;
     sched->irecvstats_s = NULL;
+    sched->waitsome_idxs_s = NULL;
     sched->isendreqs_s = NULL;
     sched->isendstats_s = NULL;
   }
@@ -7977,12 +7985,14 @@ static void schedule_delete(schedule_t* sched) {
 
   if (sched->irecvreqs_c != NULL) free(sched->irecvreqs_c);
   if (sched->irecvstats_c != NULL) free(sched->irecvstats_c);
+  if (sched->waitsome_idxs_c != NULL) free(sched->waitsome_idxs_c);
   if (sched->isendreqs_c != NULL) free(sched->isendreqs_c);
   if (sched->isendstats_c != NULL) free(sched->isendstats_c);
   free(sched->messenger_c);
 
   if (sched->irecvreqs_s != NULL) free(sched->irecvreqs_s);
   if (sched->irecvstats_s != NULL) free(sched->irecvstats_s);
+  if (sched->waitsome_idxs_s != NULL) free(sched->waitsome_idxs_s);
   if (sched->isendreqs_s != NULL) free(sched->isendreqs_s);
   if (sched->isendstats_s != NULL) free(sched->isendstats_s);
   free(sched->messenger_s);
@@ -8185,7 +8195,8 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     }
 
     if (useWaitsome) {
-      doneidxs = (int*)malloc(sizeof(int) * irecvcount);
+      doneidxs = (direction == CONTRIBUTION) ? sched->waitsome_idxs_s
+                                             : sched->waitsome_idxs_c;
       if (doneidxs == NULL) {
         fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
                 Global.myID);
@@ -8249,11 +8260,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         Timer_Stop("Schedule Unpack Incoming");
         remaining--;
       }
-    }
-
-    if (doneidxs != NULL) {
-      free(doneidxs);
-      doneidxs = NULL;
     }
 
     if (waitStage >= 0) {
