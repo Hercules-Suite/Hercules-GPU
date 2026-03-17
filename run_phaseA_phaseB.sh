@@ -303,7 +303,7 @@ if [[ -n "${PHASE_A_NP}" ]]; then
 else
   echo "Phase A ranks:  launcher default"
 fi
-echo "Phase B ranks:  ${PHASE_B_NP} (1 rank/node)"
+echo "Phase B ranks:  ${PHASE_B_NP}"
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -334,14 +334,54 @@ if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_
 fi
 
 echo
-echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} --map-by ppr:1:node --rank-by node ${PSOLVE_BIN} ${PHASE_B_IN}"
+
+PHASE_B_MAP_MODE="${PHASE_B_MAP_MODE:-auto}"
+PHASE_B_MAP_ARGS=()
+PHASE_B_MAP_DESC=""
+
+case "${PHASE_B_MAP_MODE}" in
+  per-node)
+    PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
+    PHASE_B_MAP_DESC="per-node"
+    ;;
+  single-node)
+    if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
+      PHASE_B_MAP_ARGS=(--map-by "slot:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
+      PHASE_B_MAP_DESC="single-node slot binding (PE=${OMP_NUM_THREADS})"
+    else
+      PHASE_B_MAP_ARGS=(--map-by slot --bind-to core --rank-by slot)
+      PHASE_B_MAP_DESC="single-node slot binding"
+    fi
+    ;;
+  auto)
+    if [[ "${ALLOC_NODES}" -gt 1 ]] && [[ "${PHASE_B_NP}" -le "${ALLOC_NODES}" ]]; then
+      PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
+      PHASE_B_MAP_DESC="auto(per-node)"
+    else
+      if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "slot:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(single-node, PE=${OMP_NUM_THREADS})"
+      else
+        PHASE_B_MAP_ARGS=(--map-by slot --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(single-node)"
+      fi
+    fi
+    ;;
+  *)
+    echo "ERROR: invalid PHASE_B_MAP_MODE='${PHASE_B_MAP_MODE}'. Use auto|per-node|single-node." >&2
+    exit 1
+    ;;
+esac
+
+echo "Phase B mapping: ${PHASE_B_MAP_DESC}"
+echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} ${PHASE_B_MAP_ARGS[*]} ${PSOLVE_BIN} ${PHASE_B_IN}"
 if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
   # shellcheck disable=SC2206
   B_ARGS=(${PHASE_B_MPI_ARGS})
 else
   B_ARGS=()
 fi
-"${MPI_RUN}" -np "${PHASE_B_NP}" --map-by ppr:1:node --rank-by node "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
+"${MPI_RUN}" -np "${PHASE_B_NP}" "${PHASE_B_MAP_ARGS[@]}" "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 
 echo
 echo "Two-phase run completed."
