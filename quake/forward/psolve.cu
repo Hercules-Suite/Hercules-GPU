@@ -8104,7 +8104,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   Timer_Start("Schedule Post Recv");
   irecvnum = 0;
   if ((irecvcount > 0) && (recv_order == NULL)) {
-    fprintf(stderr, "Thread %d: schedule_senddata: out of memory\n",
+    fprintf(stderr, "Thread %d: schedule_senddata: missing recv_order buffer\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
@@ -8131,11 +8131,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     int32_t useOmp = 0;
 
     if (direction == SHARING) {
-#ifdef _OPENMP
-      useOmp = (omp_get_max_threads() <= 16) ? 1 : 0;
-#else
-      useOmp = 0;
-#endif
+      useOmp = 1;
     } else if (direction == CONTRIBUTION) {
       useOmp = contrib_pack_use_omp();
     }
@@ -8327,10 +8323,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   int32_t idx;
 
   if (direction == SHARING) {
-    int32_t useOmp = 0;
-  #ifdef _OPENMP
-    useOmp = (omp_get_max_threads() <= 16) ? 1 : 0;
-  #endif
+    const int32_t useOmp = 1;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
 #endif

@@ -335,7 +335,7 @@ struct schedule_t {
     messenger_t** messenger_c;  /**< Fast lookup table to build c-list. */
     MPI_Request*  irecvreqs_c;  /**< control for non-blocking receives. */
     MPI_Status*   irecvstats_c;
-    messenger_t** recv_order_c; /**< cached receive messenger order.     */
+    messenger_t** recv_order_c; /**< deterministic/streaming recv order. */
     int*          waitsome_idxs_c; /**< scratch indices for MPI_Waitsome. */
     MPI_Request*  isendreqs_c;  /**< control for non-blocking sends.    */
     MPI_Status*   isendstats_c;
@@ -346,7 +346,7 @@ struct schedule_t {
     messenger_t** messenger_s;  /* Fast lookup table to build s-list.      */
     MPI_Request*  irecvreqs_s;  /* controls for non-blocking MPI receives. */
     MPI_Status*   irecvstats_s;
-    messenger_t** recv_order_s; /* cached receive messenger order.          */
+    messenger_t** recv_order_s;  /* deterministic/streaming recv order.     */
     int*          waitsome_idxs_s; /* scratch indices for MPI_Waitsome.     */
     MPI_Request*  isendreqs_s;  /* controls for non-blocking MPI sends.    */
     MPI_Status*   isendstats_s;
