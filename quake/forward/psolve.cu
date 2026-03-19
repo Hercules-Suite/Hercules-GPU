@@ -6814,24 +6814,23 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
 
   if (clearMode == 3) {
     int32_t fullCount = Global.myMesh->nharbored;
+    solver_wait_force_upload_source_event();
 #ifdef _OPENMP
-    if (full_clear_use_omp() && (fullCount >= 131072)) {
-      solver_wait_force_upload_source_event();
-#pragma omp parallel
-      {
-        int32_t threadCount = omp_get_num_threads();
-        int32_t threadId = omp_get_thread_num();
-        int32_t chunk = (fullCount + threadCount - 1) / threadCount;
-        int32_t start = threadId * chunk;
-        int32_t end = start + chunk;
+    if (full_clear_use_omp()) {
+      int32_t threadCount = omp_get_max_threads();
+      int32_t minNodesPerThread = 262144;
 
-        if (end > fullCount) {
-          end = fullCount;
+      if ((threadCount > 1) &&
+          ((int64_t)fullCount >=
+           (int64_t)threadCount * (int64_t)minNodesPerThread)) {
+#pragma omp parallel for schedule(static)
+        for (int32_t i = 0; i < fullCount; i++) {
+          solver->force[i].f[0] = 0;
+          solver->force[i].f[1] = 0;
+          solver->force[i].f[2] = 0;
         }
-        if (start < end) {
-          memset(solver->force + start, 0,
-                 (size_t)(end - start) * sizeof(fvector_t));
-        }
+      } else {
+        memset(solver->force, 0, sizeof(fvector_t) * fullCount);
       }
     } else
 #endif
