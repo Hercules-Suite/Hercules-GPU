@@ -8359,7 +8359,16 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
     return;
   }
 
-  for (idx = 0; idx < recv_messenger->nidx; idx++) {
+  {
+    int32_t useOmpContrib = 0;
+    if ((direction == CONTRIBUTION) &&
+        (recv_messenger->mapping_has_duplicates == 0)) {
+      useOmpContrib = contrib_pack_use_omp();
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmpContrib)
+#endif
+    for (idx = 0; idx < recv_messenger->nidx; idx++) {
     int32_t lnid, entry;
     solver_float* dvalue;
     solver_float* in;
@@ -8530,7 +8539,8 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
  */
 static int messenger_print(messenger_t* msg, char type, char cs, FILE* out) {
   int ret;
-
+    }
+  }
   assert(NULL != msg);
 
   ret = fprintf(out, "msg_info: %d %c %c %d %d %d %d %d\n", Global.myID, type,
