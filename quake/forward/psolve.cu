@@ -8369,49 +8369,52 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 #pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmpContrib)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
-    int32_t lnid, entry;
-    solver_float* dvalue;
-    solver_float* in;
+      int32_t lnid, entry;
+      solver_float* dvalue;
+      solver_float* in;
 
-    lnid = recv_messenger->mapping[idx];
-    in = (solver_float*)((char*)recv_messenger->indata +
-                         recv_messenger->insize * idx);
+      lnid = recv_messenger->mapping[idx];
+      in = (solver_float*)((char*)recv_messenger->indata +
+                           recv_messenger->insize * idx);
 
-    dvalue = (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
-    if (itemsperentry == 3) {
-      if (direction == CONTRIBUTION) {
-        dvalue[0] += in[0];
-        dvalue[1] += in[1];
-        dvalue[2] += in[2];
-      } else {
-        dvalue[0] = in[0];
-        dvalue[1] = in[1];
-        dvalue[2] = in[2];
-      }
-    } else {
-      for (entry = 0; entry < itemsperentry; entry++) {
+      dvalue = (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
+      if (itemsperentry == 3) {
         if (direction == CONTRIBUTION) {
-          *(dvalue + entry) += *(in + entry);
+          dvalue[0] += in[0];
+          dvalue[1] += in[1];
+          dvalue[2] += in[2];
         } else {
-          *(dvalue + entry) = *(in + entry);
+          dvalue[0] = in[0];
+          dvalue[1] = in[1];
+          dvalue[2] = in[2];
+        }
+      } else {
+        for (entry = 0; entry < itemsperentry; entry++) {
+          if (direction == CONTRIBUTION) {
+            *(dvalue + entry) += *(in + entry);
+          } else {
+            *(dvalue + entry) = *(in + entry);
+          }
         }
       }
-    }
 
 #ifdef DEBUG
-    {
-      int64_t* gnidp;
-      gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
+      {
+        int64_t* gnidp;
+        gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
 
-      if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
-        fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
+        if (*gnidp != Global.myMesh->nodeTable[lnid].gnid) {
+          fprintf(stderr, "Thread %d: solver_init: gnids do not match\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
       }
-    }
 #endif /* DEBUG */
+    }
   }
+
+  return;
 }
 
 static void solver_diag_reset(void) {
