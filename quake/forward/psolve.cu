@@ -8542,8 +8542,6 @@ static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
  */
 static int messenger_print(messenger_t* msg, char type, char cs, FILE* out) {
   int ret;
-    }
-  }
   assert(NULL != msg);
 
   ret = fprintf(out, "msg_info: %d %c %c %d %d %d %d %d\n", Global.myID, type,
