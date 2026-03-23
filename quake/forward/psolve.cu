@@ -8360,14 +8360,6 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   }
 
   {
-    int32_t useOmpContrib = 0;
-    if ((direction == CONTRIBUTION) &&
-        (recv_messenger->mapping_has_duplicates == 0)) {
-      useOmpContrib = contrib_pack_use_omp();
-    }
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmpContrib)
-#endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
       solver_float* dvalue;
