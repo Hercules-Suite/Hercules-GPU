@@ -6823,11 +6823,19 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
       if ((threadCount > 1) &&
           ((int64_t)fullCount >=
            (int64_t)threadCount * (int64_t)minNodesPerThread)) {
-#pragma omp parallel for schedule(static)
-        for (int32_t i = 0; i < fullCount; i++) {
-          solver->force[i].f[0] = 0;
-          solver->force[i].f[1] = 0;
-          solver->force[i].f[2] = 0;
+#pragma omp parallel
+        {
+          int32_t tid = omp_get_thread_num();
+          int32_t chunk = (fullCount + threadCount - 1) / threadCount;
+          int32_t start = tid * chunk;
+          int32_t end = start + chunk;
+          if (end > fullCount) {
+            end = fullCount;
+          }
+          if (start < end) {
+            memset(solver->force + start, 0,
+                   (size_t)(end - start) * sizeof(fvector_t));
+          }
         }
       } else {
         memset(solver->force, 0, sizeof(fvector_t) * fullCount);
