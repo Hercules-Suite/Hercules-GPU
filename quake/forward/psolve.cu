@@ -132,6 +132,8 @@ static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
 static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
+static int32_t g_fullClearOmpMinNodesPerThread = -1;
+static int32_t g_fullClearOmpMinNodesReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
@@ -342,6 +344,7 @@ static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t full_clear_use_omp(void);
+static int32_t full_clear_omp_min_nodes_per_thread(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
@@ -6818,7 +6821,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
 #ifdef _OPENMP
     if (full_clear_use_omp()) {
       int32_t threadCount = omp_get_max_threads();
-      int32_t minNodesPerThread = 262144;
+      int32_t minNodesPerThread = full_clear_omp_min_nodes_per_thread();
 
       if ((threadCount > 1) &&
           ((int64_t)fullCount >=
@@ -10032,6 +10035,40 @@ static int32_t full_clear_use_omp(void) {
   }
 
   return g_fullClearOmpMode;
+#endif
+}
+
+static int32_t full_clear_omp_min_nodes_per_thread(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (g_fullClearOmpMinNodesPerThread < 0) {
+    const char* env = getenv("HERCULES_FULL_CLEAR_MIN_NODES_PER_THREAD");
+    int32_t minNodesPerThread = 32768;
+
+    if ((env != NULL) && (*env != '\0')) {
+      char* endptr = NULL;
+      long parsed;
+
+      errno = 0;
+      parsed = strtol(env, &endptr, 10);
+      if ((errno == 0) && (endptr != env) && (*endptr == '\0') &&
+          (parsed > 0) && (parsed <= INT32_MAX)) {
+        minNodesPerThread = (int32_t)parsed;
+      }
+    }
+
+    g_fullClearOmpMinNodesPerThread = minNodesPerThread;
+
+    if ((Global.myID == 0) && (g_fullClearOmpMinNodesReported == 0)) {
+      monitor_print(
+          "full host force clear OpenMP threshold: min_nodes_per_thread=%d\n",
+          g_fullClearOmpMinNodesPerThread);
+      g_fullClearOmpMinNodesReported = 1;
+    }
+  }
+
+  return g_fullClearOmpMinNodesPerThread;
 #endif
 }
 

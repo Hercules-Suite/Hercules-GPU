@@ -38,6 +38,11 @@ when the corresponding envs are unset.
 	Enables or disables OpenMP parallelization for full-array host force
 	clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
 	(enabled).
+- `HERCULES_FULL_CLEAR_MIN_NODES_PER_THREAD=<positive integer>`
+	Sets the minimum local-node count per OpenMP thread required before
+	parallel full clear is used. Default is `32768`.
+	Lower values force OpenMP full clear on smaller local meshes; higher
+	values keep full clear serial unless the local mesh is very large.
 - `HERCULES_STATION_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for station displacement
 	interpolation and per-station file writes. Default is `1` (enabled).
@@ -76,6 +81,7 @@ Two-phase script defaults:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
 	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_FULL_CLEAR_OMP=1`,
+	`HERCULES_FULL_CLEAR_MIN_NODES_PER_THREAD=32768`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_SPARSE_UPLOAD_MODE=dense`,
 	These are the current recommended runtime defaults.
@@ -100,6 +106,7 @@ export OMP_NUM_THREADS=64
 # export HERCULES_ADJUST_DIST_OMP=0
 # export HERCULES_SPARSE_CLEAR_MODE=auto
 # export HERCULES_FULL_CLEAR_OMP=0
+# export HERCULES_FULL_CLEAR_MIN_NODES_PER_THREAD=65536
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
