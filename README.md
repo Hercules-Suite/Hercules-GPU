@@ -13,56 +13,39 @@ Some general description of the core components in this directory are given as f
 
 Runtime performance toggles (no source edits needed):
 
-These are also the current default values used by `run_phaseA_phaseB.sh`
-when the corresponding envs are unset.
+These are also the current default values used by `run_phaseA_phaseB.sh` when the corresponding envs are unset.
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
-	Enables or disables OpenMP parallelization in assignment adjust core.
-	Default is `1` (enabled).
+	Enables or disables OpenMP parallelization in assignment adjust core. Default is `1` (enabled).
 - `HERCULES_ADJUST_DIST_OMP=1|0`
-	Enables or disables OpenMP parallelization in parent-centric distribution
-	adjust core.
-	Default is `1` (enabled).
-
+	Enables or disables OpenMP parallelization in parent-centric distribution adjust core. Default is `1` (enabled).
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes|full` (or `2|0|1|3`)
 	Selects sparse host force reset mode in GPU solver path.
 	Default is `full`/`3`.
-	`auto`/`2` prefers `full` when topography touches a large fraction of
-	local nodes, otherwise falls back to `range` or `nodes`.
-	`range`/`0` uses exact contiguous ranges built from the topography node
-	set and forces range `memset`.
+	`auto`/`2` prefers `full` when topography touches a large fraction of local nodes, otherwise falls back to `range` or `nodes`.
+	`range`/`0` uses exact contiguous ranges built from the topography node set and forces range `memset`.
 	`nodes`/`1` can be faster for highly fragmented 3D model cases.
-	`full`/`3` clears the full local host force array with one contiguous
-	`memset`.
+	`full`/`3` clears the full local host force array with one contiguous `memset`.
 - `HERCULES_FULL_CLEAR_OMP=1|0`
-	Enables or disables OpenMP parallelization for full-array host force
-	clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
+	Enables or disables OpenMP parallelization for full-array host force clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
 	(enabled).
 - `HERCULES_STATION_IO_OMP=1|0`
-	Enables or disables OpenMP parallelization for station displacement
-	interpolation and per-station file writes. Default is `1` (enabled).
+	Enables or disables OpenMP parallelization for station displacement interpolation and per-station file writes. Default is `1` (enabled).
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for per-strip plane
 	interpolation before MPI send/write. Default is `1` (enabled).
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
-	Enables or disables OpenMP parallelization while packing contribution
-	messages for MPI communication. Default is `1` (enabled).
+	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse` (or `0|1|2`)
-	Selects host-to-device force upload mode for topography sparse upload path.
-	Default is `auto`/`0` (heuristic); `run_phaseA_phaseB.sh` defaults this
-	to `dense`/`1`.
-	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather,
-	often better for large models where `Sparse force upload build` dominates.
+	Selects host-to-device force upload mode for topography sparse upload path. Default is `auto`/`0` (heuristic); `run_phaseA_phaseB.sh` defaults this to `dense`/`1`.
+	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather, often better for large models where `Sparse force upload build` dominates.
 	`sparse`/`2` forces sparse gather + scatter path.
 
 Advanced/diagnostic toggles:
 
 - `HERCULES_REPRO_MODE=0|1|2`
 	`0` disables repro mode. `1` disables remaining OpenMP-sensitive
-	deterministic communication paths and uses deterministic MPI unpack
-	ordering. `2` is stricter and also disables additional CPU OpenMP
-	paths guarded by repro mode; `run_phaseA_phaseB.sh` does not auto-set
-	this env.
+	deterministic communication paths and uses deterministic MPI unpack ordering. `2` is stricter and also disables additional CPU OpenMP paths guarded by repro mode; `run_phaseA_phaseB.sh` does not auto-set this env.
 
 Build note:
 
@@ -79,8 +62,7 @@ Two-phase script defaults:
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_SPARSE_UPLOAD_MODE=dense`,
 	These are the current recommended runtime defaults.
-- You can still override any of these by exporting your own value before
-	running the script.
+- You can still override any of these by exporting your own value before running the script.
 
 Two-phase job run (Phase A then Phase B):
 
@@ -115,8 +97,7 @@ PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 
 Notes:
 
-- With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs
-	by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
+- With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
 
 Mesh mode input flags (`numerical.in`):
