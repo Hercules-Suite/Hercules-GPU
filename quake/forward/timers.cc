@@ -5,7 +5,7 @@
 #include "timers.h"
 
 
-#define MAXTIMERS 100 /*Maximim number of usable timers*/
+#define MAXTIMERS 160 /* Maximum number of usable timers */
 
 struct timer {
 
@@ -234,5 +234,4 @@ static int FindTimer(const char* TimerName){
 
     return -1;
 }
-
 

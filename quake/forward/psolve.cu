@@ -7129,11 +7129,13 @@ static void solver_run_collect_timers(void) {
    * this is NOT best and worst single step times
    */
   if (Timer_Exists("Print Planes")) {
-    Timer_Reduce("Print Planes", (TimerKind)(MAX | MIN), comm_solver);
+    Timer_Reduce("Print Planes", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
   }
 
   if (Timer_Exists("Print Stations")) {
-    Timer_Reduce("Print Stations", (TimerKind)(MAX | MIN), comm_solver);
+    Timer_Reduce("Print Stations", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
   }
 
   if (Timer_Exists("Compute Non-linear Entities")) {
@@ -7144,8 +7146,21 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Compute addforces Non-linear")) {
     Timer_Reduce("Compute addforces Non-linear",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+
+  if (Timer_Exists("Compute addforces gravity")) {
     Timer_Reduce("Compute addforces gravity", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+
+  if (Timer_Exists("Compute addforces Topography")) {
+    Timer_Reduce("Compute addforces Topography",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+
+  if (Timer_Exists("Compute addforces Incident Plane Waves")) {
+    Timer_Reduce("Compute addforces Incident Plane Waves",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
 
   if (Timer_Exists("Solver drm output")) {
@@ -7172,6 +7187,61 @@ static void solver_run_collect_timers(void) {
   }
   if (Timer_Exists("Sparse force upload scatter")) {
     Timer_Reduce("Sparse force upload scatter",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Load Fixedbase Disps")) {
+    Timer_Reduce("Load Fixedbase Disps", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Memory Copy")) {
+    Timer_Reduce("GPU Memory Copy", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Load Disp")) {
+    Timer_Reduce("GPU Load Disp", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Unload Forces")) {
+    Timer_Reduce("GPU Unload Forces", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Load Forces")) {
+    Timer_Reduce("GPU Load Forces", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Unload Disp")) {
+    Timer_Reduce("GPU Unload Disp", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("GPU Reset")) {
+    Timer_Reduce("GPU Reset", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Physics Force Prep")) {
+    Timer_Reduce("Physics Force Prep", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Physics Force Kernels Enqueue")) {
+    Timer_Reduce("Physics Force Kernels Enqueue",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Physics Force Wait/Post")) {
+    Timer_Reduce("Physics Force Wait/Post",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Physics Displacement Enqueue")) {
+    Timer_Reduce("Physics Displacement Enqueue",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Physics Displacement Wait/Post")) {
+    Timer_Reduce("Physics Displacement Wait/Post",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Comm Force Exchange")) {
+    Timer_Reduce("Comm Force Exchange", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Comm Displacement Exchange")) {
+    Timer_Reduce("Comm Displacement Exchange",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
 
@@ -7305,7 +7375,9 @@ static void solver_run() {
     Global.mySolver->tm1 = tmpvector;
 
     Timer_Start("GPU Memory Copy");
+    Timer_Start("GPU Load Disp");
     solver_load_disp_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Load Disp");
     Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Solver I/O");
@@ -7323,6 +7395,7 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
 
     Timer_Start("Compute Physics");
+    Timer_Start("Physics Force Prep");
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     if (use_gpu_source_fastpath()) {
@@ -7347,19 +7420,25 @@ static void solver_run() {
     } else if (!use_gpu_source_fastpath()) {
       solver_load_forces_gpu(Global.mySolver, Global.myMesh);
     }
+    Timer_Stop("Physics Force Prep");
 
+    Timer_Start("Physics Force Kernels Enqueue");
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
                      Global.theK2);
     solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
                    Global.theK2);
+    Timer_Stop("Physics Force Kernels Enqueue");
 
     Timer_Stop("Compute Physics");
 
     Timer_Start("GPU Memory Copy");
+    Timer_Start("GPU Unload Forces");
     solver_unload_forces_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Unload Forces");
     Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Compute Physics");
+    Timer_Start("Physics Force Wait/Post");
     solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
 
     solver_compute_force_gravity(Global.mySolver, Global.myMesh, step);
@@ -7368,47 +7447,62 @@ static void solver_run() {
     solver_compute_force_planewaves(Global.myMesh, Global.mySolver,
                                     Param.theDeltaT, step, Global.theK1,
                                     Global.theK2);
+    Timer_Stop("Physics Force Wait/Post");
 
     Timer_Stop("Compute Physics");
 
     Timer_Start("Communication");
+    Timer_Start("Comm Force Exchange");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_force_dangling(Global.mySolver);
     solver_adjust_forces(Global.mySolver);
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_force_anchored(Global.mySolver);
+    Timer_Stop("Comm Force Exchange");
     Timer_Stop("Communication");
 
     Timer_Start("GPU Memory Copy");
+    Timer_Start("GPU Load Forces");
     solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Load Forces");
     Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Compute Physics");
+    Timer_Start("Physics Displacement Enqueue");
     /* solver_compute_displacement(Global.mySolver, Global.myMesh); */
     solver_compute_displacement_gpu(Global.myID, Global.mySolver,
                                     Global.myMesh);
+    Timer_Stop("Physics Displacement Enqueue");
     Timer_Stop("Compute Physics");
 
     Timer_Start("GPU Memory Copy");
+    Timer_Start("GPU Unload Disp");
     solver_unload_disp_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Unload Disp");
     Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Compute Physics");
+    Timer_Start("Physics Displacement Wait/Post");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
+    Timer_Stop("Physics Displacement Wait/Post");
     Timer_Stop("Compute Physics");
 
     Timer_Start("GPU Memory Copy");
+    Timer_Start("GPU Reset");
     solver_reset_gpu(Global.mySolver, Global.myMesh);
+    Timer_Stop("GPU Reset");
     Timer_Stop("GPU Memory Copy");
 
     Timer_Start("Communication");
+    Timer_Start("Comm Displacement Exchange");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_displacement_anchored(Global.mySolver);
     solver_adjust_displacement(Global.mySolver);
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_displacement_dangling(Global.mySolver);
+    Timer_Stop("Comm Displacement Exchange");
     Timer_Stop("Communication");
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
@@ -10550,6 +10644,8 @@ static void print_timing_stat() {
         Timer_Value("Compute addforces Non-linear", AVERAGE),
         Timer_Value("Compute addforces Non-linear", MAX),
         Timer_Value("Compute addforces Non-linear", MIN));
+  }
+  if (Timer_Exists("Compute addforces gravity")) {
     printf(
         "    Compute addforces gravity       : %.2f (Average)   %.2f (Max) "
         "%.2f (Min) seconds\n",
@@ -10565,6 +10661,77 @@ static void print_timing_stat() {
         Timer_Value("Solver drm force compute", AVERAGE),
         Timer_Value("Solver drm force compute", MAX),
         Timer_Value("Solver drm force compute", MIN));
+  }
+  if (Timer_Exists("Compute addforces Topography")) {
+    printf(
+        "    Compute addforces Topography    : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Compute addforces Topography", AVERAGE),
+        Timer_Value("Compute addforces Topography", MAX),
+        Timer_Value("Compute addforces Topography", MIN));
+  }
+  if (Timer_Exists("Compute addforces Incident Plane Waves")) {
+    printf(
+        "    Compute addforces Plane Waves   : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Compute addforces Incident Plane Waves", AVERAGE),
+        Timer_Value("Compute addforces Incident Plane Waves", MAX),
+        Timer_Value("Compute addforces Incident Plane Waves", MIN));
+  }
+  if (Timer_Exists("Load Fixedbase Disps")) {
+    printf(
+        "    Load Fixedbase Disps            : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Load Fixedbase Disps", AVERAGE),
+        Timer_Value("Load Fixedbase Disps", MAX),
+        Timer_Value("Load Fixedbase Disps", MIN));
+  }
+  if (Timer_Exists("Physics Force Prep") ||
+      Timer_Exists("Physics Force Kernels Enqueue") ||
+      Timer_Exists("Physics Force Wait/Post") ||
+      Timer_Exists("Physics Displacement Enqueue") ||
+      Timer_Exists("Physics Displacement Wait/Post")) {
+    printf("    Physics phase internals\n");
+    if (Timer_Exists("Physics Force Prep")) {
+      printf(
+          "      Force Prep                    : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Physics Force Prep", AVERAGE),
+          Timer_Value("Physics Force Prep", MAX),
+          Timer_Value("Physics Force Prep", MIN));
+    }
+    if (Timer_Exists("Physics Force Kernels Enqueue")) {
+      printf(
+          "      Force Kernels Enqueue         : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Physics Force Kernels Enqueue", AVERAGE),
+          Timer_Value("Physics Force Kernels Enqueue", MAX),
+          Timer_Value("Physics Force Kernels Enqueue", MIN));
+    }
+    if (Timer_Exists("Physics Force Wait/Post")) {
+      printf(
+          "      Force Wait/Post               : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Physics Force Wait/Post", AVERAGE),
+          Timer_Value("Physics Force Wait/Post", MAX),
+          Timer_Value("Physics Force Wait/Post", MIN));
+    }
+    if (Timer_Exists("Physics Displacement Enqueue")) {
+      printf(
+          "      Displacement Enqueue          : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Physics Displacement Enqueue", AVERAGE),
+          Timer_Value("Physics Displacement Enqueue", MAX),
+          Timer_Value("Physics Displacement Enqueue", MIN));
+    }
+    if (Timer_Exists("Physics Displacement Wait/Post")) {
+      printf(
+          "      Displacement Wait/Post        : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Physics Displacement Wait/Post", AVERAGE),
+          Timer_Value("Physics Displacement Wait/Post", MAX),
+          Timer_Value("Physics Displacement Wait/Post", MIN));
+    }
   }
   printf(
       "    1st schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
@@ -10648,6 +10815,26 @@ static void print_timing_stat() {
       Timer_Value("4th schedule send data (sharing)", AVERAGE),
       Timer_Value("4th schedule send data (sharing)", MAX),
       Timer_Value("4th schedule send data (sharing)", MIN));
+  if (Timer_Exists("Comm Force Exchange") ||
+      Timer_Exists("Comm Displacement Exchange")) {
+    printf("    Communication phase internals\n");
+    if (Timer_Exists("Comm Force Exchange")) {
+      printf(
+          "      Force Exchange                : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Comm Force Exchange", AVERAGE),
+          Timer_Value("Comm Force Exchange", MAX),
+          Timer_Value("Comm Force Exchange", MIN));
+    }
+    if (Timer_Exists("Comm Displacement Exchange")) {
+      printf(
+          "      Displacement Exchange         : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Comm Displacement Exchange", AVERAGE),
+          Timer_Value("Comm Displacement Exchange", MAX),
+          Timer_Value("Comm Displacement Exchange", MIN));
+    }
+  }
   if (Timer_Exists("Schedule Post Recv") ||
       Timer_Exists("Schedule Pack Outgoing") ||
       Timer_Exists("Schedule Post Send") ||
@@ -10804,7 +10991,60 @@ static void print_timing_stat() {
                 ? (g_stageCommMax[recvBytesI] / g_stageCommAvg[recvBytesI])
                 : 0.0);
             }
-      }
+	    }
+	  }
+  if (Timer_Exists("GPU Memory Copy") || Timer_Exists("GPU Load Disp") ||
+      Timer_Exists("GPU Unload Forces") || Timer_Exists("GPU Load Forces") ||
+      Timer_Exists("GPU Unload Disp") || Timer_Exists("GPU Reset")) {
+    printf("    GPU copy/enqueue internals\n");
+    if (Timer_Exists("GPU Memory Copy")) {
+      printf(
+          "      GPU Memory Copy               : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Memory Copy", AVERAGE),
+          Timer_Value("GPU Memory Copy", MAX),
+          Timer_Value("GPU Memory Copy", MIN));
+    }
+    if (Timer_Exists("GPU Load Disp")) {
+      printf(
+          "      Load Disp                     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Load Disp", AVERAGE),
+          Timer_Value("GPU Load Disp", MAX),
+          Timer_Value("GPU Load Disp", MIN));
+    }
+    if (Timer_Exists("GPU Unload Forces")) {
+      printf(
+          "      Unload Forces                 : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Unload Forces", AVERAGE),
+          Timer_Value("GPU Unload Forces", MAX),
+          Timer_Value("GPU Unload Forces", MIN));
+    }
+    if (Timer_Exists("GPU Load Forces")) {
+      printf(
+          "      Load Forces                   : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Load Forces", AVERAGE),
+          Timer_Value("GPU Load Forces", MAX),
+          Timer_Value("GPU Load Forces", MIN));
+    }
+    if (Timer_Exists("GPU Unload Disp")) {
+      printf(
+          "      Unload Disp                   : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Unload Disp", AVERAGE),
+          Timer_Value("GPU Unload Disp", MAX),
+          Timer_Value("GPU Unload Disp", MIN));
+    }
+    if (Timer_Exists("GPU Reset")) {
+      printf(
+          "      Reset                         : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Reset", AVERAGE),
+          Timer_Value("GPU Reset", MAX),
+          Timer_Value("GPU Reset", MIN));
+    }
   }
   if (Timer_Exists("Adjust Cache Build") ||
       Timer_Exists("Adjust Distribution Core") ||
