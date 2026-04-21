@@ -130,6 +130,8 @@ static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
+static int32_t* g_stationAccelNodeList = NULL;
+static int32_t g_stationAccelNodeCount = 0;
 static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
@@ -341,6 +343,8 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
+static void solver_build_station_accel_node_list(void);
+static void solver_free_station_accel_node_list(void);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t sparse_force_upload_mode(void);
@@ -5736,6 +5740,11 @@ static void solver_delete() {
   cudaFreeHost(Global.mySolver->tm1);
   cudaFreeHost(Global.mySolver->tm2);
   cudaFreeHost(Global.mySolver->force);
+  if (Global.mySolver->tm3 != NULL) {
+    free(Global.mySolver->tm3);
+    Global.mySolver->tm3 = NULL;
+  }
+  solver_free_station_accel_node_list();
 
   if (Param.theTypeOfDamping >= BKT) {
     free(Global.mySolver->conv_shear_1);
@@ -6967,16 +6976,21 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   /* Copy tm2 to tm3 for accelerations */
   if (Param.printStationAccelerations == YES) {
-    /* Save tm3 for accelerations */
-    for (nindex = 0; nindex < mesh->nharbored; nindex++) {
-      fvector_t* tm2Disp = solver->tm2 + nindex;
-      fvector_t* tm3Disp = solver->tm3 + nindex;
-
-      tm3Disp->f[0] = tm2Disp->f[0];
-      tm3Disp->f[1] = tm2Disp->f[1];
-      tm3Disp->f[2] = tm2Disp->f[2];
-
-    } /* for (nindex ...): all my harbored nodes */
+    /* Save only the history nodes needed by station acceleration output. */
+    if ((g_stationAccelNodeList != NULL) && (g_stationAccelNodeCount > 0)) {
+#ifdef _OPENMP
+      const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static)
+#endif
+      for (int32_t i = 0; i < g_stationAccelNodeCount; i++) {
+        lnid_t lnid = g_stationAccelNodeList[i];
+        solver->tm3[lnid] = solver->tm2[lnid];
+      }
+    } else {
+      for (nindex = 0; nindex < mesh->nharbored; nindex++) {
+        solver->tm3[nindex] = solver->tm2[nindex];
+      }
+    }
   }
 
   /* Wait for the appropriate physics calculation to complete */
@@ -11801,6 +11815,80 @@ static int32_t station_output_use_omp(void) {
 #endif
 }
 
+static void solver_free_station_accel_node_list(void) {
+  if (g_stationAccelNodeList != NULL) {
+    free(g_stationAccelNodeList);
+    g_stationAccelNodeList = NULL;
+  }
+  g_stationAccelNodeCount = 0;
+}
+
+static void solver_build_station_accel_node_list(void) {
+  int32_t count = 0;
+  int32_t maxNodes;
+  const topostation_t* topoStations = NULL;
+
+  solver_free_station_accel_node_list();
+
+  if ((Param.printStationAccelerations != YES) || (Param.myNumberOfStations <= 0)) {
+    return;
+  }
+
+  maxNodes = Param.myNumberOfStations * 12;
+  g_stationAccelNodeList = (int32_t*)malloc(sizeof(int32_t) * (size_t)maxNodes);
+  if (g_stationAccelNodeList == NULL) {
+    fprintf(stderr,
+            "Thread %d: solver_build_station_accel_node_list: out of memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (int32_t i = 0; i < Param.myNumberOfStations; i++) {
+    for (int32_t j = 0; j < 8; j++) {
+      g_stationAccelNodeList[count++] = Param.myStations[i].nodestointerpolate[j];
+    }
+  }
+
+  topoStations = topo_get_stations();
+  if (topoStations != NULL) {
+    for (int32_t i = 0; i < Param.myNumberOfStations; i++) {
+      if (topoStations[i].TopoStation == 0) {
+        continue;
+      }
+      for (int32_t j = 0; j < 4; j++) {
+        g_stationAccelNodeList[count++] = topoStations[i].nodes_to_interpolate[j];
+      }
+    }
+  }
+
+  qsort(g_stationAccelNodeList, (size_t)count, sizeof(int32_t), compare_int32_asc);
+
+  g_stationAccelNodeCount = 0;
+  for (int32_t i = 0; i < count; i++) {
+    if ((g_stationAccelNodeCount == 0) ||
+        (g_stationAccelNodeList[i] !=
+         g_stationAccelNodeList[g_stationAccelNodeCount - 1])) {
+      g_stationAccelNodeList[g_stationAccelNodeCount++] =
+          g_stationAccelNodeList[i];
+    }
+  }
+
+  if (g_stationAccelNodeCount == 0) {
+    solver_free_station_accel_node_list();
+    return;
+  }
+
+  {
+    int32_t* shrunk = (int32_t*)realloc(g_stationAccelNodeList,
+                                        sizeof(int32_t) *
+                                            (size_t)g_stationAccelNodeCount);
+    if (shrunk != NULL) {
+      g_stationAccelNodeList = shrunk;
+    }
+  }
+}
+
 static int32_t hercules_repro_mode(void) {
   if (g_reproMode < 0) {
     const char* env = getenv("HERCULES_REPRO_MODE");
@@ -13159,6 +13247,10 @@ int main(int argc, char** argv) {
     topography_stations_init(Global.myMesh, Param.myStations,
                              Param.myNumberOfStations);
     Timer_Stop("Pre Setup Topo Stations Init");
+  }
+
+  if ((Param.printStationAccelerations == YES) && (Param.myNumberOfStations > 0)) {
+    solver_build_station_accel_node_list();
   }
 
   /* Initialize the output planes */
