@@ -2179,10 +2179,6 @@ const int32_t* topo_get_node_range_lengths() {
     return myTopoNodeRangeLengths;
 }
 
-const topostation_t* topo_get_stations() {
-    return myTopoStations;
-}
-
 void compute_addforce_topoEffective ( mesh_t     *myMesh,
                                       mysolver_t *mySolver,
                                       double      theDeltaTSquared ) {
@@ -3451,4 +3447,5 @@ int compute_tetra_displ (double *dis_x, double *dis_y, double *dis_z,
 return 0;
 
 }
+
 
