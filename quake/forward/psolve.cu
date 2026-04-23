@@ -6967,6 +6967,7 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   /* Copy tm2 to tm3 for accelerations */
   if (Param.printStationAccelerations == YES) {
+    Timer_Start("Station Accel History Copy");
     /* Save tm3 for accelerations */
     for (nindex = 0; nindex < mesh->nharbored; nindex++) {
       fvector_t* tm2Disp = solver->tm2 + nindex;
@@ -6977,22 +6978,27 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
       tm3Disp->f[2] = tm2Disp->f[2];
 
     } /* for (nindex ...): all my harbored nodes */
+    Timer_Stop("Station Accel History Copy");
   }
 
   /* Wait for the appropriate physics calculation to complete */
   if (Param.theTypeOfDamping != BKT) {
     if (Param.theStiffness == EFFECTIVE) {
+      Timer_Start("Force Stream Sync");
       Timer_Start("Compute addforces e");
       /* Uncomment for timing tests */
       cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
       Timer_Stop("Compute addforces e");
+      Timer_Stop("Force Stream Sync");
     }
 
   } else {
+    Timer_Start("Force Stream Sync");
     Timer_Start("Damping addforce");
     /* Uncomment for timing tests */
     cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
     Timer_Stop("Damping addforce");
+    Timer_Stop("Force Stream Sync");
   }
 
   return;
@@ -7228,6 +7234,18 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Physics Force Wait/Post",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
+  if (Timer_Exists("Station Accel History Copy")) {
+    Timer_Reduce("Station Accel History Copy",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force Stream Sync")) {
+    Timer_Reduce("Force Stream Sync", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Force Post CPU")) {
+    Timer_Reduce("Force Post CPU", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   if (Timer_Exists("Physics Displacement Enqueue")) {
     Timer_Reduce("Physics Displacement Enqueue",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
@@ -7441,12 +7459,14 @@ static void solver_run() {
     Timer_Start("Physics Force Wait/Post");
     solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
 
+    Timer_Start("Force Post CPU");
     solver_compute_force_gravity(Global.mySolver, Global.myMesh, step);
     solver_compute_force_nonlinear(Global.mySolver, Global.myMesh,
                                    Param.theDeltaTSquared);
     solver_compute_force_planewaves(Global.myMesh, Global.mySolver,
                                     Param.theDeltaT, step, Global.theK1,
                                     Global.theK2);
+    Timer_Stop("Force Post CPU");
     Timer_Stop("Physics Force Wait/Post");
 
     Timer_Stop("Compute Physics");
@@ -10689,6 +10709,9 @@ static void print_timing_stat() {
   if (Timer_Exists("Physics Force Prep") ||
       Timer_Exists("Physics Force Kernels Enqueue") ||
       Timer_Exists("Physics Force Wait/Post") ||
+      Timer_Exists("Station Accel History Copy") ||
+      Timer_Exists("Force Stream Sync") ||
+      Timer_Exists("Force Post CPU") ||
       Timer_Exists("Physics Displacement Enqueue") ||
       Timer_Exists("Physics Displacement Wait/Post")) {
     printf("    Physics phase internals\n");
@@ -10715,6 +10738,30 @@ static void print_timing_stat() {
           Timer_Value("Physics Force Wait/Post", AVERAGE),
           Timer_Value("Physics Force Wait/Post", MAX),
           Timer_Value("Physics Force Wait/Post", MIN));
+    }
+    if (Timer_Exists("Station Accel History Copy")) {
+      printf(
+          "      Station Accel History Copy    : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Station Accel History Copy", AVERAGE),
+          Timer_Value("Station Accel History Copy", MAX),
+          Timer_Value("Station Accel History Copy", MIN));
+    }
+    if (Timer_Exists("Force Stream Sync")) {
+      printf(
+          "      Force Stream Sync             : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force Stream Sync", AVERAGE),
+          Timer_Value("Force Stream Sync", MAX),
+          Timer_Value("Force Stream Sync", MIN));
+    }
+    if (Timer_Exists("Force Post CPU")) {
+      printf(
+          "      Force Post CPU                : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force Post CPU", AVERAGE),
+          Timer_Value("Force Post CPU", MAX),
+          Timer_Value("Force Post CPU", MIN));
     }
     if (Timer_Exists("Physics Displacement Enqueue")) {
       printf(
