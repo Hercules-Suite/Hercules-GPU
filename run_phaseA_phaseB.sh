@@ -272,12 +272,6 @@ if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   exit 1
 fi
 
-if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
-  echo "ERROR: requested Phase B ranks (${PHASE_B_NP}) exceed allocated nodes (${ALLOC_NODES})." >&2
-  echo "       Use <= allocated node count to guarantee one rank per node." >&2
-  exit 1
-fi
-
 echo "=== Two-phase run ==="
 echo "MPI launcher:   ${MPI_RUN}"
 echo "psolve binary:  ${PSOLVE_BIN}"
@@ -338,9 +332,23 @@ echo
 PHASE_B_MAP_MODE="${PHASE_B_MAP_MODE:-auto}"
 PHASE_B_MAP_ARGS=()
 PHASE_B_MAP_DESC=""
+PHASE_B_RANKS_PER_NODE=""
+
+if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
+  if (( PHASE_B_NP % ALLOC_NODES == 0 )); then
+    PHASE_B_RANKS_PER_NODE="$((PHASE_B_NP / ALLOC_NODES))"
+  fi
+fi
 
 case "${PHASE_B_MAP_MODE}" in
   per-node)
+    if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
+      echo "ERROR: Phase B map mode 'per-node' allows at most one rank per allocated node." >&2
+      echo "       Requested Phase B ranks: ${PHASE_B_NP}" >&2
+      echo "       Allocated nodes:         ${ALLOC_NODES}" >&2
+      echo "       Use PHASE_B_MAP_MODE=auto for multi-GPU nodes." >&2
+      exit 1
+    fi
     PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
     PHASE_B_MAP_DESC="per-node"
     ;;
@@ -357,6 +365,14 @@ case "${PHASE_B_MAP_MODE}" in
     if [[ "${ALLOC_NODES}" -gt 1 ]] && [[ "${PHASE_B_NP}" -le "${ALLOC_NODES}" ]]; then
       PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
       PHASE_B_MAP_DESC="auto(per-node)"
+    elif [[ -n "${PHASE_B_RANKS_PER_NODE}" ]]; then
+      if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node, PE=${OMP_NUM_THREADS})"
+      else
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node" --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node)"
+      fi
     else
       if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
         PHASE_B_MAP_ARGS=(--map-by "slot:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
