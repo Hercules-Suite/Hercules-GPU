@@ -135,6 +135,7 @@ static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
+static int32_t g_meshImportBootstrapLevel = -1;
 static cudaEvent_t g_forceUploadSourceSafeEvent;
 static int32_t g_forceUploadSourceSafeEventInit = 0;
 static int32_t g_forceUploadSourceSafePending = 0;
@@ -3119,36 +3120,6 @@ static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
   return 0;
 }
 
-static int32_t mesh_etree_lookup_dense_fallback(const octant_t* leaf,
-                                                tick_t edge_ticks,
-                                                etree_addr_t* hit_addr,
-                                                mdata_t* hit_data,
-                                                etree_addr_t* search_addr_out) {
-  /*
-   * Single-rank mesh import starts from much coarser octants than the
-   * multi-rank path. For topography-trimmed meshes, the usual handful of
-   * probe points can all land in air even though the octant still intersects
-   * retained mesh below. Use a denser fallback stencil only after the fast
-   * probes miss.
-   */
-  const int32_t xy_nums[] = {2, 8, 14}; /* 1/8, 1/2, 7/8 */
-  int32_t ix, iy, iz;
-
-  for (iz = 1; iz <= 15; iz++) {
-    for (iy = 0; iy < (int32_t)(sizeof(xy_nums) / sizeof(xy_nums[0])); iy++) {
-      for (ix = 0; ix < (int32_t)(sizeof(xy_nums) / sizeof(xy_nums[0])); ix++) {
-        if (mesh_etree_lookup_try(leaf, edge_ticks, xy_nums[ix], xy_nums[iy],
-                                  iz, 16, hit_addr, hit_data,
-                                  search_addr_out) == 0) {
-          return 0;
-        }
-      }
-    }
-  }
-
-  return -1;
-}
-
 static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
                                  mdata_t* hit_data) {
   tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
@@ -3177,11 +3148,6 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
                               &search_addr) == 0) {
       return 0;
     }
-  }
-
-  if (mesh_etree_lookup_dense_fallback(leaf, edge_ticks, hit_addr, hit_data,
-                                       &search_addr) == 0) {
-    return 0;
   }
 
   fprintf(stderr,
@@ -3292,6 +3258,24 @@ static void mesh_import_apply_properties(void) {
   }
 }
 
+static int32_t toexpand_mesh_import_bootstrap(octant_t* leaf, double ticksize,
+                                              const void* data) {
+  (void)ticksize;
+  (void)data;
+  return (g_meshImportBootstrapLevel >= 0) &&
+         (leaf->level < g_meshImportBootstrapLevel);
+}
+
+static void setrec_mesh_import_bootstrap(octant_t* leaf, double ticksize,
+                                         void* data) {
+  (void)leaf;
+  (void)ticksize;
+
+  if (data != NULL) {
+    *((int32_t*)data) = -1;
+  }
+}
+
 static void mesh_generate_from_etree(void) {
   int32_t pass;
   int converged = 0;
@@ -3329,6 +3313,24 @@ static void mesh_generate_from_etree(void) {
 
   if (Param.drmImplement == YES) {
     drm_fix_coordinates(Global.myOctree->ticksize);
+  }
+
+  if (Global.theGroupSize == 1) {
+    /*
+     * Multi-rank imports start from a pre-refined tree inside octor_newtree().
+     * Mirror that on single-rank runs so mesh-etree refinement starts from
+     * comparable leaf sizes instead of probing very coarse root cells.
+     */
+    g_meshImportBootstrapLevel = 4;
+    if (octor_refinetree(Global.myOctree, toexpand_mesh_import_bootstrap,
+                         setrec_mesh_import_bootstrap) != 0) {
+      fprintf(stderr,
+              "Thread %d: mesh_generate_from_etree: fail to bootstrap single-rank import tree\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    g_meshImportBootstrapLevel = -1;
   }
 
   Global.theMeshInputEp =
