@@ -122,6 +122,7 @@ static int32_t g_planeIOServerFirstRank = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
+static int32_t g_planePrintSequence = 0;
 
 static void plane_unpack_message(const double* messageBuffer, int recvCount) {
 	int offset = 0;
@@ -1304,8 +1305,9 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 	} /*for iStrips*/
 
 	if (planeOffset > 0) {
+	    int planeTag = g_planePrintSequence * theNumberOfPlanes + iPlane;
 	    MPI_Send(planeBuffer, planeOffset, MPI_DOUBLE,
-		     thePlanes[iPlane].IO_PE_num, iPlane, comm_IO);
+		     thePlanes[iPlane].IO_PE_num, planeTag, comm_IO);
 	}
 
 
@@ -1313,6 +1315,8 @@ int New_planes_print(int32_t PENum, mysolver_t* mySolver, int theNumberOfPlanes)
 
 
     } /* for iPlane */
+
+    g_planePrintSequence++;
 
     return 1;
 }
@@ -1446,17 +1450,23 @@ void planes_IO_PES_main(int32_t PEnum){
 	}
 	/* else pick this plane and fill in first strip */
 	else{
-	    iPlane = status.MPI_TAG;
+	    int planeTag = status.MPI_TAG;
+	    iPlane = planeTag % theNumberOfPlanes;
+	    {
+		int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
+		    * thePlanes[iPlane].numberofstepsdowndip;
+		memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	    }
 	    plane_unpack_message(planes_stripMPIRecvBuffer, recvStripCount);
-	}
 
-	/* Fill in rest of this plane until full */
-	for (rStrip = 1; rStrip < thePlanes[iPlane].globalnumberofsendersthisplane; rStrip++) {
-	    MPI_Recv( planes_stripMPIRecvBuffer,
-		      buf_len0, MPI_DOUBLE,
-		      MPI_ANY_SOURCE, iPlane, comm_IO, &status );
-	    MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
-	    plane_unpack_message(planes_stripMPIRecvBuffer, recvStripCount);
+	    /* Fill in rest of this plane for the same print sequence tag. */
+	    for (rStrip = 1; rStrip < thePlanes[iPlane].globalnumberofsendersthisplane; rStrip++) {
+		MPI_Recv( planes_stripMPIRecvBuffer,
+			  buf_len0, MPI_DOUBLE,
+			  MPI_ANY_SOURCE, planeTag, comm_IO, &status );
+		MPI_Get_count(&status, MPI_DOUBLE, &recvStripCount);
+		plane_unpack_message(planes_stripMPIRecvBuffer, recvStripCount);
+	    }
 	}
 
 	/* Print just this one plane */
