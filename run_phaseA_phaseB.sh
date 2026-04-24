@@ -235,7 +235,40 @@ detect_alloc_nodes() {
   echo "0"
 }
 
+detect_alloc_cpus_per_node() {
+  local raw=""
+
+  if [[ -n "${SLURM_CPUS_ON_NODE:-}" ]] && [[ "${SLURM_CPUS_ON_NODE}" =~ ^[0-9]+$ ]]; then
+    echo "${SLURM_CPUS_ON_NODE}"
+    return
+  fi
+  if [[ -n "${SLURM_JOB_CPUS_PER_NODE:-}" ]]; then
+    raw="${SLURM_JOB_CPUS_PER_NODE%%,*}"
+    raw="${raw%%(*}"
+    if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+      echo "${raw}"
+      return
+    fi
+  fi
+  if [[ -n "${PBS_NCPUS:-}" ]] && [[ "${PBS_NCPUS}" =~ ^[0-9]+$ ]]; then
+    echo "${PBS_NCPUS}"
+    return
+  fi
+  if command -v getconf >/dev/null 2>&1; then
+    raw="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+      echo "${raw}"
+      return
+    fi
+  fi
+  echo "0"
+}
+
 ALLOC_NODES="$(detect_alloc_nodes)"
+ALLOC_CPUS_PER_NODE="$(detect_alloc_cpus_per_node)"
+
+PHASE_A_OMP_THREADS="${PHASE_A_OMP_NUM_THREADS:-${OMP_NUM_THREADS:-}}"
+PHASE_B_OMP_THREADS="${PHASE_B_OMP_NUM_THREADS:-}"
 
 if [[ $# -ge 1 ]]; then
   PHASE_A_NP="$1"
@@ -292,12 +325,18 @@ if [[ "${ALLOC_NODES}" -gt 0 ]]; then
 else
   echo "Alloc nodes:    unknown (scheduler env not detected)"
 fi
+if [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
+  echo "CPUs/node:      ${ALLOC_CPUS_PER_NODE}"
+fi
 if [[ -n "${PHASE_A_NP}" ]]; then
   echo "Phase A ranks:  ${PHASE_A_NP}"
 else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP}"
+if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
+  echo "Phase A OMP:    ${PHASE_A_OMP_THREADS}"
+fi
 echo
 
 if [[ -n "${PHASE_A_NP}" ]]; then
@@ -316,10 +355,16 @@ if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
   mkdir -p -- "$(dirname -- "${EFFECTIVE_MESH_ETREE_PATH}")"
 fi
 
-if [[ -n "${PHASE_A_NP}" ]]; then
-  "${MPI_RUN}" -np "${PHASE_A_NP}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
+if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
+  A_ENV=(env "OMP_NUM_THREADS=${PHASE_A_OMP_THREADS}")
 else
-  "${MPI_RUN}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
+  A_ENV=()
+fi
+
+if [[ -n "${PHASE_A_NP}" ]]; then
+  "${A_ENV[@]}" "${MPI_RUN}" -np "${PHASE_A_NP}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
+else
+  "${A_ENV[@]}" "${MPI_RUN}" "${A_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_A_IN}"
 fi
 
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
@@ -340,6 +385,25 @@ if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; t
   fi
 fi
 
+if [[ -z "${PHASE_B_OMP_THREADS}" ]]; then
+  if [[ -n "${PHASE_B_RANKS_PER_NODE}" ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
+    PHASE_B_OMP_THREADS="$((ALLOC_CPUS_PER_NODE / PHASE_B_RANKS_PER_NODE))"
+  elif [[ -n "${OMP_NUM_THREADS:-}" ]]; then
+    PHASE_B_OMP_THREADS="${OMP_NUM_THREADS}"
+  fi
+fi
+
+if [[ -n "${PHASE_B_RANKS_PER_NODE}" ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]] &&
+   [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+  PHASE_B_TOTAL_CPUS="$((PHASE_B_RANKS_PER_NODE * PHASE_B_OMP_THREADS))"
+  if (( PHASE_B_TOTAL_CPUS > ALLOC_CPUS_PER_NODE )); then
+    echo "ERROR: Phase B requests ${PHASE_B_RANKS_PER_NODE} ranks/node x ${PHASE_B_OMP_THREADS} OMP threads" >&2
+    echo "       = ${PHASE_B_TOTAL_CPUS} CPUs/node, but only ${ALLOC_CPUS_PER_NODE} CPUs/node are available." >&2
+    echo "       Set PHASE_B_OMP_NUM_THREADS to at most $((ALLOC_CPUS_PER_NODE / PHASE_B_RANKS_PER_NODE))." >&2
+    exit 1
+  fi
+fi
+
 case "${PHASE_B_MAP_MODE}" in
   per-node)
     if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
@@ -353,9 +417,9 @@ case "${PHASE_B_MAP_MODE}" in
     PHASE_B_MAP_DESC="per-node"
     ;;
   single-node)
-    if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
-      PHASE_B_MAP_ARGS=(--map-by "slot:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
-      PHASE_B_MAP_DESC="single-node slot binding (PE=${OMP_NUM_THREADS})"
+    if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+      PHASE_B_MAP_ARGS=(--map-by "slot:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
+      PHASE_B_MAP_DESC="single-node slot binding (PE=${PHASE_B_OMP_THREADS})"
     else
       PHASE_B_MAP_ARGS=(--map-by slot --bind-to core --rank-by slot)
       PHASE_B_MAP_DESC="single-node slot binding"
@@ -366,17 +430,17 @@ case "${PHASE_B_MAP_MODE}" in
       PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
       PHASE_B_MAP_DESC="auto(per-node)"
     elif [[ -n "${PHASE_B_RANKS_PER_NODE}" ]]; then
-      if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
-        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node, PE=${OMP_NUM_THREADS})"
+      if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node, PE=${PHASE_B_OMP_THREADS})"
       else
         PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node" --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node)"
       fi
     else
-      if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${OMP_NUM_THREADS}" -gt 0 ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "slot:PE=${OMP_NUM_THREADS}" --bind-to core --rank-by slot)
-        PHASE_B_MAP_DESC="auto(single-node, PE=${OMP_NUM_THREADS})"
+      if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "slot:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
+        PHASE_B_MAP_DESC="auto(single-node, PE=${PHASE_B_OMP_THREADS})"
       else
         PHASE_B_MAP_ARGS=(--map-by slot --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(single-node)"
@@ -389,6 +453,9 @@ case "${PHASE_B_MAP_MODE}" in
     ;;
 esac
 
+if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
+  echo "Phase B OMP:    ${PHASE_B_OMP_THREADS}"
+fi
 echo "Phase B mapping: ${PHASE_B_MAP_DESC}"
 echo "[Phase B] ${MPI_RUN} -np ${PHASE_B_NP} ${PHASE_B_MAP_ARGS[*]} ${PSOLVE_BIN} ${PHASE_B_IN}"
 if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
@@ -397,7 +464,13 @@ if [[ -n "${PHASE_B_MPI_ARGS}" ]]; then
 else
   B_ARGS=()
 fi
-"${MPI_RUN}" -np "${PHASE_B_NP}" "${PHASE_B_MAP_ARGS[@]}" "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 
+if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
+  B_ENV=(env "OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
+else
+  B_ENV=()
+fi
+
+"${B_ENV[@]}" "${MPI_RUN}" -np "${PHASE_B_NP}" "${PHASE_B_MAP_ARGS[@]}" "${B_ARGS[@]}" "${PSOLVE_BIN}" "${PHASE_B_IN}"
 echo
 echo "Two-phase run completed."
