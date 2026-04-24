@@ -3119,6 +3119,36 @@ static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
   return 0;
 }
 
+static int32_t mesh_etree_lookup_dense_fallback(const octant_t* leaf,
+                                                tick_t edge_ticks,
+                                                etree_addr_t* hit_addr,
+                                                mdata_t* hit_data,
+                                                etree_addr_t* search_addr_out) {
+  /*
+   * Single-rank mesh import starts from much coarser octants than the
+   * multi-rank path. For topography-trimmed meshes, the usual handful of
+   * probe points can all land in air even though the octant still intersects
+   * retained mesh below. Use a denser fallback stencil only after the fast
+   * probes miss.
+   */
+  const int32_t xy_nums[] = {2, 8, 14}; /* 1/8, 1/2, 7/8 */
+  int32_t ix, iy, iz;
+
+  for (iz = 1; iz <= 15; iz++) {
+    for (iy = 0; iy < (int32_t)(sizeof(xy_nums) / sizeof(xy_nums[0])); iy++) {
+      for (ix = 0; ix < (int32_t)(sizeof(xy_nums) / sizeof(xy_nums[0])); ix++) {
+        if (mesh_etree_lookup_try(leaf, edge_ticks, xy_nums[ix], xy_nums[iy],
+                                  iz, 16, hit_addr, hit_data,
+                                  search_addr_out) == 0) {
+          return 0;
+        }
+      }
+    }
+  }
+
+  return -1;
+}
+
 static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
                                  mdata_t* hit_data) {
   tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
@@ -3147,6 +3177,11 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
                               &search_addr) == 0) {
       return 0;
     }
+  }
+
+  if (mesh_etree_lookup_dense_fallback(leaf, edge_ticks, hit_addr, hit_data,
+                                       &search_addr) == 0) {
+    return 0;
   }
 
   fprintf(stderr,
