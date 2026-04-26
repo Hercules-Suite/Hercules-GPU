@@ -104,14 +104,6 @@ static double g_dampingBkt2KappaExpCoef1 = 0.0;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
-static int32_t* g_forceCommNodeListDevice = NULL;
-static int32_t* g_forceCommNodeListHost = NULL;
-static fvector_t* g_forceCommForcesDevice = NULL;
-static fvector_t* g_forceCommForcesHost = NULL;
-static int32_t g_forceCommNodeCapacity = 0;
-static int32_t g_forceCommNodeCount = -1;
-static int32_t g_forceCommPathReported = -1;
-static int32_t g_forceCommForcesHostPinned = 0;
 static int32_t* g_sparseNodeListDevice = NULL;
 static fvector_t* g_sparseForcesDevice = NULL;
 static int32_t g_sparseNodeCapacity = 0;
@@ -350,7 +342,6 @@ static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
-static void solver_load_forces_comm_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
 static int32_t solver_sparse_clear_mode(void);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
@@ -376,8 +367,6 @@ static void solver_record_gpu_event(mysolver_t* solver, int eventID,
                                     const char* eventLabel);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
-static int32_t messenger_append_mapping_list(messenger_t* first, int32_t* out,
-                                             int32_t cursor);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
 
 static int interpolate_station_displacements(int32_t step);
@@ -5758,31 +5747,6 @@ static void solver_delete() {
   }
   g_sourceNodeCapacity = 0;
 
-  if (g_forceCommNodeListDevice != NULL) {
-    cudaFree(g_forceCommNodeListDevice);
-    g_forceCommNodeListDevice = NULL;
-  }
-  if (g_forceCommNodeListHost != NULL) {
-    free(g_forceCommNodeListHost);
-    g_forceCommNodeListHost = NULL;
-  }
-  if (g_forceCommForcesDevice != NULL) {
-    cudaFree(g_forceCommForcesDevice);
-    g_forceCommForcesDevice = NULL;
-  }
-  if (g_forceCommForcesHost != NULL) {
-    if (g_forceCommForcesHostPinned) {
-      cudaFreeHost(g_forceCommForcesHost);
-    } else {
-      free(g_forceCommForcesHost);
-    }
-    g_forceCommForcesHost = NULL;
-  }
-  g_forceCommNodeCapacity = 0;
-  g_forceCommNodeCount = -1;
-  g_forceCommPathReported = -1;
-  g_forceCommForcesHostPinned = 0;
-
   if (g_sparseNodeListDevice != NULL) {
     cudaFree(g_sparseNodeListDevice);
     g_sparseNodeListDevice = NULL;
@@ -6737,211 +6701,6 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
   return;
-}
-
-static int32_t messenger_append_mapping_list(messenger_t* first, int32_t* out,
-                                             int32_t cursor) {
-  messenger_t* messenger = first;
-
-  while (messenger != NULL) {
-    if ((messenger->nodecount > 0) && (messenger->mapping != NULL)) {
-      memcpy(out + cursor, messenger->mapping,
-             (size_t)messenger->nodecount * sizeof(int32_t));
-      cursor += messenger->nodecount;
-    }
-    messenger = messenger->next;
-  }
-
-  return cursor;
-}
-
-static void solver_init_force_comm_gpu_buffers(mysolver_t* solver,
-                                               mesh_t* mesh) {
-  int32_t roughCount;
-  int32_t cursor;
-  int32_t uniqueCount;
-  int32_t idx;
-  int32_t useSparse;
-  int32_t* nodeListHost;
-
-  if (g_forceCommNodeCount >= 0) {
-    return;
-  }
-
-  compute_adjust_cache_build();
-
-  roughCount = messenger_countnodes(Global.mySolver->dn_sched->first_c) +
-               messenger_countnodes(Global.mySolver->dn_sched->first_s) +
-               messenger_countnodes(Global.mySolver->an_sched->first_c) +
-               messenger_countnodes(Global.mySolver->an_sched->first_s) +
-               g_adjustDnCount + g_adjustParentCount;
-
-  if (roughCount <= 0) {
-    g_forceCommNodeCount = 0;
-    return;
-  }
-
-  nodeListHost = (int32_t*)malloc((size_t)roughCount * sizeof(int32_t));
-  if (nodeListHost == NULL) {
-    fprintf(stderr, "Thread %d: force-comm node list host alloc failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  cursor = 0;
-  cursor = messenger_append_mapping_list(Global.mySolver->dn_sched->first_c,
-                                         nodeListHost, cursor);
-  cursor = messenger_append_mapping_list(Global.mySolver->dn_sched->first_s,
-                                         nodeListHost, cursor);
-  cursor = messenger_append_mapping_list(Global.mySolver->an_sched->first_c,
-                                         nodeListHost, cursor);
-  cursor = messenger_append_mapping_list(Global.mySolver->an_sched->first_s,
-                                         nodeListHost, cursor);
-
-  for (idx = 0; idx < g_adjustDnCount; idx++) {
-    nodeListHost[cursor++] = g_adjustDanglingLnid[idx];
-  }
-  for (idx = 0; idx < g_adjustParentCount; idx++) {
-    nodeListHost[cursor++] = g_adjustParentIds[idx];
-  }
-
-  if (cursor != roughCount) {
-    free(nodeListHost);
-    fprintf(stderr,
-            "Thread %d: force-comm node list count mismatch (%d vs %d)\n",
-            Global.myID, cursor, roughCount);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  qsort(nodeListHost, (size_t)cursor, sizeof(int32_t), compare_int32_asc);
-
-  uniqueCount = 0;
-  for (idx = 0; idx < cursor; idx++) {
-    if ((uniqueCount == 0) || (nodeListHost[idx] != nodeListHost[uniqueCount - 1])) {
-      nodeListHost[uniqueCount++] = nodeListHost[idx];
-    }
-  }
-
-  if (uniqueCount > 0) {
-    g_forceCommNodeListHost =
-        (int32_t*)malloc((size_t)uniqueCount * sizeof(int32_t));
-    if (g_forceCommNodeListHost == NULL) {
-      free(nodeListHost);
-      fprintf(stderr, "Thread %d: force-comm node list cache alloc failed\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    memcpy(g_forceCommNodeListHost, nodeListHost,
-           (size_t)uniqueCount * sizeof(int32_t));
-  }
-  free(nodeListHost);
-
-  g_forceCommNodeCount = uniqueCount;
-
-  if (uniqueCount <= 0) {
-    return;
-  }
-
-  if (cudaMalloc((void**)&g_forceCommNodeListDevice,
-                 (size_t)uniqueCount * sizeof(int32_t)) != cudaSuccess) {
-    fprintf(stderr, "Thread %d: force-comm node list device alloc failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-  if (cudaMemcpy(g_forceCommNodeListDevice, g_forceCommNodeListHost,
-                 (size_t)uniqueCount * sizeof(int32_t),
-                 cudaMemcpyHostToDevice) != cudaSuccess) {
-    fprintf(stderr, "Thread %d: force-comm node list device copy failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-  solver->gpu_spec->numbytespci +=
-      (int64_t)uniqueCount * sizeof(int32_t);
-
-  if (cudaMalloc((void**)&g_forceCommForcesDevice,
-                 (size_t)uniqueCount * sizeof(fvector_t)) != cudaSuccess) {
-    fprintf(stderr, "Thread %d: force-comm force device alloc failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-  g_forceCommForcesHostPinned = 0;
-  if (cudaHostAlloc((void**)&g_forceCommForcesHost,
-                    (size_t)uniqueCount * sizeof(fvector_t),
-                    cudaHostAllocDefault) != cudaSuccess) {
-    g_forceCommForcesHost = (fvector_t*)malloc((size_t)uniqueCount *
-                                               sizeof(fvector_t));
-  } else {
-    g_forceCommForcesHostPinned = 1;
-  }
-  if (g_forceCommForcesHost == NULL) {
-    fprintf(stderr, "Thread %d: force-comm force host alloc failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  g_forceCommNodeCapacity = uniqueCount;
-
-  useSparse =
-      ((mesh->nharbored > 0) && ((uniqueCount * 4) < mesh->nharbored)) ? 1 : 0;
-  if ((Global.myID == 0) && (g_forceCommPathReported != useSparse)) {
-    monitor_print("Post-comm force refresh path: %s (nodes=%d, harbored=%d)\n",
-                  useSparse ? "sparse" : "dense", uniqueCount,
-                  mesh->nharbored);
-    g_forceCommPathReported = useSparse;
-  }
-}
-
-static void solver_load_forces_comm_gpu(mysolver_t* solver, mesh_t* mesh) {
-  int32_t idx;
-  int blocksize;
-  int gridsize;
-
-  solver_init_force_comm_gpu_buffers(solver, mesh);
-
-  if (g_forceCommNodeCount <= 0) {
-    g_forceUploadSourceSafePending = 0;
-    return;
-  }
-
-  if ((mesh->nharbored <= 0) || ((g_forceCommNodeCount * 4) >= mesh->nharbored)) {
-    solver_load_forces_gpu(solver, mesh);
-    return;
-  }
-
-  g_forceUploadSourceSafePending = 0;
-
-  for (idx = 0; idx < g_forceCommNodeCount; idx++) {
-    int32_t lnid = g_forceCommNodeListHost[idx];
-    g_forceCommForcesHost[idx] = solver->force[lnid];
-  }
-
-  cudaMemcpyAsync(g_forceCommForcesDevice, g_forceCommForcesHost,
-                  (size_t)g_forceCommNodeCount * sizeof(fvector_t),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      (int64_t)g_forceCommNodeCount * sizeof(fvector_t);
-
-  blocksize = 256;
-  gridsize = (g_forceCommNodeCount + blocksize - 1) / blocksize;
-  kernelSparseForceScatter<<<gridsize, blocksize, 0,
-                             solver->streams[CUDA_STREAM_MAIN]>>>(
-      g_forceCommNodeCount, g_forceCommNodeListDevice, g_forceCommForcesDevice,
-      solver->gpuData->forceDevice);
-
-  cudaError_t cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: post-comm force scatter kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
 }
 
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -7950,7 +7709,7 @@ static void solver_run() {
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Load Forces");
-    solver_load_forces_comm_gpu(Global.mySolver, Global.myMesh);
+    solver_load_forces_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Load Forces");
     Timer_Stop("GPU Memory Copy");
 
