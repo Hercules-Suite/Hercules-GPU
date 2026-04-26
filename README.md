@@ -62,6 +62,11 @@ Two-phase script defaults:
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_SPARSE_UPLOAD_MODE=dense`,
 	These are the current recommended runtime defaults.
+- OpenMP thread defaults:
+	Phase A defaults to `PHASE_A_OMP_NUM_THREADS=1` when unset.
+	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it auto-derives
+	a per-rank value for multi-rank-per-node launches, or falls back to
+	`OMP_NUM_THREADS` for single-rank-per-node / direct runs.
 - You can still override any of these by exporting your own value before running the script.
 
 Two-phase job run (Phase A then Phase B):
@@ -74,7 +79,8 @@ Example (cluster case directory + external GPU binary):
 ```bash
 cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
 
-export OMP_NUM_THREADS=64
+export PHASE_A_OMP_NUM_THREADS=1
+export PHASE_B_OMP_NUM_THREADS=64
 # Optional: override script defaults when needed
 # export OMP_PROC_BIND=spread
 # export OMP_PLACES=threads
