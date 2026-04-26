@@ -88,6 +88,19 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
+static int32_t g_dampingBkt2CoeffsReady = 0;
+static double g_dampingBkt2ShearCoef1 = 0.0;
+static double g_dampingBkt2ShearCoef2 = 0.0;
+static double g_dampingBkt2ShearExpCoef0 = 0.0;
+static double g_dampingBkt2ShearCoef3 = 0.0;
+static double g_dampingBkt2ShearCoef4 = 0.0;
+static double g_dampingBkt2ShearExpCoef1 = 0.0;
+static double g_dampingBkt2KappaCoef1 = 0.0;
+static double g_dampingBkt2KappaCoef2 = 0.0;
+static double g_dampingBkt2KappaExpCoef0 = 0.0;
+static double g_dampingBkt2KappaCoef3 = 0.0;
+static double g_dampingBkt2KappaCoef4 = 0.0;
+static double g_dampingBkt2KappaExpCoef1 = 0.0;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
@@ -5513,10 +5526,17 @@ static void solver_init() {
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_CONV];
-  strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV);
-  k->handle = (char*)kernelDampingCalcConv;
-  k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                   (char*)kernelDampingCalcConv, 0);
+  if (Param.theTypeOfDamping == BKT2) {
+    strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT2);
+    k->handle = (char*)kernelDampingCalcConvBkt2;
+    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
+                                     (char*)kernelDampingCalcConvBkt2, 0);
+  } else {
+    strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV);
+    k->handle = (char*)kernelDampingCalcConv;
+    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
+                                     (char*)kernelDampingCalcConv, 0);
+  }
   k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
@@ -5715,6 +5735,7 @@ static void solver_delete() {
     g_dampingElemMapperDevice = NULL;
   }
   g_dampingElemCountGPU = -1;
+  g_dampingBkt2CoeffsReady = 0;
 
   if (g_sourceNodeListDevice != NULL) {
     cudaFree(g_sourceNodeListDevice);
@@ -6149,17 +6170,72 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
   int32_t eindex;
   int32_t count;
   int32_t* mapperHost;
+  const int need_bkt2_coeffs =
+      ((Param.theTypeOfDamping == BKT2) && (g_dampingBkt2CoeffsReady == 0));
+  const double bkt2_rmax = Param.theDeltaT;
+  int have_bkt2_shear = 0;
+  int have_bkt2_kappa = 0;
 
   if (g_dampingElemCountGPU >= 0) {
     return;
+  }
+
+  if (need_bkt2_coeffs) {
+    g_dampingBkt2ShearCoef1 = 0.0;
+    g_dampingBkt2ShearCoef2 = 0.0;
+    g_dampingBkt2ShearExpCoef0 = 0.0;
+    g_dampingBkt2ShearCoef3 = 0.0;
+    g_dampingBkt2ShearCoef4 = 0.0;
+    g_dampingBkt2ShearExpCoef1 = 0.0;
+    g_dampingBkt2KappaCoef1 = 0.0;
+    g_dampingBkt2KappaCoef2 = 0.0;
+    g_dampingBkt2KappaExpCoef0 = 0.0;
+    g_dampingBkt2KappaCoef3 = 0.0;
+    g_dampingBkt2KappaCoef4 = 0.0;
+    g_dampingBkt2KappaExpCoef1 = 0.0;
   }
 
   count = 0;
   for (eindex = 0; eindex < mesh->lenum; eindex++) {
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
+      if (need_bkt2_coeffs) {
+        edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+        if ((!have_bkt2_shear) &&
+            ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f))) {
+          const double g0 = edata->g0_shear * bkt2_rmax;
+          const double g1 = edata->g1_shear * bkt2_rmax;
+          g_dampingBkt2ShearCoef1 = g0 / 2.0;
+          g_dampingBkt2ShearCoef2 =
+              g_dampingBkt2ShearCoef1 * (1.0 - g0);
+          g_dampingBkt2ShearExpCoef0 = exp(-g0);
+          g_dampingBkt2ShearCoef3 = g1 / 2.0;
+          g_dampingBkt2ShearCoef4 =
+              g_dampingBkt2ShearCoef3 * (1.0 - g1);
+          g_dampingBkt2ShearExpCoef1 = exp(-g1);
+          have_bkt2_shear = 1;
+        }
+        if ((!have_bkt2_kappa) &&
+            ((edata->a0_kappa != 0.0f) || (edata->a1_kappa != 0.0f))) {
+          const double g0 = edata->g0_kappa * bkt2_rmax;
+          const double g1 = edata->g1_kappa * bkt2_rmax;
+          g_dampingBkt2KappaCoef1 = g0 / 2.0;
+          g_dampingBkt2KappaCoef2 =
+              g_dampingBkt2KappaCoef1 * (1.0 - g0);
+          g_dampingBkt2KappaExpCoef0 = exp(-g0);
+          g_dampingBkt2KappaCoef3 = g1 / 2.0;
+          g_dampingBkt2KappaCoef4 =
+              g_dampingBkt2KappaCoef3 * (1.0 - g1);
+          g_dampingBkt2KappaExpCoef1 = exp(-g1);
+          have_bkt2_kappa = 1;
+        }
+      }
       count++;
     }
+  }
+
+  if (need_bkt2_coeffs) {
+    g_dampingBkt2CoeffsReady = 1;
   }
 
   g_dampingElemCountGPU = count;
@@ -6362,11 +6438,24 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   int sharedmem = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].sharedmem;
 
   cudaGetLastError();
-  kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,
-                          solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
-      (int32_t)Param.theTypeOfDamping, g_dampingElemCountGPU,
-      g_dampingElemMapperDevice);
+  if (Param.theTypeOfDamping == BKT2) {
+    kernelDampingCalcConvBkt2<<<gridsize, blocksize, sharedmem,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
+        g_dampingBkt2ShearCoef1, g_dampingBkt2ShearCoef2,
+        g_dampingBkt2ShearExpCoef0, g_dampingBkt2ShearCoef3,
+        g_dampingBkt2ShearCoef4, g_dampingBkt2ShearExpCoef1,
+        g_dampingBkt2KappaCoef1, g_dampingBkt2KappaCoef2,
+        g_dampingBkt2KappaExpCoef0, g_dampingBkt2KappaCoef3,
+        g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
+        g_dampingElemCountGPU, g_dampingElemMapperDevice);
+  } else {
+    kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,
+                            solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
+        (int32_t)Param.theTypeOfDamping, g_dampingElemCountGPU,
+        g_dampingElemMapperDevice);
+  }
 
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {

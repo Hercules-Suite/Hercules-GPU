@@ -70,6 +70,7 @@
 /* Kernel names */
 #define CUDA_KERNEL_NAME_STIFFNESS_FORCE       "kernelStiffnessCalcLocal"
 #define CUDA_KERNEL_NAME_DAMPING_CONV          "kernelDampingCalcConv"
+#define CUDA_KERNEL_NAME_DAMPING_CONV_BKT2     "kernelDampingCalcConvBkt2"
 #define CUDA_KERNEL_NAME_DAMPING_FORCE         "kernelDampingCalcLocal"
 #define CUDA_KERNEL_NAME_DISPLACEMENT          "kernelDispCalc"
 

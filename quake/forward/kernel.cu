@@ -280,6 +280,219 @@ void kernelStiffnessCalcLocal(int32_t lenum,
    FLOPs: 63M + 54A + 4T
    MEM  : 4 + 8*(48 + 1) + 2*(8*5 + 8*(6*2 + 3)) = 716
 */
+__global__  void kernelDampingCalcConvBkt2(int32_t lenum,
+                                           int32_t numcomp,
+                                           gpu_data_t *gpuData,
+                                           double rmax,
+                                           double shear_coef_1,
+                                           double shear_coef_2,
+                                           double shear_exp_coef_0,
+                                           double shear_coef_3,
+                                           double shear_coef_4,
+                                           double shear_exp_coef_1,
+                                           double kappa_coef_1,
+                                           double kappa_coef_2,
+                                           double kappa_exp_coef_0,
+                                           double kappa_coef_3,
+                                           double kappa_coef_4,
+                                           double kappa_exp_coef_1,
+                                           int32_t dampingElemCount,
+                                           int32_t* dampingElemMapperDevice)
+{
+  int i;
+  int32_t lin_eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  int32_t eindex;
+
+  if (lin_eindex >= dampingElemCount) {
+    return;
+  }
+
+  eindex = dampingElemMapperDevice[lin_eindex];
+
+  const double b_shear = gpuData->b_shearArrayDevice[eindex];
+  const double a0_shear = gpuData->a0_shearArrayDevice[eindex];
+  const double a1_shear = gpuData->a1_shearArrayDevice[eindex];
+  const double coef_shear = (rmax != 0.0) ? (b_shear / rmax) : 0.0;
+  const int need_conv_history_shear = ((a0_shear != 0.0) || (a1_shear != 0.0));
+  const int do_conv_update_shear =
+      (need_conv_history_shear && (shear_coef_1 != 0.0) &&
+       (shear_coef_3 != 0.0));
+  const int do_damping_calc_shear =
+      (need_conv_history_shear || (b_shear != 0.0));
+
+  const double b_kappa = gpuData->b_kappaArrayDevice[eindex];
+  const double a0_kappa = gpuData->a0_kappaArrayDevice[eindex];
+  const double a1_kappa = gpuData->a1_kappaArrayDevice[eindex];
+  const double coef_kappa = (rmax != 0.0) ? (b_kappa / rmax) : 0.0;
+  const int need_conv_history_kappa =
+      ((a0_kappa != 0.0) || (a1_kappa != 0.0));
+  const int do_conv_update_kappa =
+      (need_conv_history_kappa && (kappa_coef_1 != 0.0) &&
+       (kappa_coef_3 != 0.0));
+  const int do_damping_calc_kappa =
+      (need_conv_history_kappa || (b_kappa != 0.0));
+
+  for (i = 0; i < 8; i++) {
+    const int32_t offset0 = eindex + (i * lenum);
+    const int32_t offset1 = offset0 + numcomp;
+    const int32_t offset2 = offset1 + numcomp;
+    const int32_t lnid = *(gpuData->lnidArrayDevice + offset0);
+    const __restrict__ fvector_t *disp = gpuData->tm1Device + lnid;
+    const solver_float tm1x = disp->f[0];
+    const solver_float tm1y = disp->f[1];
+    const solver_float tm1z = disp->f[2];
+
+    disp = gpuData->tm2Device + lnid;
+    const solver_float tm2x = disp->f[0];
+    const solver_float tm2y = disp->f[1];
+    const solver_float tm2z = disp->f[2];
+
+    if (need_conv_history_shear) {
+      solver_float *shear0_x =
+          (solver_float *)gpuData->conv_shear_1Device + offset0;
+      solver_float *shear0_y =
+          (solver_float *)gpuData->conv_shear_1Device + offset1;
+      solver_float *shear0_z =
+          (solver_float *)gpuData->conv_shear_1Device + offset2;
+      solver_float *shear1_x =
+          (solver_float *)gpuData->conv_shear_2Device + offset0;
+      solver_float *shear1_y =
+          (solver_float *)gpuData->conv_shear_2Device + offset1;
+      solver_float *shear1_z =
+          (solver_float *)gpuData->conv_shear_2Device + offset2;
+      solver_float conv0_x = *shear0_x;
+      solver_float conv0_y = *shear0_y;
+      solver_float conv0_z = *shear0_z;
+      solver_float conv1_x = *shear1_x;
+      solver_float conv1_y = *shear1_y;
+      solver_float conv1_z = *shear1_z;
+
+      if (do_conv_update_shear) {
+        conv0_x = shear_coef_2 * tm1x + shear_coef_1 * tm2x +
+                  shear_exp_coef_0 * conv0_x;
+        conv0_y = shear_coef_2 * tm1y + shear_coef_1 * tm2y +
+                  shear_exp_coef_0 * conv0_y;
+        conv0_z = shear_coef_2 * tm1z + shear_coef_1 * tm2z +
+                  shear_exp_coef_0 * conv0_z;
+        conv1_x = shear_coef_4 * tm1x + shear_coef_3 * tm2x +
+                  shear_exp_coef_1 * conv1_x;
+        conv1_y = shear_coef_4 * tm1y + shear_coef_3 * tm2y +
+                  shear_exp_coef_1 * conv1_y;
+        conv1_z = shear_coef_4 * tm1z + shear_coef_3 * tm2z +
+                  shear_exp_coef_1 * conv1_z;
+
+        *shear0_x = conv0_x;
+        *shear0_y = conv0_y;
+        *shear0_z = conv0_z;
+        *shear1_x = conv1_x;
+        *shear1_y = conv1_y;
+        *shear1_z = conv1_z;
+      }
+
+      solver_float *convVec0 =
+          (solver_float *)gpuData->shearVectorDevice + offset0;
+      solver_float *convVec1 =
+          (solver_float *)gpuData->shearVectorDevice + offset1;
+      solver_float *convVec2 =
+          (solver_float *)gpuData->shearVectorDevice + offset2;
+      *convVec0 = coef_shear * (tm1x - tm2x) -
+                  (a0_shear * conv0_x + a1_shear * conv1_x) + tm1x;
+      *convVec1 = coef_shear * (tm1y - tm2y) -
+                  (a0_shear * conv0_y + a1_shear * conv1_y) + tm1y;
+      *convVec2 = coef_shear * (tm1z - tm2z) -
+                  (a0_shear * conv0_z + a1_shear * conv1_z) + tm1z;
+    } else {
+      solver_float *convVec0 =
+          (solver_float *)gpuData->shearVectorDevice + offset0;
+      solver_float *convVec1 =
+          (solver_float *)gpuData->shearVectorDevice + offset1;
+      solver_float *convVec2 =
+          (solver_float *)gpuData->shearVectorDevice + offset2;
+      if (do_damping_calc_shear) {
+        *convVec0 = coef_shear * (tm1x - tm2x) + tm1x;
+        *convVec1 = coef_shear * (tm1y - tm2y) + tm1y;
+        *convVec2 = coef_shear * (tm1z - tm2z) + tm1z;
+      } else {
+        *convVec0 = tm1x;
+        *convVec1 = tm1y;
+        *convVec2 = tm1z;
+      }
+    }
+
+    if (need_conv_history_kappa) {
+      solver_float *kappa0_x =
+          (solver_float *)gpuData->conv_kappa_1Device + offset0;
+      solver_float *kappa0_y =
+          (solver_float *)gpuData->conv_kappa_1Device + offset1;
+      solver_float *kappa0_z =
+          (solver_float *)gpuData->conv_kappa_1Device + offset2;
+      solver_float *kappa1_x =
+          (solver_float *)gpuData->conv_kappa_2Device + offset0;
+      solver_float *kappa1_y =
+          (solver_float *)gpuData->conv_kappa_2Device + offset1;
+      solver_float *kappa1_z =
+          (solver_float *)gpuData->conv_kappa_2Device + offset2;
+      solver_float conv0_x = *kappa0_x;
+      solver_float conv0_y = *kappa0_y;
+      solver_float conv0_z = *kappa0_z;
+      solver_float conv1_x = *kappa1_x;
+      solver_float conv1_y = *kappa1_y;
+      solver_float conv1_z = *kappa1_z;
+
+      if (do_conv_update_kappa) {
+        conv0_x = kappa_coef_2 * tm1x + kappa_coef_1 * tm2x +
+                  kappa_exp_coef_0 * conv0_x;
+        conv0_y = kappa_coef_2 * tm1y + kappa_coef_1 * tm2y +
+                  kappa_exp_coef_0 * conv0_y;
+        conv0_z = kappa_coef_2 * tm1z + kappa_coef_1 * tm2z +
+                  kappa_exp_coef_0 * conv0_z;
+        conv1_x = kappa_coef_4 * tm1x + kappa_coef_3 * tm2x +
+                  kappa_exp_coef_1 * conv1_x;
+        conv1_y = kappa_coef_4 * tm1y + kappa_coef_3 * tm2y +
+                  kappa_exp_coef_1 * conv1_y;
+        conv1_z = kappa_coef_4 * tm1z + kappa_coef_3 * tm2z +
+                  kappa_exp_coef_1 * conv1_z;
+
+        *kappa0_x = conv0_x;
+        *kappa0_y = conv0_y;
+        *kappa0_z = conv0_z;
+        *kappa1_x = conv1_x;
+        *kappa1_y = conv1_y;
+        *kappa1_z = conv1_z;
+      }
+
+      solver_float *convVec0 =
+          (solver_float *)gpuData->kappaVectorDevice + offset0;
+      solver_float *convVec1 =
+          (solver_float *)gpuData->kappaVectorDevice + offset1;
+      solver_float *convVec2 =
+          (solver_float *)gpuData->kappaVectorDevice + offset2;
+      *convVec0 = coef_kappa * (tm1x - tm2x) -
+                  (a0_kappa * conv0_x + a1_kappa * conv1_x) + tm1x;
+      *convVec1 = coef_kappa * (tm1y - tm2y) -
+                  (a0_kappa * conv0_y + a1_kappa * conv1_y) + tm1y;
+      *convVec2 = coef_kappa * (tm1z - tm2z) -
+                  (a0_kappa * conv0_z + a1_kappa * conv1_z) + tm1z;
+    } else {
+      solver_float *convVec0 =
+          (solver_float *)gpuData->kappaVectorDevice + offset0;
+      solver_float *convVec1 =
+          (solver_float *)gpuData->kappaVectorDevice + offset1;
+      solver_float *convVec2 =
+          (solver_float *)gpuData->kappaVectorDevice + offset2;
+      if (do_damping_calc_kappa) {
+        *convVec0 = coef_kappa * (tm1x - tm2x) + tm1x;
+        *convVec1 = coef_kappa * (tm1y - tm2y) + tm1y;
+        *convVec2 = coef_kappa * (tm1z - tm2z) + tm1z;
+      } else {
+        *convVec0 = tm1x;
+        *convVec1 = tm1y;
+        *convVec2 = tm1z;
+      }
+    }
+  }
+}
+
 __global__  void kernelDampingCalcConv(int32_t lenum,
 				       int32_t numcomp,
 				       gpu_data_t *gpuData,
