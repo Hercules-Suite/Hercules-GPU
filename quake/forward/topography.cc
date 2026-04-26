@@ -59,6 +59,7 @@ static int32_t            *myTopoNodeRangeLengths = NULL;
 static topometh_t         theTopoMethod;
 static topostation_t      *myTopoStations;
 static int32_t            myNumberOfTopoStations = 0;
+static int32_t            myTopoStationsCapacity = 0;
 static int32_t            myNumberOfTopoNonLinElements = 0;
 static noyesflag_t        theNonlinTopo_flag  = NO;
 static noyesflag_t        theTopoBKT_flag  = NO;
@@ -2940,6 +2941,7 @@ void topography_stations_init( mesh_t    *myMesh,
 
     /* Here I allocate memory for all stations */
     XMALLOC_VAR_N( myTopoStations, topostation_t, myNumberOfStations);
+    myTopoStationsCapacity = myNumberOfStations;
 
     /* initialize topographic stations  */
     for (iStation = 0; iStation < myNumberOfStations; iStation++) {
@@ -2948,6 +2950,9 @@ void topography_stations_init( mesh_t    *myMesh,
         myTopoStations[iStation].local_coord[0]          = 0.0;
         myTopoStations[iStation].local_coord[1]          = 0.0;
         myTopoStations[iStation].local_coord[2]          = 0.0;
+        myTopoStations[iStation].prev_disp[0]            = 0.0;
+        myTopoStations[iStation].prev_disp[1]            = 0.0;
+        myTopoStations[iStation].prev_disp[2]            = 0.0;
         myTopoStations[iStation].nodes_to_interpolate[0] = 0;
         myTopoStations[iStation].nodes_to_interpolate[1] = 0;
         myTopoStations[iStation].nodes_to_interpolate[2] = 0;
@@ -3020,6 +3025,52 @@ void topography_stations_init( mesh_t    *myMesh,
 
     //fprintf(stdout,"Topographic Stations count = %d",count);
 
+}
+
+void topography_snapshot_station_history(mysolver_t *mySolver) {
+
+    int32_t iStation;
+
+    if ((myTopoStations == NULL) || (myTopoStationsCapacity == 0) ||
+        (myNumberOfTopoStations == 0) || (theTopoMethod == FEM)) {
+        return;
+    }
+
+    for (iStation = 0; iStation < myTopoStationsCapacity; iStation++) {
+        if (myTopoStations[iStation].TopoStation == 0) {
+            continue;
+        }
+
+        double vx_0  = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[0] ].f[0];
+        double vx_10 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[1] ].f[0] - vx_0;
+        double vx_20 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[2] ].f[0] - vx_0;
+        double vx_30 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[3] ].f[0] - vx_0;
+
+        double vy_0  = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[0] ].f[1];
+        double vy_10 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[1] ].f[1] - vy_0;
+        double vy_20 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[2] ].f[1] - vy_0;
+        double vy_30 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[3] ].f[1] - vy_0;
+
+        double vz_0  = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[0] ].f[2];
+        double vz_10 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[1] ].f[2] - vz_0;
+        double vz_20 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[2] ].f[2] - vz_0;
+        double vz_30 = mySolver->tm2[ myTopoStations[iStation].nodes_to_interpolate[3] ].f[2] - vz_0;
+
+        myTopoStations[iStation].prev_disp[0] =
+            vx_0 + myTopoStations[iStation].local_coord[0] * vx_20
+                 + myTopoStations[iStation].local_coord[1] * vx_10
+                 + myTopoStations[iStation].local_coord[2] * vx_30;
+
+        myTopoStations[iStation].prev_disp[1] =
+            vy_0 + myTopoStations[iStation].local_coord[0] * vy_20
+                 + myTopoStations[iStation].local_coord[1] * vy_10
+                 + myTopoStations[iStation].local_coord[2] * vy_30;
+
+        myTopoStations[iStation].prev_disp[2] =
+            vz_0 + myTopoStations[iStation].local_coord[0] * vz_20
+                 + myTopoStations[iStation].local_coord[1] * vz_10
+                 + myTopoStations[iStation].local_coord[2] * vz_30;
+    }
 }
 
 void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
@@ -3368,22 +3419,6 @@ int compute_tetra_displ (double *dis_x, double *dis_y, double *dis_z,
         double vz_20 = mySolver->tm2[ myTopoStations[statID].nodes_to_interpolate[2] ].f[2] - vz_0;
         double vz_30 = mySolver->tm2[ myTopoStations[statID].nodes_to_interpolate[3] ].f[2] - vz_0;
 
-        /* ========= */
-        double wx_0  = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[0] ].f[0];
-        double wx_10 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[1] ].f[0] - wx_0;
-        double wx_20 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[2] ].f[0] - wx_0;
-        double wx_30 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[3] ].f[0] - wx_0;
-
-        double wy_0  = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[0] ].f[1];
-        double wy_10 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[1] ].f[1] - wy_0;
-        double wy_20 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[2] ].f[1] - wy_0;
-        double wy_30 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[3] ].f[1] - wy_0;
-
-        double wz_0  = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[0] ].f[2];
-        double wz_10 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[1] ].f[2] - wz_0;
-        double wz_20 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[2] ].f[2] - wz_0;
-        double wz_30 = mySolver->tm3[ myTopoStations[statID].nodes_to_interpolate[3] ].f[2] - wz_0;
-
          /*   get displacements */
         *dis_x = ux_0 + myTopoStations[statID].local_coord[0] * ux_20
                       + myTopoStations[statID].local_coord[1] * ux_10
@@ -3420,25 +3455,19 @@ int compute_tetra_displ (double *dis_x, double *dis_y, double *dis_z,
                   - 2.0 * ( vx_0   + myTopoStations[statID].local_coord[0] * vx_20
                                    + myTopoStations[statID].local_coord[1] * vx_10
                                    + myTopoStations[statID].local_coord[2] * vx_30 )
-                  +       ( wx_0   + myTopoStations[statID].local_coord[0] * wx_20
-                                   + myTopoStations[statID].local_coord[1] * wx_10
-                                   + myTopoStations[statID].local_coord[2] * wx_30 ) ) / theDeltaTSquared;
+                  + myTopoStations[statID].prev_disp[0] ) / theDeltaTSquared;
 
         *accel_y  = ( *dis_y
                   - 2.0 * ( vy_0   + myTopoStations[statID].local_coord[0] * vy_20
                                    + myTopoStations[statID].local_coord[1] * vy_10
                                    + myTopoStations[statID].local_coord[2] * vy_30 )
-                  +       ( wy_0   + myTopoStations[statID].local_coord[0] * wy_20
-                                   + myTopoStations[statID].local_coord[1] * wy_10
-                                   + myTopoStations[statID].local_coord[2] * wy_30 ) ) / theDeltaTSquared;
+                  + myTopoStations[statID].prev_disp[1] ) / theDeltaTSquared;
 
         *accel_z  = ( *dis_z
                   - 2.0 * ( vz_0   + myTopoStations[statID].local_coord[0] * vz_20
                                    + myTopoStations[statID].local_coord[1] * vz_10
                                    + myTopoStations[statID].local_coord[2] * vz_30 )
-                  +       ( wz_0   + myTopoStations[statID].local_coord[0] * wz_20
-                                   + myTopoStations[statID].local_coord[1] * wz_10
-                                   + myTopoStations[statID].local_coord[2] * wz_30 ) ) / theDeltaTSquared;
+                  + myTopoStations[statID].prev_disp[2] ) / theDeltaTSquared;
 
         return 1;
 
@@ -3447,5 +3476,3 @@ int compute_tetra_displ (double *dis_x, double *dis_y, double *dis_z,
 return 0;
 
 }
-
-

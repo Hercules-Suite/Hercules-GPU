@@ -351,6 +351,7 @@ static void solver_record_force_upload_source_event(mysolver_t* solver);
 static void solver_wait_force_upload_source_event(void);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
+static void solver_snapshot_station_accel_history(mysolver_t* solver);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -6508,12 +6509,12 @@ static void solver_compute_displacement(mysolver_t* solver, mesh_t* mesh) {
   lnid_t nindex;
 
   Timer_Start("Compute new displacement");
+  solver_snapshot_station_accel_history(solver);
   for (nindex = 0; nindex < mesh->nharbored; nindex++) {
     const n_t* np = &solver->nTable[nindex];
     fvector_t nodalForce = solver->force[nindex];
     const fvector_t* tm1Disp = solver->tm1 + nindex;
     fvector_t* tm2Disp = solver->tm2 + nindex;
-    fvector_t* tm3Disp = solver->tm3 + nindex;
 
     /* total nodal forces */
     nodalForce.f[0] += np->mass2_minusaM[0] * tm1Disp->f[0] -
@@ -6535,13 +6536,6 @@ static void solver_compute_displacement(mysolver_t* solver, mesh_t* mesh) {
     /* Dorian. correct Displacement */
     // TODO: Think of a better place for this
     if (np->mass_simple != 0) {
-      /* Save tm3 for accelerations */
-      if (Param.printStationAccelerations == YES) {
-        tm3Disp->f[0] = tm2Disp->f[0];
-        tm3Disp->f[1] = tm2Disp->f[1];
-        tm3Disp->f[2] = tm2Disp->f[2];
-      }
-
       tm2Disp->f[0] = nodalForce.f[0] / np->mass_simple;
       tm2Disp->f[1] = nodalForce.f[1] / np->mass_simple;
       tm2Disp->f[2] = nodalForce.f[2] / np->mass_simple;
@@ -6549,10 +6543,6 @@ static void solver_compute_displacement(mysolver_t* solver, mesh_t* mesh) {
       tm2Disp->f[0] = 0.0;
       tm2Disp->f[1] = 0.0;
       tm2Disp->f[2] = 0.0;
-
-      tm3Disp->f[0] = 0.0;
-      tm3Disp->f[1] = 0.0;
-      tm3Disp->f[2] = 0.0;
     }
 
   } /* for (nindex ...): all my harbored nodes */
@@ -7000,21 +6990,12 @@ static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 }
 
 static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
-  lnid_t nindex;
+  (void)mesh;
 
-  /* Copy tm2 to tm3 for accelerations */
+  /* Snapshot previous-step station displacement for accelerations. */
   if (Param.printStationAccelerations == YES) {
     Timer_Start("Station Accel History Copy");
-    /* Save tm3 for accelerations */
-    for (nindex = 0; nindex < mesh->nharbored; nindex++) {
-      fvector_t* tm2Disp = solver->tm2 + nindex;
-      fvector_t* tm3Disp = solver->tm3 + nindex;
-
-      tm3Disp->f[0] = tm2Disp->f[0];
-      tm3Disp->f[1] = tm2Disp->f[1];
-      tm3Disp->f[2] = tm2Disp->f[2];
-
-    } /* for (nindex ...): all my harbored nodes */
+    solver_snapshot_station_accel_history(solver);
     Timer_Stop("Station Accel History Copy");
   }
 
@@ -11617,6 +11598,9 @@ void setup_stations_data() {
     Param.myStations[iLCStation].coords = stationCoords;
     sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
     Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+    Param.myStations[iLCStation].prev_disp[0] = 0.0;
+    Param.myStations[iLCStation].prev_disp[1] = 0.0;
+    Param.myStations[iLCStation].prev_disp[2] = 0.0;
     compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                           &(Param.myStations[iLCStation].localcoords),
                           Param.myStations[iLCStation].nodestointerpolate);
@@ -11690,6 +11674,52 @@ void setup_stations_data() {
   free(Param.theStationX);
   free(Param.theStationY);
   free(Param.theStationZ);
+}
+
+static void solver_snapshot_station_accel_history(mysolver_t* solver) {
+  int iPhi;
+  int32_t iStation;
+  double xi[3][8] = {{-1, 1, -1, 1, -1, 1, -1, 1},
+                     {-1, -1, 1, 1, -1, -1, 1, 1},
+                     {-1, -1, -1, -1, 1, 1, 1, 1}};
+
+  if ((Param.printStationAccelerations != YES) ||
+      (Param.myNumberOfStations == 0)) {
+    return;
+  }
+
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static) private(iPhi)
+#endif
+  for (iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
+    int32_t nodesToInterpolate[8];
+    vector3D_t localCoords = Param.myStations[iStation].localcoords;
+    double prev_x = 0.0;
+    double prev_y = 0.0;
+    double prev_z = 0.0;
+
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      nodesToInterpolate[iPhi] =
+          Param.myStations[iStation].nodestointerpolate[iPhi];
+    }
+
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                   (1 + xi[1][iPhi] * localCoords.x[1]) *
+                   (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+
+      prev_x += phi * solver->tm2[nodesToInterpolate[iPhi]].f[0];
+      prev_y += phi * solver->tm2[nodesToInterpolate[iPhi]].f[1];
+      prev_z += phi * solver->tm2[nodesToInterpolate[iPhi]].f[2];
+    }
+
+    Param.myStations[iStation].prev_disp[0] = prev_x;
+    Param.myStations[iStation].prev_disp[1] = prev_y;
+    Param.myStations[iStation].prev_disp[2] = prev_z;
+  }
+
+  topography_snapshot_station_history(solver);
 }
 
 /**
@@ -11828,14 +11858,11 @@ static int interpolate_station_displacements(int32_t step) {
               phi[iPhi] * Global.mySolver->tm2[nodesToInterpolate[iPhi]].f[1];
           dis_z -=
               phi[iPhi] * Global.mySolver->tm2[nodesToInterpolate[iPhi]].f[2];
-
-          dis_x +=
-              phi[iPhi] * Global.mySolver->tm3[nodesToInterpolate[iPhi]].f[0];
-          dis_y +=
-              phi[iPhi] * Global.mySolver->tm3[nodesToInterpolate[iPhi]].f[1];
-          dis_z +=
-              phi[iPhi] * Global.mySolver->tm3[nodesToInterpolate[iPhi]].f[2];
         }
+
+        dis_x += Param.myStations[iStation].prev_disp[0];
+        dis_y += Param.myStations[iStation].prev_disp[1];
+        dis_z += Param.myStations[iStation].prev_disp[2];
 
         acc_x = dis_x / Param.theDeltaTSquared;
         acc_y = dis_y / Param.theDeltaTSquared;
