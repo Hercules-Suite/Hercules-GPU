@@ -6973,9 +6973,13 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
 static void solver_clear_sparse_host_forces(mysolver_t* solver) {
   int32_t clearMode = solver_sparse_clear_mode();
 
+  Timer_Start("Disp force upload safe wait");
+  solver_wait_force_upload_source_event();
+  Timer_Stop("Disp force upload safe wait");
+
+  Timer_Start("Disp host force clear only");
   if (clearMode == 3) {
     int32_t fullCount = Global.myMesh->nharbored;
-    solver_wait_force_upload_source_event();
 #ifdef _OPENMP
     if (full_clear_use_omp()) {
       int32_t threadCount = omp_get_max_threads();
@@ -7019,6 +7023,7 @@ static void solver_clear_sparse_host_forces(mysolver_t* solver) {
       memset(solver->force + start, 0, (size_t)len * sizeof(fvector_t));
     }
   }
+  Timer_Stop("Disp host force clear only");
 }
 
 static int32_t solver_sparse_clear_mode(void) {
@@ -7499,6 +7504,14 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Disp host force reset")) {
     Timer_Reduce("Disp host force reset", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+  if (Timer_Exists("Disp force upload safe wait")) {
+    Timer_Reduce("Disp force upload safe wait",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Disp host force clear only")) {
+    Timer_Reduce("Disp host force clear only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   if (Timer_Exists("Disp kernel sync wait")) {
     Timer_Reduce("Disp kernel sync wait", (TimerKind)(MAX | MIN | AVERAGE),
@@ -11097,6 +11110,22 @@ static void print_timing_stat() {
         Timer_Value("Disp host force reset", AVERAGE),
         Timer_Value("Disp host force reset", MAX),
         Timer_Value("Disp host force reset", MIN));
+  }
+  if (Timer_Exists("Disp force upload safe wait")) {
+    printf(
+        "      Disp force upload safe wait  : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp force upload safe wait", AVERAGE),
+        Timer_Value("Disp force upload safe wait", MAX),
+        Timer_Value("Disp force upload safe wait", MIN));
+  }
+  if (Timer_Exists("Disp host force clear only")) {
+    printf(
+        "      Disp host force clear only   : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp host force clear only", AVERAGE),
+        Timer_Value("Disp host force clear only", MAX),
+        Timer_Value("Disp host force clear only", MIN));
   }
   if (Timer_Exists("Disp kernel sync wait")) {
     printf(
