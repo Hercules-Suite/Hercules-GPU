@@ -6975,6 +6975,18 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
+static void solver_record_force_kernel_done_event(mysolver_t* solver) {
+  cudaError_t cerror =
+      cudaEventRecord(solver->events[CUDA_EVENT_FORCE_KERNEL_DONE],
+                      solver->streams[CUDA_STREAM_MAIN]);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: record force kernel event - %s\n", Global.myID,
+            cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Copy updated tm2 displacements from device */
   cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
@@ -7000,22 +7012,18 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   /* Wait for the appropriate physics calculation to complete */
-  if (Param.theTypeOfDamping != BKT) {
-    if (Param.theStiffness == EFFECTIVE) {
-      Timer_Start("Force Stream Sync");
-      Timer_Start("Compute addforces e");
-      /* Uncomment for timing tests */
-      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-      Timer_Stop("Compute addforces e");
-      Timer_Stop("Force Stream Sync");
-    }
-
-  } else {
+  if (((Param.theTypeOfDamping != BKT) && (Param.theStiffness == EFFECTIVE)) ||
+      (Param.theTypeOfDamping == BKT)) {
     Timer_Start("Force Stream Sync");
-    Timer_Start("Damping addforce");
-    /* Uncomment for timing tests */
+
+    Timer_Start("Force kernel wait only");
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_KERNEL_DONE]);
+    Timer_Stop("Force kernel wait only");
+
+    Timer_Start("Force postcopy sync wait");
     cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-    Timer_Stop("Damping addforce");
+    Timer_Stop("Force postcopy sync wait");
+
     Timer_Stop("Force Stream Sync");
   }
 
@@ -7260,6 +7268,14 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Force Stream Sync", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
+  if (Timer_Exists("Force kernel wait only")) {
+    Timer_Reduce("Force kernel wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force postcopy sync wait")) {
+    Timer_Reduce("Force postcopy sync wait",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
   if (Timer_Exists("Force Post CPU")) {
     Timer_Reduce("Force Post CPU", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
@@ -7463,6 +7479,7 @@ static void solver_run() {
                      Global.theK2);
     solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
                    Global.theK2);
+    solver_record_force_kernel_done_event(Global.mySolver);
     Timer_Stop("Physics Force Kernels Enqueue");
 
     Timer_Stop("Compute Physics");
@@ -10729,6 +10746,8 @@ static void print_timing_stat() {
       Timer_Exists("Physics Force Wait/Post") ||
       Timer_Exists("Station Accel History Copy") ||
       Timer_Exists("Force Stream Sync") ||
+      Timer_Exists("Force kernel wait only") ||
+      Timer_Exists("Force postcopy sync wait") ||
       Timer_Exists("Force Post CPU") ||
       Timer_Exists("Physics Displacement Enqueue") ||
       Timer_Exists("Physics Displacement Wait/Post")) {
@@ -10772,6 +10791,22 @@ static void print_timing_stat() {
           Timer_Value("Force Stream Sync", AVERAGE),
           Timer_Value("Force Stream Sync", MAX),
           Timer_Value("Force Stream Sync", MIN));
+    }
+    if (Timer_Exists("Force kernel wait only")) {
+      printf(
+          "      Force kernel wait only        : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force kernel wait only", AVERAGE),
+          Timer_Value("Force kernel wait only", MAX),
+          Timer_Value("Force kernel wait only", MIN));
+    }
+    if (Timer_Exists("Force postcopy sync wait")) {
+      printf(
+          "      Force postcopy sync wait      : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force postcopy sync wait", AVERAGE),
+          Timer_Value("Force postcopy sync wait", MAX),
+          Timer_Value("Force postcopy sync wait", MIN));
     }
     if (Timer_Exists("Force Post CPU")) {
       printf(

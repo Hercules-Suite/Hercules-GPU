@@ -74,9 +74,10 @@
 #define CUDA_KERNEL_NAME_DISPLACEMENT          "kernelDispCalc"
 
 /* Maximum simultaneous CUDA events */
-#define MAX_CUDA_EVENT             2
-#define CUDA_EVENT_FORCE_WAIT      0
+#define MAX_CUDA_EVENT              3
+#define CUDA_EVENT_FORCE_WAIT       0
 #define CUDA_EVENT_DISP_KERNEL_DONE 1
+#define CUDA_EVENT_FORCE_KERNEL_DONE 2
 
 /* GPU device specifications */
 typedef struct {
