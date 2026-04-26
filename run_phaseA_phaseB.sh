@@ -266,6 +266,11 @@ detect_alloc_cpus_per_node() {
 
 ALLOC_NODES="$(detect_alloc_nodes)"
 ALLOC_CPUS_PER_NODE="$(detect_alloc_cpus_per_node)"
+ALLOC_TOTAL_CPUS=0
+
+if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
+  ALLOC_TOTAL_CPUS="$((ALLOC_NODES * ALLOC_CPUS_PER_NODE))"
+fi
 
 PHASE_A_OMP_THREADS="${PHASE_A_OMP_NUM_THREADS:-${OMP_NUM_THREADS:-}}"
 PHASE_B_OMP_THREADS="${PHASE_B_OMP_NUM_THREADS:-}"
@@ -303,6 +308,22 @@ fi
 if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   echo "ERROR: invalid Phase B rank count: ${PHASE_B_NP}" >&2
   exit 1
+fi
+
+if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
+   [[ "${PHASE_A_NP}" -gt "${ALLOC_TOTAL_CPUS}" ]]; then
+  case " ${PHASE_A_MPI_ARGS:-} " in
+    *" --map-by :OVERSUBSCRIBE "*|*" --oversubscribe "*)
+      ;;
+    *)
+      echo "ERROR: Phase A requests ${PHASE_A_NP} MPI ranks, but the allocation provides only" >&2
+      echo "       ${ALLOC_TOTAL_CPUS} CPU slots (${ALLOC_NODES} node(s) x ${ALLOC_CPUS_PER_NODE} CPUs/node)." >&2
+      echo "       Phase A is CPU meshing, so on this allocation use PHASE_A_NP <= ${ALLOC_TOTAL_CPUS}," >&2
+      echo "       request more nodes, or explicitly allow oversubscription with" >&2
+      echo "       PHASE_A_MPI_ARGS=\"--map-by :OVERSUBSCRIBE\"." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 echo "=== Two-phase run ==="
