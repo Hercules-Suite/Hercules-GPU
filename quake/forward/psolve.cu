@@ -349,6 +349,8 @@ static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
 static void solver_wait_force_upload_source_event(void);
+static void solver_record_gpu_event(mysolver_t* solver, int eventID,
+                                    const char* eventLabel);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
