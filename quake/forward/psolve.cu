@@ -6253,6 +6253,8 @@ static void solver_compute_force_source_gpu(int32_t step) {
                   solver->streams[CUDA_STREAM_MAIN]);
 
   if (count <= 0) {
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
     Timer_Stop("Compute addforces s");
     return;
   }
@@ -6309,6 +6311,8 @@ static void solver_compute_force_source_gpu(int32_t step) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE, "force upload");
 
   Timer_Stop("Compute addforces s");
 }
@@ -6600,6 +6604,8 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
                   mesh->nharbored * sizeof(fvector_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                          "force upload");
   solver_record_force_upload_source_event(solver);
 
   /* Uncomment for timing tests */
@@ -6625,6 +6631,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     cudaMemsetAsync(solver->gpuData->forceDevice, 0,
                     mesh->nharbored * sizeof(fvector_t),
                     solver->streams[CUDA_STREAM_MAIN]);
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
     return;
   }
 
@@ -6814,6 +6822,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
                     cudaMemcpyHostToDevice,
                     solver->streams[CUDA_STREAM_MAIN]);
     solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
     solver_record_force_upload_source_event(solver);
     Timer_Stop("Sparse force upload memcpy");
     return;
@@ -6866,6 +6876,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                          "force upload");
   Timer_Stop("Sparse force upload scatter");
 }
 
@@ -7057,7 +7069,13 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
     Timer_Start("Force kernel wait only");
 
     Timer_Start("Force stiffness wait only");
+    Timer_Start("Force pre-stiffness wait only");
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_UPLOAD_DONE]);
+    Timer_Stop("Force pre-stiffness wait only");
+
+    Timer_Start("Force stiffness core wait only");
     cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_STIFFNESS_DONE]);
+    Timer_Stop("Force stiffness core wait only");
     Timer_Stop("Force stiffness wait only");
 
     Timer_Start("Force damping conv wait only");
@@ -7321,6 +7339,14 @@ static void solver_run_collect_timers(void) {
   }
   if (Timer_Exists("Force stiffness wait only")) {
     Timer_Reduce("Force stiffness wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force pre-stiffness wait only")) {
+    Timer_Reduce("Force pre-stiffness wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force stiffness core wait only")) {
+    Timer_Reduce("Force stiffness core wait only",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   if (Timer_Exists("Force damping conv wait only")) {
@@ -10812,6 +10838,8 @@ static void print_timing_stat() {
       Timer_Exists("Station Accel History Copy") ||
       Timer_Exists("Force Stream Sync") ||
       Timer_Exists("Force stiffness wait only") ||
+      Timer_Exists("Force pre-stiffness wait only") ||
+      Timer_Exists("Force stiffness core wait only") ||
       Timer_Exists("Force damping conv wait only") ||
       Timer_Exists("Force damping local wait only") ||
       Timer_Exists("Force kernel wait only") ||
@@ -10867,6 +10895,22 @@ static void print_timing_stat() {
           Timer_Value("Force stiffness wait only", AVERAGE),
           Timer_Value("Force stiffness wait only", MAX),
           Timer_Value("Force stiffness wait only", MIN));
+    }
+    if (Timer_Exists("Force pre-stiffness wait only")) {
+      printf(
+          "      Force pre-stiffness wait only : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force pre-stiffness wait only", AVERAGE),
+          Timer_Value("Force pre-stiffness wait only", MAX),
+          Timer_Value("Force pre-stiffness wait only", MIN));
+    }
+    if (Timer_Exists("Force stiffness core wait only")) {
+      printf(
+          "      Force stiffness core wait only: %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force stiffness core wait only", AVERAGE),
+          Timer_Value("Force stiffness core wait only", MAX),
+          Timer_Value("Force stiffness core wait only", MIN));
     }
     if (Timer_Exists("Force damping conv wait only")) {
       printf(
