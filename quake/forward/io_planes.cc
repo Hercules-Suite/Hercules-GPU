@@ -308,6 +308,11 @@ int Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes)
 #endif
 
     for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
+	if (myID == 0) {
+	    int planeValues = 3 * thePlanes[iPlane].numberofstepsalongstrike
+		* thePlanes[iPlane].numberofstepsdowndip;
+	    memset(planes_output_buffer, 0, (size_t)planeValues * sizeof(double));
+	}
 	for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
 	     iStrip++) {
 	    int elemCount = thePlanes[iPlane].stripend[iStrip]
@@ -700,8 +705,8 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     		                                         - thePlanes[iPlane].stripstart[stripnum] + 1;
 
     		thePlanes[iPlane].strip[stripnum]
-    		                        = (plane_strip_element_t*)malloc( sizeof(plane_strip_element_t)
-    		                        		* stripLength );
+    		                        = (plane_strip_element_t*)calloc( (size_t)stripLength,
+								 sizeof(plane_strip_element_t) );
     		if (thePlanes[ iPlane ].strip[stripnum] == NULL) {
     			fprintf( stderr,
     					"Error malloc'ing array strips for plane output\n"
@@ -736,6 +741,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					elemnum < elemCount;
     				elemnum++)
     		{
+			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1156,12 +1162,12 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		stripLength = thePlanes[iPlane].stripend[stripnum]
 		    - thePlanes[iPlane].stripstart[stripnum] + 1;
 
-		thePlanes[iPlane].strip[stripnum]
-		    = (plane_strip_element_t*)malloc( sizeof(plane_strip_element_t)
-						      * stripLength );
-		if (thePlanes[ iPlane ].strip[stripnum] == NULL) {
-		    fprintf( stderr,
-			     "Error malloc'ing array strips for plane output\n"
+    		thePlanes[iPlane].strip[stripnum]
+    		                        = (plane_strip_element_t*)calloc( (size_t)stripLength,
+								 sizeof(plane_strip_element_t) );
+    		if (thePlanes[ iPlane ].strip[stripnum] == NULL) {
+    			fprintf( stderr,
+    					"Error malloc'ing array strips for plane output\n"
 			     "PE: %d  Plane: %d  Strip: %d  Size: %zu\n",
 			     myID, iPlane, stripnum,
 			     sizeof(plane_strip_element_t) * stripLength );
@@ -1193,10 +1199,11 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 	#pragma omp parallel for if(useOmp) schedule(static) \
 	    private(iStrike, iDownDip, xLocal, yLocal, pointLocal, pointGlobal, octant)
 	#endif
-		for (elemnum = 0;
+    		for (elemnum = 0;
 		     elemnum < elemCount;
-		     elemnum++)
-		    {
+    		     elemnum++)
+    		    {
+			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
