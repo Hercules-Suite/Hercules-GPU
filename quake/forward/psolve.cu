@@ -107,6 +107,7 @@ static int32_t g_sparseClearMode = -1;
 static int32_t g_sparseClearModeReported = 0;
 static int32_t g_sparseUploadMode = -1;
 static int32_t g_sparseUploadModeReported = 0;
+static int32_t g_sparseUploadPathReported = -1;
 static vector3D_t g_istanbulVelModelOrigin;
 static int32_t g_hasIstanbulVelModelOrigin = 0;
 static int32_t* g_adjustParentOffsets = NULL;
@@ -6793,6 +6794,18 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     useDenseUpload = 1;
   }
 
+  if ((Global.myID == 0) && (g_sparseUploadPathReported != useDenseUpload)) {
+    const char* requestName =
+        (uploadMode == 1) ? "dense" :
+        (uploadMode == 2) ? "sparse" : "auto";
+    const char* chosenName = useDenseUpload ? "dense" : "sparse";
+    monitor_print(
+        "Sparse force upload path: %s (request=%s, active=%d, source=%d, topo=%d, harbored=%d)\n",
+        chosenName, requestName, activeCount, sourceCount, topoCount,
+        mesh->nharbored);
+    g_sparseUploadPathReported = useDenseUpload;
+  }
+
   if (useDenseUpload) {
     Timer_Stop("Sparse force upload build");
     Timer_Start("Sparse force upload memcpy");
@@ -10291,11 +10304,13 @@ static int32_t sparse_force_upload_mode(void) {
     const char* env = getenv("HERCULES_SPARSE_UPLOAD_MODE");
 
     /* 0: auto heuristic, 1: force dense upload, 2: force sparse upload */
-    g_sparseUploadMode = 0;
+    g_sparseUploadMode = 1;
 
     if (env != NULL) {
       if ((strcasecmp(env, "dense") == 0) || (strcmp(env, "1") == 0)) {
         g_sparseUploadMode = 1;
+      } else if ((strcasecmp(env, "auto") == 0) || (strcmp(env, "0") == 0)) {
+        g_sparseUploadMode = 0;
       } else if ((strcasecmp(env, "sparse") == 0) ||
                  (strcasecmp(env, "scatter") == 0) ||
                  (strcmp(env, "2") == 0)) {
@@ -10307,7 +10322,7 @@ static int32_t sparse_force_upload_mode(void) {
       const char* modeName =
           (g_sparseUploadMode == 1) ? "dense" :
           (g_sparseUploadMode == 2) ? "sparse" : "auto";
-      monitor_print("Sparse force upload mode: %s\n", modeName);
+      monitor_print("Sparse force upload mode request: %s\n", modeName);
       g_sparseUploadModeReported = 1;
     }
   }
