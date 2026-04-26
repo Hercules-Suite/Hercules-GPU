@@ -6323,6 +6323,8 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
       compute_addforce_conventional(mesh, solver, k1, k2);
     }
   }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_STIFFNESS_DONE,
+                          "force stiffness");
   Timer_Stop("Compute addforces e");
 }
 
@@ -6334,6 +6336,10 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
 
   solver_init_damping_gpu_mapper(myID, mesh);
   if (g_dampingElemCountGPU <= 0) {
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                            "force damping conv");
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                            "force damping local");
     return;
   }
 
@@ -6362,6 +6368,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                          "force damping conv");
 
   solver->gpu_spec->numflops +=
       kernel_flops_per_thread(FLOP_CALCCONV_KERNEL) * g_dampingElemCountGPU;
@@ -6385,6 +6393,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                          "force damping local");
 
   solver->gpu_spec->numflops +=
       kernel_flops_per_thread(FLOP_DAMPING_KERNEL) * g_dampingElemCountGPU;
@@ -6404,6 +6414,10 @@ static void solver_compute_force_damping(mysolver_t* solver, mesh_t* mesh,
 
     // damping_addforce(Global.myMesh, Global.mySolver, Global.theK1,
     // Global.theK2);
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                            "force damping conv");
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                            "force damping local");
   } else if (Param.theTypeOfDamping >= BKT) {
     solver_compute_force_damping_gpu(Global.myID, solver, mesh, Param.theFreq,
                                      Param.theDeltaT,
@@ -6416,6 +6430,10 @@ static void solver_compute_force_damping(mysolver_t* solver, mesh_t* mesh,
     //        solver_abort( __FUNCTION_NAME, NULL,
     //                "Unknown damping type: %d\n",
     //                Param.theTypeOfDamping);
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                            "force damping conv");
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                            "force damping local");
   }
 
   Timer_Stop("Damping addforce");
@@ -6975,16 +6993,21 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
-static void solver_record_force_kernel_done_event(mysolver_t* solver) {
+static void solver_record_gpu_event(mysolver_t* solver, int eventID,
+                                    const char* eventLabel) {
   cudaError_t cerror =
-      cudaEventRecord(solver->events[CUDA_EVENT_FORCE_KERNEL_DONE],
-                      solver->streams[CUDA_STREAM_MAIN]);
+      cudaEventRecord(solver->events[eventID], solver->streams[CUDA_STREAM_MAIN]);
   if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: record force kernel event - %s\n", Global.myID,
-            cudaGetErrorString(cerror));
+    fprintf(stderr, "Thread %d: record %s event - %s\n", Global.myID,
+            eventLabel, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+}
+
+static void solver_record_force_kernel_done_event(mysolver_t* solver) {
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_KERNEL_DONE,
+                          "force kernel");
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -7017,6 +7040,19 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
     Timer_Start("Force Stream Sync");
 
     Timer_Start("Force kernel wait only");
+
+    Timer_Start("Force stiffness wait only");
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_STIFFNESS_DONE]);
+    Timer_Stop("Force stiffness wait only");
+
+    Timer_Start("Force damping conv wait only");
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_DAMPING_CONV_DONE]);
+    Timer_Stop("Force damping conv wait only");
+
+    Timer_Start("Force damping local wait only");
+    cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE]);
+    Timer_Stop("Force damping local wait only");
+
     cudaEventSynchronize(solver->events[CUDA_EVENT_FORCE_KERNEL_DONE]);
     Timer_Stop("Force kernel wait only");
 
@@ -7267,6 +7303,18 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Force Stream Sync")) {
     Timer_Reduce("Force Stream Sync", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+  if (Timer_Exists("Force stiffness wait only")) {
+    Timer_Reduce("Force stiffness wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force damping conv wait only")) {
+    Timer_Reduce("Force damping conv wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  }
+  if (Timer_Exists("Force damping local wait only")) {
+    Timer_Reduce("Force damping local wait only",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   if (Timer_Exists("Force kernel wait only")) {
     Timer_Reduce("Force kernel wait only",
@@ -10746,6 +10794,9 @@ static void print_timing_stat() {
       Timer_Exists("Physics Force Wait/Post") ||
       Timer_Exists("Station Accel History Copy") ||
       Timer_Exists("Force Stream Sync") ||
+      Timer_Exists("Force stiffness wait only") ||
+      Timer_Exists("Force damping conv wait only") ||
+      Timer_Exists("Force damping local wait only") ||
       Timer_Exists("Force kernel wait only") ||
       Timer_Exists("Force postcopy sync wait") ||
       Timer_Exists("Force Post CPU") ||
@@ -10791,6 +10842,30 @@ static void print_timing_stat() {
           Timer_Value("Force Stream Sync", AVERAGE),
           Timer_Value("Force Stream Sync", MAX),
           Timer_Value("Force Stream Sync", MIN));
+    }
+    if (Timer_Exists("Force stiffness wait only")) {
+      printf(
+          "      Force stiffness wait only     : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force stiffness wait only", AVERAGE),
+          Timer_Value("Force stiffness wait only", MAX),
+          Timer_Value("Force stiffness wait only", MIN));
+    }
+    if (Timer_Exists("Force damping conv wait only")) {
+      printf(
+          "      Force damping conv wait only  : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force damping conv wait only", AVERAGE),
+          Timer_Value("Force damping conv wait only", MAX),
+          Timer_Value("Force damping conv wait only", MIN));
+    }
+    if (Timer_Exists("Force damping local wait only")) {
+      printf(
+          "      Force damping local wait only : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("Force damping local wait only", AVERAGE),
+          Timer_Value("Force damping local wait only", MAX),
+          Timer_Value("Force damping local wait only", MIN));
     }
     if (Timer_Exists("Force kernel wait only")) {
       printf(
