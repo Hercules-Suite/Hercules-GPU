@@ -168,6 +168,14 @@ static int32_t g_forcePathReported = 0;
 static cudaEvent_t g_forceUploadSourceSafeEvent;
 static int32_t g_forceUploadSourceSafeEventInit = 0;
 static int32_t g_forceUploadSourceSafePending = 0;
+static int32_t g_dispSyncMode = -1;
+static int32_t g_dispSyncReported = 0;
+static int32_t g_dispBoundaryReady = 0;
+static int32_t* g_dispBoundaryNodesHost = NULL;
+static int32_t* g_dispBoundaryNodesDevice = NULL;
+static fvector_t* g_dispBoundaryBufferHost = NULL;
+static fvector_t* g_dispBoundaryBufferDevice = NULL;
+static int32_t g_dispBoundaryNodeCount = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -386,6 +394,10 @@ static int32_t contrib_pack_use_omp(void);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
+static int32_t displacement_sync_mode(void);
+static void solver_init_disp_boundary_sync(mysolver_t* solver);
+static void solver_finalize_disp_boundary_download(mysolver_t* solver);
+static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
 static void solver_wait_force_upload_source_event(void);
 static void solver_record_gpu_event(mysolver_t* solver, int eventID,
@@ -428,6 +440,30 @@ __global__ static void kernelSparseForceScatter(int32_t count,
 
   int32_t lnid = lnidList[idx];
   forceDevice[lnid] = srcForces[idx];
+}
+
+__global__ static void kernelDispBoundaryGather(int32_t count,
+                                                const int32_t* lnidList,
+                                                const fvector_t* dispDevice,
+                                                fvector_t* bufferDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bufferDevice[idx] = dispDevice[lnidList[idx]];
+}
+
+__global__ static void kernelDispBoundaryScatter(int32_t count,
+                                                 const int32_t* lnidList,
+                                                 const fvector_t* bufferDevice,
+                                                 fvector_t* dispDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  dispDevice[lnidList[idx]] = bufferDevice[idx];
 }
 
 __device__ __constant__ int kTopoTetNodes[2][5][4] = {
@@ -7189,7 +7225,201 @@ static void solver_compute_displacement(mysolver_t* solver, mesh_t* mesh) {
   Timer_Stop("Compute new displacement");
 }
 
+static int32_t displacement_boundary_sync_safe(void) {
+  if (Param.theUseCheckPoint == 1 || Param.theCheckPointingRate != 0) {
+    return 0;
+  }
+  if (Param.theNumberOfStations != 0 || Param.theNumberOfPlanes != 0) {
+    return 0;
+  }
+  if (Param.drmImplement == YES || Param.includeNonlinearAnalysis == YES ||
+      Param.includeIncidentPlaneWaves == YES) {
+    return 0;
+  }
+  if ((get_fixedbase_flag() == YES) || (get_geostatic_total_time() > 0)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int32_t displacement_sync_mode(void) {
+  if (g_dispSyncMode < 0) {
+    const char* env = getenv("HERCULES_DISP_SYNC_MODE");
+    int32_t requestedBoundary = -1;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "boundary") == 0 || strcasecmp(env, "sparse") == 0 ||
+          strcasecmp(env, "gpu") == 0 || strcasecmp(env, "on") == 0 ||
+          strcasecmp(env, "yes") == 0 || strcasecmp(env, "true") == 0 ||
+          strcmp(env, "1") == 0) {
+        requestedBoundary = 1;
+      } else if (strcasecmp(env, "full") == 0 || strcasecmp(env, "cpu") == 0 ||
+                 strcasecmp(env, "off") == 0 || strcasecmp(env, "no") == 0 ||
+                 strcasecmp(env, "false") == 0 || strcmp(env, "0") == 0) {
+        requestedBoundary = 0;
+      }
+    }
+
+    if (requestedBoundary < 0) {
+      requestedBoundary = displacement_boundary_sync_safe();
+    }
+
+    g_dispSyncMode =
+        (requestedBoundary != 0 && displacement_boundary_sync_safe()) ? 1 : 0;
+
+    if ((Global.myID == 0) && (g_dispSyncReported == 0)) {
+      monitor_print(
+          "Displacement sync path: %s%s\n",
+          g_dispSyncMode ? "boundary" : "full",
+          (requestedBoundary != 0 && g_dispSyncMode == 0)
+              ? " (boundary requested but unsafe for this run)"
+              : "");
+      g_dispSyncReported = 1;
+    }
+  }
+
+  return g_dispSyncMode;
+}
+
+static void disp_boundary_append_messenger_nodes(int32_t* nodes,
+                                                 int32_t* count,
+                                                 messenger_t* messenger) {
+  while (messenger != NULL) {
+    for (int32_t i = 0; i < messenger->nidx; i++) {
+      nodes[(*count)++] = messenger->mapping[i];
+    }
+    messenger = messenger->next;
+  }
+}
+
+static void solver_init_disp_boundary_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes = NULL;
+  cudaError_t cerror;
+
+  if (g_dispBoundaryReady != 0 || displacement_sync_mode() == 0) {
+    return;
+  }
+
+  compute_adjust_cache_build();
+
+  capacity =
+      messenger_countnodes(solver->an_sched->first_s) +
+      messenger_countnodes(solver->an_sched->first_c) +
+      messenger_countnodes(solver->dn_sched->first_s) +
+      messenger_countnodes(solver->dn_sched->first_c) + g_adjustDnCount +
+      g_adjustParentCount;
+
+  if (capacity <= 0) {
+    g_dispBoundaryReady = 1;
+    g_dispBoundaryNodeCount = 0;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * capacity);
+  if (nodes == NULL) {
+    fprintf(stderr, "Thread %d: displacement boundary list alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_c);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_c);
+
+  for (int32_t i = 0; i < g_adjustDnCount; i++) {
+    nodes[count++] = g_adjustDanglingLnid[i];
+  }
+  for (int32_t i = 0; i < g_adjustParentCount; i++) {
+    nodes[count++] = g_adjustParentIds[i];
+  }
+
+  qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+  for (int32_t i = 0; i < count; i++) {
+    if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+      nodes[uniqueCount++] = nodes[i];
+    }
+  }
+
+  g_dispBoundaryNodeCount = uniqueCount;
+  if (g_dispBoundaryNodeCount <= 0) {
+    free(nodes);
+    g_dispBoundaryReady = 1;
+    return;
+  }
+
+  g_dispBoundaryNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * g_dispBoundaryNodeCount);
+  if (g_dispBoundaryNodesHost == NULL) {
+    free(nodes);
+    fprintf(stderr, "Thread %d: displacement boundary unique alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  memcpy(g_dispBoundaryNodesHost, nodes,
+         sizeof(int32_t) * g_dispBoundaryNodeCount);
+  free(nodes);
+
+  cerror = cudaMalloc((void**)&g_dispBoundaryNodesDevice,
+                      sizeof(int32_t) * g_dispBoundaryNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: displacement boundary node device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaMalloc((void**)&g_dispBoundaryBufferDevice,
+                      sizeof(fvector_t) * g_dispBoundaryNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr,
+            "Thread %d: displacement boundary buffer device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaHostAlloc((void**)&g_dispBoundaryBufferHost,
+                         sizeof(fvector_t) * g_dispBoundaryNodeCount,
+                         cudaHostAllocDefault);
+  if (cerror != cudaSuccess) {
+    g_dispBoundaryBufferHost =
+        (fvector_t*)malloc(sizeof(fvector_t) * g_dispBoundaryNodeCount);
+    if (g_dispBoundaryBufferHost == NULL) {
+      fprintf(stderr,
+              "Thread %d: displacement boundary buffer host alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  cerror = cudaMemcpy(g_dispBoundaryNodesDevice, g_dispBoundaryNodesHost,
+                      sizeof(int32_t) * g_dispBoundaryNodeCount,
+                      cudaMemcpyHostToDevice);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: displacement boundary node copy - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Global.myID == 0) {
+    monitor_print("Displacement boundary sync nodes: %d of %d harbored\n",
+                  g_dispBoundaryNodeCount, Global.myMesh->nharbored);
+  }
+
+  g_dispBoundaryReady = 1;
+}
+
 static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
+  if (displacement_sync_mode() != 0) {
+    return;
+  }
+
   /* Synchronize for beginning of timestep */
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
@@ -7842,6 +8072,40 @@ static void solver_record_force_kernel_done_event(mysolver_t* solver) {
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
+  if (displacement_sync_mode() != 0) {
+    int blocksize;
+    int gridsize;
+    cudaError_t cerror;
+
+    solver_init_disp_boundary_sync(solver);
+    if (g_dispBoundaryNodeCount <= 0) {
+      return;
+    }
+
+    blocksize = 256;
+    gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
+    kernelDispBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
+        solver->gpuData->tm2Device, g_dispBoundaryBufferDevice);
+
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: displacement boundary gather - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    cudaMemcpyAsync(g_dispBoundaryBufferHost, g_dispBoundaryBufferDevice,
+                    sizeof(fvector_t) * g_dispBoundaryNodeCount,
+                    cudaMemcpyDeviceToHost,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        g_dispBoundaryNodeCount * (int64_t)sizeof(fvector_t);
+    return;
+  }
+
   /* Copy updated tm2 displacements from device */
   cudaMemcpyAsync(solver->tm2, solver->gpuData->tm2Device,
                   mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
@@ -7853,6 +8117,68 @@ static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   // cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
   return;
+}
+
+static void solver_finalize_disp_boundary_download(mysolver_t* solver) {
+  (void)solver;
+
+  if (displacement_sync_mode() == 0 || g_dispBoundaryNodeCount <= 0) {
+    return;
+  }
+
+  Timer_Start("Disp boundary host scatter");
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_dispBoundaryNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_dispBoundaryNodeCount; i++) {
+    solver->tm2[g_dispBoundaryNodesHost[i]] = g_dispBoundaryBufferHost[i];
+  }
+  Timer_Stop("Disp boundary host scatter");
+}
+
+static void solver_upload_disp_boundary_gpu(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  if (displacement_sync_mode() == 0) {
+    return;
+  }
+
+  solver_init_disp_boundary_sync(solver);
+  if (g_dispBoundaryNodeCount <= 0) {
+    return;
+  }
+
+  Timer_Start("GPU Patch Disp");
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_dispBoundaryNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_dispBoundaryNodeCount; i++) {
+    g_dispBoundaryBufferHost[i] = solver->tm2[g_dispBoundaryNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_dispBoundaryBufferDevice, g_dispBoundaryBufferHost,
+                  sizeof(fvector_t) * g_dispBoundaryNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_dispBoundaryNodeCount * (int64_t)sizeof(fvector_t);
+
+  blocksize = 256;
+  gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
+  kernelDispBoundaryScatter<<<gridsize, blocksize, 0,
+                              solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
+      g_dispBoundaryBufferDevice, solver->gpuData->tm1Device);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: displacement boundary scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  Timer_Stop("GPU Patch Disp");
 }
 
 static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -7915,6 +8241,8 @@ static void solver_wait_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Disp kernel sync wait");
   Timer_Stop("Disp postcopy sync wait");
+
+  solver_finalize_disp_boundary_download(solver);
 
   Timer_Stop("Compute new displacement");
   return;
@@ -8118,6 +8446,10 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("GPU Unload Disp", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
+  if (Timer_Exists("GPU Patch Disp")) {
+    Timer_Reduce("GPU Patch Disp", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
   if (Timer_Exists("GPU Reset")) {
     Timer_Reduce("GPU Reset", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
@@ -8234,6 +8566,10 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Disp postcopy sync wait")) {
     Timer_Reduce("Disp postcopy sync wait", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
+  }
+  if (Timer_Exists("Disp boundary host scatter")) {
+    Timer_Reduce("Disp boundary host scatter",
+                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   Timer_Reduce("3rd schedule send data (sharing)",
                (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
@@ -8471,6 +8807,8 @@ static void solver_run() {
     solver_send_displacement_dangling(Global.mySolver);
     Timer_Stop("Comm Displacement Exchange");
     Timer_Stop("Communication");
+
+    solver_upload_disp_boundary_gpu(Global.mySolver);
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
@@ -11879,6 +12217,14 @@ static void print_timing_stat() {
         Timer_Value("Disp postcopy sync wait", MAX),
         Timer_Value("Disp postcopy sync wait", MIN));
   }
+  if (Timer_Exists("Disp boundary host scatter")) {
+    printf(
+        "      Disp boundary host scatter   : %.2f (Average)   %.2f (Max) %.2f "
+        "(Min) seconds\n",
+        Timer_Value("Disp boundary host scatter", AVERAGE),
+        Timer_Value("Disp boundary host scatter", MAX),
+        Timer_Value("Disp boundary host scatter", MIN));
+  }
   printf(
       "    3rd schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
       "(Min) seconds\n",
@@ -12077,7 +12423,8 @@ static void print_timing_stat() {
 	  }
   if (Timer_Exists("GPU Memory Copy") || Timer_Exists("GPU Load Disp") ||
       Timer_Exists("GPU Unload Forces") || Timer_Exists("GPU Load Forces") ||
-      Timer_Exists("GPU Unload Disp") || Timer_Exists("GPU Reset")) {
+      Timer_Exists("GPU Unload Disp") || Timer_Exists("GPU Patch Disp") ||
+      Timer_Exists("GPU Reset")) {
     printf("    GPU copy/enqueue internals\n");
     if (Timer_Exists("GPU Memory Copy")) {
       printf(
@@ -12118,6 +12465,14 @@ static void print_timing_stat() {
           Timer_Value("GPU Unload Disp", AVERAGE),
           Timer_Value("GPU Unload Disp", MAX),
           Timer_Value("GPU Unload Disp", MIN));
+    }
+    if (Timer_Exists("GPU Patch Disp")) {
+      printf(
+          "      Patch Disp                    : %.2f (Average)   %.2f (Max) %.2f "
+          "(Min) seconds\n",
+          Timer_Value("GPU Patch Disp", AVERAGE),
+          Timer_Value("GPU Patch Disp", MAX),
+          Timer_Value("GPU Patch Disp", MIN));
     }
     if (Timer_Exists("GPU Reset")) {
       printf(

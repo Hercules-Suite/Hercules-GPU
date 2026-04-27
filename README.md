@@ -47,6 +47,11 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	`gpu`/`1` is experimental and computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
 	For topography runs with `computation_method=fem`, there is no per-step effective-force topography assembly; the solver now treats that as no host-side topography force so the GPU source path can still skip the dense host-to-device force upload.
 	The run log prints a one-line `Force path:` summary showing whether source force is on CPU/GPU, whether host force upload is required, and which topography effective-force path was selected.
+- `HERCULES_DISP_SYNC_MODE=auto|full|boundary` (or `0|1`)
+	Selects how updated displacements are synchronized between GPU and host. Default is `auto`.
+	`full`/`0` keeps the legacy full-array copy each step.
+	`boundary`/`1` keeps displacement history resident on the GPU and copies only the boundary/adjustment nodes needed by MPI displacement exchange, then patches those host-updated nodes back to the GPU for the next step.
+	For correctness, `boundary` currently falls back to `full` when station/plane/checkpoint/DRM/nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host displacement arrays. The run log prints `Displacement sync path:` and, when active, the boundary node count.
 
 Advanced/diagnostic toggles:
 
