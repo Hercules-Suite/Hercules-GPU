@@ -485,10 +485,10 @@ case "${PHASE_B_MAP_MODE}" in
       if [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]] &&
          [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] &&
          [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by numa)
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa, PE=${PHASE_B_OMP_THREADS})"
       elif [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa" --bind-to core --rank-by numa)
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa" --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa)"
       elif [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
         PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
