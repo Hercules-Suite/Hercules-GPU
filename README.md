@@ -59,6 +59,11 @@ Advanced/diagnostic toggles:
 - `HERCULES_REPRO_MODE=0|1|2`
 	`0` disables repro mode. `1` disables remaining OpenMP-sensitive
 	deterministic communication paths and uses deterministic MPI unpack ordering. `2` is stricter and also disables additional CPU OpenMP paths guarded by repro mode; `run_phaseA_phaseB.sh` does not auto-set this env.
+- `HERCULES_MESH_IMPORT_VERIFY=0|1`
+	Controls the extra convergence-check refinement pass when `mesh_input_mode=1`.
+	Default is `0`, which imports the saved mesh etree with one recursive
+	`octor_refinetree()` pass. Set to `1` to restore the slower verification
+	loop when debugging mesh import correctness.
 
 Build note:
 
@@ -119,6 +124,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
+# export HERCULES_MESH_IMPORT_VERIFY=1
 # export PHASE_B_MAP_MODE=numa
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \

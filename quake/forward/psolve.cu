@@ -3542,10 +3542,13 @@ static void setrec_mesh_import_bootstrap(octant_t* leaf, double ticksize,
 }
 
 static void mesh_generate_from_etree(void) {
-  int32_t pass;
-  int converged = 0;
-  int64_t prev_total = -1;
   int64_t tote, mine, maxe;
+  const char* verify_env = getenv("HERCULES_MESH_IMPORT_VERIFY");
+  int verify_import =
+      (verify_env != NULL) && (strcmp(verify_env, "0") != 0) &&
+      (strcasecmp(verify_env, "no") != 0) &&
+      (strcasecmp(verify_env, "false") != 0) &&
+      (strcasecmp(verify_env, "off") != 0);
 
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
 
@@ -3609,45 +3612,73 @@ static void mesh_generate_from_etree(void) {
   }
 
   Timer_Start("Octor Refinetree");
-  for (pass = 0; pass < PIXELLEVEL + 2; pass++) {
-    if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
-                         setrec_mesh_etree) != 0) {
-      fprintf(stderr,
-              "Thread %d: mesh_generate_from_etree: fail to refine octree\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    MPI_Barrier(comm_solver);
-    tote = octor_getleavescount(Global.myOctree, GLOBAL);
-    mine = octor_getminleavescount(Global.myOctree, GLOBAL);
-    maxe = octor_getmaxleavescount(Global.myOctree, GLOBAL);
-
-    if (Global.myID == 0) {
-      monitor_print("Refining     %11" INT64_FMT " %11" INT64_FMT
-                    " %11" INT64_FMT " %11.2f\n",
-                    mine, maxe, tote,
-                    Timer_Value("Octor Refinetree", (TimerKind)0));
-      fflush(stdout);
-    }
-
-    if (tote == prev_total) {
-      converged = 1;
-      break;
-    }
-
-    prev_total = tote;
-  }
-  Timer_Stop("Octor Refinetree");
-
-  if (!converged) {
+  if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
+                       setrec_mesh_etree) != 0) {
     fprintf(stderr,
-            "Thread %d: mesh_generate_from_etree: refinement did not converge\n",
+            "Thread %d: mesh_generate_from_etree: fail to refine octree\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  MPI_Barrier(comm_solver);
+  tote = octor_getleavescount(Global.myOctree, GLOBAL);
+  mine = octor_getminleavescount(Global.myOctree, GLOBAL);
+  maxe = octor_getmaxleavescount(Global.myOctree, GLOBAL);
+
+  if (Global.myID == 0) {
+    monitor_print("Refining     %11" INT64_FMT " %11" INT64_FMT
+                  " %11" INT64_FMT " %11.2f\n",
+                  mine, maxe, tote,
+                  Timer_Value("Octor Refinetree", (TimerKind)0));
+    fflush(stdout);
+  }
+
+  if (verify_import) {
+    int32_t pass;
+    int converged = 0;
+    int64_t prev_total = tote;
+
+    for (pass = 0; pass < PIXELLEVEL + 1; pass++) {
+      if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
+                           setrec_mesh_etree) != 0) {
+        fprintf(stderr,
+                "Thread %d: mesh_generate_from_etree: fail to verify refined octree\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+
+      MPI_Barrier(comm_solver);
+      tote = octor_getleavescount(Global.myOctree, GLOBAL);
+      mine = octor_getminleavescount(Global.myOctree, GLOBAL);
+      maxe = octor_getmaxleavescount(Global.myOctree, GLOBAL);
+
+      if (Global.myID == 0) {
+        monitor_print("Refine check %11" INT64_FMT " %11" INT64_FMT
+                      " %11" INT64_FMT " %11.2f\n",
+                      mine, maxe, tote,
+                      Timer_Value("Octor Refinetree", (TimerKind)0));
+        fflush(stdout);
+      }
+
+      if (tote == prev_total) {
+        converged = 1;
+        break;
+      }
+
+      prev_total = tote;
+    }
+
+    if (!converged) {
+      fprintf(stderr,
+              "Thread %d: mesh_generate_from_etree: refinement did not converge\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  Timer_Stop("Octor Refinetree");
 
   Timer_Start("Octor Partitiontree");
   if (Global.myID == 0) {
