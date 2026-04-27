@@ -64,6 +64,9 @@ Advanced/diagnostic toggles:
 	Default is `0`, which imports the saved mesh etree with one recursive
 	`octor_refinetree()` pass. Set to `1` to restore the slower verification
 	loop when debugging mesh import correctness.
+- `OCTOR_EXTRACT_PROFILE=0|1`
+	Controls the detailed `octor_extractmesh()` stage profile. Mesh-input
+	runs enable it by default unless you set this variable yourself.
 
 Build note:
 

@@ -3337,6 +3337,12 @@ static int32_t toexpand(octant_t* leaf, double ticksize, const void* data) {
   return vsrule(edata, Param.theFactor);
 }
 
+static int64_t g_meshImportLookupCalls = 0;
+static int64_t g_meshImportSearchAttempts = 0;
+static int64_t g_meshImportFallbackLookups = 0;
+static int64_t g_meshImportPayloadReadySkips = 0;
+static int64_t g_meshImportPendingTargetSkips = 0;
+
 static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
                                      int32_t fx_num, int32_t fy_num,
                                      int32_t fz_num, int32_t f_den,
@@ -3377,6 +3383,7 @@ static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
     *search_addr_out = search_addr;
   }
 
+  g_meshImportSearchAttempts++;
   if (etree_search(Global.theMeshInputEp, search_addr, hit_addr, NULL,
                    hit_data) != 0) {
     return -1;
@@ -3390,6 +3397,8 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
   tick_t edge_ticks = (tick_t)1 << (PIXELLEVEL - leaf->level);
   etree_addr_t search_addr;
   int32_t i;
+
+  g_meshImportLookupCalls++;
 
   /*
    * Robust lookup for topography-trimmed meshes: center can be in air even
@@ -3411,6 +3420,9 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
                               sample_fracs[i][1], sample_fracs[i][2],
                               sample_fracs[i][3], hit_addr, hit_data,
                               &search_addr) == 0) {
+      if (i > 0) {
+        g_meshImportFallbackLookups++;
+      }
       return 0;
     }
   }
@@ -3471,6 +3483,51 @@ static void mesh_import_store_payload(void* data, const mdata_t* hit_data) {
   memcpy(data, &hit_data->edgesize, sizeof(edata_t));
 }
 
+static void mesh_import_reset_stats(void) {
+  g_meshImportLookupCalls = 0;
+  g_meshImportSearchAttempts = 0;
+  g_meshImportFallbackLookups = 0;
+  g_meshImportPayloadReadySkips = 0;
+  g_meshImportPendingTargetSkips = 0;
+}
+
+static void mesh_import_print_stats(void) {
+  int64_t local_stats[5];
+  int64_t max_stats[5];
+  int64_t sum_stats[5];
+
+  local_stats[0] = g_meshImportLookupCalls;
+  local_stats[1] = g_meshImportSearchAttempts;
+  local_stats[2] = g_meshImportFallbackLookups;
+  local_stats[3] = g_meshImportPayloadReadySkips;
+  local_stats[4] = g_meshImportPendingTargetSkips;
+
+  MPI_Reduce(local_stats, max_stats, 5, MPI_INT64_T, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(local_stats, sum_stats, 5, MPI_INT64_T, MPI_SUM, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    double ranks = (Global.theGroupSize > 0) ? (double)Global.theGroupSize : 1.0;
+    double avg_attempts_per_lookup =
+        (sum_stats[0] > 0)
+            ? ((double)sum_stats[1] / (double)sum_stats[0])
+            : 0.0;
+
+    monitor_print(
+        "Mesh import lookup stats: lookups avg %.1fM max %.1fM, "
+        "search attempts avg %.1fM max %.1fM, attempts/lookup %.2f, "
+        "fallback lookups max %.1fM, ready-skip max %.1fM, pending-skip max %.1fM\n",
+        (double)sum_stats[0] / ranks / 1.0e6,
+        (double)max_stats[0] / 1.0e6,
+        (double)sum_stats[1] / ranks / 1.0e6,
+        (double)max_stats[1] / 1.0e6,
+        avg_attempts_per_lookup,
+        (double)max_stats[2] / 1.0e6,
+        (double)max_stats[3] / 1.0e6,
+        (double)max_stats[4] / 1.0e6);
+    fflush(stdout);
+  }
+}
+
 static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
                                    const void* data) {
   etree_addr_t hit_addr;
@@ -3479,12 +3536,14 @@ static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
 
   if ((data != NULL) &&
       mesh_import_payload_ready((const edata_t*)data, leaf->level, ticksize)) {
+    g_meshImportPayloadReadySkips++;
     return 0;
   }
 
   target_level = mesh_import_pending_target(data);
   if (target_level >= 0) {
     if ((target_level >= leaf->level) && (target_level <= PIXELLEVEL)) {
+      g_meshImportPendingTargetSkips++;
       return (target_level > leaf->level) ? 1 : 0;
     }
   }
@@ -3624,6 +3683,8 @@ static void mesh_generate_from_etree(void) {
       (strcasecmp(verify_env, "off") != 0);
 
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
+  setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
+  mesh_import_reset_stats();
 
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
@@ -3752,6 +3813,7 @@ static void mesh_generate_from_etree(void) {
     }
   }
   Timer_Stop("Octor Refinetree");
+  mesh_import_print_stats();
 
   Timer_Start("Octor Partitiontree");
   if (Global.myID == 0) {
