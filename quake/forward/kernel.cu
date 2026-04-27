@@ -872,26 +872,28 @@ __global__  void kernelDispCalc(int32_t nharbored,
 
     mass_simple = gpuData->mass_simpleArrayDevice[nindex];
     if (mass_simple > 0) {
+      solver_float inv_mass_simple = (solver_float)1.0 / mass_simple;
+
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[0][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[0][nindex];
       tm2Disp.f[0] =
           (nodalForce.f[0] + mass2_minusaM * tm1Disp.f[0] -
-           mass_minusaM * tm2Disp.f[0]) /
-          mass_simple;
+           mass_minusaM * tm2Disp.f[0]) *
+          inv_mass_simple;
 
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[1][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[1][nindex];
       tm2Disp.f[1] =
           (nodalForce.f[1] + mass2_minusaM * tm1Disp.f[1] -
-           mass_minusaM * tm2Disp.f[1]) /
-          mass_simple;
+           mass_minusaM * tm2Disp.f[1]) *
+          inv_mass_simple;
 
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[2][nindex];
       mass_minusaM = gpuData->mass_minusaMArrayDevice[2][nindex];
       tm2Disp.f[2] =
           (nodalForce.f[2] + mass2_minusaM * tm1Disp.f[2] -
-           mass_minusaM * tm2Disp.f[2]) /
-          mass_simple;
+           mass_minusaM * tm2Disp.f[2]) *
+          inv_mass_simple;
     } else {
       tm2Disp.f[0] = 0;
       tm2Disp.f[1] = 0;
