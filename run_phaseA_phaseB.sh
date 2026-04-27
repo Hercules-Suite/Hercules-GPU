@@ -264,8 +264,31 @@ detect_alloc_cpus_per_node() {
   echo "0"
 }
 
+detect_local_numa_nodes() {
+  local raw=""
+
+  if command -v lscpu >/dev/null 2>&1; then
+    raw="$(lscpu -p=NODE 2>/dev/null | awk -F, '!/^#/ && $1 ~ /^[0-9]+$/ { seen[$1] = 1 } END { print length(seen) }')"
+    if [[ "${raw}" =~ ^[0-9]+$ ]] && [[ "${raw}" -gt 0 ]]; then
+      echo "${raw}"
+      return
+    fi
+  fi
+
+  if command -v numactl >/dev/null 2>&1; then
+    raw="$(numactl --hardware 2>/dev/null | awk '/available:[[:space:]]+[0-9]+[[:space:]]+nodes/ { print $2; exit }')"
+    if [[ "${raw}" =~ ^[0-9]+$ ]] && [[ "${raw}" -gt 0 ]]; then
+      echo "${raw}"
+      return
+    fi
+  fi
+
+  echo "1"
+}
+
 ALLOC_NODES="$(detect_alloc_nodes)"
 ALLOC_CPUS_PER_NODE="$(detect_alloc_cpus_per_node)"
+LOCAL_NUMA_NODES="$(detect_local_numa_nodes)"
 ALLOC_TOTAL_CPUS=0
 
 if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
@@ -399,6 +422,7 @@ PHASE_B_MAP_MODE="${PHASE_B_MAP_MODE:-auto}"
 PHASE_B_MAP_ARGS=()
 PHASE_B_MAP_DESC=""
 PHASE_B_RANKS_PER_NODE=""
+PHASE_B_RANKS_PER_NUMA=""
 
 if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]]; then
   if (( PHASE_B_NP % ALLOC_NODES == 0 )); then
@@ -451,7 +475,22 @@ case "${PHASE_B_MAP_MODE}" in
       PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
       PHASE_B_MAP_DESC="auto(per-node)"
     elif [[ -n "${PHASE_B_RANKS_PER_NODE}" ]]; then
-      if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+      if [[ "${LOCAL_NUMA_NODES}" -gt 1 ]] &&
+         (( PHASE_B_RANKS_PER_NODE % LOCAL_NUMA_NODES == 0 )); then
+        PHASE_B_RANKS_PER_NUMA="$((PHASE_B_RANKS_PER_NODE / LOCAL_NUMA_NODES))"
+      else
+        PHASE_B_RANKS_PER_NUMA=""
+      fi
+
+      if [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]] &&
+         [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] &&
+         [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by numa)
+        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa, PE=${PHASE_B_OMP_THREADS})"
+      elif [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]]; then
+        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa" --bind-to core --rank-by numa)
+        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa)"
+      elif [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
         PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node, PE=${PHASE_B_OMP_THREADS})"
       else
