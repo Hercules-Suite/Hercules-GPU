@@ -124,6 +124,9 @@ const int32_t* topo_get_nodes_list();
 int32_t topo_get_node_range_count();
 const int32_t* topo_get_node_range_starts();
 const int32_t* topo_get_node_range_lengths();
+int32_t topo_get_elements_count();
+const int32_t* topo_get_elements_mapping();
+const topoconstants_t* topo_get_constants();
 
 noyesflag_t    	get_topo_nonlin_flag();
 int   get_cube_partition(int32_t eindex);

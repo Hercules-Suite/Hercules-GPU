@@ -2180,6 +2180,21 @@ const int32_t* topo_get_node_range_lengths() {
     return myTopoNodeRangeLengths;
 }
 
+int32_t topo_get_elements_count() {
+    return myTopoElementsCount;
+}
+
+const int32_t* topo_get_elements_mapping() {
+    return myTopoElementsMapping;
+}
+
+const topoconstants_t* topo_get_constants() {
+    if (myTopoSolver == NULL) {
+        return NULL;
+    }
+    return myTopoSolver->topoconstants;
+}
+
 void compute_addforce_topoEffective ( mesh_t     *myMesh,
                                       mysolver_t *mySolver,
                                       double      theDeltaTSquared ) {

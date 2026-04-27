@@ -88,6 +88,12 @@ MPI_Comm comm_IO;
 
 static int32_t g_dampingElemCountGPU = -1;
 static int32_t* g_dampingElemMapperDevice = NULL;
+static int32_t g_topoElemCountGPU = -1;
+static int32_t* g_topoElemMapperDevice = NULL;
+static topoconstants_t* g_topoConstantsDevice = NULL;
+static int32_t g_topoForceMode = -1;
+static int32_t g_topoForceModeReported = 0;
+static int32_t g_topoForcePathReported = 0;
 static int32_t g_dampingBkt2CoeffsReady = 0;
 static double g_dampingBkt2ShearCoef1 = 0.0;
 static double g_dampingBkt2ShearCoef2 = 0.0;
@@ -349,11 +355,17 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
+static void solver_compute_force_topography_gpu(mysolver_t* solver,
+                                                mesh_t* mesh,
+                                                double deltaT2);
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_load_forces_range_gpu(mysolver_t* solver, mesh_t* mesh,
                                          int32_t sourceCount);
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
 static int32_t solver_sparse_clear_mode(void);
+static int32_t use_gpu_topography_fastpath(void);
+static int32_t need_host_force_upload(void);
+static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
@@ -413,6 +425,191 @@ __global__ static void kernelSparseForceScatter(int32_t count,
 
   int32_t lnid = lnidList[idx];
   forceDevice[lnid] = srcForces[idx];
+}
+
+__device__ __constant__ int kTopoTetNodes[2][5][4] = {
+    {{0, 2, 1, 4}, {3, 1, 2, 7}, {6, 4, 7, 2},
+     {5, 7, 4, 1}, {2, 4, 7, 1}},
+    {{0, 3, 1, 5}, {0, 2, 3, 6}, {4, 5, 6, 0},
+     {6, 5, 7, 3}, {0, 6, 3, 5}}};
+
+__device__ __constant__ double kTopoCubeCoord[8][3] = {
+    {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+    {1.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0},
+    {0.0, 1.0, 1.0}, {1.0, 1.0, 1.0}};
+
+__device__ static double topo_det3(const double a[3][3]) {
+  return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+         a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+         a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+}
+
+__device__ static void topo_inv3(const double a[3][3], double inv[3][3]) {
+  double d = topo_det3(a);
+
+  inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / d;
+  inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / d;
+  inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / d;
+  inv[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / d;
+  inv[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / d;
+  inv[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / d;
+  inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / d;
+  inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / d;
+  inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / d;
+}
+
+__device__ static void topoTetraForcesEffective(const fvector_t* un,
+                                                fvector_t* resVec,
+                                                const topoconstants_t* topo_ec) {
+  const int part = (topo_ec->cube_part == 1) ? 0 : 1;
+  const double h = topo_ec->h;
+
+  for (int k = 0; k < 5; k++) {
+    if (topo_ec->tetraVol[k] == 0.0) {
+      continue;
+    }
+
+    int nodes[4];
+    double x[4][3];
+    double a[3][3];
+    double inv[3][3];
+    double grad[4][3];
+    double gradU[3][3];
+    double sigma[3][3];
+
+    for (int i = 0; i < 4; i++) {
+      nodes[i] = kTopoTetNodes[part][k][i];
+    }
+
+    for (int i = 0; i < 4; i++) {
+      int n = nodes[i];
+      x[i][0] = kTopoCubeCoord[n][0] * h;
+      x[i][1] = kTopoCubeCoord[n][1] * h;
+      x[i][2] = kTopoCubeCoord[n][2] * h;
+    }
+
+    for (int col = 0; col < 3; col++) {
+      for (int row = 0; row < 3; row++) {
+        a[row][col] = x[col + 1][row] - x[0][row];
+      }
+    }
+
+    topo_inv3(a, inv);
+
+    for (int i = 1; i < 4; i++) {
+      grad[i][0] = inv[i - 1][0];
+      grad[i][1] = inv[i - 1][1];
+      grad[i][2] = inv[i - 1][2];
+    }
+    for (int d = 0; d < 3; d++) {
+      grad[0][d] = -(grad[1][d] + grad[2][d] + grad[3][d]);
+    }
+
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        gradU[i][j] = 0.0;
+      }
+    }
+
+    for (int aidx = 0; aidx < 4; aidx++) {
+      int n = nodes[aidx];
+      for (int comp = 0; comp < 3; comp++) {
+        for (int d = 0; d < 3; d++) {
+          gradU[comp][d] += un[n].f[comp] * grad[aidx][d];
+        }
+      }
+    }
+
+    double trace = gradU[0][0] + gradU[1][1] + gradU[2][2];
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+        sigma[i][j] = topo_ec->mu * (gradU[i][j] + gradU[j][i]);
+        if (i == j) {
+          sigma[i][j] += topo_ec->lambda * trace;
+        }
+      }
+    }
+
+    double volume = fabs(topo_det3(a)) * topo_ec->tetraVol[k] / 6.0;
+    for (int aidx = 0; aidx < 4; aidx++) {
+      int n = nodes[aidx];
+      for (int comp = 0; comp < 3; comp++) {
+        double value = 0.0;
+        for (int d = 0; d < 3; d++) {
+          value += sigma[comp][d] * grad[aidx][d];
+        }
+        resVec[n].f[comp] += (solver_float)(volume * value);
+      }
+    }
+  }
+}
+
+__global__ static void kernelTopoForceEffective(int32_t lenum,
+                                                gpu_data_t* gpuData,
+                                                int32_t topoElemCount,
+                                                const int32_t* topoElemMapper,
+                                                const topoconstants_t* topoConstants,
+                                                double dt2) {
+  int32_t topoIdx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (topoIdx >= topoElemCount) {
+    return;
+  }
+
+  int32_t eindex = topoElemMapper[topoIdx];
+  topoconstants_t topo_ec = topoConstants[topoIdx];
+  fvector_t localForce[8];
+  fvector_t curDisp[8];
+  double c1 = gpuData->c1ArrayDevice[eindex];
+  double b_over_dt;
+  int do_contrib = 0;
+
+  if (c1 == 0.0) {
+    return;
+  }
+
+  b_over_dt = gpuData->c3ArrayDevice[eindex] / c1;
+
+  for (int i = 0; i < 8; i++) {
+    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
+    const fvector_t* tm1Disp = gpuData->tm1Device + lnid;
+    const fvector_t* tm2Disp = gpuData->tm2Device + lnid;
+
+    localForce[i].f[0] = 0;
+    localForce[i].f[1] = 0;
+    localForce[i].f[2] = 0;
+
+    curDisp[i].f[0] =
+        tm1Disp->f[0] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[0];
+    curDisp[i].f[1] =
+        tm1Disp->f[1] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[1];
+    curDisp[i].f[2] =
+        tm1Disp->f[2] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[2];
+
+    do_contrib =
+        (fabs(curDisp[i].f[0]) > 1e-20) ? 1 : do_contrib;
+    do_contrib =
+        (fabs(curDisp[i].f[1]) > 1e-20) ? 1 : do_contrib;
+    do_contrib =
+        (fabs(curDisp[i].f[2]) > 1e-20) ? 1 : do_contrib;
+  }
+
+  if (!do_contrib) {
+    return;
+  }
+
+  topoTetraForcesEffective(curDisp, localForce, &topo_ec);
+
+  for (int i = 0; i < 8; i++) {
+    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
+    fvector_t* nodalForce = gpuData->forceDevice + lnid;
+
+    atomicAdd((solver_float*)&(nodalForce->f[0]),
+              (solver_float)(-localForce[i].f[0] * dt2));
+    atomicAdd((solver_float*)&(nodalForce->f[1]),
+              (solver_float)(-localForce[i].f[1] * dt2));
+    atomicAdd((solver_float*)&(nodalForce->f[2]),
+              (solver_float)(-localForce[i].f[2] * dt2));
+  }
 }
 
 double** malloc2dDouble(int n, int m) {
@@ -5001,6 +5198,13 @@ static void solver_init() {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  if (cudaMalloc((void**)&(Global.gpuData.c3ArrayDevice),
+                 Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to allocate c3 array memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 
   if (cudaMalloc((void**)&(Global.gpuData.lnidArrayDevice),
                  Global.myMesh->lenum * 8 * sizeof(int32_t)) != cudaSuccess) {
@@ -5162,6 +5366,7 @@ static void solver_init() {
   /* Temporary structure of arrays */
   double* c1Array = (double*)malloc(Global.myMesh->lenum * sizeof(double));
   double* c2Array = (double*)malloc(Global.myMesh->lenum * sizeof(double));
+  double* c3Array = (double*)malloc(Global.myMesh->lenum * sizeof(double));
   int32_t* lnidArray =
       (int32_t*)malloc(Global.myMesh->lenum * 8 * sizeof(int32_t));
 
@@ -5223,6 +5428,7 @@ static void solver_init() {
 
     c1Array[i] = Global.mySolver->eTable[i].c1;
     c2Array[i] = Global.mySolver->eTable[i].c2;
+    c3Array[i] = Global.mySolver->eTable[i].c3;
 
     for (int j = 0; j < 8; j++) {
       lnidArray[j * Global.myMesh->lenum + i] =
@@ -5275,6 +5481,13 @@ static void solver_init() {
                  Global.myMesh->lenum * sizeof(double),
                  cudaMemcpyHostToDevice) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to copy c2 array\n", Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (cudaMemcpy(Global.gpuData.c3ArrayDevice, c3Array,
+                 Global.myMesh->lenum * sizeof(double),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to copy c3 array\n", Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
@@ -5414,6 +5627,7 @@ static void solver_init() {
 
   free(c1Array);
   free(c2Array);
+  free(c3Array);
   free(lnidArray);
   free(g0_shearArray);
   free(g1_shearArray);
@@ -5435,7 +5649,7 @@ static void solver_init() {
     free(mass_minusaMArray[i]);
   }
 
-  Global.gpu_spec.numbytespci += 18 * (Global.myMesh->lenum * sizeof(double));
+  Global.gpu_spec.numbytespci += 19 * (Global.myMesh->lenum * sizeof(double));
   Global.gpu_spec.numbytespci += 1 * (Global.myMesh->lenum * sizeof(int32_t));
 
     if (Global.myID == 0) {
@@ -5716,6 +5930,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.conv_kappa_3Device);
   cudaFree(Global.gpuData.c1ArrayDevice);
   cudaFree(Global.gpuData.c2ArrayDevice);
+  cudaFree(Global.gpuData.c3ArrayDevice);
   cudaFree(Global.gpuData.lnidArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
   cudaFree(Global.gpuData.g1_shearArrayDevice);
@@ -5748,6 +5963,19 @@ static void solver_delete() {
   }
   g_dampingElemCountGPU = -1;
   g_dampingBkt2CoeffsReady = 0;
+
+  if (g_topoElemMapperDevice != NULL) {
+    cudaFree(g_topoElemMapperDevice);
+    g_topoElemMapperDevice = NULL;
+  }
+  if (g_topoConstantsDevice != NULL) {
+    cudaFree(g_topoConstantsDevice);
+    g_topoConstantsDevice = NULL;
+  }
+  g_topoElemCountGPU = -1;
+  g_topoForceMode = -1;
+  g_topoForceModeReported = 0;
+  g_topoForcePathReported = 0;
 
   if (g_sourceNodeListDevice != NULL) {
     cudaFree(g_sourceNodeListDevice);
@@ -6309,11 +6537,54 @@ static void solver_compute_force_source(int step) {
   Timer_Stop("Compute addforces s");
 }
 
+static int32_t topo_force_mode(void) {
+  if (g_topoForceMode < 0) {
+    const char* env = getenv("HERCULES_TOPO_FORCE_MODE");
+    int32_t mode = 0;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "gpu") == 0 || strcasecmp(env, "device") == 0 ||
+          strcasecmp(env, "on") == 0 || strcasecmp(env, "yes") == 0 ||
+          strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        mode = 1;
+      } else if (strcasecmp(env, "cpu") == 0 ||
+                 strcasecmp(env, "host") == 0 ||
+                 strcasecmp(env, "off") == 0 ||
+                 strcasecmp(env, "no") == 0 ||
+                 strcasecmp(env, "false") == 0 || strcmp(env, "0") == 0) {
+        mode = 0;
+      }
+    }
+
+    g_topoForceMode = mode;
+    if ((Global.myID == 0) && (g_topoForceModeReported == 0)) {
+      monitor_print("Topography force mode request: %s\n",
+                    g_topoForceMode ? "gpu" : "cpu");
+      g_topoForceModeReported = 1;
+    }
+  }
+
+  return g_topoForceMode;
+}
+
+static int32_t use_gpu_topography_fastpath(void) {
+  if (Param.includeTopography != YES) {
+    return 0;
+  }
+  if (topo_force_mode() == 0) {
+    return 0;
+  }
+  if (get_topo_meth() == FEM) {
+    return 0;
+  }
+  return 1;
+}
+
 static int use_gpu_source_fastpath(void) {
   if (Param.drmImplement == YES) {
     return 0;
   }
-  if (Param.includeTopography == YES) {
+  if ((Param.includeTopography == YES) && !use_gpu_topography_fastpath()) {
     return 0;
   }
   if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
@@ -6326,6 +6597,9 @@ static int use_sparse_force_upload_topo(void) {
   if (Param.includeTopography != YES) {
     return 0;
   }
+  if (use_gpu_topography_fastpath()) {
+    return 0;
+  }
   if (Param.drmImplement == YES) {
     return 0;
   }
@@ -6333,6 +6607,19 @@ static int use_sparse_force_upload_topo(void) {
     return 0;
   }
   return 1;
+}
+
+static int32_t need_host_force_upload(void) {
+  if (Param.drmImplement == YES) {
+    return 1;
+  }
+  if (!use_gpu_source_fastpath()) {
+    return 1;
+  }
+  if ((Param.includeTopography == YES) && !use_gpu_topography_fastpath()) {
+    return 1;
+  }
+  return 0;
 }
 
 static void solver_compute_force_source_gpu(int32_t step) {
@@ -6351,8 +6638,10 @@ static void solver_compute_force_source_gpu(int32_t step) {
                   solver->streams[CUDA_STREAM_MAIN]);
 
   if (count <= 0) {
-    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
-                            "force upload");
+    if (!use_gpu_topography_fastpath()) {
+      solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                              "force upload");
+    }
     Timer_Stop("Compute addforces s");
     return;
   }
@@ -6410,7 +6699,10 @@ static void solver_compute_force_source_gpu(int32_t step) {
     exit(1);
   }
 
-  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE, "force upload");
+  if (!use_gpu_topography_fastpath()) {
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
+  }
 
   Timer_Stop("Compute addforces s");
 }
@@ -6590,11 +6882,174 @@ static void solver_compute_force_planewaves(mesh_t* myMesh,
  * Compute the topography contribution to the force.
  * \param deltaT2 Delta t^2 (i.e., squared).
  */
+static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
+  int32_t topoCount;
+  const int32_t* topoMapperHost;
+  const topoconstants_t* topoConstantsHost;
+  int32_t* filteredMapperHost;
+  topoconstants_t* filteredConstantsHost;
+  int32_t writeIdx = 0;
+  int32_t skippedNonlinear = 0;
+  int32_t skippedTopoBkt = 0;
+  noyesflag_t topoNonlinFlag;
+
+  if (g_topoElemCountGPU >= 0) {
+    return;
+  }
+
+  topoCount = topo_get_elements_count();
+  topoMapperHost = topo_get_elements_mapping();
+  topoConstantsHost = topo_get_constants();
+  topoNonlinFlag = get_topo_nonlin_flag();
+
+  if ((topoCount <= 0) || (topoMapperHost == NULL) ||
+      (topoConstantsHost == NULL)) {
+    g_topoElemCountGPU = 0;
+    return;
+  }
+
+  filteredMapperHost = (int32_t*)malloc((size_t)topoCount * sizeof(int32_t));
+  filteredConstantsHost =
+      (topoconstants_t*)malloc((size_t)topoCount * sizeof(topoconstants_t));
+  if ((filteredMapperHost == NULL) || (filteredConstantsHost == NULL)) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    fprintf(stderr,
+            "Thread %d: topography GPU mapper host allocation failed\n",
+            myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (int32_t topoIdx = 0; topoIdx < topoCount; topoIdx++) {
+    int32_t eindex = topoMapperHost[topoIdx];
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    const topoconstants_t* topo_ec = topoConstantsHost + topoIdx;
+
+    if ((topo_ec->isTopoNonlin != 0) && (topoNonlinFlag == YES)) {
+      skippedNonlinear++;
+      continue;
+    }
+    if (edata->topoBkt != 0) {
+      skippedTopoBkt++;
+      continue;
+    }
+
+    filteredMapperHost[writeIdx] = eindex;
+    filteredConstantsHost[writeIdx] = *topo_ec;
+    writeIdx++;
+  }
+
+  g_topoElemCountGPU = writeIdx;
+  if (g_topoElemCountGPU == 0) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
+      monitor_print(
+          "Topography force path: gpu (eligible=0, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
+          topoCount, skippedNonlinear, skippedTopoBkt);
+      g_topoForcePathReported = 1;
+    }
+    return;
+  }
+
+  if (cudaMalloc((void**)&g_topoElemMapperDevice,
+                 (size_t)g_topoElemCountGPU * sizeof(int32_t)) !=
+      cudaSuccess) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    fprintf(stderr,
+            "Thread %d: topography GPU mapper device allocation failed\n",
+            myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (cudaMalloc((void**)&g_topoConstantsDevice,
+                 (size_t)g_topoElemCountGPU * sizeof(topoconstants_t)) !=
+      cudaSuccess) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    fprintf(stderr,
+            "Thread %d: topography GPU constants device allocation failed\n",
+            myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (cudaMemcpy(g_topoElemMapperDevice, filteredMapperHost,
+                 (size_t)g_topoElemCountGPU * sizeof(int32_t),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    fprintf(stderr, "Thread %d: topography GPU mapper copy failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (cudaMemcpy(g_topoConstantsDevice, filteredConstantsHost,
+                 (size_t)g_topoElemCountGPU * sizeof(topoconstants_t),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    free(filteredMapperHost);
+    free(filteredConstantsHost);
+    fprintf(stderr, "Thread %d: topography GPU constants copy failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  free(filteredMapperHost);
+  free(filteredConstantsHost);
+
+  if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
+    monitor_print(
+        "Topography force path: gpu (eligible=%d, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
+        g_topoElemCountGPU, topoCount, skippedNonlinear, skippedTopoBkt);
+    g_topoForcePathReported = 1;
+  }
+}
+
+static void solver_compute_force_topography_gpu(mysolver_t* solver, mesh_t* mesh,
+                                                double deltaT2) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_topography_gpu_mapper(Global.myID, mesh);
+
+  if (g_topoElemCountGPU <= 0) {
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
+    return;
+  }
+
+  blocksize = 128;
+  gridsize = (g_topoElemCountGPU + blocksize - 1) / blocksize;
+
+  cudaGetLastError();
+  kernelTopoForceEffective<<<gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->lenum, solver->gpuDataDevice, g_topoElemCountGPU,
+      g_topoElemMapperDevice, g_topoConstantsDevice, deltaT2);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: topography force kernel - %s\n", Global.myID,
+            cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                          "force upload");
+}
+
 static void solver_compute_force_topography(mysolver_t* solver, mesh_t* mesh,
                                             double deltaT2) {
   if (Param.includeTopography == YES) {
     Timer_Start("Compute addforces Topography");
-    compute_addforce_topoEffective(mesh, solver, deltaT2);
+    if (use_gpu_topography_fastpath()) {
+      solver_compute_force_topography_gpu(solver, mesh, deltaT2);
+    } else {
+      compute_addforce_topoEffective(mesh, solver, deltaT2);
+    }
     Timer_Stop("Compute addforces Topography");
   }
 }
@@ -6715,8 +7170,10 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
                   mesh->nharbored * sizeof(fvector_t), cudaMemcpyHostToDevice,
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
-  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
-                          "force upload");
+  if (!use_gpu_topography_fastpath()) {
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
+  }
   solver_record_force_upload_source_event(solver);
 
   /* Uncomment for timing tests */
@@ -7458,7 +7915,7 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   Timer_Start("Disp host force reset");
   if (use_sparse_force_upload_topo()) {
     solver_clear_sparse_host_forces(solver);
-  } else if (!use_gpu_source_fastpath()) {
+  } else if (need_host_force_upload()) {
     /* zero out the force vector for all nodes */
     memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
   }
@@ -7861,15 +8318,24 @@ static void solver_run() {
         Param.theDeltaT, Param.theTypeOfDamping, Param.theFreq,
         Param.theDeltaTSquared);
 
-    solver_compute_force_topography(Global.mySolver, Global.myMesh,
-                                    Param.theDeltaTSquared);
+    if (!use_gpu_topography_fastpath()) {
+      solver_compute_force_topography(Global.mySolver, Global.myMesh,
+                                      Param.theDeltaTSquared);
+    }
 
     /* Push host-side source/DRM/topography force terms to device before
      * GPU stiffness/damping accumulation. */
-    if (use_sparse_force_upload_topo()) {
-      solver_load_forces_sparse_gpu(Global.mySolver, Global.myMesh);
-    } else if (!use_gpu_source_fastpath()) {
-      solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    if (need_host_force_upload()) {
+      if (use_sparse_force_upload_topo()) {
+        solver_load_forces_sparse_gpu(Global.mySolver, Global.myMesh);
+      } else {
+        solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+      }
+    }
+
+    if (use_gpu_topography_fastpath()) {
+      solver_compute_force_topography(Global.mySolver, Global.myMesh,
+                                      Param.theDeltaTSquared);
     }
     Timer_Stop("Physics Force Prep");
 

@@ -380,6 +380,7 @@ typedef struct gpu_data_t {
 
     double*      c1ArrayDevice;
     double*      c2ArrayDevice;
+    double*      c3ArrayDevice;
     int32_t*     lnidArrayDevice;
     double*      g0_shearArrayDevice;
     double*      g1_shearArrayDevice;

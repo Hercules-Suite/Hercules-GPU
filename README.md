@@ -42,6 +42,9 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather, often better for large models where `Sparse force upload build` dominates.
 	`sparse`/`2` forces sparse gather + scatter path.
 	`range`/`3` copies cached merged contiguous spans derived from topography node ranges plus source nodes; this is an experimental middle ground between `dense` and `sparse`.
+- `HERCULES_TOPO_FORCE_MODE=cpu|gpu` (or `0|1`)
+	Selects CPU or GPU-native topography effective-force assembly. Default is `cpu`/`0`.
+	`gpu`/`1` is experimental and computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
 
 Advanced/diagnostic toggles:
 
@@ -104,6 +107,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
+# export HERCULES_TOPO_FORCE_MODE=gpu
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
