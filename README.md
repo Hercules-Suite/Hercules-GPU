@@ -36,11 +36,12 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	interpolation before MPI send/write. Default is `1` (enabled).
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
-- `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse` (or `0|1|2`)
+- `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse|range` (or `0|1|2|3`)
 	Selects host-to-device force upload mode for topography sparse upload path. Default is `dense`/`1`.
 	Use `auto`/`0` to enable the heuristic path selection explicitly.
 	`dense`/`1` forces one full-array H2D copy and avoids sparse host gather, often better for large models where `Sparse force upload build` dominates.
 	`sparse`/`2` forces sparse gather + scatter path.
+	`range`/`3` copies cached merged contiguous spans derived from topography node ranges plus source nodes; this is an experimental middle ground between `dense` and `sparse`.
 
 Advanced/diagnostic toggles:
 
@@ -102,6 +103,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
+# export HERCULES_SPARSE_UPLOAD_MODE=range
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1

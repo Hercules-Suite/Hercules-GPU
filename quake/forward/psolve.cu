@@ -116,6 +116,14 @@ static int32_t g_sparseSourceCountCached = -1;
 static int32_t g_sparseTopoCountCached = -1;
 static int32_t g_sparseCopiedSourceCount = -1;
 static int32_t g_sparseCopiedTopoCount = -1;
+static int32_t* g_rangeUploadStartsHost = NULL;
+static int32_t* g_rangeUploadLengthsHost = NULL;
+static int32_t g_rangeUploadCapacity = 0;
+static int32_t g_rangeUploadCount = 0;
+static int64_t g_rangeUploadNodeCount = 0;
+static int32_t g_rangeUploadReady = 0;
+static int32_t g_rangeUploadSourceCountCached = -1;
+static int32_t g_rangeUploadTopoCountCached = -1;
 static int32_t g_sparseClearMode = -1;
 static int32_t g_sparseClearModeReported = 0;
 static int32_t g_sparseUploadMode = -1;
@@ -342,6 +350,8 @@ static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh);
+static void solver_load_forces_range_gpu(mysolver_t* solver, mesh_t* mesh,
+                                         int32_t sourceCount);
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
 static int32_t solver_sparse_clear_mode(void);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
@@ -368,6 +378,8 @@ static void solver_record_gpu_event(mysolver_t* solver, int eventID,
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
+static void solver_prepare_force_upload_ranges(mesh_t* mesh,
+                                               int32_t sourceCount);
 
 static int interpolate_station_displacements(int32_t step);
 
@@ -5779,6 +5791,16 @@ static void solver_delete() {
   g_sparseTopoCountCached = -1;
   g_sparseCopiedSourceCount = -1;
   g_sparseCopiedTopoCount = -1;
+  free(g_rangeUploadStartsHost);
+  free(g_rangeUploadLengthsHost);
+  g_rangeUploadStartsHost = NULL;
+  g_rangeUploadLengthsHost = NULL;
+  g_rangeUploadCapacity = 0;
+  g_rangeUploadCount = 0;
+  g_rangeUploadNodeCount = 0;
+  g_rangeUploadReady = 0;
+  g_rangeUploadSourceCountCached = -1;
+  g_rangeUploadTopoCountCached = -1;
 
   compute_adjust_cache_free();
 
@@ -6703,6 +6725,156 @@ static void solver_load_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   return;
 }
 
+static void solver_prepare_force_upload_ranges(mesh_t* mesh,
+                                               int32_t sourceCount) {
+  const int32_t topoRangeCount = topo_get_node_range_count();
+  const int32_t* topoRangeStarts = topo_get_node_range_starts();
+  const int32_t* topoRangeLengths = topo_get_node_range_lengths();
+  const int32_t totalIntervals = topoRangeCount + sourceCount;
+  const int32_t mergeGapNodes = 256;
+  int32_t* sortedSourceNodes = NULL;
+  int32_t topoIdx = 0;
+  int32_t sourceIdx = 0;
+  int32_t outCount = 0;
+  int64_t copiedNodes = 0;
+  int32_t currentStart = 0;
+  int32_t currentEnd = 0;
+  int haveCurrent = 0;
+
+  (void)mesh;
+
+  if ((g_rangeUploadReady == 1) &&
+      (g_rangeUploadSourceCountCached == sourceCount) &&
+      (g_rangeUploadTopoCountCached == topoRangeCount)) {
+    return;
+  }
+
+  if (totalIntervals > g_rangeUploadCapacity) {
+    free(g_rangeUploadStartsHost);
+    free(g_rangeUploadLengthsHost);
+    g_rangeUploadStartsHost = NULL;
+    g_rangeUploadLengthsHost = NULL;
+
+    g_rangeUploadStartsHost =
+        (int32_t*)malloc((size_t)totalIntervals * sizeof(int32_t));
+    g_rangeUploadLengthsHost =
+        (int32_t*)malloc((size_t)totalIntervals * sizeof(int32_t));
+    if ((g_rangeUploadStartsHost == NULL) || (g_rangeUploadLengthsHost == NULL)) {
+      fprintf(stderr, "Thread %d: range upload host alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    g_rangeUploadCapacity = totalIntervals;
+  }
+
+  if (sourceCount > 0) {
+    sortedSourceNodes =
+        (int32_t*)malloc((size_t)sourceCount * sizeof(int32_t));
+    if (sortedSourceNodes == NULL) {
+      fprintf(stderr, "Thread %d: range upload source sort alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    memcpy(sortedSourceNodes, Global.theNodesLoadedList,
+           (size_t)sourceCount * sizeof(int32_t));
+    qsort(sortedSourceNodes, (size_t)sourceCount, sizeof(int32_t),
+          compare_int32_asc);
+  }
+
+  while ((topoIdx < topoRangeCount) || (sourceIdx < sourceCount)) {
+    int32_t nextStart;
+    int32_t nextEnd;
+
+    if (topoIdx >= topoRangeCount) {
+      nextStart = sortedSourceNodes[sourceIdx];
+      nextEnd = nextStart + 1;
+      sourceIdx++;
+      while ((sourceIdx < sourceCount) &&
+             (sortedSourceNodes[sourceIdx] == nextStart)) {
+        sourceIdx++;
+      }
+    } else if (sourceIdx >= sourceCount) {
+      nextStart = topoRangeStarts[topoIdx];
+      nextEnd = nextStart + topoRangeLengths[topoIdx];
+      topoIdx++;
+    } else if (sortedSourceNodes[sourceIdx] < topoRangeStarts[topoIdx]) {
+      nextStart = sortedSourceNodes[sourceIdx];
+      nextEnd = nextStart + 1;
+      sourceIdx++;
+      while ((sourceIdx < sourceCount) &&
+             (sortedSourceNodes[sourceIdx] == nextStart)) {
+        sourceIdx++;
+      }
+    } else {
+      nextStart = topoRangeStarts[topoIdx];
+      nextEnd = nextStart + topoRangeLengths[topoIdx];
+      topoIdx++;
+    }
+
+    if (nextEnd <= nextStart) {
+      continue;
+    }
+
+    if (!haveCurrent) {
+      currentStart = nextStart;
+      currentEnd = nextEnd;
+      haveCurrent = 1;
+    } else if (nextStart <= (currentEnd + mergeGapNodes)) {
+      if (nextEnd > currentEnd) {
+        currentEnd = nextEnd;
+      }
+    } else {
+      g_rangeUploadStartsHost[outCount] = currentStart;
+      g_rangeUploadLengthsHost[outCount] = currentEnd - currentStart;
+      copiedNodes += (int64_t)(currentEnd - currentStart);
+      outCount++;
+      currentStart = nextStart;
+      currentEnd = nextEnd;
+    }
+  }
+
+  if (haveCurrent) {
+    g_rangeUploadStartsHost[outCount] = currentStart;
+    g_rangeUploadLengthsHost[outCount] = currentEnd - currentStart;
+    copiedNodes += (int64_t)(currentEnd - currentStart);
+    outCount++;
+  }
+
+  free(sortedSourceNodes);
+
+  g_rangeUploadCount = outCount;
+  g_rangeUploadNodeCount = copiedNodes;
+  g_rangeUploadReady = 1;
+  g_rangeUploadSourceCountCached = sourceCount;
+  g_rangeUploadTopoCountCached = topoRangeCount;
+}
+
+static void solver_load_forces_range_gpu(mysolver_t* solver, mesh_t* mesh,
+                                         int32_t sourceCount) {
+  int32_t i;
+
+  solver_prepare_force_upload_ranges(mesh, sourceCount);
+
+  Timer_Start("Sparse force upload memcpy");
+  for (i = 0; i < g_rangeUploadCount; i++) {
+    int32_t start = g_rangeUploadStartsHost[i];
+    int32_t len = g_rangeUploadLengthsHost[i];
+    cudaMemcpyAsync(solver->gpuData->forceDevice + start, solver->force + start,
+                    (size_t)len * sizeof(fvector_t), cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+  }
+  solver->gpu_spec->numbytespci +=
+      g_rangeUploadNodeCount * (int64_t)sizeof(fvector_t);
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                          "force upload");
+  solver_record_force_upload_source_event(solver);
+  Timer_Stop("Sparse force upload memcpy");
+}
+
 static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int32_t sourceCount = Global.theNodesLoaded;
   int32_t topoCount = topo_get_nodes_count();
@@ -6710,6 +6882,7 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   int32_t totalCount = sourceCount + topoCount;
   int32_t activeCount;
   int32_t useDenseUpload = 0;
+  int32_t pathCode;
   int32_t uploadMode;
   int32_t idx;
   int blocksize;
@@ -6722,6 +6895,40 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
                     solver->streams[CUDA_STREAM_MAIN]);
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
                             "force upload");
+    return;
+  }
+
+  uploadMode = sparse_force_upload_mode();
+  if (uploadMode == 1) {
+    if ((Global.myID == 0) && (g_sparseUploadPathReported != 1)) {
+      monitor_print(
+          "Sparse force upload path: dense (request=dense, source=%d, topo=%d, harbored=%d)\n",
+          sourceCount, topoCount, mesh->nharbored);
+      g_sparseUploadPathReported = 1;
+    }
+    Timer_Start("Sparse force upload memcpy");
+    cudaMemcpyAsync(solver->gpuData->forceDevice, solver->force,
+                    mesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci += mesh->nharbored * sizeof(fvector_t);
+    solver_record_gpu_event(solver, CUDA_EVENT_FORCE_UPLOAD_DONE,
+                            "force upload");
+    solver_record_force_upload_source_event(solver);
+    Timer_Stop("Sparse force upload memcpy");
+    return;
+  }
+
+  if (uploadMode == 3) {
+    solver_prepare_force_upload_ranges(mesh, sourceCount);
+    if ((Global.myID == 0) && (g_sparseUploadPathReported != 3)) {
+      monitor_print(
+          "Sparse force upload path: range (request=range, spans=%d, copied=%lld, source=%d, topo=%d, harbored=%d)\n",
+          g_rangeUploadCount, (long long)g_rangeUploadNodeCount, sourceCount,
+          topoCount, mesh->nharbored);
+      g_sparseUploadPathReported = 3;
+    }
+    solver_load_forces_range_gpu(solver, mesh, sourceCount);
     return;
   }
 
@@ -6882,7 +7089,6 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   activeCount = g_sparseActiveCount;
-  uploadMode = sparse_force_upload_mode();
   if (uploadMode == 1) {
     useDenseUpload = 1;
   } else if (uploadMode == 2) {
@@ -6891,16 +7097,18 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
     useDenseUpload = 1;
   }
 
-  if ((Global.myID == 0) && (g_sparseUploadPathReported != useDenseUpload)) {
+  pathCode = useDenseUpload ? 1 : 2;
+  if ((Global.myID == 0) && (g_sparseUploadPathReported != pathCode)) {
     const char* requestName =
         (uploadMode == 1) ? "dense" :
-        (uploadMode == 2) ? "sparse" : "auto";
+        (uploadMode == 2) ? "sparse" :
+        (uploadMode == 3) ? "range" : "auto";
     const char* chosenName = useDenseUpload ? "dense" : "sparse";
     monitor_print(
         "Sparse force upload path: %s (request=%s, active=%d, source=%d, topo=%d, harbored=%d)\n",
         chosenName, requestName, activeCount, sourceCount, topoCount,
         mesh->nharbored);
-    g_sparseUploadPathReported = useDenseUpload;
+    g_sparseUploadPathReported = pathCode;
   }
 
   if (useDenseUpload) {
@@ -10431,7 +10639,8 @@ static int32_t sparse_force_upload_mode(void) {
   if (g_sparseUploadMode < 0) {
     const char* env = getenv("HERCULES_SPARSE_UPLOAD_MODE");
 
-    /* 0: auto heuristic, 1: force dense upload, 2: force sparse upload */
+    /* 0: auto heuristic, 1: force dense upload,
+     * 2: force sparse upload, 3: force range upload */
     g_sparseUploadMode = 1;
 
     if (env != NULL) {
@@ -10443,13 +10652,19 @@ static int32_t sparse_force_upload_mode(void) {
                  (strcasecmp(env, "scatter") == 0) ||
                  (strcmp(env, "2") == 0)) {
         g_sparseUploadMode = 2;
+      } else if ((strcasecmp(env, "range") == 0) ||
+                 (strcasecmp(env, "ranges") == 0) ||
+                 (strcasecmp(env, "batched") == 0) ||
+                 (strcmp(env, "3") == 0)) {
+        g_sparseUploadMode = 3;
       }
     }
 
     if ((Global.myID == 0) && (g_sparseUploadModeReported == 0)) {
       const char* modeName =
           (g_sparseUploadMode == 1) ? "dense" :
-          (g_sparseUploadMode == 2) ? "sparse" : "auto";
+          (g_sparseUploadMode == 2) ? "sparse" :
+          (g_sparseUploadMode == 3) ? "range" : "auto";
       monitor_print("Sparse force upload mode request: %s\n", modeName);
       g_sparseUploadModeReported = 1;
     }
