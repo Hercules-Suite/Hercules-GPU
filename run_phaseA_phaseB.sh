@@ -470,27 +470,35 @@ case "${PHASE_B_MAP_MODE}" in
       PHASE_B_MAP_DESC="single-node slot binding"
     fi
     ;;
+  numa)
+    if [[ -z "${PHASE_B_RANKS_PER_NODE}" ]]; then
+      echo "ERROR: Phase B map mode 'numa' requires a multi-rank-per-node Phase B layout." >&2
+      echo "       Requested Phase B ranks: ${PHASE_B_NP}" >&2
+      echo "       Allocated nodes:         ${ALLOC_NODES}" >&2
+      exit 1
+    fi
+    if [[ "${LOCAL_NUMA_NODES}" -le 1 ]] ||
+       (( PHASE_B_RANKS_PER_NODE % LOCAL_NUMA_NODES != 0 )); then
+      echo "ERROR: Phase B map mode 'numa' requires ranks/node to divide evenly across local NUMA domains." >&2
+      echo "       Ranks/node:        ${PHASE_B_RANKS_PER_NODE}" >&2
+      echo "       Local NUMA domains:${LOCAL_NUMA_NODES}" >&2
+      exit 1
+    fi
+    PHASE_B_RANKS_PER_NUMA="$((PHASE_B_RANKS_PER_NODE / LOCAL_NUMA_NODES))"
+    if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+      PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
+      PHASE_B_MAP_DESC="numa(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa, PE=${PHASE_B_OMP_THREADS})"
+    else
+      PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa" --bind-to core --rank-by slot)
+      PHASE_B_MAP_DESC="numa(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa)"
+    fi
+    ;;
   auto)
     if [[ "${ALLOC_NODES}" -gt 1 ]] && [[ "${PHASE_B_NP}" -le "${ALLOC_NODES}" ]]; then
       PHASE_B_MAP_ARGS=(--map-by ppr:1:node --rank-by node)
       PHASE_B_MAP_DESC="auto(per-node)"
     elif [[ -n "${PHASE_B_RANKS_PER_NODE}" ]]; then
-      if [[ "${LOCAL_NUMA_NODES}" -gt 1 ]] &&
-         (( PHASE_B_RANKS_PER_NODE % LOCAL_NUMA_NODES == 0 )); then
-        PHASE_B_RANKS_PER_NUMA="$((PHASE_B_RANKS_PER_NODE / LOCAL_NUMA_NODES))"
-      else
-        PHASE_B_RANKS_PER_NUMA=""
-      fi
-
-      if [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]] &&
-         [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] &&
-         [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
-        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa, PE=${PHASE_B_OMP_THREADS})"
-      elif [[ -n "${PHASE_B_RANKS_PER_NUMA}" ]]; then
-        PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NUMA}:numa" --bind-to core --rank-by slot)
-        PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NUMA} ranks/numa x ${LOCAL_NUMA_NODES} numa)"
-      elif [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
+      if [[ "${PHASE_B_OMP_THREADS:-}" =~ ^[0-9]+$ ]] && [[ "${PHASE_B_OMP_THREADS}" -gt 0 ]]; then
         PHASE_B_MAP_ARGS=(--map-by "ppr:${PHASE_B_RANKS_PER_NODE}:node:PE=${PHASE_B_OMP_THREADS}" --bind-to core --rank-by slot)
         PHASE_B_MAP_DESC="auto(${PHASE_B_RANKS_PER_NODE} ranks/node, PE=${PHASE_B_OMP_THREADS})"
       else
@@ -508,7 +516,7 @@ case "${PHASE_B_MAP_MODE}" in
     fi
     ;;
   *)
-    echo "ERROR: invalid PHASE_B_MAP_MODE='${PHASE_B_MAP_MODE}'. Use auto|per-node|single-node." >&2
+    echo "ERROR: invalid PHASE_B_MAP_MODE='${PHASE_B_MAP_MODE}'. Use auto|per-node|single-node|numa." >&2
     exit 1
     ;;
 esac
