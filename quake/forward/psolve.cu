@@ -3426,16 +3426,64 @@ static int32_t mesh_etree_lookup(const octant_t* leaf, etree_addr_t* hit_addr,
   return -1;
 }
 
+static void mesh_import_store_pending_target(void* data,
+                                             int32_t target_level) {
+  edata_t* edata = (edata_t*)data;
+
+  memset(edata, 0, sizeof(edata_t));
+  edata->edgesize = -1.0f;
+  edata->topo_eindex = target_level;
+}
+
+static int32_t mesh_import_pending_target(const void* data) {
+  const edata_t* edata = (const edata_t*)data;
+
+  if (edata == NULL) {
+    return -1;
+  }
+
+  if ((edata->edgesize < 0.0f) && (edata->topo_eindex >= 0) &&
+      (edata->topo_eindex <= PIXELLEVEL)) {
+    return edata->topo_eindex;
+  }
+
+  return -1;
+}
+
+static int mesh_import_payload_ready(const edata_t* edata, int32_t level,
+                                     double ticksize) {
+  double expected_edgesize;
+  double diff;
+  double tol;
+
+  if (edata == NULL || edata->edgesize <= 0.0f) {
+    return 0;
+  }
+
+  expected_edgesize = ticksize * (double)((tick_t)1 << (PIXELLEVEL - level));
+  diff = fabs((double)edata->edgesize - expected_edgesize);
+  tol = fmax(1.0e-3, expected_edgesize * 1.0e-5);
+
+  return diff <= tol;
+}
+
+static void mesh_import_store_payload(void* data, const mdata_t* hit_data) {
+  memcpy(data, &hit_data->edgesize, sizeof(edata_t));
+}
+
 static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
                                    const void* data) {
   etree_addr_t hit_addr;
   mdata_t hit_data;
-  const int32_t* target_level_ptr = (const int32_t*)data;
+  int32_t target_level;
 
-  (void)ticksize;
+  if ((data != NULL) &&
+      mesh_import_payload_ready((const edata_t*)data, leaf->level, ticksize)) {
+    return 0;
+  }
 
-  if (target_level_ptr != NULL) {
-    int32_t target_level = *target_level_ptr;
+  target_level = mesh_import_pending_target(data);
+  if (target_level >= 0) {
     if ((target_level >= leaf->level) && (target_level <= PIXELLEVEL)) {
       return (target_level > leaf->level) ? 1 : 0;
     }
@@ -3456,13 +3504,18 @@ static int32_t toexpand_mesh_etree(octant_t* leaf, double ticksize,
     exit(1);
   }
 
+  if ((hit_addr.level == leaf->level) && (data != NULL)) {
+    mesh_import_store_payload((void*)data, &hit_data);
+  } else if (data != NULL) {
+    mesh_import_store_pending_target((void*)data, hit_addr.level);
+  }
+
   return (hit_addr.level > leaf->level) ? 1 : 0;
 }
 
 static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
   etree_addr_t hit_addr;
   mdata_t hit_data;
-  int32_t* target_level_ptr = (int32_t*)data;
 
   (void)ticksize;
 
@@ -3481,7 +3534,27 @@ static void setrec_mesh_etree(octant_t* leaf, double ticksize, void* data) {
     exit(1);
   }
 
-  *target_level_ptr = hit_addr.level;
+  if (hit_addr.level == leaf->level) {
+    mesh_import_store_payload(data, &hit_data);
+  } else {
+    mesh_import_store_pending_target(data, hit_addr.level);
+  }
+}
+
+static int mesh_import_all_properties_ready(void) {
+  int32_t eindex;
+
+  for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    elem_t* elemp = &Global.myMesh->elemTable[eindex];
+    edata_t* edata = (edata_t*)elemp->data;
+
+    if (!mesh_import_payload_ready(edata, elemp->level,
+                                   Global.myMesh->ticksize)) {
+      return 0;
+    }
+  }
+
+  return 1;
 }
 
 static void mesh_import_apply_properties(void) {
@@ -3537,7 +3610,7 @@ static void setrec_mesh_import_bootstrap(octant_t* leaf, double ticksize,
   (void)ticksize;
 
   if (data != NULL) {
-    *((int32_t*)data) = -1;
+    mesh_import_store_pending_target(data, -1);
   }
 }
 
@@ -3730,9 +3803,26 @@ static void mesh_generate_from_etree(void) {
   }
 
   Timer_Start("Mesh correct properties");
-  mesh_import_apply_properties();
+  int import_properties_ready = mesh_import_all_properties_ready();
+  if (import_properties_ready) {
+    if (Global.myID == 0) {
+      monitor_print("Mesh properties reused from etree import\n\n");
+      fflush(stdout);
+    }
+  } else {
+    if (Global.myID == 0) {
+      monitor_print("Mesh import property backfill %20s", "");
+      fflush(stdout);
+    }
+    mesh_import_apply_properties();
+  }
   MPI_Barrier(comm_solver);
   Timer_Stop("Mesh correct properties");
+  if (!import_properties_ready && Global.myID == 0) {
+    monitor_print("%9.2f\n\n",
+                  Timer_Value("Mesh correct properties", (TimerKind)0));
+    fflush(stdout);
+  }
 
   etree_close(Global.theMeshInputEp);
   Global.theMeshInputEp = NULL;
