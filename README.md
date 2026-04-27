@@ -68,6 +68,16 @@ Two-phase script defaults:
 	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it auto-derives
 	a per-rank value for multi-rank-per-node launches, or falls back to
 	`OMP_NUM_THREADS` for single-rank-per-node / direct runs.
+- Phase B mapping defaults:
+	`PHASE_B_MAP_MODE=auto` is the default and is the conservative recommended setting.
+	For multi-rank-per-node GPU runs it uses node-level Open MPI placement such as
+	`--map-by ppr:<ranks_per_node>:node:PE=<threads> --bind-to core --rank-by slot`.
+	Available explicit modes are:
+	`auto` (default conservative behavior),
+	`per-node` (force one rank per node),
+	`single-node` (single-node slot binding),
+	`numa` (opt-in NUMA-aware placement for nodes where ranks/node divides evenly across local NUMA domains).
+	The `numa` mode is experimental and should be used only when you want to test locality-sensitive placement explicitly.
 - You can still override any of these by exporting your own value before running the script.
 
 Two-phase job run (Phase A then Phase B):
@@ -95,6 +105,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
+# export PHASE_B_MAP_MODE=numa
 
 PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 /work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
@@ -105,7 +116,11 @@ PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 Notes:
 
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
-- Phase B enforces one-rank-per-node via OpenMPI mapping inside the script.
+- Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
+	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
+	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
+	`auto` typically uses a node-level mapping like `ppr:4:node:PE=35`,
+	while `PHASE_B_MAP_MODE=numa` tries `ppr:2:numa:PE=35` when the local node exposes two NUMA domains.
 
 Mesh mode input flags (`numerical.in`):
 
