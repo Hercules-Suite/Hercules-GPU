@@ -6579,7 +6579,7 @@ static void solver_compute_force_source(int step) {
 static int32_t topo_force_mode(void) {
   if (g_topoForceMode < 0) {
     const char* env = getenv("HERCULES_TOPO_FORCE_MODE");
-    int32_t mode = 0;
+    int32_t mode = 1;
 
     if (env != NULL) {
       if (strcasecmp(env, "gpu") == 0 || strcasecmp(env, "device") == 0 ||

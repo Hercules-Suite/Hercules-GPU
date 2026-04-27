@@ -43,8 +43,9 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	`sparse`/`2` forces sparse gather + scatter path.
 	`range`/`3` copies cached merged contiguous spans derived from topography node ranges plus source nodes; this is an experimental middle ground between `dense` and `sparse`.
 - `HERCULES_TOPO_FORCE_MODE=cpu|gpu` (or `0|1`)
-	Selects CPU or GPU-native topography effective-force assembly. Default is `cpu`/`0`.
-	`gpu`/`1` is experimental and computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
+	Selects CPU or GPU-native topography effective-force assembly. Default is `gpu`/`1`.
+	`gpu`/`1` computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
+	Use `cpu`/`0` to force the legacy host topography effective-force path.
 	For topography runs with `computation_method=fem`, there is no per-step effective-force topography assembly; the solver now treats that as no host-side topography force so the GPU source path can still skip the dense host-to-device force upload.
 	The run log prints a one-line `Force path:` summary showing whether source force is on CPU/GPU, whether host force upload is required, and which topography effective-force path was selected.
 - `HERCULES_DISP_SYNC_MODE=auto|full|boundary` (or `0|1`)
@@ -114,7 +115,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
-# export HERCULES_TOPO_FORCE_MODE=gpu
+# export HERCULES_TOPO_FORCE_MODE=cpu
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_REPRO_MODE=1
