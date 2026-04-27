@@ -45,6 +45,8 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 - `HERCULES_TOPO_FORCE_MODE=cpu|gpu` (or `0|1`)
 	Selects CPU or GPU-native topography effective-force assembly. Default is `cpu`/`0`.
 	`gpu`/`1` is experimental and computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
+	For topography runs with `computation_method=fem`, there is no per-step effective-force topography assembly; the solver now treats that as no host-side topography force so the GPU source path can still skip the dense host-to-device force upload.
+	The run log prints a one-line `Force path:` summary showing whether source force is on CPU/GPU, whether host force upload is required, and which topography effective-force path was selected.
 
 Advanced/diagnostic toggles:
 

@@ -164,6 +164,7 @@ static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_reproMode = -1;
 static int32_t g_meshImportBootstrapLevel = -1;
+static int32_t g_forcePathReported = 0;
 static cudaEvent_t g_forceUploadSourceSafeEvent;
 static int32_t g_forceUploadSourceSafeEventInit = 0;
 static int32_t g_forceUploadSourceSafePending = 0;
@@ -364,6 +365,8 @@ static void solver_load_forces_range_gpu(mysolver_t* solver, mesh_t* mesh,
 static void solver_clear_sparse_host_forces(mysolver_t* solver);
 static int32_t solver_sparse_clear_mode(void);
 static int32_t use_gpu_topography_fastpath(void);
+static int32_t topography_has_host_force_path(void);
+static void solver_report_force_paths_once(void);
 static int32_t need_host_force_upload(void);
 static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
@@ -6580,11 +6583,24 @@ static int32_t use_gpu_topography_fastpath(void) {
   return 1;
 }
 
+static int32_t topography_has_host_force_path(void) {
+  if (Param.includeTopography != YES) {
+    return 0;
+  }
+  if (get_topo_meth() == FEM) {
+    return 0;
+  }
+  if (use_gpu_topography_fastpath()) {
+    return 0;
+  }
+  return 1;
+}
+
 static int use_gpu_source_fastpath(void) {
   if (Param.drmImplement == YES) {
     return 0;
   }
-  if ((Param.includeTopography == YES) && !use_gpu_topography_fastpath()) {
+  if (topography_has_host_force_path()) {
     return 0;
   }
   if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
@@ -6594,10 +6610,7 @@ static int use_gpu_source_fastpath(void) {
 }
 
 static int use_sparse_force_upload_topo(void) {
-  if (Param.includeTopography != YES) {
-    return 0;
-  }
-  if (use_gpu_topography_fastpath()) {
+  if (!topography_has_host_force_path()) {
     return 0;
   }
   if (Param.drmImplement == YES) {
@@ -6616,10 +6629,42 @@ static int32_t need_host_force_upload(void) {
   if (!use_gpu_source_fastpath()) {
     return 1;
   }
-  if ((Param.includeTopography == YES) && !use_gpu_topography_fastpath()) {
+  if (topography_has_host_force_path()) {
     return 1;
   }
   return 0;
+}
+
+static void solver_report_force_paths_once(void) {
+  const char* topoMethodName = "none";
+  const char* topoEffectivePath = "none";
+  int32_t topoRequest = 0;
+
+  if ((Global.myID != 0) || (g_forcePathReported != 0)) {
+    return;
+  }
+
+  if (Param.includeTopography == YES) {
+    topometh_t topoMethod = get_topo_meth();
+    topoRequest = topo_force_mode();
+    topoMethodName = (topoMethod == FEM) ? "fem" : "vt";
+    if (topoMethod == FEM) {
+      topoEffectivePath = "none-fem";
+    } else if (use_gpu_topography_fastpath()) {
+      topoEffectivePath = "gpu";
+    } else {
+      topoEffectivePath = "cpu";
+    }
+  }
+
+  monitor_print(
+      "Force path: source=%s, host-force-upload=%s, topography-effective=%s "
+      "(topography=%s, method=%s, topo-request=%s)\n",
+      use_gpu_source_fastpath() ? "gpu" : "cpu",
+      need_host_force_upload() ? "yes" : "no", topoEffectivePath,
+      (Param.includeTopography == YES) ? "yes" : "no", topoMethodName,
+      topoRequest ? "gpu" : "cpu");
+  g_forcePathReported = 1;
 }
 
 static void solver_compute_force_source_gpu(int32_t step) {
@@ -8302,6 +8347,8 @@ static void solver_run() {
                                      Param.theTotalSteps);
     Timer_Stop("Solver I/O");
 
+    solver_report_force_paths_once();
+
     Timer_Start("Compute Physics");
     Timer_Start("Physics Force Prep");
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
@@ -8318,7 +8365,7 @@ static void solver_run() {
         Param.theDeltaT, Param.theTypeOfDamping, Param.theFreq,
         Param.theDeltaTSquared);
 
-    if (!use_gpu_topography_fastpath()) {
+    if (topography_has_host_force_path()) {
       solver_compute_force_topography(Global.mySolver, Global.myMesh,
                                       Param.theDeltaTSquared);
     }
