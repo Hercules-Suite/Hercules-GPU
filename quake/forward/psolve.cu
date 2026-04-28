@@ -3345,7 +3345,7 @@ static int64_t g_meshImportPendingTargetSkips = 0;
 
 static int mesh_import_etree_bufsize_mb(void) {
   const char* env = getenv("HERCULES_MESH_IMPORT_ETREE_BUFSIZE_MB");
-  long value = 256;
+  long value = 20;
 
   if ((env != NULL) && (env[0] != '\0')) {
     char* endptr = NULL;
