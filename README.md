@@ -64,14 +64,10 @@ Advanced/diagnostic toggles:
 	Default is `0`, which imports the saved mesh etree with one recursive
 	`octor_refinetree()` pass. Set to `1` to restore the slower verification
 	loop when debugging mesh import correctness.
-- `HERCULES_MESH_IMPORT_ETREE_BUFSIZE_MB=<integer>`
-	Controls the per-rank etree/B-tree cache size used when Phase B imports an
-	existing `mesh.e`. Default is `20` MB/rank, matching the etree library
-	default, and values are clamped to `20..4096`. Raise it only as an
-	experiment; `256` MB/rank did not improve the NVL72 test case.
-- `OCTOR_EXTRACT_PROFILE=0|1`
-	Controls the detailed `octor_extractmesh()` stage profile. Mesh-input
-	runs enable it by default unless you set this variable yourself.
+- `OCTOR_EXTRACT_PROFILE=0|1|2`
+	Controls the `octor_extractmesh()` stage profile. Mesh-input runs enable
+	the coarse profile by default unless you set this variable yourself. Use
+	`2` only when you want the extra vertex/indirect/node sub-stage profile.
 - `OCTOR_INIT_TASKS_PER_RANK=<integer>`
 	Controls the number of coarse bootstrap octree tasks per MPI rank before
 	parallel refinement. Default is the original octor value, `10`.

@@ -5408,6 +5408,8 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     mess_t *mess = NULL;
     com_t *allcom = NULL, *partcom = NULL;
     int extract_profile = 0;
+    int extract_detail_profile = 0;
+    int extract_profile_level = 0;
     const char *extract_profile_env = getenv("OCTOR_EXTRACT_PROFILE");
     enum {
         EX_DETAIL_VERTEX_BUILD = 0,
@@ -5449,7 +5451,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     double t_detail_max[EX_DETAIL_COUNT] = {0.0};
 
     if ((extract_profile_env != NULL) && (atoi(extract_profile_env) != 0)) {
+        extract_profile_level = atoi(extract_profile_env);
         extract_profile = 1;
+        extract_detail_profile = (extract_profile_level > 1);
         t_extract_start = MPI_Wtime();
     }
 
@@ -5473,7 +5477,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     if (extract_profile) {
         t_stage_start = MPI_Wtime();
-        t_detail_start = t_stage_start;
     }
 
     /* Note by Ricardo:
@@ -5571,7 +5574,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         exit(1);
     }
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail_start = MPI_Wtime();
     }
 
@@ -5792,7 +5795,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     } /* for all the local octants */
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail[EX_DETAIL_VERTEX_BUILD] += MPI_Wtime() - t_detail_start;
     }
 
@@ -5816,7 +5819,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
         com_resetpctl(tree->com, sizeof(vertex_info_t));
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail_start = MPI_Wtime();
         }
 
@@ -6007,7 +6010,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             } /* while link != NULL */
         } /* for all the entries in the hash table */
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_VERTEX_DIRECT_PACK] +=
                 MPI_Wtime() - t_detail_start;
             t_detail_start = MPI_Wtime();
@@ -6016,7 +6019,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         /* Exchange vertex information between adjacent processors */
         com_OrchestrateExchange(tree->com, VERTEX_INFO_MSG, tree->comm_tree);
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_VERTEX_DIRECT_EXCHANGE] +=
                 MPI_Wtime() - t_detail_start;
             t_detail_start = MPI_Wtime();
@@ -6115,7 +6118,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             frompctl = frompctl->next;
         } /* While there are unprocessed incoming message */
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_VERTEX_DIRECT_APPLY] +=
                 MPI_Wtime() - t_detail_start;
         }
@@ -6136,7 +6139,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     if (tree->groupsize > 1) {
         int32_t nbrprocid, msgsize;
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail_start = MPI_Wtime();
         }
 
@@ -6171,14 +6174,14 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             allcom->nbrcnt++;
         }
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_INDIRECT_SETUP] +=
                 MPI_Wtime() - t_detail_start;
         }
     } /* if groupsize > 1 */
 
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail_start = MPI_Wtime();
     }
 
@@ -6344,7 +6347,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     } /* for all the hash table entries */
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail[EX_DETAIL_INDIRECT_PROPERTY] +=
             MPI_Wtime() - t_detail_start;
     }
@@ -6352,7 +6355,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     if (tree->groupsize > 1) {
         pctl_t *frompctl;
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail_start = MPI_Wtime();
         }
 
@@ -6360,7 +6363,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
            relationship */
         com_OrchestrateExchange(allcom, ANCHORED_MSG, tree->comm_tree);
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_INDIRECT_EXCHANGE] +=
                 MPI_Wtime() - t_detail_start;
             t_detail_start = MPI_Wtime();
@@ -6423,7 +6426,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             frompctl = frompctl->next;
         }
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_INDIRECT_APPLY] +=
                 MPI_Wtime() - t_detail_start;
         }
@@ -6465,7 +6468,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     if (extract_profile) {
         t_node_start = MPI_Wtime();
         t_stage_start = MPI_Wtime();
-        t_detail_start = t_stage_start;
+        if (extract_detail_profile) {
+            t_detail_start = t_stage_start;
+        }
     }
 
     /* Visit all the vertices I have harbored */
@@ -6546,10 +6551,15 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     } /* for all the hash table entries */
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_BUILD] += MPI_Wtime() - t_detail_start;
+    }
+
+    if (extract_profile) {
         t_stage_start = MPI_Wtime();
-        t_detail_start = t_stage_start;
+        if (extract_detail_profile) {
+            t_detail_start = t_stage_start;
+        }
     }
 
     /* Sort all the nodes I've harbored in ascending Z-order */
@@ -6558,7 +6568,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     qsort(nodeTable, harborcount, sizeof(node_t), octor_zcompare);
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_SORT] += MPI_Wtime() - t_detail_start;
     }
 
@@ -6594,7 +6604,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
     if (extract_profile) {
         t_stage_start = MPI_Wtime();
-        t_detail_start = t_stage_start;
+        if (extract_detail_profile) {
+            t_detail_start = t_stage_start;
+        }
     }
 
     /* Assign the global node id to nodes owned by me and fill the
@@ -6757,7 +6769,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         }
     } /* for all the harbored nodes */
 
-    if (extract_profile) {
+    if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_GNID_PACK] +=
             MPI_Wtime() - t_detail_start;
     }
@@ -6766,13 +6778,13 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     if (tree->groupsize > 1) {
         pctl_t *frompctl;
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail_start = MPI_Wtime();
         }
 
         com_OrchestrateExchange(partcom, GNID_MSG, tree->comm_tree);
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_NODE_GNID_EXCHANGE] +=
                 MPI_Wtime() - t_detail_start;
             t_detail_start = MPI_Wtime();
@@ -6837,7 +6849,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             frompctl = frompctl->next;
         } /* While there are unprocessed incoming message */
 
-        if (extract_profile) {
+        if (extract_detail_profile) {
             t_detail[EX_DETAIL_NODE_GNID_APPLY] +=
                 MPI_Wtime() - t_detail_start;
         }
@@ -7068,8 +7080,10 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    tree->comm_tree);
         MPI_Reduce(&t_total, &t_total_max, 1, MPI_DOUBLE, MPI_MAX, 0,
                    tree->comm_tree);
-        MPI_Reduce(t_detail, t_detail_max, EX_DETAIL_COUNT, MPI_DOUBLE,
-                   MPI_MAX, 0, tree->comm_tree);
+        if (extract_detail_profile) {
+            MPI_Reduce(t_detail, t_detail_max, EX_DETAIL_COUNT, MPI_DOUBLE,
+                       MPI_MAX, 0, tree->comm_tree);
+        }
 
         if (tree->procid == 0) {
             printf("OCTOR Extractmesh Profile (MAX ranks): setcom %.3fs, "
@@ -7077,27 +7091,30 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                    "dnode %.3fs, cleanup %.3fs, total %.3fs\n",
                    t_setcom_max, t_vertex_max, t_indirect_max, t_node_max,
                    t_elem_max, t_dnode_max, t_cleanup_max, t_total_max);
-            printf("OCTOR Extractmesh Vertex Detail (MAX ranks): build %.3fs, "
-                   "direct-pack %.3fs, direct-exchange %.3fs, "
-                   "direct-apply %.3fs\n",
-                   t_detail_max[EX_DETAIL_VERTEX_BUILD],
-                   t_detail_max[EX_DETAIL_VERTEX_DIRECT_PACK],
-                   t_detail_max[EX_DETAIL_VERTEX_DIRECT_EXCHANGE],
-                   t_detail_max[EX_DETAIL_VERTEX_DIRECT_APPLY]);
-            printf("OCTOR Extractmesh Indirect Detail (MAX ranks): setup %.3fs, "
-                   "property %.3fs, exchange %.3fs, apply %.3fs\n",
-                   t_detail_max[EX_DETAIL_INDIRECT_SETUP],
-                   t_detail_max[EX_DETAIL_INDIRECT_PROPERTY],
-                   t_detail_max[EX_DETAIL_INDIRECT_EXCHANGE],
-                   t_detail_max[EX_DETAIL_INDIRECT_APPLY]);
-            printf("OCTOR Extractmesh Node Detail (MAX ranks): build %.3fs, "
-                   "sort %.3fs, gnid-pack %.3fs, gnid-exchange %.3fs, "
-                   "gnid-apply %.3fs\n",
-                   t_detail_max[EX_DETAIL_NODE_BUILD],
-                   t_detail_max[EX_DETAIL_NODE_SORT],
-                   t_detail_max[EX_DETAIL_NODE_GNID_PACK],
-                   t_detail_max[EX_DETAIL_NODE_GNID_EXCHANGE],
-                   t_detail_max[EX_DETAIL_NODE_GNID_APPLY]);
+            if (extract_detail_profile) {
+                printf("OCTOR Extractmesh Vertex Detail (MAX ranks): "
+                       "build %.3fs, direct-pack %.3fs, "
+                       "direct-exchange %.3fs, direct-apply %.3fs\n",
+                       t_detail_max[EX_DETAIL_VERTEX_BUILD],
+                       t_detail_max[EX_DETAIL_VERTEX_DIRECT_PACK],
+                       t_detail_max[EX_DETAIL_VERTEX_DIRECT_EXCHANGE],
+                       t_detail_max[EX_DETAIL_VERTEX_DIRECT_APPLY]);
+                printf("OCTOR Extractmesh Indirect Detail (MAX ranks): "
+                       "setup %.3fs, property %.3fs, exchange %.3fs, "
+                       "apply %.3fs\n",
+                       t_detail_max[EX_DETAIL_INDIRECT_SETUP],
+                       t_detail_max[EX_DETAIL_INDIRECT_PROPERTY],
+                       t_detail_max[EX_DETAIL_INDIRECT_EXCHANGE],
+                       t_detail_max[EX_DETAIL_INDIRECT_APPLY]);
+                printf("OCTOR Extractmesh Node Detail (MAX ranks): "
+                       "build %.3fs, sort %.3fs, gnid-pack %.3fs, "
+                       "gnid-exchange %.3fs, gnid-apply %.3fs\n",
+                       t_detail_max[EX_DETAIL_NODE_BUILD],
+                       t_detail_max[EX_DETAIL_NODE_SORT],
+                       t_detail_max[EX_DETAIL_NODE_GNID_PACK],
+                       t_detail_max[EX_DETAIL_NODE_GNID_EXCHANGE],
+                       t_detail_max[EX_DETAIL_NODE_GNID_APPLY]);
+            }
             fflush(stdout);
         }
     }
