@@ -3683,6 +3683,7 @@ static void mesh_generate_from_etree(void) {
       (strcasecmp(verify_env, "off") != 0);
 
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
+  setenv("OCTOR_INIT_TASKS_PER_RANK", "1024", 0);
   setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
   mesh_import_reset_stats();
 

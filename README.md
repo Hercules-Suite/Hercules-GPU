@@ -67,6 +67,10 @@ Advanced/diagnostic toggles:
 - `OCTOR_EXTRACT_PROFILE=0|1`
 	Controls the detailed `octor_extractmesh()` stage profile. Mesh-input
 	runs enable it by default unless you set this variable yourself.
+- `OCTOR_INIT_TASKS_PER_RANK=<integer>`
+	Controls the number of coarse bootstrap octree tasks per MPI rank before
+	parallel refinement. Mesh-input runs default to `1024` unless you set this
+	variable yourself; the original octor default is `10`.
 
 Build note:
 

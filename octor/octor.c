@@ -4201,11 +4201,28 @@ octor_newtree(double x, double y, double z, int32_t recsize,
         oct_t *oct;
         int32_t *inited; /* indicate wheter an interval has been inited */
 
-        /* Create enough tasks for every processor */
-        tasks = 1;
-        threshold = 10 * groupsize;
+	/* Create enough tasks for every processor */
+	tasks = 1;
+	{
+	    int32_t tasks_per_rank = 10;
+	    const char *tasks_env = getenv("OCTOR_INIT_TASKS_PER_RANK");
 
-        while (tasks < threshold) {
+	    if (tasks_env != NULL && tasks_env[0] != '\0') {
+		char *endptr = NULL;
+		long requested = strtol(tasks_env, &endptr, 10);
+
+		if ((endptr != tasks_env) && (requested > 0)) {
+		    if (requested > 8192) {
+			requested = 8192;
+		    }
+		    tasks_per_rank = (int32_t)requested;
+		}
+	    }
+
+	    threshold = tasks_per_rank * groupsize;
+	}
+
+	while (tasks < threshold) {
             tasks = 0;
 
             oct = tree->firstleaf;
