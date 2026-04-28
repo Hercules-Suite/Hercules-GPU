@@ -69,8 +69,9 @@ Advanced/diagnostic toggles:
 	runs enable it by default unless you set this variable yourself.
 - `OCTOR_INIT_TASKS_PER_RANK=<integer>`
 	Controls the number of coarse bootstrap octree tasks per MPI rank before
-	parallel refinement. Mesh-input runs default to `1024` unless you set this
-	variable yourself; the original octor default is `10`.
+	parallel refinement. Default is the original octor value, `10`.
+	Higher values are experimental; `1024` improved initial refinement balance
+	in one run but caused an unsafe partitioning tree shape.
 
 Build note:
 
