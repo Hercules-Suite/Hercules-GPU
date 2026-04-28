@@ -912,9 +912,12 @@ static int32_t math_zsearch(const point_t *interval, int32_t size,
 static int32_t math_bsearch(const int64_t *start, int32_t count, int64_t key);
 static uint32_t math_hashuint32(const void *start, int32_t count);
 
-static void    node_qsort_by_morton(node_t *nodes, int32_t count);
-static int32_t node_radixsort_by_morton(node_t *nodes, int32_t count);
-static void    node_sort_by_morton(node_t *nodes, int32_t count);
+static int32_t node_qsort_by_morton(node_t *nodes, vertex_t **vertices,
+                                    int64_t count);
+static int32_t node_radixsort_by_morton(node_t *nodes, vertex_t **vertices,
+                                        int64_t count);
+static int32_t node_sort_by_morton(node_t *nodes, vertex_t **vertices,
+                                   int64_t count);
 
 
 
@@ -3309,19 +3312,55 @@ octor_zcompare(const void *ptr1, const void *ptr2)
 }
 
 
-static void
-node_qsort_by_morton(node_t *nodes, int32_t count)
+static int32_t
+node_qsort_by_morton(node_t *nodes, vertex_t **vertices, int64_t count)
 {
-    qsort(nodes, count, sizeof(node_t), octor_zcompare);
+    typedef struct node_vertex_pair_t {
+        node_t node;
+        vertex_t *vertex;
+    } node_vertex_pair_t;
+
+    int64_t i;
+    node_vertex_pair_t *pairs;
+
+    if (vertices == NULL) {
+        qsort(nodes, (size_t)count, sizeof(node_t), octor_zcompare);
+        return 0;
+    }
+
+    pairs = (node_vertex_pair_t *)malloc(sizeof(node_vertex_pair_t) *
+                                         (size_t)count);
+    if (pairs == NULL) {
+        qsort(nodes, (size_t)count, sizeof(node_t), octor_zcompare);
+        return -1;
+    }
+
+    for (i = 0; i < count; i++) {
+        pairs[i].node = nodes[i];
+        pairs[i].vertex = vertices[i];
+    }
+
+    qsort(pairs, (size_t)count, sizeof(node_vertex_pair_t), octor_zcompare);
+
+    for (i = 0; i < count; i++) {
+        nodes[i] = pairs[i].node;
+        vertices[i] = pairs[i].vertex;
+    }
+
+    free(pairs);
+    return 0;
 }
 
 
 static int32_t
-node_radixsort_by_morton(node_t *nodes, int32_t count)
+node_radixsort_by_morton(node_t *nodes, vertex_t **vertices, int64_t count)
 {
     node_t *scratch;
+    vertex_t **scratch_vertices = NULL;
     node_t *src;
     node_t *dst;
+    vertex_t **src_vertices;
+    vertex_t **dst_vertices;
     int32_t bit;
     size_t bytes;
 
@@ -3335,14 +3374,25 @@ node_radixsort_by_morton(node_t *nodes, int32_t count)
         return -1;
     }
 
+    if (vertices != NULL) {
+        scratch_vertices =
+            (vertex_t **)malloc(sizeof(vertex_t *) * (size_t)count);
+        if (scratch_vertices == NULL) {
+            free(scratch);
+            return -1;
+        }
+    }
+
     src = nodes;
     dst = scratch;
+    src_vertices = vertices;
+    dst_vertices = scratch_vertices;
 
     for (bit = 0; bit < PIXELLEVEL; bit++) {
         size_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         size_t offsets[8];
         size_t next[8];
-        int32_t i;
+        int64_t i;
         int bucket;
 
         for (i = 0; i < count; i++) {
@@ -3365,10 +3415,16 @@ node_radixsort_by_morton(node_t *nodes, int32_t count)
             uint32_t x = (uint32_t)src[i].x;
             uint32_t y = (uint32_t)src[i].y;
             uint32_t z = (uint32_t)src[i].z;
+            size_t dst_index;
+
             bucket = (int)(((x >> bit) & 1u) |
                            (((y >> bit) & 1u) << 1) |
                            (((z >> bit) & 1u) << 2));
-            dst[next[bucket]++] = src[i];
+            dst_index = next[bucket]++;
+            dst[dst_index] = src[i];
+            if (vertices != NULL) {
+                dst_vertices[dst_index] = src_vertices[i];
+            }
         }
 
         {
@@ -3376,31 +3432,41 @@ node_radixsort_by_morton(node_t *nodes, int32_t count)
             src = dst;
             dst = tmp;
         }
+        if (vertices != NULL) {
+            vertex_t **tmp_vertices = src_vertices;
+            src_vertices = dst_vertices;
+            dst_vertices = tmp_vertices;
+        }
     }
 
     if (src != nodes) {
         memcpy(nodes, src, bytes);
+        if (vertices != NULL) {
+            memcpy(vertices, src_vertices, sizeof(vertex_t *) * (size_t)count);
+        }
     }
 
+    free(scratch_vertices);
     free(scratch);
     return 0;
 }
 
 
-static void
-node_sort_by_morton(node_t *nodes, int32_t count)
+static int32_t
+node_sort_by_morton(node_t *nodes, vertex_t **vertices, int64_t count)
 {
     const char *mode = getenv("OCTOR_NODE_SORT_MODE");
 
     if ((mode != NULL) &&
         ((strcmp(mode, "qsort") == 0) || (strcmp(mode, "legacy") == 0))) {
-        node_qsort_by_morton(nodes, count);
-        return;
+        return node_qsort_by_morton(nodes, vertices, count);
     }
 
-    if (node_radixsort_by_morton(nodes, count) != 0) {
-        node_qsort_by_morton(nodes, count);
+    if (node_radixsort_by_morton(nodes, vertices, count) != 0) {
+        return node_qsort_by_morton(nodes, vertices, count);
     }
+
+    return 0;
 }
 
 
@@ -5684,6 +5750,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     int32_t eindex, nindex, dnindex;
     elem_t *elemTable;
     vertex_t **elemVertexRef;
+    vertex_t **nodeVertexRef = NULL;
     node_t *nodeTable, *node;
     dnode_t *dnodeTable;
     link_t **vertexHashTable, *link;
@@ -6747,6 +6814,11 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         theAllocatedMemSum += sizeof(node_t) * harborcount;
     }
 
+    nodeVertexRef = (vertex_t **)malloc(sizeof(vertex_t *) * harborcount);
+    if (nodeVertexRef != NULL) {
+        theAllocatedMemSum += sizeof(vertex_t *) * harborcount;
+    }
+
     ncount = 0; /* Number of nodes owned by this processor */
     ldnnum = 0; /* Number of dangling nodes owned by this processor */
     nindex = 0;
@@ -6827,6 +6899,10 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 }
             }
 
+            if (nodeVertexRef != NULL) {
+                nodeVertexRef[nindex] = vertex;
+            }
+
             /* Move to the next empty entry in the node table */
             nindex++;
 
@@ -6852,7 +6928,10 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     /* Yigit says --  Nodes on the building boundaries are not adjusted.
      * But not sure if that is necessary */
 
-    node_sort_by_morton(nodeTable, harborcount);
+    if (node_sort_by_morton(nodeTable, nodeVertexRef, harborcount) != 0) {
+        free(nodeVertexRef);
+        nodeVertexRef = NULL;
+    }
 
     if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_SORT] += MPI_Wtime() - t_detail_start;
@@ -7031,27 +7110,41 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             }
         } /* I don't own this node */
 
-        hashentry = math_hashuint32(&nodeTable[nindex], 3) % vertexHashSize;
-        link = vertexHashTable[hashentry];
-
-        while (link != NULL) {
-            vertex = (vertex_t *)link->record;
-
-            if ((vertex->x == nodeTable[nindex].x) &&
-                (vertex->y == nodeTable[nindex].y) &&
-                (vertex->z == nodeTable[nindex].z)) {
-                /* Hit */
-                vertex->lnid = nindex;
-                break;
+        if (nodeVertexRef != NULL) {
+            vertex = nodeVertexRef[nindex];
+            if ((vertex == NULL) ||
+                (vertex->x != nodeTable[nindex].x) ||
+                (vertex->y != nodeTable[nindex].y) ||
+                (vertex->z != nodeTable[nindex].z)) {
+                fprintf(stderr, "Thread %d: %s %d: internal error\n",
+                        tree->procid, __FILE__, __LINE__);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
             }
-            link = link->next;
-        }
+            vertex->lnid = nindex;
+        } else {
+            hashentry = math_hashuint32(&nodeTable[nindex], 3) % vertexHashSize;
+            link = vertexHashTable[hashentry];
 
-        if (link == NULL) {
-            fprintf(stderr, "Thread %d: %s %d: internal error\n",
-                    tree->procid, __FILE__, __LINE__);
-            MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-            exit(1);
+            while (link != NULL) {
+                vertex = (vertex_t *)link->record;
+
+                if ((vertex->x == nodeTable[nindex].x) &&
+                    (vertex->y == nodeTable[nindex].y) &&
+                    (vertex->z == nodeTable[nindex].z)) {
+                    /* Hit */
+                    vertex->lnid = nindex;
+                    break;
+                }
+                link = link->next;
+            }
+
+            if (link == NULL) {
+                fprintf(stderr, "Thread %d: %s %d: internal error\n",
+                        tree->procid, __FILE__, __LINE__);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
+            }
         }
     } /* for all the harbored nodes */
 
@@ -7324,6 +7417,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
     free(vertexHashTable);
     free(elemVertexRef);
+    free(nodeVertexRef);
     mem_delete(vertexpool);
     mem_delete(linkpool);
 
