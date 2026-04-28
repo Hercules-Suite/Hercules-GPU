@@ -3343,6 +3343,29 @@ static int64_t g_meshImportFallbackLookups = 0;
 static int64_t g_meshImportPayloadReadySkips = 0;
 static int64_t g_meshImportPendingTargetSkips = 0;
 
+static int mesh_import_etree_bufsize_mb(void) {
+  const char* env = getenv("HERCULES_MESH_IMPORT_ETREE_BUFSIZE_MB");
+  long value = 256;
+
+  if ((env != NULL) && (env[0] != '\0')) {
+    char* endptr = NULL;
+    long requested = strtol(env, &endptr, 10);
+
+    if ((endptr != env) && (requested > 0)) {
+      value = requested;
+    }
+  }
+
+  if (value < 20) {
+    value = 20;
+  }
+  if (value > 4096) {
+    value = 4096;
+  }
+
+  return (int)value;
+}
+
 static int32_t mesh_etree_lookup_try(const octant_t* leaf, tick_t edge_ticks,
                                      int32_t fx_num, int32_t fy_num,
                                      int32_t fz_num, int32_t f_den,
@@ -3690,6 +3713,8 @@ static void mesh_generate_from_etree(void) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
     monitor_print("Stage %14s Min %7s Max %5s Total    Time(s)\n\n", "", "",
                   "");
+    monitor_print("Mesh import etree buffer: %d MB/rank\n",
+                  mesh_import_etree_bufsize_mb());
   }
 
   MPI_Barrier(comm_solver);
@@ -3736,7 +3761,8 @@ static void mesh_generate_from_etree(void) {
   }
 
   Global.theMeshInputEp =
-      etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
+      etree_open(Param.mesh_etree_output_file, O_RDONLY,
+                 mesh_import_etree_bufsize_mb(), 0, 0);
   if (Global.theMeshInputEp == NULL) {
     fprintf(stderr,
             "Thread %d: mesh_generate_from_etree: cannot open mesh etree %s\n",

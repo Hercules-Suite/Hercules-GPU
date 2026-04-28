@@ -64,6 +64,11 @@ Advanced/diagnostic toggles:
 	Default is `0`, which imports the saved mesh etree with one recursive
 	`octor_refinetree()` pass. Set to `1` to restore the slower verification
 	loop when debugging mesh import correctness.
+- `HERCULES_MESH_IMPORT_ETREE_BUFSIZE_MB=<integer>`
+	Controls the per-rank etree/B-tree cache size used when Phase B imports an
+	existing `mesh.e`. Default is `256` MB/rank, clamped to `20..4096`.
+	Lower this if memory per node is tight; raise it experimentally if
+	`Octor Refinetree` remains dominated by mesh etree lookup time.
 - `OCTOR_EXTRACT_PROFILE=0|1`
 	Controls the detailed `octor_extractmesh()` stage profile. Mesh-input
 	runs enable it by default unless you set this variable yourself.
