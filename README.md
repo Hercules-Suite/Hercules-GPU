@@ -76,6 +76,11 @@ Advanced/diagnostic toggles:
 	`node` sub-stage profiles. Mesh-input runs set this to `1` by default
 	unless you define it yourself. Use `2` only for diagnostic runs because it
 	adds extra timing/reduction work.
+- `OCTOR_NODE_SORT_MODE=radix|qsort`
+	Controls the node-table Morton/Z-order sort inside `octor_extractmesh()`.
+	Default is `radix`, a linear-time 8-bucket radix sort over the 30 Morton
+	bit planes. Set to `qsort` or `legacy` to restore the original C library
+	`qsort()` path.
 - `OCTOR_INIT_TASKS_PER_RANK=<integer>`
 	Controls the number of coarse bootstrap octree tasks per MPI rank before
 	parallel refinement. Default is the original octor value, `10`.

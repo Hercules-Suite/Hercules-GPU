@@ -912,6 +912,10 @@ static int32_t math_zsearch(const point_t *interval, int32_t size,
 static int32_t math_bsearch(const int64_t *start, int32_t count, int64_t key);
 static uint32_t math_hashuint32(const void *start, int32_t count);
 
+static void    node_qsort_by_morton(node_t *nodes, int32_t count);
+static int32_t node_radixsort_by_morton(node_t *nodes, int32_t count);
+static void    node_sort_by_morton(node_t *nodes, int32_t count);
+
 
 
 /****************************/
@@ -3302,6 +3306,101 @@ octor_zcompare(const void *ptr1, const void *ptr2)
 
         continue;
     } /* while */
+}
+
+
+static void
+node_qsort_by_morton(node_t *nodes, int32_t count)
+{
+    qsort(nodes, count, sizeof(node_t), octor_zcompare);
+}
+
+
+static int32_t
+node_radixsort_by_morton(node_t *nodes, int32_t count)
+{
+    node_t *scratch;
+    node_t *src;
+    node_t *dst;
+    int32_t bit;
+    size_t bytes;
+
+    if (count <= 1) {
+        return 0;
+    }
+
+    bytes = sizeof(node_t) * (size_t)count;
+    scratch = (node_t *)malloc(bytes);
+    if (scratch == NULL) {
+        return -1;
+    }
+
+    src = nodes;
+    dst = scratch;
+
+    for (bit = 0; bit < PIXELLEVEL; bit++) {
+        size_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        size_t offsets[8];
+        size_t next[8];
+        int32_t i;
+        int bucket;
+
+        for (i = 0; i < count; i++) {
+            uint32_t x = (uint32_t)src[i].x;
+            uint32_t y = (uint32_t)src[i].y;
+            uint32_t z = (uint32_t)src[i].z;
+            bucket = (int)(((x >> bit) & 1u) |
+                           (((y >> bit) & 1u) << 1) |
+                           (((z >> bit) & 1u) << 2));
+            counts[bucket]++;
+        }
+
+        offsets[0] = 0;
+        for (bucket = 1; bucket < 8; bucket++) {
+            offsets[bucket] = offsets[bucket - 1] + counts[bucket - 1];
+        }
+        memcpy(next, offsets, sizeof(offsets));
+
+        for (i = 0; i < count; i++) {
+            uint32_t x = (uint32_t)src[i].x;
+            uint32_t y = (uint32_t)src[i].y;
+            uint32_t z = (uint32_t)src[i].z;
+            bucket = (int)(((x >> bit) & 1u) |
+                           (((y >> bit) & 1u) << 1) |
+                           (((z >> bit) & 1u) << 2));
+            dst[next[bucket]++] = src[i];
+        }
+
+        {
+            node_t *tmp = src;
+            src = dst;
+            dst = tmp;
+        }
+    }
+
+    if (src != nodes) {
+        memcpy(nodes, src, bytes);
+    }
+
+    free(scratch);
+    return 0;
+}
+
+
+static void
+node_sort_by_morton(node_t *nodes, int32_t count)
+{
+    const char *mode = getenv("OCTOR_NODE_SORT_MODE");
+
+    if ((mode != NULL) &&
+        ((strcmp(mode, "qsort") == 0) || (strcmp(mode, "legacy") == 0))) {
+        node_qsort_by_morton(nodes, count);
+        return;
+    }
+
+    if (node_radixsort_by_morton(nodes, count) != 0) {
+        node_qsort_by_morton(nodes, count);
+    }
 }
 
 
@@ -6753,7 +6852,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     /* Yigit says --  Nodes on the building boundaries are not adjusted.
      * But not sure if that is necessary */
 
-    qsort(nodeTable, harborcount, sizeof(node_t), octor_zcompare);
+    node_sort_by_morton(nodeTable, harborcount);
 
     if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_SORT] += MPI_Wtime() - t_detail_start;
