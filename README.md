@@ -61,9 +61,12 @@ Advanced/diagnostic toggles:
 	deterministic communication paths and uses deterministic MPI unpack ordering. `2` is stricter and also disables additional CPU OpenMP paths guarded by repro mode; `run_phaseA_phaseB.sh` does not auto-set this env.
 - `HERCULES_MESH_IMPORT_VERIFY=0|1`
 	Controls the extra convergence-check refinement pass when `mesh_input_mode=1`.
-	Default is `0`, which imports the saved mesh etree with one recursive
-	`octor_refinetree()` pass. Set to `1` to restore the slower verification
-	loop when debugging mesh import correctness.
+	Default is `0`. This applies only when `HERCULES_MESH_IMPORT_TREE_MODE=refine`.
+- `HERCULES_MESH_IMPORT_TREE_MODE=cursor|refine`
+	Controls how Phase B rebuilds the octree from an existing `mesh.e`.
+	Default is `cursor`, which streams saved mesh leaves from the etree and
+	imports them directly into the local octor tree. Set to `refine` to restore
+	the older recursive `octor_refinetree()` search path.
 - `OCTOR_EXTRACT_PROFILE=0|1|2`
 	Controls the `octor_extractmesh()` stage profile. Mesh-input runs enable
 	the coarse profile by default unless you set this variable yourself. Use

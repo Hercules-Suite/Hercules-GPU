@@ -3483,6 +3483,21 @@ static void mesh_import_store_payload(void* data, const mdata_t* hit_data) {
   memcpy(data, &hit_data->edgesize, sizeof(edata_t));
 }
 
+static int mesh_import_use_cursor_tree(void) {
+  const char* env = getenv("HERCULES_MESH_IMPORT_TREE_MODE");
+
+  if ((env == NULL) || (env[0] == '\0')) {
+    return 1;
+  }
+
+  if ((strcasecmp(env, "refine") == 0) || (strcasecmp(env, "search") == 0) ||
+      (strcasecmp(env, "legacy") == 0)) {
+    return 0;
+  }
+
+  return 1;
+}
+
 static void mesh_import_reset_stats(void) {
   g_meshImportLookupCalls = 0;
   g_meshImportSearchAttempts = 0;
@@ -3524,6 +3539,161 @@ static void mesh_import_print_stats(void) {
         (double)max_stats[2] / 1.0e6,
         (double)max_stats[3] / 1.0e6,
         (double)max_stats[4] / 1.0e6);
+    fflush(stdout);
+  }
+}
+
+static void mesh_import_cursor_addr_point(const etree_addr_t* addr,
+                                          point_t* point) {
+  point->x = (tick_t)addr->x;
+  point->y = (tick_t)addr->y;
+  point->z = (tick_t)addr->z;
+}
+
+static int mesh_import_cursor_before_start(const etree_addr_t* addr,
+                                           const point_t* start_point) {
+  point_t point;
+
+  mesh_import_cursor_addr_point(addr, &point);
+  return octor_zcompare(&point, start_point) < 0;
+}
+
+static int mesh_import_cursor_past_end(const etree_addr_t* addr,
+                                       const point_t* end_point) {
+  point_t point;
+
+  if (end_point == NULL) {
+    return 0;
+  }
+
+  mesh_import_cursor_addr_point(addr, &point);
+  return octor_zcompare(&point, end_point) >= 0;
+}
+
+static void mesh_import_cursor_start_addr(etree_addr_t* addr,
+                                          const point_t** end_point_out) {
+  const point_t* intervals = octor_getintervaltable(Global.myOctree);
+  const point_t* end_point = NULL;
+
+  memset(addr, 0, sizeof(*addr));
+
+  if ((intervals != NULL) && (Global.theGroupSize > 1)) {
+    addr->x = (etree_tick_t)intervals[Global.myID].x;
+    addr->y = (etree_tick_t)intervals[Global.myID].y;
+    addr->z = (etree_tick_t)intervals[Global.myID].z;
+    if (Global.myID + 1 < Global.theGroupSize) {
+      end_point = &intervals[Global.myID + 1];
+    }
+  }
+
+  addr->level = 0;
+  addr->type = ETREE_INTERIOR;
+
+  *end_point_out = end_point;
+}
+
+static int64_t mesh_import_cursor_load_tree(void) {
+  etree_addr_t start_addr;
+  etree_addr_t addr;
+  mdata_t hit_data;
+  edata_t edata;
+  point_t start_point;
+  const point_t* end_point = NULL;
+  int64_t imported = 0;
+
+  mesh_import_cursor_start_addr(&start_addr, &end_point);
+  start_point.x = (tick_t)start_addr.x;
+  start_point.y = (tick_t)start_addr.y;
+  start_point.z = (tick_t)start_addr.z;
+
+  if (octor_beginleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: mesh_import_cursor_load_tree: begin failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (etree_initcursor(Global.theMeshInputEp, start_addr) != 0) {
+    fprintf(stderr,
+            "Thread %d: mesh_import_cursor_load_tree: cannot initialize etree cursor\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  while (etree_getcursor(Global.theMeshInputEp, &addr, NULL, &hit_data) == 0) {
+    if (mesh_import_cursor_before_start(&addr, &start_point)) {
+      if (etree_advcursor(Global.theMeshInputEp) != 0) {
+        if (etree_errno(Global.theMeshInputEp) != ET_END_OF_TREE) {
+          fprintf(stderr,
+                  "Thread %d: mesh_import_cursor_load_tree: etree cursor advance failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        break;
+      }
+      continue;
+    }
+
+    if (mesh_import_cursor_past_end(&addr, end_point)) {
+      break;
+    }
+
+    if (addr.type == ETREE_LEAF) {
+      mesh_import_store_payload(&edata, &hit_data);
+      if (octor_importleaf(Global.myOctree, (tick_t)addr.x, (tick_t)addr.y,
+                           (tick_t)addr.z, (int8_t)addr.level, &edata) != 0) {
+        fprintf(stderr,
+                "Thread %d: mesh_import_cursor_load_tree: cannot import leaf "
+                "(%d,%d,%d,l=%d)\n",
+                Global.myID, (int32_t)addr.x, (int32_t)addr.y,
+                (int32_t)addr.z, (int32_t)addr.level);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      imported++;
+    }
+
+    if (etree_advcursor(Global.theMeshInputEp) != 0) {
+      if (etree_errno(Global.theMeshInputEp) != ET_END_OF_TREE) {
+        fprintf(stderr,
+                "Thread %d: mesh_import_cursor_load_tree: etree cursor advance failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      break;
+    }
+  }
+
+  if (octor_finishleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: mesh_import_cursor_load_tree: finish failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  return imported;
+}
+
+static void mesh_import_print_cursor_stats(int64_t imported) {
+  int64_t min_imported = 0;
+  int64_t max_imported = 0;
+  int64_t total_imported = 0;
+
+  MPI_Reduce(&imported, &min_imported, 1, MPI_INT64_T, MPI_MIN, 0,
+             comm_solver);
+  MPI_Reduce(&imported, &max_imported, 1, MPI_INT64_T, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&imported, &total_imported, 1, MPI_INT64_T, MPI_SUM, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    monitor_print("Mesh import cursor leaves: min %.1fM max %.1fM total %.1fM\n",
+                  (double)min_imported / 1.0e6,
+                  (double)max_imported / 1.0e6,
+                  (double)total_imported / 1.0e6);
     fflush(stdout);
   }
 }
@@ -3676,6 +3846,7 @@ static void setrec_mesh_import_bootstrap(octant_t* leaf, double ticksize,
 static void mesh_generate_from_etree(void) {
   int64_t tote, mine, maxe;
   const char* verify_env = getenv("HERCULES_MESH_IMPORT_VERIFY");
+  int use_cursor_tree = mesh_import_use_cursor_tree();
   int verify_import =
       (verify_env != NULL) && (strcmp(verify_env, "0") != 0) &&
       (strcasecmp(verify_env, "no") != 0) &&
@@ -3688,6 +3859,8 @@ static void mesh_generate_from_etree(void) {
 
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
+    monitor_print("Mesh import tree mode: %s\n",
+                  use_cursor_tree ? "cursor" : "refine");
     monitor_print("Stage %14s Min %7s Max %5s Total    Time(s)\n\n", "", "",
                   "");
   }
@@ -3717,7 +3890,7 @@ static void mesh_generate_from_etree(void) {
     drm_fix_coordinates(Global.myOctree->ticksize);
   }
 
-  if (Global.theGroupSize == 1) {
+  if ((Global.theGroupSize == 1) && !use_cursor_tree) {
     /*
      * Multi-rank imports start from a pre-refined tree inside octor_newtree().
      * Mirror that on single-rank runs so mesh-etree refinement starts from
@@ -3746,13 +3919,18 @@ static void mesh_generate_from_etree(void) {
   }
 
   Timer_Start("Octor Refinetree");
-  if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
-                       setrec_mesh_etree) != 0) {
-    fprintf(stderr,
-            "Thread %d: mesh_generate_from_etree: fail to refine octree\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  if (use_cursor_tree) {
+    int64_t imported = mesh_import_cursor_load_tree();
+    mesh_import_print_cursor_stats(imported);
+  } else {
+    if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
+                         setrec_mesh_etree) != 0) {
+      fprintf(stderr,
+              "Thread %d: mesh_generate_from_etree: fail to refine octree\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   MPI_Barrier(comm_solver);
@@ -3768,7 +3946,7 @@ static void mesh_generate_from_etree(void) {
     fflush(stdout);
   }
 
-  if (verify_import) {
+  if (verify_import && !use_cursor_tree) {
     int32_t pass;
     int converged = 0;
     int64_t prev_total = tote;
@@ -3813,7 +3991,9 @@ static void mesh_generate_from_etree(void) {
     }
   }
   Timer_Stop("Octor Refinetree");
-  mesh_import_print_stats();
+  if (!use_cursor_tree) {
+    mesh_import_print_stats();
+  }
 
   Timer_Start("Octor Partitiontree");
   if (Global.myID == 0) {

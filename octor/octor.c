@@ -567,6 +567,10 @@ static int32_t oct_installleaf(tick_t lx, tick_t ly, tick_t lz,
 
 
 static int32_t oct_sprout(oct_t *leafoct, tree_t *tree);
+static void    oct_clear_local_leaves(oct_t *oct, tree_t *tree);
+static int32_t oct_make_import_interior(oct_t *oct, tree_t *tree);
+static oct_t  *oct_make_import_child(oct_t *parent, tree_t *tree,
+                                     int8_t which, int8_t level);
 static void    oct_prune(oct_t *oct, tree_t *tree);
 static int32_t oct_expand(oct_t *leafoct, tree_t *tree,
                           toexpand_t *toexpand, setrec_t *setrec);
@@ -1635,6 +1639,97 @@ oct_sprout(oct_t *leafoct, tree_t *tree)
     tree->firstleaf = (tree->firstleaf == leafoct) ? child : tree->firstleaf;
 
     return childcount;
+}
+
+
+static void
+oct_clear_local_leaves(oct_t *oct, tree_t *tree)
+{
+    int8_t which;
+
+    if (oct == NULL) {
+        return;
+    }
+
+    if (oct->type == LEAF) {
+        if (oct->where == LOCAL) {
+            if (oct->payload.leaf != NULL) {
+                mem_recycleobj(theRecordPool, oct->payload.leaf->data);
+                mem_recycleobj(tree->leafmem, oct->payload.leaf);
+                oct->payload.leaf = NULL;
+            }
+            oct->where = REMOTE;
+        }
+        return;
+    }
+
+    for (which = 0; which < 8; which++) {
+        oct_clear_local_leaves(oct->payload.interior->child[(int32_t)which],
+                               tree);
+    }
+}
+
+
+static int32_t
+oct_make_import_interior(oct_t *oct, tree_t *tree)
+{
+    if (oct->type == INTERIOR) {
+        return 0;
+    }
+
+    if (oct->where == LOCAL) {
+        tree->leafcount[(int32_t)oct->level]--;
+    }
+
+    if (oct->payload.leaf != NULL) {
+        mem_recycleobj(theRecordPool, oct->payload.leaf->data);
+        mem_recycleobj(tree->leafmem, oct->payload.leaf);
+    }
+
+    oct->type = INTERIOR;
+    oct->where = REMOTE;
+    oct->payload.interior = (interior_t *)mem_newobj(tree->interiormem);
+    if (oct->payload.interior == NULL) {
+        return -1;
+    }
+
+    memset(oct->payload.interior->child, 0, sizeof(oct->payload.interior->child));
+    return 0;
+}
+
+
+static oct_t *
+oct_make_import_child(oct_t *parent, tree_t *tree, int8_t which, int8_t level)
+{
+    oct_t *child;
+    tick_t childsize;
+
+    child = parent->payload.interior->child[(int32_t)which];
+    if (child != NULL) {
+        return child;
+    }
+
+    child = (oct_t *)mem_newobj(tree->octmem);
+    if (child == NULL) {
+        return NULL;
+    }
+
+    childsize = (tick_t)1 << (PIXELLEVEL - level);
+    child->type = LEAF;
+    child->where = LOCAL;
+    child->which = which;
+    child->level = level;
+    child->lx = parent->lx + ((which & 0x1) ? childsize : 0);
+    child->ly = parent->ly + ((which & 0x2) ? childsize : 0);
+    child->lz = parent->lz + ((which & 0x4) ? childsize : 0);
+    child->parent = parent;
+    child->appdata = NULL;
+    child->payload.leaf = NULL;
+
+    parent->payload.interior->child[(int32_t)which] = child;
+    tree->leafcount[(int32_t)level]++;
+
+    return child;
 }
 
 
@@ -4406,6 +4501,98 @@ octor_refinetree(octree_t *octree, toexpand_t *toexpand, setrec_t *setrec)
 #endif /* TREE_VERBOSE */
 
     return 0;
+}
+
+
+extern int32_t
+octor_beginleafimport(octree_t *octree)
+{
+    tree_t *tree = (tree_t *)octree;
+
+    oct_clear_local_leaves(tree->root, tree);
+    memset(tree->leafcount, 0, sizeof(tree->leafcount));
+    tree->firstleaf = NULL;
+
+    return 0;
+}
+
+
+extern int32_t
+octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
+                 int8_t level, const void *data)
+{
+    tree_t *tree = (tree_t *)octree;
+    oct_t *oct = tree->root;
+    int8_t childlevel;
+
+    if ((level < 0) || (level >= TOTALLEVEL) || (data == NULL)) {
+        return -1;
+    }
+
+    for (childlevel = 1; childlevel <= level; childlevel++) {
+        tick_t childsize = (tick_t)1 << (PIXELLEVEL - childlevel);
+        int8_t which = 0;
+        oct_t *child;
+
+        if (oct_make_import_interior(oct, tree) != 0) {
+            return -1;
+        }
+
+        if (lx & childsize) {
+            which |= 0x1;
+        }
+        if (ly & childsize) {
+            which |= 0x2;
+        }
+        if (lz & childsize) {
+            which |= 0x4;
+        }
+
+        child = oct_make_import_child(oct, tree, which, childlevel);
+        if (child == NULL) {
+            return -1;
+        }
+
+        oct = child;
+    }
+
+    if (oct->type != LEAF) {
+        return -1;
+    }
+
+    if (oct->where != LOCAL) {
+        oct->where = LOCAL;
+        tree->leafcount[(int32_t)oct->level]++;
+    }
+
+    if (oct->payload.leaf == NULL) {
+        oct->payload.leaf = (leaf_t *)mem_newobj(tree->leafmem);
+        if (oct->payload.leaf == NULL) {
+            return -1;
+        }
+        oct->payload.leaf->next = oct->payload.leaf->prev = NULL;
+        oct->payload.leaf->data = mem_newobj(theRecordPool);
+        if (oct->payload.leaf->data == NULL) {
+            return -1;
+        }
+    }
+
+    oct->lx = lx;
+    oct->ly = ly;
+    oct->lz = lz;
+    memcpy(oct->payload.leaf->data, data, tree->recsize);
+
+    return 0;
+}
+
+
+extern int32_t
+octor_finishleafimport(octree_t *octree)
+{
+    tree_t *tree = (tree_t *)octree;
+
+    tree->firstleaf = oct_getleftmost(tree->root);
+    return (tree->firstleaf == NULL) ? -1 : 0;
 }
 
 

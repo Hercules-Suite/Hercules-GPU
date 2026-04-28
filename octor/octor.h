@@ -327,6 +327,16 @@ octor_deletetree(octree_t * octree);
 extern int32_t 
 octor_refinetree(octree_t *octree, toexpand_t *toexpand, setrec_t *setrec);
 
+extern int32_t
+octor_beginleafimport(octree_t *octree);
+
+extern int32_t
+octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
+                 int8_t level, const void *data);
+
+extern int32_t
+octor_finishleafimport(octree_t *octree);
+
 extern int32_t 
 octor_coarsentree(octree_t *octree, toshrink_t *toshrink, setrec_t *setrec);
 
