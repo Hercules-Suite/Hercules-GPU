@@ -3600,6 +3600,7 @@ static int64_t mesh_import_cursor_load_tree(void) {
   point_t start_point;
   const point_t* end_point = NULL;
   int64_t imported = 0;
+  int cursor_active = 0;
 
   mesh_import_cursor_start_addr(&start_addr, &end_point);
   start_point.x = (tick_t)start_addr.x;
@@ -3620,6 +3621,7 @@ static int64_t mesh_import_cursor_load_tree(void) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  cursor_active = 1;
 
   while (etree_getcursor(Global.theMeshInputEp, &addr, NULL, &hit_data) == 0) {
     if (mesh_import_cursor_before_start(&addr, &start_point)) {
@@ -3631,6 +3633,7 @@ static int64_t mesh_import_cursor_load_tree(void) {
           MPI_Abort(MPI_COMM_WORLD, ERROR);
           exit(1);
         }
+        cursor_active = 0;
         break;
       }
       continue;
@@ -3663,8 +3666,17 @@ static int64_t mesh_import_cursor_load_tree(void) {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      cursor_active = 0;
       break;
     }
+  }
+
+  if (cursor_active && (etree_stopcursor(Global.theMeshInputEp) != 0)) {
+    fprintf(stderr,
+            "Thread %d: mesh_import_cursor_load_tree: etree cursor stop failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
 
   if (octor_finishleafimport(Global.myOctree) != 0) {
