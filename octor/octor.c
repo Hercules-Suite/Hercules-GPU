@@ -915,6 +915,8 @@ static uint32_t math_hashuint32(const void *start, int32_t count);
 static void    node_qsort_by_morton(node_t *nodes, int64_t count);
 static int32_t node_radixsort_by_morton(node_t *nodes, int64_t count);
 static void    node_sort_by_morton(node_t *nodes, int64_t count);
+static void    node_store_vertex_ref(node_t *node, vertex_t *vertex);
+static vertex_t *node_load_vertex_ref(const node_t *node);
 
 
 
@@ -3407,6 +3409,26 @@ node_sort_by_morton(node_t *nodes, int64_t count)
 }
 
 
+static void
+node_store_vertex_ref(node_t *node, vertex_t *vertex)
+{
+    uintptr_t ref = (uintptr_t)vertex;
+
+    memset(&node->gnid, 0, sizeof(node->gnid));
+    memcpy(&node->gnid, &ref, sizeof(ref));
+}
+
+
+static vertex_t *
+node_load_vertex_ref(const node_t *node)
+{
+    uintptr_t ref = 0;
+
+    memcpy(&ref, &node->gnid, sizeof(ref));
+    return (vertex_t *)ref;
+}
+
+
 /**
  * math_zsearch: binary search in a point array to find the entry whose
  *           z-value is the largest among those entries that have smaller
@@ -5687,7 +5709,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     int32_t eindex, nindex, dnindex;
     elem_t *elemTable;
     vertex_t **elemVertexRef;
-    vertex_t **nodeVertexRef = NULL;
     node_t *nodeTable, *node;
     dnode_t *dnodeTable;
     link_t **vertexHashTable, *link;
@@ -6751,11 +6772,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         theAllocatedMemSum += sizeof(node_t) * harborcount;
     }
 
-    nodeVertexRef = (vertex_t **)malloc(sizeof(vertex_t *) * harborcount);
-    if (nodeVertexRef != NULL) {
-        theAllocatedMemSum += sizeof(vertex_t *) * harborcount;
-    }
-
     ncount = 0; /* Number of nodes owned by this processor */
     ldnnum = 0; /* Number of dangling nodes owned by this processor */
     nindex = 0;
@@ -6779,7 +6795,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             /* Install the node data into the nodeTable. */
 
             node = &nodeTable[nindex];
-            node->gnid = (int64_t)(((uint64_t)(uint32_t)nindex) << 32);
+            node_store_vertex_ref(node, vertex);
 
             /* Adjust the node coordinate for ordering purpose. We
                shall reverse the coordinate at later stage */
@@ -6820,25 +6836,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 node->isanchored = 0;
 
                 if (node->ismine) {
-                    uint32_t dnode_info;
-
                     /* I need to allocate space for it in dnodeTable */
                     ldnnum++;
-
-                    /* Store various dangling node property
-                       temporarily in gnid */
-                    dnode_info = (uint32_t)(unsigned char)vertex->property;
-                    dnode_info |=
-                        ((uint32_t)(unsigned char)vertex->level) << 8;
-                    node->gnid =
-                        (int64_t)(((uint64_t)node->gnid &
-                                   0xffffffff00000000ULL) |
-                                  (uint64_t)dnode_info);
                 }
-            }
-
-            if (nodeVertexRef != NULL) {
-                nodeVertexRef[nindex] = vertex;
             }
 
             /* Move to the next empty entry in the node table */
@@ -6928,10 +6928,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
 
     for (nindex = 0; nindex < harborcount; nindex++) {
-        uint32_t original_node_index;
-
-        original_node_index =
-            (uint32_t)(((uint64_t)nodeTable[nindex].gnid) >> 32);
+        vertex = node_load_vertex_ref(&nodeTable[nindex]);
 
         /* Reverse the adjustments made earlier to make hashing work */
         nodeTable[nindex].x = (nodeTable[nindex].x == tree->farbound[0]) ?
@@ -6940,6 +6937,16 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             tree->farendp[1] : nodeTable[nindex].y;
         nodeTable[nindex].z = (nodeTable[nindex].z == tree->farbound[2]) ?
             tree->farendp[2] : nodeTable[nindex].z;
+
+        if ((vertex == NULL) ||
+            (vertex->x != nodeTable[nindex].x) ||
+            (vertex->y != nodeTable[nindex].y) ||
+            (vertex->z != nodeTable[nindex].z)) {
+            fprintf(stderr, "Thread %d: %s %d: internal error\n",
+                    tree->procid, __FILE__, __LINE__);
+            MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+            exit(1);
+        }
 
         if (nodeTable[nindex].ismine &&
             (!nodeTable[nindex].isanchored)) {
@@ -6952,7 +6959,8 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
             /* Copy the temperary information to deps */
             dnodeTable[dnindex].deps =
-                (uint32_t)((uint64_t)nodeTable[nindex].gnid & 0xffffffffu);
+                (uint32_t)(unsigned char)vertex->property |
+                (((uint32_t)(unsigned char)vertex->level) << 8);
 
             dnodeTable[dnindex].lanid = NULL;
 
@@ -7050,48 +7058,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             }
         } /* I don't own this node */
 
-        if (nodeVertexRef != NULL) {
-            if ((int64_t)original_node_index >= harborcount) {
-                fprintf(stderr, "Thread %d: %s %d: internal error\n",
-                        tree->procid, __FILE__, __LINE__);
-                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-                exit(1);
-            }
-            vertex = nodeVertexRef[original_node_index];
-            if ((vertex == NULL) ||
-                (vertex->x != nodeTable[nindex].x) ||
-                (vertex->y != nodeTable[nindex].y) ||
-                (vertex->z != nodeTable[nindex].z)) {
-                fprintf(stderr, "Thread %d: %s %d: internal error\n",
-                        tree->procid, __FILE__, __LINE__);
-                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-                exit(1);
-            }
-            vertex->lnid = nindex;
-        } else {
-            hashentry = math_hashuint32(&nodeTable[nindex], 3) % vertexHashSize;
-            link = vertexHashTable[hashentry];
-
-            while (link != NULL) {
-                vertex = (vertex_t *)link->record;
-
-                if ((vertex->x == nodeTable[nindex].x) &&
-                    (vertex->y == nodeTable[nindex].y) &&
-                    (vertex->z == nodeTable[nindex].z)) {
-                    /* Hit */
-                    vertex->lnid = nindex;
-                    break;
-                }
-                link = link->next;
-            }
-
-            if (link == NULL) {
-                fprintf(stderr, "Thread %d: %s %d: internal error\n",
-                        tree->procid, __FILE__, __LINE__);
-                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-                exit(1);
-            }
-        }
+        vertex->lnid = nindex;
     } /* for all the harbored nodes */
 
     if (extract_detail_profile) {
@@ -7363,7 +7330,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
     free(vertexHashTable);
     free(elemVertexRef);
-    free(nodeVertexRef);
     mem_delete(vertexpool);
     mem_delete(linkpool);
 
