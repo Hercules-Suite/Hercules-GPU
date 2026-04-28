@@ -68,9 +68,14 @@ Advanced/diagnostic toggles:
 	imports them directly into the local octor tree. Set to `refine` to restore
 	the older recursive `octor_refinetree()` search path.
 - `OCTOR_EXTRACT_PROFILE=0|1|2`
-	Controls the `octor_extractmesh()` stage profile. Mesh-input runs enable
-	the coarse profile by default unless you set this variable yourself. Use
-	`2` only when you want the extra vertex/indirect/node sub-stage profile.
+	Controls `octor_extractmesh()` profiling:
+	`0` disables the Extractmesh profile.
+	`1` prints the coarse stage profile: `setcom`, `vertex`, `indirect`,
+	`node`, `elem`, `dnode`, `cleanup`, and `total`.
+	`2` prints the coarse profile plus detailed `vertex`, `indirect`, and
+	`node` sub-stage profiles. Mesh-input runs set this to `1` by default
+	unless you define it yourself. Use `2` only for diagnostic runs because it
+	adds extra timing/reduction work.
 - `OCTOR_INIT_TASKS_PER_RANK=<integer>`
 	Controls the number of coarse bootstrap octree tasks per MPI rank before
 	parallel refinement. Default is the original octor value, `10`.
