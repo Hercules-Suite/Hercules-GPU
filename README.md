@@ -67,6 +67,11 @@ Advanced/diagnostic toggles:
 	Default is `cursor`, which streams saved mesh leaves from the etree and
 	imports them directly into the local octor tree. Set to `refine` to restore
 	the older recursive `octor_refinetree()` search path.
+- `OCTOR_IMPORT_PATH_CACHE=0|1`
+	Controls a small parent-path cache used by cursor mesh import.
+	Default is `1`, which reuses the shared root-to-leaf prefix between
+	consecutive etree leaves. Set to `0`/`off`/`false`/`no` to disable it for
+	comparison runs.
 - `OCTOR_EXTRACT_PROFILE=0|1|2`
 	Controls `octor_extractmesh()` profiling:
 	`0` disables the Extractmesh profile.

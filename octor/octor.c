@@ -568,6 +568,13 @@ static int32_t oct_installleaf(tick_t lx, tick_t ly, tick_t lz,
 
 static int32_t oct_sprout(oct_t *leafoct, tree_t *tree);
 static void    oct_clear_local_leaves(oct_t *oct, tree_t *tree);
+static int     oct_import_path_cache_enabled(void);
+static void    oct_import_path_cache_reset(tree_t *tree);
+static oct_t  *oct_import_path_cache_start(tree_t *tree, tick_t lx,
+                                           tick_t ly, tick_t lz,
+                                           int8_t level,
+                                           int8_t *childlevel);
+static void    oct_import_path_cache_store(tree_t *tree, oct_t *oct);
 static int32_t oct_make_import_interior(oct_t *oct, tree_t *tree);
 static oct_t  *oct_make_import_child(oct_t *parent, tree_t *tree,
                                      int8_t which, int8_t level);
@@ -1672,6 +1679,112 @@ oct_clear_local_leaves(oct_t *oct, tree_t *tree)
     for (which = 0; which < 8; which++) {
         oct_clear_local_leaves(oct->payload.interior->child[(int32_t)which],
                                tree);
+    }
+}
+
+
+typedef struct import_path_cache_t {
+    tree_t *tree;
+    oct_t *path[TOTALLEVEL];
+    int8_t depth;
+} import_path_cache_t;
+
+static import_path_cache_t theImportPathCache;
+
+
+static int
+oct_import_path_cache_enabled(void)
+{
+    static int enabled = -1;
+    const char *env;
+
+    if (enabled >= 0) {
+        return enabled;
+    }
+
+    env = getenv("OCTOR_IMPORT_PATH_CACHE");
+    enabled = (env == NULL) || (env[0] == '\0') ||
+        ((strcmp(env, "0") != 0) &&
+         (strcmp(env, "off") != 0) &&
+         (strcmp(env, "false") != 0) &&
+         (strcmp(env, "no") != 0));
+    return enabled;
+}
+
+
+static void
+oct_import_path_cache_reset(tree_t *tree)
+{
+    memset(&theImportPathCache, 0, sizeof(theImportPathCache));
+    theImportPathCache.tree = tree;
+    if (tree != NULL) {
+        theImportPathCache.path[0] = tree->root;
+    }
+}
+
+
+static int
+oct_import_path_cache_contains(const oct_t *oct, tick_t lx, tick_t ly,
+                               tick_t lz)
+{
+    tick_t size;
+
+    if (oct == NULL) {
+        return 0;
+    }
+
+    size = (tick_t)1 << (PIXELLEVEL - oct->level);
+    return (lx >= oct->lx) && (lx < oct->lx + size) &&
+        (ly >= oct->ly) && (ly < oct->ly + size) &&
+        (lz >= oct->lz) && (lz < oct->lz + size);
+}
+
+
+static oct_t *
+oct_import_path_cache_start(tree_t *tree, tick_t lx, tick_t ly, tick_t lz,
+                            int8_t level, int8_t *childlevel)
+{
+    oct_t *oct;
+    int8_t maxlevel;
+    int8_t cachedlevel;
+
+    if ((theImportPathCache.tree != tree) ||
+        (theImportPathCache.path[0] != tree->root)) {
+        oct_import_path_cache_reset(tree);
+    }
+
+    oct = tree->root;
+    maxlevel = (theImportPathCache.depth < level) ?
+        theImportPathCache.depth : level;
+
+    for (cachedlevel = 1; cachedlevel <= maxlevel; cachedlevel++) {
+        oct_t *cached = theImportPathCache.path[(int32_t)cachedlevel];
+
+        if ((cached == NULL) || (cached->parent != oct) ||
+            !oct_import_path_cache_contains(cached, lx, ly, lz)) {
+            break;
+        }
+
+        oct = cached;
+    }
+
+    *childlevel = cachedlevel;
+    return oct;
+}
+
+
+static void
+oct_import_path_cache_store(tree_t *tree, oct_t *oct)
+{
+    if ((theImportPathCache.tree != tree) ||
+        (theImportPathCache.path[0] != tree->root)) {
+        oct_import_path_cache_reset(tree);
+    }
+
+    theImportPathCache.path[(int32_t)oct->level] = oct;
+    theImportPathCache.depth = oct->level;
+    if (oct->level + 1 < TOTALLEVEL) {
+        theImportPathCache.path[(int32_t)oct->level + 1] = NULL;
     }
 }
 
@@ -4636,6 +4749,7 @@ octor_beginleafimport(octree_t *octree)
     oct_clear_local_leaves(tree->root, tree);
     memset(tree->leafcount, 0, sizeof(tree->leafcount));
     tree->firstleaf = NULL;
+    oct_import_path_cache_reset(tree);
 
     return 0;
 }
@@ -4648,12 +4762,21 @@ octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
     tree_t *tree = (tree_t *)octree;
     oct_t *oct = tree->root;
     int8_t childlevel;
+    int use_path_cache;
 
     if ((level < 0) || (level >= TOTALLEVEL) || (data == NULL)) {
         return -1;
     }
 
-    for (childlevel = 1; childlevel <= level; childlevel++) {
+    use_path_cache = oct_import_path_cache_enabled();
+    if (use_path_cache) {
+        oct = oct_import_path_cache_start(tree, lx, ly, lz, level,
+                                          &childlevel);
+    } else {
+        childlevel = 1;
+    }
+
+    for (; childlevel <= level; childlevel++) {
         tick_t childsize = (tick_t)1 << (PIXELLEVEL - childlevel);
         int8_t which = 0;
         oct_t *child;
@@ -4678,6 +4801,13 @@ octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
         }
 
         oct = child;
+        if (use_path_cache) {
+            oct_import_path_cache_store(tree, oct);
+        }
+    }
+
+    if (use_path_cache) {
+        oct_import_path_cache_store(tree, oct);
     }
 
     if (oct->type != LEAF) {
