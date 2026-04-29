@@ -575,8 +575,8 @@ static oct_t  *oct_import_path_cache_start(tree_t *tree, tick_t lx,
                                            int8_t level,
                                            int8_t *childlevel);
 static void    oct_import_path_cache_store(tree_t *tree, oct_t *oct);
-static void    oct_import_path_cache_put(oct_t *oct);
-static void    oct_import_path_cache_store_leaf(tick_t lx, tick_t ly,
+static void    oct_import_path_cache_store_leaf(tree_t *tree, oct_t *oct,
+                                                tick_t lx, tick_t ly,
                                                 tick_t lz, int8_t level);
 static int32_t oct_make_import_interior(oct_t *oct, tree_t *tree);
 static oct_t  *oct_make_import_child(oct_t *parent, tree_t *tree,
@@ -1799,8 +1799,13 @@ oct_import_path_cache_start(tree_t *tree, tick_t lx, tick_t ly, tick_t lz,
 
 
 static void
-oct_import_path_cache_put(oct_t *oct)
+oct_import_path_cache_store(tree_t *tree, oct_t *oct)
 {
+    if ((theImportPathCache.tree != tree) ||
+        (theImportPathCache.path[0] != tree->root)) {
+        oct_import_path_cache_reset(tree);
+    }
+
     theImportPathCache.path[(int32_t)oct->level] = oct;
     theImportPathCache.depth = oct->level;
     if (oct->level + 1 < TOTALLEVEL) {
@@ -1810,21 +1815,11 @@ oct_import_path_cache_put(oct_t *oct)
 
 
 static void
-oct_import_path_cache_store(tree_t *tree, oct_t *oct)
+oct_import_path_cache_store_leaf(tree_t *tree, oct_t *oct, tick_t lx,
+                                 tick_t ly, tick_t lz, int8_t level)
 {
-    if ((theImportPathCache.tree != tree) ||
-        (theImportPathCache.path[0] != tree->root)) {
-        oct_import_path_cache_reset(tree);
-    }
+    oct_import_path_cache_store(tree, oct);
 
-    oct_import_path_cache_put(oct);
-}
-
-
-static void
-oct_import_path_cache_store_leaf(tick_t lx, tick_t ly, tick_t lz,
-                                 int8_t level)
-{
     theImportPathCache.last_lx = lx;
     theImportPathCache.last_ly = ly;
     theImportPathCache.last_lz = lz;
@@ -3709,9 +3704,9 @@ math_hashuint32(const void *start, int32_t length)
 
         /* c is reserved for the length */
     case 2 : b+=k[1];
-        break;
+    		break;
     case 1 : a+=k[0];
-        break;
+    		break;
         /* case 0: nothing left to add */
     }
 
@@ -4846,12 +4841,12 @@ octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
 
         oct = child;
         if (use_path_cache) {
-            oct_import_path_cache_put(oct);
+            oct_import_path_cache_store(tree, oct);
         }
     }
 
     if (use_path_cache) {
-        oct_import_path_cache_store_leaf(lx, ly, lz, level);
+        oct_import_path_cache_store_leaf(tree, oct, lx, ly, lz, level);
     }
 
     if (oct->type != LEAF) {
