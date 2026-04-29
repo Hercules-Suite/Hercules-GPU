@@ -575,6 +575,9 @@ static oct_t  *oct_import_path_cache_start(tree_t *tree, tick_t lx,
                                            int8_t level,
                                            int8_t *childlevel);
 static void    oct_import_path_cache_store(tree_t *tree, oct_t *oct);
+static void    oct_import_path_cache_store_leaf(tree_t *tree, oct_t *oct,
+                                                tick_t lx, tick_t ly,
+                                                tick_t lz, int8_t level);
 static int32_t oct_make_import_interior(oct_t *oct, tree_t *tree);
 static oct_t  *oct_make_import_child(oct_t *parent, tree_t *tree,
                                      int8_t which, int8_t level);
@@ -1687,6 +1690,9 @@ typedef struct import_path_cache_t {
     tree_t *tree;
     oct_t *path[TOTALLEVEL];
     int8_t depth;
+    tick_t last_lx, last_ly, last_lz;
+    int8_t last_level;
+    int has_last;
 } import_path_cache_t;
 
 static import_path_cache_t theImportPathCache;
@@ -1745,30 +1751,49 @@ oct_import_path_cache_start(tree_t *tree, tick_t lx, tick_t ly, tick_t lz,
                             int8_t level, int8_t *childlevel)
 {
     oct_t *oct;
-    int8_t maxlevel;
-    int8_t cachedlevel;
 
     if ((theImportPathCache.tree != tree) ||
         (theImportPathCache.path[0] != tree->root)) {
         oct_import_path_cache_reset(tree);
     }
 
-    oct = tree->root;
-    maxlevel = (theImportPathCache.depth < level) ?
-        theImportPathCache.depth : level;
+    if (theImportPathCache.has_last) {
+        uint32_t diff =
+            (uint32_t)(((uint32_t)(lx ^ theImportPathCache.last_lx)) |
+                       ((uint32_t)(ly ^ theImportPathCache.last_ly)) |
+                       ((uint32_t)(lz ^ theImportPathCache.last_lz)));
+        int32_t common_level;
+        int32_t max_common;
 
-    for (cachedlevel = 1; cachedlevel <= maxlevel; cachedlevel++) {
-        oct_t *cached = theImportPathCache.path[(int32_t)cachedlevel];
-
-        if ((cached == NULL) || (cached->parent != oct) ||
-            !oct_import_path_cache_contains(cached, lx, ly, lz)) {
-            break;
+        if (diff == 0) {
+            common_level = PIXELLEVEL;
+        } else {
+            common_level = PIXELLEVEL - LOG2_32b(diff) - 1;
+            if (common_level < 0) {
+                common_level = 0;
+            }
         }
 
-        oct = cached;
+        max_common = level;
+        if (theImportPathCache.last_level < max_common) {
+            max_common = theImportPathCache.last_level;
+        }
+        if (theImportPathCache.depth < max_common) {
+            max_common = theImportPathCache.depth;
+        }
+        if (common_level > max_common) {
+            common_level = max_common;
+        }
+
+        oct = theImportPathCache.path[common_level];
+        if ((oct != NULL) && oct_import_path_cache_contains(oct, lx, ly, lz)) {
+            *childlevel = (int8_t)(common_level + 1);
+            return oct;
+        }
     }
 
-    *childlevel = cachedlevel;
+    oct = tree->root;
+    *childlevel = 1;
     return oct;
 }
 
@@ -1786,6 +1811,20 @@ oct_import_path_cache_store(tree_t *tree, oct_t *oct)
     if (oct->level + 1 < TOTALLEVEL) {
         theImportPathCache.path[(int32_t)oct->level + 1] = NULL;
     }
+}
+
+
+static void
+oct_import_path_cache_store_leaf(tree_t *tree, oct_t *oct, tick_t lx,
+                                 tick_t ly, tick_t lz, int8_t level)
+{
+    oct_import_path_cache_store(tree, oct);
+
+    theImportPathCache.last_lx = lx;
+    theImportPathCache.last_ly = ly;
+    theImportPathCache.last_lz = lz;
+    theImportPathCache.last_level = level;
+    theImportPathCache.has_last = 1;
 }
 
 
@@ -4807,7 +4846,7 @@ octor_importleaf(octree_t *octree, tick_t lx, tick_t ly, tick_t lz,
     }
 
     if (use_path_cache) {
-        oct_import_path_cache_store(tree, oct);
+        oct_import_path_cache_store_leaf(tree, oct, lx, ly, lz, level);
     }
 
     if (oct->type != LEAF) {
