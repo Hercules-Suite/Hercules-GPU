@@ -184,12 +184,6 @@ typedef struct vertex_t {
 } vertex_t;
 
 
-typedef struct vertex_lookup_cache_entry_t {
-    tick_t x, y, z;
-    vertex_t *vertex;
-} vertex_lookup_cache_entry_t;
-
-
 /**
  * vertex_info_t: Vertex info sent between processors.
  *
@@ -926,8 +920,7 @@ static int32_t math_gcd(int32_t a, int32_t b);
 static int32_t math_zsearch(const point_t *interval, int32_t size,
                             const point_t *key);
 static int32_t math_bsearch(const int64_t *start, int32_t count, int64_t key);
-static uint32_t math_hashpoint(tick_t x, tick_t y, tick_t z);
-static size_t  vertex_lookup_cache_entries(void);
+static uint32_t math_hashuint32(const void *start, int32_t count);
 
 static void    node_qsort_by_morton(node_t *nodes, int64_t count);
 static int32_t node_radixsort_by_morton(node_t *nodes, int64_t count);
@@ -3684,64 +3677,47 @@ math_bsearch(const int64_t *table, int32_t size, int64_t key)
 }
 
 
+/**
+ * math_hashuint32: Hash 'count' number of uint32's to an offset value
+ *
+ */
 static uint32_t
-math_hashpoint(tick_t x, tick_t y, tick_t z)
+math_hashuint32(const void *start, int32_t length)
 {
-    register uint32_t a, b, c;
+    const uint32_t *k = (uint32_t *)start;
+    register uint32_t a, b, c, len;
 
-    a = b = 0x9e3779b9;
-    c = 0;
+    /* Set up the internal state */
+    len = length;
+    a = b = 0x9e3779b9;    /* the golden ratio; an arbitrary value */
+    c = 0;                 /* A random number */
 
-    a += (uint32_t)x;
-    b += (uint32_t)y;
-    c += (uint32_t)z;
+    /* Handle most of the key */
+    while (len >= 3) {
+        a += k[0];
+        b += k[1];
+        c += k[2];
+
+        mix(a,b,c);
+        k += 3; len -= 3;
+    }
+
+    /* Handle the last 2 uint32_t's */
+    c += length;
+    switch(len) {
+        /* all the case statements fall through */
+
+        /* c is reserved for the length */
+    case 2 : b+=k[1];
+        break;
+    case 1 : a+=k[0];
+        break;
+        /* case 0: nothing left to add */
+    }
+
     mix(a,b,c);
 
-    c += 3;
-    mix(a,b,c);
-
-    return c;
-}
-
-
-static size_t
-vertex_lookup_cache_entries(void)
-{
-    const char *env = getenv("OCTOR_VERTEX_LOOKUP_CACHE");
-    size_t entries = (size_t)1 << 20;
-    size_t rounded = 1;
-    char *endptr = NULL;
-    unsigned long requested;
-
-    if ((env == NULL) || (*env == '\0') ||
-        (strcmp(env, "1") == 0) ||
-        (strcmp(env, "on") == 0) ||
-        (strcmp(env, "true") == 0) ||
-        (strcmp(env, "yes") == 0)) {
-        return entries;
-    }
-
-    if ((strcmp(env, "0") == 0) ||
-        (strcmp(env, "off") == 0) ||
-        (strcmp(env, "false") == 0) ||
-        (strcmp(env, "no") == 0)) {
-        return 0;
-    }
-
-    requested = strtoul(env, &endptr, 10);
-    if ((endptr == env) || (requested == 0)) {
-        return entries;
-    }
-
-    entries = (size_t)requested;
-    while (rounded < entries) {
-        if (rounded > (((size_t)-1) >> 1)) {
-            return 0;
-        }
-        rounded <<= 1;
-    }
-
-    return rounded;
+   return c;
 }
 
 
@@ -4192,7 +4168,7 @@ dnode_correlate(tree_t *tree, mess_t *mess, link_t **vertexHashTable,
     link_t *link;
     vertex_t *vertex;
 
-    hashentry = math_hashpoint(pt.x, pt.y, pt.z) % ecount;
+    hashentry = math_hashuint32(&pt, 3) % ecount;
     link = vertexHashTable[hashentry];
 
     while (link != NULL) {
@@ -4249,7 +4225,7 @@ node_harboranchored(tree_t *tree, link_t **vertexHashTable,
     link_t *link;
     vertex_t *vertex;
 
-    hashentry = math_hashpoint(pt.x, pt.y, pt.z) % ecount;
+    hashentry = math_hashuint32(&pt, 3) % ecount;
     link = vertexHashTable[hashentry];
 
     while (link != NULL) {
@@ -5910,8 +5886,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     node_t *nodeTable, *node;
     dnode_t *dnodeTable;
     link_t **vertexHashTable, *link;
-    vertex_lookup_cache_entry_t *vertexLookupCache = NULL;
-    size_t vertexLookupCacheMask = 0;
     mem_t *vertexpool, *linkpool;
     oct_t *oct;
     int32_t hashentry;
@@ -6021,18 +5995,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     elemTable = (elem_t *)malloc(sizeof(elem_t) * ecount);
     elemVertexRef = (vertex_t **)malloc(sizeof(vertex_t *) * ecount * 8);
     vertexHashTable = (link_t **)calloc(vertexHashSize, sizeof(link_t *));
-    {
-        size_t vertexLookupCacheEntries = vertex_lookup_cache_entries();
-
-        if (vertexLookupCacheEntries > 0) {
-            vertexLookupCache =
-                (vertex_lookup_cache_entry_t *)calloc(vertexLookupCacheEntries,
-                                                      sizeof(*vertexLookupCache));
-            if (vertexLookupCache != NULL) {
-                vertexLookupCacheMask = vertexLookupCacheEntries - 1;
-            }
-        }
-    }
 
     vertexpool = (mem_t *)mem_new(sizeof(vertex_t), (int32_t)(ecount * 1.4));
     linkpool = (mem_t *)mem_new(sizeof(link_t), (int32_t)(ecount * 1.4));
@@ -6054,8 +6016,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         theAllocatedMemSum += sizeof(elem_t) * ecount +
             sizeof(vertex_t *) * ecount * 8 +
             vertexHashSize * sizeof(link_t *) +
-            (vertexLookupCache == NULL ? 0 :
-             sizeof(*vertexLookupCache) * (vertexLookupCacheMask + 1)) +
             sizeof(vertex_t) * (int32_t)(ecount * 1.4) +
             sizeof(link_t) * (int32_t)(ecount * 1.4);
     }
@@ -6139,45 +6099,24 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
 
                 for (i = 0; i < 2; i++) {
                     point_t adjustedpt;
-                    uint32_t vertexhash;
-                    int found_vertex = 0;
-                    vertex_lookup_cache_entry_t *cache_entry = NULL;
 
                     pt.x = oct->lx + i * edgesize;
 
-                    vertexhash = math_hashpoint(pt.x, pt.y, pt.z);
+                    hashentry = math_hashuint32(&pt, 3) % vertexHashSize;
+                    link = vertexHashTable[hashentry];
 
-                    if (vertexLookupCache != NULL) {
-                        cache_entry =
-                            &vertexLookupCache[vertexhash &
-                                               vertexLookupCacheMask];
-                        vertex = cache_entry->vertex;
-                        if ((vertex != NULL) &&
-                            (vertex->x == pt.x) &&
+                    while (link != NULL) {
+                        vertex = (vertex_t *)link->record;
+                        if ((vertex->x == pt.x) &&
                             (vertex->y == pt.y) &&
                             (vertex->z == pt.z)) {
-                            found_vertex = 1;
+                            break;
+                        } else {
+                            link = link->next;
                         }
                     }
 
-                    if (!found_vertex) {
-                        hashentry = vertexhash % vertexHashSize;
-                        link = vertexHashTable[hashentry];
-
-                        while (link != NULL) {
-                            vertex = (vertex_t *)link->record;
-                            if ((vertex->x == pt.x) &&
-                                (vertex->y == pt.y) &&
-                                (vertex->z == pt.z)) {
-                                found_vertex = 1;
-                                break;
-                            } else {
-                                link = link->next;
-                            }
-                        }
-                    }
-
-                    if (!found_vertex) {
+                    if (link == NULL) {
                         /* A newly encounter vertex */
                         vertex = (vertex_t *)mem_newobj(vertexpool);
                         link = (link_t *)mem_newobj(linkpool);
@@ -6325,13 +6264,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                         vertex->touches++;
                         vertex->level = (vertex->level < oct->level) ?
                             vertex->level : oct->level;
-                    }
-
-                    if (cache_entry != NULL) {
-                        cache_entry->x = pt.x;
-                        cache_entry->y = pt.y;
-                        cache_entry->z = pt.z;
-                        cache_entry->vertex = vertex;
                     }
 
                     elemVertexRef[eindex * 8 + whichchild] = vertex;
@@ -6583,8 +6515,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     (vertex_info_t *)mem_getcursor(frompctl->rcvmem))
                    != NULL) {
 
-                hashentry = math_hashpoint(invertex->x, invertex->y,
-                                           invertex->z) % vertexHashSize;
+                hashentry = math_hashuint32(&invertex->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -6921,8 +6852,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
             while ((anchored = (point_t *)mem_getcursor(frompctl->rcvmem))
                    != NULL) {
 
-                hashentry = math_hashpoint(anchored->x, anchored->y,
-                                           anchored->z) % vertexHashSize;
+                hashentry = math_hashuint32(&anchored->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -7320,8 +7250,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 int32_t lnid;
 
                 /* Find the vertex in my hashtable */
-                hashentry = math_hashpoint(in_gnid_info->x, in_gnid_info->y,
-                                           in_gnid_info->z) % vertexHashSize;
+                hashentry = math_hashuint32(&in_gnid_info->x, 3) % vertexHashSize;
                 link = vertexHashTable[hashentry];
 
                 while (link != NULL) {
@@ -7553,7 +7482,6 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         free(nodeStartTable);
     }
     free(vertexHashTable);
-    free(vertexLookupCache);
     free(elemVertexRef);
     mem_delete(vertexpool);
     mem_delete(linkpool);

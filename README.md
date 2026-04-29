@@ -86,11 +86,6 @@ Advanced/diagnostic toggles:
 	Default is `radix`, a linear-time 8-bucket radix sort over the 30 Morton
 	bit planes. Set to `qsort` or `legacy` to restore the original C library
 	`qsort()` path.
-- `OCTOR_VERTEX_LOOKUP_CACHE=0|1|<entries>`
-	Controls a direct-mapped cache in front of the Extractmesh vertex hash
-	table. Default is `1`, which enables a `1048576`-entry cache. Set to
-	`0`/`off`/`false`/`no` to disable it. A positive integer requests that
-	many cache entries, rounded up to the next power of two.
 - `OCTOR_INIT_TASKS_PER_RANK=<integer>`
 	Controls the number of coarse bootstrap octree tasks per MPI rank before
 	parallel refinement. Default is the original octor value, `10`.
