@@ -296,7 +296,7 @@ if [[ "${ALLOC_NODES}" -gt 0 ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
 fi
 
 PHASE_A_OMP_THREADS="${PHASE_A_OMP_NUM_THREADS:-1}"
-PHASE_B_OMP_THREADS="${PHASE_B_OMP_NUM_THREADS:-}"
+PHASE_B_OMP_THREADS="${PHASE_B_OMP_NUM_THREADS:-${OMP_NUM_THREADS:-}}"
 
 if [[ $# -ge 1 ]]; then
   PHASE_A_NP="$1"
@@ -433,8 +433,6 @@ fi
 if [[ -z "${PHASE_B_OMP_THREADS}" ]]; then
   if [[ -n "${PHASE_B_RANKS_PER_NODE}" ]] && [[ "${ALLOC_CPUS_PER_NODE}" -gt 0 ]]; then
     PHASE_B_OMP_THREADS="$((ALLOC_CPUS_PER_NODE / PHASE_B_RANKS_PER_NODE))"
-  elif [[ -n "${OMP_NUM_THREADS:-}" ]]; then
-    PHASE_B_OMP_THREADS="${OMP_NUM_THREADS}"
   fi
 fi
 

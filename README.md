@@ -109,9 +109,9 @@ Two-phase script defaults:
 	These are the current recommended runtime defaults.
 - OpenMP thread defaults:
 	Phase A defaults to `PHASE_A_OMP_NUM_THREADS=1` when unset.
-	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it auto-derives
-	a per-rank value for multi-rank-per-node launches, or falls back to
-	`OMP_NUM_THREADS` for single-rank-per-node / direct runs.
+	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it uses
+	`OMP_NUM_THREADS` when set; otherwise it auto-derives a per-rank value
+	for multi-rank-per-node launches.
 - Phase B mapping defaults:
 	`PHASE_B_MAP_MODE=auto` is the default and is the conservative recommended setting.
 	For multi-rank-per-node GPU runs it uses node-level Open MPI placement such as
