@@ -6304,24 +6304,19 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         }
 
         /* Visit all my vertices */
-        for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
+        mem_initcursor(vertexpool);
+        while ((vertex = (vertex_t *)mem_getcursor(vertexpool)) != NULL) {
+            tick_t nx, ny, nz;
+            int32_t procid, nbrprocid[8], nbrs, xtick, ytick, ztick;
+            point_t pt;
+            int32_t idx, existed;
 
-            link = vertexHashTable[hashentry];
-
-            while (link != NULL) {
-                tick_t nx, ny, nz;
-                int32_t procid, nbrprocid[8], nbrs, xtick, ytick, ztick;
-                point_t pt;
-                int32_t idx, existed;
-
-                vertex = (vertex_t *)link->record;
-
-                if (vertex->touches == 8) {
-                    /* All the octants sharing this vertex must
-                       be on my processor. */
-                    link = link->next;
-                    continue;
-                }
+            if (vertex->touches == 8) {
+                /* All the octants sharing this vertex must
+                   be on my processor. */
+                mem_advcursor(vertexpool);
+                continue;
+            }
 
                 /* Yigit says -- +1(nx,ny,nz) is added so that each search point is
                  * located inside the elements. This is important to identify
@@ -6484,11 +6479,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                     outvertex->touches = vertex->touches;
                     outvertex->level = vertex->level;
                 }
-                /* Move to the next vertex */
-                link = link->next;
-
-            } /* while link != NULL */
-        } /* for all the entries in the hash table */
+            /* Move to the next vertex */
+            mem_advcursor(vertexpool);
+        } /* for all vertices */
 
         if (extract_detail_profile) {
             t_detail[EX_DETAIL_VERTEX_DIRECT_PACK] +=
@@ -6665,37 +6658,32 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         t_detail_start = MPI_Wtime();
     }
 
-    for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
+    mem_initcursor(vertexpool);
+    while ((vertex = (vertex_t *)mem_getcursor(vertexpool)) != NULL) {
         int dep;
         tick_t smalloctsize;
 
-        link = vertexHashTable[hashentry];
+        int32_t rp = node_setproperty(tree, vertex, &vertex->property,
+                bldgs_nodesearch, topo_nodesearch );
 
-        while (link != NULL) {
+        if ( rp != 0) {
+            double x = vertex->x * tree->ticksize;
+            double y = vertex->y * tree->ticksize;
+            double z = vertex->z * tree->ticksize;
+            fprintf( stderr,
+                     "\n\nThread %d: %s %d: "
+                     "node_setproperty() error %d\n"
+                     "vertex coords (x,y,z): %f %f %f\n",
+                     tree->procid, __FILE__, __LINE__, rp, x, y, z);
+            MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+            exit(1);
+        }
 
-            vertex = (vertex_t *)link->record;
-
-            int32_t rp = node_setproperty(tree, vertex, &vertex->property,
-                    bldgs_nodesearch, topo_nodesearch );
-
-            if ( rp != 0) {
-                double x = vertex->x * tree->ticksize;
-                double y = vertex->y * tree->ticksize;
-                double z = vertex->z * tree->ticksize;
-                fprintf( stderr,
-                         "\n\nThread %d: %s %d: "
-                         "node_setproperty() error %d\n"
-                         "vertex coords (x,y,z): %f %f %f\n",
-                         tree->procid, __FILE__, __LINE__, rp, x, y, z);
-                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
-                exit(1);
-            }
-
-            if (vertex->owner != tree->procid) {
-                /* I do not own this vertex */
-                link = link->next;
-                continue;
-            }
+        if (vertex->owner != tree->procid) {
+            /* I do not own this vertex */
+            mem_advcursor(vertexpool);
+            continue;
+        }
 
             /* I own this vertex. If it is an dangling node, I might
                need to harbor its parent anchors */
@@ -6821,11 +6809,9 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 break;
             }
 
-            /* Get to the next link */
-            link = link->next;
-        }
-
-    } /* for all the hash table entries */
+        /* Get to the next vertex */
+        mem_advcursor(vertexpool);
+    } /* for all vertices */
 
     if (extract_detail_profile) {
         t_detail[EX_DETAIL_INDIRECT_PROPERTY] +=
@@ -6954,12 +6940,8 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
     }
 
     /* Visit all the vertices I have harbored */
-    for (hashentry = 0; hashentry < vertexHashSize; hashentry++) {
-
-        link = vertexHashTable[hashentry];
-
-        while (link != NULL) {
-            vertex = (vertex_t *)link->record;
+    mem_initcursor(vertexpool);
+    while ((vertex = (vertex_t *)mem_getcursor(vertexpool)) != NULL) {
 
             /* Install the node data into the nodeTable. */
 
@@ -7010,15 +6992,12 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
                 }
             }
 
-            /* Move to the next empty entry in the node table */
-            nindex++;
+        /* Move to the next empty entry in the node table */
+        nindex++;
 
-            /* Get to the next link */
-            link = link->next;
-        }
-
-
-    } /* for all the hash table entries */
+        /* Get to the next vertex */
+        mem_advcursor(vertexpool);
+    } /* for all vertices */
 
     if (extract_detail_profile) {
         t_detail[EX_DETAIL_NODE_BUILD] += MPI_Wtime() - t_detail_start;
