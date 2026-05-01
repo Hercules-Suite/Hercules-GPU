@@ -164,8 +164,6 @@ static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
 static int32_t g_contribRecvMode = -1;
 static int32_t g_contribRecvReported = 0;
-static int32_t g_scheduleOrderMode = -1;
-static int32_t g_scheduleOrderReported = 0;
 static int32_t g_reproMode = -1;
 static int32_t g_meshImportBootstrapLevel = -1;
 static int32_t g_forcePathReported = 0;
@@ -352,9 +350,6 @@ static void messenger_set(messenger_t* messenger, int32_t outsize,
 static int32_t messenger_countnodes(messenger_t* first);
 static void messenger_prepare_offsets(messenger_t* first,
                                       int32_t itemsperentry);
-static int32_t schedule_size_order_enabled(void);
-static void messenger_sort_by_nodecount_desc(messenger_t** first);
-static void schedule_order_messengers(schedule_t* sched);
 static int compare_int32_asc(const void* a, const void* b);
 static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger);
 
@@ -9737,9 +9732,6 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
-  schedule_order_messengers(ansched);
-  schedule_order_messengers(dnsched);
-
   return;
 }
 
@@ -10701,43 +10693,6 @@ static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger) {
 
   free(copy);
   return 0;
-}
-
-static void messenger_sort_by_nodecount_desc(messenger_t** first) {
-  messenger_t* sorted = NULL;
-  messenger_t* current;
-
-  if ((first == NULL) || (*first == NULL)) {
-    return;
-  }
-
-  current = *first;
-  while (current != NULL) {
-    messenger_t* next = current->next;
-    messenger_t** insert = &sorted;
-
-    while ((*insert != NULL) &&
-           (((*insert)->nodecount > current->nodecount) ||
-            (((*insert)->nodecount == current->nodecount) &&
-             ((*insert)->procid < current->procid)))) {
-      insert = &((*insert)->next);
-    }
-
-    current->next = *insert;
-    *insert = current;
-    current = next;
-  }
-
-  *first = sorted;
-}
-
-static void schedule_order_messengers(schedule_t* sched) {
-  if ((sched == NULL) || !schedule_size_order_enabled()) {
-    return;
-  }
-
-  messenger_sort_by_nodecount_desc(&sched->first_c);
-  messenger_sort_by_nodecount_desc(&sched->first_s);
 }
 
 /**
@@ -11931,33 +11886,6 @@ static int32_t contrib_recv_use_waitsome(void) {
   }
 
   return g_contribRecvMode;
-}
-
-static int32_t schedule_size_order_enabled(void) {
-  if (g_scheduleOrderMode < 0) {
-    const char* env = getenv("HERCULES_SCHEDULE_ORDER");
-
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "build") == 0) ||
-          (strcasecmp(env, "original") == 0) ||
-          (strcasecmp(env, "off") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0)) {
-        g_scheduleOrderMode = 0;
-      } else {
-        g_scheduleOrderMode = 1;
-      }
-    } else {
-      g_scheduleOrderMode = 1;
-    }
-
-    if ((Global.myID == 0) && (g_scheduleOrderReported == 0)) {
-      monitor_print("schedule messenger order: %s\n",
-                    g_scheduleOrderMode ? "size-desc" : "build");
-      g_scheduleOrderReported = 1;
-    }
-  }
-
-  return g_scheduleOrderMode;
 }
 
 static int32_t sparse_force_upload_mode(void) {
