@@ -22,6 +22,7 @@
  */
 
 #include <mpi.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6080,6 +6081,7 @@ octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,
         elemTable[eindex].geid = geid;
         elemTable[eindex].level = oct->level;
         elemTable[eindex].data = oct->payload.leaf->data;
+        oct->appdata = (void *)(intptr_t)(eindex + 1);
         whichchild = 0;
 
         /* Produce eight mesh nodes, some of which may have been

@@ -32,6 +32,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,6 +159,8 @@ static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
+static int32_t g_stationIntervalFilterMode = -1;
+static int32_t g_stationIntervalFilterReported = 0;
 static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
@@ -391,6 +394,8 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
+static int32_t station_interval_filter_enabled(void);
+static int32_t station_point_in_local_interval(vector3D_t point);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t contrib_recv_use_waitsome(void);
@@ -12199,6 +12204,34 @@ static void print_timing_stat() {
                Timer_Value("Pre Setup Stations Init", AVERAGE),
                Timer_Value("Pre Setup Stations Init", MAX),
                Timer_Value("Pre Setup Stations Init", MIN));
+        if (Timer_Exists("Stations Read Input")) {
+          printf("        Stations Read Input       : %.2f (Average)   %.2f (Max) %.2f "
+                 "(Min) seconds\n",
+                 Timer_Value("Stations Read Input", AVERAGE),
+                 Timer_Value("Stations Read Input", MAX),
+                 Timer_Value("Stations Read Input", MIN));
+        }
+        if (Timer_Exists("Stations Broadcast")) {
+          printf("        Stations Broadcast        : %.2f (Average)   %.2f (Max) %.2f "
+                 "(Min) seconds\n",
+                 Timer_Value("Stations Broadcast", AVERAGE),
+                 Timer_Value("Stations Broadcast", MAX),
+                 Timer_Value("Stations Broadcast", MIN));
+        }
+        if (Timer_Exists("Stations Locate")) {
+          printf("        Stations Locate           : %.2f (Average)   %.2f (Max) %.2f "
+                 "(Min) seconds\n",
+                 Timer_Value("Stations Locate", AVERAGE),
+                 Timer_Value("Stations Locate", MAX),
+                 Timer_Value("Stations Locate", MIN));
+        }
+        if (Timer_Exists("Stations Local Init")) {
+          printf("        Stations Local Init       : %.2f (Average)   %.2f (Max) %.2f "
+                 "(Min) seconds\n",
+                 Timer_Value("Stations Local Init", AVERAGE),
+                 Timer_Value("Stations Local Init", MAX),
+                 Timer_Value("Stations Local Init", MIN));
+        }
       }
       if (Timer_Exists("Pre Setup Topo Stations Init")) {
         printf("      Pre Setup Topo Stations Init: %.2f (Average)   %.2f (Max) %.2f "
@@ -13097,7 +13130,7 @@ extern int compute_csi_eta_dzeta(octant_t* octant, vector3D_t pointcoords,
                                  vector3D_t* localcoords,
                                  int32_t* localNodeID) {
   tick_t edgeticks;
-  int32_t eindex;
+  int32_t eindex = -1;
   double center_x, center_y, center_z;
 
   /* various convienient variables */
@@ -13114,37 +13147,41 @@ extern int compute_csi_eta_dzeta(octant_t* octant, vector3D_t pointcoords,
   center_y = Global.myMesh->ticksize * (octant->ly + edgeticks / 2);
   center_z = Global.myMesh->ticksize * (octant->lz + edgeticks / 2);
 
-  /* Go through my local elements to find which one matches the
-   * containing octant. I should have a better solution than this.
-   */
-  for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-    int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
-
-    if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
-        (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
-        (Global.myMesh->nodeTable[lnid0].z == octant->lz)) {
-      /* Sanity check */
-      if (Global.myMesh->elemTable[eindex].level != octant->level) {
-        fprintf(stderr, "Thread %d: source_init: internal error\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-
-      /* Fill in the local node ids of the containing element */
-      memcpy(localNodeID, Global.myMesh->elemTable[eindex].lnid,
-             sizeof(int32_t) * 8);
-
-      break;
+  if (octant->appdata != NULL) {
+    int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
+    if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
+      eindex = cached;
     }
-  } /* for all the local elements */
+  }
 
-  if (eindex == Global.myMesh->lenum) {
+  if (eindex < 0) {
+    /* Fallback for octants that were not produced by octor_extractmesh(). */
+    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+
+      if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
+          (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
+          (Global.myMesh->nodeTable[lnid0].z == octant->lz)) {
+        break;
+      }
+    }
+  }
+
+  if ((eindex < 0) || (eindex == Global.myMesh->lenum)) {
     fprintf(stderr, "Thread %d: source_init: ", Global.myID);
     fprintf(stderr, "No element matches the containing octant.\n");
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  if (Global.myMesh->elemTable[eindex].level != octant->level) {
+    fprintf(stderr, "Thread %d: source_init: internal error\n", Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  memcpy(localNodeID, Global.myMesh->elemTable[eindex].lnid,
+         sizeof(int32_t) * 8);
 
   localcoords->x[0] = 2 * (xGlobal - center_x) / h;
   localcoords->x[1] = 2 * (yGlobal - center_y) / h;
@@ -13312,10 +13349,15 @@ void setup_stations_data() {
 
   /* Locate stations once, cache their owning octants, and reuse that for
    * per-station setup to avoid a second full search pass. */
+  Timer_Start("Stations Locate");
   for (iStation = 0; iStation < Param.theNumberOfStations; iStation++) {
     stationCoords.x[0] = Param.theStationX[iStation];
     stationCoords.x[1] = Param.theStationY[iStation];
     stationCoords.x[2] = Param.theStationZ[iStation];
+
+    if (!station_point_in_local_interval(stationCoords)) {
+      continue;
+    }
 
     if (search_point(stationCoords, &octant) == 1) {
       if (Param.myNumberOfStations == localCapacity) {
@@ -13344,6 +13386,7 @@ void setup_stations_data() {
       Param.myNumberOfStations++;
     }
   }
+  Timer_Stop("Stations Locate");
 
   /* allocate memory if necessary and generate the list of stations per
    * processor */
@@ -13355,6 +13398,7 @@ void setup_stations_data() {
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
   }
 
+  Timer_Start("Stations Local Init");
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
 #pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
@@ -13441,6 +13485,7 @@ void setup_stations_data() {
           Param.myStations[iLCStation].fpoutputfile);
     }
   }
+  Timer_Stop("Stations Local Init");
 
   free(localStationIds);
   free(localStationOctants);
@@ -13686,6 +13731,62 @@ static int32_t station_output_use_omp(void) {
 #endif
 }
 
+static int32_t station_interval_filter_enabled(void) {
+  if (g_stationIntervalFilterMode < 0) {
+    const char* env = getenv("HERCULES_STATION_ROUTE_MODE");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "all") == 0) ||
+          (strcasecmp(env, "search-all") == 0) ||
+          (strcasecmp(env, "off") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_stationIntervalFilterMode = 0;
+      } else {
+        g_stationIntervalFilterMode = 1;
+      }
+    } else {
+      g_stationIntervalFilterMode = 1;
+    }
+
+    if ((Global.myID == 0) && (g_stationIntervalFilterReported == 0)) {
+      monitor_print("station route mode: %s\n",
+                    g_stationIntervalFilterMode ? "interval" : "all");
+      g_stationIntervalFilterReported = 1;
+    }
+  }
+
+  return g_stationIntervalFilterMode;
+}
+
+static int32_t station_point_in_local_interval(vector3D_t point) {
+  const point_t* intervals;
+  point_t stationPoint;
+
+  if (!station_interval_filter_enabled() || Global.theGroupSize <= 1) {
+    return 1;
+  }
+
+  intervals = octor_getintervaltable(Global.myOctree);
+  if (intervals == NULL) {
+    return 1;
+  }
+
+  stationPoint.x = (tick_t)(point.x[0] / Global.myMesh->ticksize);
+  stationPoint.y = (tick_t)(point.x[1] / Global.myMesh->ticksize);
+  stationPoint.z = (tick_t)(point.x[2] / Global.myMesh->ticksize);
+
+  if (octor_zcompare(&stationPoint, &intervals[Global.myID]) < 0) {
+    return 0;
+  }
+
+  if ((Global.myID + 1 < Global.theGroupSize) &&
+      (octor_zcompare(&stationPoint, &intervals[Global.myID + 1]) >= 0)) {
+    return 0;
+  }
+
+  return 1;
+}
+
 static int32_t hercules_repro_mode(void) {
   if (g_reproMode < 0) {
     const char* env = getenv("HERCULES_REPRO_MODE");
@@ -13738,11 +13839,16 @@ void output_stations_init(const char* numericalin) {
 
   t0 = MPI_Wtime();
 
+  Timer_Start("Stations Read Input");
   if (Global.myID == 0) {
     read_stations_info(numericalin);
   }
+  Timer_Stop("Stations Read Input");
 
+  Timer_Start("Stations Broadcast");
   broadcast_stations_info();
+  Timer_Stop("Stations Broadcast");
+
   setup_stations_data();
 
   t1 = MPI_Wtime();
@@ -13757,6 +13863,12 @@ void output_stations_init(const char* numericalin) {
     monitor_print(
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
         totalStations, setupSecondsMax);
+    if (totalStations != Param.theNumberOfStations) {
+      monitor_print(
+          "WARNING: located %d of %d configured stations. "
+          "Set HERCULES_STATION_ROUTE_MODE=all to compare the full-search path.\n",
+          totalStations, Param.theNumberOfStations);
+    }
   }
 
   MPI_Barrier(comm_solver);
@@ -15141,6 +15253,22 @@ int main(int argc, char** argv) {
                comm_solver);
   if (Timer_Exists("Pre Setup Stations Init")) {
     Timer_Reduce("Pre Setup Stations Init", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Stations Read Input")) {
+    Timer_Reduce("Stations Read Input", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Stations Broadcast")) {
+    Timer_Reduce("Stations Broadcast", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Stations Locate")) {
+    Timer_Reduce("Stations Locate", (TimerKind)(MAX | MIN | AVERAGE),
+                 comm_solver);
+  }
+  if (Timer_Exists("Stations Local Init")) {
+    Timer_Reduce("Stations Local Init", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
   if (Timer_Exists("Pre Setup Topo Stations Init")) {
