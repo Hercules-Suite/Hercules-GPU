@@ -12232,20 +12232,6 @@ static void print_timing_stat() {
                  Timer_Value("Stations Local Init", MAX),
                  Timer_Value("Stations Local Init", MIN));
         }
-        if (Timer_Exists("Stations Interp Init")) {
-          printf("        Stations Interp Init      : %.2f (Average)   %.2f (Max) %.2f "
-                 "(Min) seconds\n",
-                 Timer_Value("Stations Interp Init", AVERAGE),
-                 Timer_Value("Stations Interp Init", MAX),
-                 Timer_Value("Stations Interp Init", MIN));
-        }
-        if (Timer_Exists("Stations File Init")) {
-          printf("        Stations File Init        : %.2f (Average)   %.2f (Max) %.2f "
-                 "(Min) seconds\n",
-                 Timer_Value("Stations File Init", AVERAGE),
-                 Timer_Value("Stations File Init", MAX),
-                 Timer_Value("Stations File Init", MIN));
-        }
       }
       if (Timer_Exists("Pre Setup Topo Stations Init")) {
         printf("      Pre Setup Topo Stations Init: %.2f (Average)   %.2f (Max) %.2f "
@@ -13413,12 +13399,13 @@ void setup_stations_data() {
   }
 
   Timer_Start("Stations Local Init");
-  Timer_Start("Stations Interp Init");
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
 #pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
 #endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
+    char stationFile[256];
+
     iStation = localStationIds[iLCStation];
     octant = localStationOctants[iLCStation];
     stationCoords.x[0] = Param.theStationX[iStation];
@@ -13427,26 +13414,14 @@ void setup_stations_data() {
 
     Param.myStations[iLCStation].id = iStation;
     Param.myStations[iLCStation].coords = stationCoords;
-    Param.myStations[iLCStation].fpoutputfile = NULL;
+    sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
+    Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
     Param.myStations[iLCStation].prev_disp[2] = 0.0;
     compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                           &(Param.myStations[iLCStation].localcoords),
                           Param.myStations[iLCStation].nodestointerpolate);
-  }
-  Timer_Stop("Stations Interp Init");
-
-  Timer_Start("Stations File Init");
-#ifdef _OPENMP
-#pragma omp parallel for if(useOmp) schedule(dynamic, 32)
-#endif
-  for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
-    char stationFile[256];
-
-    sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut,
-            Param.myStations[iLCStation].id);
-    Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
 
     /*
      * This section now enclosed in a DEBUG def because its information
@@ -13510,7 +13485,6 @@ void setup_stations_data() {
           Param.myStations[iLCStation].fpoutputfile);
     }
   }
-  Timer_Stop("Stations File Init");
   Timer_Stop("Stations Local Init");
 
   free(localStationIds);
@@ -15295,14 +15269,6 @@ int main(int argc, char** argv) {
   }
   if (Timer_Exists("Stations Local Init")) {
     Timer_Reduce("Stations Local Init", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Stations Interp Init")) {
-    Timer_Reduce("Stations Interp Init", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Stations File Init")) {
-    Timer_Reduce("Stations File Init", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
   if (Timer_Exists("Pre Setup Topo Stations Init")) {
