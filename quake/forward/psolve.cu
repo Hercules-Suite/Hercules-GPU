@@ -162,6 +162,8 @@ static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
+static int32_t g_contribRecvMode = -1;
+static int32_t g_contribRecvReported = 0;
 static int32_t g_reproMode = -1;
 static int32_t g_meshImportBootstrapLevel = -1;
 static int32_t g_forcePathReported = 0;
@@ -391,6 +393,7 @@ static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
+static int32_t contrib_recv_use_waitsome(void);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
@@ -9851,10 +9854,13 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
   send_head = send_messenger;
   recv_head = recv_messenger;
-  /* Contribution messages use += accumulation, so preserve deterministic
-   * unpack order there. Sharing messages are assignments and can stream
-   * unpack with Waitsome unless repro mode requests strict behavior. */
-  useWaitsome = ((direction == SHARING) && !hercules_repro_mode());
+  /* Sharing messages are assignments and can stream unpack safely.
+   * Contribution messages use += accumulation; in performance mode we stream
+   * them too to overlap unpack work with MPI progress, while repro mode keeps
+   * the deterministic Waitall/unpack ordering. */
+  useWaitsome =
+      ((direction == SHARING) && !hercules_repro_mode()) ||
+      ((direction == CONTRIBUTION) && contrib_recv_use_waitsome());
 
   messenger_prepare_offsets(send_head, itemsperentry);
   messenger_prepare_offsets(recv_head, itemsperentry);
@@ -11859,6 +11865,38 @@ static int32_t contrib_pack_use_omp(void) {
 
   return g_contribPackOmpMode;
 #endif
+}
+
+static int32_t contrib_recv_use_waitsome(void) {
+  if (hercules_repro_mode()) {
+    return 0;
+  }
+
+  if (g_contribRecvMode < 0) {
+    const char* env = getenv("HERCULES_CONTRIB_RECV_MODE");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "waitall") == 0) ||
+          (strcasecmp(env, "deterministic") == 0) ||
+          (strcasecmp(env, "ordered") == 0) ||
+          (strcasecmp(env, "off") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0)) {
+        g_contribRecvMode = 0;
+      } else {
+        g_contribRecvMode = 1;
+      }
+    } else {
+      g_contribRecvMode = 1;
+    }
+
+    if ((Global.myID == 0) && (g_contribRecvReported == 0)) {
+      monitor_print("contribution receive mode: %s\n",
+                    g_contribRecvMode ? "waitsome" : "waitall");
+      g_contribRecvReported = 1;
+    }
+  }
+
+  return g_contribRecvMode;
 }
 
 static int32_t sparse_force_upload_mode(void) {
