@@ -9892,8 +9892,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
   Timer_Stop("Schedule Post Recv");
 
-  /* Asssemble outgoing messages */
-  Timer_Start("Schedule Pack Outgoing");
+  /* Assemble each outgoing message and post it immediately.  Starting large
+   * sends while later messages are still being packed helps hide some of the
+   * communication tail on imbalanced dangling-node schedules. */
+  isendnum = 0;
   while (send_messenger != NULL) {
     int32_t idx;
     int32_t useOmp = 0;
@@ -9904,6 +9906,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       useOmp = contrib_pack_use_omp();
     }
 
+    Timer_Start("Schedule Pack Outgoing");
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && useOmp)
 #endif
@@ -9934,24 +9937,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       *gnidp = Global.myMesh->nodeTable[lnid].gnid;
 #endif /* DEBUG */
     }
+    Timer_Stop("Schedule Pack Outgoing");
 
-    send_messenger = send_messenger->next;
-  }
-  Timer_Stop("Schedule Pack Outgoing");
-
-  /* Revisit messengers */
-  if (direction == CONTRIBUTION) {
-    send_messenger = sched->first_c;
-    recv_messenger = sched->first_s;
-  } else {
-    send_messenger = sched->first_s;
-    recv_messenger = sched->first_c;
-  }
-
-  /* Send the data */
-  Timer_Start("Schedule Post Send");
-  isendnum = 0;
-  while (send_messenger != NULL) {
+    Timer_Start("Schedule Post Send");
     bytesize = send_messenger->nodecount * send_messenger->outsize;
     callSendBytes += (double)bytesize;
     callSendNodes += (double)send_messenger->nodecount;
@@ -9959,10 +9947,11 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     MPI_Isend(send_messenger->outdata, bytesize, MPI_CHAR,
               send_messenger->procid, msgtag, comm_solver,
               &isendreqs[isendnum]);
+    Timer_Stop("Schedule Post Send");
+
     isendnum++;
     send_messenger = send_messenger->next;
   }
-  Timer_Stop("Schedule Post Send");
 
   /* Wait till I receive all the data I want */
   if (irecvcount != 0) {
