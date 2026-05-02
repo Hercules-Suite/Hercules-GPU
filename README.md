@@ -42,6 +42,8 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	Enables or disables OpenMP parallelization while unpacking contribution messages when a message's destination mapping has no duplicates. Default is `1` (enabled).
 - `HERCULES_CONTRIB_RECV_MODE=waitsome|waitall`
 	Selects how contribution messages are received and unpacked. Default is `waitsome`, which unpacks completed receives as they arrive so MPI receive wait and local unpack work can overlap. `waitall` restores the older deterministic receive behavior. Setting `HERCULES_REPRO_MODE=1` or `2` also forces deterministic `waitall`.
+- `HERCULES_DEFER_ADJUST_SEND_WAIT=1|0`
+	Defers send-completion waits for the schedule stages immediately followed by `compute_adjust`, then flushes those sends after the adjust work. Default is `1` (enabled). Set to `0` to wait for sends inside each schedule call.
 - `HERCULES_SPARSE_UPLOAD_MODE=auto|dense|sparse|range` (or `0|1|2|3`)
 	Selects host-to-device force upload mode for topography sparse upload path. Default is `dense`/`1`.
 	Use `auto`/`0` to enable the heuristic path selection explicitly.
@@ -114,6 +116,7 @@ Two-phase script defaults:
 	`HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_CONTRIB_UNPACK_OMP=1`,
 	`HERCULES_CONTRIB_RECV_MODE=waitsome`,
+	`HERCULES_DEFER_ADJUST_SEND_WAIT=1`,
 	`HERCULES_SPARSE_UPLOAD_MODE=dense`,
 	These are the current recommended runtime defaults.
 - OpenMP thread defaults:
@@ -162,6 +165,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_CONTRIB_UNPACK_OMP=0
 # export HERCULES_CONTRIB_RECV_MODE=waitall
+# export HERCULES_DEFER_ADJUST_SEND_WAIT=0
 # export HERCULES_REPRO_MODE=1
 # export HERCULES_MESH_IMPORT_VERIFY=1
 # export PHASE_B_MAP_MODE=numa
