@@ -169,8 +169,6 @@ static int32_t g_contribUnpackOmpMode = -1;
 static int32_t g_contribUnpackOmpReported = 0;
 static int32_t g_contribRecvMode = -1;
 static int32_t g_contribRecvReported = 0;
-static int32_t g_deferAdjustSendWaitMode = -1;
-static int32_t g_deferAdjustSendWaitReported = 0;
 static int32_t g_reproMode = -1;
 static int32_t g_meshImportBootstrapLevel = -1;
 static int32_t g_forcePathReported = 0;
@@ -362,7 +360,6 @@ static void schedule_delete(schedule_t* sched);
 static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
                              int32_t c_insize, int32_t s_outsize,
                              int32_t s_insize);
-static void schedule_wait_deferred_sends(schedule_t* sched, int32_t direction);
 static void schedule_senddata(schedule_t* sched, void* valuetable,
                               int32_t itemsperentry, int32_t direction,
                               int32_t msgtag);
@@ -431,8 +428,6 @@ static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
 static int32_t contrib_unpack_use_omp(void);
 static int32_t contrib_recv_use_waitsome(void);
-static int32_t defer_adjust_send_wait_enabled(void);
-static int32_t should_defer_send_wait(int32_t msgtag);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
@@ -7580,7 +7575,6 @@ static void solver_adjust_forces(mysolver_t* solver) {
   compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
                  DISTRIBUTION);
   Timer_Stop("1st compute adjust (distribution)");
-  schedule_wait_deferred_sends(solver->dn_sched, CONTRIBUTION);
 }
 
 static void solver_send_force_anchored(mysolver_t* solver) {
@@ -8746,7 +8740,6 @@ static void solver_adjust_displacement(mysolver_t* solver) {
   compute_adjust(Global.mySolver->tm2, sizeof(fvector_t) / sizeof(solver_float),
                  ASSIGNMENT);
   Timer_Stop("2nd compute adjust (assignment)");
-  schedule_wait_deferred_sends(Global.mySolver->an_sched, SHARING);
 }
 
 /** Share the displacement of dangling nodes with other processors. */
@@ -9016,10 +9009,6 @@ static void solver_run_collect_timers(void) {
   if (Timer_Exists("Schedule Wait Send")) {
     Timer_Reduce("Schedule Wait Send", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
-  }
-  if (Timer_Exists("Schedule Deferred Wait Send")) {
-    Timer_Reduce("Schedule Deferred Wait Send",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
   if (Timer_Exists("Schedule Unpack Incoming")) {
     Timer_Reduce("Schedule Unpack Incoming", (TimerKind)(MAX | MIN | AVERAGE),
@@ -9507,15 +9496,11 @@ static schedule_t* schedule_new() {
   sched->waitsome_idxs_c = NULL;
   sched->isendreqs_c = NULL;
   sched->isendstats_c = NULL;
-  sched->pending_isends_c = 0;
-  sched->pending_isend_stage_c = -1;
   sched->irecvreqs_s = NULL;
   sched->irecvstats_s = NULL;
   sched->waitsome_idxs_s = NULL;
   sched->isendreqs_s = NULL;
   sched->isendstats_s = NULL;
-  sched->pending_isends_s = 0;
-  sched->pending_isend_stage_s = -1;
 
   return sched;
 }
@@ -9790,9 +9775,6 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
 static void schedule_delete(schedule_t* sched) {
   messenger_t *current, *next;
 
-  schedule_wait_deferred_sends(sched, CONTRIBUTION);
-  schedule_wait_deferred_sends(sched, SHARING);
-
   /* Release messengers overseeing my contributions */
   current = sched->first_c;
   while (current != NULL) {
@@ -9853,49 +9835,6 @@ static void schedule_prepare(schedule_t* sched, int32_t c_outsize,
   return;
 }
 
-static void schedule_wait_deferred_sends(schedule_t* sched, int32_t direction) {
-  MPI_Request* isendreqs;
-  MPI_Status* isendstats;
-  int32_t* pendingCount;
-  int32_t* pendingStage;
-  double stageTimerStart;
-
-  if (sched == NULL) {
-    return;
-  }
-
-  if (direction == CONTRIBUTION) {
-    isendreqs = sched->isendreqs_c;
-    isendstats = sched->isendstats_c;
-    pendingCount = &sched->pending_isends_c;
-    pendingStage = &sched->pending_isend_stage_c;
-  } else {
-    isendreqs = sched->isendreqs_s;
-    isendstats = sched->isendstats_s;
-    pendingCount = &sched->pending_isends_s;
-    pendingStage = &sched->pending_isend_stage_s;
-  }
-
-  if (*pendingCount <= 0) {
-    return;
-  }
-
-  stageTimerStart = MPI_Wtime();
-  Timer_Start("Schedule Wait Send");
-  Timer_Start("Schedule Deferred Wait Send");
-  MPI_Waitall(*pendingCount, isendreqs, isendstats);
-  Timer_Stop("Schedule Deferred Wait Send");
-  Timer_Stop("Schedule Wait Send");
-
-  if (*pendingStage >= 0) {
-    g_stageTimeLocal[stage_time_index(*pendingStage, STAGE_TIME_WAIT_SEND)] +=
-        MPI_Wtime() - stageTimerStart;
-  }
-
-  *pendingCount = 0;
-  *pendingStage = -1;
-}
-
 /**
  * Assemble the proper information for the group of messengers managed by
  * a scheduler and send the data.
@@ -9946,8 +9885,6 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     isendreqs = sched->isendreqs_s;
     isendstats = sched->isendstats_s;
   }
-
-  schedule_wait_deferred_sends(sched, direction);
 
   send_head = send_messenger;
   recv_head = recv_messenger;
@@ -10207,25 +10144,15 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   if (isendcount != 0) {
-    if (should_defer_send_wait(msgtag)) {
-      if (direction == CONTRIBUTION) {
-        sched->pending_isends_c = isendnum;
-        sched->pending_isend_stage_c = waitStage;
-      } else {
-        sched->pending_isends_s = isendnum;
-        sched->pending_isend_stage_s = waitStage;
-      }
-    } else {
-      if (waitStage >= 0) {
-        stageTimerStart = MPI_Wtime();
-      }
-      Timer_Start("Schedule Wait Send");
-      MPI_Waitall(isendnum, isendreqs, isendstats);
-      Timer_Stop("Schedule Wait Send");
-      if (waitStage >= 0) {
-        g_stageTimeLocal[stage_time_index(waitStage, STAGE_TIME_WAIT_SEND)] +=
-            MPI_Wtime() - stageTimerStart;
-      }
+    if (waitStage >= 0) {
+      stageTimerStart = MPI_Wtime();
+    }
+    Timer_Start("Schedule Wait Send");
+    MPI_Waitall(isendnum, isendreqs, isendstats);
+    Timer_Stop("Schedule Wait Send");
+    if (waitStage >= 0) {
+      g_stageTimeLocal[stage_time_index(waitStage, STAGE_TIME_WAIT_SEND)] +=
+          MPI_Wtime() - stageTimerStart;
     }
   }
 
@@ -12130,43 +12057,6 @@ static int32_t contrib_recv_use_waitsome(void) {
   return g_contribRecvMode;
 }
 
-static int32_t defer_adjust_send_wait_enabled(void) {
-  if (hercules_repro_mode()) {
-    return 0;
-  }
-
-  if (g_deferAdjustSendWaitMode < 0) {
-    const char* env = getenv("HERCULES_DEFER_ADJUST_SEND_WAIT");
-
-    if (env != NULL) {
-      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
-          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
-        g_deferAdjustSendWaitMode = 0;
-      } else {
-        g_deferAdjustSendWaitMode = 1;
-      }
-    } else {
-      g_deferAdjustSendWaitMode = 1;
-    }
-
-    if ((Global.myID == 0) && (g_deferAdjustSendWaitReported == 0)) {
-      monitor_print("adjust-adjacent send wait deferral: %s\n",
-                    g_deferAdjustSendWaitMode ? "enabled" : "disabled");
-      g_deferAdjustSendWaitReported = 1;
-    }
-  }
-
-  return g_deferAdjustSendWaitMode;
-}
-
-static int32_t should_defer_send_wait(int32_t msgtag) {
-  if (!defer_adjust_send_wait_enabled()) {
-    return 0;
-  }
-
-  return (msgtag == DN_FORCE_MSG) || (msgtag == AN_DISP_MSG);
-}
-
 static int32_t sparse_force_upload_mode(void) {
   if (g_sparseUploadMode < 0) {
     const char* env = getenv("HERCULES_SPARSE_UPLOAD_MODE");
@@ -12977,7 +12867,6 @@ static void print_timing_stat() {
       Timer_Exists("Schedule Post Send") ||
       Timer_Exists("Schedule Wait Recv") ||
       Timer_Exists("Schedule Wait Send") ||
-      Timer_Exists("Schedule Deferred Wait Send") ||
       Timer_Exists("Schedule Unpack Incoming")) {
     printf("    Schedule internals (all send phases)\n");
     if (Timer_Exists("Schedule Post Recv")) {
@@ -13019,14 +12908,6 @@ static void print_timing_stat() {
           Timer_Value("Schedule Wait Send", AVERAGE),
           Timer_Value("Schedule Wait Send", MAX),
           Timer_Value("Schedule Wait Send", MIN));
-    }
-    if (Timer_Exists("Schedule Deferred Wait Send")) {
-      printf(
-          "      Deferred Wait Send            : %.2f (Average)   %.2f (Max) %.2f "
-          "(Min) seconds\n",
-          Timer_Value("Schedule Deferred Wait Send", AVERAGE),
-          Timer_Value("Schedule Deferred Wait Send", MAX),
-          Timer_Value("Schedule Deferred Wait Send", MIN));
     }
     if (Timer_Exists("Schedule Unpack Incoming")) {
       printf(
