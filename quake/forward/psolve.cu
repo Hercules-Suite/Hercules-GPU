@@ -157,14 +157,6 @@ static int32_t g_adjustDistributionOmpMode = -1;
 static int32_t g_adjustAssignmentOmpMode = -1;
 static int32_t g_adjustDistributionOmpReported = 0;
 static int32_t g_adjustAssignmentOmpReported = 0;
-static int32_t g_adjustOmpScheduleMode = -1;
-static int32_t g_adjustOmpScheduleChunk = 64;
-static int32_t g_adjustOmpScheduleReported = 0;
-enum {
-  ADJUST_OMP_SCHEDULE_STATIC = 0,
-  ADJUST_OMP_SCHEDULE_DYNAMIC = 1,
-  ADJUST_OMP_SCHEDULE_GUIDED = 2
-};
 static int32_t g_stationOutputOmpMode = -1;
 static int32_t g_stationOutputOmpReported = 0;
 static int32_t g_stationIntervalFilterMode = -1;
@@ -429,7 +421,6 @@ static int32_t stage_comm_index(int32_t stage, int32_t metric);
 static int32_t stage_time_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
-static void adjust_apply_omp_schedule(void);
 static int32_t station_output_use_omp(void);
 static int32_t station_interval_filter_enabled(void);
 static int32_t station_point_in_local_interval(vector3D_t point);
@@ -11627,10 +11618,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Distribution Core");
 #ifdef _OPENMP
       const int32_t useOmp = adjust_distribution_use_omp();
-      if (useOmp) {
-        adjust_apply_omp_schedule();
-      }
-#pragma omp parallel for if(useOmp) schedule(runtime)
+#pragma omp parallel for if(useOmp) schedule(static)
 #endif
       for (int32_t run = 0; run < g_adjustDistRunCount; run++) {
         int32_t start = g_adjustDistRunOffsets[run];
@@ -11661,10 +11649,7 @@ static void compute_adjust(void* valuetable, int32_t itemsperentry,
       Timer_Start("Adjust Assignment Core");
       const int32_t useOmp = adjust_assignment_use_omp();
 #ifdef _OPENMP
-      if (useOmp) {
-        adjust_apply_omp_schedule();
-      }
-#pragma omp parallel for if(useOmp) schedule(runtime)
+#pragma omp parallel for if(useOmp) schedule(static)
 #endif
       for (int32_t d = 0; d < g_adjustDnCount; d++) {
         dnindex = g_adjustDnOrder[d];
@@ -11909,69 +11894,6 @@ static int32_t adjust_assignment_use_omp(void) {
   }
 
   return g_adjustAssignmentOmpMode;
-#endif
-}
-
-static void adjust_apply_omp_schedule(void) {
-#ifdef _OPENMP
-  if (g_adjustOmpScheduleMode < 0) {
-    const char* scheduleEnv = getenv("HERCULES_ADJUST_OMP_SCHEDULE");
-    const char* chunkEnv = getenv("HERCULES_ADJUST_OMP_CHUNK");
-
-    g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_GUIDED;
-
-    if (scheduleEnv != NULL) {
-      if ((strcasecmp(scheduleEnv, "static") == 0) ||
-          (strcmp(scheduleEnv, "0") == 0)) {
-        g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_STATIC;
-      } else if ((strcasecmp(scheduleEnv, "dynamic") == 0) ||
-                 (strcmp(scheduleEnv, "1") == 0)) {
-        g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_DYNAMIC;
-      } else if ((strcasecmp(scheduleEnv, "guided") == 0) ||
-                 (strcmp(scheduleEnv, "2") == 0)) {
-        g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_GUIDED;
-      } else if (Global.myID == 0) {
-        monitor_print("Unknown HERCULES_ADJUST_OMP_SCHEDULE=%s; using guided\n",
-                      scheduleEnv);
-      }
-    }
-
-    if (chunkEnv != NULL) {
-      char* endptr = NULL;
-      long parsed = strtol(chunkEnv, &endptr, 10);
-      if ((endptr != chunkEnv) && (parsed > 0) && (parsed <= INT32_MAX)) {
-        g_adjustOmpScheduleChunk = (int32_t)parsed;
-      } else if (Global.myID == 0) {
-        monitor_print("Unknown HERCULES_ADJUST_OMP_CHUNK=%s; using %d\n",
-                      chunkEnv, g_adjustOmpScheduleChunk);
-      }
-    }
-  }
-
-  switch (g_adjustOmpScheduleMode) {
-    case ADJUST_OMP_SCHEDULE_STATIC:
-      omp_set_schedule(omp_sched_static, g_adjustOmpScheduleChunk);
-      break;
-    case ADJUST_OMP_SCHEDULE_DYNAMIC:
-      omp_set_schedule(omp_sched_dynamic, g_adjustOmpScheduleChunk);
-      break;
-    case ADJUST_OMP_SCHEDULE_GUIDED:
-    default:
-      omp_set_schedule(omp_sched_guided, g_adjustOmpScheduleChunk);
-      break;
-  }
-
-  if ((Global.myID == 0) && (g_adjustOmpScheduleReported == 0)) {
-    const char* modeName = "guided";
-    if (g_adjustOmpScheduleMode == ADJUST_OMP_SCHEDULE_STATIC) {
-      modeName = "static";
-    } else if (g_adjustOmpScheduleMode == ADJUST_OMP_SCHEDULE_DYNAMIC) {
-      modeName = "dynamic";
-    }
-    monitor_print("compute_adjust OpenMP schedule: %s, chunk=%d\n",
-                  modeName, g_adjustOmpScheduleChunk);
-    g_adjustOmpScheduleReported = 1;
-  }
 #endif
 }
 

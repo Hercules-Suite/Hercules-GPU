@@ -19,10 +19,6 @@ These are also the current default values used by `run_phaseA_phaseB.sh` when th
 	Enables or disables OpenMP parallelization in assignment adjust core. Default is `1` (enabled).
 - `HERCULES_ADJUST_DIST_OMP=1|0`
 	Enables or disables OpenMP parallelization in parent-centric distribution adjust core. Default is `1` (enabled).
-- `HERCULES_ADJUST_OMP_SCHEDULE=static|dynamic|guided` (or `0|1|2`)
-	Selects the OpenMP loop schedule used by both compute-adjust distribution and assignment cores. Default is `guided`, which can reduce long-rank tails when dangling-node work is imbalanced. Use `static` to restore the older fixed block schedule.
-- `HERCULES_ADJUST_OMP_CHUNK=<integer>`
-	Controls the chunk size for `HERCULES_ADJUST_OMP_SCHEDULE`. Default is `64`.
 - `HERCULES_SPARSE_CLEAR_MODE=auto|range|nodes|full` (or `2|0|1|3`)
 	Selects sparse host force reset mode in GPU solver path.
 	Default is `full`/`3`.
@@ -113,7 +109,6 @@ Two-phase script defaults:
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
 	`HERCULES_ADJUST_ASSIGN_OMP=1`, `HERCULES_ADJUST_DIST_OMP=1`,
-	`HERCULES_ADJUST_OMP_SCHEDULE=guided`, `HERCULES_ADJUST_OMP_CHUNK=64`,
 	`HERCULES_SPARSE_CLEAR_MODE=full`, `HERCULES_FULL_CLEAR_OMP=1`,
 	`HERCULES_STATION_IO_OMP=1`, `HERCULES_STATION_ROUTE_MODE=interval`,
 	`HERCULES_PLANE_IO_OMP=1`,
@@ -155,8 +150,6 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export OMP_PLACES=threads
 # export HERCULES_ADJUST_ASSIGN_OMP=0
 # export HERCULES_ADJUST_DIST_OMP=0
-# export HERCULES_ADJUST_OMP_SCHEDULE=static
-# export HERCULES_ADJUST_OMP_CHUNK=64
 # export HERCULES_SPARSE_CLEAR_MODE=auto
 # export HERCULES_FULL_CLEAR_OMP=0
 # export HERCULES_STATION_IO_OMP=0
