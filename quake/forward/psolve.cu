@@ -11918,7 +11918,7 @@ static void adjust_apply_omp_schedule(void) {
     const char* scheduleEnv = getenv("HERCULES_ADJUST_OMP_SCHEDULE");
     const char* chunkEnv = getenv("HERCULES_ADJUST_OMP_CHUNK");
 
-    g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_STATIC;
+    g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_GUIDED;
 
     if (scheduleEnv != NULL) {
       if ((strcasecmp(scheduleEnv, "static") == 0) ||
@@ -11931,7 +11931,7 @@ static void adjust_apply_omp_schedule(void) {
                  (strcmp(scheduleEnv, "2") == 0)) {
         g_adjustOmpScheduleMode = ADJUST_OMP_SCHEDULE_GUIDED;
       } else if (Global.myID == 0) {
-        monitor_print("Unknown HERCULES_ADJUST_OMP_SCHEDULE=%s; using static\n",
+        monitor_print("Unknown HERCULES_ADJUST_OMP_SCHEDULE=%s; using guided\n",
                       scheduleEnv);
       }
     }
