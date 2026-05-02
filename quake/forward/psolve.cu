@@ -237,6 +237,31 @@ static double g_stageCommMin[STAGE_COMM_METRIC_COUNT] = {0.0};
 static double g_stageCommMax[STAGE_COMM_METRIC_COUNT] = {0.0};
 static double g_stageCommAvg[STAGE_COMM_METRIC_COUNT] = {0.0};
 
+#define STAGE_TIME_METRIC_COUNT_PER_STAGE 6
+#define STAGE_TIME_METRIC_COUNT \
+  (WAIT_RECV_STAGE_COUNT * STAGE_TIME_METRIC_COUNT_PER_STAGE)
+enum {
+  STAGE_TIME_POST_RECV = 0,
+  STAGE_TIME_PACK_OUTGOING,
+  STAGE_TIME_POST_SEND,
+  STAGE_TIME_WAIT_RECV,
+  STAGE_TIME_WAIT_SEND,
+  STAGE_TIME_UNPACK_INCOMING
+};
+
+static const char* g_stageTimeMetricNames[STAGE_TIME_METRIC_COUNT_PER_STAGE] = {
+    "post recv",
+    "pack outgoing",
+    "post send",
+    "wait recv",
+    "wait send",
+    "unpack incoming"};
+
+static double g_stageTimeLocal[STAGE_TIME_METRIC_COUNT] = {0.0};
+static double g_stageTimeMin[STAGE_TIME_METRIC_COUNT] = {0.0};
+static double g_stageTimeMax[STAGE_TIME_METRIC_COUNT] = {0.0};
+static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
+
 #ifndef PROCPERNODE
 #define PROCPERNODE 4
 #endif
@@ -391,6 +416,7 @@ static void solver_diag_prepare_local(mesh_t* mesh);
 static void solver_diag_reduce(void);
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag);
 static int32_t stage_comm_index(int32_t stage, int32_t metric);
+static int32_t stage_time_index(int32_t stage, int32_t metric);
 static int32_t adjust_distribution_use_omp(void);
 static int32_t adjust_assignment_use_omp(void);
 static int32_t station_output_use_omp(void);
@@ -9871,6 +9897,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   messenger_prepare_offsets(recv_head, itemsperentry);
 
   /* Post receives */
+  double stageTimerStart = 0.0;
+  if (waitStage >= 0) {
+    stageTimerStart = MPI_Wtime();
+  }
   Timer_Start("Schedule Post Recv");
   irecvnum = 0;
   if (irecvcount > 0) {
@@ -9896,6 +9926,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
     recv_messenger = recv_messenger->next;
   }
   Timer_Stop("Schedule Post Recv");
+  if (waitStage >= 0) {
+    g_stageTimeLocal[stage_time_index(waitStage, STAGE_TIME_POST_RECV)] +=
+        MPI_Wtime() - stageTimerStart;
+  }
 
   /* Assemble each outgoing message and post it immediately.  Starting large
    * sends while later messages are still being packed helps hide some of the
@@ -9911,6 +9945,9 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
       useOmp = contrib_pack_use_omp();
     }
 
+    if (waitStage >= 0) {
+      stageTimerStart = MPI_Wtime();
+    }
     Timer_Start("Schedule Pack Outgoing");
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && useOmp)
@@ -9943,7 +9980,15 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 #endif /* DEBUG */
     }
     Timer_Stop("Schedule Pack Outgoing");
+    if (waitStage >= 0) {
+      g_stageTimeLocal[stage_time_index(waitStage,
+                                        STAGE_TIME_PACK_OUTGOING)] +=
+          MPI_Wtime() - stageTimerStart;
+    }
 
+    if (waitStage >= 0) {
+      stageTimerStart = MPI_Wtime();
+    }
     Timer_Start("Schedule Post Send");
     bytesize = send_messenger->nodecount * send_messenger->outsize;
     callSendBytes += (double)bytesize;
@@ -9953,6 +9998,10 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
               send_messenger->procid, msgtag, comm_solver,
               &isendreqs[isendnum]);
     Timer_Stop("Schedule Post Send");
+    if (waitStage >= 0) {
+      g_stageTimeLocal[stage_time_index(waitStage, STAGE_TIME_POST_SEND)] +=
+          MPI_Wtime() - stageTimerStart;
+    }
 
     isendnum++;
     send_messenger = send_messenger->next;
@@ -9983,14 +10032,25 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
         int outcount;
         int i;
 
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Wait Recv");
         MPI_Waitsome(irecvcount, irecvreqs, &outcount, doneidxs, irecvstats);
         Timer_Stop("Schedule Wait Recv");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_WAIT_RECV)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
 
         if (outcount == MPI_UNDEFINED) {
           break;
         }
 
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Unpack Incoming");
         for (i = 0; i < outcount; i++) {
           int doneidx = doneidxs[i];
@@ -9998,39 +10058,76 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
                                            itemsperentry, direction);
         }
         Timer_Stop("Schedule Unpack Incoming");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_UNPACK_INCOMING)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
         remaining -= outcount;
       } else if ((direction == CONTRIBUTION) || hercules_repro_mode()) {
         int i;
 
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Wait Recv");
         MPI_Waitall(irecvcount, irecvreqs, irecvstats);
         Timer_Stop("Schedule Wait Recv");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_WAIT_RECV)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
 
         /* Contribution paths use += accumulation, so unpack in a
          * deterministic order independent of receive completion timing. */
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Unpack Incoming");
         for (i = 0; i < irecvcount; i++) {
           schedule_unpack_incoming_message(recv_order[i], valuetable,
                                            itemsperentry, direction);
         }
         Timer_Stop("Schedule Unpack Incoming");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_UNPACK_INCOMING)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
         remaining = 0;
       } else {
         int doneidx;
         MPI_Status status;
 
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Wait Recv");
         MPI_Waitany(irecvcount, irecvreqs, &doneidx, &status);
         Timer_Stop("Schedule Wait Recv");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_WAIT_RECV)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
 
         if (doneidx == MPI_UNDEFINED) {
           break;
         }
 
+        if (waitStage >= 0) {
+          stageTimerStart = MPI_Wtime();
+        }
         Timer_Start("Schedule Unpack Incoming");
         schedule_unpack_incoming_message(recv_order[doneidx], valuetable,
                                          itemsperentry, direction);
         Timer_Stop("Schedule Unpack Incoming");
+        if (waitStage >= 0) {
+          g_stageTimeLocal[stage_time_index(waitStage,
+                                            STAGE_TIME_UNPACK_INCOMING)] +=
+              MPI_Wtime() - stageTimerStart;
+        }
         remaining--;
       }
     }
@@ -10044,9 +10141,16 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   }
 
   if (isendcount != 0) {
+    if (waitStage >= 0) {
+      stageTimerStart = MPI_Wtime();
+    }
     Timer_Start("Schedule Wait Send");
     MPI_Waitall(isendnum, isendreqs, isendstats);
     Timer_Stop("Schedule Wait Send");
+    if (waitStage >= 0) {
+      g_stageTimeLocal[stage_time_index(waitStage, STAGE_TIME_WAIT_SEND)] +=
+          MPI_Wtime() - stageTimerStart;
+    }
   }
 
   if (recv_order != NULL) {
@@ -10193,6 +10297,10 @@ static void solver_diag_reset(void) {
   memset(g_stageCommMin, 0, sizeof(g_stageCommMin));
   memset(g_stageCommMax, 0, sizeof(g_stageCommMax));
   memset(g_stageCommAvg, 0, sizeof(g_stageCommAvg));
+  memset(g_stageTimeLocal, 0, sizeof(g_stageTimeLocal));
+  memset(g_stageTimeMin, 0, sizeof(g_stageTimeMin));
+  memset(g_stageTimeMax, 0, sizeof(g_stageTimeMax));
+  memset(g_stageTimeAvg, 0, sizeof(g_stageTimeAvg));
   g_waitRecvStageMaxRank[0] = -1;
   g_waitRecvStageMaxRank[1] = -1;
   g_waitRecvStageMaxRank[2] = -1;
@@ -10241,6 +10349,13 @@ static void solver_diag_reduce(void) {
   MPI_Reduce(g_stageCommLocal, g_stageCommAvg, STAGE_COMM_METRIC_COUNT,
              MPI_DOUBLE, MPI_SUM, 0, comm_solver);
 
+  MPI_Reduce(g_stageTimeLocal, g_stageTimeMin, STAGE_TIME_METRIC_COUNT,
+             MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_stageTimeLocal, g_stageTimeMax, STAGE_TIME_METRIC_COUNT,
+             MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  MPI_Reduce(g_stageTimeLocal, g_stageTimeAvg, STAGE_TIME_METRIC_COUNT,
+             MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+
   if (Global.myID == 0) {
     gatheredStage =
         (double*)malloc(sizeof(double) * WAIT_RECV_STAGE_COUNT *
@@ -10274,6 +10389,10 @@ static void solver_diag_reduce(void) {
       g_stageCommAvg[i] /= (double)Global.theGroupSize;
     }
 
+    for (i = 0; i < STAGE_TIME_METRIC_COUNT; i++) {
+      g_stageTimeAvg[i] /= (double)Global.theGroupSize;
+    }
+
     free(gatheredStage);
     g_dnDiagReady = 1;
   }
@@ -10281,6 +10400,10 @@ static void solver_diag_reduce(void) {
 
 static int32_t stage_comm_index(int32_t stage, int32_t metric) {
   return (stage * 6) + metric;
+}
+
+static int32_t stage_time_index(int32_t stage, int32_t metric) {
+  return (stage * STAGE_TIME_METRIC_COUNT_PER_STAGE) + metric;
 }
 
 static int32_t wait_recv_stage_from_msgtag(int32_t msgtag) {
@@ -12824,6 +12947,19 @@ static void print_timing_stat() {
             g_waitRecvStageNames[i], g_waitRecvStageAvg[i],
             g_waitRecvStageMax[i], g_waitRecvStageMaxRank[i],
             g_waitRecvStageMin[i]);
+          }
+
+          printf("    Per-stage schedule timing diagnostics\n");
+          for (int i = 0; i < WAIT_RECV_STAGE_COUNT; i++) {
+            printf("      %s\n", g_waitRecvStageNames[i]);
+            for (int metric = 0; metric < STAGE_TIME_METRIC_COUNT_PER_STAGE;
+                 metric++) {
+              const int32_t idx = stage_time_index(i, metric);
+              printf(
+                "        %-15s : %.2f (Average)   %.2f (Max) %.2f (Min) seconds\n",
+                g_stageTimeMetricNames[metric], g_stageTimeAvg[idx],
+                g_stageTimeMax[idx], g_stageTimeMin[idx]);
+            }
           }
 
             printf("    Per-stage comm volume/message diagnostics\n");
