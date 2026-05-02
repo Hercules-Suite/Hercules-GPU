@@ -165,6 +165,8 @@ static int32_t g_fullClearOmpMode = -1;
 static int32_t g_fullClearOmpReported = 0;
 static int32_t g_contribPackOmpMode = -1;
 static int32_t g_contribPackOmpReported = 0;
+static int32_t g_contribUnpackOmpMode = -1;
+static int32_t g_contribUnpackOmpReported = 0;
 static int32_t g_contribRecvMode = -1;
 static int32_t g_contribRecvReported = 0;
 static int32_t g_reproMode = -1;
@@ -424,6 +426,7 @@ static int32_t station_interval_filter_enabled(void);
 static int32_t station_point_in_local_interval(vector3D_t point);
 static int32_t full_clear_use_omp(void);
 static int32_t contrib_pack_use_omp(void);
+static int32_t contrib_unpack_use_omp(void);
 static int32_t contrib_recv_use_waitsome(void);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
@@ -10238,6 +10241,10 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   }
 
   {
+#ifdef _OPENMP
+    const int32_t useOmp = contrib_unpack_use_omp();
+#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
+#endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
       int32_t lnid, entry;
       solver_float* dvalue;
@@ -11981,6 +11988,40 @@ static int32_t contrib_pack_use_omp(void) {
   }
 
   return g_contribPackOmpMode;
+#endif
+}
+
+static int32_t contrib_unpack_use_omp(void) {
+#ifndef _OPENMP
+  return 0;
+#else
+  if (hercules_repro_mode()) {
+    return 0;
+  }
+
+  if (g_contribUnpackOmpMode < 0) {
+    const char* env = getenv("HERCULES_CONTRIB_UNPACK_OMP");
+
+    if (env != NULL) {
+      if ((strcmp(env, "0") == 0) || (strcasecmp(env, "no") == 0) ||
+          (strcasecmp(env, "false") == 0) || (strcasecmp(env, "off") == 0)) {
+        g_contribUnpackOmpMode = 0;
+      } else {
+        g_contribUnpackOmpMode = 1;
+      }
+    } else {
+      g_contribUnpackOmpMode = 1;
+    }
+
+    if ((g_contribUnpackOmpMode == 1) && (Global.myID == 0) &&
+        (g_contribUnpackOmpReported == 0)) {
+      monitor_print("contribution unpack OpenMP: enabled (threads=%d)\n",
+                    omp_get_max_threads());
+      g_contribUnpackOmpReported = 1;
+    }
+  }
+
+  return g_contribUnpackOmpMode;
 #endif
 }
 
