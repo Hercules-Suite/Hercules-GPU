@@ -909,6 +909,7 @@ static struct Param_t {
            .theScheduleStatFilename = NULL,
            .theMeshStatFilename = NULL,
            .theTopoStatFilename = NULL,
+           .includeAcoustic = NO,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
@@ -918,8 +919,7 @@ static struct Param_t {
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .useProfile = NO,
-           .theNumberOfLayers = 0,
-           .includeAcoustic = NO};
+           .theNumberOfLayers = 0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
