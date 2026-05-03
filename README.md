@@ -168,17 +168,17 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_MESH_IMPORT_VERIFY=1
 # export PHASE_B_MAP_MODE=numa
 
-PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
-/work/08458/wz_tacc/vista/hercules_GPU_new/run_phaseA_phaseB.sh \
+PSOLVE_BIN=<path to psolve> \
+<path to run_phaseA_phaseB.sh> \
 288 4 \
-/scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case/inputfiles/Test_merge.in
+inputfiles/parameter.in
 ```
 
 Notes:
 
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
-- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles_gpu/mesh.e`, run `mkdir -p outputfiles_gpu` from the case directory first. The two-phase script prints `Mesh etree: ...` when it finds and rewrites this setting.
+- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh etree: ...` when it finds and rewrites this setting.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
