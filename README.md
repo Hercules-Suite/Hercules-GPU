@@ -13,7 +13,7 @@ Some general description of the core components in this directory are given as f
 
 Runtime performance toggles (no source edits needed):
 
-These are also the current default values used by `run_phaseA_phaseB.sh` when the corresponding envs are unset.
+Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected inside the solver/octor code when the corresponding envs are unset.
 
 - `HERCULES_ADJUST_ASSIGN_OMP=1|0`
 	Enables or disables OpenMP parallelization in assignment adjust core. Default is `1` (enabled).
@@ -65,6 +65,8 @@ Advanced/diagnostic toggles:
 - `HERCULES_REPRO_MODE=0|1|2`
 	`0` disables repro mode. `1` disables remaining OpenMP-sensitive
 	deterministic communication paths and uses deterministic MPI unpack ordering. `2` is stricter and also disables additional CPU OpenMP paths guarded by repro mode; `run_phaseA_phaseB.sh` does not auto-set this env.
+- `HERCULES_ALLOW_MULTI_RANK_PER_GPU=0|1`
+	Allows more than one local MPI rank to share the same GPU. Default is unset/`0`, which aborts when local MPI ranks exceed visible GPUs. This guard is intentional; set it only for diagnostic oversubscription runs.
 - `HERCULES_MESH_IMPORT_VERIFY=0|1`
 	Controls the extra convergence-check refinement pass when `mesh_input_mode=1`.
 	Default is `0`. This applies only when `HERCULES_MESH_IMPORT_TREE_MODE=refine`.
@@ -114,7 +116,7 @@ Two-phase script defaults:
 	`HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_CONTRIB_UNPACK_OMP=1`,
 	`HERCULES_CONTRIB_RECV_MODE=waitsome`,
-	`HERCULES_SPARSE_UPLOAD_MODE=dense`,
+	`HERCULES_SPARSE_UPLOAD_MODE=dense`.
 	These are the current recommended runtime defaults.
 - OpenMP thread defaults:
 	Phase A defaults to `PHASE_A_OMP_NUM_THREADS=1` when unset.
@@ -175,13 +177,15 @@ PSOLVE_BIN=/work/08458/wz_tacc/vista/hercules_GPU_new/quake/forward/psolve \
 Notes:
 
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
+- `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
+- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles_gpu/mesh.e`, run `mkdir -p outputfiles_gpu` from the case directory first. The two-phase script prints `Mesh etree: ...` when it finds and rewrites this setting.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
 	`auto` typically uses a node-level mapping like `ppr:4:node:PE=35`,
 	while `PHASE_B_MAP_MODE=numa` tries `ppr:2:numa:PE=35` when the local node exposes two NUMA domains.
 
-Mesh mode input flags (`numerical.in`):
+Mesh mode input flags (input file):
 
 - `output_mesh`
 	`1` writes the generated mesh etree (`mesh_etree_output_file`) to disk.
