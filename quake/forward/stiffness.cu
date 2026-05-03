@@ -247,7 +247,7 @@ void compute_addforce_effective( mesh_t* myMesh, mysolver_t* mySolver )
 
         memset( localForce, 0, 8 * sizeof(fvector_t) );
 
-        double b_over_dt = ep->c3 / ep->c1;
+        double b_over_dt = (ep->c1 != 0.0) ? (ep->c3 / ep->c1) : 0.0;
 
         for (i = 0; i < 8; i++) {
             int32_t    lnid = elemp->lnid[i];

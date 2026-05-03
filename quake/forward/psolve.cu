@@ -835,6 +835,7 @@ static struct Param_t {
   noyesflag_t IstanbulVelocityModel;
   noyesflag_t basinVelocityModel;
   noyesflag_t threeDVelocityModel;
+  noyesflag_t includeAcoustic;
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
@@ -917,7 +918,8 @@ static struct Param_t {
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .useProfile = NO,
-           .theNumberOfLayers = 0};
+           .theNumberOfLayers = 0,
+           .includeAcoustic = NO};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -980,6 +982,36 @@ static struct Global_t {
 
 /* ------------------------------End of
  * declarations------------------------------ */
+
+#define ACOUSTIC_VS_EPS 1.0e-6
+
+static int material_values_are_acoustic(double Vp, double Vs, double rho) {
+  return (Param.includeAcoustic == YES) && (Vp > 0.0) && (rho > 0.0) &&
+         (Vs <= ACOUSTIC_VS_EPS);
+}
+
+static int element_is_acoustic(const edata_t* edata) {
+  return (edata != NULL) &&
+         material_values_are_acoustic(edata->Vp, edata->Vs, edata->rho);
+}
+
+static double element_meshing_velocity(const edata_t* edata) {
+  if (element_is_acoustic(edata)) {
+    return edata->Vp;
+  }
+
+  return (edata != NULL) ? edata->Vs : 0.0;
+}
+
+static int32_t wavespeed_rule(const edata_t* edata, double theFactor) {
+  double speed = element_meshing_velocity(edata);
+
+  if ((edata == NULL) || (edata->edgesize <= 0.0) || (speed <= 0.0)) {
+    return 1;
+  }
+
+  return (edata->edgesize <= speed / theFactor) ? 0 : 1;
+}
 
 void getGPUHardware(int32_t myID, int device, gpu_spec_t* gpuSpecs) {
   int i;
@@ -1053,7 +1085,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  33 /* Must adjust this if adding int params */
+  34 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1161,6 +1193,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[30] = (int)Param.threeDVelocityModel;
   int_message[31] = Param.theMeshOnlyMode;
   int_message[32] = Param.theMeshInputMode;
+  int_message[33] = (int)Param.includeAcoustic;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1198,6 +1231,7 @@ static void read_parameters(int argc, char** argv) {
   Param.threeDVelocityModel = (noyesflag_t)int_message[30];
   Param.theMeshOnlyMode = int_message[31];
   Param.theMeshInputMode = int_message[32];
+  Param.includeAcoustic = (noyesflag_t)int_message[33];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1439,6 +1473,7 @@ static int32_t parse_parameters(const char* numericalin) {
        print_station_accelerations[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
+       include_acoustic[64] = "no",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
        include_nonlinear_analysis[64] = "no",
        include_incident_planewaves[64] = "no", include_hmgHalfSpace[64] = "no",
@@ -1459,6 +1494,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t meshCoordinatesForMatlab = UNSET;
   noyesflag_t implementdrm = UNSET;
   noyesflag_t haveTopography = UNSET;
+  noyesflag_t includeAcoustic = UNSET;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -1621,6 +1657,7 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_buildings", 's', &include_buildings);
   parsetext(fp, "implement_drm", 's', &implement_drm);
   parsetext(fp, "include_topography", 's', &include_topography);
+  parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
   parsetext(fp, "3D_velocity_model", 's', &threeDModel);
@@ -1867,6 +1904,16 @@ static int32_t parse_parameters(const char* numericalin) {
                  include_topography);
   }
 
+  if (strcasecmp(include_acoustic, "yes") == 0) {
+    includeAcoustic = YES;
+  } else if (strcasecmp(include_acoustic, "no") == 0) {
+    includeAcoustic = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for include_acoustic (yes or no): %s\n",
+                 include_acoustic);
+  }
+
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
     includePlaneWaves = YES;
   } else if (strcasecmp(include_incident_planewaves, "no") == 0) {
@@ -2029,6 +2076,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.drmImplement = implementdrm;
 
   Param.includeTopography = haveTopography;
+  Param.includeAcoustic = includeAcoustic;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
   Param.includeHomogeneousHalfSpace = includeHmgHalfSpace;
 
@@ -2067,6 +2115,7 @@ static int32_t parse_parameters(const char* numericalin) {
                 Param.cvmdb_input_file);
   monitor_print("Implement drm:                      %s\n", implement_drm);
   monitor_print("Include Topography:                 %s\n", include_topography);
+  monitor_print("Include Acoustic:                   %s\n", include_acoustic);
   monitor_print("Include Incident Plane Waves:       %s\n",
                 include_incident_planewaves);
   monitor_print("Include Homogeneous Halfspace:      %s\n",
@@ -2713,6 +2762,12 @@ outer_loop_label: /* in order to completely break out from the inner loop */
     /* all the queries failed, then center out of bound point. Set Vs
      * to force split */
     edata->Vs = Param.theFactor * edata->edgesize / 2;
+  } else if (element_is_acoustic(edata)) {
+    edata->Vs = 0.0f;
+  } else if (edata->Vs <= 0.0f) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Encountered Vs <= 0 with include_acoustic = no. "
+                 "Set include_acoustic = yes for water/acoustic regions.\n");
   } else if (edata->Vs <= Param.theVsCut) { /* adjust Vs, Vp, and rho */
     double VpVsRatio = edata->Vp / edata->Vs;
     double RhoVpRatio = edata->rho / edata->Vp;
@@ -3036,7 +3091,15 @@ void setrec(octant_t* leaf, double ticksize, void* data) {
     edata->rho = agghit->density;
 
     /* Adjust the Vs */
-    edata->Vs = (edata->Vs < Param.theVsCut) ? Param.theVsCut : edata->Vs;
+    if (element_is_acoustic(edata)) {
+      edata->Vs = 0.0f;
+    } else if (edata->Vs <= 0.0f) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Encountered Vs <= 0 with include_acoustic = no. "
+                   "Set include_acoustic = yes for water/acoustic regions.\n");
+    } else {
+      edata->Vs = (edata->Vs < Param.theVsCut) ? Param.theVsCut : edata->Vs;
+    }
   }
 
   return;
@@ -3371,7 +3434,7 @@ static int32_t toexpand(octant_t* leaf, double ticksize, const void* data) {
     }
   }
 
-  return vsrule(edata, Param.theFactor);
+  return wavespeed_rule(edata, Param.theFactor);
 }
 
 static int64_t g_meshImportLookupCalls = 0;
@@ -4499,8 +4562,8 @@ static void damping_statistics(double min_xi, double max_xi, double min_zeta,
 
   /* Initializing clue values and variables */
 
-  min_VpVs = 1 / max_VsVp;
-  max_VpVs = 1 / min_VsVp;
+  min_VpVs = (max_VsVp > 0.0) ? (1 / max_VsVp) : 0.0;
+  max_VpVs = (min_VsVp > 0.0) ? (1 / min_VsVp) : 0.0;
 
   themins[0] = min_zeta;
   themins[1] = min_xi;
@@ -4538,17 +4601,20 @@ static void damping_statistics(double min_xi, double max_xi, double min_zeta,
     elemp = &Global.myMesh->elemTable[eindex];
     edata = (edata_t*)elemp->data;
 
-    /* the parameteres */
-    elementvalues[0] = 25.0 / edata->Vs;
+    /* the parameters */
+    elementvalues[0] = element_is_acoustic(edata) ? 0.0 : (25.0 / edata->Vs);
     /* (edata->Vs < 1500) ? 25 / edata->Vs : 5 / edata->Vs; */
     /* zeta */
     omega = 3.46410161514 / (edata->edgesize / edata->Vp);  /* freq in rad */
     a = elementvalues[0] * Global.theABase;                 /* a     */
     b = elementvalues[0] * Global.theBBase;                 /* b     */
     elementvalues[1] = (a / (2 * omega)) + (b * omega / 2); /* xi    */
-    elementvalues[2] = (edata->Vs / edata->Vp);             /* Vs/Vp */
-    elementvalues[3] = edata->Vp / edata->Vs;               /* Vp/Vs */
-    elementvalues[4] = elementvalues[0] * (edata->Vp / edata->Vs);
+    elementvalues[2] = (edata->Vs / edata->Vp); /* Vs/Vp */
+    elementvalues[3] =
+        element_is_acoustic(edata) ? 0.0 : (edata->Vp / edata->Vs); /* Vp/Vs */
+    elementvalues[4] = element_is_acoustic(edata)
+                           ? 0.0
+                           : elementvalues[0] * (edata->Vp / edata->Vs);
     /* Vp/Vs*zeta  */
     elementvalues[5] = edata->Vs; /* Vs    */
 
@@ -4718,7 +4784,7 @@ static void solver_set_critical_T() {
       z_m -= get_surface_shift();
     }
 
-    zeta = 25.0 / edata->Vs;
+    zeta = element_is_acoustic(edata) ? 0.0 : (25.0 / edata->Vs);
 
     /*If element is in the building, use 5% damping.*/
     if (z_m < 0) {
@@ -4733,8 +4799,13 @@ static void solver_set_critical_T() {
     // Clifford's NOTE: 0.57735026919 = 1/sqrt(3)
     dt_factor_X = 0.57735026919 * (1 - xi) * ratio;
     dt_factor_Z = 0.57735026919 * (1 - zeta) * ratio;
-    VsVp = edata->Vs / edata->Vp;
-    VpVsZ = zeta * (edata->Vp / edata->Vs);
+    if (element_is_acoustic(edata)) {
+      VsVp = 0.0;
+      VpVsZ = 0.0;
+    } else {
+      VsVp = edata->Vs / edata->Vp;
+      VpVsZ = zeta * (edata->Vp / edata->Vs);
+    }
     Vs = edata->Vs;
 
     /* Updating for extreme values */
@@ -5097,6 +5168,12 @@ void mu_and_lambda(double* theMu, double* theLambda, edata_t* edata,
     return;
   }
 
+  if (element_is_acoustic(edata)) {
+    *theMu = 0.0;
+    *theLambda = edata->rho * edata->Vp * edata->Vp;
+    return;
+  }
+
   mu = edata->rho * edata->Vs * edata->Vs;
 
   if (edata->Vp > (edata->Vs * Param.theThresholdVpVs)) {
@@ -5413,8 +5490,9 @@ static void solver_init() {
       z_m -= get_surface_shift();
     }
 
-    /* New formula for damping according to Graves */
-    zeta = 25.0 / edata->Vs;
+    /* New formula for damping according to Graves. Acoustic elements do not
+     * use the shear-velocity damping law. */
+    zeta = element_is_acoustic(edata) ? 0.0 : (25.0 / edata->Vs);
 
     /* If element is in a building, use 5% damping */
     if ((z_m < 0) &&
@@ -14449,8 +14527,12 @@ static void mesh_correct_properties(etree_t* cvm) {
   int32_t eindex;
   double east_m, north_m, depth_m, VpVsRatio, RhoVpRatio;
   int res, iNorth, iEast, iDepth, numPoints = 3, cnt = 0;
+  int acoustic_cnt = 0, elastic_cnt = 0;
   double vs, vp, rho, s_0, qp, qs;
+  double acoustic_vp, acoustic_rho, acoustic_qp;
+  double elastic_vp, elastic_vs, elastic_rho, elastic_qp, elastic_qs;
   double points[3];
+  noyesflag_t centerAcoustic = NO;
   int32_t lnid0;
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
@@ -14511,6 +14593,17 @@ static void mesh_correct_properties(etree_t* cvm) {
     s_0 = 0;
     qp = 0;
     qs = 0;
+    acoustic_vp = 0;
+    acoustic_rho = 0;
+    acoustic_qp = 0;
+    acoustic_cnt = 0;
+    elastic_vp = 0;
+    elastic_vs = 0;
+    elastic_rho = 0;
+    elastic_qp = 0;
+    elastic_qs = 0;
+    elastic_cnt = 0;
+    centerAcoustic = NO;
 
     for (iNorth = 0; iNorth < numPoints; iNorth++) {
       north_m = (Global.myMesh->ticksize) *
@@ -14569,6 +14662,29 @@ static void mesh_correct_properties(etree_t* cvm) {
                     "depth = %lf \n",
                     east_m, north_m, depth_m);
             exit(1);
+          }
+
+          if (material_values_are_acoustic(g_props.Vp, g_props.Vs,
+                                           g_props.rho)) {
+            acoustic_vp += g_props.Vp;
+            acoustic_rho += g_props.rho;
+            acoustic_qp += g_props.Qp;
+            ++acoustic_cnt;
+            if ((iNorth == 1) && (iEast == 1) && (iDepth == 1)) {
+              centerAcoustic = YES;
+            }
+          } else if (g_props.Vs <= 0.0) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "Encountered Vs <= 0 with include_acoustic = no. "
+                         "Set include_acoustic = yes for water/acoustic "
+                         "regions.\n");
+          } else {
+            elastic_vp += g_props.Vp;
+            elastic_vs += g_props.Vs;
+            elastic_rho += g_props.rho;
+            elastic_qp += g_props.Qp;
+            elastic_qs += g_props.Qs;
+            ++elastic_cnt;
           }
 
           vp += g_props.Vp;
@@ -14634,21 +14750,66 @@ static void mesh_correct_properties(etree_t* cvm) {
       }
     }
 
-    edata->Vp = vp;
-    edata->Vs = vs;
-    edata->rho = rho;
-    // edata->Qp  = qp;
-    // edata->Qs  = qs;
+    if ((Param.includeAcoustic == YES) && (acoustic_cnt > 0) &&
+        ((centerAcoustic == YES) || (elastic_cnt == 0))) {
+      edata->Vp = acoustic_vp / acoustic_cnt;
+      edata->Vs = 0.0f;
+      edata->rho = acoustic_rho / acoustic_cnt;
+      qp = (acoustic_cnt > 0) ? (acoustic_qp / acoustic_cnt) : 1000.0;
+      qs = 1000.0;
+    } else if ((Param.includeAcoustic == YES) && (elastic_cnt > 0) &&
+               (acoustic_cnt > 0)) {
+      edata->Vp = elastic_vp / elastic_cnt;
+      edata->Vs = elastic_vs / elastic_cnt;
+      edata->rho = elastic_rho / elastic_cnt;
+      qp = elastic_qp / elastic_cnt;
+      qs = elastic_qs / elastic_cnt;
+    } else {
+      edata->Vp = vp;
+      edata->Vs = vs;
+      edata->rho = rho;
+      // edata->Qp  = qp;
+      // edata->Qs  = qs;
 
-    if (cnt != 0) {
-      edata->Vp = vp / cnt;
-      edata->Vs = vs / cnt;
-      edata->rho = rho / cnt;
-      qp = qp / cnt;
-      qs = qs / cnt;
+      if (cnt != 0) {
+        edata->Vp = vp / cnt;
+        edata->Vs = vs / cnt;
+        edata->rho = rho / cnt;
+        qp = qp / cnt;
+        qs = qs / cnt;
 
-      // edata->Qp  = qp / cnt;
-      // edata->Qs  = qs / cnt;
+        // edata->Qp  = qp / cnt;
+        // edata->Qs  = qs / cnt;
+      }
+    }
+
+    if (element_is_acoustic(edata)) {
+      edata->Vs = 0.0f;
+
+      if (Param.theTypeOfDamping >= BKT) {
+        edata->a0_shear = 0;
+        edata->a1_shear = 0;
+        edata->a2_shear = 0;
+        edata->a0_kappa = 0;
+        edata->a1_kappa = 0;
+        edata->a2_kappa = 0;
+        edata->g0_shear = 0;
+        edata->g1_shear = 0;
+        edata->g2_shear = 0;
+        edata->g0_kappa = 0;
+        edata->g1_kappa = 0;
+        edata->g2_kappa = 0;
+        edata->b_shear = 0;
+        edata->b_kappa = 0;
+      }
+
+      continue;
+    }
+
+    if (edata->Vs <= 0.0f) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Encountered Vs <= 0 with include_acoustic = no. "
+                   "Set include_acoustic = yes for water/acoustic regions.\n");
     }
 
     /* Auxiliary ratios for adjustments */

@@ -243,7 +243,8 @@ void saveMeshCoordinatesForMatlab(mesh_t *myMesh, int32_t myID, const char *para
 
 						//If element is not in the soft-soil box, use the Graves damping formula
 						if (zeta == -1) {
-							zeta = 10 / edata_temp->Vs;
+							zeta = (edata_temp->Vs <= 1.0e-6f) ?
+									0.0f : (10 / edata_temp->Vs);
 						}
 
 						//If element is in the building, use 5% damping.
