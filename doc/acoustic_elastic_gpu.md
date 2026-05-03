@@ -53,8 +53,8 @@ solve. For acoustic-water runs, regenerate `mesh.e` with `include_acoustic =
 yes` after changing the water model or after switching to this branch.
 
 Imported acoustic elements are sanitized after loading: `Vs` is kept at zero,
-BKT-family damping coefficients are cleared, and those elements are skipped by
-the GPU damping mapper.
+BKT-family damping coefficients are cleared, and those elements retain their
+undamped pressure stiffness in the BKT/BKT2 force path.
 
 ## Current Limitation
 

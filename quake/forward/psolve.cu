@@ -7009,10 +7009,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
   for (eindex = 0; eindex < mesh->lenum; eindex++) {
     edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
 
-    if (element_is_acoustic(edata)) {
-      acoustic_sanitize_element(edata);
-      continue;
-    }
+    acoustic_sanitize_element(edata);
 
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
@@ -7071,10 +7068,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
   for (eindex = 0; eindex < mesh->lenum; eindex++) {
     edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
 
-    if (element_is_acoustic(edata)) {
-      acoustic_sanitize_element(edata);
-      continue;
-    }
+    acoustic_sanitize_element(edata);
 
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
