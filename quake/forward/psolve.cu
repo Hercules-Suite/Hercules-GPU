@@ -809,6 +809,7 @@ static struct Param_t {
   int monitor_stats_rate;
   double theSofteningFactor;
   int theStepMeshingFactor;
+  int theAcousticInterfaceMaxLevel;
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
@@ -902,6 +903,7 @@ static struct Param_t {
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
+           .theAcousticInterfaceMaxLevel = -1,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -1025,6 +1027,48 @@ static void acoustic_sanitize_element(edata_t* edata) {
   acoustic_zero_damping(edata);
 }
 
+static int acoustic_has_damping(const edata_t* edata) {
+  return (edata != NULL) &&
+         ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f) ||
+          (edata->a2_shear != 0.0f) || (edata->a0_kappa != 0.0f) ||
+          (edata->a1_kappa != 0.0f) || (edata->a2_kappa != 0.0f) ||
+          (edata->g0_shear != 0.0f) || (edata->g1_shear != 0.0f) ||
+          (edata->g2_shear != 0.0f) || (edata->g0_kappa != 0.0f) ||
+          (edata->g1_kappa != 0.0f) || (edata->g2_kappa != 0.0f) ||
+          (edata->b_shear != 0.0f) || (edata->b_kappa != 0.0f));
+}
+
+static void mesh_sanitize_and_report_acoustic(const char* context) {
+  int32_t eindex;
+  int64_t local_counts[2] = {0, 0};
+  int64_t global_counts[2] = {0, 0};
+
+  if ((Param.includeAcoustic != YES) || (Global.myMesh == NULL)) {
+    return;
+  }
+
+  for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)Global.myMesh->elemTable[eindex].data;
+
+    if (element_is_acoustic(edata)) {
+      local_counts[0]++;
+      if (acoustic_has_damping(edata)) {
+        local_counts[1]++;
+      }
+      acoustic_sanitize_element(edata);
+    }
+  }
+
+  MPI_Reduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print("%s acoustic elements: %.1fM, sanitized damping: %.1fM\n",
+                  context, (double)global_counts[0] / 1.0e6,
+                  (double)global_counts[1] / 1.0e6);
+    fflush(stdout);
+  }
+}
+
 static double element_meshing_velocity(const edata_t* edata) {
   if (element_is_acoustic(edata)) {
     return edata->Vp;
@@ -1115,7 +1159,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  34 /* Must adjust this if adding int params */
+  35 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1224,6 +1268,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[31] = Param.theMeshOnlyMode;
   int_message[32] = Param.theMeshInputMode;
   int_message[33] = (int)Param.includeAcoustic;
+  int_message[34] = Param.theAcousticInterfaceMaxLevel;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1262,6 +1307,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theMeshOnlyMode = int_message[31];
   Param.theMeshInputMode = int_message[32];
   Param.includeAcoustic = (noyesflag_t)int_message[33];
+  Param.theAcousticInterfaceMaxLevel = int_message[34];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1497,7 +1543,7 @@ static int32_t parse_parameters(const char* numericalin) {
   int32_t rate = 1000000;
   int number_output_planes = 0, number_output_stations = 0,
       damping_statistics = 0, use_checkpoint = 0, checkpointing_rate = 0,
-      step_meshing = 1;
+      step_meshing = 1, acoustic_interface_max_level = -1;
   double freq_vel = 0., softening_factor = 0, startT = 0.;
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
@@ -1704,6 +1750,8 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "output_mesh", &Param.theMeshOutFlag);
   hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
   hu_config_get_int_opt(fp, "mesh_input_mode", &Param.theMeshInputMode);
+  hu_config_get_int_opt(fp, "maximum_octant_level",
+                        &acoustic_interface_max_level);
   hu_config_get_int_opt(fp, "enable_timing_barriers",
                         &Param.theTimingBarriersFlag);
   hu_config_get_int_opt(fp, "forces_buffer_size", &theForcesBufferSize);
@@ -1768,6 +1816,13 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if (step_meshing < 0) {
     fprintf(stderr, "Illegal progressive meshing factor %d\n", step_meshing);
+    return -1;
+  }
+
+  if ((acoustic_interface_max_level < -1) ||
+      (acoustic_interface_max_level > PIXELLEVEL)) {
+    fprintf(stderr, "Illegal acoustic interface maximum octant level %d\n",
+            acoustic_interface_max_level);
     return -1;
   }
 
@@ -2084,6 +2139,7 @@ static int32_t parse_parameters(const char* numericalin) {
 
   Param.theSofteningFactor = softening_factor;
   Param.theStepMeshingFactor = step_meshing;
+  Param.theAcousticInterfaceMaxLevel = acoustic_interface_max_level;
   Param.theThresholdDamping = threshold_damping;
   Param.theThresholdVpVs = threshold_VpVs;
   Param.theDampingStatisticsFlag = damping_statistics;
@@ -2146,6 +2202,14 @@ static int32_t parse_parameters(const char* numericalin) {
   monitor_print("Implement drm:                      %s\n", implement_drm);
   monitor_print("Include Topography:                 %s\n", include_topography);
   monitor_print("Include Acoustic:                   %s\n", include_acoustic);
+  if (Param.includeAcoustic == YES) {
+    if (Param.theAcousticInterfaceMaxLevel >= 0) {
+      monitor_print("Acoustic interface max level:       %d\n",
+                    Param.theAcousticInterfaceMaxLevel);
+    } else {
+      monitor_print("Acoustic interface max level:       disabled\n");
+    }
+  }
   monitor_print("Include Incident Plane Waves:       %s\n",
                 include_incident_planewaves);
   monitor_print("Include Homogeneous Halfspace:      %s\n",
@@ -2651,6 +2715,7 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
   vector3D_t threeDVelModel_origin;
 
   int i_x, i_y, i_z, n_points = 3;
+  int acoustic_samples = 0, elastic_samples = 0;
   double points[3];
 
   int res = 0;
@@ -2768,13 +2833,20 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
           continue;
         }
 
+        if (material_values_are_acoustic(g_props.Vp, g_props.Vs,
+                                         g_props.rho)) {
+          acoustic_samples++;
+        } else if (g_props.Vs > 0.0) {
+          elastic_samples++;
+        }
+
         if (g_props.Vs < g_props_min.Vs) {
           /* assign minimum value of vs to produce elements
            * that are small enough to rightly represent the model */
           g_props_min = g_props;
         }
 
-        if (g_props.Vs <= Param.theVsCut) {
+        if ((Param.includeAcoustic != YES) && (g_props.Vs <= Param.theVsCut)) {
           /* stop early if needed, completely break out of all
            * the loops, the label is just outside the loop */
           goto outer_loop_label;
@@ -2783,6 +2855,15 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
     }
   }
 outer_loop_label: /* in order to completely break out from the inner loop */
+
+  if ((Param.includeAcoustic == YES) && (acoustic_samples > 0) &&
+      (elastic_samples > 0) && (Param.theAcousticInterfaceMaxLevel >= 0) &&
+      (leaf->level < Param.theAcousticInterfaceMaxLevel)) {
+    edata->Vp = isnan(g_props_min.Vp) ? Param.theVsCut : g_props_min.Vp;
+    edata->rho = isnan(g_props_min.rho) ? 1.0f : g_props_min.rho;
+    edata->Vs = Param.theFactor * edata->edgesize / 2.0;
+    return;
+  }
 
   edata->Vp = g_props_min.Vp;
   edata->Vs = g_props_min.Vs;
@@ -4209,6 +4290,8 @@ static void mesh_generate_from_etree(void) {
     fflush(stdout);
   }
 
+  mesh_sanitize_and_report_acoustic("Imported mesh");
+
   etree_close(Global.theMeshInputEp);
   Global.theMeshInputEp = NULL;
 }
@@ -5498,6 +5581,7 @@ static void solver_init() {
     elemp = &Global.myMesh->elemTable[eindex];
     edata = (edata_t*)elemp->data;
     ep = &Global.mySolver->eTable[eindex];
+    acoustic_sanitize_element(edata);
 
     /* Calculate the Lame constants */
     mu_and_lambda(&mu, &lambda, edata, eindex);
@@ -6002,6 +6086,7 @@ static void solver_init() {
     /* capturing the elements */
     elemp = &Global.myMesh->elemTable[i];
     edata = (edata_t*)elemp->data;
+    acoustic_sanitize_element(edata);
 
     g0_shearArray[i] = edata->g0_shear * rmax;
     g1_shearArray[i] = edata->g1_shear * rmax;
@@ -14570,8 +14655,9 @@ static void mesh_correct_properties(etree_t* cvm) {
   double acoustic_vp, acoustic_rho, acoustic_qp;
   double elastic_vp, elastic_vs, elastic_rho, elastic_qp, elastic_qs;
   double points[3];
-  noyesflag_t centerAcoustic = NO;
   int32_t lnid0;
+  int64_t acoustic_elements = 0;
+  int64_t mixed_elements = 0;
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
@@ -14641,7 +14727,6 @@ static void mesh_correct_properties(etree_t* cvm) {
     elastic_qp = 0;
     elastic_qs = 0;
     elastic_cnt = 0;
-    centerAcoustic = NO;
 
     for (iNorth = 0; iNorth < numPoints; iNorth++) {
       north_m = (Global.myMesh->ticksize) *
@@ -14708,9 +14793,6 @@ static void mesh_correct_properties(etree_t* cvm) {
             acoustic_rho += g_props.rho;
             acoustic_qp += g_props.Qp;
             ++acoustic_cnt;
-            if ((iNorth == 1) && (iEast == 1) && (iDepth == 1)) {
-              centerAcoustic = YES;
-            }
           } else if (g_props.Vs <= 0.0) {
             solver_abort(__FUNCTION_NAME, NULL,
                          "Encountered Vs <= 0 with include_acoustic = no. "
@@ -14789,12 +14871,13 @@ static void mesh_correct_properties(etree_t* cvm) {
     }
 
     if ((Param.includeAcoustic == YES) && (acoustic_cnt > 0) &&
-        ((centerAcoustic == YES) || (elastic_cnt == 0))) {
+        (elastic_cnt == 0)) {
       edata->Vp = acoustic_vp / acoustic_cnt;
       edata->Vs = 0.0f;
       edata->rho = acoustic_rho / acoustic_cnt;
       qp = (acoustic_cnt > 0) ? (acoustic_qp / acoustic_cnt) : 1000.0;
       qs = 1000.0;
+      acoustic_elements++;
     } else if ((Param.includeAcoustic == YES) && (elastic_cnt > 0) &&
                (acoustic_cnt > 0)) {
       edata->Vp = elastic_vp / elastic_cnt;
@@ -14802,6 +14885,7 @@ static void mesh_correct_properties(etree_t* cvm) {
       edata->rho = elastic_rho / elastic_cnt;
       qp = elastic_qp / elastic_cnt;
       qs = elastic_qs / elastic_cnt;
+      mixed_elements++;
     } else {
       edata->Vp = vp;
       edata->Vs = vs;
@@ -15218,6 +15302,24 @@ static void mesh_correct_properties(etree_t* cvm) {
             sqrt(kappa_vel_corr_factor * kappa_vel_corr_factor * vksquared +
                  4. / 3. * edata->Vs * edata->Vs);
       }
+    }
+  }
+
+  if (Param.includeAcoustic == YES) {
+    int64_t local_counts[2];
+    int64_t global_counts[2];
+
+    local_counts[0] = acoustic_elements;
+    local_counts[1] = mixed_elements;
+    MPI_Reduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, 0,
+               comm_solver);
+    if (Global.myID == 0) {
+      monitor_print(
+          "Acoustic mesh material stats: acoustic elements %.1fM, "
+          "mixed interface elements kept elastic %.1fM\n",
+          (double)global_counts[0] / 1.0e6,
+          (double)global_counts[1] / 1.0e6);
+      fflush(stdout);
     }
   }
 }

@@ -32,6 +32,12 @@ h <= Vp / (simulation_node_per_wavelength * simulation_wave_max_freq_hz)
 
 This prevents a water layer with `Vs = 0` from forcing infinite refinement.
 
+For non-conforming water-solid boundaries, set `maximum_octant_level` in the
+input file. When acoustic support is enabled, mixed acoustic/elastic cells are
+refined up to that level. At the final level, cells that still contain both
+water and solid samples are kept elastic; this avoids removing shear stiffness
+from solid material at the seafloor.
+
 ## Solver Constants
 
 Acoustic elements are initialized with:
