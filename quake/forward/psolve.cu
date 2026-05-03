@@ -995,6 +995,36 @@ static int element_is_acoustic(const edata_t* edata) {
          material_values_are_acoustic(edata->Vp, edata->Vs, edata->rho);
 }
 
+static void acoustic_zero_damping(edata_t* edata) {
+  if (edata == NULL) {
+    return;
+  }
+
+  edata->a0_shear = 0.0f;
+  edata->a1_shear = 0.0f;
+  edata->a2_shear = 0.0f;
+  edata->a0_kappa = 0.0f;
+  edata->a1_kappa = 0.0f;
+  edata->a2_kappa = 0.0f;
+  edata->g0_shear = 0.0f;
+  edata->g1_shear = 0.0f;
+  edata->g2_shear = 0.0f;
+  edata->g0_kappa = 0.0f;
+  edata->g1_kappa = 0.0f;
+  edata->g2_kappa = 0.0f;
+  edata->b_shear = 0.0f;
+  edata->b_kappa = 0.0f;
+}
+
+static void acoustic_sanitize_element(edata_t* edata) {
+  if (!element_is_acoustic(edata)) {
+    return;
+  }
+
+  edata->Vs = 0.0f;
+  acoustic_zero_damping(edata);
+}
+
 static double element_meshing_velocity(const edata_t* edata) {
   if (element_is_acoustic(edata)) {
     return edata->Vp;
@@ -3581,6 +3611,7 @@ static int mesh_import_payload_ready(const edata_t* edata, int32_t level,
 
 static void mesh_import_store_payload(void* data, const mdata_t* hit_data) {
   memcpy(data, &hit_data->edgesize, sizeof(edata_t));
+  acoustic_sanitize_element((edata_t*)data);
 }
 
 static int mesh_import_use_cursor_tree(void) {
@@ -3933,7 +3964,7 @@ static void mesh_import_apply_properties(void) {
       exit(1);
     }
 
-    memcpy(edata, &hit_data.edgesize, sizeof(edata_t));
+    mesh_import_store_payload(edata, &hit_data);
   }
 }
 
@@ -6976,10 +7007,16 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   count = 0;
   for (eindex = 0; eindex < mesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+
+    if (element_is_acoustic(edata)) {
+      acoustic_sanitize_element(edata);
+      continue;
+    }
+
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
       if (need_bkt2_coeffs) {
-        edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
         if ((!have_bkt2_shear) &&
             ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f))) {
           const double g0 = edata->g0_shear * bkt2_rmax;
@@ -7032,6 +7069,13 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   count = 0;
   for (eindex = 0; eindex < mesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+
+    if (element_is_acoustic(edata)) {
+      acoustic_sanitize_element(edata);
+      continue;
+    }
+
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
       mapperHost[count++] = eindex;
@@ -14784,25 +14828,7 @@ static void mesh_correct_properties(etree_t* cvm) {
     }
 
     if (element_is_acoustic(edata)) {
-      edata->Vs = 0.0f;
-
-      if (Param.theTypeOfDamping >= BKT) {
-        edata->a0_shear = 0;
-        edata->a1_shear = 0;
-        edata->a2_shear = 0;
-        edata->a0_kappa = 0;
-        edata->a1_kappa = 0;
-        edata->a2_kappa = 0;
-        edata->g0_shear = 0;
-        edata->g1_shear = 0;
-        edata->g2_shear = 0;
-        edata->g0_kappa = 0;
-        edata->g1_kappa = 0;
-        edata->g2_kappa = 0;
-        edata->b_shear = 0;
-        edata->b_kappa = 0;
-      }
-
+      acoustic_sanitize_element(edata);
       continue;
     }
 

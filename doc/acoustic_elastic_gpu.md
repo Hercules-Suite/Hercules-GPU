@@ -44,6 +44,18 @@ lambda = rho * Vp^2
 The old shear-velocity Rayleigh damping rule is disabled for acoustic elements.
 BKT-family damping coefficients are also zeroed for acoustic elements.
 
+## Imported Meshes
+
+When `mesh_input_mode = 1`, Hercules reuses the material payload stored in
+`mesh_etree_output_file` once those properties are available. In that mode,
+`3D_velocity_model_directory` is not re-sampled for every element during the
+solve. For acoustic-water runs, regenerate `mesh.e` with `include_acoustic =
+yes` after changing the water model or after switching to this branch.
+
+Imported acoustic elements are sanitized after loading: `Vs` is kept at zero,
+BKT-family damping coefficients are cleared, and those elements are skipped by
+the GPU damping mapper.
+
 ## Current Limitation
 
 This first pass does not yet implement a physically exact inviscid
@@ -51,6 +63,10 @@ acoustic-elastic interface. The current mesh still shares vector displacement
 DOFs across material boundaries. That is useful as a runnable foundation, but a
 full water-solid coupling should duplicate/interface-couple only the normal
 component or introduce pressure DOFs in acoustic elements.
+
+Station or plane output inside acoustic water should therefore not be
+interpreted as physical three-component water motion; pressure output and a
+proper acoustic interface remain future work.
 
 The next implementation step should therefore be interface-aware meshing and
 coupling: identify octants cut by the water-solid boundary, refine them to the
