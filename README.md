@@ -197,6 +197,24 @@ Mesh mode input flags (input file):
 	`1` builds mesh from an existing mesh etree (import path).
 	`0` builds mesh from the velocity/topography models (normal meshing path).
 
+Acoustic-elastic input flags (input file):
+
+- `include_acoustic`
+	`yes` enables acoustic material handling for water/fluid regions. Elements
+	whose material properties satisfy `Vp > 0`, `rho > 0`, and
+	`Vs <= 1.0e-6` are treated as acoustic. Acoustic elements have `Vs` forced
+	to zero and their material damping coefficients are cleared during mesh
+	setup/import. If this is `no`, the solver aborts when it encounters
+	nonpositive `Vs` in the material model.
+- `acoustic_interface_coupling`
+	Optional. `yes` enables the current normal-projected coupling treatment on
+	acoustic element faces adjacent to elastic material. Default is `yes`, but
+	it is only active when `include_acoustic=yes`.
+- `acoustic_interface_max_level`
+	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
+	octants are refined up to that level during meshing. Default is `-1`, which
+	disables this extra interface-refinement limit.
+
 Typical two-phase settings:
 
 - Phase A (generate mesh database):
