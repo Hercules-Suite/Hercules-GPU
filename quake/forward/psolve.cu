@@ -2695,9 +2695,22 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
     g_props->Vs = output[0];
     g_props->Vp = output[1];
     g_props->rho = output[2];
-    g_props->Qs =
-        output[0] * 0.1;  // Same simple expression as in la Habra runs
-    g_props->Qp = 2.0 * g_props->Qs;
+
+    if (Param.useProfile == YES) {
+      cvmpayload_t profile_props;
+      res = profile_query(z_m, &profile_props);
+      if (res == 0) {
+        g_props->Qp = profile_props.Qp;
+        g_props->Qs = profile_props.Qs;
+      }
+    }
+
+    if ((Param.useProfile == NO) || (res != 0)) {
+      g_props->Qs =
+          output[0] * 0.1;  // Same simple expression as in la Habra runs
+      g_props->Qp = 2.0 * g_props->Qs;
+      res = 0;
+    }
   }
   return res;
 }
