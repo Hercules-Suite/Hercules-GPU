@@ -342,6 +342,10 @@ static void mesh_generate_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
 static void mesh_correct_properties(etree_t* cvm);
+static void mesh_release_acoustic_interface_data(void);
+static void mesh_build_acoustic_interface_flags(
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -838,6 +842,7 @@ static struct Param_t {
   noyesflag_t basinVelocityModel;
   noyesflag_t threeDVelocityModel;
   noyesflag_t includeAcoustic;
+  noyesflag_t acousticInterfaceCoupling;
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
@@ -913,6 +918,7 @@ static struct Param_t {
            .theMeshStatFilename = NULL,
            .theTopoStatFilename = NULL,
            .includeAcoustic = NO,
+           .acousticInterfaceCoupling = YES,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
@@ -962,6 +968,9 @@ static struct Global_t {
   gpu_spec_t gpu_spec;
   gpu_kernel_t gpu_kernel[MAX_CUDA_KERNEL];
   gpu_data_t gpuData;
+  uint8_t* acousticFaceFlags;
+  int64_t acousticInterfaceElements;
+  int64_t acousticInterfaceFaces;
 
 } Global = {.myID = -1,
             .theGroupSize = -1,
@@ -1160,7 +1169,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  35 /* Must adjust this if adding int params */
+  36 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1270,6 +1279,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[32] = Param.theMeshInputMode;
   int_message[33] = (int)Param.includeAcoustic;
   int_message[34] = Param.theAcousticInterfaceMaxLevel;
+  int_message[35] = (int)Param.acousticInterfaceCoupling;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1309,6 +1319,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theMeshInputMode = int_message[32];
   Param.includeAcoustic = (noyesflag_t)int_message[33];
   Param.theAcousticInterfaceMaxLevel = int_message[34];
+  Param.acousticInterfaceCoupling = (noyesflag_t)int_message[35];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1387,6 +1398,7 @@ static void local_finalize() {
   /* Free memory associated with the octree and mesh */
   octor_deletetree(Global.myOctree);
   octor_deletemesh(Global.myMesh);
+  mesh_release_acoustic_interface_data();
 
   /* Free the memory used by the source */
   free(Global.myForces);
@@ -1550,7 +1562,7 @@ static int32_t parse_parameters(const char* numericalin) {
        print_station_accelerations[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
-       include_acoustic[64] = "no",
+       include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
        include_nonlinear_analysis[64] = "no",
        include_incident_planewaves[64] = "no", include_hmgHalfSpace[64] = "no",
@@ -1572,6 +1584,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t implementdrm = UNSET;
   noyesflag_t haveTopography = UNSET;
   noyesflag_t includeAcoustic = UNSET;
+  noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -1735,6 +1748,8 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "implement_drm", 's', &implement_drm);
   parsetext(fp, "include_topography", 's', &include_topography);
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
+  parsetext(fp, "acoustic_interface_coupling", 's',
+            &acoustic_interface_coupling);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
   parsetext(fp, "3D_velocity_model", 's', &threeDModel);
@@ -2000,6 +2015,17 @@ static int32_t parse_parameters(const char* numericalin) {
                  include_acoustic);
   }
 
+  if (strcasecmp(acoustic_interface_coupling, "yes") == 0) {
+    acousticInterfaceCoupling = YES;
+  } else if (strcasecmp(acoustic_interface_coupling, "no") == 0) {
+    acousticInterfaceCoupling = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_interface_coupling (yes or no): "
+                 "%s\n",
+                 acoustic_interface_coupling);
+  }
+
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
     includePlaneWaves = YES;
   } else if (strcasecmp(include_incident_planewaves, "no") == 0) {
@@ -2164,6 +2190,7 @@ static int32_t parse_parameters(const char* numericalin) {
 
   Param.includeTopography = haveTopography;
   Param.includeAcoustic = includeAcoustic;
+  Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
   Param.includeHomogeneousHalfSpace = includeHmgHalfSpace;
 
@@ -2204,6 +2231,8 @@ static int32_t parse_parameters(const char* numericalin) {
   monitor_print("Include Topography:                 %s\n", include_topography);
   monitor_print("Include Acoustic:                   %s\n", include_acoustic);
   if (Param.includeAcoustic == YES) {
+    monitor_print("Acoustic interface coupling:        %s\n",
+                  acoustic_interface_coupling);
     if (Param.theAcousticInterfaceMaxLevel >= 0) {
       monitor_print("Acoustic interface max level:       %d\n",
                     Param.theAcousticInterfaceMaxLevel);
@@ -2707,6 +2736,271 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
     g_props->Qp = 2.0 * g_props->Qs;
   }
   return res;
+}
+
+static int acoustic_face_count(uint8_t flags) {
+  int count = 0;
+
+  for (int bit = 0; bit < 6; bit++) {
+    if ((flags & (1u << bit)) != 0) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+static int material_values_are_elastic(double Vp, double Vs, double rho) {
+  return (Vp > 0.0) && (rho > 0.0) && (Vs > ACOUSTIC_VS_EPS);
+}
+
+static void mesh_release_acoustic_interface_data(void) {
+  free(Global.acousticFaceFlags);
+  Global.acousticFaceFlags = NULL;
+  Global.acousticInterfaceElements = 0;
+  Global.acousticInterfaceFaces = 0;
+}
+
+static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
+                                                   int32_t* eindex_out) {
+  octant_t* octant;
+  tick_t xTick, yTick, zTick;
+  int32_t eindex = -1;
+
+  if ((Global.myMesh == NULL) || (Global.myOctree == NULL) || (point == NULL) ||
+      (eindex_out == NULL)) {
+    return 0;
+  }
+
+  if ((point->x[0] < 0.0) || (point->x[0] >= Param.theDomainX) ||
+      (point->x[1] < 0.0) || (point->x[1] >= Param.theDomainY) ||
+      (point->x[2] < 0.0) || (point->x[2] >= Param.theDomainZ)) {
+    return 0;
+  }
+
+  xTick = (tick_t)(point->x[0] / Global.myMesh->ticksize);
+  yTick = (tick_t)(point->x[1] / Global.myMesh->ticksize);
+  zTick = (tick_t)(point->x[2] / Global.myMesh->ticksize);
+
+  octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
+                              AGGREGATE_SEARCH);
+  if ((octant == NULL) || (octant->where == REMOTE)) {
+    return 0;
+  }
+
+  if (octant->appdata != NULL) {
+    int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
+    if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
+      eindex = cached;
+    }
+  }
+
+  if (eindex < 0) {
+    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+
+      if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
+          (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
+          (Global.myMesh->nodeTable[lnid0].z == octant->lz) &&
+          (Global.myMesh->elemTable[eindex].level == octant->level)) {
+        break;
+      }
+    }
+  }
+
+  if ((eindex < 0) || (eindex >= Global.myMesh->lenum)) {
+    return 0;
+  }
+
+  *eindex_out = eindex;
+  return 1;
+}
+
+static int mesh_query_material_at_model_point(
+    double north_m, double east_m, double depth_m,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, cvmpayload_t* g_props) {
+  if (g_props == NULL) {
+    return 1;
+  }
+
+  if (Param.includeBuildings == YES) {
+    depth_m -= get_surface_shift();
+  }
+
+  if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
+    depth_m -= point_elevation(north_m, east_m);
+    if (depth_m < 0.0) {
+      return 1;
+    }
+    if (depth_m > Param.theDomainZ) {
+      depth_m = Param.theDomainZ;
+    }
+  }
+
+  if (belongs2hmgHalfspace(east_m, north_m, depth_m)) {
+    return get_halfspaceproperties(g_props);
+  }
+
+  if ((Param.IstanbulVelocityModel == YES) && (IstVelModel_origin != NULL)) {
+    return getIstanbulMaterial(g_props, *IstVelModel_origin, north_m, east_m,
+                               depth_m);
+  }
+  if ((Param.basinVelocityModel == YES) && (basinVelModel_origin != NULL)) {
+    return getBasinMaterial(g_props, *basinVelModel_origin, north_m, east_m,
+                            depth_m);
+  }
+  if ((Param.threeDVelocityModel == YES) && (threeDVelModel_origin != NULL)) {
+    return get3DMaterial(g_props, *threeDVelModel_origin, north_m, east_m,
+                         depth_m);
+  }
+
+  if (Param.useProfile == YES) {
+    return profile_query(depth_m, g_props);
+  }
+
+  if (Global.theCVMEp != NULL) {
+    return cvm_query(Global.theCVMEp, east_m, north_m, depth_m, g_props);
+  }
+
+  return 1;
+}
+
+static int mesh_probe_face_is_elastic(
+    const vector3D_t* domain_point, const vector3D_t* IstVelModel_origin,
+    const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin) {
+  int32_t neighbor_eindex;
+
+  if (domain_point == NULL) {
+    return 0;
+  }
+
+  if ((domain_point->x[0] < 0.0) || (domain_point->x[0] >= Param.theDomainX) ||
+      (domain_point->x[1] < 0.0) || (domain_point->x[1] >= Param.theDomainY) ||
+      (domain_point->x[2] < 0.0) || (domain_point->x[2] >= Param.theDomainZ)) {
+    return 0;
+  }
+
+  if (mesh_find_local_element_at_domain_point(domain_point, &neighbor_eindex)) {
+    edata_t* neighbor_edata =
+        (edata_t*)Global.myMesh->elemTable[neighbor_eindex].data;
+    return material_values_are_elastic(neighbor_edata->Vp, neighbor_edata->Vs,
+                                       neighbor_edata->rho);
+  }
+
+  if ((IstVelModel_origin == NULL) && (basinVelModel_origin == NULL) &&
+      (threeDVelModel_origin == NULL) &&
+      !((Param.useProfile == NO) && (Global.theCVMEp != NULL))) {
+    return 0;
+  }
+
+  cvmpayload_t g_props;
+  double north_m = Global.theXForMeshOrigin + domain_point->x[0];
+  double east_m = Global.theYForMeshOrigin + domain_point->x[1];
+  double depth_m = Global.theZForMeshOrigin + domain_point->x[2];
+
+  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
+                                         IstVelModel_origin, basinVelModel_origin,
+                                         threeDVelModel_origin, &g_props) != 0) {
+    return 0;
+  }
+
+  return material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
+}
+
+static uint8_t mesh_detect_acoustic_interface_faces(
+    int32_t eindex, const vector3D_t* IstVelModel_origin,
+    const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin) {
+  static const uint8_t face_bits[6] = {
+      ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS, ACOUSTIC_FACE_Y_MINUS,
+      ACOUSTIC_FACE_Y_PLUS,  ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
+  static const int face_axis[6] = {0, 0, 1, 1, 2, 2};
+  static const int face_sign[6] = {-1, 1, -1, 1, -1, 1};
+  uint8_t flags = 0;
+  elem_t* elemp = &Global.myMesh->elemTable[eindex];
+  edata_t* edata = (edata_t*)elemp->data;
+  int32_t lnid0 = elemp->lnid[0];
+  double h = edata->edgesize;
+  double ldb[3] = {Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].x,
+                   Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].y,
+                   Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z};
+  double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
+
+  for (int face = 0; face < 6; face++) {
+    vector3D_t probe;
+    int axis = face_axis[face];
+
+    probe.x[0] = ldb[0] + 0.5 * h;
+    probe.x[1] = ldb[1] + 0.5 * h;
+    probe.x[2] = ldb[2] + 0.5 * h;
+    probe.x[axis] = ldb[axis] + ((face_sign[face] > 0) ? h : 0.0) +
+                    face_sign[face] * eps;
+
+    if (mesh_probe_face_is_elastic(&probe, IstVelModel_origin,
+                                   basinVelModel_origin,
+                                   threeDVelModel_origin)) {
+      flags |= face_bits[face];
+    }
+  }
+
+  return flags;
+}
+
+static void mesh_build_acoustic_interface_flags(
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin) {
+  int64_t local_counts[2] = {0, 0};
+  int64_t global_counts[2] = {0, 0};
+
+  mesh_release_acoustic_interface_data();
+
+  if ((Param.includeAcoustic != YES) ||
+      (Param.acousticInterfaceCoupling != YES) || (Global.myMesh == NULL)) {
+    return;
+  }
+
+  Global.acousticFaceFlags =
+      (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
+  if (Global.acousticFaceFlags == NULL) {
+    fprintf(stderr,
+            "Thread %d: failed to allocate acoustic interface face flags\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)Global.myMesh->elemTable[eindex].data;
+    uint8_t flags;
+
+    if (!element_is_acoustic(edata)) {
+      continue;
+    }
+
+    flags = mesh_detect_acoustic_interface_faces(
+        eindex, IstVelModel_origin, basinVelModel_origin, threeDVelModel_origin);
+    Global.acousticFaceFlags[eindex] = flags;
+
+    if (flags != 0) {
+      local_counts[0]++;
+      local_counts[1] += acoustic_face_count(flags);
+    }
+  }
+
+  Global.acousticInterfaceElements = local_counts[0];
+  Global.acousticInterfaceFaces = local_counts[1];
+
+  MPI_Reduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print(
+        "Acoustic interface coupling: normal-projected acoustic faces %.1fM, "
+        "acoustic interface elements %.1fM\n",
+        (double)global_counts[1] / 1.0e6, (double)global_counts[0] / 1.0e6);
+    fflush(stdout);
+  }
 }
 
 /**
@@ -4299,6 +4593,7 @@ static void mesh_generate_from_etree(void) {
   }
 
   mesh_sanitize_and_report_acoustic("Imported mesh");
+  mesh_build_acoustic_interface_flags(NULL, NULL, NULL);
 
   etree_close(Global.theMeshInputEp);
   Global.theMeshInputEp = NULL;
@@ -5866,6 +6161,15 @@ static void solver_init() {
     exit(1);
   }
 
+  if (cudaMalloc((void**)&(Global.gpuData.acousticFaceFlagsArrayDevice),
+                 Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
+    fprintf(stderr,
+            "Thread %d: Failed to allocate acoustic interface flag memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
   if (cudaMalloc((void**)&(Global.gpuData.g0_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate g0 shear array memory\n",
@@ -6021,6 +6325,15 @@ static void solver_init() {
   double* c3Array = (double*)malloc(Global.myMesh->lenum * sizeof(double));
   int32_t* lnidArray =
       (int32_t*)malloc(Global.myMesh->lenum * 8 * sizeof(int32_t));
+  uint8_t* acousticFaceFlagsArray =
+      (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
+  if (acousticFaceFlagsArray == NULL) {
+    fprintf(stderr,
+            "Thread %d: Failed to allocate acoustic interface flag host array\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 
   double* g0_shearArray =
       (double*)malloc(Global.myMesh->lenum * sizeof(double));
@@ -6081,6 +6394,9 @@ static void solver_init() {
     c1Array[i] = Global.mySolver->eTable[i].c1;
     c2Array[i] = Global.mySolver->eTable[i].c2;
     c3Array[i] = Global.mySolver->eTable[i].c3;
+    if (Global.acousticFaceFlags != NULL) {
+      acousticFaceFlagsArray[i] = Global.acousticFaceFlags[i];
+    }
 
     for (int j = 0; j < 8; j++) {
       lnidArray[j * Global.myMesh->lenum + i] =
@@ -6148,6 +6464,14 @@ static void solver_init() {
                  Global.myMesh->lenum * 8 * sizeof(int32_t),
                  cudaMemcpyHostToDevice) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to copy lnid array\n", Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (cudaMemcpy(Global.gpuData.acousticFaceFlagsArrayDevice,
+                 acousticFaceFlagsArray, Global.myMesh->lenum * sizeof(uint8_t),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    fprintf(stderr, "Thread %d: Failed to copy acoustic interface flags\n",
+            Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
@@ -6282,6 +6606,7 @@ static void solver_init() {
   free(c2Array);
   free(c3Array);
   free(lnidArray);
+  free(acousticFaceFlagsArray);
   free(g0_shearArray);
   free(g1_shearArray);
   free(g2_shearArray);
@@ -6585,6 +6910,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.c2ArrayDevice);
   cudaFree(Global.gpuData.c3ArrayDevice);
   cudaFree(Global.gpuData.lnidArrayDevice);
+  cudaFree(Global.gpuData.acousticFaceFlagsArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
   cudaFree(Global.gpuData.g1_shearArrayDevice);
   cudaFree(Global.gpuData.g2_shearArrayDevice);
@@ -15330,6 +15656,11 @@ static void mesh_correct_properties(etree_t* cvm) {
       fflush(stdout);
     }
   }
+
+  mesh_build_acoustic_interface_flags(
+      (Param.IstanbulVelocityModel == YES) ? &IstVelModel_origin : NULL,
+      (Param.basinVelocityModel == YES) ? &basinVelModel_origin : NULL,
+      (Param.threeDVelocityModel == YES) ? &threeDVelModel_origin : NULL);
 }
 
 /*** Program's standard entry point. ***/

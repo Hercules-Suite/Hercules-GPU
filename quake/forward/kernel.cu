@@ -47,6 +47,61 @@
 __constant__ fmatrix_t theK1Device[8][8];
 __constant__ fmatrix_t theK2Device[8][8];
 
+__host__ __device__ static inline uint8_t acoustic_node_axis_mask(int node,
+                                                                  uint8_t flags)
+{
+  uint8_t mask = 0;
+
+  if ((flags & ACOUSTIC_FACE_X_MINUS) &&
+      ((node == 0) || (node == 2) || (node == 4) || (node == 6))) {
+    mask |= 0x01u;
+  }
+  if ((flags & ACOUSTIC_FACE_X_PLUS) &&
+      ((node == 1) || (node == 3) || (node == 5) || (node == 7))) {
+    mask |= 0x01u;
+  }
+  if ((flags & ACOUSTIC_FACE_Y_MINUS) &&
+      ((node == 0) || (node == 1) || (node == 4) || (node == 5))) {
+    mask |= 0x02u;
+  }
+  if ((flags & ACOUSTIC_FACE_Y_PLUS) &&
+      ((node == 2) || (node == 3) || (node == 6) || (node == 7))) {
+    mask |= 0x02u;
+  }
+  if ((flags & ACOUSTIC_FACE_Z_MINUS) &&
+      ((node == 0) || (node == 1) || (node == 2) || (node == 3))) {
+    mask |= 0x04u;
+  }
+  if ((flags & ACOUSTIC_FACE_Z_PLUS) &&
+      ((node == 4) || (node == 5) || (node == 6) || (node == 7))) {
+    mask |= 0x04u;
+  }
+
+  return mask;
+}
+
+__host__ __device__ static inline void acoustic_project_interface_nodes(
+    fvector_t localVec[8], uint8_t flags)
+{
+  for (int node = 0; node < 8; node++) {
+    uint8_t mask = acoustic_node_axis_mask(node, flags);
+
+    if (mask == 0) {
+      continue;
+    }
+
+    if ((mask & 0x01u) == 0) {
+      localVec[node].f[0] = 0.0;
+    }
+    if ((mask & 0x02u) == 0) {
+      localVec[node].f[1] = 0.0;
+    }
+    if ((mask & 0x04u) == 0) {
+      localVec[node].f[2] = 0.0;
+    }
+  }
+}
+
 
 /* Flag denoting if kernel FLOP count cache initialized */
 static int kernel_cached_flag = 0;
@@ -239,6 +294,11 @@ void kernelStiffnessCalcLocal(int32_t lenum,
       return;
     }
 
+    uint8_t acousticFaceFlags = gpuData->acousticFaceFlagsArrayDevice[eindex];
+    if (acousticFaceFlags != 0) {
+      acoustic_project_interface_nodes(localForce, acousticFaceFlags);
+    }
+
     /* Coefficients for new stiffness matrix calculation */
     //if (vector_is_zero( localForce ) != 0) {
     double first_coeff  = -0.5625 * (gpuData->c2ArrayDevice[eindex] +
@@ -256,6 +316,10 @@ void kernelStiffnessCalcLocal(int32_t lenum,
     //  /* Returning saves us from memset of localForce buffer */
     //  return;
     //}
+
+    if (acousticFaceFlags != 0) {
+      acoustic_project_interface_nodes(localForce, acousticFaceFlags);
+    }
 
     /* Sum the nodal forces */
     lnid = &(gpuData->lnidArrayDevice[eindex]);
@@ -774,6 +838,7 @@ void kernelDampingCalcLocal(int32_t lenum,
   double      mu, kappa;
   solver_float *cVec;
   int         do_contrib;
+  uint8_t acousticFaceFlags = gpuData->acousticFaceFlagsArrayDevice[eindex];
 
   /* SHEAR CONTRIBUTION */
   cVec = (solver_float *)gpuData->shearVectorDevice + eindex;
@@ -815,6 +880,9 @@ void kernelDampingCalcLocal(int32_t lenum,
   kappa = -0.5625 * (gpuData->c2ArrayDevice[eindex] + 
 		     2. / 3. * gpuData->c1ArrayDevice[eindex]);
   if (do_contrib) {
+    if (acousticFaceFlags != 0) {
+      acoustic_project_interface_nodes(damping_vector, acousticFaceFlags);
+    }
     //if(vector_is_zero( damping_vector ) != 0) {
     aTransposeU( damping_vector, atu );
     firstVector_kappa( atu, firstVec, kappa);
@@ -827,6 +895,10 @@ void kernelDampingCalcLocal(int32_t lenum,
 
   /* Re-use the damping vector for the local force */
   au( damping_vector, firstVec );
+
+  if (acousticFaceFlags != 0) {
+    acoustic_project_interface_nodes(damping_vector, acousticFaceFlags);
+  }
   
   /* Sum the nodal forces */
   lnid = &(gpuData->lnidArrayDevice[eindex]);

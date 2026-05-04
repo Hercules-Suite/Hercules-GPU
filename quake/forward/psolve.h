@@ -37,6 +37,7 @@
 #define PSOLVE_H
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <mpi.h>
 
@@ -136,6 +137,13 @@ struct corner_ref_t {
 };
 
 typedef struct corner_ref_t corner_ref_t;
+
+#define ACOUSTIC_FACE_X_MINUS 0x01u
+#define ACOUSTIC_FACE_X_PLUS  0x02u
+#define ACOUSTIC_FACE_Y_MINUS 0x04u
+#define ACOUSTIC_FACE_Y_PLUS  0x08u
+#define ACOUSTIC_FACE_Z_MINUS 0x10u
+#define ACOUSTIC_FACE_Z_PLUS  0x20u
 
 /**
  * Mesh database (element) record payload.
@@ -382,6 +390,7 @@ typedef struct gpu_data_t {
     double*      c2ArrayDevice;
     double*      c3ArrayDevice;
     int32_t*     lnidArrayDevice;
+    uint8_t*     acousticFaceFlagsArrayDevice;
     double*      g0_shearArrayDevice;
     double*      g1_shearArrayDevice;
     double*      g2_shearArrayDevice;
