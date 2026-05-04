@@ -330,6 +330,7 @@ typedef struct mrecord_t {
 } mrecord_t;
 
 /* Mesh generation related routines */
+static inline int monitor_print(const char* format, ...);
 static int32_t toexpand(octant_t* leaf, double ticksize, const void* data);
 static void setrec(octant_t* leaf, double ticksize, void* data);
 static void mesh_generate(void);
