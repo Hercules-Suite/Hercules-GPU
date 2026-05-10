@@ -410,6 +410,8 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
 #endif /* BOUNDARY */
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
+static int32_t mesh_element_index_for_octant(octant_t* octant,
+                                             const char* context);
 static void compute_addforce_s(int32_t timestep);
 static void solver_compute_force_source_gpu(int32_t timestep);
 static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
@@ -461,6 +463,8 @@ static void solver_record_gpu_event(mysolver_t* solver, int eventID,
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
+static void solver_update_acoustic_station_kinematics(int32_t step);
+static int station_pressure_gradient(int32_t iStation, double grad[3]);
 static void solver_prepare_force_upload_ranges(mesh_t* mesh,
                                                int32_t sourceCount);
 
@@ -10191,6 +10195,7 @@ static void solver_run() {
     solver_load_pressure_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Load Disp");
     Timer_Stop("GPU Memory Copy");
+    solver_update_acoustic_station_kinematics(step);
 
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
@@ -14411,6 +14416,45 @@ int32_t search_point(vector3D_t point, octant_t** octant) {
   return 1;
 }
 
+static int32_t mesh_element_index_for_octant(octant_t* octant,
+                                             const char* context) {
+  int32_t eindex = -1;
+
+  if (octant->appdata != NULL) {
+    int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
+    if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
+      eindex = cached;
+    }
+  }
+
+  if (eindex < 0) {
+    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+
+      if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
+          (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
+          (Global.myMesh->nodeTable[lnid0].z == octant->lz)) {
+        break;
+      }
+    }
+  }
+
+  if ((eindex < 0) || (eindex == Global.myMesh->lenum)) {
+    fprintf(stderr, "Thread %d: %s: ", Global.myID, context);
+    fprintf(stderr, "No element matches the containing octant.\n");
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Global.myMesh->elemTable[eindex].level != octant->level) {
+    fprintf(stderr, "Thread %d: %s: internal error\n", Global.myID, context);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  return eindex;
+}
+
 /**
  * \param octant where the point is located.
  * \param pointcoords coordinates of the point.
@@ -14420,7 +14464,7 @@ extern int compute_csi_eta_dzeta(octant_t* octant, vector3D_t pointcoords,
                                  vector3D_t* localcoords,
                                  int32_t* localNodeID) {
   tick_t edgeticks;
-  int32_t eindex = -1;
+  int32_t eindex;
   double center_x, center_y, center_z;
 
   /* various convienient variables */
@@ -14437,38 +14481,7 @@ extern int compute_csi_eta_dzeta(octant_t* octant, vector3D_t pointcoords,
   center_y = Global.myMesh->ticksize * (octant->ly + edgeticks / 2);
   center_z = Global.myMesh->ticksize * (octant->lz + edgeticks / 2);
 
-  if (octant->appdata != NULL) {
-    int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
-    if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
-      eindex = cached;
-    }
-  }
-
-  if (eindex < 0) {
-    /* Fallback for octants that were not produced by octor_extractmesh(). */
-    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
-
-      if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
-          (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
-          (Global.myMesh->nodeTable[lnid0].z == octant->lz)) {
-        break;
-      }
-    }
-  }
-
-  if ((eindex < 0) || (eindex == Global.myMesh->lenum)) {
-    fprintf(stderr, "Thread %d: source_init: ", Global.myID);
-    fprintf(stderr, "No element matches the containing octant.\n");
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  if (Global.myMesh->elemTable[eindex].level != octant->level) {
-    fprintf(stderr, "Thread %d: source_init: internal error\n", Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
+  eindex = mesh_element_index_for_octant(octant, __FUNCTION_NAME);
 
   memcpy(localNodeID, Global.myMesh->elemTable[eindex].lnid,
          sizeof(int32_t) * 8);
@@ -14691,10 +14704,13 @@ void setup_stations_data() {
   Timer_Start("Stations Local Init");
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
-#pragma omp parallel for if(useOmp) schedule(static) private(iStation, octant, stationCoords)
+#pragma omp parallel for if(useOmp) schedule(static) \
+    private(iStation, octant, stationCoords)
 #endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
     char stationFile[256];
+    int32_t stationElementIndex;
+    edata_t* stationMaterial;
 
     iStation = localStationIds[iLCStation];
     octant = localStationOctants[iLCStation];
@@ -14704,6 +14720,27 @@ void setup_stations_data() {
 
     Param.myStations[iLCStation].id = iStation;
     Param.myStations[iLCStation].coords = stationCoords;
+    stationElementIndex =
+        mesh_element_index_for_octant(octant, __FUNCTION_NAME);
+    stationMaterial =
+        (edata_t*)Global.myMesh->elemTable[stationElementIndex].data;
+    Param.myStations[iLCStation].pressure_is_defined =
+        (acoustic_pressure_enabled() && element_is_acoustic(stationMaterial))
+            ? 1
+            : 0;
+    Param.myStations[iLCStation].acoustic_kinematics_ready = 0;
+    memset(Param.myStations[iLCStation].acoustic_disp, 0,
+           sizeof(Param.myStations[iLCStation].acoustic_disp));
+    memset(Param.myStations[iLCStation].acoustic_vel, 0,
+           sizeof(Param.myStations[iLCStation].acoustic_vel));
+    memset(Param.myStations[iLCStation].acoustic_acc, 0,
+           sizeof(Param.myStations[iLCStation].acoustic_acc));
+    memset(Param.myStations[iLCStation].acoustic_prev_acc, 0,
+           sizeof(Param.myStations[iLCStation].acoustic_prev_acc));
+    Param.myStations[iLCStation].h =
+        (stationMaterial != NULL) ? stationMaterial->edgesize : 0.0;
+    Param.myStations[iLCStation].rho =
+        (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
     sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
     Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
@@ -14836,6 +14873,107 @@ static void solver_snapshot_station_accel_history(mysolver_t* solver) {
   topography_snapshot_station_history(solver);
 }
 
+static int station_pressure_gradient(int32_t iStation, double grad[3]) {
+  int iPhi;
+  const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+  const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+  const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+  const double h = Param.myStations[iStation].h;
+  const vector3D_t localCoords = Param.myStations[iStation].localcoords;
+  const double xi = localCoords.x[0];
+  const double eta = localCoords.x[1];
+  const double zeta = localCoords.x[2];
+  int32_t nodesToInterpolate[8];
+
+  grad[0] = 0.0;
+  grad[1] = 0.0;
+  grad[2] = 0.0;
+
+  if ((Param.myStations[iStation].pressure_is_defined == 0) ||
+      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL) ||
+      (h <= 0.0)) {
+    return 0;
+  }
+
+  for (iPhi = 0; iPhi < 8; iPhi++) {
+    nodesToInterpolate[iPhi] =
+        Param.myStations[iStation].nodestointerpolate[iPhi];
+  }
+
+  for (iPhi = 0; iPhi < 8; iPhi++) {
+    const double pressure =
+        Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+    const double dphidx =
+        sx[iPhi] * (1.0 + sy[iPhi] * eta) *
+        (1.0 + sz[iPhi] * zeta) / (4.0 * h);
+    const double dphidy =
+        sy[iPhi] * (1.0 + sx[iPhi] * xi) *
+        (1.0 + sz[iPhi] * zeta) / (4.0 * h);
+    const double dphidz =
+        sz[iPhi] * (1.0 + sx[iPhi] * xi) *
+        (1.0 + sy[iPhi] * eta) / (4.0 * h);
+
+    grad[0] += dphidx * pressure;
+    grad[1] += dphidy * pressure;
+    grad[2] += dphidz * pressure;
+  }
+
+  return 1;
+}
+
+static void solver_update_acoustic_station_kinematics(int32_t step) {
+  int32_t iStation;
+
+  if ((!acoustic_pressure_enabled()) || (Param.myNumberOfStations == 0) ||
+      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
+    return;
+  }
+
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static)
+#endif
+  for (iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
+    double grad[3];
+    double accel[3];
+    station_t* station = &Param.myStations[iStation];
+
+    if (station->pressure_is_defined == 0) {
+      continue;
+    }
+    if ((station->rho <= 0.0) ||
+        (station_pressure_gradient(iStation, grad) == 0)) {
+      continue;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+      accel[axis] = -grad[axis] / station->rho;
+    }
+
+    if ((station->acoustic_kinematics_ready == 0) || (step == 0)) {
+      for (int axis = 0; axis < 3; axis++) {
+        station->acoustic_acc[axis] = accel[axis];
+        station->acoustic_prev_acc[axis] = accel[axis];
+      }
+      station->acoustic_kinematics_ready = 1;
+      continue;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+      const double oldVel = station->acoustic_vel[axis];
+      const double oldAcc = station->acoustic_prev_acc[axis];
+
+      station->acoustic_disp[axis] +=
+          oldVel * Param.theDeltaT +
+          0.5 * oldAcc * Param.theDeltaTSquared;
+      station->acoustic_vel[axis] +=
+          0.5 * (oldAcc + accel[axis]) * Param.theDeltaT;
+      station->acoustic_acc[axis] = accel[axis];
+      station->acoustic_prev_acc[axis] = accel[axis];
+    }
+  }
+}
+
 /**
  * Interpolate the displacements for the stations.
  */
@@ -14886,11 +15024,44 @@ static int interpolate_station_displacements(int32_t step) {
 
     double time = Param.theDeltaT * step;
 
-    if ((Param.includeTopography == YES) &&
-        (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y, &vel_z,
-                             &acc_x, &acc_y, &acc_z, Param.theDeltaT,
-                             Param.theDeltaTSquared, iStation,
-                             Global.mySolver) == 1)) {
+    if (Param.myStations[iStation].pressure_is_defined != 0) {
+      dis_x = Param.myStations[iStation].acoustic_disp[0];
+      dis_y = Param.myStations[iStation].acoustic_disp[1];
+      dis_z = Param.myStations[iStation].acoustic_disp[2];
+      vel_x = Param.myStations[iStation].acoustic_vel[0];
+      vel_y = Param.myStations[iStation].acoustic_vel[1];
+      vel_z = Param.myStations[iStation].acoustic_vel[2];
+      acc_x = Param.myStations[iStation].acoustic_acc[0];
+      acc_y = Param.myStations[iStation].acoustic_acc[1];
+      acc_z = Param.myStations[iStation].acoustic_acc[2];
+
+      fprintf(Param.myStations[iStation].fpoutputfile,
+              "\n%10.6f % 8e % 8e % 8e", time, dis_x, dis_y, dis_z);
+
+      if ((Param.printStationVelocities == YES) ||
+          (Param.printStationAccelerations == YES)) {
+        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e % 8e % 8e",
+                vel_x, vel_y, vel_z);
+      }
+
+      if (Param.printStationAccelerations == YES) {
+        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e % 8e % 8e",
+                acc_x, acc_y, acc_z);
+      }
+
+      if (Param.printStationPressures == YES) {
+        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
+                interpolate_station_pressure_value(iStation));
+      }
+
+      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
+        fflush(Param.myStations[iStation].fpoutputfile);
+      }
+    } else if ((Param.includeTopography == YES) &&
+               (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y,
+                                    &vel_z, &acc_x, &acc_y, &acc_z,
+                                    Param.theDeltaT, Param.theDeltaTSquared,
+                                    iStation, Global.mySolver) == 1)) {
       fprintf(Param.myStations[iStation].fpoutputfile,
               "\n%10.6f % 8e % 8e % 8e", time, dis_x, dis_y, dis_z);
 
@@ -15018,6 +15189,9 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   if ((Param.printStationPressures != YES) || !acoustic_pressure_enabled() ||
       (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
     return 0.0;
+  }
+  if (Param.myStations[iStation].pressure_is_defined == 0) {
+    return NAN;
   }
 
   localCoords = Param.myStations[iStation].localcoords;

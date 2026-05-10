@@ -225,7 +225,12 @@ Acoustic-elastic input flags (input file):
 	Optional. `yes` writes scalar pressure station histories when
 	`acoustic_pressure_formulation=yes`. Pressure is appended as a
 	`Pressure(Pa)` column in the normal `station.N` files after any requested
-	displacement, velocity, and acceleration columns.
+	displacement, velocity, and acceleration columns. For stations whose
+	containing element is acoustic, the motion columns are reconstructed from
+	the pressure gradient; for elastic stations they continue to use the
+	elastic displacement field. The pressure column is `nan` for stations whose
+	containing element is elastic, because scalar acoustic pressure is not
+	defined there.
 
 Typical two-phase settings:
 

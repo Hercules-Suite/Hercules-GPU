@@ -501,11 +501,18 @@ typedef struct vector3D_t vector3D_t;
 
 struct station_t {
     int32_t    id, nodestointerpolate[8];
+    int32_t    pressure_is_defined;
+    int32_t    acoustic_kinematics_ready;
     double*    displacementsX;
     double*    displacementsY;
     double*    displacementsZ;
     double     prev_disp[3];
+    double     acoustic_disp[3];
+    double     acoustic_vel[3];
+    double     acoustic_acc[3];
+    double     acoustic_prev_acc[3];
     double     h; /* dorian: added size edge to compute station's strains */
+    double     rho;
     double     mu;
     double     lambda;
 
