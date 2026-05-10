@@ -81,8 +81,19 @@ __global__  void kernelDampingCalcLocal(int32_t lenum,
 					int32_t* dampingElemMapperDevice);
 
 __global__  void kernelDispCalc(int32_t nharbored,
-				gpu_data_t* gpuData,
-                                noyesflag_t printAccel);
+					gpu_data_t* gpuData,
+	                                noyesflag_t printAccel);
+
+__global__ void kernelAcousticPressureDisplacementCoupling(int32_t lenum,
+							   gpu_data_t* gpuData,
+							   double deltaT2);
+
+__global__ void kernelAcousticPressureForce(int32_t lenum,
+					    gpu_data_t* gpuData,
+					    double deltaT2);
+
+__global__ void kernelAcousticPressureUpdate(int32_t nharbored,
+					     gpu_data_t* gpuData);
 
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,

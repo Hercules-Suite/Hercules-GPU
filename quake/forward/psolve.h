@@ -379,6 +379,11 @@ typedef struct gpu_data_t {
     fvector_t*   tm3Device; // GPU nodal tm3 displacements
     fvector_t*   forceDevice; // GPU nodal forces
 
+    solver_float* pressureTm1Device;   // GPU nodal acoustic pressure at t
+    solver_float* pressureTm2Device;   // GPU nodal acoustic pressure at t-dt/new
+    solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
+    solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
+
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
     fvector_t*   conv_shear_3Device;
@@ -390,7 +395,10 @@ typedef struct gpu_data_t {
     double*      c2ArrayDevice;
     double*      c3ArrayDevice;
     int32_t*     lnidArrayDevice;
+    uint8_t*     acousticElementFlagsArrayDevice;
     uint8_t*     acousticFaceFlagsArrayDevice;
+    double*      acousticPressureCoeffArrayDevice;
+    double*      acousticPressureBoundaryCoeffArrayDevice;
     double*      g0_shearArrayDevice;
     double*      g1_shearArrayDevice;
     double*      g2_shearArrayDevice;
@@ -444,6 +452,11 @@ struct mysolver_t {
     fvector_t* tm2;           /* Displacements at time-step t - 2      */
     fvector_t* tm3;           /* Displacements at time-step t - 3      */
     fvector_t* force;         /* Force accumulation at time-step t     */
+
+    solver_float* pressure_tm1;   /* Acoustic pressure at time-step t - 1 */
+    solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
+    solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
+    solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
