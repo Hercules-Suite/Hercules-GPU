@@ -511,6 +511,7 @@ struct station_t {
     vector3D_t coords;        /* cartesian */
     vector3D_t localcoords;   /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1) */
     FILE*      fpoutputfile;
+    FILE*      fppressureoutputfile;
 };
 
 typedef struct station_t station_t;

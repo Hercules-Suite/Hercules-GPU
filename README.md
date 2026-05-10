@@ -214,6 +214,16 @@ Acoustic-elastic input flags (input file):
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
 	disables this extra interface-refinement limit.
+- `acoustic_pressure_formulation`
+	Optional. `yes` enables the pressure-DOF acoustic solver path. Acoustic
+	elements assemble scalar pressure mass/stiffness instead of displacement
+	mass/stiffness, while elastic elements continue to use displacement DOFs.
+	This requires `include_acoustic=yes`.
+- `print_station_pressures`
+	Optional. `yes` writes scalar pressure station histories when
+	`acoustic_pressure_formulation=yes`. Files are written beside the normal
+	displacement station files as `pressure_station.N` with columns
+	`time pressure`.
 
 Typical two-phase settings:
 

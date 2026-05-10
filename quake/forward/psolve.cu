@@ -462,6 +462,7 @@ static void solver_prepare_force_upload_ranges(mesh_t* mesh,
                                                int32_t sourceCount);
 
 static int interpolate_station_displacements(int32_t step);
+static int interpolate_station_pressures(int32_t step);
 
 __global__ static void kernelSourceForceScatter(int32_t count,
                                                 const int32_t* lnidList,
@@ -842,6 +843,7 @@ static struct Param_t {
   noyesflag_t printStationVelocities;
   noyesflag_t printK;
   noyesflag_t printStationAccelerations;
+  noyesflag_t printStationPressures;
   noyesflag_t includeBuildings;
   noyesflag_t includeTopography;
   noyesflag_t useParametricQ;
@@ -929,6 +931,7 @@ static struct Param_t {
            .theScheduleStatFilename = NULL,
            .theMeshStatFilename = NULL,
            .theTopoStatFilename = NULL,
+           .printStationPressures = NO,
            .includeAcoustic = NO,
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
@@ -1187,7 +1190,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  37 /* Must adjust this if adding int params */
+  38 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1299,6 +1302,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[34] = Param.theAcousticInterfaceMaxLevel;
   int_message[35] = (int)Param.acousticInterfaceCoupling;
   int_message[36] = (int)Param.acousticPressureFormulation;
+  int_message[37] = (int)Param.printStationPressures;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1340,6 +1344,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticInterfaceMaxLevel = int_message[34];
   Param.acousticInterfaceCoupling = (noyesflag_t)int_message[35];
   Param.acousticPressureFormulation = (noyesflag_t)int_message[36];
+  Param.printStationPressures = (noyesflag_t)int_message[37];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1580,6 +1585,7 @@ static int32_t parse_parameters(const char* numericalin) {
   double freq_vel = 0., softening_factor = 0, startT = 0.;
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
+       print_station_pressures[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
@@ -1599,6 +1605,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t printMatrixK = UNSET;
   noyesflag_t printStationVels = UNSET;
   noyesflag_t printStationAccs = UNSET;
+  noyesflag_t printStationPressures = NO;
   noyesflag_t useInfQk = UNSET;
 
   noyesflag_t meshCoordinatesForMatlab = UNSET;
@@ -1764,6 +1771,7 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "print_station_velocities", 's', &print_station_velocities);
   parsetext(fp, "print_station_accelerations", 's',
             &print_station_accelerations);
+  parsetext(fp, "print_station_pressures", 's', &print_station_pressures);
   parsetext(fp, "mesh_coordinates_for_matlab", 's',
             &mesh_coordinates_for_matlab);
   parsetext(fp, "include_buildings", 's', &include_buildings);
@@ -1966,6 +1974,17 @@ static int32_t parse_parameters(const char* numericalin) {
                  print_station_accelerations);
   }
 
+  if (strcasecmp(print_station_pressures, "yes") == 0) {
+    printStationPressures = YES;
+  } else if (strcasecmp(print_station_pressures, "no") == 0) {
+    printStationPressures = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for printing"
+                 "station pressures (yes or no): %s\n",
+                 print_station_pressures);
+  }
+
   if (strcasecmp(mesh_coordinates_for_matlab, "yes") == 0) {
     meshCoordinatesForMatlab = YES;
     parsetext(fp, "mesh_coordinates_directory_for_matlab", 's',
@@ -2065,6 +2084,12 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "acoustic_pressure_formulation=yes requires "
                  "include_acoustic=yes\n");
+  }
+  if ((printStationPressures == YES) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "print_station_pressures=yes requires include_acoustic=yes "
+                 "and acoustic_pressure_formulation=yes\n");
   }
 
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
@@ -2221,6 +2246,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.printK = printMatrixK;
   Param.printStationVelocities = printStationVels;
   Param.printStationAccelerations = printStationAccs;
+  Param.printStationPressures = printStationPressures;
 
   Param.includeBuildings = have_buildings;
   Param.useParametricQ = have_parametricq;
@@ -2263,6 +2289,8 @@ static int32_t parse_parameters(const char* numericalin) {
                 print_station_velocities);
   monitor_print("Printing accelerations on stations: %s\n",
                 print_station_accelerations);
+  monitor_print("Printing pressures on stations:     %s\n",
+                print_station_pressures);
   monitor_print("Mesh Coordinates For Matlab:        %s\n",
                 mesh_coordinates_for_matlab);
   monitor_print("Mesh-Mode Only:                     %s\n",
@@ -7647,6 +7675,7 @@ static void solver_output_stations(int step) {
     if (step % Param.theStationsPrintRate == 0) {
       Timer_Start("Print Stations");
       interpolate_station_displacements(step);
+      interpolate_station_pressures(step);
       Timer_Stop("Print Stations");
     }
   }
@@ -14601,6 +14630,7 @@ void setup_stations_data() {
 #endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
     char stationFile[256];
+    char pressureStationFile[256];
 
     iStation = localStationIds[iLCStation];
     octant = localStationOctants[iLCStation];
@@ -14612,6 +14642,13 @@ void setup_stations_data() {
     Param.myStations[iLCStation].coords = stationCoords;
     sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
     Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+    Param.myStations[iLCStation].fppressureoutputfile = NULL;
+    if (Param.printStationPressures == YES) {
+      sprintf(pressureStationFile, "%s/pressure_station.%d",
+              Param.theStationsDirOut, iStation);
+      Param.myStations[iLCStation].fppressureoutputfile =
+          hu_fopen(pressureStationFile, "w");
+    }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
     Param.myStations[iLCStation].prev_disp[2] = 0.0;
@@ -14661,6 +14698,11 @@ void setup_stations_data() {
     if (Param.printStationAccelerations == YES) {
       fputs("      X|(m/s2)      Y-(m/s2)      Z.(m/s2)",
             Param.myStations[iLCStation].fpoutputfile);
+    }
+
+    if (Param.printStationPressures == YES) {
+      fputs("#  Time(s)       Pressure(Pa)",
+            Param.myStations[iLCStation].fppressureoutputfile);
     }
 
     /*
@@ -14891,6 +14933,59 @@ static int interpolate_station_displacements(int32_t step) {
       if ((step % (Param.theStationsPrintRate * 10)) == 0) {
         fflush(Param.myStations[iStation].fpoutputfile);
       }
+    }
+  }
+
+  return 1;
+}
+
+/**
+ * Interpolate scalar acoustic pressure for stations.
+ */
+static int interpolate_station_pressures(int32_t step) {
+  int iPhi;
+  double xi[3][8] = {{-1, 1, -1, 1, -1, 1, -1, 1},
+                     {-1, -1, 1, 1, -1, -1, 1, 1},
+                     {-1, -1, -1, -1, 1, 1, 1, 1}};
+  int32_t iStation, nodesToInterpolate[8];
+  vector3D_t localCoords;
+
+  if ((Param.printStationPressures != YES) || !acoustic_pressure_enabled() ||
+      (Param.myNumberOfStations == 0)) {
+    return 1;
+  }
+
+#ifdef _OPENMP
+  const int32_t useOmp = station_output_use_omp();
+#pragma omp parallel for if(useOmp) schedule(static) \
+    private(iPhi, nodesToInterpolate, localCoords)
+#endif
+  for (iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
+    double pressure = 0.0;
+    const double time = Param.theDeltaT * step;
+
+    if (Param.myStations[iStation].fppressureoutputfile == NULL) {
+      continue;
+    }
+
+    localCoords = Param.myStations[iStation].localcoords;
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      nodesToInterpolate[iPhi] =
+          Param.myStations[iStation].nodestointerpolate[iPhi];
+    }
+
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                         (1 + xi[1][iPhi] * localCoords.x[1]) *
+                         (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+      pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+    }
+
+    fprintf(Param.myStations[iStation].fppressureoutputfile,
+            "\n%10.6f % 8e", time, pressure);
+
+    if ((step % (Param.theStationsPrintRate * 10)) == 0) {
+      fflush(Param.myStations[iStation].fppressureoutputfile);
     }
   }
 
