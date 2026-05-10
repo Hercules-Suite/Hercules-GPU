@@ -1,5 +1,6 @@
 *.o
 *.a
+.DS_Store
 quake/cvm/dumpcvm
 quake/cvm/pickrecord
 quake/cvm/querycvm
