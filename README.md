@@ -218,12 +218,14 @@ Acoustic-elastic input flags (input file):
 	Optional. `yes` enables the pressure-DOF acoustic solver path. Acoustic
 	elements assemble scalar pressure mass/stiffness instead of displacement
 	mass/stiffness, while elastic elements continue to use displacement DOFs.
-	This requires `include_acoustic=yes`.
+	This requires `include_acoustic=yes`. On a flat model surface, acoustic
+	pressure nodes on the top external domain face are constrained to `p=0`
+	for a pressure-release water surface.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
-	`acoustic_pressure_formulation=yes`. Files are written beside the normal
-	displacement station files as `pressure_station.N` with columns
-	`time pressure`.
+	`acoustic_pressure_formulation=yes`. Pressure is appended as a
+	`Pressure(Pa)` column in the normal `station.N` files after any requested
+	displacement, velocity, and acceleration columns.
 
 Typical two-phase settings:
 

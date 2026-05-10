@@ -554,6 +554,13 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
     return;
   }
 
+  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
+      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
+    gpuData->pressureTm2Device[nindex] = 0.0;
+    gpuData->pressureForceDevice[nindex] = 0.0;
+    return;
+  }
+
   const solver_float mass = gpuData->pressureMassDevice[nindex];
   solver_float p_new = 0.0;
 

@@ -97,6 +97,7 @@ static int32_t g_topoForceModeReported = 0;
 static int32_t g_topoForcePathReported = 0;
 static int64_t g_acousticPressureElementCount = 0;
 static int64_t g_acousticPressureNodeCount = 0;
+static int64_t g_acousticPressureFreeSurfaceNodeCount = 0;
 static int32_t g_dampingBkt2CoeffsReady = 0;
 static double g_dampingBkt2ShearCoef1 = 0.0;
 static double g_dampingBkt2ShearCoef2 = 0.0;
@@ -288,6 +289,8 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define DN_PRESSURE_MSG 123
 #define DN_PRESSURE_MASS_MSG 124
 #define AN_PRESSURE_MASS_MSG 125
+#define DN_PRESSURE_SURFACE_MSG 126
+#define AN_PRESSURE_SURFACE_MSG 127
 #define CVMRECORD_MSG 110
 
 #define BATCH (1 << 20)
@@ -462,7 +465,7 @@ static void solver_prepare_force_upload_ranges(mesh_t* mesh,
                                                int32_t sourceCount);
 
 static int interpolate_station_displacements(int32_t step);
-static int interpolate_station_pressures(int32_t step);
+static double interpolate_station_pressure_value(int32_t iStation);
 
 __global__ static void kernelSourceForceScatter(int32_t count,
                                                 const int32_t* lnidList,
@@ -5799,6 +5802,7 @@ static void solver_init() {
   int32_t c_outsize, c_insize, s_outsize, s_insize;
   int64_t localPressureElements = 0;
   int64_t globalPressureElements = 0;
+  solver_float* pressureFreeSurfaceHost = NULL;
 
   /* Initialize the GPU */
   gpu_init(Global.myID);
@@ -5918,6 +5922,16 @@ static void solver_init() {
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_mass, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
+
+    pressureFreeSurfaceHost =
+        (solver_float*)calloc(Global.myMesh->nharbored, sizeof(solver_float));
+    if (pressureFreeSurfaceHost == NULL) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic pressure free-surface flags\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   if (Param.theTypeOfDamping >= BKT) {
@@ -6023,6 +6037,12 @@ static void solver_init() {
         const int32_t lnid = elemp->lnid[j];
         Global.mySolver->pressure_mass[lnid] +=
             (solver_float)nodalPressureMass;
+      }
+      if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
+          Global.myOctree->nearendp[2]) {
+        for (j = 0; j < 4; j++) {
+          pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
+        }
       }
       localPressureElements++;
       continue;
@@ -6193,16 +6213,26 @@ static void solver_init() {
   if (acoustic_pressure_enabled()) {
     int64_t localPressureNodes = 0;
     int64_t globalPressureNodes = 0;
+    int64_t localPressureFreeSurfaceNodes = 0;
+    int64_t globalPressureFreeSurfaceNodes = 0;
 
     schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, DN_PRESSURE_MASS_MSG);
     compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, AN_PRESSURE_MASS_MSG);
+    schedule_senddata(Global.mySolver->dn_sched, pressureFreeSurfaceHost, 1,
+                      CONTRIBUTION, DN_PRESSURE_SURFACE_MSG);
+    compute_adjust(pressureFreeSurfaceHost, 1, DISTRIBUTION);
+    schedule_senddata(Global.mySolver->an_sched, pressureFreeSurfaceHost, 1,
+                      CONTRIBUTION, AN_PRESSURE_SURFACE_MSG);
 
     for (int32_t nindex = 0; nindex < Global.myMesh->nharbored; nindex++) {
       if (Global.mySolver->pressure_mass[nindex] > 0.0) {
         localPressureNodes++;
+      }
+      if (pressureFreeSurfaceHost[nindex] > 0.0) {
+        localPressureFreeSurfaceNodes++;
       }
     }
 
@@ -6210,17 +6240,23 @@ static void solver_init() {
                   MPI_INT64_T, MPI_SUM, comm_solver);
     MPI_Allreduce(&localPressureNodes, &globalPressureNodes, 1, MPI_INT64_T,
                   MPI_SUM, comm_solver);
+    MPI_Allreduce(&localPressureFreeSurfaceNodes,
+                  &globalPressureFreeSurfaceNodes, 1, MPI_INT64_T, MPI_SUM,
+                  comm_solver);
     g_acousticPressureElementCount = globalPressureElements;
     g_acousticPressureNodeCount = globalPressureNodes;
+    g_acousticPressureFreeSurfaceNodeCount = globalPressureFreeSurfaceNodes;
     if (Global.myID == 0) {
       monitor_print(
-          "Acoustic pressure formulation: pressure elements %.1fM, pressure nodes %.1fM\n",
+          "Acoustic pressure formulation: pressure elements %.1fM, pressure nodes %.1fM, free-surface nodes %.1fM\n",
           (double)globalPressureElements / 1.0e6,
-          (double)globalPressureNodes / 1.0e6);
+          (double)globalPressureNodes / 1.0e6,
+          (double)globalPressureFreeSurfaceNodes / 1.0e6);
     }
   } else {
     g_acousticPressureElementCount = 0;
     g_acousticPressureNodeCount = 0;
+    g_acousticPressureFreeSurfaceNodeCount = 0;
   }
 
   if (Global.myID == 0) {
@@ -6292,6 +6328,15 @@ static void solver_init() {
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure mass memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc(
+            (void**)&Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
+            Global.myMesh->nharbored * sizeof(uint8_t)) != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate pressure free-surface flag memory\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -6571,16 +6616,20 @@ static void solver_init() {
     exit(1);
   }
   uint8_t* acousticElementFlagsArray = NULL;
+  uint8_t* pressureFreeSurfaceNodeFlagsArray = NULL;
   double* acousticPressureCoeffArray = NULL;
   double* acousticPressureBoundaryCoeffArray = NULL;
   if (acoustic_pressure_enabled()) {
     acousticElementFlagsArray =
         (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
+    pressureFreeSurfaceNodeFlagsArray =
+        (uint8_t*)calloc((size_t)Global.myMesh->nharbored, sizeof(uint8_t));
     acousticPressureCoeffArray =
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     acousticPressureBoundaryCoeffArray =
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     if ((acousticElementFlagsArray == NULL) ||
+        (pressureFreeSurfaceNodeFlagsArray == NULL) ||
         (acousticPressureCoeffArray == NULL) ||
         (acousticPressureBoundaryCoeffArray == NULL)) {
       fprintf(stderr,
@@ -6701,6 +6750,10 @@ static void solver_init() {
     mass_minusaMArray[0][i] = Global.mySolver->nTable[i].mass_minusaM[0];
     mass_minusaMArray[1][i] = Global.mySolver->nTable[i].mass_minusaM[1];
     mass_minusaMArray[2][i] = Global.mySolver->nTable[i].mass_minusaM[2];
+    if (acoustic_pressure_enabled()) {
+      pressureFreeSurfaceNodeFlagsArray[i] =
+          (pressureFreeSurfaceHost[i] > 0.0) ? 1u : 0u;
+    }
   }
 
   if (cudaMemcpy(Global.gpuData.c1ArrayDevice, c1Array,
@@ -6934,6 +6987,16 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (cudaMemcpy(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
+                   pressureFreeSurfaceNodeFlagsArray,
+                   Global.myMesh->nharbored * sizeof(uint8_t),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to copy pressure free-surface flags\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   free(c1Array);
@@ -6942,8 +7005,10 @@ static void solver_init() {
   free(lnidArray);
   free(acousticFaceFlagsArray);
   free(acousticElementFlagsArray);
+  free(pressureFreeSurfaceNodeFlagsArray);
   free(acousticPressureCoeffArray);
   free(acousticPressureBoundaryCoeffArray);
+  free(pressureFreeSurfaceHost);
   free(g0_shearArray);
   free(g1_shearArray);
   free(g2_shearArray);
@@ -7245,6 +7310,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
+  cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
   cudaFree(Global.gpuData.conv_shear_3Device);
@@ -7675,7 +7741,6 @@ static void solver_output_stations(int step) {
     if (step % Param.theStationsPrintRate == 0) {
       Timer_Start("Print Stations");
       interpolate_station_displacements(step);
-      interpolate_station_pressures(step);
       Timer_Stop("Print Stations");
     }
   }
@@ -14630,7 +14695,6 @@ void setup_stations_data() {
 #endif
   for (iLCStation = 0; iLCStation < Param.myNumberOfStations; iLCStation++) {
     char stationFile[256];
-    char pressureStationFile[256];
 
     iStation = localStationIds[iLCStation];
     octant = localStationOctants[iLCStation];
@@ -14642,13 +14706,6 @@ void setup_stations_data() {
     Param.myStations[iLCStation].coords = stationCoords;
     sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
     Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
-    Param.myStations[iLCStation].fppressureoutputfile = NULL;
-    if (Param.printStationPressures == YES) {
-      sprintf(pressureStationFile, "%s/pressure_station.%d",
-              Param.theStationsDirOut, iStation);
-      Param.myStations[iLCStation].fppressureoutputfile =
-          hu_fopen(pressureStationFile, "w");
-    }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
     Param.myStations[iLCStation].prev_disp[2] = 0.0;
@@ -14701,8 +14758,8 @@ void setup_stations_data() {
     }
 
     if (Param.printStationPressures == YES) {
-      fputs("#  Time(s)       Pressure(Pa)",
-            Param.myStations[iLCStation].fppressureoutputfile);
+      fputs("      Pressure(Pa)",
+            Param.myStations[iLCStation].fpoutputfile);
     }
 
     /*
@@ -14847,6 +14904,11 @@ static int interpolate_station_displacements(int32_t step) {
                 acc_x, acc_y, acc_z);
       }
 
+      if (Param.printStationPressures == YES) {
+        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
+                interpolate_station_pressure_value(iStation));
+      }
+
       if ((step % (Param.theStationsPrintRate * 10)) == 0) {
         fflush(Param.myStations[iStation].fpoutputfile);
       }
@@ -14929,6 +14991,11 @@ static int interpolate_station_displacements(int32_t step) {
                 acc_x, acc_y, acc_z);
       }
 
+      if (Param.printStationPressures == YES) {
+        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
+                interpolate_station_pressure_value(iStation));
+      }
+
       /* TODO: Have this 10 as a parameter with a default value */
       if ((step % (Param.theStationsPrintRate * 10)) == 0) {
         fflush(Param.myStations[iStation].fpoutputfile);
@@ -14939,57 +15006,34 @@ static int interpolate_station_displacements(int32_t step) {
   return 1;
 }
 
-/**
- * Interpolate scalar acoustic pressure for stations.
- */
-static int interpolate_station_pressures(int32_t step) {
+static double interpolate_station_pressure_value(int32_t iStation) {
   int iPhi;
   double xi[3][8] = {{-1, 1, -1, 1, -1, 1, -1, 1},
                      {-1, -1, 1, 1, -1, -1, 1, 1},
                      {-1, -1, -1, -1, 1, 1, 1, 1}};
-  int32_t iStation, nodesToInterpolate[8];
+  int32_t nodesToInterpolate[8];
   vector3D_t localCoords;
+  double pressure = 0.0;
 
   if ((Param.printStationPressures != YES) || !acoustic_pressure_enabled() ||
-      (Param.myNumberOfStations == 0)) {
-    return 1;
+      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
+    return 0.0;
   }
 
-#ifdef _OPENMP
-  const int32_t useOmp = station_output_use_omp();
-#pragma omp parallel for if(useOmp) schedule(static) \
-    private(iPhi, nodesToInterpolate, localCoords)
-#endif
-  for (iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
-    double pressure = 0.0;
-    const double time = Param.theDeltaT * step;
-
-    if (Param.myStations[iStation].fppressureoutputfile == NULL) {
-      continue;
-    }
-
-    localCoords = Param.myStations[iStation].localcoords;
-    for (iPhi = 0; iPhi < 8; iPhi++) {
-      nodesToInterpolate[iPhi] =
-          Param.myStations[iStation].nodestointerpolate[iPhi];
-    }
-
-    for (iPhi = 0; iPhi < 8; iPhi++) {
-      const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
-                         (1 + xi[1][iPhi] * localCoords.x[1]) *
-                         (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-      pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
-    }
-
-    fprintf(Param.myStations[iStation].fppressureoutputfile,
-            "\n%10.6f % 8e", time, pressure);
-
-    if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-      fflush(Param.myStations[iStation].fppressureoutputfile);
-    }
+  localCoords = Param.myStations[iStation].localcoords;
+  for (iPhi = 0; iPhi < 8; iPhi++) {
+    nodesToInterpolate[iPhi] =
+        Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
-  return 1;
+  for (iPhi = 0; iPhi < 8; iPhi++) {
+    const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                       (1 + xi[1][iPhi] * localCoords.x[1]) *
+                       (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+    pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+  }
+
+  return pressure;
 }
 
 static int32_t station_output_use_omp(void) {
