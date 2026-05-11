@@ -221,9 +221,14 @@ Acoustic-elastic input flags (input file):
 	This requires `include_acoustic=yes`. On a flat model surface, acoustic
 	pressure nodes on the top external domain face are constrained to `p=0`
 	for a pressure-release water surface. When `acoustic_interface_coupling=yes`,
-	the pressure formulation builds an explicit acoustic-solid interface-face
-	table and CUDA kernels apply the normal traction/acceleration coupling only
-	on those faces.
+	the pressure formulation builds an explicit acoustic-solid interface table.
+	In octree meshes, nonconforming interface faces are split into area-weighted
+	fragments with fragment centers and normals, and CUDA kernels apply the
+	normal traction/acceleration coupling only on those fragments. Fragment
+	subdivision follows `acoustic_interface_max_level` and finer local neighbors;
+	each fragment center is also checked against the material model so mixed
+	octants do not force the whole face into the interface table. Subdivision has
+	a per-face cap of `32 x 32` fragments to avoid accidental table blow-up.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
 	`acoustic_pressure_formulation=yes`. Pressure is appended as a

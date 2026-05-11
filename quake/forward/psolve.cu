@@ -1027,7 +1027,9 @@ static struct Global_t {
   int32_t* acousticInterfaceElementIds;
   uint8_t* acousticInterfaceFaceIds;
   double* acousticInterfaceFaceAreas;
+  double* acousticInterfaceFaceCenters;
   double* acousticInterfaceFaceNormals;
+  int64_t* acousticInterfaceAdjacentElementIds;
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
 
@@ -1075,6 +1077,7 @@ struct station_medium_record_t {
  * declarations------------------------------ */
 
 #define ACOUSTIC_VS_EPS 1.0e-6
+#define ACOUSTIC_INTERFACE_FRAGMENT_MAX_LEVEL_DELTA 5
 
 static int material_values_are_acoustic(double Vp, double Vs, double rho) {
   return (Param.includeAcoustic == YES) && (Vp > 0.0) && (rho > 0.0) &&
@@ -2873,20 +2876,56 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
   return res;
 }
 
-static int acoustic_face_count(uint8_t flags) {
-  int count = 0;
-
-  for (int bit = 0; bit < 6; bit++) {
-    if ((flags & (1u << bit)) != 0) {
-      count++;
-    }
-  }
-
-  return count;
-}
-
 static int material_values_are_elastic(double Vp, double Vs, double rho) {
   return (Vp > 0.0) && (rho > 0.0) && (Vs > ACOUSTIC_VS_EPS);
+}
+
+static int mesh_acoustic_face_axis(uint8_t face, int* axis, int* sign,
+                                   int tangent_axes[2]) {
+  if ((axis == NULL) || (sign == NULL) || (tangent_axes == NULL)) {
+    return 0;
+  }
+
+  switch (face) {
+    case ACOUSTIC_FACE_X_MINUS:
+      *axis = 0;
+      *sign = -1;
+      tangent_axes[0] = 1;
+      tangent_axes[1] = 2;
+      return 1;
+    case ACOUSTIC_FACE_X_PLUS:
+      *axis = 0;
+      *sign = 1;
+      tangent_axes[0] = 1;
+      tangent_axes[1] = 2;
+      return 1;
+    case ACOUSTIC_FACE_Y_MINUS:
+      *axis = 1;
+      *sign = -1;
+      tangent_axes[0] = 0;
+      tangent_axes[1] = 2;
+      return 1;
+    case ACOUSTIC_FACE_Y_PLUS:
+      *axis = 1;
+      *sign = 1;
+      tangent_axes[0] = 0;
+      tangent_axes[1] = 2;
+      return 1;
+    case ACOUSTIC_FACE_Z_MINUS:
+      *axis = 2;
+      *sign = -1;
+      tangent_axes[0] = 0;
+      tangent_axes[1] = 1;
+      return 1;
+    case ACOUSTIC_FACE_Z_PLUS:
+      *axis = 2;
+      *sign = 1;
+      tangent_axes[0] = 0;
+      tangent_axes[1] = 1;
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 static void mesh_acoustic_face_normal(uint8_t face, double normal[3]) {
@@ -2921,12 +2960,16 @@ static void mesh_release_acoustic_interface_data(void) {
   free(Global.acousticInterfaceElementIds);
   free(Global.acousticInterfaceFaceIds);
   free(Global.acousticInterfaceFaceAreas);
+  free(Global.acousticInterfaceFaceCenters);
   free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceAdjacentElementIds);
   Global.acousticFaceFlags = NULL;
   Global.acousticInterfaceElementIds = NULL;
   Global.acousticInterfaceFaceIds = NULL;
   Global.acousticInterfaceFaceAreas = NULL;
+  Global.acousticInterfaceFaceCenters = NULL;
   Global.acousticInterfaceFaceNormals = NULL;
+  Global.acousticInterfaceAdjacentElementIds = NULL;
   Global.acousticInterfaceElements = 0;
   Global.acousticInterfaceFaces = 0;
 }
@@ -2989,6 +3032,80 @@ static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
 static int mesh_query_material_at_model_point(
     double north_m, double east_m, double depth_m,
     const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, cvmpayload_t* g_props);
+
+static int mesh_probe_face_elastic_info(
+    const vector3D_t* domain_point, const vector3D_t* IstVelModel_origin,
+    const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, int32_t* neighbor_eindex_out,
+    int32_t* neighbor_level_out, int64_t* neighbor_geid_out) {
+  int32_t neighbor_eindex = -1;
+  int found_local_neighbor = 0;
+  int local_neighbor_is_elastic = 0;
+  cvmpayload_t g_props;
+  double north_m;
+  double east_m;
+  double depth_m;
+
+  if (neighbor_eindex_out != NULL) {
+    *neighbor_eindex_out = -1;
+  }
+  if (neighbor_level_out != NULL) {
+    *neighbor_level_out = -1;
+  }
+  if (neighbor_geid_out != NULL) {
+    *neighbor_geid_out = -1;
+  }
+
+  if (domain_point == NULL) {
+    return 0;
+  }
+
+  if ((domain_point->x[0] < 0.0) || (domain_point->x[0] >= Param.theDomainX) ||
+      (domain_point->x[1] < 0.0) || (domain_point->x[1] >= Param.theDomainY) ||
+      (domain_point->x[2] < 0.0) || (domain_point->x[2] >= Param.theDomainZ)) {
+    return 0;
+  }
+
+  found_local_neighbor =
+      mesh_find_local_element_at_domain_point(domain_point, &neighbor_eindex);
+  if (found_local_neighbor) {
+    elem_t* neighbor_elemp = &Global.myMesh->elemTable[neighbor_eindex];
+    edata_t* neighbor_edata = (edata_t*)neighbor_elemp->data;
+
+    local_neighbor_is_elastic = material_values_are_elastic(
+        neighbor_edata->Vp, neighbor_edata->Vs, neighbor_edata->rho);
+
+    if (local_neighbor_is_elastic && (neighbor_eindex_out != NULL)) {
+      *neighbor_eindex_out = neighbor_eindex;
+    }
+    if (local_neighbor_is_elastic && (neighbor_level_out != NULL)) {
+      *neighbor_level_out = neighbor_elemp->level;
+    }
+    if (local_neighbor_is_elastic && (neighbor_geid_out != NULL)) {
+      *neighbor_geid_out = neighbor_elemp->geid;
+    }
+  }
+
+  north_m = Global.theXForMeshOrigin + domain_point->x[0];
+  east_m = Global.theYForMeshOrigin + domain_point->x[1];
+  depth_m = Global.theZForMeshOrigin + domain_point->x[2];
+
+  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
+                                         IstVelModel_origin, basinVelModel_origin,
+                                         threeDVelModel_origin, &g_props) == 0) {
+    if (found_local_neighbor && !local_neighbor_is_elastic) {
+      return 0;
+    }
+    return material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
+  }
+
+  return found_local_neighbor && local_neighbor_is_elastic;
+}
+
+static int mesh_query_material_at_model_point(
+    double north_m, double east_m, double depth_m,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin, cvmpayload_t* g_props) {
   if (g_props == NULL) {
     return 1;
@@ -3036,86 +3153,221 @@ static int mesh_query_material_at_model_point(
   return 1;
 }
 
-static int mesh_probe_face_is_elastic(
-    const vector3D_t* domain_point, const vector3D_t* IstVelModel_origin,
-    const vector3D_t* basinVelModel_origin,
-    const vector3D_t* threeDVelModel_origin) {
-  int32_t neighbor_eindex;
+static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
+                                                      int64_t current_count,
+                                                      int64_t* capacity) {
+  int64_t new_capacity;
+  int32_t* new_elements;
+  uint8_t* new_faces;
+  double* new_areas;
+  double* new_centers;
+  double* new_normals;
+  int64_t* new_adjacent;
 
-  if (domain_point == NULL) {
-    return 0;
+  if ((capacity == NULL) || (needed <= *capacity)) {
+    return;
+  }
+  if (needed > INT32_MAX) {
+    fprintf(stderr,
+            "Thread %d: too many local acoustic interface fragments for GPU table\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
 
-  if ((domain_point->x[0] < 0.0) || (domain_point->x[0] >= Param.theDomainX) ||
-      (domain_point->x[1] < 0.0) || (domain_point->x[1] >= Param.theDomainY) ||
-      (domain_point->x[2] < 0.0) || (domain_point->x[2] >= Param.theDomainZ)) {
-    return 0;
+  new_capacity = (*capacity == 0) ? 1024 : *capacity;
+  while (new_capacity < needed) {
+    new_capacity *= 2;
   }
 
-  if (mesh_find_local_element_at_domain_point(domain_point, &neighbor_eindex)) {
-    edata_t* neighbor_edata =
-        (edata_t*)Global.myMesh->elemTable[neighbor_eindex].data;
-    return material_values_are_elastic(neighbor_edata->Vp, neighbor_edata->Vs,
-                                       neighbor_edata->rho);
+  new_elements = (int32_t*)malloc((size_t)new_capacity * sizeof(int32_t));
+  new_faces = (uint8_t*)malloc((size_t)new_capacity * sizeof(uint8_t));
+  new_areas = (double*)malloc((size_t)new_capacity * sizeof(double));
+  new_centers = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
+  new_normals = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
+  new_adjacent = (int64_t*)malloc((size_t)new_capacity * sizeof(int64_t));
+  if ((new_elements == NULL) || (new_faces == NULL) || (new_areas == NULL) ||
+      (new_centers == NULL) || (new_normals == NULL) ||
+      (new_adjacent == NULL)) {
+    free(new_elements);
+    free(new_faces);
+    free(new_areas);
+    free(new_centers);
+    free(new_normals);
+    free(new_adjacent);
+    fprintf(stderr,
+            "Thread %d: failed to allocate acoustic interface fragment table\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
 
-  if ((IstVelModel_origin == NULL) && (basinVelModel_origin == NULL) &&
-      (threeDVelModel_origin == NULL) &&
-      !((Param.useProfile == NO) && (Global.theCVMEp != NULL))) {
-    return 0;
+  if (current_count > 0) {
+    size_t count = (size_t)current_count;
+    memcpy(new_elements, Global.acousticInterfaceElementIds,
+           count * sizeof(int32_t));
+    memcpy(new_faces, Global.acousticInterfaceFaceIds, count * sizeof(uint8_t));
+    memcpy(new_areas, Global.acousticInterfaceFaceAreas, count * sizeof(double));
+    memcpy(new_centers, Global.acousticInterfaceFaceCenters,
+           3 * count * sizeof(double));
+    memcpy(new_normals, Global.acousticInterfaceFaceNormals,
+           3 * count * sizeof(double));
+    memcpy(new_adjacent, Global.acousticInterfaceAdjacentElementIds,
+           count * sizeof(int64_t));
   }
 
-  cvmpayload_t g_props;
-  double north_m = Global.theXForMeshOrigin + domain_point->x[0];
-  double east_m = Global.theYForMeshOrigin + domain_point->x[1];
-  double depth_m = Global.theZForMeshOrigin + domain_point->x[2];
+  free(Global.acousticInterfaceElementIds);
+  free(Global.acousticInterfaceFaceIds);
+  free(Global.acousticInterfaceFaceAreas);
+  free(Global.acousticInterfaceFaceCenters);
+  free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceAdjacentElementIds);
 
-  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
-                                         IstVelModel_origin, basinVelModel_origin,
-                                         threeDVelModel_origin, &g_props) != 0) {
-    return 0;
-  }
-
-  return material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
+  Global.acousticInterfaceElementIds = new_elements;
+  Global.acousticInterfaceFaceIds = new_faces;
+  Global.acousticInterfaceFaceAreas = new_areas;
+  Global.acousticInterfaceFaceCenters = new_centers;
+  Global.acousticInterfaceFaceNormals = new_normals;
+  Global.acousticInterfaceAdjacentElementIds = new_adjacent;
+  *capacity = new_capacity;
 }
 
-static uint8_t mesh_detect_acoustic_interface_faces(
-    int32_t eindex, const vector3D_t* IstVelModel_origin,
+static void mesh_append_acoustic_interface_fragment(
+    int64_t* count, int64_t* capacity, int32_t eindex, uint8_t face,
+    double area, const double center[3], const double normal[3],
+    int64_t adjacent_geid) {
+  int64_t index;
+
+  mesh_reserve_acoustic_interface_fragments(*count + 1, *count, capacity);
+  index = *count;
+
+  Global.acousticInterfaceElementIds[index] = eindex;
+  Global.acousticInterfaceFaceIds[index] = face;
+  Global.acousticInterfaceFaceAreas[index] = area;
+  Global.acousticInterfaceFaceCenters[3 * index + 0] = center[0];
+  Global.acousticInterfaceFaceCenters[3 * index + 1] = center[1];
+  Global.acousticInterfaceFaceCenters[3 * index + 2] = center[2];
+  Global.acousticInterfaceFaceNormals[3 * index + 0] = normal[0];
+  Global.acousticInterfaceFaceNormals[3 * index + 1] = normal[1];
+  Global.acousticInterfaceFaceNormals[3 * index + 2] = normal[2];
+  Global.acousticInterfaceAdjacentElementIds[index] = adjacent_geid;
+  *count = index + 1;
+}
+
+static int32_t mesh_interface_fragment_split(int32_t element_level,
+                                             int32_t target_level) {
+  int32_t level_delta;
+  int32_t split = 1;
+
+  if (target_level <= element_level) {
+    return 1;
+  }
+
+  level_delta = target_level - element_level;
+  if (level_delta > ACOUSTIC_INTERFACE_FRAGMENT_MAX_LEVEL_DELTA) {
+    level_delta = ACOUSTIC_INTERFACE_FRAGMENT_MAX_LEVEL_DELTA;
+  }
+  split <<= level_delta;
+  return split;
+}
+
+static int64_t mesh_build_acoustic_interface_face_fragments(
+    int32_t eindex, uint8_t face, int append_fragments,
+    int64_t* table_count, int64_t* table_capacity,
+    const vector3D_t* IstVelModel_origin,
     const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin) {
-  static const uint8_t face_bits[6] = {
-      ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS, ACOUSTIC_FACE_Y_MINUS,
-      ACOUSTIC_FACE_Y_PLUS,  ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
-  static const int face_axis[6] = {0, 0, 1, 1, 2, 2};
-  static const int face_sign[6] = {-1, 1, -1, 1, -1, 1};
-  uint8_t flags = 0;
   elem_t* elemp = &Global.myMesh->elemTable[eindex];
   edata_t* edata = (edata_t*)elemp->data;
   int32_t lnid0 = elemp->lnid[0];
+  int axis, sign, tangent_axes[2];
+  int32_t target_level = elemp->level;
+  int32_t split;
+  int changed;
+  int64_t fragment_count = 0;
   double h = edata->edgesize;
   double ldb[3] = {Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].x,
                    Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].y,
                    Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z};
   double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
+  double normal[3];
 
-  for (int face = 0; face < 6; face++) {
-    vector3D_t probe;
-    int axis = face_axis[face];
+  if (!mesh_acoustic_face_axis(face, &axis, &sign, tangent_axes)) {
+    return 0;
+  }
+  mesh_acoustic_face_normal(face, normal);
 
-    probe.x[0] = ldb[0] + 0.5 * h;
-    probe.x[1] = ldb[1] + 0.5 * h;
-    probe.x[2] = ldb[2] + 0.5 * h;
-    probe.x[axis] = ldb[axis] + ((face_sign[face] > 0) ? h : 0.0) +
-                    face_sign[face] * eps;
+  if ((Param.theAcousticInterfaceMaxLevel >= elemp->level) &&
+      (Param.theAcousticInterfaceMaxLevel > target_level)) {
+    target_level = Param.theAcousticInterfaceMaxLevel;
+  }
 
-    if (mesh_probe_face_is_elastic(&probe, IstVelModel_origin,
-                                   basinVelModel_origin,
-                                   threeDVelModel_origin)) {
-      flags |= face_bits[face];
+  do {
+    changed = 0;
+    split = mesh_interface_fragment_split(elemp->level, target_level);
+
+    for (int iu = 0; iu < split; iu++) {
+      for (int iv = 0; iv < split; iv++) {
+        vector3D_t probe;
+        int32_t neighbor_level = -1;
+        double u = ((double)iu + 0.5) / (double)split;
+        double v = ((double)iv + 0.5) / (double)split;
+
+        probe.x[0] = ldb[0] + 0.5 * h;
+        probe.x[1] = ldb[1] + 0.5 * h;
+        probe.x[2] = ldb[2] + 0.5 * h;
+        probe.x[axis] = ldb[axis] + ((sign > 0) ? h : 0.0) + sign * eps;
+        probe.x[tangent_axes[0]] = ldb[tangent_axes[0]] + u * h;
+        probe.x[tangent_axes[1]] = ldb[tangent_axes[1]] + v * h;
+
+        if (mesh_probe_face_elastic_info(
+                &probe, IstVelModel_origin, basinVelModel_origin,
+                threeDVelModel_origin, NULL, &neighbor_level, NULL) &&
+            (neighbor_level > target_level)) {
+          target_level = neighbor_level;
+          changed = 1;
+        }
+      }
+    }
+  } while (changed);
+
+  split = mesh_interface_fragment_split(elemp->level, target_level);
+  for (int iu = 0; iu < split; iu++) {
+    for (int iv = 0; iv < split; iv++) {
+      vector3D_t probe;
+      int64_t adjacent_geid = -1;
+      double center[3] = {0.0, 0.0, 0.0};
+      double u = ((double)iu + 0.5) / (double)split;
+      double v = ((double)iv + 0.5) / (double)split;
+
+      probe.x[0] = ldb[0] + 0.5 * h;
+      probe.x[1] = ldb[1] + 0.5 * h;
+      probe.x[2] = ldb[2] + 0.5 * h;
+      probe.x[axis] = ldb[axis] + ((sign > 0) ? h : 0.0) + sign * eps;
+      probe.x[tangent_axes[0]] = ldb[tangent_axes[0]] + u * h;
+      probe.x[tangent_axes[1]] = ldb[tangent_axes[1]] + v * h;
+
+      if (!mesh_probe_face_elastic_info(
+              &probe, IstVelModel_origin, basinVelModel_origin,
+              threeDVelModel_origin, NULL, NULL, &adjacent_geid)) {
+        continue;
+      }
+
+      center[axis] = (double)sign;
+      center[tangent_axes[0]] = -1.0 + 2.0 * u;
+      center[tangent_axes[1]] = -1.0 + 2.0 * v;
+      fragment_count++;
+
+      if (append_fragments) {
+        const double fragment_h = h / (double)split;
+        mesh_append_acoustic_interface_fragment(
+            table_count, table_capacity, eindex, face, fragment_h * fragment_h,
+            center, normal, adjacent_geid);
+      }
     }
   }
 
-  return flags;
+  return fragment_count;
 }
 
 static void mesh_build_acoustic_interface_flags(
@@ -3124,8 +3376,10 @@ static void mesh_build_acoustic_interface_flags(
   static const uint8_t face_bits[6] = {
       ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS, ACOUSTIC_FACE_Y_MINUS,
       ACOUSTIC_FACE_Y_PLUS,  ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
-  int64_t local_counts[2] = {0, 0};
-  int64_t global_counts[2] = {0, 0};
+  int64_t local_counts[3] = {0, 0, 0};
+  int64_t global_counts[3] = {0, 0, 0};
+  int64_t table_count = 0;
+  int64_t table_capacity = 0;
 
   mesh_release_acoustic_interface_data();
 
@@ -3146,96 +3400,67 @@ static void mesh_build_acoustic_interface_flags(
 
   for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     edata_t* edata = (edata_t*)Global.myMesh->elemTable[eindex].data;
-    uint8_t flags;
+    uint8_t flags = 0;
 
     if (!element_is_acoustic(edata)) {
       continue;
     }
 
-    flags = mesh_detect_acoustic_interface_faces(
-        eindex, IstVelModel_origin, basinVelModel_origin, threeDVelModel_origin);
+    for (int iface = 0; iface < 6; iface++) {
+      uint8_t face = face_bits[iface];
+      int64_t fragments = mesh_build_acoustic_interface_face_fragments(
+          eindex, face, acoustic_pressure_enabled(), &table_count,
+          &table_capacity, IstVelModel_origin, basinVelModel_origin,
+          threeDVelModel_origin);
+
+      if (fragments == 0) {
+        continue;
+      }
+
+      flags |= face;
+      local_counts[1]++;
+      local_counts[2] += fragments;
+    }
+
     Global.acousticFaceFlags[eindex] = flags;
 
     if (flags != 0) {
       local_counts[0]++;
-      local_counts[1] += acoustic_face_count(flags);
     }
   }
 
   Global.acousticInterfaceElements = local_counts[0];
-  Global.acousticInterfaceFaces = local_counts[1];
+  if (acoustic_pressure_enabled()) {
+    assert(table_count == local_counts[2]);
+  }
+  Global.acousticInterfaceFaces =
+      acoustic_pressure_enabled() ? table_count : local_counts[1];
 
-  if (local_counts[1] > INT32_MAX) {
+  if (Global.acousticInterfaceFaces > INT32_MAX) {
     fprintf(stderr,
-            "Thread %d: too many local acoustic interface faces for GPU table\n",
+            "Thread %d: too many local acoustic interface fragments for GPU table\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
 
-  if (acoustic_pressure_enabled() && (local_counts[1] > 0)) {
-    int64_t table_index = 0;
-    size_t face_count = (size_t)local_counts[1];
-
-    Global.acousticInterfaceElementIds =
-        (int32_t*)malloc(face_count * sizeof(int32_t));
-    Global.acousticInterfaceFaceIds =
-        (uint8_t*)malloc(face_count * sizeof(uint8_t));
-    Global.acousticInterfaceFaceAreas =
-        (double*)malloc(face_count * sizeof(double));
-    Global.acousticInterfaceFaceNormals =
-        (double*)malloc(3 * face_count * sizeof(double));
-    if ((Global.acousticInterfaceElementIds == NULL) ||
-        (Global.acousticInterfaceFaceIds == NULL) ||
-        (Global.acousticInterfaceFaceAreas == NULL) ||
-        (Global.acousticInterfaceFaceNormals == NULL)) {
-      fprintf(stderr,
-              "Thread %d: failed to allocate acoustic interface face table\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-      elem_t* elemp = &Global.myMesh->elemTable[eindex];
-      edata_t* edata = (edata_t*)elemp->data;
-      double face_area = edata->edgesize * edata->edgesize;
-      uint8_t flags = Global.acousticFaceFlags[eindex];
-
-      if (flags == 0) {
-        continue;
-      }
-
-      for (int iface = 0; iface < 6; iface++) {
-        double normal[3];
-        uint8_t face = face_bits[iface];
-
-        if ((flags & face) == 0) {
-          continue;
-        }
-
-        mesh_acoustic_face_normal(face, normal);
-        Global.acousticInterfaceElementIds[table_index] = eindex;
-        Global.acousticInterfaceFaceIds[table_index] = face;
-        Global.acousticInterfaceFaceAreas[table_index] = face_area;
-        Global.acousticInterfaceFaceNormals[3 * table_index + 0] = normal[0];
-        Global.acousticInterfaceFaceNormals[3 * table_index + 1] = normal[1];
-        Global.acousticInterfaceFaceNormals[3 * table_index + 2] = normal[2];
-        table_index++;
-      }
-    }
-
-    assert(table_index == local_counts[1]);
-  }
-
-  MPI_Reduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, 0,
+  MPI_Reduce(local_counts, global_counts, 3, MPI_INT64_T, MPI_SUM, 0,
              comm_solver);
   if (Global.myID == 0) {
-    monitor_print(
-        "Acoustic interface coupling: %snormal-projected acoustic faces %.1fM, "
-        "acoustic interface elements %.1fM\n",
-        acoustic_pressure_enabled() ? "table-backed " : "",
-        (double)global_counts[1] / 1.0e6, (double)global_counts[0] / 1.0e6);
+    if (acoustic_pressure_enabled()) {
+      monitor_print(
+          "Acoustic interface coupling: interface faces %.1fM, "
+          "face fragments %.1fM, acoustic interface elements %.1fM\n",
+          (double)global_counts[1] / 1.0e6,
+          (double)global_counts[2] / 1.0e6,
+          (double)global_counts[0] / 1.0e6);
+    } else {
+      monitor_print(
+          "Acoustic interface coupling: normal-projected acoustic faces %.1fM, "
+          "acoustic interface elements %.1fM\n",
+          (double)global_counts[1] / 1.0e6,
+          (double)global_counts[0] / 1.0e6);
+    }
     fflush(stdout);
   }
 }
@@ -4608,6 +4833,9 @@ static void setrec_mesh_import_bootstrap(octant_t* leaf, double ticksize,
 
 static void mesh_generate_from_etree(void) {
   int64_t tote, mine, maxe;
+  vector3D_t IstVelModel_origin;
+  vector3D_t basinVelModel_origin;
+  vector3D_t threeDVelModel_origin;
   const char* verify_env = getenv("HERCULES_MESH_IMPORT_VERIFY");
   int use_cursor_tree = mesh_import_use_cursor_tree();
   int verify_import =
@@ -4619,6 +4847,25 @@ static void mesh_generate_from_etree(void) {
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
   setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
   mesh_import_reset_stats();
+
+  if (Param.IstanbulVelocityModel == YES) {
+    IstVelModel_origin = compute_domain_coords_linearinterp(
+        28.675, 40.9565, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.basinVelocityModel == YES) {
+    basinVelModel_origin = compute_domain_coords_linearinterp(
+        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+  }
+  if (Param.threeDVelocityModel == YES) {
+    threeDVelModel_origin = compute_domain_coords_linearinterp(
+        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+        Param.theDomainY, Param.theDomainX, &Param.utmZone);
+  }
 
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
@@ -4830,7 +5077,10 @@ static void mesh_generate_from_etree(void) {
   }
 
   mesh_sanitize_and_report_acoustic("Imported mesh");
-  mesh_build_acoustic_interface_flags(NULL, NULL, NULL);
+  mesh_build_acoustic_interface_flags(
+      (Param.IstanbulVelocityModel == YES) ? &IstVelModel_origin : NULL,
+      (Param.basinVelocityModel == YES) ? &basinVelModel_origin : NULL,
+      (Param.threeDVelocityModel == YES) ? &threeDVelModel_origin : NULL);
 
   etree_close(Global.theMeshInputEp);
   Global.theMeshInputEp = NULL;
@@ -6589,6 +6839,7 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
+  Global.gpuData.acousticInterfaceFaceCentersDevice = NULL;
   Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
@@ -6643,6 +6894,15 @@ static void solver_init() {
                      face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to allocate acoustic interface face areas\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceFaceCentersDevice),
+              3 * face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface fragment centers\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -7239,6 +7499,16 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceCentersDevice,
+                     Global.acousticInterfaceFaceCenters,
+                     3 * face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface fragment centers\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
       if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceNormalsDevice,
                      Global.acousticInterfaceFaceNormals,
                      3 * face_count * sizeof(double),
@@ -7579,6 +7849,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceElementIdsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceIdsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
@@ -16971,27 +17242,29 @@ int main(int argc, char** argv) {
     g_hasIstanbulVelModelOrigin = 0;
   }
 
-  if (Param.theMeshInputMode == 0) {
-    if (Param.useProfile == YES) {
-      /* Read profile to memory */
-      load_profile(Param.parameters_input_file);
-    } else {
-      /* Create and open database */
-      open_cvmdb();
-    }
+  int need_material_queries =
+      (Param.theMeshInputMode == 0) ||
+      ((Param.includeAcoustic == YES) &&
+       (Param.acousticInterfaceCoupling == YES));
+
+  if (Param.useProfile == YES) {
+    /* Read profile to memory */
+    load_profile(Param.parameters_input_file);
+  } else if (need_material_queries) {
+    /* Create and open database */
+    open_cvmdb();
   }
 
-  /* Initialize velocity models only when they will be queried during meshing */
-  if (Param.theMeshInputMode == 0) {
-    if (Param.IstanbulVelocityModel == YES) {
-      Istanbul_init(Global.myID);
-    } else if (Param.threeDVelocityModel == YES) {
-      /* Initialize 3D velocity model */
-      general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
-    }
-  } else if (Global.myID == 0) {
-    monitor_print(
-        "Mesh input mode: skipping Istanbul/3D velocity model initialization.\n");
+  /* Initialize velocity models when meshing or interface sampling uses them. */
+  if (Param.IstanbulVelocityModel == YES && need_material_queries) {
+    Istanbul_init(Global.myID);
+  } else if (Param.threeDVelocityModel == YES && need_material_queries) {
+    /* Initialize 3D velocity model */
+    general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
+  } else if (((Param.IstanbulVelocityModel == YES) ||
+              (Param.threeDVelocityModel == YES)) &&
+             (Global.myID == 0)) {
+    monitor_print("Skipping Istanbul/3D velocity model initialization.\n");
   }
 
   /* Initialize nonlinear parameters */
