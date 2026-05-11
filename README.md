@@ -234,6 +234,12 @@ Acoustic-elastic input flags (input file):
 	elastic displacement field. The pressure column is `nan` for stations whose
 	containing element is elastic, because scalar acoustic pressure is not
 	defined there.
+- `station_mediums_output_file`
+	Optional station diagnostic output path. The solver writes this one-time
+	metadata file during station setup. It records each station's owning medium
+	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
+	element id/level, local coordinates, and material properties. If unset, it
+	defaults to `output_stations_directory/station_mediums.txt`.
 
 Typical two-phase settings:
 

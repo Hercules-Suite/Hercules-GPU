@@ -466,6 +466,9 @@ static int compare_adjust_dist_edge(const void* a, const void* b);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
 static void solver_update_acoustic_station_kinematics(int32_t step);
 static int station_pressure_gradient(int32_t iStation, double grad[3]);
+typedef struct station_medium_record_t station_medium_record_t;
+static void station_write_mediums_file(
+    const station_medium_record_t* localRecords);
 static void solver_prepare_force_upload_ranges(mesh_t* mesh,
                                                int32_t sourceCount);
 
@@ -804,6 +807,32 @@ void createDir(const char* path, const char* fname) {
   free(path_copy);
 }
 
+static void create_parent_dir_for_file(const char* path, const char* fname) {
+  char dir[256];
+  char* slash;
+
+  if ((path == NULL) || (path[0] == '\0')) {
+    return;
+  }
+
+  strncpy(dir, path, sizeof(dir));
+  dir[sizeof(dir) - 1] = '\0';
+  slash = strrchr(dir, '/');
+  if (slash == NULL) {
+    return;
+  }
+
+  if (slash == dir) {
+    dir[1] = '\0';
+  } else {
+    *slash = '\0';
+  }
+
+  if (dir[0] != '\0') {
+    createDir(dir, fname);
+  }
+}
+
 /* ---------- Static global variables ------------------------------------ */
 
 /* These are all of the input parameters - add new ones here */
@@ -822,6 +851,7 @@ static struct Param_t {
   char theMeshDirMatlab[256];
   char the3DVelModelDir[256];
   char theTopoDir[256];
+  char theStationMediumsFile[256];
   double theVsCut;
   double theFactor;
   double theFreq;
@@ -927,6 +957,7 @@ static struct Param_t {
            .theMeshDirMatlab = "outputfiles/For_Matlab",
            .the3DVelModelDir = "inputfiles/materialfiles",
            .theTopoDir = "inputfiles/topography",
+           .theStationMediumsFile = "",
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1019,6 +1050,26 @@ static struct Global_t {
             .theYForMeshOrigin = 0.0,
             .theZForMeshOrigin = 0.0,
             .theCVMRecordSize = sizeof(cvmrecord_t)};
+
+struct station_medium_record_t {
+  int32_t stationId;
+  int32_t ownerRank;
+  int32_t ownerIsAcoustic;
+  int32_t pressureDefined;
+  int32_t elementLevel;
+  int32_t reserved;
+  int64_t elementId;
+  double x;
+  double y;
+  double z;
+  double csi;
+  double eta;
+  double dzeta;
+  double h;
+  double Vp;
+  double Vs;
+  double rho;
+};
 
 /* ------------------------------End of
  * declarations------------------------------ */
@@ -14827,7 +14878,16 @@ static void read_stations_info(const char* numericalin) {
 
   parsetext(fp, "output_stations_directory", 's', Param.theStationsDirOut);
   createDir(Param.theStationsDirOut, fname);
+  Param.theStationMediumsFile[0] = '\0';
+  parsetext(fp, "station_mediums_output_file", 's',
+            Param.theStationMediumsFile);
+  if (Param.theStationMediumsFile[0] == '\0') {
+    snprintf(Param.theStationMediumsFile, sizeof(Param.theStationMediumsFile),
+             "%s/station_mediums.txt", Param.theStationsDirOut);
+  }
+  create_parent_dir_for_file(Param.theStationMediumsFile, fname);
 
+  fclose(fp);
   return;
 }
 
@@ -14863,8 +14923,118 @@ void broadcast_stations_info() {
 
   broadcast_char_array(Param.theStationsDirOut, sizeof(Param.theStationsDirOut),
                        0, comm_solver);
+  broadcast_char_array(Param.theStationMediumsFile,
+                       sizeof(Param.theStationMediumsFile), 0, comm_solver);
 
   return;
+}
+
+static int station_medium_record_compare(const void* a, const void* b) {
+  const station_medium_record_t* lhs = (const station_medium_record_t*)a;
+  const station_medium_record_t* rhs = (const station_medium_record_t*)b;
+
+  if (lhs->stationId < rhs->stationId) {
+    return -1;
+  }
+  if (lhs->stationId > rhs->stationId) {
+    return 1;
+  }
+  return 0;
+}
+
+static void station_write_mediums_file(
+    const station_medium_record_t* localRecords) {
+  const int32_t localCount = Param.myNumberOfStations;
+  const int64_t localBytes64 =
+      (int64_t)localCount * (int64_t)sizeof(station_medium_record_t);
+  station_medium_record_t emptyRecord;
+  int localBytes;
+  int* recvCounts = NULL;
+  int* displs = NULL;
+  station_medium_record_t* records = NULL;
+  int totalBytes = 0;
+  int totalRecords = 0;
+  void* sendBuffer;
+
+  if (localBytes64 > INT_MAX) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Too many local station medium records to gather");
+  }
+  localBytes = (int)localBytes64;
+  sendBuffer = (localBytes > 0) ? (void*)localRecords : &emptyRecord;
+
+  if (Global.myID == 0) {
+    recvCounts = (int*)calloc((size_t)Global.theGroupSize, sizeof(int));
+    displs = (int*)calloc((size_t)Global.theGroupSize, sizeof(int));
+    if ((recvCounts == NULL) || (displs == NULL)) {
+      free(recvCounts);
+      free(displs);
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Error allocating station medium gather buffers");
+    }
+  }
+
+  MPI_Gather((void*)&localBytes, 1, MPI_INT, recvCounts, 1, MPI_INT, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    for (int rank = 0; rank < Global.theGroupSize; rank++) {
+      displs[rank] = totalBytes;
+      totalBytes += recvCounts[rank];
+    }
+    totalRecords = totalBytes / (int)sizeof(station_medium_record_t);
+    if (totalRecords > 0) {
+      records = (station_medium_record_t*)malloc((size_t)totalBytes);
+      if (records == NULL) {
+        free(recvCounts);
+        free(displs);
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Error allocating station medium records");
+      }
+    }
+  }
+
+  MPI_Gatherv(sendBuffer, localBytes, MPI_BYTE, records, recvCounts,
+              displs, MPI_BYTE, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    FILE* fp;
+
+    if (totalRecords > 0) {
+      qsort(records, (size_t)totalRecords, sizeof(station_medium_record_t),
+            station_medium_record_compare);
+    }
+
+    fp = hu_fopen(Param.theStationMediumsFile, "w");
+    fprintf(fp,
+            "# station_id owner_medium pressure_defined owner_rank element_id "
+            "element_level x_m y_m z_m csi eta dzeta h_m Vp_mps Vs_mps "
+            "rho_kgm3\n");
+    for (int i = 0; i < totalRecords; i++) {
+      const station_medium_record_t* rec = &records[i];
+      fprintf(fp,
+              "%d %s %s %d %" PRId64 " %d %.9e %.9e %.9e %.9e %.9e %.9e "
+              "%.9e %.9e %.9e %.9e\n",
+              rec->stationId, rec->ownerIsAcoustic ? "acoustic" : "elastic",
+              rec->pressureDefined ? "yes" : "no", rec->ownerRank,
+              rec->elementId, rec->elementLevel, rec->x, rec->y, rec->z,
+              rec->csi, rec->eta, rec->dzeta, rec->h, rec->Vp, rec->Vs,
+              rec->rho);
+    }
+    fclose(fp);
+
+    monitor_print("Station medium metadata:           %s\n",
+                  Param.theStationMediumsFile);
+    if (totalRecords != Param.theNumberOfStations) {
+      monitor_print(
+          "WARNING: wrote %d of %d configured station medium records.\n",
+          totalRecords, Param.theNumberOfStations);
+    }
+
+    free(records);
+    free(recvCounts);
+    free(displs);
+  }
 }
 
 /**
@@ -14875,6 +15045,7 @@ void setup_stations_data() {
   int32_t localCapacity = 0;
   int32_t* localStationIds = NULL;
   octant_t** localStationOctants = NULL;
+  station_medium_record_t* stationMediumRecords = NULL;
   vector3D_t stationCoords;
   octant_t* octant;
 
@@ -14927,6 +15098,12 @@ void setup_stations_data() {
     //             Param.theNumberOfStations );
 
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
+    stationMediumRecords = (station_medium_record_t*)calloc(
+        (size_t)Param.myNumberOfStations, sizeof(station_medium_record_t));
+    if (stationMediumRecords == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Error allocating station medium records");
+    }
   }
 
   Timer_Start("Stations Local Init");
@@ -14977,6 +15154,34 @@ void setup_stations_data() {
     compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                           &(Param.myStations[iLCStation].localcoords),
                           Param.myStations[iLCStation].nodestointerpolate);
+
+    stationMediumRecords[iLCStation].stationId = iStation;
+    stationMediumRecords[iLCStation].ownerRank = Global.myID;
+    stationMediumRecords[iLCStation].ownerIsAcoustic =
+        element_is_acoustic(stationMaterial) ? 1 : 0;
+    stationMediumRecords[iLCStation].pressureDefined =
+        Param.myStations[iLCStation].pressure_is_defined;
+    stationMediumRecords[iLCStation].elementLevel =
+        Global.myMesh->elemTable[stationElementIndex].level;
+    stationMediumRecords[iLCStation].elementId =
+        Global.myMesh->elemTable[stationElementIndex].geid;
+    stationMediumRecords[iLCStation].x = stationCoords.x[0];
+    stationMediumRecords[iLCStation].y = stationCoords.x[1];
+    stationMediumRecords[iLCStation].z = stationCoords.x[2];
+    stationMediumRecords[iLCStation].csi =
+        Param.myStations[iLCStation].localcoords.x[0];
+    stationMediumRecords[iLCStation].eta =
+        Param.myStations[iLCStation].localcoords.x[1];
+    stationMediumRecords[iLCStation].dzeta =
+        Param.myStations[iLCStation].localcoords.x[2];
+    stationMediumRecords[iLCStation].h =
+        (stationMaterial != NULL) ? stationMaterial->edgesize : 0.0;
+    stationMediumRecords[iLCStation].Vp =
+        (stationMaterial != NULL) ? stationMaterial->Vp : 0.0;
+    stationMediumRecords[iLCStation].Vs =
+        (stationMaterial != NULL) ? stationMaterial->Vs : 0.0;
+    stationMediumRecords[iLCStation].rho =
+        (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
 
     /*
      * This section now enclosed in a DEBUG def because its information
@@ -15046,6 +15251,9 @@ void setup_stations_data() {
     }
   }
   Timer_Stop("Stations Local Init");
+
+  station_write_mediums_file(stationMediumRecords);
+  free(stationMediumRecords);
 
   free(localStationIds);
   free(localStationOctants);
