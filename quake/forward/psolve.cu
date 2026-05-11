@@ -17173,6 +17173,7 @@ int main(int argc, char** argv) {
   int32_t flag;
   MPI_Status status;
 #endif /* DEBUG */
+  int need_material_queries = 0;
 
   /* MPI initialization */
   MPI_Init(&argc, &argv);
@@ -17242,7 +17243,7 @@ int main(int argc, char** argv) {
     g_hasIstanbulVelModelOrigin = 0;
   }
 
-  int need_material_queries =
+  need_material_queries =
       (Param.theMeshInputMode == 0) ||
       ((Param.includeAcoustic == YES) &&
        (Param.acousticInterfaceCoupling == YES));
