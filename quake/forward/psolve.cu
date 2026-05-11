@@ -8799,12 +8799,14 @@ static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
   if ((!acoustic_pressure_enabled()) || (g_acousticPressureElementCount <= 0)) {
     return;
   }
+
+  Timer_Start("Acoustic pressure traction");
   face_count = solver->gpuData->acousticInterfaceFaceCount;
   if (face_count <= 0) {
+    Timer_Stop("Acoustic pressure traction");
     return;
   }
 
-  Timer_Start("Acoustic pressure traction");
   blocksize = 256;
   gridsize = (face_count + blocksize - 1) / blocksize;
   kernelAcousticPressureDisplacementCoupling<<<
