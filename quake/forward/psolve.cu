@@ -3076,15 +3076,20 @@ static int mesh_probe_face_elastic_info(
     local_neighbor_is_elastic = material_values_are_elastic(
         neighbor_edata->Vp, neighbor_edata->Vs, neighbor_edata->rho);
 
-    if (local_neighbor_is_elastic && (neighbor_eindex_out != NULL)) {
+    if (!local_neighbor_is_elastic) {
+      return 0;
+    }
+
+    if (neighbor_eindex_out != NULL) {
       *neighbor_eindex_out = neighbor_eindex;
     }
-    if (local_neighbor_is_elastic && (neighbor_level_out != NULL)) {
+    if (neighbor_level_out != NULL) {
       *neighbor_level_out = neighbor_elemp->level;
     }
-    if (local_neighbor_is_elastic && (neighbor_geid_out != NULL)) {
+    if (neighbor_geid_out != NULL) {
       *neighbor_geid_out = neighbor_elemp->geid;
     }
+    return 1;
   }
 
   north_m = Global.theXForMeshOrigin + domain_point->x[0];
@@ -3094,13 +3099,10 @@ static int mesh_probe_face_elastic_info(
   if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
                                          IstVelModel_origin, basinVelModel_origin,
                                          threeDVelModel_origin, &g_props) == 0) {
-    if (found_local_neighbor && !local_neighbor_is_elastic) {
-      return 0;
-    }
     return material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
   }
 
-  return found_local_neighbor && local_neighbor_is_elastic;
+  return 0;
 }
 
 static int mesh_query_material_at_model_point(
