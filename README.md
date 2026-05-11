@@ -224,8 +224,11 @@ Acoustic-elastic input flags (input file):
 	the pressure formulation builds an explicit acoustic-solid interface table.
 	In octree meshes, nonconforming interface faces are split into area-weighted
 	fragments with fragment centers and normals, and CUDA kernels apply the
-	normal traction/acceleration coupling only on those fragments. Fragment
-	subdivision follows `acoustic_interface_max_level` and finer local neighbors.
+	normal traction/acceleration coupling only on those fragments. Each fragment
+	interpolates pressure on the acoustic element and displacement acceleration
+	on the adjacent elastic element, so refined elastic neighbors can couple to
+	coarser acoustic faces. Fragment subdivision follows
+	`acoustic_interface_max_level` and finer local neighbors.
 	When the neighboring element is local, the table uses that element's
 	mesh-level acoustic/elastic classification, so mixed elements kept elastic
 	still couple to adjacent acoustic elements. Subdivision has a per-face cap of
@@ -236,8 +239,8 @@ Acoustic-elastic input flags (input file):
 	acoustic-solid interface fragment after mesh setup. The file records the
 	acoustic element id, face id, fragment area, fragment center in local and
 	model coordinates, outward normal, element level/size, and adjacent elastic
-	element id when the adjacent element is local. This file can be very large,
-	so it is disabled when unset.
+	element local index/id and local fragment coordinates when the adjacent
+	element is local. This file can be very large, so it is disabled when unset.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
 	`acoustic_pressure_formulation=yes`. Pressure is appended as a

@@ -402,7 +402,6 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
 
   const int32_t eindex =
       gpuData->acousticInterfaceElementIdsDevice[faceIndex];
-  const uint8_t face = gpuData->acousticInterfaceFaceIdsDevice[faceIndex];
   const double face_coeff =
       deltaT2 * gpuData->acousticInterfaceFaceAreasDevice[faceIndex];
   const double center[3] = {
@@ -413,19 +412,44 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
+  const int32_t adjacent_eindex =
+      (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
+          : -1;
+  const double adjacent_center[3] = {
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 0]
+          : center[0],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 1]
+          : center[1],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
+          : center[2]};
+  const int32_t force_eindex = (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const double* force_center = (adjacent_eindex >= 0) ? adjacent_center : center;
+  double pressure = 0.0;
 
   for (int i = 0; i < 8; i++) {
-    if (!acoustic_face_has_node(face, i)) {
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+    const double weight =
+        acoustic_shape_value_at(i, center[0], center[1], center[2]);
+
+    pressure += weight * (double)gpuData->pressureTm1Device[lnid];
+  }
+
+  for (int i = 0; i < 8; i++) {
+    const double weight =
+        acoustic_shape_value_at(i, force_center[0], force_center[1],
+                                force_center[2]);
+    if (weight == 0.0) {
       continue;
     }
 
     const int32_t lnid =
-        gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
-    const solver_float pressure = gpuData->pressureTm1Device[lnid];
-    const double weight =
-        acoustic_shape_value_at(i, center[0], center[1], center[2]);
+        gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
     fvector_t* nodalForce = gpuData->forceDevice + lnid;
-
     atomicAdd((solver_float*)&nodalForce->f[0],
               (solver_float)(face_coeff * weight * pressure * normal[0]));
     atomicAdd((solver_float*)&nodalForce->f[1],
@@ -484,7 +508,6 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 
   const int32_t eindex =
       gpuData->acousticInterfaceElementIdsDevice[faceIndex];
-  const uint8_t face = gpuData->acousticInterfaceFaceIdsDevice[faceIndex];
   const double face_coeff =
       gpuData->acousticInterfaceFaceAreasDevice[faceIndex];
   const double center[3] = {
@@ -495,30 +518,61 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
+  const int32_t adjacent_eindex =
+      (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
+          : -1;
+  const double adjacent_center[3] = {
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 0]
+          : center[0],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 1]
+          : center[1],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
+          : center[2]};
+  const int32_t accel_eindex =
+      (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const double* accel_center =
+      (adjacent_eindex >= 0) ? adjacent_center : center;
+  double accel_n = 0.0;
 
   for (int i = 0; i < 8; i++) {
-    if (!acoustic_face_has_node(face, i)) {
+    const double weight =
+        acoustic_shape_value_at(i, accel_center[0], accel_center[1],
+                                accel_center[2]);
+    if (weight == 0.0) {
+      continue;
+    }
+
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
+    const fvector_t u_next = gpuData->tm2Device[lnid];
+    const fvector_t u_curr = gpuData->tm1Device[lnid];
+    const fvector_t u_prev = gpuData->tm3Device[lnid];
+
+    accel_n += weight *
+               ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
+                  (double)u_prev.f[0]) *
+                     invDeltaT2 * normal[0]) +
+                (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
+                  (double)u_prev.f[1]) *
+                     invDeltaT2 * normal[1]) +
+                (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
+                  (double)u_prev.f[2]) *
+                     invDeltaT2 * normal[2]));
+  }
+
+  for (int i = 0; i < 8; i++) {
+    const double weight =
+        acoustic_shape_value_at(i, center[0], center[1], center[2]);
+    if (weight == 0.0) {
       continue;
     }
 
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
-    const fvector_t u_next = gpuData->tm2Device[lnid];
-    const fvector_t u_curr = gpuData->tm1Device[lnid];
-    const fvector_t u_prev = gpuData->tm3Device[lnid];
-    const double weight =
-        acoustic_shape_value_at(i, center[0], center[1], center[2]);
-    const double accel_n =
-        ((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-         (double)u_prev.f[0]) *
-            invDeltaT2 * normal[0] +
-        ((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-         (double)u_prev.f[1]) *
-            invDeltaT2 * normal[1] +
-        ((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-         (double)u_prev.f[2]) *
-            invDeltaT2 * normal[2];
-
     atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
               (solver_float)(-face_coeff * weight * deltaT2 * accel_n));
   }

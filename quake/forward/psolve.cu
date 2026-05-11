@@ -1032,6 +1032,8 @@ static struct Global_t {
   double* acousticInterfaceFaceAreas;
   double* acousticInterfaceFaceCenters;
   double* acousticInterfaceFaceNormals;
+  int32_t* acousticInterfaceAdjacentElementIndexes;
+  double* acousticInterfaceAdjacentCenters;
   int64_t* acousticInterfaceAdjacentElementIds;
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
@@ -2977,6 +2979,8 @@ static void mesh_release_acoustic_interface_data(void) {
   free(Global.acousticInterfaceFaceAreas);
   free(Global.acousticInterfaceFaceCenters);
   free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceAdjacentElementIndexes);
+  free(Global.acousticInterfaceAdjacentCenters);
   free(Global.acousticInterfaceAdjacentElementIds);
   Global.acousticFaceFlags = NULL;
   Global.acousticInterfaceElementIds = NULL;
@@ -2984,6 +2988,8 @@ static void mesh_release_acoustic_interface_data(void) {
   Global.acousticInterfaceFaceAreas = NULL;
   Global.acousticInterfaceFaceCenters = NULL;
   Global.acousticInterfaceFaceNormals = NULL;
+  Global.acousticInterfaceAdjacentElementIndexes = NULL;
+  Global.acousticInterfaceAdjacentCenters = NULL;
   Global.acousticInterfaceAdjacentElementIds = NULL;
   Global.acousticInterfaceElements = 0;
   Global.acousticInterfaceFaces = 0;
@@ -3179,6 +3185,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   double* new_areas;
   double* new_centers;
   double* new_normals;
+  int32_t* new_adjacent_indexes;
+  double* new_adjacent_centers;
   int64_t* new_adjacent;
 
   if ((capacity == NULL) || (needed <= *capacity)) {
@@ -3202,15 +3210,22 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   new_areas = (double*)malloc((size_t)new_capacity * sizeof(double));
   new_centers = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_normals = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
+  new_adjacent_indexes =
+      (int32_t*)malloc((size_t)new_capacity * sizeof(int32_t));
+  new_adjacent_centers =
+      (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_adjacent = (int64_t*)malloc((size_t)new_capacity * sizeof(int64_t));
   if ((new_elements == NULL) || (new_faces == NULL) || (new_areas == NULL) ||
       (new_centers == NULL) || (new_normals == NULL) ||
+      (new_adjacent_indexes == NULL) || (new_adjacent_centers == NULL) ||
       (new_adjacent == NULL)) {
     free(new_elements);
     free(new_faces);
     free(new_areas);
     free(new_centers);
     free(new_normals);
+    free(new_adjacent_indexes);
+    free(new_adjacent_centers);
     free(new_adjacent);
     fprintf(stderr,
             "Thread %d: failed to allocate acoustic interface fragment table\n",
@@ -3229,6 +3244,10 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
            3 * count * sizeof(double));
     memcpy(new_normals, Global.acousticInterfaceFaceNormals,
            3 * count * sizeof(double));
+    memcpy(new_adjacent_indexes, Global.acousticInterfaceAdjacentElementIndexes,
+           count * sizeof(int32_t));
+    memcpy(new_adjacent_centers, Global.acousticInterfaceAdjacentCenters,
+           3 * count * sizeof(double));
     memcpy(new_adjacent, Global.acousticInterfaceAdjacentElementIds,
            count * sizeof(int64_t));
   }
@@ -3238,6 +3257,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   free(Global.acousticInterfaceFaceAreas);
   free(Global.acousticInterfaceFaceCenters);
   free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceAdjacentElementIndexes);
+  free(Global.acousticInterfaceAdjacentCenters);
   free(Global.acousticInterfaceAdjacentElementIds);
 
   Global.acousticInterfaceElementIds = new_elements;
@@ -3245,6 +3266,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   Global.acousticInterfaceFaceAreas = new_areas;
   Global.acousticInterfaceFaceCenters = new_centers;
   Global.acousticInterfaceFaceNormals = new_normals;
+  Global.acousticInterfaceAdjacentElementIndexes = new_adjacent_indexes;
+  Global.acousticInterfaceAdjacentCenters = new_adjacent_centers;
   Global.acousticInterfaceAdjacentElementIds = new_adjacent;
   *capacity = new_capacity;
 }
@@ -3252,7 +3275,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
 static void mesh_append_acoustic_interface_fragment(
     int64_t* count, int64_t* capacity, int32_t eindex, uint8_t face,
     double area, const double center[3], const double normal[3],
-    int64_t adjacent_geid) {
+    int32_t adjacent_eindex, int64_t adjacent_geid,
+    const double adjacent_center[3]) {
   int64_t index;
 
   mesh_reserve_acoustic_interface_fragments(*count + 1, *count, capacity);
@@ -3267,7 +3291,11 @@ static void mesh_append_acoustic_interface_fragment(
   Global.acousticInterfaceFaceNormals[3 * index + 0] = normal[0];
   Global.acousticInterfaceFaceNormals[3 * index + 1] = normal[1];
   Global.acousticInterfaceFaceNormals[3 * index + 2] = normal[2];
+  Global.acousticInterfaceAdjacentElementIndexes[index] = adjacent_eindex;
   Global.acousticInterfaceAdjacentElementIds[index] = adjacent_geid;
+  Global.acousticInterfaceAdjacentCenters[3 * index + 0] = adjacent_center[0];
+  Global.acousticInterfaceAdjacentCenters[3 * index + 1] = adjacent_center[1];
+  Global.acousticInterfaceAdjacentCenters[3 * index + 2] = adjacent_center[2];
   *count = index + 1;
 }
 
@@ -3318,8 +3346,9 @@ static void mesh_write_acoustic_interface_diagnostics(void) {
     fprintf(fp,
             "# fragment_id rank local_fragment acoustic_element_index "
             "acoustic_element_id acoustic_level face face_name "
-            "adjacent_elastic_element_id area_m2 center_csi center_eta "
-            "center_dzeta center_domain_x_m center_domain_y_m "
+            "adjacent_elastic_element_index adjacent_elastic_element_id "
+            "area_m2 center_csi center_eta center_dzeta adjacent_csi "
+            "adjacent_eta adjacent_dzeta center_domain_x_m center_domain_y_m "
             "center_domain_z_m center_model_north_m center_model_east_m "
             "center_model_depth_m normal_x normal_y normal_z h_m\n");
     fclose(fp);
@@ -3340,6 +3369,12 @@ static void mesh_write_acoustic_interface_diagnostics(void) {
         double center_csi = Global.acousticInterfaceFaceCenters[3 * i + 0];
         double center_eta = Global.acousticInterfaceFaceCenters[3 * i + 1];
         double center_dzeta = Global.acousticInterfaceFaceCenters[3 * i + 2];
+        double adjacent_csi =
+            Global.acousticInterfaceAdjacentCenters[3 * i + 0];
+        double adjacent_eta =
+            Global.acousticInterfaceAdjacentCenters[3 * i + 1];
+        double adjacent_dzeta =
+            Global.acousticInterfaceAdjacentCenters[3 * i + 2];
         double normal_x = Global.acousticInterfaceFaceNormals[3 * i + 0];
         double normal_y = Global.acousticInterfaceFaceNormals[3 * i + 1];
         double normal_z = Global.acousticInterfaceFaceNormals[3 * i + 2];
@@ -3363,14 +3398,16 @@ static void mesh_write_acoustic_interface_diagnostics(void) {
 
         fprintf(fp,
                 "%" PRId64 " %d %" PRId64 " %d %" PRId64 " %d %u %s "
-                "%" PRId64 " %.9e %.9e %.9e %.9e %.9e %.9e %.9e %.9e "
-                "%.9e %.9e %.9e %.9e %.9e %.9e\n",
+                "%d %" PRId64 " %.9e %.9e %.9e %.9e %.9e %.9e %.9e "
+                "%.9e %.9e %.9e %.9e %.9e %.9e %.9e %.9e %.9e %.9e\n",
                 fragment_offset + i, Global.myID, i, eindex, elemp->geid,
                 elemp->level, (unsigned int)face,
                 mesh_acoustic_face_name(face),
+                Global.acousticInterfaceAdjacentElementIndexes[i],
                 Global.acousticInterfaceAdjacentElementIds[i],
                 Global.acousticInterfaceFaceAreas[i], center_csi, center_eta,
-                center_dzeta, center_x, center_y, center_z,
+                center_dzeta, adjacent_csi, adjacent_eta, adjacent_dzeta,
+                center_x, center_y, center_z,
                 Global.theXForMeshOrigin + center_x,
                 Global.theYForMeshOrigin + center_y,
                 Global.theZForMeshOrigin + center_z, normal_x, normal_y,
@@ -3469,22 +3506,28 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
   split = mesh_interface_fragment_split(elemp->level, target_level);
   for (int iu = 0; iu < split; iu++) {
     for (int iv = 0; iv < split; iv++) {
+      vector3D_t fragment_point;
       vector3D_t probe;
+      int32_t adjacent_eindex = -1;
       int64_t adjacent_geid = -1;
       double center[3] = {0.0, 0.0, 0.0};
+      double adjacent_center[3] = {0.0, 0.0, 0.0};
       double u = ((double)iu + 0.5) / (double)split;
       double v = ((double)iv + 0.5) / (double)split;
 
-      probe.x[0] = ldb[0] + 0.5 * h;
-      probe.x[1] = ldb[1] + 0.5 * h;
-      probe.x[2] = ldb[2] + 0.5 * h;
-      probe.x[axis] = ldb[axis] + ((sign > 0) ? h : 0.0) + sign * eps;
-      probe.x[tangent_axes[0]] = ldb[tangent_axes[0]] + u * h;
-      probe.x[tangent_axes[1]] = ldb[tangent_axes[1]] + v * h;
+      fragment_point.x[0] = ldb[0] + 0.5 * h;
+      fragment_point.x[1] = ldb[1] + 0.5 * h;
+      fragment_point.x[2] = ldb[2] + 0.5 * h;
+      fragment_point.x[axis] = ldb[axis] + ((sign > 0) ? h : 0.0);
+      fragment_point.x[tangent_axes[0]] = ldb[tangent_axes[0]] + u * h;
+      fragment_point.x[tangent_axes[1]] = ldb[tangent_axes[1]] + v * h;
+
+      probe = fragment_point;
+      probe.x[axis] += sign * eps;
 
       if (!mesh_probe_face_elastic_info(
               &probe, IstVelModel_origin, basinVelModel_origin,
-              threeDVelModel_origin, NULL, NULL, &adjacent_geid)) {
+              threeDVelModel_origin, &adjacent_eindex, NULL, &adjacent_geid)) {
         continue;
       }
 
@@ -3495,9 +3538,39 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
       if (append_fragments) {
         const double fragment_h = h / (double)split;
+
+        if ((adjacent_eindex >= 0) && (adjacent_eindex < Global.myMesh->lenum)) {
+          elem_t* adjacent_elemp = &Global.myMesh->elemTable[adjacent_eindex];
+          edata_t* adjacent_edata = (edata_t*)adjacent_elemp->data;
+          int32_t adjacent_lnid0 = adjacent_elemp->lnid[0];
+          double adjacent_h = adjacent_edata->edgesize;
+          double adjacent_ldb[3] = {
+              Global.myMesh->ticksize *
+                  Global.myMesh->nodeTable[adjacent_lnid0].x,
+              Global.myMesh->ticksize *
+                  Global.myMesh->nodeTable[adjacent_lnid0].y,
+              Global.myMesh->ticksize *
+                  Global.myMesh->nodeTable[adjacent_lnid0].z};
+
+          for (int dim = 0; dim < 3; dim++) {
+            adjacent_center[dim] =
+                2.0 * (fragment_point.x[dim] - adjacent_ldb[dim]) /
+                    adjacent_h -
+                1.0;
+            if ((adjacent_center[dim] > 1.0) &&
+                (adjacent_center[dim] < 1.0 + 1.0e-8)) {
+              adjacent_center[dim] = 1.0;
+            }
+            if ((adjacent_center[dim] < -1.0) &&
+                (adjacent_center[dim] > -1.0 - 1.0e-8)) {
+              adjacent_center[dim] = -1.0;
+            }
+          }
+        }
+
         mesh_append_acoustic_interface_fragment(
             table_count, table_capacity, eindex, face, fragment_h * fragment_h,
-            center, normal, adjacent_geid);
+            center, normal, adjacent_eindex, adjacent_geid, adjacent_center);
       }
     }
   }
@@ -6978,6 +7051,8 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
   Global.gpuData.acousticInterfaceFaceCentersDevice = NULL;
   Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
+  Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
+  Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
@@ -7049,6 +7124,25 @@ static void solver_init() {
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to allocate acoustic interface face normals\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
+              (void**)&(
+                  Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice),
+              face_count * sizeof(int32_t)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface adjacent element indexes\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceAdjacentCentersDevice),
+              3 * face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface adjacent centers\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -7656,6 +7750,27 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      if (cudaMemcpy(
+              Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice,
+              Global.acousticInterfaceAdjacentElementIndexes,
+              face_count * sizeof(int32_t), cudaMemcpyHostToDevice) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface adjacent element indexes\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceAdjacentCentersDevice,
+                     Global.acousticInterfaceAdjacentCenters,
+                     3 * face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface adjacent centers\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
     }
   }
 
@@ -7988,6 +8103,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
+  cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
