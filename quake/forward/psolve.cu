@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <float.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <mpi.h>
 #include <stdarg.h>
@@ -992,6 +993,10 @@ static struct Global_t {
   gpu_kernel_t gpu_kernel[MAX_CUDA_KERNEL];
   gpu_data_t gpuData;
   uint8_t* acousticFaceFlags;
+  int32_t* acousticInterfaceElementIds;
+  uint8_t* acousticInterfaceFaceIds;
+  double* acousticInterfaceFaceAreas;
+  double* acousticInterfaceFaceNormals;
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
 
@@ -2833,9 +2838,44 @@ static int material_values_are_elastic(double Vp, double Vs, double rho) {
   return (Vp > 0.0) && (rho > 0.0) && (Vs > ACOUSTIC_VS_EPS);
 }
 
+static void mesh_acoustic_face_normal(uint8_t face, double normal[3]) {
+  normal[0] = 0.0;
+  normal[1] = 0.0;
+  normal[2] = 0.0;
+
+  switch (face) {
+    case ACOUSTIC_FACE_X_MINUS:
+      normal[0] = -1.0;
+      break;
+    case ACOUSTIC_FACE_X_PLUS:
+      normal[0] = 1.0;
+      break;
+    case ACOUSTIC_FACE_Y_MINUS:
+      normal[1] = -1.0;
+      break;
+    case ACOUSTIC_FACE_Y_PLUS:
+      normal[1] = 1.0;
+      break;
+    case ACOUSTIC_FACE_Z_MINUS:
+      normal[2] = -1.0;
+      break;
+    case ACOUSTIC_FACE_Z_PLUS:
+      normal[2] = 1.0;
+      break;
+  }
+}
+
 static void mesh_release_acoustic_interface_data(void) {
   free(Global.acousticFaceFlags);
+  free(Global.acousticInterfaceElementIds);
+  free(Global.acousticInterfaceFaceIds);
+  free(Global.acousticInterfaceFaceAreas);
+  free(Global.acousticInterfaceFaceNormals);
   Global.acousticFaceFlags = NULL;
+  Global.acousticInterfaceElementIds = NULL;
+  Global.acousticInterfaceFaceIds = NULL;
+  Global.acousticInterfaceFaceAreas = NULL;
+  Global.acousticInterfaceFaceNormals = NULL;
   Global.acousticInterfaceElements = 0;
   Global.acousticInterfaceFaces = 0;
 }
@@ -3030,6 +3070,9 @@ static uint8_t mesh_detect_acoustic_interface_faces(
 static void mesh_build_acoustic_interface_flags(
     const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin) {
+  static const uint8_t face_bits[6] = {
+      ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS, ACOUSTIC_FACE_Y_MINUS,
+      ACOUSTIC_FACE_Y_PLUS,  ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
   int64_t local_counts[2] = {0, 0};
   int64_t global_counts[2] = {0, 0};
 
@@ -3071,12 +3114,76 @@ static void mesh_build_acoustic_interface_flags(
   Global.acousticInterfaceElements = local_counts[0];
   Global.acousticInterfaceFaces = local_counts[1];
 
+  if (local_counts[1] > INT32_MAX) {
+    fprintf(stderr,
+            "Thread %d: too many local acoustic interface faces for GPU table\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (acoustic_pressure_enabled() && (local_counts[1] > 0)) {
+    int64_t table_index = 0;
+    size_t face_count = (size_t)local_counts[1];
+
+    Global.acousticInterfaceElementIds =
+        (int32_t*)malloc(face_count * sizeof(int32_t));
+    Global.acousticInterfaceFaceIds =
+        (uint8_t*)malloc(face_count * sizeof(uint8_t));
+    Global.acousticInterfaceFaceAreas =
+        (double*)malloc(face_count * sizeof(double));
+    Global.acousticInterfaceFaceNormals =
+        (double*)malloc(3 * face_count * sizeof(double));
+    if ((Global.acousticInterfaceElementIds == NULL) ||
+        (Global.acousticInterfaceFaceIds == NULL) ||
+        (Global.acousticInterfaceFaceAreas == NULL) ||
+        (Global.acousticInterfaceFaceNormals == NULL)) {
+      fprintf(stderr,
+              "Thread %d: failed to allocate acoustic interface face table\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+      elem_t* elemp = &Global.myMesh->elemTable[eindex];
+      edata_t* edata = (edata_t*)elemp->data;
+      double face_area = edata->edgesize * edata->edgesize;
+      uint8_t flags = Global.acousticFaceFlags[eindex];
+
+      if (flags == 0) {
+        continue;
+      }
+
+      for (int iface = 0; iface < 6; iface++) {
+        double normal[3];
+        uint8_t face = face_bits[iface];
+
+        if ((flags & face) == 0) {
+          continue;
+        }
+
+        mesh_acoustic_face_normal(face, normal);
+        Global.acousticInterfaceElementIds[table_index] = eindex;
+        Global.acousticInterfaceFaceIds[table_index] = face;
+        Global.acousticInterfaceFaceAreas[table_index] = face_area;
+        Global.acousticInterfaceFaceNormals[3 * table_index + 0] = normal[0];
+        Global.acousticInterfaceFaceNormals[3 * table_index + 1] = normal[1];
+        Global.acousticInterfaceFaceNormals[3 * table_index + 2] = normal[2];
+        table_index++;
+      }
+    }
+
+    assert(table_index == local_counts[1]);
+  }
+
   MPI_Reduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, 0,
              comm_solver);
   if (Global.myID == 0) {
     monitor_print(
-        "Acoustic interface coupling: normal-projected acoustic faces %.1fM, "
+        "Acoustic interface coupling: %snormal-projected acoustic faces %.1fM, "
         "acoustic interface elements %.1fM\n",
+        acoustic_pressure_enabled() ? "table-backed " : "",
         (double)global_counts[1] / 1.0e6, (double)global_counts[0] / 1.0e6);
     fflush(stdout);
   }
@@ -6427,6 +6534,11 @@ static void solver_init() {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+  Global.gpuData.acousticInterfaceFaceCount = 0;
+  Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
+  Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
+  Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
+  Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
@@ -6452,6 +6564,47 @@ static void solver_init() {
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
+    }
+    Global.gpuData.acousticInterfaceFaceCount =
+        (int32_t)Global.acousticInterfaceFaces;
+    if (Global.gpuData.acousticInterfaceFaceCount > 0) {
+      size_t face_count =
+          (size_t)Global.gpuData.acousticInterfaceFaceCount;
+
+      if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceElementIdsDevice),
+              face_count * sizeof(int32_t)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface element table\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.acousticInterfaceFaceIdsDevice),
+                     face_count * sizeof(uint8_t)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface face table\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.acousticInterfaceFaceAreasDevice),
+                     face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface face areas\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceFaceNormalsDevice),
+              3 * face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface face normals\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
     }
   }
 
@@ -7001,6 +7154,51 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (Global.gpuData.acousticInterfaceFaceCount > 0) {
+      size_t face_count =
+          (size_t)Global.gpuData.acousticInterfaceFaceCount;
+
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceElementIdsDevice,
+                     Global.acousticInterfaceElementIds,
+                     face_count * sizeof(int32_t),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface element table\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceIdsDevice,
+                     Global.acousticInterfaceFaceIds,
+                     face_count * sizeof(uint8_t),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface face table\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceAreasDevice,
+                     Global.acousticInterfaceFaceAreas,
+                     face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface face areas\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceNormalsDevice,
+                     Global.acousticInterfaceFaceNormals,
+                     3 * face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface face normals\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
   }
 
   free(c1Array);
@@ -7327,6 +7525,10 @@ static void solver_delete() {
   cudaFree(Global.gpuData.lnidArrayDevice);
   cudaFree(Global.gpuData.acousticElementFlagsArrayDevice);
   cudaFree(Global.gpuData.acousticFaceFlagsArrayDevice);
+  cudaFree(Global.gpuData.acousticInterfaceElementIdsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFaceIdsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
@@ -8589,19 +8791,25 @@ static void solver_swap_pressure_buffers(mysolver_t* solver) {
 static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
                                                    mesh_t* mesh) {
   int blocksize;
+  int32_t face_count;
   int gridsize;
   cudaError_t cerror;
+  (void)mesh;
 
   if ((!acoustic_pressure_enabled()) || (g_acousticPressureElementCount <= 0)) {
+    return;
+  }
+  face_count = solver->gpuData->acousticInterfaceFaceCount;
+  if (face_count <= 0) {
     return;
   }
 
   Timer_Start("Acoustic pressure traction");
   blocksize = 256;
-  gridsize = (mesh->lenum + blocksize - 1) / blocksize;
+  gridsize = (face_count + blocksize - 1) / blocksize;
   kernelAcousticPressureDisplacementCoupling<<<
       gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, solver->gpuDataDevice, Param.theDeltaTSquared);
+      face_count, solver->gpuDataDevice, Param.theDeltaTSquared);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -8616,6 +8824,7 @@ static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
 static void solver_run_acoustic_pressure_step(mysolver_t* solver,
                                               mesh_t* mesh) {
   int blocksize;
+  int32_t face_count;
   int gridsize;
   cudaError_t cerror;
 
@@ -8640,6 +8849,23 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
+  }
+
+  face_count = solver->gpuData->acousticInterfaceFaceCount;
+  if (face_count > 0) {
+    gridsize = (face_count + blocksize - 1) / blocksize;
+    kernelAcousticPressureInterfaceForce<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        face_count, solver->gpuDataDevice, Param.theDeltaTSquared);
+
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: acoustic pressure interface force kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,

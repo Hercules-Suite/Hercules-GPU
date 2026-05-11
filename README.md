@@ -220,7 +220,10 @@ Acoustic-elastic input flags (input file):
 	mass/stiffness, while elastic elements continue to use displacement DOFs.
 	This requires `include_acoustic=yes`. On a flat model surface, acoustic
 	pressure nodes on the top external domain face are constrained to `p=0`
-	for a pressure-release water surface.
+	for a pressure-release water surface. When `acoustic_interface_coupling=yes`,
+	the pressure formulation builds an explicit acoustic-solid interface-face
+	table and CUDA kernels apply the normal traction/acceleration coupling only
+	on those faces.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
 	`acoustic_pressure_formulation=yes`. Pressure is appended as a

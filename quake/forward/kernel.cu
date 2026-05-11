@@ -406,56 +406,42 @@ void kernelStiffnessCalcLocal(int32_t lenum,
     return;
 }
 
-__global__ void kernelAcousticPressureDisplacementCoupling(int32_t lenum,
+__global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                                                            gpu_data_t* gpuData,
                                                            double deltaT2)
 {
-  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  const uint8_t face_bits[6] = {ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS,
-                                ACOUSTIC_FACE_Y_MINUS, ACOUSTIC_FACE_Y_PLUS,
-                                ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
+  int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  if (eindex >= lenum) {
-    return;
-  }
-  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
+  if (faceIndex >= faceCount) {
     return;
   }
 
-  uint8_t flags = gpuData->acousticFaceFlagsArrayDevice[eindex];
-  if (flags == 0) {
-    return;
-  }
-
+  const int32_t eindex =
+      gpuData->acousticInterfaceElementIdsDevice[faceIndex];
+  const uint8_t face = gpuData->acousticInterfaceFaceIdsDevice[faceIndex];
   const double face_coeff =
-      deltaT2 * gpuData->acousticPressureBoundaryCoeffArrayDevice[eindex];
+      0.25 * deltaT2 * gpuData->acousticInterfaceFaceAreasDevice[faceIndex];
+  const double normal[3] = {
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
 
-  for (int iface = 0; iface < 6; iface++) {
-    const uint8_t face = face_bits[iface];
-    double normal[3];
-
-    if ((flags & face) == 0) {
+  for (int i = 0; i < 8; i++) {
+    if (!acoustic_face_has_node(face, i)) {
       continue;
     }
 
-    acoustic_face_normal(face, normal);
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+    const solver_float pressure = gpuData->pressureTm1Device[lnid];
+    fvector_t* nodalForce = gpuData->forceDevice + lnid;
 
-    for (int i = 0; i < 8; i++) {
-      if (!acoustic_face_has_node(face, i)) {
-        continue;
-      }
-
-      const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-      const solver_float pressure = gpuData->pressureTm1Device[lnid];
-      fvector_t* nodalForce = gpuData->forceDevice + lnid;
-
-      atomicAdd((solver_float*)&nodalForce->f[0],
-                (solver_float)(face_coeff * pressure * normal[0]));
-      atomicAdd((solver_float*)&nodalForce->f[1],
-                (solver_float)(face_coeff * pressure * normal[1]));
-      atomicAdd((solver_float*)&nodalForce->f[2],
-                (solver_float)(face_coeff * pressure * normal[2]));
-    }
+    atomicAdd((solver_float*)&nodalForce->f[0],
+              (solver_float)(face_coeff * pressure * normal[0]));
+    atomicAdd((solver_float*)&nodalForce->f[1],
+              (solver_float)(face_coeff * pressure * normal[1]));
+    atomicAdd((solver_float*)&nodalForce->f[2],
+              (solver_float)(face_coeff * pressure * normal[2]));
   }
 }
 
@@ -465,10 +451,7 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
 {
   int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
   solver_float pressure[8];
-  const double invDeltaT2 = 1.0 / deltaT2;
-  const uint8_t face_bits[6] = {ACOUSTIC_FACE_X_MINUS, ACOUSTIC_FACE_X_PLUS,
-                                ACOUSTIC_FACE_Y_MINUS, ACOUSTIC_FACE_Y_PLUS,
-                                ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
+  (void)deltaT2;
 
   if (eindex >= lenum) {
     return;
@@ -496,52 +479,52 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
     atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
               (solver_float)(-stiffness_coeff * local));
   }
+}
 
-  if (gpuData->tm3Device == NULL) {
+__global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
+                                                     gpu_data_t* gpuData,
+                                                     double deltaT2)
+{
+  int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const double invDeltaT2 = 1.0 / deltaT2;
+
+  if ((faceIndex >= faceCount) || (gpuData->tm3Device == NULL)) {
     return;
   }
 
-  const uint8_t flags = gpuData->acousticFaceFlagsArrayDevice[eindex];
-  if (flags == 0) {
-    return;
-  }
-
+  const int32_t eindex =
+      gpuData->acousticInterfaceElementIdsDevice[faceIndex];
+  const uint8_t face = gpuData->acousticInterfaceFaceIdsDevice[faceIndex];
   const double face_coeff =
-      gpuData->acousticPressureBoundaryCoeffArrayDevice[eindex];
+      0.25 * gpuData->acousticInterfaceFaceAreasDevice[faceIndex];
+  const double normal[3] = {
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
+      gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
 
-  for (int iface = 0; iface < 6; iface++) {
-    const uint8_t face = face_bits[iface];
-    double normal[3];
-
-    if ((flags & face) == 0) {
+  for (int i = 0; i < 8; i++) {
+    if (!acoustic_face_has_node(face, i)) {
       continue;
     }
 
-    acoustic_face_normal(face, normal);
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+    const fvector_t u_next = gpuData->tm2Device[lnid];
+    const fvector_t u_curr = gpuData->tm1Device[lnid];
+    const fvector_t u_prev = gpuData->tm3Device[lnid];
+    const double accel_n =
+        ((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
+         (double)u_prev.f[0]) *
+            invDeltaT2 * normal[0] +
+        ((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
+         (double)u_prev.f[1]) *
+            invDeltaT2 * normal[1] +
+        ((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
+         (double)u_prev.f[2]) *
+            invDeltaT2 * normal[2];
 
-    for (int i = 0; i < 8; i++) {
-      if (!acoustic_face_has_node(face, i)) {
-        continue;
-      }
-
-      const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-      const fvector_t u_next = gpuData->tm2Device[lnid];
-      const fvector_t u_curr = gpuData->tm1Device[lnid];
-      const fvector_t u_prev = gpuData->tm3Device[lnid];
-      const double accel_n =
-          ((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-           (double)u_prev.f[0]) *
-              invDeltaT2 * normal[0] +
-          ((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-           (double)u_prev.f[1]) *
-              invDeltaT2 * normal[1] +
-          ((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-           (double)u_prev.f[2]) *
-              invDeltaT2 * normal[2];
-
-      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                (solver_float)(-face_coeff * deltaT2 * accel_n));
-    }
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)(-face_coeff * deltaT2 * accel_n));
   }
 }
 

@@ -397,6 +397,11 @@ typedef struct gpu_data_t {
     int32_t*     lnidArrayDevice;
     uint8_t*     acousticElementFlagsArrayDevice;
     uint8_t*     acousticFaceFlagsArrayDevice;
+    int32_t      acousticInterfaceFaceCount;
+    int32_t*     acousticInterfaceElementIdsDevice;
+    uint8_t*     acousticInterfaceFaceIdsDevice;
+    double*      acousticInterfaceFaceAreasDevice;
+    double*      acousticInterfaceFaceNormalsDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
     double*      acousticPressureCoeffArrayDevice;
     double*      acousticPressureBoundaryCoeffArrayDevice;

@@ -84,13 +84,17 @@ __global__  void kernelDispCalc(int32_t nharbored,
 					gpu_data_t* gpuData,
 	                                noyesflag_t printAccel);
 
-__global__ void kernelAcousticPressureDisplacementCoupling(int32_t lenum,
+__global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
 							   gpu_data_t* gpuData,
 							   double deltaT2);
 
 __global__ void kernelAcousticPressureForce(int32_t lenum,
 					    gpu_data_t* gpuData,
 					    double deltaT2);
+
+__global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
+						     gpu_data_t* gpuData,
+						     double deltaT2);
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 					     gpu_data_t* gpuData);
