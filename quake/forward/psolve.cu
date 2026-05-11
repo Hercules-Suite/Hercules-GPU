@@ -358,6 +358,7 @@ static void mesh_release_acoustic_interface_data(void);
 static void mesh_build_acoustic_interface_flags(
     const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin);
+static void mesh_write_acoustic_interface_diagnostics(void);
 
 static void gpu_init(int32_t myID);
 static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh);
@@ -852,6 +853,7 @@ static struct Param_t {
   char the3DVelModelDir[256];
   char theTopoDir[256];
   char theStationMediumsFile[256];
+  char theAcousticInterfaceDiagnosticsFile[256];
   double theVsCut;
   double theFactor;
   double theFreq;
@@ -958,6 +960,7 @@ static struct Param_t {
            .the3DVelModelDir = "inputfiles/materialfiles",
            .theTopoDir = "inputfiles/topography",
            .theStationMediumsFile = "",
+           .theAcousticInterfaceDiagnosticsFile = "",
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1425,6 +1428,8 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(Param.theMeshDirMatlab, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.the3DVelModelDir, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(Param.theAcousticInterfaceDiagnosticsFile, 256, MPI_CHAR, 0,
+            comm_solver);
 
   /*Broadcast domain's coords */
   MPI_Bcast(Param.theSurfaceCornersLong, 4, MPI_DOUBLE, 0, comm_solver);
@@ -1848,6 +1853,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_pressure_formulation", 's',
             &acoustic_pressure_formulation);
+  parsetext(fp, "acoustic_interface_diagnostics_file", 's',
+            Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
   parsetext(fp, "3D_velocity_model", 's', &threeDModel);
@@ -2237,6 +2244,10 @@ static int32_t parse_parameters(const char* numericalin) {
 
   parsetext(fp, "source_directory_output", 's', &Param.theSourceOutputDir);
   createDir(Param.theSourceOutputDir, __FUNCTION_NAME);
+  if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
+    create_parent_dir_for_file(Param.theAcousticInterfaceDiagnosticsFile,
+                               __FUNCTION_NAME);
+  }
 
 /* read domain corners */
 #ifndef PROJ
@@ -2371,6 +2382,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   acoustic_interface_coupling);
     monitor_print("Acoustic pressure formulation:      %s\n",
                   acoustic_pressure_formulation);
+    if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
+      monitor_print("Acoustic interface diagnostics:     %s\n",
+                    Param.theAcousticInterfaceDiagnosticsFile);
+    }
     if (Param.theAcousticInterfaceMaxLevel >= 0) {
       monitor_print("Acoustic interface max level:       %d\n",
                     Param.theAcousticInterfaceMaxLevel);
@@ -3256,6 +3271,124 @@ static void mesh_append_acoustic_interface_fragment(
   *count = index + 1;
 }
 
+static const char* mesh_acoustic_face_name(uint8_t face) {
+  switch (face) {
+    case ACOUSTIC_FACE_X_MINUS:
+      return "x-";
+    case ACOUSTIC_FACE_X_PLUS:
+      return "x+";
+    case ACOUSTIC_FACE_Y_MINUS:
+      return "y-";
+    case ACOUSTIC_FACE_Y_PLUS:
+      return "y+";
+    case ACOUSTIC_FACE_Z_MINUS:
+      return "z-";
+    case ACOUSTIC_FACE_Z_PLUS:
+      return "z+";
+    default:
+      return "unknown";
+  }
+}
+
+static void mesh_write_acoustic_interface_diagnostics(void) {
+  const char* path = Param.theAcousticInterfaceDiagnosticsFile;
+  int64_t local_count;
+  int64_t global_count = 0;
+  int64_t fragment_offset = 0;
+
+  if ((path[0] == '\0') || !acoustic_pressure_enabled() ||
+      (Global.myMesh == NULL)) {
+    return;
+  }
+
+  local_count = Global.acousticInterfaceFaces;
+  MPI_Allreduce(&local_count, &global_count, 1, MPI_INT64_T, MPI_SUM,
+                comm_solver);
+
+  if (Global.theGroupSize > 1) {
+    MPI_Exscan(&local_count, &fragment_offset, 1, MPI_INT64_T, MPI_SUM,
+               comm_solver);
+    if (Global.myID == 0) {
+      fragment_offset = 0;
+    }
+  }
+
+  if (Global.myID == 0) {
+    FILE* fp = hu_fopen(path, "w");
+    fprintf(fp,
+            "# fragment_id rank local_fragment acoustic_element_index "
+            "acoustic_element_id acoustic_level face face_name "
+            "adjacent_elastic_element_id area_m2 center_csi center_eta "
+            "center_dzeta center_domain_x_m center_domain_y_m "
+            "center_domain_z_m center_model_north_m center_model_east_m "
+            "center_model_depth_m normal_x normal_y normal_z h_m\n");
+    fclose(fp);
+  }
+
+  MPI_Barrier(comm_solver);
+  for (int rank = 0; rank < Global.theGroupSize; rank++) {
+    if ((Global.myID == rank) && (local_count > 0)) {
+      FILE* fp = hu_fopen(path, "a");
+
+      for (int64_t i = 0; i < local_count; i++) {
+        int32_t eindex = Global.acousticInterfaceElementIds[i];
+        uint8_t face = Global.acousticInterfaceFaceIds[i];
+        elem_t* elemp;
+        edata_t* edata;
+        int32_t lnid0;
+        double h;
+        double center_csi = Global.acousticInterfaceFaceCenters[3 * i + 0];
+        double center_eta = Global.acousticInterfaceFaceCenters[3 * i + 1];
+        double center_dzeta = Global.acousticInterfaceFaceCenters[3 * i + 2];
+        double normal_x = Global.acousticInterfaceFaceNormals[3 * i + 0];
+        double normal_y = Global.acousticInterfaceFaceNormals[3 * i + 1];
+        double normal_z = Global.acousticInterfaceFaceNormals[3 * i + 2];
+        double lower_x, lower_y, lower_z;
+        double center_x, center_y, center_z;
+
+        if ((eindex < 0) || (eindex >= Global.myMesh->lenum)) {
+          continue;
+        }
+
+        elemp = &Global.myMesh->elemTable[eindex];
+        edata = (edata_t*)elemp->data;
+        lnid0 = elemp->lnid[0];
+        h = edata->edgesize;
+        lower_x = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].x;
+        lower_y = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].y;
+        lower_z = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z;
+        center_x = lower_x + 0.5 * h * (center_csi + 1.0);
+        center_y = lower_y + 0.5 * h * (center_eta + 1.0);
+        center_z = lower_z + 0.5 * h * (center_dzeta + 1.0);
+
+        fprintf(fp,
+                "%" PRId64 " %d %" PRId64 " %d %" PRId64 " %d %u %s "
+                "%" PRId64 " %.9e %.9e %.9e %.9e %.9e %.9e %.9e %.9e "
+                "%.9e %.9e %.9e %.9e %.9e %.9e\n",
+                fragment_offset + i, Global.myID, i, eindex, elemp->geid,
+                elemp->level, (unsigned int)face,
+                mesh_acoustic_face_name(face),
+                Global.acousticInterfaceAdjacentElementIds[i],
+                Global.acousticInterfaceFaceAreas[i], center_csi, center_eta,
+                center_dzeta, center_x, center_y, center_z,
+                Global.theXForMeshOrigin + center_x,
+                Global.theYForMeshOrigin + center_y,
+                Global.theZForMeshOrigin + center_z, normal_x, normal_y,
+                normal_z, h);
+      }
+
+      fclose(fp);
+    }
+    MPI_Barrier(comm_solver);
+  }
+
+  if (Global.myID == 0) {
+    monitor_print(
+        "Acoustic interface diagnostics: wrote %.1fM pressure fragments to %s\n",
+        (double)global_count / 1.0e6, path);
+  }
+}
+
 static int32_t mesh_interface_fragment_split(int32_t element_level,
                                              int32_t target_level) {
   int32_t level_delta;
@@ -3465,6 +3598,8 @@ static void mesh_build_acoustic_interface_flags(
     }
     fflush(stdout);
   }
+
+  mesh_write_acoustic_interface_diagnostics();
 }
 
 /**

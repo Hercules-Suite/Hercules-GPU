@@ -230,6 +230,14 @@ Acoustic-elastic input flags (input file):
 	mesh-level acoustic/elastic classification, so mixed elements kept elastic
 	still couple to adjacent acoustic elements. Subdivision has a per-face cap of
 	`32 x 32` fragments to avoid accidental table blow-up.
+- `acoustic_interface_diagnostics_file`
+	Optional pressure-interface diagnostic output path. When this path is set
+	and `acoustic_pressure_formulation=yes`, the solver writes one row per local
+	acoustic-solid interface fragment after mesh setup. The file records the
+	acoustic element id, face id, fragment area, fragment center in local and
+	model coordinates, outward normal, element level/size, and adjacent elastic
+	element id when the adjacent element is local. This file can be very large,
+	so it is disabled when unset.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
 	`acoustic_pressure_formulation=yes`. Pressure is appended as a
