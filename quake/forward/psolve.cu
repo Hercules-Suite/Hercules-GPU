@@ -947,7 +947,10 @@ static struct Param_t {
   double theBasinLong;
   double theBasinLat;
   int basinXCount, basinYCount, basinZCount;
+  int basinMaterialType;
   double basinIncrement;
+  double basinWaterVp;
+  double basinWaterRho;
   double** basinData;
   double the3DVelocityModelLong;
   double the3DVelocityModelLat;
@@ -988,7 +991,10 @@ static struct Param_t {
            .the4DOutSize = 0,
            .theMeshOutFlag = DO_OUTPUT,
            .useProfile = NO,
-           .theNumberOfLayers = 0};
+           .theNumberOfLayers = 0,
+           .basinMaterialType = BASIN_MATERIAL_ELASTIC,
+           .basinWaterVp = 1500.0,
+           .basinWaterRho = 1000.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1260,9 +1266,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  26 /* Must adjust this if adding double params */
+  28 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  39 /* Must adjust this if adding int params */
+  40 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1305,6 +1311,8 @@ static void read_parameters(int argc, char** argv) {
   double_message[23] = Param.basinIncrement;
   double_message[24] = Param.the3DVelocityModelLong;
   double_message[25] = Param.the3DVelocityModelLat;
+  double_message[26] = Param.basinWaterVp;
+  double_message[27] = Param.basinWaterRho;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1335,6 +1343,8 @@ static void read_parameters(int argc, char** argv) {
   Param.basinIncrement = double_message[23];
   Param.the3DVelocityModelLong = double_message[24];
   Param.the3DVelocityModelLat = double_message[25];
+  Param.basinWaterVp = double_message[26];
+  Param.basinWaterRho = double_message[27];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1376,6 +1386,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[36] = (int)Param.acousticPressureFormulation;
   int_message[37] = (int)Param.printStationPressures;
   int_message[38] = (int)Param.reconstructAcousticPlaneDisplacements;
+  int_message[39] = Param.basinMaterialType;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1420,6 +1431,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationPressures = (noyesflag_t)int_message[37];
   Param.reconstructAcousticPlaneDisplacements =
       (noyesflag_t)int_message[38];
+  Param.basinMaterialType = int_message[39];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1668,6 +1680,7 @@ static int32_t parse_parameters(const char* numericalin) {
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
        reconstruct_acoustic_plane_displacements[64] = "no",
+       basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
        include_nonlinear_analysis[64] = "no",
        include_incident_planewaves[64] = "no", include_hmgHalfSpace[64] = "no",
@@ -1698,6 +1711,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t includeIstanbulVelModel = UNSET;
   noyesflag_t includeBasinVelModel = UNSET;
   noyesflag_t include3DVelModel = UNSET;
+  basin_material_type_t basinMaterialType = BASIN_MATERIAL_ELASTIC;
 
   /* Obtain the specification of the simulation */
   if ((fp = fopen(physicsin, "r")) == NULL) {
@@ -1867,6 +1881,7 @@ static int32_t parse_parameters(const char* numericalin) {
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
+  parsetext(fp, "basin_material_type", 's', &basin_material_type);
   parsetext(fp, "3D_velocity_model", 's', &threeDModel);
   parsetext(fp, "include_nonlinear_analysis", 's', &include_nonlinear_analysis);
   parsetext(fp, "include_incident_planewaves", 's',
@@ -1888,6 +1903,8 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "forces_buffer_size", &theForcesBufferSize);
   hu_config_get_int_opt(fp, "schedule_print_file",
                         &Param.theSchedulePrintToFile);
+  hu_config_get_double_opt(fp, "basin_water_vp", &Param.basinWaterVp);
+  hu_config_get_double_opt(fp, "basin_water_rho", &Param.basinWaterRho);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -2174,6 +2191,19 @@ static int32_t parse_parameters(const char* numericalin) {
                  reconstruct_acoustic_plane_displacements);
   }
 
+  if ((strcasecmp(basin_material_type, "elastic") == 0) ||
+      (strcasecmp(basin_material_type, "default") == 0)) {
+    basinMaterialType = BASIN_MATERIAL_ELASTIC;
+  } else if ((strcasecmp(basin_material_type, "acoustic_water") == 0) ||
+             (strcasecmp(basin_material_type, "water") == 0)) {
+    basinMaterialType = BASIN_MATERIAL_ACOUSTIC_WATER;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for basin_material_type "
+                 "(elastic or acoustic_water): %s\n",
+                 basin_material_type);
+  }
+
   if ((acousticPressureFormulation == YES) && (includeAcoustic != YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "acoustic_pressure_formulation=yes requires "
@@ -2190,6 +2220,18 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
                  "include_acoustic=yes and acoustic_pressure_formulation=yes\n");
+  }
+  if ((basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) &&
+      (includeAcoustic != YES)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "basin_material_type=acoustic_water requires "
+                 "include_acoustic=yes\n");
+  }
+  if ((basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) &&
+      ((Param.basinWaterVp <= 0.0) || (Param.basinWaterRho <= 0.0))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "basin_water_vp and basin_water_rho must be positive "
+                 "for basin_material_type=acoustic_water\n");
   }
 
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
@@ -2370,6 +2412,7 @@ static int32_t parse_parameters(const char* numericalin) {
 
   Param.IstanbulVelocityModel = includeIstanbulVelModel;
   Param.basinVelocityModel = includeBasinVelModel;
+  Param.basinMaterialType = basinMaterialType;
   Param.threeDVelocityModel = include3DVelModel;
 
   strcpy(Param.theCheckPointingDirOut, checkpoint_path);
@@ -2430,6 +2473,16 @@ static int32_t parse_parameters(const char* numericalin) {
                 include_hmgHalfSpace);
   monitor_print("Include Istanbul Velocity model:    %s\n", IstanbulModel);
   monitor_print("Include Basin Velocity model:       %s\n", basinModel);
+  if (Param.basinVelocityModel == YES) {
+    monitor_print("Basin material type:                %s\n",
+                  basin_material_type);
+    if (Param.basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) {
+      monitor_print("Basin water Vp:                     %f\n",
+                    Param.basinWaterVp);
+      monitor_print("Basin water rho:                    %f\n",
+                    Param.basinWaterRho);
+    }
+  }
   monitor_print("Include 3D Velocity model:          %s\n", threeDModel);
 #ifdef PROJ
   monitor_print("Use PROJ library:                   yes\n");
@@ -2876,7 +2929,9 @@ int getBasinMaterial(cvmpayload_t* g_props, vector3D_t basinVelModel_origin,
   double y_rel = y_m - basinVelModel_origin.x[1];
   if (isInBasin(Param.basinData, Param.basinXCount, Param.basinYCount,
                 Param.basinIncrement, x_rel, y_rel, z_m) == 0) {
-    getBasinMaterialProperties(g_props, z_m);
+    getBasinMaterialProperties(g_props, z_m,
+                               (basin_material_type_t)Param.basinMaterialType,
+                               Param.basinWaterVp, Param.basinWaterRho);
   } else {
     if (Param.useProfile == NO) {
       res = cvm_query(Global.theCVMEp, y_m, x_m, z_m, g_props);

@@ -259,6 +259,16 @@ Acoustic-elastic input flags (input file):
 	three-component displacement file. This requires `include_acoustic=yes` and
 	`acoustic_pressure_formulation=yes`. Default is `no`, which preserves the
 	legacy plane-output behavior.
+- `basin_material_type`
+	Optional. Controls material assigned inside `basin_velocity_model` geometry.
+	Default is `elastic`, which preserves the historical hard-coded basin
+	material. Set to `acoustic_water` to assign water properties inside the
+	basin geometry: `Vs=0`, `Qs=0`, `Qp=0`, and configurable `Vp/rho`. This
+	requires `include_acoustic=yes`.
+- `basin_water_vp`, `basin_water_rho`
+	Optional acoustic-water basin properties used only when
+	`basin_material_type=acoustic_water`. Defaults are `1500.0 m/s` and
+	`1000.0 kg/m3`.
 - `station_mediums_output_file`
 	Optional station diagnostic output path. The solver writes this one-time
 	metadata file during station setup. It records each station's owning medium
