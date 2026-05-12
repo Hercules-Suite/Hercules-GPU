@@ -84,7 +84,9 @@ typedef struct plane_strip_element_t {
 
     int32_t nodestointerpolate[8];
 	vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
+	int32_t point_is_valid;
 	int32_t topostrip;
+	int32_t owner_is_acoustic;
 	int32_t pressure_is_defined;
 	int32_t acoustic_kinematics_ready;
 	double h;
@@ -177,6 +179,7 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 		return;
 	}
 
+	element->owner_is_acoustic = 0;
 	element->pressure_is_defined = 0;
 	element->acoustic_kinematics_ready = 0;
 	element->h = 0.0;
@@ -187,9 +190,16 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	memset(element->acoustic_prev_acc, 0, sizeof(element->acoustic_prev_acc));
 
 	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
-	    (element->topostrip != 0) ||
 	    (solver_get_octant_material(octant, &material) < 0) ||
 	    !plane_element_is_acoustic(&material)) {
+		return;
+	}
+
+	element->owner_is_acoustic = 1;
+
+	/* Topography tetrahedra do not have the full hex pressure stencil needed
+	 * by plane_pressure_gradient(); keep them from falling back to tm1. */
+	if (element->topostrip != 0) {
 		return;
 	}
 
@@ -299,8 +309,15 @@ static void plane_interpolate_point(const mysolver_t* mySolver,
 	double displacementsY = 0.0;
 	double displacementsZ = 0.0;
 
+	if ((element == NULL) || (element->point_is_valid == 0)) {
+		*outX = 0.0;
+		*outY = 0.0;
+		*outZ = 0.0;
+		return;
+	}
+
 	if ((g_reconstructAcousticPlaneDisplacements != 0) &&
-	    (element->pressure_is_defined != 0) &&
+	    (element->owner_is_acoustic != 0) &&
 	    (mySolver != NULL) && (mySolver->pressure_tm1 != NULL)) {
 		*outX = element->acoustic_disp[0];
 		*outY = element->acoustic_disp[1];
@@ -916,6 +933,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     				elemnum++)
     		{
 			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
+			thePlanes[iPlane].strip[stripnum][elemnum].point_is_valid = 0;
     			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    						/ thePlanes[iPlane].numberofstepsdowndip;
     			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -936,6 +954,7 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     			}
 
     			if (search_point( pointGlobal, &octant) == 1) {
+					thePlanes[iPlane].strip[stripnum][elemnum].point_is_valid = 1;
     				compute_csi_eta_dzeta( octant, pointGlobal,
 							&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 							thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
@@ -1384,6 +1403,7 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
     		     elemnum++)
     		    {
 			thePlanes[iPlane].strip[stripnum][elemnum].topostrip = 0;
+			thePlanes[iPlane].strip[stripnum][elemnum].point_is_valid = 0;
 			iStrike  = (elemnum+thePlanes[iPlane].stripstart[stripnum])
 			    / thePlanes[iPlane].numberofstepsdowndip;
 			iDownDip = (elemnum+thePlanes[iPlane].stripstart[stripnum])
@@ -1404,6 +1424,7 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 			}
 
 			if (search_point( pointGlobal, &octant) == 1) {
+				thePlanes[iPlane].strip[stripnum][elemnum].point_is_valid = 1;
 				compute_csi_eta_dzeta( octant, pointGlobal,
 						&(thePlanes[ iPlane ].strip[stripnum][elemnum].localcoords),
 						thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate);
