@@ -251,6 +251,14 @@ Acoustic-elastic input flags (input file):
 	elastic displacement field. The pressure column is `nan` for stations whose
 	containing element is elastic, because scalar acoustic pressure is not
 	defined there.
+- `reconstruct_acoustic_plane_displacements`
+	Optional. `yes` reconstructs displacement at acoustic output-plane points
+	from the pressure gradient and writes those reconstructed values into the
+	standard `planedisplacements.N` files. Elastic plane points continue to use
+	the elastic displacement field, so mixed water/solid planes remain a single
+	three-component displacement file. This requires `include_acoustic=yes` and
+	`acoustic_pressure_formulation=yes`. Default is `no`, which preserves the
+	legacy plane-output behavior.
 - `station_mediums_output_file`
 	Optional station diagnostic output path. The solver writes this one-time
 	metadata file during station setup. It records each station's owning medium

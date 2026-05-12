@@ -22,10 +22,13 @@
 
 extern int planes_print(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes, 
 			mysolver_t* mySolver);
+extern void planes_update_acoustic_kinematics(mysolver_t* mySolver,
+    int theNumberOfPlanes, int32_t step, double deltaT,
+    double deltaTSquared);
 extern void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-    UTMZone_t* utmZone);
+    UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements);
 extern void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes);
 extern void planes_IO_PES_main(int32_t myID);

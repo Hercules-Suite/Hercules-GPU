@@ -144,6 +144,7 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_FACE_Y_PLUS  0x08u
 #define ACOUSTIC_FACE_Z_MINUS 0x10u
 #define ACOUSTIC_FACE_Z_PLUS  0x20u
+#define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
  * Mesh database (element) record payload.
@@ -561,6 +562,7 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
  *  output: 0 fail 1 success
  */
 int32_t search_point( vector3D_t point, octant_t **octant );
+int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
 
 #ifdef __cplusplus

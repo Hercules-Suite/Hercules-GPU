@@ -897,6 +897,7 @@ static struct Param_t {
   noyesflag_t includeAcoustic;
   noyesflag_t acousticInterfaceCoupling;
   noyesflag_t acousticPressureFormulation;
+  noyesflag_t reconstructAcousticPlaneDisplacements;
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
@@ -977,6 +978,7 @@ static struct Param_t {
            .includeAcoustic = NO,
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
+           .reconstructAcousticPlaneDisplacements = NO,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
@@ -1081,7 +1083,6 @@ struct station_medium_record_t {
 /* ------------------------------End of
  * declarations------------------------------ */
 
-#define ACOUSTIC_VS_EPS 1.0e-6
 #define ACOUSTIC_INTERFACE_FRAGMENT_MAX_LEVEL_DELTA 5
 
 static int material_values_are_acoustic(double Vp, double Vs, double rho) {
@@ -1261,7 +1262,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   26 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  38 /* Must adjust this if adding int params */
+  39 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1374,6 +1375,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[35] = (int)Param.acousticInterfaceCoupling;
   int_message[36] = (int)Param.acousticPressureFormulation;
   int_message[37] = (int)Param.printStationPressures;
+  int_message[38] = (int)Param.reconstructAcousticPlaneDisplacements;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1416,6 +1418,8 @@ static void read_parameters(int argc, char** argv) {
   Param.acousticInterfaceCoupling = (noyesflag_t)int_message[35];
   Param.acousticPressureFormulation = (noyesflag_t)int_message[36];
   Param.printStationPressures = (noyesflag_t)int_message[37];
+  Param.reconstructAcousticPlaneDisplacements =
+      (noyesflag_t)int_message[38];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1663,6 +1667,7 @@ static int32_t parse_parameters(const char* numericalin) {
        implement_drm[64] = "no", include_topography[64] = "no",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
+       reconstruct_acoustic_plane_displacements[64] = "no",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
        include_nonlinear_analysis[64] = "no",
        include_incident_planewaves[64] = "no", include_hmgHalfSpace[64] = "no",
@@ -1687,6 +1692,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t includeAcoustic = UNSET;
   noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t acousticPressureFormulation = NO;
+  noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -1855,6 +1861,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_pressure_formulation", 's',
             &acoustic_pressure_formulation);
+  parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
+            &reconstruct_acoustic_plane_displacements);
   parsetext(fp, "acoustic_interface_diagnostics_file", 's',
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
@@ -2155,6 +2163,17 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_pressure_formulation);
   }
 
+  if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
+    reconstructAcousticPlaneDisplacements = YES;
+  } else if (strcasecmp(reconstruct_acoustic_plane_displacements, "no") == 0) {
+    reconstructAcousticPlaneDisplacements = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for reconstruct_acoustic_plane_displacements "
+                 "(yes or no): %s\n",
+                 reconstruct_acoustic_plane_displacements);
+  }
+
   if ((acousticPressureFormulation == YES) && (includeAcoustic != YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "acoustic_pressure_formulation=yes requires "
@@ -2165,6 +2184,12 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "print_station_pressures=yes requires include_acoustic=yes "
                  "and acoustic_pressure_formulation=yes\n");
+  }
+  if ((reconstructAcousticPlaneDisplacements == YES) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "reconstruct_acoustic_plane_displacements=yes requires "
+                 "include_acoustic=yes and acoustic_pressure_formulation=yes\n");
   }
 
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
@@ -2338,6 +2363,8 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.includeAcoustic = includeAcoustic;
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
+  Param.reconstructAcousticPlaneDisplacements =
+      reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
   Param.includeHomogeneousHalfSpace = includeHmgHalfSpace;
 
@@ -2384,6 +2411,8 @@ static int32_t parse_parameters(const char* numericalin) {
                   acoustic_interface_coupling);
     monitor_print("Acoustic pressure formulation:      %s\n",
                   acoustic_pressure_formulation);
+    monitor_print("Acoustic plane displacement recon.: %s\n",
+                  reconstruct_acoustic_plane_displacements);
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -11000,6 +11029,9 @@ static void solver_run() {
     Timer_Stop("GPU Load Disp");
     Timer_Stop("GPU Memory Copy");
     solver_update_acoustic_station_kinematics(step);
+    planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
+                                      step, Param.theDeltaT,
+                                      Param.theDeltaTSquared);
 
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
@@ -15259,6 +15291,23 @@ static int32_t mesh_element_index_for_octant(octant_t* octant,
   return eindex;
 }
 
+int32_t solver_get_octant_material(octant_t* octant, edata_t* material) {
+  int32_t eindex;
+
+  if ((octant == NULL) || (material == NULL)) {
+    return -1;
+  }
+
+  eindex = mesh_element_index_for_octant(octant, __FUNCTION_NAME);
+  if ((eindex < 0) || (Global.myMesh == NULL) ||
+      (Global.myMesh->elemTable[eindex].data == NULL)) {
+    return -1;
+  }
+
+  memcpy(material, Global.myMesh->elemTable[eindex].data, sizeof(edata_t));
+  return eindex;
+}
+
 /**
  * \param octant where the point is located.
  * \param pointcoords coordinates of the point.
@@ -17730,7 +17779,8 @@ int main(int argc, char** argv) {
                  Param.parameters_input_file, get_surface_shift(),
                  Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
                  Param.theDomainX, Param.theDomainY, Param.theDomainZ,
-                 Param.planes_input_file, &Param.utmZone);
+                 Param.planes_input_file, &Param.utmZone,
+                 Param.reconstructAcousticPlaneDisplacements);
     Timer_Stop("Pre Setup Planes Init");
 
     planesSetupElapsed = MPI_Wtime() - planesSetupStart;

@@ -63,7 +63,7 @@ void New_planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDi
     int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone);
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements);
 void New_planes_close(int32_t myID, int theNumberOfPlanes);
 void planes_IO_PES_main(int32_t myID);
 static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlanes);
@@ -75,7 +75,7 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char* theP
     int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone);
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements);
 void Old_planes_close(int32_t myID, int theNumberOfPlanes);
 static int  Old_print_plane_displacements(int32_t myID, int ThisPlane);
 static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlanes);
@@ -85,6 +85,14 @@ typedef struct plane_strip_element_t {
     int32_t nodestointerpolate[8];
 	vector3D_t localcoords;  /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1)*/
 	int32_t topostrip;
+	int32_t pressure_is_defined;
+	int32_t acoustic_kinematics_ready;
+	double h;
+	double rho;
+	double acoustic_disp[3];
+	double acoustic_vel[3];
+	double acoustic_acc[3];
+	double acoustic_prev_acc[3];
 
 } plane_strip_element_t;
 
@@ -123,6 +131,7 @@ static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
 static int32_t g_planePrintSequence = 0;
+static int32_t g_reconstructAcousticPlaneDisplacements = 0;
 
 static void plane_unpack_message(const double* messageBuffer, int recvCount) {
 	int offset = 0;
@@ -155,6 +164,123 @@ static void plane_unpack_message(const double* messageBuffer, int recvCount) {
 	}
 }
 
+static int32_t plane_element_is_acoustic(const edata_t* edata) {
+	return (edata != NULL) && (edata->Vp > 0.0) && (edata->rho > 0.0) &&
+	       (edata->Vs <= ACOUSTIC_VS_EPS);
+}
+
+static void plane_init_acoustic_metadata(plane_strip_element_t* element,
+		octant_t* octant) {
+	edata_t material;
+
+	if (element == NULL) {
+		return;
+	}
+
+	element->pressure_is_defined = 0;
+	element->acoustic_kinematics_ready = 0;
+	element->h = 0.0;
+	element->rho = 0.0;
+	memset(element->acoustic_disp, 0, sizeof(element->acoustic_disp));
+	memset(element->acoustic_vel, 0, sizeof(element->acoustic_vel));
+	memset(element->acoustic_acc, 0, sizeof(element->acoustic_acc));
+	memset(element->acoustic_prev_acc, 0, sizeof(element->acoustic_prev_acc));
+
+	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
+	    (element->topostrip != 0) ||
+	    (solver_get_octant_material(octant, &material) < 0) ||
+	    !plane_element_is_acoustic(&material)) {
+		return;
+	}
+
+	element->pressure_is_defined = 1;
+	element->h = material.edgesize;
+	element->rho = material.rho;
+}
+
+static int plane_pressure_gradient(const mysolver_t* mySolver,
+		const plane_strip_element_t* element,
+		double grad[3]) {
+	int iPhi;
+	const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+	const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+	const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+	const double h = element->h;
+	const vector3D_t localCoords = element->localcoords;
+	const double xi = localCoords.x[0];
+	const double eta = localCoords.x[1];
+	const double zeta = localCoords.x[2];
+
+	grad[0] = 0.0;
+	grad[1] = 0.0;
+	grad[2] = 0.0;
+
+	if ((element->pressure_is_defined == 0) || (mySolver == NULL) ||
+	    (mySolver->pressure_tm1 == NULL) || (h <= 0.0)) {
+		return 0;
+	}
+
+	for (iPhi = 0; iPhi < 8; iPhi++) {
+		const int32_t node = element->nodestointerpolate[iPhi];
+		const double pressure = mySolver->pressure_tm1[node];
+		const double dphidx =
+			sx[iPhi] * (1.0 + sy[iPhi] * eta) *
+			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
+		const double dphidy =
+			sy[iPhi] * (1.0 + sx[iPhi] * xi) *
+			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
+		const double dphidz =
+			sz[iPhi] * (1.0 + sx[iPhi] * xi) *
+			(1.0 + sy[iPhi] * eta) / (4.0 * h);
+
+		grad[0] += dphidx * pressure;
+		grad[1] += dphidy * pressure;
+		grad[2] += dphidz * pressure;
+	}
+
+	return 1;
+}
+
+static void plane_update_acoustic_point(const mysolver_t* mySolver,
+		plane_strip_element_t* element,
+		int32_t step,
+		double deltaT,
+		double deltaTSquared) {
+	double grad[3];
+	double accel[3];
+
+	if ((element == NULL) || (element->pressure_is_defined == 0) ||
+	    (element->rho <= 0.0) ||
+	    (plane_pressure_gradient(mySolver, element, grad) == 0)) {
+		return;
+	}
+
+	for (int axis = 0; axis < 3; axis++) {
+		accel[axis] = -grad[axis] / element->rho;
+	}
+
+	if ((element->acoustic_kinematics_ready == 0) || (step == 0)) {
+		for (int axis = 0; axis < 3; axis++) {
+			element->acoustic_acc[axis] = accel[axis];
+			element->acoustic_prev_acc[axis] = accel[axis];
+		}
+		element->acoustic_kinematics_ready = 1;
+		return;
+	}
+
+	for (int axis = 0; axis < 3; axis++) {
+		const double oldVel = element->acoustic_vel[axis];
+		const double oldAcc = element->acoustic_prev_acc[axis];
+
+		element->acoustic_disp[axis] +=
+			oldVel * deltaT + 0.5 * oldAcc * deltaTSquared;
+		element->acoustic_vel[axis] +=
+			0.5 * (oldAcc + accel[axis]) * deltaT;
+		element->acoustic_acc[axis] = accel[axis];
+		element->acoustic_prev_acc[axis] = accel[axis];
+	}
+}
+
 static void plane_interpolate_point(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
 		double* outX,
@@ -172,6 +298,15 @@ static void plane_interpolate_point(const mysolver_t* mySolver,
 	double displacementsX = 0.0;
 	double displacementsY = 0.0;
 	double displacementsZ = 0.0;
+
+	if ((g_reconstructAcousticPlaneDisplacements != 0) &&
+	    (element->pressure_is_defined != 0) &&
+	    (mySolver != NULL) && (mySolver->pressure_tm1 != NULL)) {
+		*outX = element->acoustic_disp[0];
+		*outY = element->acoustic_disp[1];
+		*outZ = element->acoustic_disp[2];
+		return;
+	}
 
 	localCoords = element->localcoords;
 	for (iPhi = 0; iPhi < 8; iPhi++) {
@@ -258,24 +393,60 @@ int planes_print(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes, myso
     return 1;
 }
 
+void planes_update_acoustic_kinematics(mysolver_t* mySolver,
+    int theNumberOfPlanes, int32_t step, double deltaT,
+    double deltaTSquared) {
+	int iPlane, iStrip;
+
+	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
+	    (theNumberOfPlanes == 0) || (thePlanes == NULL) ||
+	    (mySolver == NULL) || (mySolver->pressure_tm1 == NULL)) {
+		return;
+	}
+
+	for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+		for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
+		     iStrip++) {
+			int elemnum;
+			const int elemCount =
+				thePlanes[iPlane].stripend[iStrip] -
+				thePlanes[iPlane].stripstart[iStrip] + 1;
+
+	#ifdef _OPENMP
+			const int32_t useOmp = plane_output_use_omp();
+	#pragma omp parallel for if(useOmp) schedule(static)
+	#endif
+			for (elemnum = 0; elemnum < elemCount; elemnum++) {
+				plane_update_acoustic_point(mySolver,
+					&(thePlanes[iPlane].strip[iStrip][elemnum]),
+					step, deltaT, deltaTSquared);
+			}
+		}
+	}
+}
+
 void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone){
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements){
 
 //	IO_pool_pe_count = 1;
+	g_reconstructAcousticPlaneDisplacements =
+		reconstructAcousticPlaneDisplacements ? 1 : 0;
     if (IO_pool_pe_count)
 	New_planes_setup(myID, thePlanePrintRate, thePlaneDirOut,
 		IO_pool_pe_count,
         theNumberOfPlanes, numericalin, 
         surfaceShift, theSurfaceCornersLong, theSurfaceCornersLat,
-        theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone);
+        theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
+        reconstructAcousticPlaneDisplacements);
     else
     Old_planes_setup(myID, thePlanePrintRate, thePlaneDirOut, 
         theNumberOfPlanes, numericalin, 
         surfaceShift, theSurfaceCornersLong, theSurfaceCornersLat,
-        theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone);
+        theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
+        reconstructAcousticPlaneDisplacements);
 }
 
 void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
@@ -421,7 +592,7 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
     int theNumberOfPlanes, const char *numericalin,
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone) {
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements) {
 
     static const char* fname = "output_planes_setup()";
     char       planedisplacementsout[1024]; 
@@ -429,8 +600,11 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
     int        iPlane; 
     vector3D_t originPlaneCoords;
     int        largestplanesize;
-    FILE*      fp;
-    FILE*      fp_planes;
+	FILE*      fp;
+	FILE*      fp_planes;
+
+    g_reconstructAcousticPlaneDisplacements =
+        reconstructAcousticPlaneDisplacements ? 1 : 0;
 
     if (myID == 0) {
 
@@ -771,6 +945,9 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 						 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
 						 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
 						thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+					plane_init_acoustic_metadata(
+						&(thePlanes[iPlane].strip[stripnum][elemnum]),
+						octant);
     			}
     		}
     	}
@@ -869,7 +1046,7 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
     int theNumberOfPlanes, const char *numericalin,
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone) {
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements) {
 
     static const char* fname = "new_output_planes_setup()";
     int        iPlane;
@@ -877,6 +1054,9 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
     int largestplanesize;
     FILE*      fp;
     FILE*      fp_planes;
+
+    g_reconstructAcousticPlaneDisplacements =
+        reconstructAcousticPlaneDisplacements ? 1 : 0;
 
     if (PENum == 0) {
 
@@ -1233,6 +1413,9 @@ static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[6] == 0 ) &&
 					 ( thePlanes[ iPlane ].strip[stripnum][elemnum].nodestointerpolate[7] == 0 ) ) {
 					thePlanes[ iPlane ].strip[stripnum][elemnum].topostrip = 1;}
+				plane_init_acoustic_metadata(
+					&(thePlanes[iPlane].strip[stripnum][elemnum]),
+					octant);
 			}
 		    }
 	    }
