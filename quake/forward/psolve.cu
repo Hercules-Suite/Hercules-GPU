@@ -856,6 +856,7 @@ static struct Param_t {
   char theAcousticInterfaceDiagnosticsFile[256];
   double theVsCut;
   double theFactor;
+  double theAcousticMeshRefinementFactor;
   double theFreq;
   double theFreq_Vel;
   double theDeltaT;
@@ -965,6 +966,7 @@ static struct Param_t {
            .theTopoDir = "inputfiles/topography",
            .theStationMediumsFile = "",
            .theAcousticInterfaceDiagnosticsFile = "",
+           .theAcousticMeshRefinementFactor = 1.0,
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1188,12 +1190,17 @@ static double element_meshing_velocity(const edata_t* edata) {
 
 static int32_t wavespeed_rule(const edata_t* edata, double theFactor) {
   double speed = element_meshing_velocity(edata);
+  double effective_factor = theFactor;
 
   if ((edata == NULL) || (edata->edgesize <= 0.0) || (speed <= 0.0)) {
     return 1;
   }
 
-  return (edata->edgesize <= speed / theFactor) ? 0 : 1;
+  if (element_is_acoustic(edata)) {
+    effective_factor *= Param.theAcousticMeshRefinementFactor;
+  }
+
+  return (edata->edgesize <= speed / effective_factor) ? 0 : 1;
 }
 
 void getGPUHardware(int32_t myID, int device, gpu_spec_t* gpuSpecs) {
@@ -1266,7 +1273,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  28 /* Must adjust this if adding double params */
+  29 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   40 /* Must adjust this if adding int params */
 
@@ -1313,6 +1320,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[25] = Param.the3DVelocityModelLat;
   double_message[26] = Param.basinWaterVp;
   double_message[27] = Param.basinWaterRho;
+  double_message[28] = Param.theAcousticMeshRefinementFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1345,6 +1353,7 @@ static void read_parameters(int argc, char** argv) {
   Param.the3DVelocityModelLat = double_message[25];
   Param.basinWaterVp = double_message[26];
   Param.basinWaterRho = double_message[27];
+  Param.theAcousticMeshRefinementFactor = double_message[28];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1671,7 +1680,8 @@ static int32_t parse_parameters(const char* numericalin) {
   int number_output_planes = 0, number_output_stations = 0,
       damping_statistics = 0, use_checkpoint = 0, checkpointing_rate = 0,
       step_meshing = 1, acoustic_interface_max_level = -1;
-  double freq_vel = 0., softening_factor = 0, startT = 0.;
+  double freq_vel = 0., softening_factor = 0, startT = 0.,
+         acoustic_mesh_refinement_factor = 1.0;
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
        print_station_pressures[64] = "no",
@@ -1905,6 +1915,8 @@ static int32_t parse_parameters(const char* numericalin) {
                         &Param.theSchedulePrintToFile);
   hu_config_get_double_opt(fp, "basin_water_vp", &Param.basinWaterVp);
   hu_config_get_double_opt(fp, "basin_water_rho", &Param.basinWaterRho);
+  hu_config_get_double_opt(fp, "acoustic_mesh_refinement_factor",
+                           &acoustic_mesh_refinement_factor);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -1971,6 +1983,12 @@ static int32_t parse_parameters(const char* numericalin) {
       (acoustic_interface_max_level > PIXELLEVEL)) {
     fprintf(stderr, "Illegal acoustic interface maximum octant level %d\n",
             acoustic_interface_max_level);
+    return -1;
+  }
+
+  if (acoustic_mesh_refinement_factor < 1.0) {
+    fprintf(stderr, "Illegal acoustic mesh refinement factor %f\n",
+            acoustic_mesh_refinement_factor);
     return -1;
   }
 
@@ -2379,6 +2397,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theSofteningFactor = softening_factor;
   Param.theStepMeshingFactor = step_meshing;
   Param.theAcousticInterfaceMaxLevel = acoustic_interface_max_level;
+  Param.theAcousticMeshRefinementFactor = acoustic_mesh_refinement_factor;
   Param.theThresholdDamping = threshold_damping;
   Param.theThresholdVpVs = threshold_VpVs;
   Param.theDampingStatisticsFlag = damping_statistics;
@@ -2456,6 +2475,8 @@ static int32_t parse_parameters(const char* numericalin) {
                   acoustic_pressure_formulation);
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
+    monitor_print("Acoustic mesh refinement factor:    %f\n",
+                  Param.theAcousticMeshRefinementFactor);
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);

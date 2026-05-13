@@ -214,6 +214,17 @@ Acoustic-elastic input flags (input file):
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
 	disables this extra interface-refinement limit.
+- `acoustic_mesh_refinement_factor`
+	Optional. Extra refinement multiplier for fully acoustic elements during
+	fresh mesh generation. The acoustic mesh-size target becomes
+	`Vp / (simulation_node_per_wavelength * simulation_wave_max_freq_hz *
+	acoustic_mesh_refinement_factor)`, while elastic elements still use the
+	usual shear-wave rule. Default is `1.0`. Values must be `>= 1.0`. This does
+	not replace `acoustic_interface_max_level`: that parameter refines mixed
+	water/solid interface octants, while this parameter refines the acoustic
+	water volume. When using a two-phase workflow, set this before generating
+	the mesh etree in phase A; importing an already-generated mesh preserves the
+	existing mesh resolution.
 - `acoustic_pressure_formulation`
 	Optional. `yes` enables the pressure-DOF acoustic solver path. Acoustic
 	elements assemble scalar pressure mass/stiffness instead of displacement
