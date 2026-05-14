@@ -443,31 +443,50 @@ typedef struct gpu_data_t {
     fvector_t*   kappaVectorDevice;
     //edata_t*     matPropsDevice;
 
-    /* CPML state on device. All arrays sized [pmlElemCount] except where noted.
-     * Profile coefficients are precomputed per element from the local edata
-     * (Vp, Vs, edgesize) and the per-face damping profile (d, kappa, alpha).
-     * pml_b_j = exp(-(d_j/kappa_j + alpha_j) * dt);
-     * pml_a_j = (d_j / (kappa_j * (d_j + kappa_j * alpha_j))) * (pml_b_j - 1);
-     * pml_invKappa_j = 1 / kappa_j.
-     * For axes where pml_face_mask bit is unset, d_j=0, kappa_j=1, alpha_j=0
-     * so pml_b_j=1, pml_a_j=0, pml_invKappa_j=1 (memory variable stays at 0).
+    /* CPML state on device, partitioned by material type. Each PML element
+     * sits in exactly one mapper (elastic or acoustic); coefficient and
+     * memory-variable arrays are sized by the corresponding per-type count.
      *
-     * pml_psiArrayDevice[i][j] is the memory variable ψ_{i}^{(j)} = the
-     * j-axis convolution of ∂_j u_i. Index i = displacement component (x,y,z),
-     * j = stretching direction (x,y,z). Updated per step by the ADE recurrence.
+     * Profile coefficients (a_j, b_j, 1/kappa_j) are precomputed per element
+     * from the local edata (Vp, edgesize) and the per-face damping profile
+     * (d, kappa, alpha):
+     *   pml_b_j      = exp(-(d_j/kappa_j + alpha_j) * dt);
+     *   pml_a_j      = (d_j / (kappa_j * (d_j + kappa_j * alpha_j)))*(pml_b_j-1);
+     *   pml_invKappa = 1 / kappa_j.
+     * For axes outside the face mask the identity (b=1, a=0, invKappa=1) is
+     * stored so the recurrence ψ ← b·ψ + a·∂u acts as a no-op on that axis.
+     *
+     * Elastic psi has 9 components: psi[i][j] is ψ_{i}^{(j)} = j-axis
+     * convolution of ∂_j u_i. Acoustic psi has 3 components: psi[j] is the
+     * j-axis convolution of ∂_j p (scalar pressure field).
      */
-    int32_t       pmlElemCount;
-    int32_t*      pmlElemMapperDevice;             /* PML linear idx -> eindex */
-    double*       pml_b_xArrayDevice;
-    double*       pml_b_yArrayDevice;
-    double*       pml_b_zArrayDevice;
-    double*       pml_a_xArrayDevice;
-    double*       pml_a_yArrayDevice;
-    double*       pml_a_zArrayDevice;
-    double*       pml_invKappa_xArrayDevice;
-    double*       pml_invKappa_yArrayDevice;
-    double*       pml_invKappa_zArrayDevice;
-    solver_float* pml_psiArrayDevice[3][3];        /* [i_disp][j_axis] */
+    /* --- Elastic PML state --- */
+    int32_t       pmlElasticElemCount;
+    int32_t*      pmlElasticElemMapperDevice;
+    double*       pml_elastic_b_xArrayDevice;
+    double*       pml_elastic_b_yArrayDevice;
+    double*       pml_elastic_b_zArrayDevice;
+    double*       pml_elastic_a_xArrayDevice;
+    double*       pml_elastic_a_yArrayDevice;
+    double*       pml_elastic_a_zArrayDevice;
+    double*       pml_elastic_invKappa_xArrayDevice;
+    double*       pml_elastic_invKappa_yArrayDevice;
+    double*       pml_elastic_invKappa_zArrayDevice;
+    solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
+
+    /* --- Acoustic PML state --- */
+    int32_t       pmlAcousticElemCount;
+    int32_t*      pmlAcousticElemMapperDevice;
+    double*       pml_acoustic_b_xArrayDevice;
+    double*       pml_acoustic_b_yArrayDevice;
+    double*       pml_acoustic_b_zArrayDevice;
+    double*       pml_acoustic_a_xArrayDevice;
+    double*       pml_acoustic_a_yArrayDevice;
+    double*       pml_acoustic_a_zArrayDevice;
+    double*       pml_acoustic_invKappa_xArrayDevice;
+    double*       pml_acoustic_invKappa_yArrayDevice;
+    double*       pml_acoustic_invKappa_zArrayDevice;
+    solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
 
 } gpu_data_t;
 
@@ -517,11 +536,17 @@ struct mysolver_t {
     fvector_t* conv_kappa_3;
 
     /* CPML host-side state (used for checkpoint I/O only). NULL when
-     * abc_type != cpml or pmlElemCount == 0. pml_psi[i][j] is the host mirror
-     * of gpuData->pml_psiArrayDevice[i][j], length pmlElemCount. */
-    int32_t       pmlElemCount;
-    int32_t*      pmlElemList;            /* host copy of pmlElemMapper, sized [pmlElemCount] */
-    solver_float* pml_psi[3][3];          /* host mirrors of psi memory variables */
+     * abc_type != cpml or the respective count is zero. The psi host mirrors
+     * shadow the device arrays of the same name; the elem_list arrays are
+     * host copies of the device mappers so checkpoint writes don't need a
+     * device->host pull just to know which eindex each slot belongs to. */
+    int32_t       pmlElasticElemCount;
+    int32_t*      pmlElasticElemList;
+    solver_float* pml_elastic_psi[3][3];
+
+    int32_t       pmlAcousticElemCount;
+    int32_t*      pmlAcousticElemList;
+    solver_float* pml_acoustic_psi[3];
 
     /* GPU device data structures - should be declared in a separate struct */
     gpu_spec_t*  gpu_spec; // GPU device specifications
