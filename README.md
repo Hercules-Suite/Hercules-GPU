@@ -287,6 +287,73 @@ Acoustic-elastic input flags (input file):
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`.
 
+Absorbing boundary input flags (input file):
+
+Hercules supports two absorbing boundary conditions, selected at run
+time. The default is the legacy first-order Lysmer dashpot, folded into
+the lumped mass matrix at setup. The newer option is an unsplit
+Convolutional Perfectly Matched Layer (C-PML) in ADE form (Komatitsch &
+Martin, 2007), implemented for both elastic and acoustic materials with
+shared profile coefficients. C-PML wraps the five absorbing faces
+(`x_min`, `x_max`, `y_min`, `y_max`, `z_max`) and leaves `z_min` as the
+free surface.
+
+- `abc_type`
+	Optional. `dashpot` (default) selects the legacy Lysmer dashpot path
+	used historically by Hercules. `cpml` selects the unsplit C-PML path.
+	If unset, behavior is unchanged from earlier versions.
+- `cpml_thickness_m`
+	Target PML thickness in metres. When `> 0`, this value is used directly.
+	When `0` or unset (the default), the solver falls back to `cpml_layers ×
+	(global max element edgesize)`, which is logged at startup so you can
+	confirm the realized thickness. The face mask is computed independently
+	per element from this thickness, so every rank must agree on the value;
+	the fallback uses an MPI max-reduce to keep ranks consistent.
+- `cpml_layers`
+	Optional integer. Default `10`. Used only when `cpml_thickness_m` is `0`.
+	Provides a coarse "this many element layers deep" specification without
+	requiring the user to know the local mesh resolution at the boundary.
+- `cpml_reflection_target`
+	Optional. Target theoretical reflection coefficient `R` used in the
+	`d_max` formula `d_max = -(p+1) Vp ln(R) / (2 L)`. Default `1.0e-3`.
+	Smaller values give stronger absorption but can compress the spatial
+	profile and degrade stability margins.
+- `cpml_poly_order`
+	Optional integer, must be in `[1, 4]`. Default `2`. The polynomial order
+	`p` in the spatial profile `d_j(xi) ~ (xi/L)^p`. `p = 2` is the standard
+	K&M/SPECFEM3D choice.
+- `cpml_kappa_max`
+	Optional. Default `1.0` (no real stretch). Raising `kappa_max` (e.g. to
+	`3` or `7`) improves absorption at grazing incidence but can degrade
+	stability with corner elements. Try `1.0` first; raise only if you see
+	grazing-angle leakage.
+- `cpml_alpha_max_hz`
+	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
+	rad/s. When `< 0` or unset (default), the solver uses
+	`alpha_max = pi * simulation_wave_max_freq_hz`. `alpha_max > 0` is
+	required for corner-element stability with multi-axis PML.
+- `cpml_cfl_safety`
+	Optional. Default `0.9`. The critical time-step computed from `min h/Vp`
+	is multiplied by this factor when `abc_type=cpml` to give a margin
+	against the corner-element multi-axis ADE recurrence. Set to `1.0` to
+	disable the reduction; values `< 0.5` are likely unnecessary.
+
+Notes on C-PML behavior:
+
+- Per-element classification (acoustic vs elastic) uses the same
+	`element_is_acoustic(edata)` test the existing acoustic-pressure path
+	uses, so heterogeneous models and acoustic/elastic coupling work without
+	extra configuration. Each PML element appears in exactly one of two
+	per-type mappers (elastic or acoustic).
+- BKT visco-elastic (Q-attenuation) damping is automatically skipped on
+	PML elements when `abc_type=cpml`; the CPML ADE recurrence handles
+	their attenuation. Non-PML elements continue to use BKT as usual.
+- The startup log prints
+	`CPML: N elastic + M acoustic PML elements globally (thickness X m, alpha_max Y rad/s)`,
+	and the derived thickness when `cpml_thickness_m` was zero. Use this to
+	confirm the PML zone is non-empty and split between materials the way you
+	expect.
+
 Typical two-phase settings:
 
 - Phase A (generate mesh database):
