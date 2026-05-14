@@ -460,33 +460,59 @@ typedef struct gpu_data_t {
      * convolution of ∂_j u_i. Acoustic psi has 3 components: psi[j] is the
      * j-axis convolution of ∂_j p (scalar pressure field).
      */
-    /* --- Elastic PML state --- */
+    /* --- Elastic PML state ---
+     *
+     * a_eff_j  = a_j / (4h),     storage of pml_elastic_a_jArrayDevice
+     * invK_eff_j = (1/kappa_j) / (4h), storage of pml_elastic_invKappa_jArrayDevice
+     *   (pre-scaling by 1/(4h) absorbs the hex8 1-pt B-matrix factor so the
+     *    kernel just multiplies by the raw signed displacement sum.)
+     *
+     * muCoeff     = dt^2 * h^2 * mu / 4
+     * lambdaCoeff = dt^2 * h^2 * lambda / 4
+     *   (these combine the Galerkin volume factor h^2/4 with material and
+     *    time-step constants so the kernel only needs one multiply per term.)
+     */
     int32_t       pmlElasticElemCount;
     int32_t*      pmlElasticElemMapperDevice;
     double*       pml_elastic_b_xArrayDevice;
     double*       pml_elastic_b_yArrayDevice;
     double*       pml_elastic_b_zArrayDevice;
-    double*       pml_elastic_a_xArrayDevice;
+    double*       pml_elastic_a_xArrayDevice;        /* a / (4h) */
     double*       pml_elastic_a_yArrayDevice;
     double*       pml_elastic_a_zArrayDevice;
-    double*       pml_elastic_invKappa_xArrayDevice;
+    double*       pml_elastic_invKappa_xArrayDevice; /* (1/kappa) / (4h) */
     double*       pml_elastic_invKappa_yArrayDevice;
     double*       pml_elastic_invKappa_zArrayDevice;
+    double*       pml_elastic_muCoeffArrayDevice;
+    double*       pml_elastic_lambdaCoeffArrayDevice;
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
 
-    /* --- Acoustic PML state --- */
+    /* --- Acoustic PML state ---
+     *
+     * Same pre-scaling for a and invKappa as elastic above.
+     * forceCoeff = dt^2 * h^2 / (4 * rho)
+     *   (combines volume integration and 1/rho for the acoustic Laplacian.)
+     */
     int32_t       pmlAcousticElemCount;
     int32_t*      pmlAcousticElemMapperDevice;
     double*       pml_acoustic_b_xArrayDevice;
     double*       pml_acoustic_b_yArrayDevice;
     double*       pml_acoustic_b_zArrayDevice;
-    double*       pml_acoustic_a_xArrayDevice;
+    double*       pml_acoustic_a_xArrayDevice;        /* a / (4h) */
     double*       pml_acoustic_a_yArrayDevice;
     double*       pml_acoustic_a_zArrayDevice;
-    double*       pml_acoustic_invKappa_xArrayDevice;
+    double*       pml_acoustic_invKappa_xArrayDevice; /* (1/kappa) / (4h) */
     double*       pml_acoustic_invKappa_yArrayDevice;
     double*       pml_acoustic_invKappa_zArrayDevice;
+    double*       pml_acoustic_forceCoeffArrayDevice;
     solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
+
+    /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
+     * non-NULL, has value 1 for any element that lives in either PML pipeline
+     * (elastic or acoustic) and 0 otherwise. Lets the existing non-PML
+     * kernels (kernelStiffnessCalcLocal, kernelAcousticPressureForce, BKT
+     * damping kernels) early-exit on PML elements so we don't double-count. */
+    uint8_t*      pmlFlagArrayDevice;
 
 } gpu_data_t;
 

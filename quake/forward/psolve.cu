@@ -434,19 +434,29 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
 typedef struct cpml_build_s {
   uint8_t* face_mask;            /* [lenum], NULL when abc_type != cpml */
 
-  /* Elastic PML build state (9-component psi via separate device arrays). */
+  /* Elastic PML build state. Coefficients are stored already-scaled:
+   *   a[j]        = a_raw_j / (4h)
+   *   invKappa[j] = (1/kappa_j) / (4h)
+   *   muCoeff     = dt^2 * h^2 * mu / 4
+   *   lambdaCoeff = dt^2 * h^2 * lambda / 4
+   */
   int32_t  elastic_count;
   int32_t* elastic_elem_list;    /* sized [lenum] during build */
   double*  elastic_a[3];         /* [lenum] each, used [0..elastic_count) */
   double*  elastic_b[3];
   double*  elastic_invKappa[3];
+  double*  elastic_muCoeff;
+  double*  elastic_lambdaCoeff;
 
-  /* Acoustic PML build state (3-component psi). */
+  /* Acoustic PML build state. Same pre-scaling for a / invKappa.
+   *   forceCoeff = dt^2 * h^2 / (4 * rho)
+   */
   int32_t  acoustic_count;
   int32_t* acoustic_elem_list;
   double*  acoustic_a[3];
   double*  acoustic_b[3];
   double*  acoustic_invKappa[3];
+  double*  acoustic_forceCoeff;
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
@@ -6920,6 +6930,12 @@ static void solver_init() {
         (int32_t*)malloc(Global.myMesh->lenum * sizeof(int32_t));
     g_cpmlBuild.acoustic_elem_list =
         (int32_t*)malloc(Global.myMesh->lenum * sizeof(int32_t));
+    g_cpmlBuild.elastic_muCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.elastic_lambdaCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.acoustic_forceCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
     for (int axis = 0; axis < 3; axis++) {
       g_cpmlBuild.elastic_a[axis] =
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
@@ -6940,9 +6956,12 @@ static void solver_init() {
         (g_cpmlBuild.elastic_a[0] == NULL) ||
         (g_cpmlBuild.elastic_b[0] == NULL) ||
         (g_cpmlBuild.elastic_invKappa[0] == NULL) ||
+        (g_cpmlBuild.elastic_muCoeff == NULL) ||
+        (g_cpmlBuild.elastic_lambdaCoeff == NULL) ||
         (g_cpmlBuild.acoustic_a[0] == NULL) ||
         (g_cpmlBuild.acoustic_b[0] == NULL) ||
-        (g_cpmlBuild.acoustic_invKappa[0] == NULL)) {
+        (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
+        (g_cpmlBuild.acoustic_forceCoeff == NULL)) {
       fprintf(stderr,
               "Thread %d: solver_init: out of memory for CPML build state\n",
               Global.myID);
@@ -7087,22 +7106,38 @@ static void solver_init() {
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max, a_axis, b_axis,
             invKappa_axis);
 
+        /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
+         * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
+         * invKappa lets the kernel multiply by the raw signed displacement
+         * (or pressure) sum without per-call divisions. */
+        const double h = (double)edata->edgesize;
+        const double inv4h = 1.0 / (4.0 * h);
+        const double dt2 = Param.theDeltaTSquared;
+        const double h2_over_4 = h * h * 0.25;
+
         if (element_is_acoustic(edata)) {
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
           for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis];
+            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis] * inv4h;
             g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
-            g_cpmlBuild.acoustic_invKappa[axis][pml_idx] = invKappa_axis[axis];
+            g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
+                invKappa_axis[axis] * inv4h;
           }
+          const double rho = (double)edata->rho;
+          /* dt^2 * h^2 / (4 * rho); rho > 0 is guaranteed by mesh validation. */
+          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
         } else {
           int32_t pml_idx = g_cpmlBuild.elastic_count++;
           g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;
           for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.elastic_a[axis][pml_idx] = a_axis[axis];
+            g_cpmlBuild.elastic_a[axis][pml_idx] = a_axis[axis] * inv4h;
             g_cpmlBuild.elastic_b[axis][pml_idx] = b_axis[axis];
-            g_cpmlBuild.elastic_invKappa[axis][pml_idx] = invKappa_axis[axis];
+            g_cpmlBuild.elastic_invKappa[axis][pml_idx] =
+                invKappa_axis[axis] * inv4h;
           }
+          g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
+          g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
         }
       }
     }
@@ -7303,6 +7338,30 @@ static void solver_init() {
             MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
           }
         }
+
+        /* Elastic material coefficients per PML element. */
+        if (cudaMalloc((void**)&(Global.gpuData.pml_elastic_muCoeffArrayDevice),
+                       (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+            cudaMalloc((void**)&(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice),
+                       (size_t)pmlN * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc elastic CPML mu/lambda failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.pml_elastic_muCoeffArrayDevice,
+                       g_cpmlBuild.elastic_muCoeff,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice,
+                       g_cpmlBuild.elastic_lambdaCoeff,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMemcpy elastic CPML mu/lambda failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
       }
     }
 
@@ -7401,7 +7460,60 @@ static void solver_init() {
             MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
           }
         }
+
+        /* Acoustic per-element force coefficient (dt^2 * h^2 / (4 rho)). */
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.pml_acoustic_forceCoeffArrayDevice),
+                (size_t)pmlN * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc acoustic CPML forceCoeff failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.pml_acoustic_forceCoeffArrayDevice,
+                       g_cpmlBuild.acoustic_forceCoeff,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMemcpy acoustic CPML forceCoeff failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
       }
+    }
+
+    /* --- Per-element PML flag (lenum-sized) --- */
+    /* Lets the non-PML kernels (kernelStiffnessCalcLocal,
+     * kernelAcousticPressureForce, BKT damping) early-exit on PML elements
+     * so each element is processed by exactly one stiffness/force kernel.
+     * Allocated even if both PML counts are zero so the kernels can
+     * unconditionally null-check the pointer. */
+    if (cudaMalloc((void**)&(Global.gpuData.pmlFlagArrayDevice),
+                   (size_t)Global.myMesh->lenum * sizeof(uint8_t)) !=
+        cudaSuccess) {
+      fprintf(stderr, "Thread %d: cudaMalloc pmlFlag failed\n", Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+    }
+    /* g_cpmlBuild.face_mask already has 1 bit per touched face; cast to a
+     * boolean "is any PML face" array for the kernel-side fast check. */
+    {
+      uint8_t* flag_host =
+          (uint8_t*)malloc((size_t)Global.myMesh->lenum * sizeof(uint8_t));
+      if (flag_host == NULL) {
+        fprintf(stderr, "Thread %d: oom pmlFlag host buffer\n", Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
+        flag_host[ei] = (g_cpmlBuild.face_mask[ei] != 0) ? 1u : 0u;
+      }
+      if (cudaMemcpy(Global.gpuData.pmlFlagArrayDevice, flag_host,
+                     (size_t)Global.myMesh->lenum * sizeof(uint8_t),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr, "Thread %d: cudaMemcpy pmlFlag failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      free(flag_host);
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
@@ -7412,6 +7524,12 @@ static void solver_init() {
     g_cpmlBuild.elastic_elem_list = NULL;
     free(g_cpmlBuild.acoustic_elem_list);
     g_cpmlBuild.acoustic_elem_list = NULL;
+    free(g_cpmlBuild.elastic_muCoeff);
+    g_cpmlBuild.elastic_muCoeff = NULL;
+    free(g_cpmlBuild.elastic_lambdaCoeff);
+    g_cpmlBuild.elastic_lambdaCoeff = NULL;
+    free(g_cpmlBuild.acoustic_forceCoeff);
+    g_cpmlBuild.acoustic_forceCoeff = NULL;
     for (int axis = 0; axis < 3; axis++) {
       free(g_cpmlBuild.elastic_a[axis]);
       g_cpmlBuild.elastic_a[axis] = NULL;
@@ -8766,6 +8884,7 @@ static void solver_delete() {
 
   /* CPML device arrays — both elastic and acoustic. cudaFree(NULL) and
    * free(NULL) are no-ops, so this is safe in dashpot mode too. */
+  cudaFree(Global.gpuData.pmlFlagArrayDevice);
   cudaFree(Global.gpuData.pmlElasticElemMapperDevice);
   cudaFree(Global.gpuData.pml_elastic_a_xArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_a_yArrayDevice);
@@ -8776,6 +8895,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pml_elastic_invKappa_xArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_invKappa_yArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_invKappa_zArrayDevice);
+  cudaFree(Global.gpuData.pml_elastic_muCoeffArrayDevice);
+  cudaFree(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice);
   for (int i = 0; i < 3; i++) {
     for (int jx = 0; jx < 3; jx++) {
       cudaFree(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]);
@@ -8791,6 +8912,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pml_acoustic_invKappa_xArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_invKappa_yArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_invKappa_zArrayDevice);
+  cudaFree(Global.gpuData.pml_acoustic_forceCoeffArrayDevice);
   for (int axis = 0; axis < 3; axis++) {
     cudaFree(Global.gpuData.pml_acoustic_psiArrayDevice[axis]);
   }
