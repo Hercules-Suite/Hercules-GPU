@@ -14076,8 +14076,19 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
       double poly = pow(xi_norm, (double)p);
       d_j = d_max_pre * poly;
       kappa_j = 1.0 + (kappa_max - 1.0) * poly;
+      /* alpha must remain strictly positive everywhere inside the PML to
+       * avoid the classical corner instability (Komatitsch & Martin 2007,
+       * Section 5.4). The linear profile alpha = alpha_max*(1 - xi/L)
+       * collapses to zero at the outer edge xi=L, and at corner elements
+       * where two or three PML axes are simultaneously at xi=L the recurrence
+       * loses the alpha-driven decay term on every active axis. Floor alpha
+       * at a small fraction of alpha_max so corner elements still have a
+       * stabilising decay rate. The 10% fraction matches the heuristic in
+       * SPECFEM3D and is a no-op at the inner edge where alpha already
+       * exceeds the floor. */
       alpha_j = alpha_max * (1.0 - xi_norm);
-      if (alpha_j < 0.0) alpha_j = 0.0;
+      const double alpha_floor = 0.1 * alpha_max;
+      if (alpha_j < alpha_floor) alpha_j = alpha_floor;
     }
 
     double decay = d_j / kappa_j + alpha_j;
