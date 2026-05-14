@@ -6879,9 +6879,37 @@ static void solver_init() {
   if (Param.theAbcType == ABC_CPML) {
     g_cpmlBuild.elastic_count = 0;
     g_cpmlBuild.acoustic_count = 0;
-    g_cpmlBuild.thickness_m = (Param.theCpmlThicknessM > 0.0)
-                                  ? Param.theCpmlThicknessM
-                                  : 0.0;
+
+    /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
+     * cpml_layers × (global max element edgesize). The max is taken across
+     * all elements on all ranks so the realized thickness is identical
+     * everywhere — necessary because face_mask is computed independently
+     * per element and must agree on shared corners across partitions. */
+    if (Param.theCpmlThicknessM > 0.0) {
+      g_cpmlBuild.thickness_m = Param.theCpmlThicknessM;
+    } else {
+      double local_max_h = 0.0;
+      for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
+        edata_t* ed = (edata_t*)Global.myMesh->elemTable[ei].data;
+        double h = (double)ed->edgesize;
+        if (h > local_max_h) local_max_h = h;
+      }
+      double global_max_h = 0.0;
+      MPI_Allreduce(&local_max_h, &global_max_h, 1, MPI_DOUBLE, MPI_MAX,
+                    comm_solver);
+      g_cpmlBuild.thickness_m =
+          (double)Param.theCpmlLayers * global_max_h;
+      /* Cache the realized thickness so the log line and the MPI broadcast
+       * (if a checkpoint or replay needs it later) reflect what was used. */
+      Param.theCpmlThicknessM = g_cpmlBuild.thickness_m;
+      if (Global.myID == 0) {
+        fprintf(stdout,
+                "CPML: derived thickness %.3f m from %d layers x %.3f m "
+                "(global max element edgesize)\n",
+                g_cpmlBuild.thickness_m, Param.theCpmlLayers, global_max_h);
+      }
+    }
+
     /* Default alpha_max = pi * f_max if user didn't specify */
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
