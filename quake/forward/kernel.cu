@@ -326,6 +326,14 @@ void kernelStiffnessCalcLocal(int32_t lenum,
     }
 
     eindex = myLinearElementsMapperDevice[lin_eindex];
+
+    /* CPML: PML elements are handled by kernelPMLElasticStep, so skip them
+     * here when abc_type=cpml. pmlFlagArrayDevice is NULL in dashpot mode. */
+    if (gpuData->pmlFlagArrayDevice != NULL &&
+        gpuData->pmlFlagArrayDevice[eindex] != 0) {
+      return;
+    }
+
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
     for (i = 0; i < 8; i++) {
@@ -471,6 +479,12 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
     return;
   }
   if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
+    return;
+  }
+
+  /* CPML: acoustic PML elements are handled by kernelPMLAcousticStep. */
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) {
     return;
   }
 
@@ -641,6 +655,12 @@ __global__  void kernelDampingCalcConvBkt2(int32_t lenum,
   }
 
   eindex = dampingElemMapperDevice[lin_eindex];
+
+  /* CPML: skip BKT damping on PML elements. */
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+    return;
+  }
 
   const double b_shear = gpuData->b_shearArrayDevice[eindex];
   const double a0_shear = gpuData->a0_shearArrayDevice[eindex];
@@ -845,6 +865,14 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
   }
 
   eindex = dampingElemMapperDevice[lin_eindex];
+
+  /* CPML: PML elements run their own elastic/acoustic memory recurrence;
+   * the BKT (Q-attenuation) memory variables are skipped on PML elements
+   * to keep the two memory-variable systems decoupled. */
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+    return;
+  }
 
   double g0, g1, g2;
   double coef_1_shear, coef_2_shear, coef_3_shear, coef_4_shear;
@@ -1099,6 +1127,12 @@ void kernelDampingCalcLocal(int32_t lenum,
   }
 
   eindex = dampingElemMapperDevice[lin_eindex];
+
+  /* CPML: skip BKT damping force on PML elements. */
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+    return;
+  }
 
   int         numcomp = lenum * 8;
   int32_t     *lnid;
@@ -1654,9 +1688,203 @@ __host__ __device__ void MultAddMatVecGPU( fmatrix_t* M, fvector_t* V1,
   V2->f[1] += (M->f[1][0] * V1->f[0] + 
 		 M->f[1][1] * V1->f[1] + M->f[1][2] * V1->f[2]);
 
-  V2->f[2] += (M->f[2][0] * V1->f[0] + 
+  V2->f[2] += (M->f[2][0] * V1->f[0] +
 		 M->f[2][1] * V1->f[1] + M->f[2][2] * V1->f[2]);
   }
 
   return;
+}
+
+
+/* ------------------------------------------------------------------------- */
+/*                  C-PML (unsplit ADE) GPU kernels                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * Hex8 1-pt-rule node ordering: node n in [0..7] has corner bits
+ *   (n & 1) -> +x face when 1, -x when 0       => s_x(n) = (n & 1) ? +1 : -1
+ *   (n & 2) -> +y face when 1, -y when 0       => s_y(n) = ...
+ *   (n & 4) -> +z face when 1, -z when 0       => s_z(n) = ...
+ * At the element center (xi = eta = zeta = 0):
+ *   dN_n/dx_j = s_j(n) / (4h).
+ * The (1/(4h)) factor is absorbed into the stored per-element a and
+ * 1/kappa coefficients (see solver_init), so the kernels work with the
+ * raw signed displacement (or pressure) sums S_j = sum_n s_j(n) u_i^(n).
+ * The dt^2 * h^2 / 4 volume/time factor is folded into muCoeff,
+ * lambdaCoeff (elastic) and forceCoeff (acoustic).
+ *
+ * Force sign: the central-difference update in kernelDispCalc reads
+ *   u^{n+1} = (force + 2M u^n - M u^{n-1}) / M
+ * so "force" already encodes dt^2 * F_stiff; an elastic restoring force
+ * F_stiff = -K u gives a negative sign in the assembly below.
+ */
+
+__global__ void kernelPMLElasticStep(int32_t lenum,
+                                     gpu_data_t* gpuData,
+                                     int32_t pmlElasticCount)
+{
+    int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (pml_idx >= pmlElasticCount) return;
+
+    const int32_t eindex = gpuData->pmlElasticElemMapperDevice[pml_idx];
+    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
+
+    /* Read 8 nodal displacements (u_alpha at each node n in [0..7]). */
+    double u[8][3];
+    for (int n = 0; n < 8; n++) {
+        const int32_t lnid = lnid_base[n * lenum];
+        u[n][0] = gpuData->tm1Device[lnid].f[0];
+        u[n][1] = gpuData->tm1Device[lnid].f[1];
+        u[n][2] = gpuData->tm1Device[lnid].f[2];
+    }
+
+    /* Signed sums S[j][alpha] = sum_n s_j(n) * u_alpha^(n).
+     * du_alpha/dx_j = S[j][alpha] / (4h); the 1/(4h) factor is absorbed
+     * into the per-element a and 1/kappa coefficients. */
+    double S[3][3];
+    for (int j = 0; j < 3; j++) {
+        for (int a = 0; a < 3; a++) {
+            double s = 0.0;
+            for (int n = 0; n < 8; n++) {
+                const double sign = ((n >> j) & 1) ? 1.0 : -1.0;
+                s += sign * u[n][a];
+            }
+            S[j][a] = s;
+        }
+    }
+
+    /* Per-axis ADE coefficients (a and 1/kappa already pre-divided by 4h). */
+    const double aJ[3] = { gpuData->pml_elastic_a_xArrayDevice[pml_idx],
+                           gpuData->pml_elastic_a_yArrayDevice[pml_idx],
+                           gpuData->pml_elastic_a_zArrayDevice[pml_idx] };
+    const double bJ[3] = { gpuData->pml_elastic_b_xArrayDevice[pml_idx],
+                           gpuData->pml_elastic_b_yArrayDevice[pml_idx],
+                           gpuData->pml_elastic_b_zArrayDevice[pml_idx] };
+    const double invKJ[3] = {
+        gpuData->pml_elastic_invKappa_xArrayDevice[pml_idx],
+        gpuData->pml_elastic_invKappa_yArrayDevice[pml_idx],
+        gpuData->pml_elastic_invKappa_zArrayDevice[pml_idx] };
+
+    /* ADE recurrence + modified partial derivative.
+     *   psi_new        = b_j * psi_old + a_j * S[j][i]
+     *   partial[j][i]  = invK_j * S[j][i] + psi_new
+     * Index convention: psi[i][j] holds the j-axis convolution of d/dx_j u_i.
+     * partial[j][i] is the CPML-modified du_i/dx_j. */
+    double partial[3][3];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            const double psi_old =
+                (double)gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx];
+            const double psi_new = bJ[j] * psi_old + aJ[j] * S[j][i];
+            gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx] =
+                (solver_float)psi_new;
+            partial[j][i] = invKJ[j] * S[j][i] + psi_new;
+        }
+    }
+
+    /* Strain eps_ab = 1/2 ( du_a/dx_b + du_b/dx_a ) using CPML-modified partials.
+     * (partial[j][i] = du_i/dx_j, so du_a/dx_b = partial[b][a].) */
+    double eps[3][3];
+    double trace = 0.0;
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            eps[a][b] = 0.5 * (partial[b][a] + partial[a][b]);
+        }
+        trace += eps[a][a];
+    }
+
+    /* Pre-scaled stress (sigma * dt^2 * h^2 / 4). */
+    const double muCoeff =
+        gpuData->pml_elastic_muCoeffArrayDevice[pml_idx];
+    const double lambdaCoeff =
+        gpuData->pml_elastic_lambdaCoeffArrayDevice[pml_idx];
+    double sigma[3][3];
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            sigma[a][b] = 2.0 * muCoeff * eps[a][b];
+        }
+        sigma[a][a] += lambdaCoeff * trace;
+    }
+
+    /* Nodal force: f_alpha^(n) = - sum_beta s_beta(n) * sigma_{alpha,beta}. */
+    for (int n = 0; n < 8; n++) {
+        const double sx = (n & 1) ? 1.0 : -1.0;
+        const double sy = (n & 2) ? 1.0 : -1.0;
+        const double sz = (n & 4) ? 1.0 : -1.0;
+        const int32_t lnid = lnid_base[n * lenum];
+        fvector_t* nodalForce = gpuData->forceDevice + lnid;
+        for (int a = 0; a < 3; a++) {
+            const double f = -(sx * sigma[a][0] +
+                               sy * sigma[a][1] +
+                               sz * sigma[a][2]);
+            atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
+        }
+    }
+}
+
+
+__global__ void kernelPMLAcousticStep(int32_t lenum,
+                                      gpu_data_t* gpuData,
+                                      int32_t pmlAcousticCount)
+{
+    int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (pml_idx >= pmlAcousticCount) return;
+
+    const int32_t eindex = gpuData->pmlAcousticElemMapperDevice[pml_idx];
+    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
+
+    /* Read 8 nodal pressures. */
+    double p[8];
+    for (int n = 0; n < 8; n++) {
+        const int32_t lnid = lnid_base[n * lenum];
+        p[n] = (double)gpuData->pressureTm1Device[lnid];
+    }
+
+    /* Signed sums S[j] = sum_n s_j(n) * p^(n).
+     * dp/dx_j = S[j] / (4h); 1/(4h) absorbed into a and 1/kappa. */
+    double S[3];
+    for (int j = 0; j < 3; j++) {
+        double s = 0.0;
+        for (int n = 0; n < 8; n++) {
+            const double sign = ((n >> j) & 1) ? 1.0 : -1.0;
+            s += sign * p[n];
+        }
+        S[j] = s;
+    }
+
+    const double aJ[3] = { gpuData->pml_acoustic_a_xArrayDevice[pml_idx],
+                           gpuData->pml_acoustic_a_yArrayDevice[pml_idx],
+                           gpuData->pml_acoustic_a_zArrayDevice[pml_idx] };
+    const double bJ[3] = { gpuData->pml_acoustic_b_xArrayDevice[pml_idx],
+                           gpuData->pml_acoustic_b_yArrayDevice[pml_idx],
+                           gpuData->pml_acoustic_b_zArrayDevice[pml_idx] };
+    const double invKJ[3] = {
+        gpuData->pml_acoustic_invKappa_xArrayDevice[pml_idx],
+        gpuData->pml_acoustic_invKappa_yArrayDevice[pml_idx],
+        gpuData->pml_acoustic_invKappa_zArrayDevice[pml_idx] };
+
+    /* ADE update and modified gradient: ~dp/dx_j = invK_j*S[j] + psi_new. */
+    double partial[3];
+    for (int j = 0; j < 3; j++) {
+        const double psi_old =
+            (double)gpuData->pml_acoustic_psiArrayDevice[j][pml_idx];
+        const double psi_new = bJ[j] * psi_old + aJ[j] * S[j];
+        gpuData->pml_acoustic_psiArrayDevice[j][pml_idx] =
+            (solver_float)psi_new;
+        partial[j] = invKJ[j] * S[j] + psi_new;
+    }
+
+    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * partial[j].
+     * forceCoeff = dt^2 * h^2 / (4 rho). */
+    const double forceCoeff =
+        gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
+    for (int n = 0; n < 8; n++) {
+        const double sx = (n & 1) ? 1.0 : -1.0;
+        const double sy = (n & 2) ? 1.0 : -1.0;
+        const double sz = (n & 4) ? 1.0 : -1.0;
+        const int32_t lnid = lnid_base[n * lenum];
+        const double f = -forceCoeff *
+                         (sx * partial[0] + sy * partial[1] + sz * partial[2]);
+        atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                  (solver_float)f);
+    }
 }

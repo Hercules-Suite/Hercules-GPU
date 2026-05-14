@@ -6316,6 +6316,16 @@ static void solver_set_critical_T() {
   /* Static global variable for the critical delta t */
   Global.theCriticalT = min_h_over_Vp_global;
 
+  /* CPML imposes a stricter CFL constraint to keep the corner-element
+   * multi-axis ADE recurrence stable. Default safety factor is 0.9. */
+  if (Param.theAbcType == ABC_CPML) {
+    Global.theCriticalT *= Param.theCpmlCflSafety;
+    if (Global.myID == 0) {
+      monitor_print("\n CPML CFL safety factor %.3f applied: critical dt = %.6e s\n",
+                    Param.theCpmlCflSafety, Global.theCriticalT);
+    }
+  }
+
   /* Printing of information */
   MPI_Barrier(comm_solver);
   if (Global.myID == 0) {
@@ -9760,6 +9770,29 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
       compute_addforce_conventional(mesh, solver, k1, k2);
     }
   }
+
+  /* CPML elastic-side force (ADE memory-variable update fused with the
+   * modified-strain Galerkin assembly). Operates on its own mapper, so
+   * the non-PML kernels above have already early-exited on these
+   * elements via the pmlFlagArrayDevice check. */
+  if (Param.theAbcType == ABC_CPML &&
+      solver->gpuData->pmlElasticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlElasticElemCount;
+    const int blocksize = 128;
+    const int gridsize = (pmlN + blocksize - 1) / blocksize;
+    cudaGetLastError();
+    kernelPMLElasticStep<<<gridsize, blocksize, 0,
+                           solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN);
+    cudaError_t cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: PML elastic step kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
   solver_record_gpu_event(solver, CUDA_EVENT_FORCE_STIFFNESS_DONE,
                           "force stiffness");
   Timer_Stop("Compute addforces e");
@@ -10228,6 +10261,24 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
+  }
+
+  /* CPML acoustic-side force (ADE update + modified Laplacian assembly). */
+  if (Param.theAbcType == ABC_CPML &&
+      solver->gpuData->pmlAcousticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
+    const int pmlBlock = 128;
+    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
+    kernelPMLAcousticStep<<<pmlGrid, pmlBlock, 0,
+                            solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: PML acoustic step kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   face_count = solver->gpuData->acousticInterfaceFaceCount;
@@ -11782,24 +11833,6 @@ static void solver_run() {
   }
 
   MPI_Barrier(comm_solver);
-
-  /* TEMPORARY: abort here when abc_type=cpml because the kernels and
-   * time-loop wiring have not landed yet. Setup (PML element marking,
-   * coefficient precompute, GPU upload) completes normally so the
-   * "CPML: N elastic + M acoustic ..." classification log prints before
-   * this trips. Phase A (mesh_only_mode) never reaches this point.
-   * Remove once the CPML kernels are hooked into the force path. */
-  if (Param.theAbcType == ABC_CPML) {
-    if (Global.myID == 0) {
-      fprintf(stderr,
-              "CPML kernels are not yet wired up on this branch; aborting "
-              "before the time loop. Re-run with abc_type=dashpot, or wait "
-              "for the kernel commit.\n");
-    }
-    MPI_Barrier(comm_solver);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
 
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {

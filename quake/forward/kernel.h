@@ -103,6 +103,19 @@ __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);
 
+/* C-PML kernels (unsplit ADE form). Each kernel processes the PML
+ * elements of one material type (elastic or acoustic) via its dedicated
+ * mapper. The kernel fuses the ADE memory-variable update and the
+ * modified-strain/gradient force assembly so the per-element nodal data
+ * (tm1 disp / pressureTm1) is loaded only once. */
+__global__ void kernelPMLElasticStep(int32_t lenum,
+				     gpu_data_t* gpuData,
+				     int32_t pmlElasticCount);
+
+__global__ void kernelPMLAcousticStep(int32_t lenum,
+				      gpu_data_t* gpuData,
+				      int32_t pmlAcousticCount);
+
 /* Physics functions used on both host and device */
 #ifdef __cplusplus
 extern "C" {
