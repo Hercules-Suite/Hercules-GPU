@@ -897,14 +897,6 @@ static struct Param_t {
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
-  abc_type_t theAbcType;
-  double theCpmlThicknessM;
-  int theCpmlLayers;
-  double theCpmlReflectionTarget;
-  int theCpmlPolyOrder;
-  double theCpmlKappaMax;
-  double theCpmlAlphaMaxHz;
-  double theCpmlCflSafety;
   double theThresholdDamping;
   double theThresholdVpVs;
   int theDampingStatisticsFlag;
@@ -990,6 +982,18 @@ static struct Param_t {
   double the3DVelocityModelLong;
   double the3DVelocityModelLat;
   UTMZone_t utmZone;
+
+  /* Absorbing boundary configuration. Placed at the end of the struct so the
+   * designated initializer below can keep these fields in declaration order
+   * (NVCC compiles psolve.cu as C++, which requires that). */
+  abc_type_t theAbcType;
+  double theCpmlThicknessM;
+  int theCpmlLayers;
+  double theCpmlReflectionTarget;
+  int theCpmlPolyOrder;
+  double theCpmlKappaMax;
+  double theCpmlAlphaMaxHz;
+  double theCpmlCflSafety;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
