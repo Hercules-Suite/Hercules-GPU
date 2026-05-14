@@ -1959,9 +1959,11 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlAlphaMaxHz = cpml_alpha_max_hz;
       Param.theCpmlCflSafety = cpml_cfl_safety;
 
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "abc_type=cpml: CPML kernels are not yet wired up on this "
-                   "branch. Use abc_type=dashpot for now.\n");
+      /* The CPML kernels and time-loop wiring are not yet committed; the
+       * solver aborts just before the time-stepping loop in phase B so that
+       * phase A (mesh_only_mode) and the CPML element-classification log
+       * still complete normally. See the abort site near the main
+       * "march forward in time" loop. */
     }
   }
 
@@ -11630,6 +11632,24 @@ static void solver_run() {
   }
 
   MPI_Barrier(comm_solver);
+
+  /* TEMPORARY: abort here when abc_type=cpml because the kernels and
+   * time-loop wiring have not landed yet. Setup (PML element marking,
+   * coefficient precompute, GPU upload) completes normally so the
+   * "CPML: N elastic + M acoustic ..." classification log prints before
+   * this trips. Phase A (mesh_only_mode) never reaches this point.
+   * Remove once the CPML kernels are hooked into the force path. */
+  if (Param.theAbcType == ABC_CPML) {
+    if (Global.myID == 0) {
+      fprintf(stderr,
+              "CPML kernels are not yet wired up on this branch; aborting "
+              "before the time loop. Re-run with abc_type=dashpot, or wait "
+              "for the kernel commit.\n");
+    }
+    MPI_Barrier(comm_solver);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
