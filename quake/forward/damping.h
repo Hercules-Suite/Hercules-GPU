@@ -29,6 +29,17 @@ typedef enum
 
 } damping_type_t;
 
+/* Absorbing boundary condition selection.
+ * ABC_DASHPOT: legacy Lysmer dashpots (folded into mass coefficients at setup).
+ * ABC_CPML:    unsplit Convolutional PML in ADE form (Komatitsch & Martin 2007).
+ */
+typedef enum
+{
+
+  ABC_DASHPOT = 0, ABC_CPML
+
+} abc_type_t;
+
 void damping_addforce(mesh_t *myMesh, mysolver_t *mySolver, fmatrix_t (*theK1)[8], fmatrix_t (*theK2)[8]);
 void calc_conv(mesh_t *myMesh, mysolver_t *mySolver, double theFreq, double theDeltaT, double theDeltaTSquared, damping_type_t typeOfDamping);
 void constant_Q_addforce(mesh_t *myMesh, mysolver_t *mySolver, double theFreq, double theDeltaT, double theDeltaTSquared, damping_type_t typeOfDamping);

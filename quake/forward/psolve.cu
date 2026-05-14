@@ -871,6 +871,14 @@ static struct Param_t {
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
+  abc_type_t theAbcType;
+  double theCpmlThicknessM;
+  int theCpmlLayers;
+  double theCpmlReflectionTarget;
+  int theCpmlPolyOrder;
+  double theCpmlKappaMax;
+  double theCpmlAlphaMaxHz;
+  double theCpmlCflSafety;
   double theThresholdDamping;
   double theThresholdVpVs;
   int theDampingStatisticsFlag;
@@ -996,7 +1004,15 @@ static struct Param_t {
            .theNumberOfLayers = 0,
            .basinMaterialType = BASIN_MATERIAL_ELASTIC,
            .basinWaterVp = 1500.0,
-           .basinWaterRho = 1000.0};
+           .basinWaterRho = 1000.0,
+           .theAbcType = ABC_DASHPOT,
+           .theCpmlThicknessM = 0.0,
+           .theCpmlLayers = 10,
+           .theCpmlReflectionTarget = 1.0e-3,
+           .theCpmlPolyOrder = 2,
+           .theCpmlKappaMax = 1.0,
+           .theCpmlAlphaMaxHz = -1.0,
+           .theCpmlCflSafety = 0.9};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1273,9 +1289,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  29 /* Must adjust this if adding double params */
+  34 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  40 /* Must adjust this if adding int params */
+  43 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1321,6 +1337,11 @@ static void read_parameters(int argc, char** argv) {
   double_message[26] = Param.basinWaterVp;
   double_message[27] = Param.basinWaterRho;
   double_message[28] = Param.theAcousticMeshRefinementFactor;
+  double_message[29] = Param.theCpmlThicknessM;
+  double_message[30] = Param.theCpmlReflectionTarget;
+  double_message[31] = Param.theCpmlKappaMax;
+  double_message[32] = Param.theCpmlAlphaMaxHz;
+  double_message[33] = Param.theCpmlCflSafety;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1354,6 +1375,11 @@ static void read_parameters(int argc, char** argv) {
   Param.basinWaterVp = double_message[26];
   Param.basinWaterRho = double_message[27];
   Param.theAcousticMeshRefinementFactor = double_message[28];
+  Param.theCpmlThicknessM = double_message[29];
+  Param.theCpmlReflectionTarget = double_message[30];
+  Param.theCpmlKappaMax = double_message[31];
+  Param.theCpmlAlphaMaxHz = double_message[32];
+  Param.theCpmlCflSafety = double_message[33];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1396,6 +1422,9 @@ static void read_parameters(int argc, char** argv) {
   int_message[37] = (int)Param.printStationPressures;
   int_message[38] = (int)Param.reconstructAcousticPlaneDisplacements;
   int_message[39] = Param.basinMaterialType;
+  int_message[40] = (int)Param.theAbcType;
+  int_message[41] = Param.theCpmlLayers;
+  int_message[42] = Param.theCpmlPolyOrder;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1441,6 +1470,9 @@ static void read_parameters(int argc, char** argv) {
   Param.reconstructAcousticPlaneDisplacements =
       (noyesflag_t)int_message[38];
   Param.basinMaterialType = int_message[39];
+  Param.theAbcType = (abc_type_t)int_message[40];
+  Param.theCpmlLayers = int_message[41];
+  Param.theCpmlPolyOrder = int_message[42];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1809,6 +1841,81 @@ static int32_t parse_parameters(const char* numericalin) {
                 numericalin);
         return -1;
       }
+    }
+  }
+
+  /* Absorbing boundary condition selection (optional; defaults to dashpot). */
+  {
+    char type_of_abc[64] = "dashpot";
+    abc_type_t abcType = ABC_DASHPOT;
+    if (parsetext(fp, "abc_type", 's', &type_of_abc) == 0) {
+      if (strcasecmp(type_of_abc, "dashpot") == 0) {
+        abcType = ABC_DASHPOT;
+      } else if (strcasecmp(type_of_abc, "cpml") == 0) {
+        abcType = ABC_CPML;
+      } else {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unknown abc_type: %s (expected dashpot or cpml)\n",
+                     type_of_abc);
+      }
+    }
+    Param.theAbcType = abcType;
+
+    if (abcType == ABC_CPML) {
+      /* All CPML parameters are optional; defaults set in Param initializer. */
+      double cpml_thickness_m = Param.theCpmlThicknessM;
+      int cpml_layers = Param.theCpmlLayers;
+      double cpml_reflection_target = Param.theCpmlReflectionTarget;
+      int cpml_poly_order = Param.theCpmlPolyOrder;
+      double cpml_kappa_max = Param.theCpmlKappaMax;
+      double cpml_alpha_max_hz = Param.theCpmlAlphaMaxHz;
+      double cpml_cfl_safety = Param.theCpmlCflSafety;
+
+      (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
+      (void)parsetext(fp, "cpml_layers", 'i', &cpml_layers);
+      (void)parsetext(fp, "cpml_reflection_target", 'd',
+                      &cpml_reflection_target);
+      (void)parsetext(fp, "cpml_poly_order", 'i', &cpml_poly_order);
+      (void)parsetext(fp, "cpml_kappa_max", 'd', &cpml_kappa_max);
+      (void)parsetext(fp, "cpml_alpha_max_hz", 'd', &cpml_alpha_max_hz);
+      (void)parsetext(fp, "cpml_cfl_safety", 'd', &cpml_cfl_safety);
+
+      if (cpml_thickness_m <= 0.0 && cpml_layers <= 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "abc_type=cpml requires cpml_thickness_m > 0 or "
+                     "cpml_layers > 0.\n");
+      }
+      if (cpml_reflection_target <= 0.0 || cpml_reflection_target >= 1.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_reflection_target=%g must be in (0,1).\n",
+                     cpml_reflection_target);
+      }
+      if (cpml_poly_order < 1 || cpml_poly_order > 4) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_poly_order=%d must be in [1,4].\n",
+                     cpml_poly_order);
+      }
+      if (cpml_kappa_max < 1.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_kappa_max=%g must be >= 1.0.\n", cpml_kappa_max);
+      }
+      if (cpml_cfl_safety <= 0.0 || cpml_cfl_safety > 1.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_cfl_safety=%g must be in (0,1].\n",
+                     cpml_cfl_safety);
+      }
+
+      Param.theCpmlThicknessM = cpml_thickness_m;
+      Param.theCpmlLayers = cpml_layers;
+      Param.theCpmlReflectionTarget = cpml_reflection_target;
+      Param.theCpmlPolyOrder = cpml_poly_order;
+      Param.theCpmlKappaMax = cpml_kappa_max;
+      Param.theCpmlAlphaMaxHz = cpml_alpha_max_hz;
+      Param.theCpmlCflSafety = cpml_cfl_safety;
+
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "abc_type=cpml: CPML kernels are not yet wired up on this "
+                   "branch. Use abc_type=dashpot for now.\n");
     }
   }
 
