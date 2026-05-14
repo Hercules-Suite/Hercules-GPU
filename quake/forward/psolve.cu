@@ -409,7 +409,33 @@ static char compute_setflag(tick_t ldb[3], tick_t ruf[3], tick_t nearendp[3],
                             tick_t farendp[3]);
 static void compute_setboundary(float size, float Vp, float Vs, float rho,
                                 int flag, double dashpot[8][3]);
+static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
+                                     tick_t nearendp[3], tick_t farendp[3],
+                                     double ticksize, double pml_thickness_m);
+static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
+                                       tick_t ruf[3], tick_t nearendp[3],
+                                       tick_t farendp[3], double ticksize,
+                                       double pml_thickness_m, double Vp,
+                                       double dt, int poly_order, double R,
+                                       double kappa_max, double alpha_max,
+                                       double a_out[3], double b_out[3],
+                                       double invKappa_out[3]);
 #endif /* BOUNDARY */
+
+/* CPML build-time context. Populated by solver_init() while iterating
+ * elements; the contents are uploaded into Global.gpuData and then freed
+ * (except elem_list, which is moved into mySolver for checkpoint I/O). */
+typedef struct cpml_build_s {
+  uint8_t* face_mask;   /* [lenum], NULL when abc_type != cpml */
+  int32_t  count;       /* number of PML elements found */
+  int32_t* elem_list;   /* sized [lenum] during build, shrunk to [count] */
+  double*  a[3];        /* [count] ADE recurrence a-coefficients per axis */
+  double*  b[3];        /* [count] ADE recurrence b-coefficients per axis */
+  double*  invKappa[3]; /* [count] 1/kappa_j per axis                     */
+  double   thickness_m; /* realized PML thickness (snapped per-face, max here) */
+  double   alpha_max;   /* alpha_max used for profiles                     */
+} cpml_build_t;
+static cpml_build_t g_cpmlBuild = {0};
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static int32_t mesh_element_index_for_octant(octant_t* octant,
@@ -6825,6 +6851,43 @@ static void solver_init() {
     }
   }
 
+#ifdef BOUNDARY
+  /* CPML build-time scratch. Sized to the upper bound (lenum) for the
+   * coefficient arrays; the GPU upload at the end of the loop shrinks them
+   * to g_cpmlBuild.count entries. */
+  if (Param.theAbcType == ABC_CPML) {
+    g_cpmlBuild.count = 0;
+    g_cpmlBuild.thickness_m = (Param.theCpmlThicknessM > 0.0)
+                                  ? Param.theCpmlThicknessM
+                                  : 0.0;
+    /* Default alpha_max = pi * f_max if user didn't specify */
+    g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
+                                ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
+                                : (M_PI * Param.theFreq);
+    g_cpmlBuild.face_mask =
+        (uint8_t*)calloc(Global.myMesh->lenum, sizeof(uint8_t));
+    g_cpmlBuild.elem_list =
+        (int32_t*)malloc(Global.myMesh->lenum * sizeof(int32_t));
+    for (int axis = 0; axis < 3; axis++) {
+      g_cpmlBuild.a[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.b[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.invKappa[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    }
+    if ((g_cpmlBuild.face_mask == NULL) || (g_cpmlBuild.elem_list == NULL) ||
+        (g_cpmlBuild.a[0] == NULL) || (g_cpmlBuild.b[0] == NULL) ||
+        (g_cpmlBuild.invKappa[0] == NULL)) {
+      fprintf(stderr,
+              "Thread %d: solver_init: out of memory for CPML build state\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+#endif /* BOUNDARY */
+
   /* For each element:
    * Initialize the data structures. tm1, tm2 and force have
    * already been initialized to 0 by calloc(). */
@@ -6841,6 +6904,7 @@ static void solver_init() {
     int32_t lnid0;
     char flag;
     double dashpot[8][3];
+    uint8_t pml_face_mask = 0;
 #endif
 
     double zeta, a, b;
@@ -6943,9 +7007,40 @@ static void solver_init() {
 
     flag = compute_setflag(ldb, ruf, Global.myOctree->nearendp,
                            Global.myOctree->farendp);
-    if (flag != 13) {
+
+    if (Param.theAbcType == ABC_CPML) {
+      pml_face_mask = compute_pml_face_mask(
+          ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
+          Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+      g_cpmlBuild.face_mask[eindex] = pml_face_mask;
+      if (pml_face_mask != 0) {
+        int32_t pml_idx = g_cpmlBuild.count++;
+        double a_axis[3], b_axis[3], invKappa_axis[3];
+        compute_pml_profile_coeffs(
+            pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
+            Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.thickness_m, (double)edata->Vp, Param.theDeltaT,
+            Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+            Param.theCpmlKappaMax, g_cpmlBuild.alpha_max, a_axis, b_axis,
+            invKappa_axis);
+        g_cpmlBuild.elem_list[pml_idx] = eindex;
+        for (int axis = 0; axis < 3; axis++) {
+          g_cpmlBuild.a[axis][pml_idx] = a_axis[axis];
+          g_cpmlBuild.b[axis][pml_idx] = b_axis[axis];
+          g_cpmlBuild.invKappa[axis][pml_idx] = invKappa_axis[axis];
+        }
+      }
+    }
+
+    /* Compute the Lysmer dashpot contribution unless CPML claims this
+     * element (i.e., pml_face_mask != 0 in CPML mode). Interior elements
+     * (flag == 13) always skip; that is unchanged. */
+    if ((flag != 13) &&
+        ((Param.theAbcType == ABC_DASHPOT) || (pml_face_mask == 0))) {
       compute_setboundary(edata->edgesize, edata->Vp, edata->Vs, edata->rho,
                           flag, dashpot);
+    } else {
+      memset(dashpot, 0, sizeof(dashpot));
     }
 #endif /* BOUNDARY */
 
@@ -6991,8 +7086,9 @@ static void solver_init() {
         np->mass2_minusaM[axis] -= (Param.theDeltaT * a * M);
 
 #ifdef BOUNDARY
-        if (flag != 13) {
-          /* boundary impact */
+        if ((flag != 13) &&
+            ((Param.theAbcType == ABC_DASHPOT) || (pml_face_mask == 0))) {
+          /* boundary impact (Lysmer dashpot) — skipped for CPML elements */
           np->mass_minusaM[axis] -= (Param.theDeltaT * dashpot[j][axis]);
           np->mass2_minusaM[axis] -= (Param.theDeltaT * dashpot[j][axis]);
         }
@@ -7006,6 +7102,151 @@ static void solver_init() {
     } /* end loop for each node */
 
   } /* eindex for elements */
+
+#ifdef BOUNDARY
+  /* CPML post-loop: publish count, copy elem_list to mySolver (for checkpoint
+   * I/O), allocate GPU coefficient/psi arrays, and upload coefficients. The
+   * GPU memory variables psi are zero-initialized. Build-time host scratch
+   * (face_mask + a/b/invKappa upper-bound arrays) is freed after upload. */
+  if (Param.theAbcType == ABC_CPML) {
+    int32_t pmlN = g_cpmlBuild.count;
+    int64_t pmlNLocal = (int64_t)pmlN;
+    int64_t pmlNGlobal = 0;
+    MPI_Reduce(&pmlNLocal, &pmlNGlobal, 1, MPI_LONG_LONG, MPI_SUM, 0,
+               comm_solver);
+    if (Global.myID == 0) {
+      fprintf(stdout,
+              "CPML: marked %lld PML elements globally (target thickness %.3f m, "
+              "alpha_max = %.3g rad/s)\n",
+              (long long)pmlNGlobal, g_cpmlBuild.thickness_m,
+              g_cpmlBuild.alpha_max);
+      if (Param.theMonitorFileFp != NULL) {
+        fprintf(Param.theMonitorFileFp,
+                "CPML: %lld PML elements globally, thickness %.3f m, "
+                "alpha_max %.3g rad/s\n",
+                (long long)pmlNGlobal, g_cpmlBuild.thickness_m,
+                g_cpmlBuild.alpha_max);
+      }
+    }
+
+    Global.gpuData.pmlElemCount = pmlN;
+    Global.mySolver->pmlElemCount = pmlN;
+
+    if (pmlN > 0) {
+      /* Host mirror of elem_list, kept for checkpointing. */
+      Global.mySolver->pmlElemList =
+          (int32_t*)malloc((size_t)pmlN * sizeof(int32_t));
+      if (Global.mySolver->pmlElemList == NULL) {
+        fprintf(stderr,
+                "Thread %d: solver_init: out of memory for pmlElemList\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      memcpy(Global.mySolver->pmlElemList, g_cpmlBuild.elem_list,
+             (size_t)pmlN * sizeof(int32_t));
+
+      /* Allocate host mirrors for psi memory variables (zeroed). */
+      for (int i = 0; i < 3; i++) {
+        for (int jx = 0; jx < 3; jx++) {
+          Global.mySolver->pml_psi[i][jx] = (solver_float*)calloc(
+              (size_t)pmlN, sizeof(solver_float));
+          if (Global.mySolver->pml_psi[i][jx] == NULL) {
+            fprintf(stderr,
+                    "Thread %d: solver_init: out of memory for pml_psi[%d][%d]\n",
+                    Global.myID, i, jx);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+          }
+        }
+      }
+
+      /* GPU allocations. */
+      if (cudaMalloc((void**)&(Global.gpuData.pmlElemMapperDevice),
+                     (size_t)pmlN * sizeof(int32_t)) != cudaSuccess) {
+        fprintf(stderr, "Thread %d: cudaMalloc pmlElemMapperDevice failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      double** dev_a[3] = {&Global.gpuData.pml_a_xArrayDevice,
+                           &Global.gpuData.pml_a_yArrayDevice,
+                           &Global.gpuData.pml_a_zArrayDevice};
+      double** dev_b[3] = {&Global.gpuData.pml_b_xArrayDevice,
+                           &Global.gpuData.pml_b_yArrayDevice,
+                           &Global.gpuData.pml_b_zArrayDevice};
+      double** dev_invK[3] = {&Global.gpuData.pml_invKappa_xArrayDevice,
+                              &Global.gpuData.pml_invKappa_yArrayDevice,
+                              &Global.gpuData.pml_invKappa_zArrayDevice};
+      for (int axis = 0; axis < 3; axis++) {
+        if (cudaMalloc((void**)dev_a[axis],
+                       (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+            cudaMalloc((void**)dev_b[axis],
+                       (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+            cudaMalloc((void**)dev_invK[axis],
+                       (size_t)pmlN * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc CPML coefficient arrays failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
+      for (int i = 0; i < 3; i++) {
+        for (int jx = 0; jx < 3; jx++) {
+          if (cudaMalloc((void**)&(Global.gpuData.pml_psiArrayDevice[i][jx]),
+                         (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
+            fprintf(stderr,
+                    "Thread %d: cudaMalloc pml_psiArrayDevice[%d][%d] failed\n",
+                    Global.myID, i, jx);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+          }
+          cudaMemset(Global.gpuData.pml_psiArrayDevice[i][jx], 0,
+                     (size_t)pmlN * sizeof(solver_float));
+        }
+      }
+
+      /* Upload coefficients and elem_list. */
+      if (cudaMemcpy(Global.gpuData.pmlElemMapperDevice,
+                     g_cpmlBuild.elem_list,
+                     (size_t)pmlN * sizeof(int32_t),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr, "Thread %d: cudaMemcpy pmlElemMapper failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      for (int axis = 0; axis < 3; axis++) {
+        if (cudaMemcpy(*dev_a[axis], g_cpmlBuild.a[axis],
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(*dev_b[axis], g_cpmlBuild.b[axis],
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(*dev_invK[axis], g_cpmlBuild.invKappa[axis],
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMemcpy CPML coefficient arrays failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
+    }
+
+    /* Free the build-time host scratch. The compact pmlElemList survives
+     * in mySolver; coefficients live only on the GPU from here on. */
+    free(g_cpmlBuild.face_mask);     g_cpmlBuild.face_mask = NULL;
+    free(g_cpmlBuild.elem_list);     g_cpmlBuild.elem_list = NULL;
+    for (int axis = 0; axis < 3; axis++) {
+      free(g_cpmlBuild.a[axis]);        g_cpmlBuild.a[axis]        = NULL;
+      free(g_cpmlBuild.b[axis]);        g_cpmlBuild.b[axis]        = NULL;
+      free(g_cpmlBuild.invKappa[axis]); g_cpmlBuild.invKappa[axis] = NULL;
+    }
+  }
+#endif /* BOUNDARY */
 
   /* Build the communication schedules */
   schedule_build(Global.myMesh, Global.mySolver->dn_sched,
@@ -8340,6 +8581,32 @@ static void solver_delete() {
   for (int i = 0; i < 3; i++) {
     cudaFree(Global.gpuData.mass2_minusaMArrayDevice[i]);
     cudaFree(Global.gpuData.mass_minusaMArrayDevice[i]);
+  }
+
+  /* CPML device arrays (NULL when abc_type != cpml or pmlElemCount == 0;
+   * cudaFree(NULL) is a no-op so this is safe in either case). */
+  cudaFree(Global.gpuData.pmlElemMapperDevice);
+  cudaFree(Global.gpuData.pml_a_xArrayDevice);
+  cudaFree(Global.gpuData.pml_a_yArrayDevice);
+  cudaFree(Global.gpuData.pml_a_zArrayDevice);
+  cudaFree(Global.gpuData.pml_b_xArrayDevice);
+  cudaFree(Global.gpuData.pml_b_yArrayDevice);
+  cudaFree(Global.gpuData.pml_b_zArrayDevice);
+  cudaFree(Global.gpuData.pml_invKappa_xArrayDevice);
+  cudaFree(Global.gpuData.pml_invKappa_yArrayDevice);
+  cudaFree(Global.gpuData.pml_invKappa_zArrayDevice);
+  for (int i = 0; i < 3; i++) {
+    for (int jx = 0; jx < 3; jx++) {
+      cudaFree(Global.gpuData.pml_psiArrayDevice[i][jx]);
+    }
+  }
+  free(Global.mySolver->pmlElemList);
+  Global.mySolver->pmlElemList = NULL;
+  for (int i = 0; i < 3; i++) {
+    for (int jx = 0; jx < 3; jx++) {
+      free(Global.mySolver->pml_psi[i][jx]);
+      Global.mySolver->pml_psi[i][jx] = NULL;
+    }
   }
 
   cudaFree(Global.mySolver->gpuDataDevice);
@@ -13356,6 +13623,101 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
   }
 
   return;
+}
+
+/* CPML face-mask: which of the 5 absorbing faces an element touches.
+ * The mask is computed from the element centroid's distance to each face;
+ * an element belongs to face j's PML zone iff that distance < pml_thickness_m.
+ * The z_min face (top, free surface) is never PML.  Corner/edge elements
+ * have multiple bits set. */
+static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
+                                     tick_t nearendp[3], tick_t farendp[3],
+                                     double ticksize, double pml_thickness_m) {
+  double cx = 0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize;
+  double cy = 0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize;
+  double cz = 0.5 * ((double)ldb[2] + (double)ruf[2]) * ticksize;
+  double xn = (double)nearendp[0] * ticksize;
+  double yn = (double)nearendp[1] * ticksize;
+  double xf = (double)farendp[0]  * ticksize;
+  double yf = (double)farendp[1]  * ticksize;
+  double zf = (double)farendp[2]  * ticksize;
+
+  uint8_t m = 0;
+  if (cx - xn < pml_thickness_m) m |= PML_FACE_X_MIN;
+  if (xf - cx < pml_thickness_m) m |= PML_FACE_X_MAX;
+  if (cy - yn < pml_thickness_m) m |= PML_FACE_Y_MIN;
+  if (yf - cy < pml_thickness_m) m |= PML_FACE_Y_MAX;
+  if (zf - cz < pml_thickness_m) m |= PML_FACE_Z_MAX;
+  return m;
+}
+
+/* Compute per-axis CPML ADE recurrence coefficients for one element.
+ * Output triples are indexed by stretching axis j in {x=0,y=1,z=2}.
+ * For axes outside the mask, returns the no-PML identity:
+ *   b_j = 1, a_j = 0, invKappa_j = 1  (memory variable stays at 0).
+ *
+ * The damping profile uses the local element Vp, so material heterogeneity
+ * is handled per-element automatically.
+ */
+static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
+                                       tick_t ruf[3], tick_t nearendp[3],
+                                       tick_t farendp[3], double ticksize,
+                                       double L, double Vp, double dt,
+                                       int poly_order, double R,
+                                       double kappa_max, double alpha_max,
+                                       double a_out[3], double b_out[3],
+                                       double invKappa_out[3]) {
+  const double c[3] = {
+      0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize,
+      0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize,
+      0.5 * ((double)ldb[2] + (double)ruf[2]) * ticksize};
+  const double bounds_lo[3] = {(double)nearendp[0] * ticksize,
+                               (double)nearendp[1] * ticksize,
+                               0.0 /* z_min unused, free surface */};
+  const double bounds_hi[3] = {(double)farendp[0] * ticksize,
+                               (double)farendp[1] * ticksize,
+                               (double)farendp[2] * ticksize};
+  const uint8_t lo_bits[3] = {PML_FACE_X_MIN, PML_FACE_Y_MIN, 0};
+  const uint8_t hi_bits[3] = {PML_FACE_X_MAX, PML_FACE_Y_MAX, PML_FACE_Z_MAX};
+  const int p = poly_order;
+  const double d_max_pre = (L > 0.0)
+                               ? (-(p + 1.0) * Vp * log(R) / (2.0 * L))
+                               : 0.0;
+
+  for (int j = 0; j < 3; j++) {
+    double xi = 0.0;
+    if (lo_bits[j] && (face_mask & lo_bits[j])) {
+      double d_lo = (bounds_lo[j] + L) - c[j];
+      if (d_lo > xi) xi = d_lo;
+    }
+    if (hi_bits[j] && (face_mask & hi_bits[j])) {
+      double d_hi = c[j] - (bounds_hi[j] - L);
+      if (d_hi > xi) xi = d_hi;
+    }
+    if (xi < 0.0) xi = 0.0;
+    if (xi > L) xi = L;
+
+    double d_j = 0.0, kappa_j = 1.0, alpha_j = 0.0;
+    if (xi > 0.0) {
+      double xi_norm = xi / L;
+      double poly = pow(xi_norm, (double)p);
+      d_j = d_max_pre * poly;
+      kappa_j = 1.0 + (kappa_max - 1.0) * poly;
+      alpha_j = alpha_max * (1.0 - xi_norm);
+      if (alpha_j < 0.0) alpha_j = 0.0;
+    }
+
+    double decay = d_j / kappa_j + alpha_j;
+    double b_j = exp(-decay * dt);
+    double a_j = 0.0;
+    double denom = d_j + kappa_j * alpha_j;
+    if (denom > 1.0e-30 && d_j > 0.0) {
+      a_j = (d_j / (kappa_j * denom)) * (b_j - 1.0);
+    }
+    a_out[j] = a_j;
+    b_out[j] = b_j;
+    invKappa_out[j] = 1.0 / kappa_j;
+  }
 }
 #endif /* BOUNDARY */
 
