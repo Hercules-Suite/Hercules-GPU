@@ -181,6 +181,17 @@ typedef struct edata_t {
 
 } edata_t;
 
+/* CPML per-element face mask bit definitions (over the 5 absorbing faces).
+ * z_min is the free surface (never PML). Multiple bits set => corner/edge
+ * PML element with multi-axis damping. Stored at runtime in a per-element
+ * uint8_t array (Global.pmlFaceMask), not persisted in edata_t/mdata_t. */
+#define PML_FACE_X_MIN 0x01u  /* south  */
+#define PML_FACE_X_MAX 0x02u  /* north  */
+#define PML_FACE_Y_MIN 0x04u  /* west   */
+#define PML_FACE_Y_MAX 0x08u  /* east   */
+#define PML_FACE_Z_MAX 0x10u  /* bottom */
+#define PML_FACE_ANY   0x1Fu
+
 /** 3-ary double vector */
 struct fvector_t {
     solver_float f[3];
@@ -432,6 +443,32 @@ typedef struct gpu_data_t {
     fvector_t*   kappaVectorDevice;
     //edata_t*     matPropsDevice;
 
+    /* CPML state on device. All arrays sized [pmlElemCount] except where noted.
+     * Profile coefficients are precomputed per element from the local edata
+     * (Vp, Vs, edgesize) and the per-face damping profile (d, kappa, alpha).
+     * pml_b_j = exp(-(d_j/kappa_j + alpha_j) * dt);
+     * pml_a_j = (d_j / (kappa_j * (d_j + kappa_j * alpha_j))) * (pml_b_j - 1);
+     * pml_invKappa_j = 1 / kappa_j.
+     * For axes where pml_face_mask bit is unset, d_j=0, kappa_j=1, alpha_j=0
+     * so pml_b_j=1, pml_a_j=0, pml_invKappa_j=1 (memory variable stays at 0).
+     *
+     * pml_psiArrayDevice[i][j] is the memory variable ψ_{i}^{(j)} = the
+     * j-axis convolution of ∂_j u_i. Index i = displacement component (x,y,z),
+     * j = stretching direction (x,y,z). Updated per step by the ADE recurrence.
+     */
+    int32_t       pmlElemCount;
+    int32_t*      pmlElemMapperDevice;             /* PML linear idx -> eindex */
+    double*       pml_b_xArrayDevice;
+    double*       pml_b_yArrayDevice;
+    double*       pml_b_zArrayDevice;
+    double*       pml_a_xArrayDevice;
+    double*       pml_a_yArrayDevice;
+    double*       pml_a_zArrayDevice;
+    double*       pml_invKappa_xArrayDevice;
+    double*       pml_invKappa_yArrayDevice;
+    double*       pml_invKappa_zArrayDevice;
+    solver_float* pml_psiArrayDevice[3][3];        /* [i_disp][j_axis] */
+
 } gpu_data_t;
 
 
@@ -478,6 +515,13 @@ struct mysolver_t {
     fvector_t* conv_kappa_1;
     fvector_t* conv_kappa_2;
     fvector_t* conv_kappa_3;
+
+    /* CPML host-side state (used for checkpoint I/O only). NULL when
+     * abc_type != cpml or pmlElemCount == 0. pml_psi[i][j] is the host mirror
+     * of gpuData->pml_psiArrayDevice[i][j], length pmlElemCount. */
+    int32_t       pmlElemCount;
+    int32_t*      pmlElemList;            /* host copy of pmlElemMapper, sized [pmlElemCount] */
+    solver_float* pml_psi[3][3];          /* host mirrors of psi memory variables */
 
     /* GPU device data structures - should be declared in a separate struct */
     gpu_spec_t*  gpu_spec; // GPU device specifications
