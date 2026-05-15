@@ -418,6 +418,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double pml_thickness_m, double Vp,
                                        double dt, int poly_order, double R,
                                        double kappa_max, double alpha_max,
+                                       double mpml_cross_fraction,
+                                       double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3]);
 #endif /* BOUNDARY */
@@ -1020,6 +1022,8 @@ static struct Param_t {
   double theCpmlKappaMax;
   double theCpmlAlphaMaxHz;
   double theCpmlCflSafety;
+  double theCpmlMpmlCrossFraction;
+  double theCpmlAlphaFloorFraction;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1068,7 +1072,9 @@ static struct Param_t {
            .theCpmlPolyOrder = 2,
            .theCpmlKappaMax = 1.0,
            .theCpmlAlphaMaxHz = -1.0,
-           .theCpmlCflSafety = 0.9};
+           .theCpmlCflSafety = 0.9,
+           .theCpmlMpmlCrossFraction = 0.1,
+           .theCpmlAlphaFloorFraction = 0.1};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1345,7 +1351,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  34 /* Must adjust this if adding double params */
+  36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   43 /* Must adjust this if adding int params */
 
@@ -1398,6 +1404,8 @@ static void read_parameters(int argc, char** argv) {
   double_message[31] = Param.theCpmlKappaMax;
   double_message[32] = Param.theCpmlAlphaMaxHz;
   double_message[33] = Param.theCpmlCflSafety;
+  double_message[34] = Param.theCpmlMpmlCrossFraction;
+  double_message[35] = Param.theCpmlAlphaFloorFraction;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1436,6 +1444,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlKappaMax = double_message[31];
   Param.theCpmlAlphaMaxHz = double_message[32];
   Param.theCpmlCflSafety = double_message[33];
+  Param.theCpmlMpmlCrossFraction = double_message[34];
+  Param.theCpmlAlphaFloorFraction = double_message[35];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1926,6 +1936,8 @@ static int32_t parse_parameters(const char* numericalin) {
       double cpml_kappa_max = Param.theCpmlKappaMax;
       double cpml_alpha_max_hz = Param.theCpmlAlphaMaxHz;
       double cpml_cfl_safety = Param.theCpmlCflSafety;
+      double cpml_mpml_cross_fraction = Param.theCpmlMpmlCrossFraction;
+      double cpml_alpha_floor_fraction = Param.theCpmlAlphaFloorFraction;
 
       (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
       (void)parsetext(fp, "cpml_layers", 'i', &cpml_layers);
@@ -1935,6 +1947,10 @@ static int32_t parse_parameters(const char* numericalin) {
       (void)parsetext(fp, "cpml_kappa_max", 'd', &cpml_kappa_max);
       (void)parsetext(fp, "cpml_alpha_max_hz", 'd', &cpml_alpha_max_hz);
       (void)parsetext(fp, "cpml_cfl_safety", 'd', &cpml_cfl_safety);
+      (void)parsetext(fp, "cpml_mpml_cross_fraction", 'd',
+                      &cpml_mpml_cross_fraction);
+      (void)parsetext(fp, "cpml_alpha_floor_fraction", 'd',
+                      &cpml_alpha_floor_fraction);
 
       if (cpml_thickness_m <= 0.0 && cpml_layers <= 0) {
         solver_abort(__FUNCTION_NAME, NULL,
@@ -1960,6 +1976,18 @@ static int32_t parse_parameters(const char* numericalin) {
                      "cpml_cfl_safety=%g must be in (0,1].\n",
                      cpml_cfl_safety);
       }
+      if (cpml_mpml_cross_fraction < 0.0 ||
+          cpml_mpml_cross_fraction > 0.5) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_mpml_cross_fraction=%g must be in [0, 0.5].\n",
+                     cpml_mpml_cross_fraction);
+      }
+      if (cpml_alpha_floor_fraction < 0.0 ||
+          cpml_alpha_floor_fraction > 1.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_alpha_floor_fraction=%g must be in [0, 1].\n",
+                     cpml_alpha_floor_fraction);
+      }
 
       Param.theCpmlThicknessM = cpml_thickness_m;
       Param.theCpmlLayers = cpml_layers;
@@ -1968,6 +1996,8 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlKappaMax = cpml_kappa_max;
       Param.theCpmlAlphaMaxHz = cpml_alpha_max_hz;
       Param.theCpmlCflSafety = cpml_cfl_safety;
+      Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
+      Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
 
       /* The CPML kernels and time-loop wiring are not yet committed; the
        * solver aborts just before the time-stepping loop in phase B so that
@@ -7113,8 +7143,10 @@ static void solver_init() {
             Global.myOctree->farendp, Global.myOctree->ticksize,
             g_cpmlBuild.thickness_m, (double)edata->Vp, Param.theDeltaT,
             Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
-            Param.theCpmlKappaMax, g_cpmlBuild.alpha_max, a_axis, b_axis,
-            invKappa_axis);
+            Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+            Param.theCpmlMpmlCrossFraction,
+            Param.theCpmlAlphaFloorFraction,
+            a_axis, b_axis, invKappa_axis);
 
         /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
          * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
@@ -14038,6 +14070,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double L, double Vp, double dt,
                                        int poly_order, double R,
                                        double kappa_max, double alpha_max,
+                                       double mpml_cross_fraction,
+                                       double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3]) {
   const double c[3] = {
@@ -14059,9 +14093,9 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
 
   /* First pass: compute the *standard* per-axis CPML profile values
    * d_j, kappa_j, alpha_j. These are the K&M 2007 profiles unchanged.
-   * The alpha floor at 10% of alpha_max prevents alpha from collapsing to
+   * alpha_floor_fraction (default 0.1) prevents alpha from collapsing to
    * zero at xi = L. */
-  const double alpha_floor = 0.1 * alpha_max;
+  const double alpha_floor = alpha_floor_fraction * alpha_max;
   double d_raw[3] = {0.0, 0.0, 0.0};
   double kappa_arr[3] = {1.0, 1.0, 1.0};
   double alpha_arr[3] = {0.0, 0.0, 0.0};
@@ -14111,9 +14145,10 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
    * the first pass; we floor alpha for those axes too so the ADE
    * recurrence has a non-zero decay rate.
    *
-   * p = 0.1 is the standard recommended value (Meza-Fajardo & Papageorgiou
-   * 2008 Section 4.2; SPECFEM3D uses the same). */
-  const double mpml_p = 0.1;
+   * mpml_cross_fraction is the runtime-tunable p value (default 0.1).
+   * Set to 0 to disable M-PML and run plain CPML; values in [0.05, 0.20]
+   * are the literature-recommended range. */
+  const double mpml_p = mpml_cross_fraction;
 
   for (int j = 0; j < 3; j++) {
     int k1 = (j + 1) % 3;
