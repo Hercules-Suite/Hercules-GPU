@@ -293,10 +293,13 @@ Hercules supports two absorbing boundary conditions, selected at run
 time. The default is the legacy first-order Lysmer dashpot, folded into
 the lumped mass matrix at setup. The newer option is an unsplit
 Convolutional Perfectly Matched Layer (C-PML) in ADE form (Komatitsch &
-Martin, 2007), implemented for both elastic and acoustic materials with
-shared profile coefficients. C-PML wraps the five absorbing faces
-(`x_min`, `x_max`, `y_min`, `y_max`, `z_max`) and leaves `z_min` as the
-free surface.
+Martin, 2007), augmented with two stability fixes — an `alpha` floor and
+M-PML cross-axis coupling (Meza-Fajardo & Papageorgiou, 2008) — for
+robust long-time behaviour on elastic-only and elastic-acoustic
+problems. The C-PML implementation is per-element (each element appears
+in exactly one elastic or acoustic mapper), wraps the five absorbing
+faces (`x_min`, `x_max`, `y_min`, `y_max`, `z_max`), and leaves `z_min`
+as the free surface.
 
 - `abc_type`
 	Optional. `dashpot` (default) selects the legacy Lysmer dashpot path
@@ -323,15 +326,21 @@ free surface.
 	`p` in the spatial profile `d_j(xi) ~ (xi/L)^p`. `p = 2` is the standard
 	K&M/SPECFEM3D choice.
 - `cpml_kappa_max`
-	Optional. Default `1.0` (no real stretch). Raising `kappa_max` (e.g. to
-	`3` or `7`) improves absorption at grazing incidence but can degrade
-	stability with corner elements. Try `1.0` first; raise only if you see
-	grazing-angle leakage.
+	Optional. Default `1.0` (no real stretch). **Stick with `1.0` unless
+	you have concrete evidence of grazing-angle leakage.** Raising
+	`kappa_max` (e.g. to `3` or `7`) is sometimes recommended for grazing
+	incidence in PML literature, but on long elastic Hercules runs it has
+	been observed to destabilise the corner ADE mode even with M-PML
+	active. Empirically `kappa_max = 1` gives the most robust late-time
+	behaviour for typical earthquake simulations.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
 	rad/s. When `< 0` or unset (default), the solver uses
-	`alpha_max = pi * simulation_wave_max_freq_hz`. `alpha_max > 0` is
-	required for corner-element stability with multi-axis PML.
+	`alpha_max = pi * simulation_wave_max_freq_hz`. The standard recipe
+	from the PML literature is `alpha_max = pi * f_dominant_source`. Use
+	this knob if your source has a peak frequency distinctly different
+	from `simulation_wave_max_freq_hz` (e.g. a Ricker pulse at `fc=2.5 Hz`
+	in a 1 Hz-resolved mesh) — set `cpml_alpha_max_hz = fc`.
 - `cpml_cfl_safety`
 	Optional. Default `0.9`. The critical time-step computed from `min h/Vp`
 	is multiplied by this factor when `abc_type=cpml` to give a margin
@@ -353,6 +362,47 @@ Notes on C-PML behavior:
 	and the derived thickness when `cpml_thickness_m` was zero. Use this to
 	confirm the PML zone is non-empty and split between materials the way you
 	expect.
+
+Stability fixes baked in (no user knobs required):
+
+- **Alpha floor at 10% of `alpha_max`.** The K&M linear profile
+	`alpha(xi) = alpha_max * (1 - xi/L)` falls to zero at the outer PML
+	edge, which lets corner elements lose all ADE decay simultaneously on
+	multiple axes and triggers a fast exponential blow-up (this was
+	observed in early testing). The solver clamps `alpha` from below at
+	`0.1 * alpha_max` so corner elements always retain some decay rate.
+	No-op at the inner edge.
+- **M-PML cross-axis coupling.** Plain unsplit CPML has a known
+	long-time creeping instability for the elastic wave equation even
+	with the alpha floor. Following Meza-Fajardo & Papageorgiou (2008),
+	each axis's damping rate `d_j` is augmented at coefficient-build time
+	with a 10% contribution from the other two axes:
+
+	    d_eff_j = d_j + 0.1 * (d_{k1} + d_{k2})
+
+	`d_eff_j` is what enters the `b` and `a` ADE coefficients (the
+	constitutive operator `1/kappa_j` is unchanged). The cross-coupling
+	restores inter-axis symmetry in the corner and stabilises long
+	elastic runs at the cost of slightly more absorption "leaking" onto
+	auxiliary axes. The `p = 0.1` fraction is hard-coded; if you have
+	stability issues on a particularly long run, exposing this as a
+	parameter is a small change.
+
+Recommended starting parameters (typical earthquake-scale runs):
+
+```
+abc_type = cpml
+cpml_layers = 50            # ~2 wavelengths at f_max for a 78 m mesh
+# leave cpml_kappa_max at default 1.0
+# leave cpml_alpha_max_hz at default unless source f_dominant != f_max
+```
+
+Bumping `cpml_layers` higher (e.g. 80–100) is generally safe and gives
+better absorption of low-frequency Rayleigh waves at lateral faces. Do
+not raise `cpml_kappa_max` above 1 without a specific motivation; the
+M-PML stabilisation has been verified at `kappa_max = 1` but the
+`kappa_max > 1` regime remains a known stability gotcha (Komatitsch &
+Martin 2007 Section 5.4).
 
 Typical two-phase settings:
 
