@@ -1128,6 +1128,15 @@ static struct Global_t {
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
 
+  /* Host scratch for the CPML-aware interface coupling correction. Filled
+   * in solver_init while g_cpmlBuild.face_mask is still alive; uploaded
+   * alongside the other interface arrays. NULL when not applicable. */
+  uint8_t* acousticInterfacePmlFlag;
+  double* acousticInterfacePml_a;
+  double* acousticInterfacePml_b;
+  double* acousticInterfacePml_invKappa;
+  int64_t acousticInterfacePmlFaceCount;
+
 } Global = {.myID = -1,
             .theGroupSize = -1,
             .myOctree = NULL,
@@ -7637,6 +7646,108 @@ static void solver_init() {
       free(clamp_host);
     }
 
+    /* --- CPML-aware acoustic-elastic interface coupling correction --- */
+    /* For each interface face whose acoustic or elastic side is a PML
+     * element, precompute the face-normal-axis ADE coefficients (a, b,
+     * 1/kappa) from that PML element so the coupling kernels can apply the
+     * same unsplit-CPML modification to the interface flux as the volume
+     * kernels apply to the strain/gradient. No-op when there are no
+     * interface faces or none of them touch the PML. */
+    Global.acousticInterfacePmlFaceCount = 0;
+    if (Global.acousticInterfaceFaces > 0) {
+      int64_t nface = Global.acousticInterfaceFaces;
+      uint8_t* iface_flag = (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
+      double*  iface_a    = (double*)calloc((size_t)nface, sizeof(double));
+      double*  iface_b    = (double*)malloc((size_t)nface * sizeof(double));
+      double*  iface_iK   = (double*)malloc((size_t)nface * sizeof(double));
+      if (iface_flag == NULL || iface_a == NULL || iface_b == NULL ||
+          iface_iK == NULL) {
+        fprintf(stderr,
+                "Thread %d: oom CPML interface-correction host arrays\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      /* Default = identity (no-op): b=1, a=0, invKappa=1. */
+      for (int64_t i = 0; i < nface; i++) {
+        iface_b[i] = 1.0;
+        iface_iK[i] = 1.0;
+      }
+      int64_t pml_face_count = 0;
+      for (int64_t i = 0; i < nface; i++) {
+        int32_t ea = Global.acousticInterfaceElementIds[i];
+        int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
+                         ? Global.acousticInterfaceAdjacentElementIndexes[i]
+                         : -1;
+        uint8_t ma = (ea >= 0 && ea < Global.myMesh->lenum)
+                         ? g_cpmlBuild.face_mask[ea]
+                         : 0;
+        uint8_t me = (ee >= 0 && ee < Global.myMesh->lenum)
+                         ? g_cpmlBuild.face_mask[ee]
+                         : 0;
+        if (ma == 0 && me == 0) continue; /* face not in PML: identity */
+
+        /* Use whichever side is the PML element to source the profile.
+         * Both sides being PML is rare (interface deep in PML); the
+         * acoustic side is preferred since the coupling pressure sample
+         * is taken there. */
+        int32_t pml_eindex = (ma != 0) ? ea : ee;
+        elem_t* pe = &Global.myMesh->elemTable[pml_eindex];
+        edata_t* ped = (edata_t*)pe->data;
+        int32_t pln0 = pe->lnid[0];
+        tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
+                         Global.myMesh->nodeTable[pln0].y,
+                         Global.myMesh->nodeTable[pln0].z};
+        tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
+        tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
+                         ldb[2] + edgeticks};
+        double a3[3], b3[3], iK3[3];
+        compute_pml_profile_coeffs(
+            (ma != 0) ? ma : me, ldb, ruf, Global.myOctree->nearendp,
+            Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.thickness_m, (double)ped->Vp, Param.theDeltaT,
+            Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+            Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+            Param.theCpmlMpmlCrossFraction,
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3);
+
+        /* Pick the axis most aligned with the interface normal. */
+        double nx = fabs(Global.acousticInterfaceFaceNormals[3 * i + 0]);
+        double ny = fabs(Global.acousticInterfaceFaceNormals[3 * i + 1]);
+        double nz = fabs(Global.acousticInterfaceFaceNormals[3 * i + 2]);
+        int axis = (nx >= ny && nx >= nz) ? 0 : ((ny >= nz) ? 1 : 2);
+
+        iface_flag[i] = 1u;
+        iface_a[i]    = a3[axis];
+        iface_b[i]    = b3[axis];
+        iface_iK[i]   = iK3[axis];
+        pml_face_count++;
+      }
+
+      if (pml_face_count > 0) {
+        Global.acousticInterfacePmlFlag = iface_flag;
+        Global.acousticInterfacePml_a = iface_a;
+        Global.acousticInterfacePml_b = iface_b;
+        Global.acousticInterfacePml_invKappa = iface_iK;
+        Global.acousticInterfacePmlFaceCount = pml_face_count;
+      } else {
+        /* No interface face is in the PML: keep everything NULL so the
+         * coupling kernels skip the correction entirely. */
+        free(iface_flag);
+        free(iface_a);
+        free(iface_b);
+        free(iface_iK);
+      }
+      int64_t global_pml_iface = 0;
+      MPI_Reduce(&pml_face_count, &global_pml_iface, 1, MPI_LONG_LONG,
+                 MPI_SUM, 0, comm_solver);
+      if (Global.myID == 0 && global_pml_iface > 0) {
+        fprintf(stdout,
+                "CPML: %lld acoustic-elastic interface faces lie inside the "
+                "PML zone; applying unsplit-CPML interface correction\n",
+                (long long)global_pml_iface);
+      }
+    }
+
     /* Free the build-time host scratch. The compact per-type elem_lists
      * survive in mySolver; coefficients live only on the GPU from here on. */
     free(g_cpmlBuild.face_mask);
@@ -8644,6 +8755,64 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+
+      /* CPML-aware interface coupling correction arrays. Only allocated
+       * when at least one interface face is inside the PML zone (host
+       * arrays non-NULL). Two psi memory variables per face, zero-init. */
+      if (Global.acousticInterfacePmlFlag != NULL) {
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePmlFlagDevice),
+                face_count * sizeof(uint8_t)) != cudaSuccess ||
+            cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePml_aDevice),
+                face_count * sizeof(double)) != cudaSuccess ||
+            cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePml_bDevice),
+                face_count * sizeof(double)) != cudaSuccess ||
+            cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePml_invKappaDevice),
+                face_count * sizeof(double)) != cudaSuccess ||
+            cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePsiPressureDevice),
+                face_count * sizeof(solver_float)) != cudaSuccess ||
+            cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfacePsiAccelDevice),
+                face_count * sizeof(solver_float)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate CPML interface-correction "
+                  "arrays\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        cudaMemset(Global.gpuData.acousticInterfacePsiPressureDevice, 0,
+                   face_count * sizeof(solver_float));
+        cudaMemset(Global.gpuData.acousticInterfacePsiAccelDevice, 0,
+                   face_count * sizeof(solver_float));
+        if (cudaMemcpy(Global.gpuData.acousticInterfacePmlFlagDevice,
+                       Global.acousticInterfacePmlFlag,
+                       face_count * sizeof(uint8_t),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.acousticInterfacePml_aDevice,
+                       Global.acousticInterfacePml_a,
+                       face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.acousticInterfacePml_bDevice,
+                       Global.acousticInterfacePml_b,
+                       face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.acousticInterfacePml_invKappaDevice,
+                       Global.acousticInterfacePml_invKappa,
+                       face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy CPML interface-correction "
+                  "arrays\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
     }
   }
 
@@ -8978,6 +9147,20 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
+  cudaFree(Global.gpuData.acousticInterfacePmlFlagDevice);
+  cudaFree(Global.gpuData.acousticInterfacePml_aDevice);
+  cudaFree(Global.gpuData.acousticInterfacePml_bDevice);
+  cudaFree(Global.gpuData.acousticInterfacePml_invKappaDevice);
+  cudaFree(Global.gpuData.acousticInterfacePsiPressureDevice);
+  cudaFree(Global.gpuData.acousticInterfacePsiAccelDevice);
+  free(Global.acousticInterfacePmlFlag);
+  Global.acousticInterfacePmlFlag = NULL;
+  free(Global.acousticInterfacePml_a);
+  Global.acousticInterfacePml_a = NULL;
+  free(Global.acousticInterfacePml_b);
+  Global.acousticInterfacePml_b = NULL;
+  free(Global.acousticInterfacePml_invKappa);
+  Global.acousticInterfacePml_invKappa = NULL;
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);

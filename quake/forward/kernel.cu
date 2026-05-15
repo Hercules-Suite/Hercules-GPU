@@ -447,6 +447,24 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     pressure += weight * (double)gpuData->pressureTm1Device[lnid];
   }
 
+  /* CPML-aware interface correction. On interface faces inside the PML
+   * zone, the exchanged pressure is stretched the same way the volume
+   * CPML stretches gradients: p~ = invKappa_n*p + psi, with
+   * psi <- b_n*psi + a_n*p along the face-normal axis. Identity (no-op)
+   * on non-PML faces (flag=0) and at the PML inner edge (a=0,b=1,iK=1). */
+  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
+      gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
+    const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
+    const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
+    const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
+    const double psi_old =
+        (double)gpuData->acousticInterfacePsiPressureDevice[faceIndex];
+    const double psi_new = b * psi_old + a * pressure;
+    gpuData->acousticInterfacePsiPressureDevice[faceIndex] =
+        (solver_float)psi_new;
+    pressure = iK * pressure + psi_new;
+  }
+
   for (int i = 0; i < 8; i++) {
     const double weight =
         acoustic_shape_value_at(i, force_center[0], force_center[1],
@@ -576,6 +594,22 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
                 (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
                   (double)u_prev.f[2]) *
                      invDeltaT2 * normal[2]));
+  }
+
+  /* CPML-aware interface correction (mirror of the pressure->force path,
+   * with its own memory variable so the two coupling directions stay
+   * symmetric). Identity on non-PML faces / at the PML inner edge. */
+  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
+      gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
+    const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
+    const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
+    const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
+    const double psi_old =
+        (double)gpuData->acousticInterfacePsiAccelDevice[faceIndex];
+    const double psi_new = b * psi_old + a * accel_n;
+    gpuData->acousticInterfacePsiAccelDevice[faceIndex] =
+        (solver_float)psi_new;
+    accel_n = iK * accel_n + psi_new;
   }
 
   for (int i = 0; i < 8; i++) {

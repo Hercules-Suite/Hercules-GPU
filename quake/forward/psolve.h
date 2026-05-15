@@ -417,6 +417,21 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceFaceNormalsDevice;
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
+    /* CPML-aware interface coupling correction. All NULL unless
+     * abc_type=cpml AND at least one acoustic-elastic interface face has a
+     * PML element on either side. Per-face: a 1/0 flag, the face-normal-axis
+     * ADE coefficients taken from the adjacent PML element, and two memory
+     * variables (one per coupling direction: pressure->force and
+     * accel->pressure). The coupling kernels replace the exchanged scalar q
+     * by q~ = invKappa_n*q + psi, psi <- b_n*psi + a_n*q, exactly mirroring
+     * the volume CPML treatment but on the interface flux. No-op at the PML
+     * inner edge (a=0, b=1, invKappa=1) and on non-PML faces (flag=0). */
+    uint8_t*     acousticInterfacePmlFlagDevice;
+    double*      acousticInterfacePml_aDevice;
+    double*      acousticInterfacePml_bDevice;
+    double*      acousticInterfacePml_invKappaDevice;
+    solver_float* acousticInterfacePsiPressureDevice;
+    solver_float* acousticInterfacePsiAccelDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
     double*      acousticPressureCoeffArrayDevice;
     double*      acousticPressureBoundaryCoeffArrayDevice;
