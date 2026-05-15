@@ -14057,6 +14057,15 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                ? (-(p + 1.0) * Vp * log(R) / (2.0 * L))
                                : 0.0;
 
+  /* First pass: compute the *standard* per-axis CPML profile values
+   * d_j, kappa_j, alpha_j. These are the K&M 2007 profiles unchanged.
+   * The alpha floor at 10% of alpha_max prevents alpha from collapsing to
+   * zero at xi = L. */
+  const double alpha_floor = 0.1 * alpha_max;
+  double d_raw[3] = {0.0, 0.0, 0.0};
+  double kappa_arr[3] = {1.0, 1.0, 1.0};
+  double alpha_arr[3] = {0.0, 0.0, 0.0};
+
   for (int j = 0; j < 3; j++) {
     double xi = 0.0;
     if (lo_bits[j] && (face_mask & lo_bits[j])) {
@@ -14070,33 +14079,61 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     if (xi < 0.0) xi = 0.0;
     if (xi > L) xi = L;
 
-    double d_j = 0.0, kappa_j = 1.0, alpha_j = 0.0;
     if (xi > 0.0) {
       double xi_norm = xi / L;
       double poly = pow(xi_norm, (double)p);
-      d_j = d_max_pre * poly;
-      kappa_j = 1.0 + (kappa_max - 1.0) * poly;
-      /* alpha must remain strictly positive everywhere inside the PML to
-       * avoid the classical corner instability (Komatitsch & Martin 2007,
-       * Section 5.4). The linear profile alpha = alpha_max*(1 - xi/L)
-       * collapses to zero at the outer edge xi=L, and at corner elements
-       * where two or three PML axes are simultaneously at xi=L the recurrence
-       * loses the alpha-driven decay term on every active axis. Floor alpha
-       * at a small fraction of alpha_max so corner elements still have a
-       * stabilising decay rate. The 10% fraction matches the heuristic in
-       * SPECFEM3D and is a no-op at the inner edge where alpha already
-       * exceeds the floor. */
-      alpha_j = alpha_max * (1.0 - xi_norm);
-      const double alpha_floor = 0.1 * alpha_max;
-      if (alpha_j < alpha_floor) alpha_j = alpha_floor;
+      d_raw[j] = d_max_pre * poly;
+      kappa_arr[j] = 1.0 + (kappa_max - 1.0) * poly;
+      alpha_arr[j] = alpha_max * (1.0 - xi_norm);
+      if (alpha_arr[j] < alpha_floor) alpha_arr[j] = alpha_floor;
+    }
+  }
+
+  /* Second pass: M-PML (Multi-axial PML) cross-coupling.
+   *
+   * Plain unsplit CPML for the elastic wave equation has a known long-time
+   * instability mode at PML corners (K&M 2007 Section 5.4). The alpha
+   * floor above prevents the immediate "alpha=0 at the outer edge"
+   * variant of the failure, but a slower-growing creeping instability
+   * remains, particularly when kappa_max > 1.
+   *
+   * M-PML (Meza-Fajardo & Papageorgiou 2008) cures this by replacing each
+   * axis's damping rate d_j with an effective rate
+   *     d_eff_j = d_j + p * (d_{k1} + d_{k2})
+   * where p ∈ [0.05, 0.20] is a small cross-coupling fraction. The
+   * per-axis psi recurrence then uses d_eff_j in the b and a coefficients,
+   * while the constitutive operator (1/kappa_j) is unchanged. Effect:
+   * every axis in a PML element gets at least *some* damping rate, even
+   * axes that have no own face-mask bit, which restores the symmetry the
+   * corner mode exploited.
+   *
+   * Axes that inherit damping only via cross-coupling have alpha=0 from
+   * the first pass; we floor alpha for those axes too so the ADE
+   * recurrence has a non-zero decay rate.
+   *
+   * p = 0.1 is the standard recommended value (Meza-Fajardo & Papageorgiou
+   * 2008 Section 4.2; SPECFEM3D uses the same). */
+  const double mpml_p = 0.1;
+
+  for (int j = 0; j < 3; j++) {
+    int k1 = (j + 1) % 3;
+    int k2 = (j + 2) % 3;
+    double d_total = d_raw[j] + mpml_p * (d_raw[k1] + d_raw[k2]);
+    double kappa_j = kappa_arr[j];
+    double alpha_j = alpha_arr[j];
+
+    /* For axes inheriting damping only via M-PML cross-coupling
+     * (d_raw[j]==0 but d_total>0), give them a non-zero alpha too. */
+    if (d_total > 0.0 && alpha_j <= 0.0) {
+      alpha_j = alpha_floor;
     }
 
-    double decay = d_j / kappa_j + alpha_j;
+    double decay = d_total / kappa_j + alpha_j;
     double b_j = exp(-decay * dt);
     double a_j = 0.0;
-    double denom = d_j + kappa_j * alpha_j;
-    if (denom > 1.0e-30 && d_j > 0.0) {
-      a_j = (d_j / (kappa_j * denom)) * (b_j - 1.0);
+    double denom = d_total + kappa_j * alpha_j;
+    if (denom > 1.0e-30 && d_total > 0.0) {
+      a_j = (d_total / (kappa_j * denom)) * (b_j - 1.0);
     }
     a_out[j] = a_j;
     b_out[j] = b_j;
