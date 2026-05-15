@@ -346,6 +346,24 @@ as the free surface.
 	is multiplied by this factor when `abc_type=cpml` to give a margin
 	against the corner-element multi-axis ADE recurrence. Set to `1.0` to
 	disable the reduction; values `< 0.5` are likely unnecessary.
+- `cpml_mpml_cross_fraction`
+	Optional. Default `0.1`. Cross-axis coupling fraction `p` for the
+	M-PML stabilisation (Meza-Fajardo & Papageorgiou 2008):
+	`d_eff_j = d_j + p * (d_{k1} + d_{k2})`. Setting `p = 0` disables M-PML
+	(reverting to plain unsplit CPML, which is known to drift for long
+	elastic simulations). The literature-recommended range is `[0.05,
+	0.20]`. Lowering `p` reduces the "modification bleed" onto auxiliary
+	axes — useful if receivers very close to the PML inner edge show
+	extra coda content; raising `p` improves stability margin in
+	pathological cases. Valid range `[0, 0.5]`.
+- `cpml_alpha_floor_fraction`
+	Optional. Default `0.1`. Fraction of `alpha_max` that the per-axis
+	`alpha` profile is clamped to from below. The K&M profile
+	`alpha(xi) = alpha_max * (1 - xi/L)` reaches zero at the outer edge,
+	which destabilises corner elements; flooring at 10% of `alpha_max`
+	keeps a non-zero decay rate everywhere in the PML. Set to `0` to
+	disable the floor (only safe with explicit M-PML cross-coupling).
+	Valid range `[0, 1]`.
 
 Notes on C-PML behavior:
 
@@ -363,30 +381,47 @@ Notes on C-PML behavior:
 	confirm the PML zone is non-empty and split between materials the way you
 	expect.
 
-Stability fixes baked in (no user knobs required):
+Stability fixes baked in (tunable via the fractions above):
 
-- **Alpha floor at 10% of `alpha_max`.** The K&M linear profile
-	`alpha(xi) = alpha_max * (1 - xi/L)` falls to zero at the outer PML
-	edge, which lets corner elements lose all ADE decay simultaneously on
-	multiple axes and triggers a fast exponential blow-up (this was
-	observed in early testing). The solver clamps `alpha` from below at
-	`0.1 * alpha_max` so corner elements always retain some decay rate.
-	No-op at the inner edge.
-- **M-PML cross-axis coupling.** Plain unsplit CPML has a known
-	long-time creeping instability for the elastic wave equation even
-	with the alpha floor. Following Meza-Fajardo & Papageorgiou (2008),
-	each axis's damping rate `d_j` is augmented at coefficient-build time
-	with a 10% contribution from the other two axes:
+- **Alpha floor** (`cpml_alpha_floor_fraction`, default `0.1`). The K&M
+	linear profile `alpha(xi) = alpha_max * (1 - xi/L)` falls to zero at
+	the outer PML edge, which lets corner elements lose all ADE decay
+	simultaneously on multiple axes and triggers a fast exponential
+	blow-up (this was observed in early testing). The solver clamps
+	`alpha` from below at `cpml_alpha_floor_fraction * alpha_max` so
+	corner elements always retain some decay rate. No-op at the inner
+	edge.
+- **M-PML cross-axis coupling** (`cpml_mpml_cross_fraction`, default
+	`0.1`). Plain unsplit CPML has a known long-time creeping
+	instability for the elastic wave equation even with the alpha
+	floor. Following Meza-Fajardo & Papageorgiou (2008), each axis's
+	damping rate `d_j` is augmented at coefficient-build time with a `p`
+	contribution from the other two axes:
 
-	    d_eff_j = d_j + 0.1 * (d_{k1} + d_{k2})
+	    d_eff_j = d_j + p * (d_{k1} + d_{k2})
 
 	`d_eff_j` is what enters the `b` and `a` ADE coefficients (the
 	constitutive operator `1/kappa_j` is unchanged). The cross-coupling
 	restores inter-axis symmetry in the corner and stabilises long
 	elastic runs at the cost of slightly more absorption "leaking" onto
-	auxiliary axes. The `p = 0.1` fraction is hard-coded; if you have
-	stability issues on a particularly long run, exposing this as a
-	parameter is a small change.
+	auxiliary axes inside the PML elements.
+
+CPS analytical validation (homogeneous half-space, point source, 60 s
+simulation, 0–16 km offsets, depth 1500 m):
+
+|       | Lysmer / CPS | M-PML / CPS |
+|-------|--------------|-------------|
+| 0 km  | 0.98         | 0.98        |
+| 4 km  | 0.96         | 0.96        |
+| 8 km  | 0.99         | 0.99        |
+| 12 km | 0.99         | 0.99        |
+| 16 km | 1.01         | 1.66        |
+
+M-PML matches CPS to within 1–4% everywhere except very close to the
+PML inner edge. The 16 km receiver sits only ~520 m inside the PML
+inner edge for a 50-element PML, which is where the M-PML modified
+strain field bleeds into the receiver. **For benchmarking PML quality,
+keep receivers at least one PML thickness away from the inner edge.**
 
 Recommended starting parameters (typical earthquake-scale runs):
 
