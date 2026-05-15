@@ -1024,6 +1024,7 @@ static struct Param_t {
   double theCpmlCflSafety;
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
+  noyesflag_t theCpmlClampOuter;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1074,7 +1075,8 @@ static struct Param_t {
            .theCpmlAlphaMaxHz = -1.0,
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.1,
-           .theCpmlAlphaFloorFraction = 0.1};
+           .theCpmlAlphaFloorFraction = 0.1,
+           .theCpmlClampOuter = NO};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1353,7 +1355,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  43 /* Must adjust this if adding int params */
+  44 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1491,6 +1493,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[40] = (int)Param.theAbcType;
   int_message[41] = Param.theCpmlLayers;
   int_message[42] = Param.theCpmlPolyOrder;
+  int_message[43] = (int)Param.theCpmlClampOuter;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1539,6 +1542,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAbcType = (abc_type_t)int_message[40];
   Param.theCpmlLayers = int_message[41];
   Param.theCpmlPolyOrder = int_message[42];
+  Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1951,6 +1955,19 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_mpml_cross_fraction);
       (void)parsetext(fp, "cpml_alpha_floor_fraction", 'd',
                       &cpml_alpha_floor_fraction);
+
+      char cpml_clamp_outer[64] = "";
+      if (parsetext(fp, "cpml_clamp_outer", 's', &cpml_clamp_outer) == 0) {
+        if (strcasecmp(cpml_clamp_outer, "yes") == 0) {
+          Param.theCpmlClampOuter = YES;
+        } else if (strcasecmp(cpml_clamp_outer, "no") == 0) {
+          Param.theCpmlClampOuter = NO;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_clamp_outer must be 'yes' or 'no': got '%s'\n",
+                       cpml_clamp_outer);
+        }
+      }
 
       if (cpml_thickness_m <= 0.0 && cpml_layers <= 0) {
         solver_abort(__FUNCTION_NAME, NULL,
@@ -7558,6 +7575,68 @@ static void solver_init() {
       free(flag_host);
     }
 
+    /* --- Optional Dirichlet clamp at outer PML face --- */
+    /* When cpml_clamp_outer=yes, mark every node that sits on a domain-
+     * extent face touched by a PML (x_min, x_max, y_min, y_max, z_max).
+     * z_min is always the free surface so it is never clamped. The clamp
+     * is applied per-step in kernelDispCalc by zeroing tm2Disp at flagged
+     * nodes.
+     *
+     * The check is geometric (node coordinate equals nearendp / farendp on
+     * the relevant axis) rather than element-based, so it correctly
+     * captures every shared node on the outer face regardless of which
+     * PML element owns it. */
+    if (Param.theCpmlClampOuter == YES) {
+      if (cudaMalloc((void**)&(Global.gpuData.pmlClampNodeMaskDevice),
+                     (size_t)Global.myMesh->nharbored * sizeof(uint8_t)) !=
+          cudaSuccess) {
+        fprintf(stderr, "Thread %d: cudaMalloc pmlClampNodeMask failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      uint8_t* clamp_host = (uint8_t*)calloc(
+          (size_t)Global.myMesh->nharbored, sizeof(uint8_t));
+      if (clamp_host == NULL) {
+        fprintf(stderr,
+                "Thread %d: oom pmlClampNodeMask host buffer\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      const tick_t xn = Global.myOctree->nearendp[0];
+      const tick_t yn = Global.myOctree->nearendp[1];
+      const tick_t xf = Global.myOctree->farendp[0];
+      const tick_t yf = Global.myOctree->farendp[1];
+      const tick_t zf = Global.myOctree->farendp[2];
+      int64_t local_clamped = 0;
+      for (int32_t ni = 0; ni < Global.myMesh->nharbored; ni++) {
+        tick_t nx = Global.myMesh->nodeTable[ni].x;
+        tick_t ny = Global.myMesh->nodeTable[ni].y;
+        tick_t nz = Global.myMesh->nodeTable[ni].z;
+        if (nx == xn || nx == xf || ny == yn || ny == yf || nz == zf) {
+          clamp_host[ni] = 1u;
+          local_clamped++;
+        }
+      }
+      int64_t global_clamped = 0;
+      MPI_Reduce(&local_clamped, &global_clamped, 1, MPI_LONG_LONG, MPI_SUM,
+                 0, comm_solver);
+      if (Global.myID == 0) {
+        fprintf(stdout,
+                "CPML: cpml_clamp_outer=yes; %lld outer-face nodes clamped "
+                "to u=0 globally\n",
+                (long long)global_clamped);
+      }
+      if (cudaMemcpy(Global.gpuData.pmlClampNodeMaskDevice, clamp_host,
+                     (size_t)Global.myMesh->nharbored * sizeof(uint8_t),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: cudaMemcpy pmlClampNodeMask failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      free(clamp_host);
+    }
+
     /* Free the build-time host scratch. The compact per-type elem_lists
      * survive in mySolver; coefficients live only on the GPU from here on. */
     free(g_cpmlBuild.face_mask);
@@ -8927,6 +9006,7 @@ static void solver_delete() {
   /* CPML device arrays — both elastic and acoustic. cudaFree(NULL) and
    * free(NULL) are no-ops, so this is safe in dashpot mode too. */
   cudaFree(Global.gpuData.pmlFlagArrayDevice);
+  cudaFree(Global.gpuData.pmlClampNodeMaskDevice);
   cudaFree(Global.gpuData.pmlElasticElemMapperDevice);
   cudaFree(Global.gpuData.pml_elastic_a_xArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_a_yArrayDevice);

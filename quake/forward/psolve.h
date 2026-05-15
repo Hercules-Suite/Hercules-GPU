@@ -514,6 +514,13 @@ typedef struct gpu_data_t {
      * damping kernels) early-exit on PML elements so we don't double-count. */
     uint8_t*      pmlFlagArrayDevice;
 
+    /* Per-node (sized [nharbored]) Dirichlet clamp mask for the outermost
+     * PML face. Set to 1 only when cpml_clamp_outer = yes. Nodes that lie
+     * on a domain-extent face touched by a PML element get their
+     * displacement forced to zero each step in kernelDispCalc. z_min is the
+     * free surface and is never clamped. NULL otherwise. */
+    uint8_t*      pmlClampNodeMaskDevice;
+
 } gpu_data_t;
 
 

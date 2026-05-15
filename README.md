@@ -364,6 +364,17 @@ as the free surface.
 	keeps a non-zero decay rate everywhere in the PML. Set to `0` to
 	disable the floor (only safe with explicit M-PML cross-coupling).
 	Valid range `[0, 1]`.
+- `cpml_clamp_outer`
+	Optional. `yes` or `no`, default `no`. When `yes`, forces `u = 0` at
+	every node sitting on a domain-extent face that is part of the PML
+	zone (`x_min`, `x_max`, `y_min`, `y_max`, `z_max`). `z_min` is the
+	free surface and is never clamped. This converts the PML problem
+	from a round-trip absorption (wave goes out, reflects off the outer
+	free surface, comes back through the PML) into a single-pass
+	absorption (wave goes out, gets killed at the outer face). Useful
+	when very thin PMLs or very long simulations leak round-trip
+	reflections. Default `no` preserves the K&M-style free outer face,
+	which is what most pre-2010 CPML papers assume.
 
 Notes on C-PML behavior:
 

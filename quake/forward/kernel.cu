@@ -1279,6 +1279,19 @@ __global__  void kernelDispCalc(int32_t nharbored,
       tm2Disp.f[2] = 0;
     }
 
+    /* Optional CPML outer-face Dirichlet clamp. pmlClampNodeMaskDevice is
+     * non-NULL only when cpml_clamp_outer=yes; it marks nodes lying on
+     * x_min/x_max/y_min/y_max/z_max domain-extent faces touched by a PML
+     * element. Force u=0 at those nodes so the wave cannot reflect off
+     * the outer free surface of the PML zone. z_min (free surface) is
+     * never clamped. */
+    if (gpuData->pmlClampNodeMaskDevice != NULL &&
+        gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
+      tm2Disp.f[0] = 0;
+      tm2Disp.f[1] = 0;
+      tm2Disp.f[2] = 0;
+    }
+
     gpuData->tm2Device[nindex] = tm2Disp;
 }
 
