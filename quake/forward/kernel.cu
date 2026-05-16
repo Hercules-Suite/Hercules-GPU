@@ -1852,33 +1852,21 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         sigma[a][a] += lambdaCoeff * trace;
     }
 
-    /* Divergence-side CPML (two-sided unsplit form).
-     *   rho d^2u_i/dt^2 = d~_j sigma_ij ,  d~_j = (1/s_j) d_j
-     * The stretched operator acts on the stress divergence as well as on
-     * the strain. In the discrete weak form the stress that pairs with the
-     * test-gradient sign s_j(n) is replaced by a divergence-stretched stress
-     *   sigma~_ij = (1/kappa_j) sigma_ij + xi_ij
-     *   xi_ij(t+dt) = b_j xi_ij(t) + a_j sigma_ij(t)
-     * sharing b_j with the gradient side. The gradient-side a and 1/kappa
-     * were pre-divided by 4h (they multiply the 4h-scaled signed sums); the
-     * divergence side convolves the element-constant stress directly, so the
-     * raw coefficients are recovered by multiplying back by fourH = 4h. */
-    const double fourH = gpuData->pml_elastic_fourHArrayDevice[pml_idx];
-    double sigmaTilde[3][3];
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            const double a_div     = aJ[j]    * fourH;   /* raw a_j      */
-            const double invK_div  = invKJ[j] * fourH;   /* 1/kappa_j    */
-            const double xi_old =
-                (double)gpuData->pml_elastic_divPsiArrayDevice[i][j][pml_idx];
-            const double xi_new = bJ[j] * xi_old + a_div * sigma[i][j];
-            gpuData->pml_elastic_divPsiArrayDevice[i][j][pml_idx] =
-                (solver_float)xi_new;
-            sigmaTilde[i][j] = invK_div * sigma[i][j] + xi_new;
-        }
-    }
-
-    /* Nodal force: f_alpha^(n) = - sum_beta s_beta(n) * sigma~_{alpha,beta}. */
+    /* Nodal force: f_alpha^(n) = - sum_beta s_beta(n) * sigma_{alpha,beta}.
+     *
+     * NOTE: only the gradient/strain side of the CPML stretch is applied
+     * here (the modified strain eps above). The divergence side of the
+     * stretched operator d~_j sigma_ij is NOT a stress convolution -- in
+     * the second-order displacement formulation (Matzen 2011; Xie et al.
+     * 2014, the SPECFEM3D FE-PML) multiplying the momentum equation by s_j
+     * turns the divergence-side stretch into a modified-inertia +
+     * mass-proportional damping (rho d_j du_i/dt) + CFS terms acting on
+     * the NODE, not a convolved stress. That nodal damping is injected
+     * into the mass arrays in solver_init (mirroring the Lysmer dashpot),
+     * so it must NOT also appear here. A previous "convolve sigma" attempt
+     * (commit 6db1d7b) was a first-order velocity-stress idea misapplied
+     * to this second-order code and corrupted even the ABC-independent
+     * direct window; it was reverted. */
     for (int n = 0; n < 8; n++) {
         const double sx = (n & 1) ? 1.0 : -1.0;
         const double sy = (n & 2) ? 1.0 : -1.0;
@@ -1886,9 +1874,9 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         const int32_t lnid = lnid_base[n * lenum];
         fvector_t* nodalForce = gpuData->forceDevice + lnid;
         for (int a = 0; a < 3; a++) {
-            const double f = -(sx * sigmaTilde[a][0] +
-                               sy * sigmaTilde[a][1] +
-                               sz * sigmaTilde[a][2]);
+            const double f = -(sx * sigma[a][0] +
+                               sy * sigma[a][1] +
+                               sz * sigma[a][2]);
             atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
         }
     }
@@ -1946,29 +1934,14 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
         partial[j] = invKJ[j] * S[j] + psi_new;
     }
 
-    /* Divergence-side CPML (two-sided unsplit form).
-     *   (1/kappa_ac) d^2p/dt^2 = d~_j ( (1/rho) d~_j p )
-     * The stretched operator acts on the flux divergence as well as on the
-     * pressure gradient. The gradient-modified flux partial[j] is replaced by
-     *   flux~_j = (1/kappa_j) partial[j] + xi_j
-     *   xi_j(t+dt) = b_j xi_j(t) + a_j partial[j]
-     * Raw a_j / (1/kappa_j) recovered from the 4h-prescaled coefficients via
-     * fourH = 4h (the same un-scaling as the elastic divergence side). */
-    const double fourH = gpuData->pml_acoustic_fourHArrayDevice[pml_idx];
-    double fluxTilde[3];
-    for (int j = 0; j < 3; j++) {
-        const double a_div    = aJ[j]    * fourH;   /* raw a_j   */
-        const double invK_div = invKJ[j] * fourH;   /* 1/kappa_j */
-        const double xi_old =
-            (double)gpuData->pml_acoustic_divPsiArrayDevice[j][pml_idx];
-        const double xi_new = bJ[j] * xi_old + a_div * partial[j];
-        gpuData->pml_acoustic_divPsiArrayDevice[j][pml_idx] =
-            (solver_float)xi_new;
-        fluxTilde[j] = invK_div * partial[j] + xi_new;
-    }
-
-    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * flux~[j].
-     * forceCoeff = dt^2 * h^2 / (4 rho). */
+    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * partial[j].
+     * forceCoeff = dt^2 * h^2 / (4 rho).
+     *
+     * Only the gradient side of the CPML stretch is applied (partial[j]).
+     * As in the elastic kernel, the divergence-side stretch of the
+     * second-order pressure equation is a modified-inertia / damping term
+     * on the node, not a flux convolution; the reverted "convolve the
+     * flux" form (commit 6db1d7b) is intentionally absent here. */
     const double forceCoeff =
         gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
     for (int n = 0; n < 8; n++) {
@@ -1977,8 +1950,7 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
         const double sz = (n & 4) ? 1.0 : -1.0;
         const int32_t lnid = lnid_base[n * lenum];
         const double f = -forceCoeff *
-                         (sx * fluxTilde[0] + sy * fluxTilde[1] +
-                          sz * fluxTilde[2]);
+                         (sx * partial[0] + sy * partial[1] + sz * partial[2]);
         atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
                   (solver_float)f);
     }

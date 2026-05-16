@@ -421,7 +421,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double mpml_cross_fraction,
                                        double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
-                                       double invKappa_out[3]);
+                                       double invKappa_out[3],
+                                       double d_out[3]);
 #endif /* BOUNDARY */
 
 /* CPML build-time context. Populated by solver_init() while iterating
@@ -7062,6 +7063,10 @@ static void solver_init() {
     char flag;
     double dashpot[8][3];
     uint8_t pml_face_mask = 0;
+    /* Summed CPML damping rate sum_j d_j (1/s) for this element, used to
+     * build the Matzen second-order divergence-side mass-proportional
+     * damping rho*d*du/dt. Non-zero only for elastic CPML elements. */
+    double cpml_damp_rate = 0.0;
 #endif
 
     double zeta, a, b;
@@ -7171,7 +7176,7 @@ static void solver_init() {
           Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
       g_cpmlBuild.face_mask[eindex] = pml_face_mask;
       if (pml_face_mask != 0) {
-        double a_axis[3], b_axis[3], invKappa_axis[3];
+        double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
         compute_pml_profile_coeffs(
             pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7180,7 +7185,7 @@ static void solver_init() {
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
             Param.theCpmlAlphaFloorFraction,
-            a_axis, b_axis, invKappa_axis);
+            a_axis, b_axis, invKappa_axis, d_axis);
 
         /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
          * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
@@ -7216,6 +7221,14 @@ static void solver_init() {
           g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
           g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
           g_cpmlBuild.elastic_fourH[pml_idx] = 4.0 * h;
+          /* Matzen second-order divergence-side term: total volumetric
+           * CPML damping rate sum_j d_j (1/s). Injected below as the
+           * mass-proportional damping rho*d*du/dt at this element's
+           * nodes, exactly mirroring the Lysmer dashpot discretization
+           * (mass_minusaM / mass2_minusaM -= dt * C). Elastic only;
+           * the acoustic-pressure update path is left gradient-side
+           * only for now (documented asymmetry). */
+          cpml_damp_rate = d_axis[0] + d_axis[1] + d_axis[2];
         }
       }
     }
@@ -7279,6 +7292,28 @@ static void solver_init() {
           /* boundary impact (Lysmer dashpot) — skipped for CPML elements */
           np->mass_minusaM[axis] -= (Param.theDeltaT * dashpot[j][axis]);
           np->mass2_minusaM[axis] -= (Param.theDeltaT * dashpot[j][axis]);
+        }
+
+        /* Matzen 2011 / Xie et al. 2014 second-order displacement CPML:
+         * the divergence-side coordinate stretch, obtained by multiplying
+         * the momentum equation by s_j, contributes (to leading order,
+         * kappa_max = 1 default) a mass-proportional volumetric damping
+         *     rho * d_j * du_i/dt
+         * Per node the damping coefficient is C = (rho * V_node) * sum_j d_j
+         * = M * cpml_damp_rate. It is discretized exactly like the Lysmer
+         * dashpot above (same backward-difference, mass_minusaM and
+         * mass2_minusaM each -= dt*C), so it inherits the dashpot path's
+         * stability. cpml_damp_rate > 0 only for elastic CPML elements;
+         * interior and acoustic elements are untouched. This is the
+         * unconditionally-stable core of the two-sided stretch; the CFS
+         * sub-terms (-d*alpha*u + d*alpha^2*zeta, displacement memory)
+         * are a documented lower-order refinement, not yet added. The
+         * gradient/strain side is handled separately in kernelPMLElasticStep
+         * via the psi memory (modified strain). */
+        if ((Param.theAbcType == ABC_CPML) && (cpml_damp_rate > 0.0)) {
+          double cpml_C = M * cpml_damp_rate;
+          np->mass_minusaM[axis]  -= (Param.theDeltaT * cpml_C);
+          np->mass2_minusaM[axis] -= (Param.theDeltaT * cpml_C);
         }
 #endif /* BOUNDARY */
 
@@ -7774,7 +7809,7 @@ static void solver_init() {
         tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
         tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
                          ldb[2] + edgeticks};
-        double a3[3], b3[3], iK3[3];
+        double a3[3], b3[3], iK3[3], d3[3]; /* d3 unused at interface */
         compute_pml_profile_coeffs(
             (ma != 0) ? ma : me, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7782,7 +7817,8 @@ static void solver_init() {
             Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
-            Param.theCpmlAlphaFloorFraction, a3, b3, iK3);
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3);
+        (void)d3;
 
         /* Pick the axis most aligned with the interface normal. */
         double nx = fabs(Global.acousticInterfaceFaceNormals[3 * i + 0]);
@@ -14418,7 +14454,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double mpml_cross_fraction,
                                        double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
-                                       double invKappa_out[3]) {
+                                       double invKappa_out[3],
+                                       double d_out[3]) {
   const double c[3] = {
       0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize,
       0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize,
@@ -14518,6 +14555,11 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     a_out[j] = a_j;
     b_out[j] = b_j;
     invKappa_out[j] = 1.0 / kappa_j;
+    /* d_total (M-PML-coupled damping rate, units 1/s) is exported so the
+     * caller can build the Matzen second-order divergence-side term:
+     * the mass-proportional CPML damping rho * d_j * du/dt injected into
+     * the nodal mass arrays (mirroring the Lysmer dashpot path). */
+    d_out[j] = d_total;
   }
 }
 #endif /* BOUNDARY */
