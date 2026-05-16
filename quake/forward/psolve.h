@@ -505,20 +505,19 @@ typedef struct gpu_data_t {
      * (Matzen 2011; Xie et al. 2014). Multiplying the momentum equation
      * by s_j turns the divergence-side stretch into, per damping axis a:
      *   rho*d_a du_i/dt           (mass-prop. damping, in the mass arrays)
-     *   - rho*d_a*alpha_a u_i     (CFS restoring, in mass2_minusaM)
-     *   + rho*d_a*alpha_a^2 zeta_i^(a)   (CFS memory force, this kernel)
-     * with zeta_i^(a) the exponential convolution of the element-centroid
-     * displacement:  d zeta/dt = -alpha_a zeta + u_i, integrated exactly as
-     *   zeta_new = zetaDecay_a*zeta_old + zetaGain_a*ubar_i
+     *   + rho*d_a*alpha_a u_i     (CFS restoring)
+     *   - rho*d_a*alpha_a^2 zeta_i^(a)   (CFS displacement memory)
+     * The CFS restoring and memory are evaluated together in
+     * kernelPMLElasticStep from the element-centroid displacement
+     * ubar_i = (1/8) sum_n u_i^(n) so they cancel exactly at DC; the
+     * per-node net CFS force is
+     *   cfs_i = restoreCoeff*ubar_i - sum_a memForce_a*zeta_i^(a)
+     * zeta_i^(a) advances by the exact exponential integrator
+     *   zeta_new   = zetaDecay_a*zeta_old + zetaGain_a*ubar_i
      *   zetaDecay_a = exp(-alpha_a*dt)
      *   zetaGain_a  = (1 - exp(-alpha_a*dt)) / alpha_a
-     * The per-step nodal memory force added in kernelPMLElasticStep is
-     *   f_i -= sum_a memForce_a * zeta_i^(a),
-     *   memForce_a = dt^2 * (rho*h^3/8) * d_a * alpha_a^2  (per node).
-     * NOTE: divPsiArrayDevice is REUSED as the zeta_i^(a) state (9 per
-     * element); fourHArrayDevice is dormant (was the reverted stress-
-     * convolution unscale) and slated for removal. */
-    double*       pml_elastic_fourHArrayDevice;       /* dormant, unused */
+     *   memForce_a  = dt^2 * (rho*h^3/8) * d_a * alpha_a^2
+     * divPsiArrayDevice is the zeta_i^(a) state (9 per element). */
     solver_float* pml_elastic_divPsiArrayDevice[3][3];/* zeta_i^(a) state */
     double*       pml_elastic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
     double*       pml_elastic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
@@ -549,12 +548,10 @@ typedef struct gpu_data_t {
     double*       pml_acoustic_invKappa_zArrayDevice;
     double*       pml_acoustic_forceCoeffArrayDevice;
     solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
-    /* Two-sided (divergence) CPML memory for the acoustic pressure
-     * Laplacian: divPsi[j] is the j-axis convolution of the modified
-     * flux component; assembly uses flux~_j = invK_div_j*flux_j + divPsi.
-     * Same fourH unscale trick as elastic. */
-    double*       pml_acoustic_fourHArrayDevice;     /* 4 * edgesize */
-    solver_float* pml_acoustic_divPsiArrayDevice[3]; /* [j_axis] */
+    /* (Acoustic PML is gradient-side only: the pressure update path has
+     * no divergence-side CFS term, so there is no acoustic zeta/divPsi
+     * or fourH array. The elastic divergence-side treatment above does
+     * not apply to the scalar pressure formulation here.) */
 
     /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
      * non-NULL, has value 1 for any element that lives in either PML pipeline
