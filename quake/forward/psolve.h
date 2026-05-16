@@ -501,6 +501,16 @@ typedef struct gpu_data_t {
     double*       pml_elastic_muCoeffArrayDevice;
     double*       pml_elastic_lambdaCoeffArrayDevice;
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
+    /* Two-sided (divergence) CPML memory. The 2nd-order elastic equation
+     * stretches the spatial derivative twice: once forming sigma from the
+     * modified strain (psiArray above), and once in the stress divergence
+     * d~_j sigma_ij. divPsi[i][j] is the j-axis convolution of sigma_ij;
+     * the assembly uses sigma~_ij = invK_div_j*sigma_ij + divPsi.
+     * The divergence side needs the *unscaled* a and 1/kappa (no 1/(4h)),
+     * recovered in-kernel as (stored grad coeff)*fourH, where fourH = 4h
+     * is stored per element. b_j is shared with the gradient side. */
+    double*       pml_elastic_fourHArrayDevice;       /* 4 * edgesize */
+    solver_float* pml_elastic_divPsiArrayDevice[3][3];/* [i_disp][j_axis] */
 
     /* --- Acoustic PML state ---
      *
@@ -521,6 +531,12 @@ typedef struct gpu_data_t {
     double*       pml_acoustic_invKappa_zArrayDevice;
     double*       pml_acoustic_forceCoeffArrayDevice;
     solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
+    /* Two-sided (divergence) CPML memory for the acoustic pressure
+     * Laplacian: divPsi[j] is the j-axis convolution of the modified
+     * flux component; assembly uses flux~_j = invK_div_j*flux_j + divPsi.
+     * Same fourH unscale trick as elastic. */
+    double*       pml_acoustic_fourHArrayDevice;     /* 4 * edgesize */
+    solver_float* pml_acoustic_divPsiArrayDevice[3]; /* [j_axis] */
 
     /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
      * non-NULL, has value 1 for any element that lives in either PML pipeline

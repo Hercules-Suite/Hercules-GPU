@@ -449,6 +449,7 @@ typedef struct cpml_build_s {
   double*  elastic_invKappa[3];
   double*  elastic_muCoeff;
   double*  elastic_lambdaCoeff;
+  double*  elastic_fourH;        /* 4*edgesize, for divergence-side unscale */
 
   /* Acoustic PML build state. Same pre-scaling for a / invKappa.
    *   forceCoeff = dt^2 * h^2 / (4 * rho)
@@ -459,6 +460,7 @@ typedef struct cpml_build_s {
   double*  acoustic_b[3];
   double*  acoustic_invKappa[3];
   double*  acoustic_forceCoeff;
+  double*  acoustic_fourH;
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
@@ -7000,7 +7002,11 @@ static void solver_init() {
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.elastic_lambdaCoeff =
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.elastic_fourH =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.acoustic_forceCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.acoustic_fourH =
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
     for (int axis = 0; axis < 3; axis++) {
       g_cpmlBuild.elastic_a[axis] =
@@ -7024,10 +7030,12 @@ static void solver_init() {
         (g_cpmlBuild.elastic_invKappa[0] == NULL) ||
         (g_cpmlBuild.elastic_muCoeff == NULL) ||
         (g_cpmlBuild.elastic_lambdaCoeff == NULL) ||
+        (g_cpmlBuild.elastic_fourH == NULL) ||
         (g_cpmlBuild.acoustic_a[0] == NULL) ||
         (g_cpmlBuild.acoustic_b[0] == NULL) ||
         (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
-        (g_cpmlBuild.acoustic_forceCoeff == NULL)) {
+        (g_cpmlBuild.acoustic_forceCoeff == NULL) ||
+        (g_cpmlBuild.acoustic_fourH == NULL)) {
       fprintf(stderr,
               "Thread %d: solver_init: out of memory for CPML build state\n",
               Global.myID);
@@ -7195,6 +7203,7 @@ static void solver_init() {
           const double rho = (double)edata->rho;
           /* dt^2 * h^2 / (4 * rho); rho > 0 is guaranteed by mesh validation. */
           g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
+          g_cpmlBuild.acoustic_fourH[pml_idx] = 4.0 * h;
         } else {
           int32_t pml_idx = g_cpmlBuild.elastic_count++;
           g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;
@@ -7206,6 +7215,7 @@ static void solver_init() {
           }
           g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
           g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
+          g_cpmlBuild.elastic_fourH[pml_idx] = 4.0 * h;
         }
       }
     }
@@ -7430,6 +7440,39 @@ static void solver_init() {
                   Global.myID);
           MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
         }
+
+        /* Two-sided (divergence) CPML: per-element 4h + 9 divPsi arrays. */
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.pml_elastic_fourHArrayDevice),
+                (size_t)pmlN * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc elastic CPML fourH failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.pml_elastic_fourHArrayDevice,
+                       g_cpmlBuild.elastic_fourH,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMemcpy elastic CPML fourH failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        for (int i = 0; i < 3; i++) {
+          for (int jx = 0; jx < 3; jx++) {
+            if (cudaMalloc(
+                    (void**)&(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]),
+                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
+              fprintf(stderr,
+                      "Thread %d: cudaMalloc pml_elastic_divPsi[%d][%d] failed\n",
+                      Global.myID, i, jx);
+              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+            }
+            cudaMemset(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx], 0,
+                       (size_t)pmlN * sizeof(solver_float));
+          }
+        }
       }
     }
 
@@ -7546,6 +7589,37 @@ static void solver_init() {
                   "Thread %d: cudaMemcpy acoustic CPML forceCoeff failed\n",
                   Global.myID);
           MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+
+        /* Two-sided (divergence) CPML: per-element 4h + 3 divPsi arrays. */
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.pml_acoustic_fourHArrayDevice),
+                (size_t)pmlN * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc acoustic CPML fourH failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.pml_acoustic_fourHArrayDevice,
+                       g_cpmlBuild.acoustic_fourH,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMemcpy acoustic CPML fourH failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
+        for (int axis = 0; axis < 3; axis++) {
+          if (cudaMalloc(
+                  (void**)&(Global.gpuData.pml_acoustic_divPsiArrayDevice[axis]),
+                  (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
+            fprintf(stderr,
+                    "Thread %d: cudaMalloc pml_acoustic_divPsi[%d] failed\n",
+                    Global.myID, axis);
+            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+          }
+          cudaMemset(Global.gpuData.pml_acoustic_divPsiArrayDevice[axis], 0,
+                     (size_t)pmlN * sizeof(solver_float));
         }
       }
     }
@@ -7760,8 +7834,12 @@ static void solver_init() {
     g_cpmlBuild.elastic_muCoeff = NULL;
     free(g_cpmlBuild.elastic_lambdaCoeff);
     g_cpmlBuild.elastic_lambdaCoeff = NULL;
+    free(g_cpmlBuild.elastic_fourH);
+    g_cpmlBuild.elastic_fourH = NULL;
     free(g_cpmlBuild.acoustic_forceCoeff);
     g_cpmlBuild.acoustic_forceCoeff = NULL;
+    free(g_cpmlBuild.acoustic_fourH);
+    g_cpmlBuild.acoustic_fourH = NULL;
     for (int axis = 0; axis < 3; axis++) {
       free(g_cpmlBuild.elastic_a[axis]);
       g_cpmlBuild.elastic_a[axis] = NULL;
@@ -9202,9 +9280,11 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pml_elastic_invKappa_zArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_muCoeffArrayDevice);
   cudaFree(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice);
+  cudaFree(Global.gpuData.pml_elastic_fourHArrayDevice);
   for (int i = 0; i < 3; i++) {
     for (int jx = 0; jx < 3; jx++) {
       cudaFree(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]);
+      cudaFree(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]);
     }
   }
   cudaFree(Global.gpuData.pmlAcousticElemMapperDevice);
@@ -9218,8 +9298,10 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pml_acoustic_invKappa_yArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_invKappa_zArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_forceCoeffArrayDevice);
+  cudaFree(Global.gpuData.pml_acoustic_fourHArrayDevice);
   for (int axis = 0; axis < 3; axis++) {
     cudaFree(Global.gpuData.pml_acoustic_psiArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_acoustic_divPsiArrayDevice[axis]);
   }
   free(Global.mySolver->pmlElasticElemList);
   Global.mySolver->pmlElasticElemList = NULL;
