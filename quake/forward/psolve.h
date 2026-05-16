@@ -501,16 +501,28 @@ typedef struct gpu_data_t {
     double*       pml_elastic_muCoeffArrayDevice;
     double*       pml_elastic_lambdaCoeffArrayDevice;
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
-    /* Two-sided (divergence) CPML memory. The 2nd-order elastic equation
-     * stretches the spatial derivative twice: once forming sigma from the
-     * modified strain (psiArray above), and once in the stress divergence
-     * d~_j sigma_ij. divPsi[i][j] is the j-axis convolution of sigma_ij;
-     * the assembly uses sigma~_ij = invK_div_j*sigma_ij + divPsi.
-     * The divergence side needs the *unscaled* a and 1/kappa (no 1/(4h)),
-     * recovered in-kernel as (stored grad coeff)*fourH, where fourH = 4h
-     * is stored per element. b_j is shared with the gradient side. */
-    double*       pml_elastic_fourHArrayDevice;       /* 4 * edgesize */
-    solver_float* pml_elastic_divPsiArrayDevice[3][3];/* [i_disp][j_axis] */
+    /* Divergence-side CPML, correct 2nd-order displacement form
+     * (Matzen 2011; Xie et al. 2014). Multiplying the momentum equation
+     * by s_j turns the divergence-side stretch into, per damping axis a:
+     *   rho*d_a du_i/dt           (mass-prop. damping, in the mass arrays)
+     *   - rho*d_a*alpha_a u_i     (CFS restoring, in mass2_minusaM)
+     *   + rho*d_a*alpha_a^2 zeta_i^(a)   (CFS memory force, this kernel)
+     * with zeta_i^(a) the exponential convolution of the element-centroid
+     * displacement:  d zeta/dt = -alpha_a zeta + u_i, integrated exactly as
+     *   zeta_new = zetaDecay_a*zeta_old + zetaGain_a*ubar_i
+     *   zetaDecay_a = exp(-alpha_a*dt)
+     *   zetaGain_a  = (1 - exp(-alpha_a*dt)) / alpha_a
+     * The per-step nodal memory force added in kernelPMLElasticStep is
+     *   f_i -= sum_a memForce_a * zeta_i^(a),
+     *   memForce_a = dt^2 * (rho*h^3/8) * d_a * alpha_a^2  (per node).
+     * NOTE: divPsiArrayDevice is REUSED as the zeta_i^(a) state (9 per
+     * element); fourHArrayDevice is dormant (was the reverted stress-
+     * convolution unscale) and slated for removal. */
+    double*       pml_elastic_fourHArrayDevice;       /* dormant, unused */
+    solver_float* pml_elastic_divPsiArrayDevice[3][3];/* zeta_i^(a) state */
+    double*       pml_elastic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
+    double*       pml_elastic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
+    double*       pml_elastic_memForceArrayDevice[3]; /* dt^2 Mn d_a a_a^2 */
 
     /* --- Acoustic PML state ---
      *

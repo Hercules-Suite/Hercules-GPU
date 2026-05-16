@@ -422,7 +422,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
-                                       double d_out[3]);
+                                       double d_out[3],
+                                       double alpha_out[3]);
 #endif /* BOUNDARY */
 
 /* CPML build-time context. Populated by solver_init() while iterating
@@ -450,7 +451,11 @@ typedef struct cpml_build_s {
   double*  elastic_invKappa[3];
   double*  elastic_muCoeff;
   double*  elastic_lambdaCoeff;
-  double*  elastic_fourH;        /* 4*edgesize, for divergence-side unscale */
+  double*  elastic_fourH;        /* dormant (reverted stress-conv unscale) */
+  /* CFS divergence-side coefficients (Matzen 2nd-order form), per axis. */
+  double*  elastic_zetaDecay[3]; /* exp(-alpha_a*dt) */
+  double*  elastic_zetaGain[3];  /* (1-exp(-alpha_a*dt))/alpha_a */
+  double*  elastic_memForce[3];  /* dt^2 * (rho*h^3/8) * d_a * alpha_a^2 */
 
   /* Acoustic PML build state. Same pre-scaling for a / invKappa.
    *   forceCoeff = dt^2 * h^2 / (4 * rho)
@@ -7016,6 +7021,12 @@ static void solver_init() {
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
       g_cpmlBuild.elastic_invKappa[axis] =
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.elastic_zetaDecay[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.elastic_zetaGain[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.elastic_memForce[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
       g_cpmlBuild.acoustic_a[axis] =
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
       g_cpmlBuild.acoustic_b[axis] =
@@ -7032,6 +7043,9 @@ static void solver_init() {
         (g_cpmlBuild.elastic_muCoeff == NULL) ||
         (g_cpmlBuild.elastic_lambdaCoeff == NULL) ||
         (g_cpmlBuild.elastic_fourH == NULL) ||
+        (g_cpmlBuild.elastic_zetaDecay[0] == NULL) ||
+        (g_cpmlBuild.elastic_zetaGain[0] == NULL) ||
+        (g_cpmlBuild.elastic_memForce[0] == NULL) ||
         (g_cpmlBuild.acoustic_a[0] == NULL) ||
         (g_cpmlBuild.acoustic_b[0] == NULL) ||
         (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
@@ -7067,6 +7081,11 @@ static void solver_init() {
      * build the Matzen second-order divergence-side mass-proportional
      * damping rho*d*du/dt. Non-zero only for elastic CPML elements. */
     double cpml_damp_rate = 0.0;
+    /* Summed CFS restoring rate sum_a d_a*alpha_a (1/s^2) for this
+     * element; injected as +dt^2*M*rate into mass2_minusaM. Paired with
+     * the +d*alpha^2*zeta memory force so the net is the CFS frequency
+     * shift (cancels at DC, active at grazing). Elastic CPML only. */
+    double cpml_restore_rate = 0.0;
 #endif
 
     double zeta, a, b;
@@ -7177,6 +7196,7 @@ static void solver_init() {
       g_cpmlBuild.face_mask[eindex] = pml_face_mask;
       if (pml_face_mask != 0) {
         double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
+        double alpha_axis[3];
         compute_pml_profile_coeffs(
             pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7185,7 +7205,7 @@ static void solver_init() {
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
             Param.theCpmlAlphaFloorFraction,
-            a_axis, b_axis, invKappa_axis, d_axis);
+            a_axis, b_axis, invKappa_axis, d_axis, alpha_axis);
 
         /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
          * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
@@ -7229,6 +7249,36 @@ static void solver_init() {
            * the acoustic-pressure update path is left gradient-side
            * only for now (documented asymmetry). */
           cpml_damp_rate = d_axis[0] + d_axis[1] + d_axis[2];
+
+          /* CFS sub-terms (Matzen 2011; Xie et al. 2014). Per damping
+           * axis a the divergence-side stretch also contributes
+           *   -rho*d_a*alpha_a u_i  (restoring; host, mass2_minusaM)
+           *   +rho*d_a*alpha_a^2 zeta_i^(a)  (memory; kernel)
+           * with zeta the exact exponential convolution of the element
+           * displacement, d zeta/dt = -alpha_a zeta + u:
+           *   zetaDecay_a = exp(-alpha_a*dt)
+           *   zetaGain_a  = (1 - zetaDecay_a)/alpha_a   (alpha_a>0: floor)
+           * memForce_a = dt^2 * M_node * d_a * alpha_a^2, M_node = rho*h^3/8
+           * (per-node share; added to each of the 8 nodes in the kernel).
+           * Together with the damping these are the full second-order
+           * displacement CFS-CPML; they sharpen grazing-incidence
+           * absorption (the v9 Z-component near-PML weakness). */
+          const double dt = Param.theDeltaT;
+          const double rho_e = (double)edata->rho;
+          const double M_node = rho_e * h * h * h / 8.0;
+          double restore = 0.0;
+          for (int axis = 0; axis < 3; axis++) {
+            const double da = d_axis[axis];
+            const double aa = alpha_axis[axis];
+            const double decay = exp(-aa * dt);
+            g_cpmlBuild.elastic_zetaDecay[axis][pml_idx] = decay;
+            g_cpmlBuild.elastic_zetaGain[axis][pml_idx] =
+                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
+            g_cpmlBuild.elastic_memForce[axis][pml_idx] =
+                dt2 * M_node * da * aa * aa;
+            restore += da * aa;
+          }
+          cpml_restore_rate = restore;
         }
       }
     }
@@ -7304,16 +7354,27 @@ static void solver_init() {
          * dashpot above (same backward-difference, mass_minusaM and
          * mass2_minusaM each -= dt*C), so it inherits the dashpot path's
          * stability. cpml_damp_rate > 0 only for elastic CPML elements;
-         * interior and acoustic elements are untouched. This is the
-         * unconditionally-stable core of the two-sided stretch; the CFS
-         * sub-terms (-d*alpha*u + d*alpha^2*zeta, displacement memory)
-         * are a documented lower-order refinement, not yet added. The
-         * gradient/strain side is handled separately in kernelPMLElasticStep
-         * via the psi memory (modified strain). */
+         * interior and acoustic elements are untouched. The gradient/
+         * strain side is handled separately in kernelPMLElasticStep via
+         * the psi memory (modified strain); the CFS restoring/memory
+         * sub-terms are added just below + in the kernel. */
         if ((Param.theAbcType == ABC_CPML) && (cpml_damp_rate > 0.0)) {
           double cpml_C = M * cpml_damp_rate;
           np->mass_minusaM[axis]  -= (Param.theDeltaT * cpml_C);
           np->mass2_minusaM[axis] -= (Param.theDeltaT * cpml_C);
+        }
+
+        /* CFS restoring term +rho*d_a*alpha_a*u_i (Matzen second-order
+         * form). In Hercules' folded-dt^2 update this is a u^n
+         * coefficient, so it adds +dt^2 * M * sum_a(d_a*alpha_a) to
+         * mass2_minusaM. It is the anti-restoring half of the CFS pair;
+         * the matching -rho*d_a*alpha_a^2*zeta memory force (added per
+         * node in kernelPMLElasticStep) cancels it at DC, leaving only
+         * the grazing-incidence frequency shift. Stable for alpha>0
+         * (alpha floor) and kappa=1 (Roden & Gedney 2000; K&M 2007). */
+        if ((Param.theAbcType == ABC_CPML) && (cpml_restore_rate > 0.0)) {
+          np->mass2_minusaM[axis] +=
+              (Param.theDeltaTSquared * M * cpml_restore_rate);
         }
 #endif /* BOUNDARY */
 
@@ -7506,6 +7567,38 @@ static void solver_init() {
             }
             cudaMemset(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx], 0,
                        (size_t)pmlN * sizeof(solver_float));
+          }
+        }
+
+        /* CFS divergence-side coefficients (zetaDecay, zetaGain,
+         * memForce) per axis. divPsi above is reused as the zeta state
+         * (zero-initialised by the cudaMemset). */
+        double** cfs_dev[3] = {
+            Global.gpuData.pml_elastic_zetaDecayArrayDevice,
+            Global.gpuData.pml_elastic_zetaGainArrayDevice,
+            Global.gpuData.pml_elastic_memForceArrayDevice};
+        double* cfs_host[3][3] = {
+            {g_cpmlBuild.elastic_zetaDecay[0],
+             g_cpmlBuild.elastic_zetaDecay[1],
+             g_cpmlBuild.elastic_zetaDecay[2]},
+            {g_cpmlBuild.elastic_zetaGain[0],
+             g_cpmlBuild.elastic_zetaGain[1],
+             g_cpmlBuild.elastic_zetaGain[2]},
+            {g_cpmlBuild.elastic_memForce[0],
+             g_cpmlBuild.elastic_memForce[1],
+             g_cpmlBuild.elastic_memForce[2]}};
+        for (int k = 0; k < 3; k++) {
+          for (int axis = 0; axis < 3; axis++) {
+            if (cudaMalloc((void**)&(cfs_dev[k][axis]),
+                           (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+                cudaMemcpy(cfs_dev[k][axis], cfs_host[k][axis],
+                           (size_t)pmlN * sizeof(double),
+                           cudaMemcpyHostToDevice) != cudaSuccess) {
+              fprintf(stderr,
+                      "Thread %d: cudaMalloc/Memcpy elastic CPML CFS "
+                      "coeff [%d][%d] failed\n", Global.myID, k, axis);
+              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+            }
           }
         }
       }
@@ -7810,6 +7903,7 @@ static void solver_init() {
         tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
                          ldb[2] + edgeticks};
         double a3[3], b3[3], iK3[3], d3[3]; /* d3 unused at interface */
+        double al3[3]; /* alpha unused at interface */
         compute_pml_profile_coeffs(
             (ma != 0) ? ma : me, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7817,8 +7911,9 @@ static void solver_init() {
             Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
-            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3);
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3);
         (void)d3;
+        (void)al3;
 
         /* Pick the axis most aligned with the interface normal. */
         double nx = fabs(Global.acousticInterfaceFaceNormals[3 * i + 0]);
@@ -7883,6 +7978,12 @@ static void solver_init() {
       g_cpmlBuild.elastic_b[axis] = NULL;
       free(g_cpmlBuild.elastic_invKappa[axis]);
       g_cpmlBuild.elastic_invKappa[axis] = NULL;
+      free(g_cpmlBuild.elastic_zetaDecay[axis]);
+      g_cpmlBuild.elastic_zetaDecay[axis] = NULL;
+      free(g_cpmlBuild.elastic_zetaGain[axis]);
+      g_cpmlBuild.elastic_zetaGain[axis] = NULL;
+      free(g_cpmlBuild.elastic_memForce[axis]);
+      g_cpmlBuild.elastic_memForce[axis] = NULL;
       free(g_cpmlBuild.acoustic_a[axis]);
       g_cpmlBuild.acoustic_a[axis] = NULL;
       free(g_cpmlBuild.acoustic_b[axis]);
@@ -9322,6 +9423,11 @@ static void solver_delete() {
       cudaFree(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]);
       cudaFree(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]);
     }
+  }
+  for (int axis = 0; axis < 3; axis++) {
+    cudaFree(Global.gpuData.pml_elastic_zetaDecayArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_elastic_zetaGainArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_elastic_memForceArrayDevice[axis]);
   }
   cudaFree(Global.gpuData.pmlAcousticElemMapperDevice);
   cudaFree(Global.gpuData.pml_acoustic_a_xArrayDevice);
@@ -14455,7 +14561,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double alpha_floor_fraction,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
-                                       double d_out[3]) {
+                                       double d_out[3],
+                                       double alpha_out[3]) {
   const double c[3] = {
       0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize,
       0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize,
@@ -14560,6 +14667,12 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
      * the mass-proportional CPML damping rho * d_j * du/dt injected into
      * the nodal mass arrays (mirroring the Lysmer dashpot path). */
     d_out[j] = d_total;
+    /* Floored alpha_a (CFS frequency, rad/s) for this axis. Exported so
+     * the caller can build the CFS restoring (-d*alpha*u) and the
+     * displacement-convolution memory (+d*alpha^2*zeta) terms. The floor
+     * (alpha_floor) already applied above guarantees alpha_a > 0, so the
+     * exact zeta integrator gain (1-exp(-alpha dt))/alpha is well-posed. */
+    alpha_out[j] = alpha_j;
   }
 }
 #endif /* BOUNDARY */
