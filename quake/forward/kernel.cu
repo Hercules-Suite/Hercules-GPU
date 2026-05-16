@@ -1857,20 +1857,25 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
      * momentum equation by s_j turns the divergence-side stretch into,
      * per damping axis a:
      *   rho*d_a du_i/dt           -> mass-prop. damping (mass arrays)
-     *   -rho*d_a*alpha_a u_i      -> CFS restoring  (mass2_minusaM)
-     *   +rho*d_a*alpha_a^2 zeta_i -> CFS memory force (added HERE)
-     * The first two are injected at the node in solver_init; this kernel
-     * adds only the memory-force part, because zeta is a running
-     * convolution that must be advanced every step:
+     *   +rho*d_a*alpha_a u_i      -> CFS restoring     (HERE)
+     *   -rho*d_a*alpha_a^2 zeta_i -> CFS memory force  (HERE)
+     * The damping is injected at the node in solver_init (validated,
+     * stable in v9). The CFS restoring + memory are a pair that must
+     * cancel at DC; v10 applied the restoring per-node via mass2_minusaM
+     * while zeta was element-centroid based -- the discrete cancellation
+     * failed and PML corners grew exponentially. Both halves are now
+     * evaluated HERE from the SAME element-centroid displacement
+     *   ubar_i = (1/8) sum_n u_i^(n)   (exact for trilinear hex8)
+     * so the per-element net CFS force
+     *   cfs_i = restoreCoeff*ubar_i - sum_a memForce_a*zeta_i^(a)
+     * is an exact discrete null at DC (zeta_i^(a) -> ubar_i/alpha_a =>
+     * sum_a memForce_a*zeta_i -> restoreCoeff*ubar_i). zeta advances by
      *   zeta_i^(a) = zetaDecay_a*zeta_i^(a) + zetaGain_a*ubar_i
-     * with ubar_i the element-centroid displacement = (1/8) sum_n u_i^(n)
-     * (exact for trilinear hex8 at the center). memForce_a already packs
-     * dt^2 * (rho h^3/8) * d_a * alpha_a^2 (the PER-NODE share), so the
-     * same -sum_a memForce_a*zeta_i is added to each of the 8 nodes.
-     * zeta state reuses pml_elastic_divPsiArrayDevice[i][a]. A strict
-     * no-op where d_a=0 (a=0 => memForce_a=0; zeta stays 0). The earlier
-     * "convolve sigma" attempt (6db1d7b) was a first-order velocity-
-     * stress idea misapplied here and was reverted. */
+     * restoreCoeff = dt^2*(rho h^3/8)*sum_a d_a*alpha_a and
+     * memForce_a   = dt^2*(rho h^3/8)*d_a*alpha_a^2 are PER-NODE shares,
+     * so the same cfs_i is added to each of the 8 nodes. Strict no-op
+     * where d_a=0 (restoreCoeff=0, memForce_a=0). zeta state reuses
+     * pml_elastic_divPsiArrayDevice[i][a]. */
     double ubar[3] = {0.0, 0.0, 0.0};
     for (int n = 0; n < 8; n++) {
         ubar[0] += u[n][0];
@@ -1891,23 +1896,27 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         gpuData->pml_elastic_memForceArrayDevice[0][pml_idx],
         gpuData->pml_elastic_memForceArrayDevice[1][pml_idx],
         gpuData->pml_elastic_memForceArrayDevice[2][pml_idx] };
+    const double restoreCoeff =
+        gpuData->pml_elastic_restoreCoeffArrayDevice[pml_idx];
 
-    /* Advance zeta_i^(a) and accumulate the per-node memory force
-     * fmem_i = sum_a memForce_a * zeta_i^(a). */
-    double fmem[3] = {0.0, 0.0, 0.0};
+    /* Advance zeta_i^(a); net per-node CFS force
+     * cfs_i = restoreCoeff*ubar_i - sum_a memForce_a * zeta_i^(a). */
+    double cfs[3];
     for (int i = 0; i < 3; i++) {
+        double fmem = 0.0;
         for (int a = 0; a < 3; a++) {
             const double z_old =
                 (double)gpuData->pml_elastic_divPsiArrayDevice[i][a][pml_idx];
             const double z_new = zDec[a] * z_old + zGain[a] * ubar[i];
             gpuData->pml_elastic_divPsiArrayDevice[i][a][pml_idx] =
                 (solver_float)z_new;
-            fmem[i] += memF[a] * z_new;
+            fmem += memF[a] * z_new;
         }
+        cfs[i] = restoreCoeff * ubar[i] - fmem;
     }
 
     /* Nodal force: f_alpha^(n) = - sum_beta s_beta(n) * sigma_{alpha,beta}
-     * (gradient-side stretched stress)  -  fmem_alpha (CFS memory). */
+     * (gradient-side stretched stress)  +  cfs_alpha (CFS pair). */
     for (int n = 0; n < 8; n++) {
         const double sx = (n & 1) ? 1.0 : -1.0;
         const double sy = (n & 2) ? 1.0 : -1.0;
@@ -1917,7 +1926,7 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         for (int a = 0; a < 3; a++) {
             const double f = -(sx * sigma[a][0] +
                                sy * sigma[a][1] +
-                               sz * sigma[a][2]) - fmem[a];
+                               sz * sigma[a][2]) + cfs[a];
             atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
         }
     }

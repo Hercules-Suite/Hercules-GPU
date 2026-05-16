@@ -456,6 +456,7 @@ typedef struct cpml_build_s {
   double*  elastic_zetaDecay[3]; /* exp(-alpha_a*dt) */
   double*  elastic_zetaGain[3];  /* (1-exp(-alpha_a*dt))/alpha_a */
   double*  elastic_memForce[3];  /* dt^2 * (rho*h^3/8) * d_a * alpha_a^2 */
+  double*  elastic_restoreCoeff; /* dt^2 * (rho*h^3/8) * sum_a d_a*alpha_a */
 
   /* Acoustic PML build state. Same pre-scaling for a / invKappa.
    *   forceCoeff = dt^2 * h^2 / (4 * rho)
@@ -7010,6 +7011,8 @@ static void solver_init() {
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.elastic_fourH =
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.elastic_restoreCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.acoustic_forceCoeff =
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.acoustic_fourH =
@@ -7046,6 +7049,7 @@ static void solver_init() {
         (g_cpmlBuild.elastic_zetaDecay[0] == NULL) ||
         (g_cpmlBuild.elastic_zetaGain[0] == NULL) ||
         (g_cpmlBuild.elastic_memForce[0] == NULL) ||
+        (g_cpmlBuild.elastic_restoreCoeff == NULL) ||
         (g_cpmlBuild.acoustic_a[0] == NULL) ||
         (g_cpmlBuild.acoustic_b[0] == NULL) ||
         (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
@@ -7081,11 +7085,6 @@ static void solver_init() {
      * build the Matzen second-order divergence-side mass-proportional
      * damping rho*d*du/dt. Non-zero only for elastic CPML elements. */
     double cpml_damp_rate = 0.0;
-    /* Summed CFS restoring rate sum_a d_a*alpha_a (1/s^2) for this
-     * element; injected as +dt^2*M*rate into mass2_minusaM. Paired with
-     * the +d*alpha^2*zeta memory force so the net is the CFS frequency
-     * shift (cancels at DC, active at grazing). Elastic CPML only. */
-    double cpml_restore_rate = 0.0;
 #endif
 
     double zeta, a, b;
@@ -7252,17 +7251,22 @@ static void solver_init() {
 
           /* CFS sub-terms (Matzen 2011; Xie et al. 2014). Per damping
            * axis a the divergence-side stretch also contributes
-           *   -rho*d_a*alpha_a u_i  (restoring; host, mass2_minusaM)
-           *   +rho*d_a*alpha_a^2 zeta_i^(a)  (memory; kernel)
+           *   +rho*d_a*alpha_a u_i           (restoring)
+           *   -rho*d_a*alpha_a^2 zeta_i^(a)  (displacement memory)
            * with zeta the exact exponential convolution of the element
            * displacement, d zeta/dt = -alpha_a zeta + u:
            *   zetaDecay_a = exp(-alpha_a*dt)
            *   zetaGain_a  = (1 - zetaDecay_a)/alpha_a   (alpha_a>0: floor)
-           * memForce_a = dt^2 * M_node * d_a * alpha_a^2, M_node = rho*h^3/8
-           * (per-node share; added to each of the 8 nodes in the kernel).
-           * Together with the damping these are the full second-order
-           * displacement CFS-CPML; they sharpen grazing-incidence
-           * absorption (the v9 Z-component near-PML weakness). */
+           *   memForce_a  = dt^2 * M_node * d_a * alpha_a^2
+           *   restoreCoeff= dt^2 * M_node * sum_a d_a*alpha_a
+           * M_node = rho*h^3/8 (per-node share). BOTH the restoring and
+           * the memory are applied in kernelPMLElasticStep from the
+           * element-centroid displacement so the CFS pair cancels
+           * exactly at DC discretely. (v10 applied the restoring per
+           * node via mass2_minusaM while zeta was centroid-based; the
+           * mismatch left a net anti-restoring forcing that grew
+           * exponentially at PML corners. Using ubar for both halves
+           * removes that net injection.) */
           const double dt = Param.theDeltaT;
           const double rho_e = (double)edata->rho;
           const double M_node = rho_e * h * h * h / 8.0;
@@ -7278,7 +7282,7 @@ static void solver_init() {
                 dt2 * M_node * da * aa * aa;
             restore += da * aa;
           }
-          cpml_restore_rate = restore;
+          g_cpmlBuild.elastic_restoreCoeff[pml_idx] = dt2 * M_node * restore;
         }
       }
     }
@@ -7364,18 +7368,12 @@ static void solver_init() {
           np->mass2_minusaM[axis] -= (Param.theDeltaT * cpml_C);
         }
 
-        /* CFS restoring term +rho*d_a*alpha_a*u_i (Matzen second-order
-         * form). In Hercules' folded-dt^2 update this is a u^n
-         * coefficient, so it adds +dt^2 * M * sum_a(d_a*alpha_a) to
-         * mass2_minusaM. It is the anti-restoring half of the CFS pair;
-         * the matching -rho*d_a*alpha_a^2*zeta memory force (added per
-         * node in kernelPMLElasticStep) cancels it at DC, leaving only
-         * the grazing-incidence frequency shift. Stable for alpha>0
-         * (alpha floor) and kappa=1 (Roden & Gedney 2000; K&M 2007). */
-        if ((Param.theAbcType == ABC_CPML) && (cpml_restore_rate > 0.0)) {
-          np->mass2_minusaM[axis] +=
-              (Param.theDeltaTSquared * M * cpml_restore_rate);
-        }
+        /* (CFS restoring is NOT applied here. v10 added it as a per-node
+         * mass2_minusaM u^n coefficient while the paired zeta memory was
+         * element-centroid based; the discrete DC cancellation failed
+         * and corners grew exponentially. Both CFS halves are now
+         * evaluated together from the centroid displacement in
+         * kernelPMLElasticStep.) */
 #endif /* BOUNDARY */
 
         np->mass_minusaM[axis] += M;
@@ -7600,6 +7598,18 @@ static void solver_init() {
               MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
             }
           }
+        }
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.pml_elastic_restoreCoeffArrayDevice),
+                (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.pml_elastic_restoreCoeffArrayDevice,
+                       g_cpmlBuild.elastic_restoreCoeff,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc/Memcpy elastic CPML "
+                  "restoreCoeff failed\n", Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
         }
       }
     }
@@ -7967,6 +7977,8 @@ static void solver_init() {
     g_cpmlBuild.elastic_lambdaCoeff = NULL;
     free(g_cpmlBuild.elastic_fourH);
     g_cpmlBuild.elastic_fourH = NULL;
+    free(g_cpmlBuild.elastic_restoreCoeff);
+    g_cpmlBuild.elastic_restoreCoeff = NULL;
     free(g_cpmlBuild.acoustic_forceCoeff);
     g_cpmlBuild.acoustic_forceCoeff = NULL;
     free(g_cpmlBuild.acoustic_fourH);
@@ -9429,6 +9441,7 @@ static void solver_delete() {
     cudaFree(Global.gpuData.pml_elastic_zetaGainArrayDevice[axis]);
     cudaFree(Global.gpuData.pml_elastic_memForceArrayDevice[axis]);
   }
+  cudaFree(Global.gpuData.pml_elastic_restoreCoeffArrayDevice);
   cudaFree(Global.gpuData.pmlAcousticElemMapperDevice);
   cudaFree(Global.gpuData.pml_acoustic_a_xArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_a_yArrayDevice);

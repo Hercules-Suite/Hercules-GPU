@@ -523,6 +523,12 @@ typedef struct gpu_data_t {
     double*       pml_elastic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
     double*       pml_elastic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
     double*       pml_elastic_memForceArrayDevice[3]; /* dt^2 Mn d_a a_a^2 */
+    /* CFS restoring coeff = dt^2 * M_node * sum_a(d_a*alpha_a). The
+     * restoring +rho*d*alpha*u and the memory -rho*d*alpha^2*zeta are
+     * BOTH evaluated in-kernel from the element-centroid displacement so
+     * they cancel exactly at DC discretely (a per-node restoring vs a
+     * centroid zeta did NOT cancel and blew up at corners in v10). */
+    double*       pml_elastic_restoreCoeffArrayDevice;
 
     /* --- Acoustic PML state ---
      *
