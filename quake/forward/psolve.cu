@@ -7307,22 +7307,33 @@ static void solver_init() {
               Param.theCpmlAlphaFloorFraction,
               a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
           const double h = (double)edata->edgesize;
-          const double inv4h = 1.0 / (4.0 * h);
           const double dt = Param.theDeltaT;
           const double dt2 = Param.theDeltaTSquared;
-          const double h2_over_4 = h * h * 0.25;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
-          /* Gradient side (Step A) -- unchanged. */
+          /* Gradient side -- store RAW profile coeffs (natural signed-sum
+           * normalization), mirroring the validated elastic native+
+           * correction (elastic_a/b/invKappa = a/b/invKappa raw, the
+           * 1/(4h) folded into the single stiffness coeff below = the
+           * corrected consistent interior coeff dt^2*h/(16 rho), exactly
+           * as elastic folds it into mu=9*c1). kernelPMLAcousticStep then
+           * forms the native delta -(P_pml - P_raw), zero at d=0 -> exact
+           * match to the hourglass-free consistent interior operator. */
           for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis] * inv4h;
+            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis];
             g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
             g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis] * inv4h;
+                invKappa_axis[axis];
           }
           const double rho = (double)edata->rho;
-          /* dt^2 * h^2 / (4 * rho); rho > 0 guaranteed by mesh validation. */
-          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
+          /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
+           * interior acoustic stiffness coefficient (commit 20180b6), so
+           * P_raw exactly equals the constant-gradient content of the
+           * interior operator and the native delta vanishes at the PML
+           * inner edge. rho > 0 guaranteed by mesh validation. (Array
+           * name kept; semantics are now the stiffness coeff, not the
+           * old dt^2 h^2/4 forceCoeff.) */
+          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
 
           /* Step B divergence side -- scalar mirror of the validated
            * elastic two-sided. memForce/restoreCoeff use the acoustic
@@ -7451,27 +7462,33 @@ static void solver_init() {
             Param.theCpmlAlphaFloorFraction,
             a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
 
-        /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
-         * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
-         * invKappa lets the kernel multiply by the raw signed displacement
-         * (or pressure) sum without per-call divisions. */
+        /* Native (c1,c2-style) normalization: store RAW profile a/b/
+         * invKappa; the physical scaling is folded into a single
+         * stiffness coeff per type (elastic: mu=9*c1, lambda=9*c2;
+         * acoustic: Cstiff = dt^2*h/(16 rho)). h2_over_4 is still used
+         * by the elastic muCoeff/lambdaCoeff below. */
         const double h = (double)edata->edgesize;
-        const double inv4h = 1.0 / (4.0 * h);
         const double dt2 = Param.theDeltaTSquared;
         const double h2_over_4 = h * h * 0.25;
 
         if (element_is_acoustic(edata)) {
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+          /* RAW profile coeffs + Cstiff = dt^2*h/(16 rho): native+
+           * correction mirror of the elastic path (see the matching
+           * acoustic block above and kernelPMLAcousticStep). At d=0 the
+           * PML delta -(P_pml - P_raw) is exactly 0 -> the element is
+           * purely the validated consistent interior operator. */
           for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis] * inv4h;
+            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis];
             g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
             g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis] * inv4h;
+                invKappa_axis[axis];
           }
           const double rho = (double)edata->rho;
-          /* dt^2 * h^2 / (4 * rho); rho > 0 is guaranteed by mesh validation. */
-          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
+          /* rho > 0 guaranteed by mesh validation. (Array name kept;
+           * semantics now the stiffness coeff, not the old dt^2 h^2/4. */
+          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
         } else {
           int32_t pml_idx = g_cpmlBuild.elastic_count++;
           g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;

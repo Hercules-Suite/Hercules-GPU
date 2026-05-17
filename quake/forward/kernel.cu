@@ -511,9 +511,22 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
     return;
   }
 
-  /* CPML: acoustic PML elements are handled by kernelPMLAcousticStep. */
+  /* CPML acoustic PML stiffness mode (mirror of the validated elastic
+   * native+correction in kernelStiffnessCalcLocal):
+   *  - native (1, default): do NOT skip -- PML acoustic elements get the
+   *    FULL consistent operator here, byte-identical to the interior (the
+   *    operator validated against CPS, commit 20180b6).
+   *    kernelPMLAcousticStep then adds only the CPML delta
+   *    -(P_pml - P_raw) + CFS, which is exactly zero where d=0, so the
+   *    PML<->interior operator is continuous and PML elements keep the
+   *    consistent, hourglass-free modes (the bare 1-pt reduced operator
+   *    is rank-deficient and rings undamped in the lossless fluid).
+   *  - reduced (0): SKIP here; kernelPMLAcousticStep then supplies the
+   *    full standalone 1-point reduced CPML stiffness (pre-restructure
+   *    behaviour, bit-identical). */
   if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+      gpuData->pmlNativeStiffness == 0) {
     return;
   }
 
@@ -2088,19 +2101,45 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
     }
     const double cfs = restoreCoeff * pbar - fmem;
 
-    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * partial[j]
-     * (gradient-side stretched flux)  +  cfs  (CFS pair).
-     * forceCoeff = dt^2 * h^2 / (4 rho). */
-    const double forceCoeff =
+    /* Pressure force -- native+correction mirror of kernelPMLElasticStep.
+     * Cstiff = dt^2 * h / (16 rho) is the corrected consistent interior
+     * acoustic stiffness coefficient (commit 20180b6), stored (raw a/b/
+     * invKappa, natural signed-sum normalization) exactly as the elastic
+     * path stores raw a/b/invKappa and folds the physical scaling into
+     * mu=9*c1. With  S[j] = sum_n s_j(n) p_n  (constant-gradient signed
+     * sum) and  partial[j] = invKappa*S[j] + psi  (CPML-stretched):
+     *   P_raw(n) = Cstiff * sum_j s_j(n) * S[j]        -- the constant-
+     *     gradient projection, exactly the content the consistent
+     *     interior operator already carries (1-pt Gauss is exact on the
+     *     linear subspace), and
+     *   P_pml(n) = Cstiff * sum_j s_j(n) * partial[j]  -- CPML-stretched.
+     * native (default): kernelAcousticPressureForce added the FULL
+     *   consistent operator for this element; here add only the CPML
+     *   delta  -(P_pml - P_raw) + cfs.  At d=0 partial==S so the delta
+     *   is exactly 0 and cfs==0 -> the element is purely the consistent
+     *   interior operator (validated, hourglass-free, inner-edge exact).
+     * reduced: interior skipped this element -> add the full standalone
+     *   1-point reduced CPML stiffness  -P_pml + cfs  (bit-identical to
+     *   the pre-restructure kernel; the raw/Cstiff rescaling is an exact
+     *   algebraic identity with the old inv4h / dt^2 h^2/4 form). */
+    const double Cstiff =
         gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
+    const int native = gpuData->pmlNativeStiffness;
     for (int n = 0; n < 8; n++) {
         const double sx = (n & 1) ? 1.0 : -1.0;
         const double sy = (n & 2) ? 1.0 : -1.0;
         const double sz = (n & 4) ? 1.0 : -1.0;
         const int32_t lnid = lnid_base[n * lenum];
-        const double f = -forceCoeff *
-                         (sx * partial[0] + sy * partial[1] + sz * partial[2])
-                         + cfs;
+        const double Ppml = Cstiff *
+            (sx * partial[0] + sy * partial[1] + sz * partial[2]);
+        double f;
+        if (native) {
+            const double Praw = Cstiff *
+                (sx * S[0] + sy * S[1] + sz * S[2]);
+            f = -(Ppml - Praw) + cfs;
+        } else {
+            f = -Ppml + cfs;
+        }
         atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
                   (solver_float)f);
     }
