@@ -293,13 +293,35 @@ Hercules supports two absorbing boundary conditions, selected at run
 time. The default is the legacy first-order Lysmer dashpot, folded into
 the lumped mass matrix at setup. The newer option is an unsplit
 Convolutional Perfectly Matched Layer (C-PML) in ADE form (Komatitsch &
-Martin, 2007), augmented with two stability fixes — an `alpha` floor and
-M-PML cross-axis coupling (Meza-Fajardo & Papageorgiou, 2008) — for
-robust long-time behaviour on elastic-only and elastic-acoustic
-problems. The C-PML implementation is per-element (each element appears
-in exactly one elastic or acoustic mapper), wraps the five absorbing
-faces (`x_min`, `x_max`, `y_min`, `y_max`, `z_max`), and leaves `z_min`
-as the free surface.
+Martin, 2007).
+
+The C-PML is the **complete two-sided second-order displacement form**
+(Matzen 2011; Xie et al. 2014 — the formulation SPECFEM3D's FE-PML
+uses). Both occurrences of the spatial derivative in the elastic
+momentum equation are coordinate-stretched:
+
+- **Gradient/strain side:** a per-element `psi` ADE memory modifies the
+	strain fed to the constitutive law (the stretched stress).
+- **Divergence side:** multiplying the momentum equation by `s_j` turns
+	the stress-divergence stretch into nodal terms — a mass-proportional
+	volumetric damping `rho*d*du/dt` (injected into the mass arrays,
+	mirroring the Lysmer discretisation) plus a Complex-Frequency-Shifted
+	(CFS) restoring `+rho*d*alpha*u` and displacement-convolution memory
+	`-rho*d*alpha^2*zeta`. The CFS pair is evaluated from the element-
+	centroid displacement so it cancels exactly at DC and only acts at
+	grazing incidence. (A naive "convolve the stress" divergence memory —
+	a first-order velocity-stress idea — was tried and rejected: it
+	corrupts even the ABC-independent direct arrival under 1-point
+	reduced integration. See the git history for the diagnosis.)
+
+Two robustness fixes are layered on: an `alpha` floor and M-PML
+cross-axis coupling (Meza-Fajardo & Papageorgiou, 2008). The C-PML
+implementation is per-element (each element appears in exactly one
+elastic or acoustic mapper), wraps the five absorbing faces (`x_min`,
+`x_max`, `y_min`, `y_max`, `z_max`), and leaves `z_min` as the free
+surface. The acoustic-pressure PML path is gradient-side only. Validated
+against CPS analytical seismograms it is uniformly more accurate than
+the Lysmer dashpot at every offset/component (see the table below).
 
 - `abc_type`
 	Optional. `dashpot` (default) selects the legacy Lysmer dashpot path
@@ -326,13 +348,20 @@ as the free surface.
 	`p` in the spatial profile `d_j(xi) ~ (xi/L)^p`. `p = 2` is the standard
 	K&M/SPECFEM3D choice.
 - `cpml_kappa_max`
-	Optional. Default `1.0` (no real stretch). **Stick with `1.0` unless
-	you have concrete evidence of grazing-angle leakage.** Raising
-	`kappa_max` (e.g. to `3` or `7`) is sometimes recommended for grazing
-	incidence in PML literature, but on long elastic Hercules runs it has
-	been observed to destabilise the corner ADE mode even with M-PML
-	active. Empirically `kappa_max = 1` gives the most robust late-time
-	behaviour for typical earthquake simulations.
+	Optional. Default `1.0` (no real stretch, kept for backward
+	compatibility). **`cpml_kappa_max = 3.0` is the recommended
+	production value** and the validated best configuration: with the
+	complete two-sided CFS-CPML it is stable for long elastic runs and
+	resolves the deep-corner grazing residual (the `kappa` real-
+	coordinate stretch is the textbook remedy for grazing incidence,
+	K&M 2007 §"importance of kappa"; it only acts deep in the layer —
+	`kappa(xi) = 1 + (kappa_max-1)(xi/L)^p` is 1 at the inner edge, so
+	it adds no interface reflection). Earlier guidance to "stick with
+	1.0" referred to an incorrect single-sided/stress-convolution build
+	in which `kappa_max > 1` destabilised; that build was replaced. With
+	the corrected formulation, raising `kappa_max` to `3` improved every
+	near-PML metric (notably the vertical 16 km late coda) without any
+	instability. Values much higher than `3` are still untested here.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
 	rad/s. When `< 0` or unset (default), the solver uses
@@ -416,39 +445,73 @@ Stability fixes baked in (tunable via the fractions above):
 	restores inter-axis symmetry in the corner and stabilises long
 	elastic runs at the cost of slightly more absorption "leaking" onto
 	auxiliary axes inside the PML elements.
+- **Centroid-paired CFS terms.** The divergence-side CFS restoring
+	`+rho*d*alpha*u` and memory `-rho*d*alpha^2*zeta` must cancel at DC.
+	Applying the restoring per-node (via the mass arrays) while advancing
+	`zeta` from the element-centroid displacement breaks that discrete
+	cancellation and grows exponentially at PML corners. Both halves are
+	therefore evaluated together from the same element-centroid
+	displacement in the PML kernel, which makes the per-element net CFS
+	force an exact discrete null at DC. No-op where `d = 0`.
 
-CPS analytical validation (homogeneous half-space, point source, 60 s
-simulation, 0–16 km offsets, depth 1500 m):
+CPS analytical validation (elastic half-space, dip-slip point source,
+2 s source, 60 s simulation, depth 1500 m). Metric: per-component RMS
+misfit vs the CPS analytic, normalised by the CPS RMS — `0` = perfect,
+lower = better. The **late coda (25–40 s)** isolates absorbing-boundary
+quality (the direct arrival is gone; only boundary reflections remain).
+Configuration: `abc_type=cpml`, `cpml_kappa_max=3`, `cpml_clamp_outer=yes`,
+other defaults.
 
-|       | Lysmer / CPS | M-PML / CPS |
-|-------|--------------|-------------|
-| 0 km  | 0.98         | 0.98        |
-| 4 km  | 0.96         | 0.96        |
-| 8 km  | 0.99         | 0.99        |
-| 12 km | 0.99         | 0.99        |
-| 16 km | 1.01         | 1.66        |
+Late-coda RMS misfit, near-PML receivers (where ABC quality matters):
 
-M-PML matches CPS to within 1–4% everywhere except very close to the
-PML inner edge. The 16 km receiver sits only ~520 m inside the PML
-inner edge for a 50-element PML, which is where the M-PML modified
-strain field bleeds into the receiver. **For benchmarking PML quality,
-keep receivers at least one PML thickness away from the inner edge.**
+| receiver        | Lysmer | CFS-CPML (k=3) | other-branch CPML |
+|-----------------|--------|----------------|-------------------|
+| R east, 12 km   | 0.222  | **0.107**      | 0.121             |
+| R east, 16 km   | 0.649  | **0.153**      | 0.400             |
+| Z up,   12 km   | 0.561  | **0.171**      | 0.886             |
+| Z up,   16 km   | 2.195  | **1.110**      | 2.735             |
 
-Recommended starting parameters (typical earthquake-scale runs):
+The CFS-CPML is **2–5× more accurate than the Lysmer dashpot** in the
+coda at the near-PML receivers, and best of every implementation tested.
+At far-field receivers (0–8 km, > 1 PML thickness from the inner edge)
+all methods are already accurate and differences are negligible.
+
+In the **direct-arrival window (10–22 s), which is ABC-independent**, the
+CFS-CPML matches CPS as closely as Lysmer (e.g. R-east 16 km: 0.151 vs
+Lysmer 0.154) — i.e. it does not contaminate the physical wavefield, a
+property the rejected stress-convolution variant did not have. Over the
+**full record (0–40 s)** it is likewise the most accurate at every
+near-PML receiver (e.g. R-east 16 km: 0.170 vs Lysmer 0.366).
+
+**For benchmarking PML quality, keep receivers at least one PML
+thickness away from the inner edge** (a receiver embedded in the PML
+sees the modified strain field, not a physical seismogram).
+
+Recommended (validated) parameters — this is the configuration behind
+the table above:
 
 ```
 abc_type = cpml
-cpml_layers = 50            # ~2 wavelengths at f_max for a 78 m mesh
-# leave cpml_kappa_max at default 1.0
-# leave cpml_alpha_max_hz at default unless source f_dominant != f_max
+cpml_kappa_max = 3.0        # real-coordinate stretch: kills grazing residual
+cpml_clamp_outer = yes      # single-pass absorption (Dirichlet outer face)
+cpml_layers = 10            # ~1 PML; raise for stronger low-freq absorption
+# cpml_alpha_max_hz: leave at default unless source f_dominant != f_max
+# cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1
 ```
 
-Bumping `cpml_layers` higher (e.g. 80–100) is generally safe and gives
-better absorption of low-frequency Rayleigh waves at lateral faces. Do
-not raise `cpml_kappa_max` above 1 without a specific motivation; the
-M-PML stabilisation has been verified at `kappa_max = 1` but the
-`kappa_max > 1` regime remains a known stability gotcha (Komatitsch &
-Martin 2007 Section 5.4).
+Notes:
+
+- `cpml_kappa_max = 3.0` is the single most important non-default knob:
+	it is what closed the deep-corner vertical grazing residual and is
+	stable with the corrected two-sided formulation. The legacy default
+	stays `1.0` only for backward compatibility.
+- `cpml_clamp_outer = yes` converts round-trip to single-pass
+	absorption and is recommended for long runs / thinner PMLs.
+- Bumping `cpml_layers` higher (e.g. 30–50) further improves absorption
+	of low-frequency Rayleigh waves at lateral faces; `10` already beats
+	the Lysmer dashpot by 2–5× in the validation above.
+- For double-precision correctness checks build with `solver_float =
+	double`; production single-precision runs are verified back-to-back.
 
 Typical two-phase settings:
 
