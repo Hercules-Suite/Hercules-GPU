@@ -654,12 +654,25 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   }
 
   const solver_float mass = gpuData->pressureMassDevice[nindex];
+  /* Step B: acoustic CPML mass-proportional damping. cd is the
+   * assembled dt*C term (dt baked in at build, dt*C summed across
+   * elements and ranks like pressure_mass). cd == 0 everywhere unless
+   * an acoustic PML element contributes, in which case the update is
+   * the damped central difference
+   *   mass*(p^{n+1}-2p^n+p^{n-1}) + dt*C*(p^n - p^{n-1}) = F
+   * mirroring the validated elastic v9 dashpot discretization. When
+   * cd == 0 this reduces EXACTLY to the legacy update (bit-identical
+   * for any run without acoustic PML). */
+  const solver_float cd = (gpuData->pressureDampDevice != NULL)
+                              ? gpuData->pressureDampDevice[nindex]
+                              : (solver_float)0.0;
   solver_float p_new = 0.0;
 
   if (mass > 0.0) {
     p_new = (gpuData->pressureForceDevice[nindex] +
-             (solver_float)2.0 * mass * gpuData->pressureTm1Device[nindex] -
-             mass * gpuData->pressureTm2Device[nindex]) /
+             ((solver_float)2.0 * mass - cd) *
+                 gpuData->pressureTm1Device[nindex] -
+             (mass - cd) * gpuData->pressureTm2Device[nindex]) /
             mass;
   }
 
@@ -2019,14 +2032,52 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
         partial[j] = invKJ[j] * S[j] + psi_new;
     }
 
-    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * partial[j].
-     * forceCoeff = dt^2 * h^2 / (4 rho).
-     *
-     * Only the gradient side of the CPML stretch is applied (partial[j]).
-     * As in the elastic kernel, the divergence-side stretch of the
-     * second-order pressure equation is a modified-inertia / damping term
-     * on the node, not a flux convolution; the reverted "convolve the
-     * flux" form (commit 6db1d7b) is intentionally absent here. */
+    /* Step B -- divergence-side CFS (scalar mirror of the elastic
+     * kernelPMLElasticStep CFS pair). The gradient side is partial[j];
+     * the divergence-side mass-prop damping is applied to the nodal
+     * pressure mass (pressure_damp), and the CFS restoring + memory pair
+     * is evaluated here from the element-centroid pressure
+     *   pbar = (1/8) sum_n p^(n)
+     *   cfs  = restoreCoeff*pbar - sum_a memForce_a * zeta_p^(a)
+     *   zeta_p^(a) = zetaDecay_a*zeta_p^(a) + zetaGain_a*pbar
+     * restoreCoeff/memForce already pack dt^2 * nodalPressureMass *
+     * (d*alpha, d*alpha^2), i.e. the PER-NODE share, so the same cfs is
+     * added to each of the 8 nodes. At d=0 (inner edge / non-PML axis)
+     * restoreCoeff = memForce = 0 -> cfs = 0 (strict no-op), and the
+     * pair cancels at DC (zeta_p -> pbar/alpha). */
+    double pbar = 0.0;
+    for (int n = 0; n < 8; n++) pbar += p[n];
+    pbar *= 0.125;
+
+    const double zDec[3] = {
+        gpuData->pml_acoustic_zetaDecayArrayDevice[0][pml_idx],
+        gpuData->pml_acoustic_zetaDecayArrayDevice[1][pml_idx],
+        gpuData->pml_acoustic_zetaDecayArrayDevice[2][pml_idx] };
+    const double zGain[3] = {
+        gpuData->pml_acoustic_zetaGainArrayDevice[0][pml_idx],
+        gpuData->pml_acoustic_zetaGainArrayDevice[1][pml_idx],
+        gpuData->pml_acoustic_zetaGainArrayDevice[2][pml_idx] };
+    const double memF[3] = {
+        gpuData->pml_acoustic_memForceArrayDevice[0][pml_idx],
+        gpuData->pml_acoustic_memForceArrayDevice[1][pml_idx],
+        gpuData->pml_acoustic_memForceArrayDevice[2][pml_idx] };
+    const double restoreCoeff =
+        gpuData->pml_acoustic_restoreCoeffArrayDevice[pml_idx];
+
+    double fmem = 0.0;
+    for (int a = 0; a < 3; a++) {
+        const double z_old =
+            (double)gpuData->pml_acoustic_zetaPArrayDevice[a][pml_idx];
+        const double z_new = zDec[a] * z_old + zGain[a] * pbar;
+        gpuData->pml_acoustic_zetaPArrayDevice[a][pml_idx] =
+            (solver_float)z_new;
+        fmem += memF[a] * z_new;
+    }
+    const double cfs = restoreCoeff * pbar - fmem;
+
+    /* Pressure force: f^(n) = - forceCoeff * sum_j s_j(n) * partial[j]
+     * (gradient-side stretched flux)  +  cfs  (CFS pair).
+     * forceCoeff = dt^2 * h^2 / (4 rho). */
     const double forceCoeff =
         gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
     for (int n = 0; n < 8; n++) {
@@ -2035,7 +2086,8 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
         const double sz = (n & 4) ? 1.0 : -1.0;
         const int32_t lnid = lnid_base[n * lenum];
         const double f = -forceCoeff *
-                         (sx * partial[0] + sy * partial[1] + sz * partial[2]);
+                         (sx * partial[0] + sy * partial[1] + sz * partial[2])
+                         + cfs;
         atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
                   (solver_float)f);
     }

@@ -292,6 +292,8 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define AN_PRESSURE_MASS_MSG 125
 #define DN_PRESSURE_SURFACE_MSG 126
 #define AN_PRESSURE_SURFACE_MSG 127
+#define DN_PRESSURE_DAMP_MSG 128
+#define AN_PRESSURE_DAMP_MSG 129
 #define CVMRECORD_MSG 110
 
 #define BATCH (1 << 20)
@@ -469,6 +471,13 @@ typedef struct cpml_build_s {
   double*  acoustic_b[3];
   double*  acoustic_invKappa[3];
   double*  acoustic_forceCoeff;
+  /* Step B divergence-side CFS coeffs (scalar mirror of elastic;
+   * memForce/restoreCoeff use the acoustic nodal mass volume/(8*bulk)
+   * in place of the elastic rho*h^3/8). */
+  double*  acoustic_zetaDecay[3]; /* exp(-alpha_a*dt) */
+  double*  acoustic_zetaGain[3];  /* (1-exp(-alpha_a*dt))/alpha_a */
+  double*  acoustic_memForce[3];  /* dt^2 * nodalPressureMass * d_a*alpha_a^2 */
+  double*  acoustic_restoreCoeff; /* dt^2 * nodalPressureMass * sum d_a*alpha_a */
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
@@ -6943,6 +6952,19 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    /* Step B: acoustic CPML nodal damping C. Allocated unconditionally
+     * (acoustic path exists regardless of BOUNDARY/CPML); stays 0
+     * everywhere unless an acoustic PML element contributes, so the
+     * pressure update is bit-identical when there is no acoustic PML. */
+    if (cudaMallocHost(&(Global.mySolver->pressure_damp),
+                       Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic pressure damp pinned memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     memset(Global.mySolver->pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_tm2, 0,
@@ -6950,6 +6972,8 @@ static void solver_init() {
     memset(Global.mySolver->pressure_force, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_mass, 0,
+           Global.myMesh->nharbored * sizeof(solver_float));
+    memset(Global.mySolver->pressure_damp, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
 
     pressureFreeSurfaceHost =
@@ -7123,6 +7147,8 @@ static void solver_init() {
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
     g_cpmlBuild.acoustic_forceCoeff =
         (double*)malloc(Global.myMesh->lenum * sizeof(double));
+    g_cpmlBuild.acoustic_restoreCoeff =
+        (double*)malloc(Global.myMesh->lenum * sizeof(double));
     for (int axis = 0; axis < 3; axis++) {
       g_cpmlBuild.elastic_a[axis] =
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
@@ -7142,6 +7168,12 @@ static void solver_init() {
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
       g_cpmlBuild.acoustic_invKappa[axis] =
           (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.acoustic_zetaDecay[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.acoustic_zetaGain[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
+      g_cpmlBuild.acoustic_memForce[axis] =
+          (double*)malloc(Global.myMesh->lenum * sizeof(double));
     }
     if ((g_cpmlBuild.face_mask == NULL) ||
         (g_cpmlBuild.elastic_elem_list == NULL) ||
@@ -7158,7 +7190,11 @@ static void solver_init() {
         (g_cpmlBuild.acoustic_a[0] == NULL) ||
         (g_cpmlBuild.acoustic_b[0] == NULL) ||
         (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
-        (g_cpmlBuild.acoustic_forceCoeff == NULL)) {
+        (g_cpmlBuild.acoustic_forceCoeff == NULL) ||
+        (g_cpmlBuild.acoustic_zetaDecay[0] == NULL) ||
+        (g_cpmlBuild.acoustic_zetaGain[0] == NULL) ||
+        (g_cpmlBuild.acoustic_memForce[0] == NULL) ||
+        (g_cpmlBuild.acoustic_restoreCoeff == NULL)) {
       fprintf(stderr,
               "Thread %d: solver_init: out of memory for CPML build state\n",
               Global.myID);
@@ -7228,31 +7264,23 @@ static void solver_init() {
       ep->c3 = 0.0;
       ep->c4 = 0.0;
 
-      for (j = 0; j < 8; j++) {
-        const int32_t lnid = elemp->lnid[j];
-        Global.mySolver->pressure_mass[lnid] +=
-            (solver_float)nodalPressureMass;
-      }
-      if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
-          Global.myOctree->nearendp[2]) {
-        for (j = 0; j < 4; j++) {
-          pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
-        }
-      }
+      /* Step B divergence-side scalars. Defaults are a STRICT no-op:
+       * acoustic_kprod = 1 (pressure mass unscaled, bit-identical) and
+       * acoustic_damp = 0 (no damping). They are set only for an
+       * ABC_CPML acoustic element inside the PML zone. Declared here
+       * (outside #ifdef BOUNDARY) because they scale the unconditional
+       * nodal pressure-mass / pressure-damp accumulation below. */
+      double acoustic_kprod = 1.0;
+      double acoustic_damp = 0.0;
 
 #ifdef BOUNDARY
-      /* Step A -- ACTIVATE acoustic CPML. Acoustic elements 'continue'
-       * below before ever reaching the CPML face-mask / coefficient
-       * build (the elastic-path block ~150 lines down), so until now
-       * g_cpmlBuild.acoustic_count stayed 0, pmlAcousticElemCount was 0,
-       * and kernelPMLAcousticStep was never launched -- the acoustic PML
-       * (gradient-side psi included) was entirely inactive. Enroll the
-       * acoustic PML element here. The math is byte-identical to the
-       * acoustic branch of the elastic-path CPML block; it is just
-       * relocated so acoustic elements actually reach it. Runs only for
-       * ABC_CPML acoustic elements that fall in the PML zone; otherwise
-       * a strict no-op (dashpot / non-PML / non-BOUNDARY unaffected, so
-       * every previously-validated configuration is bit-identical). */
+      /* Step A activation + Step B divergence-side coefficient build.
+       * Acoustic elements 'continue' below before the elastic-path CPML
+       * block, so this is where acoustic PML is enrolled (Step A) and
+       * its divergence-side coeffs are built (Step B). Relocated ABOVE
+       * the pressure-mass accumulation so the matched kappa-inertia can
+       * scale it. Strict no-op for dashpot / non-PML / non-BOUNDARY ->
+       * every previously-validated configuration is bit-identical. */
       if (Param.theAbcType == ABC_CPML) {
         lnid0 = elemp->lnid[0];
         ldb[0] = Global.myMesh->nodeTable[lnid0].x;
@@ -7278,18 +7306,14 @@ static void solver_init() {
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction,
               a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
-          /* d/alpha/kappa are for the Step-B divergence side (damping,
-           * CFS, kappa-inertia); unused in this gradient-side-only
-           * activation. */
-          (void)d_axis;
-          (void)alpha_axis;
-          (void)kappa_axis;
           const double h = (double)edata->edgesize;
           const double inv4h = 1.0 / (4.0 * h);
+          const double dt = Param.theDeltaT;
           const double dt2 = Param.theDeltaTSquared;
           const double h2_over_4 = h * h * 0.25;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+          /* Gradient side (Step A) -- unchanged. */
           for (int axis = 0; axis < 3; axis++) {
             g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis] * inv4h;
             g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
@@ -7299,9 +7323,49 @@ static void solver_init() {
           const double rho = (double)edata->rho;
           /* dt^2 * h^2 / (4 * rho); rho > 0 guaranteed by mesh validation. */
           g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
+
+          /* Step B divergence side -- scalar mirror of the validated
+           * elastic two-sided. memForce/restoreCoeff use the acoustic
+           * nodal mass (nodalPressureMass) in place of the elastic
+           * rho*h^3/8. */
+          acoustic_kprod =
+              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
+          double restore = 0.0;
+          for (int axis = 0; axis < 3; axis++) {
+            const double da = d_axis[axis];
+            const double aa = alpha_axis[axis];
+            const double decay = exp(-aa * dt);
+            g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
+            g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
+                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
+            g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
+                dt2 * nodalPressureMass * da * aa * aa;
+            restore += da * aa;
+          }
+          g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
+              dt2 * nodalPressureMass * restore;
+          acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
         }
       }
 #endif /* BOUNDARY */
+
+      for (j = 0; j < 8; j++) {
+        const int32_t lnid = elemp->lnid[j];
+        Global.mySolver->pressure_mass[lnid] +=
+            (solver_float)(nodalPressureMass * acoustic_kprod);
+        /* Bake dt into pressure_damp so kernelAcousticPressureUpdate
+         * needs no dt: stored value is the assembled dt*C term, exactly
+         * as the elastic path bakes dt*C into mass_minusaM/mass2. */
+        Global.mySolver->pressure_damp[lnid] +=
+            (solver_float)(nodalPressureMass * acoustic_damp *
+                           Param.theDeltaT);
+      }
+      if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
+          Global.myOctree->nearendp[2]) {
+        for (j = 0; j < 4; j++) {
+          pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
+        }
+      }
 
       localPressureElements++;
       continue;
@@ -7919,8 +7983,62 @@ static void solver_init() {
                   Global.myID);
           MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
         }
-        /* (Acoustic PML is gradient-side only -- no divergence-side
-         * zeta/divPsi or fourH arrays.) */
+
+        /* Step B: divergence-side CFS coeffs (zetaDecay/Gain/memForce
+         * per axis + scalar restoreCoeff) and the zeta_p memory state
+         * (3 per element, zero-initialised; advanced in
+         * kernelPMLAcousticStep). Scalar mirror of the elastic CFS
+         * upload. */
+        double** cfs_dev[3] = {
+            Global.gpuData.pml_acoustic_zetaDecayArrayDevice,
+            Global.gpuData.pml_acoustic_zetaGainArrayDevice,
+            Global.gpuData.pml_acoustic_memForceArrayDevice};
+        double* cfs_host[3][3] = {
+            {g_cpmlBuild.acoustic_zetaDecay[0],
+             g_cpmlBuild.acoustic_zetaDecay[1],
+             g_cpmlBuild.acoustic_zetaDecay[2]},
+            {g_cpmlBuild.acoustic_zetaGain[0],
+             g_cpmlBuild.acoustic_zetaGain[1],
+             g_cpmlBuild.acoustic_zetaGain[2]},
+            {g_cpmlBuild.acoustic_memForce[0],
+             g_cpmlBuild.acoustic_memForce[1],
+             g_cpmlBuild.acoustic_memForce[2]}};
+        for (int k = 0; k < 3; k++) {
+          for (int axis = 0; axis < 3; axis++) {
+            if (cudaMalloc((void**)&(cfs_dev[k][axis]),
+                           (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+                cudaMemcpy(cfs_dev[k][axis], cfs_host[k][axis],
+                           (size_t)pmlN * sizeof(double),
+                           cudaMemcpyHostToDevice) != cudaSuccess) {
+              fprintf(stderr,
+                      "Thread %d: cudaMalloc/Memcpy acoustic CPML CFS "
+                      "coeff [%d][%d] failed\n", Global.myID, k, axis);
+              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+            }
+          }
+          if (cudaMalloc(
+                  (void**)&(Global.gpuData.pml_acoustic_zetaPArrayDevice[k]),
+                  (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
+            fprintf(stderr,
+                    "Thread %d: cudaMalloc pml_acoustic_zetaP[%d] failed\n",
+                    Global.myID, k);
+            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+          }
+          cudaMemset(Global.gpuData.pml_acoustic_zetaPArrayDevice[k], 0,
+                     (size_t)pmlN * sizeof(solver_float));
+        }
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice),
+                (size_t)pmlN * sizeof(double)) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice,
+                       g_cpmlBuild.acoustic_restoreCoeff,
+                       (size_t)pmlN * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: cudaMalloc/Memcpy acoustic CPML "
+                  "restoreCoeff failed\n", Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+        }
       }
     }
 
@@ -8147,6 +8265,8 @@ static void solver_init() {
     g_cpmlBuild.elastic_restoreCoeff = NULL;
     free(g_cpmlBuild.acoustic_forceCoeff);
     g_cpmlBuild.acoustic_forceCoeff = NULL;
+    free(g_cpmlBuild.acoustic_restoreCoeff);
+    g_cpmlBuild.acoustic_restoreCoeff = NULL;
     for (int axis = 0; axis < 3; axis++) {
       free(g_cpmlBuild.elastic_a[axis]);
       g_cpmlBuild.elastic_a[axis] = NULL;
@@ -8166,6 +8286,12 @@ static void solver_init() {
       g_cpmlBuild.acoustic_b[axis] = NULL;
       free(g_cpmlBuild.acoustic_invKappa[axis]);
       g_cpmlBuild.acoustic_invKappa[axis] = NULL;
+      free(g_cpmlBuild.acoustic_zetaDecay[axis]);
+      g_cpmlBuild.acoustic_zetaDecay[axis] = NULL;
+      free(g_cpmlBuild.acoustic_zetaGain[axis]);
+      g_cpmlBuild.acoustic_zetaGain[axis] = NULL;
+      free(g_cpmlBuild.acoustic_memForce[axis]);
+      g_cpmlBuild.acoustic_memForce[axis] = NULL;
     }
   }
 #endif /* BOUNDARY */
@@ -8218,6 +8344,18 @@ static void solver_init() {
     compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, AN_PRESSURE_MASS_MSG);
+    /* Step B: assemble the acoustic CPML nodal damping across ranks
+     * exactly like pressure_mass -- it is a node-accumulated quantity,
+     * so partition-boundary nodes must get the full cross-rank sum,
+     * otherwise damping is under-counted (asymmetric) there. All ranks
+     * call these collectives unconditionally (pressure_damp is allocated
+     * + zeroed for every rank; it is simply all-zero when there is no
+     * acoustic PML, so this is a strict no-op then). */
+    schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->pressure_damp,
+                      1, CONTRIBUTION, DN_PRESSURE_DAMP_MSG);
+    compute_adjust(Global.mySolver->pressure_damp, 1, DISTRIBUTION);
+    schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_damp,
+                      1, CONTRIBUTION, AN_PRESSURE_DAMP_MSG);
     schedule_senddata(Global.mySolver->dn_sched, pressureFreeSurfaceHost, 1,
                       CONTRIBUTION, DN_PRESSURE_SURFACE_MSG);
     compute_adjust(pressureFreeSurfaceHost, 1, DISTRIBUTION);
@@ -8325,6 +8463,14 @@ static void solver_init() {
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure mass memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.pressureDampDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to allocate pressure damp memory\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -9034,6 +9180,15 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (cudaMemcpy(Global.gpuData.pressureDampDevice,
+                   Global.mySolver->pressure_damp,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pressure damp array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     if (cudaMemcpy(Global.gpuData.pressureTm1Device,
                    Global.mySolver->pressure_tm1,
                    Global.myMesh->nharbored * sizeof(solver_float),
@@ -9616,8 +9771,13 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pml_acoustic_invKappa_yArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_invKappa_zArrayDevice);
   cudaFree(Global.gpuData.pml_acoustic_forceCoeffArrayDevice);
+  cudaFree(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice);
   for (int axis = 0; axis < 3; axis++) {
     cudaFree(Global.gpuData.pml_acoustic_psiArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_acoustic_zetaDecayArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_acoustic_zetaGainArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_acoustic_memForceArrayDevice[axis]);
+    cudaFree(Global.gpuData.pml_acoustic_zetaPArrayDevice[axis]);
   }
   free(Global.mySolver->pmlElasticElemList);
   Global.mySolver->pmlElasticElemList = NULL;
@@ -9741,6 +9901,9 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_mass != NULL) {
     cudaFreeHost(Global.mySolver->pressure_mass);
+  }
+  if (Global.mySolver->pressure_damp != NULL) {
+    cudaFreeHost(Global.mySolver->pressure_damp);
   }
 
   if (Param.theTypeOfDamping >= BKT) {

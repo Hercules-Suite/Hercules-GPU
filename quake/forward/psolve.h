@@ -395,6 +395,9 @@ typedef struct gpu_data_t {
     solver_float* pressureTm2Device;   // GPU nodal acoustic pressure at t-dt/new
     solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
     solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
+    solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
+                                       // (Step B; NULL/0 = no damping ->
+                                       // bit-identical to the legacy update)
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -548,10 +551,17 @@ typedef struct gpu_data_t {
     double*       pml_acoustic_invKappa_zArrayDevice;
     double*       pml_acoustic_forceCoeffArrayDevice;
     solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
-    /* (Acoustic PML is gradient-side only: the pressure update path has
-     * no divergence-side CFS term, so there is no acoustic zeta/divPsi
-     * or fourH array. The elastic divergence-side treatment above does
-     * not apply to the scalar pressure formulation here.) */
+    /* Step B -- acoustic divergence-side CFS-CPML (scalar mirror of the
+     * validated elastic two-sided). zetaP is the pressure-convolution
+     * memory (3 per element, one per stretch axis). restoreCoeff/memForce
+     * use the acoustic nodal mass (volume/(8*bulk)) in place of rho*h^3/8.
+     * The matched kappa-inertia and the mass-prop damping are applied to
+     * the nodal pressure mass / pressureDampDevice respectively. */
+    double*       pml_acoustic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
+    double*       pml_acoustic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
+    double*       pml_acoustic_memForceArrayDevice[3]; /* dt^2 Mp d_a a_a^2 */
+    double*       pml_acoustic_restoreCoeffArrayDevice;/* dt^2 Mp sum d_a a_a */
+    solver_float* pml_acoustic_zetaPArrayDevice[3];    /* [j_axis] zeta_p */
 
     /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
      * non-NULL, has value 1 for any element that lives in either PML pipeline
@@ -610,6 +620,8 @@ struct mysolver_t {
     solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
     solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
+    solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
+                                   * 0 everywhere unless acoustic PML) */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
