@@ -330,10 +330,16 @@ the Lysmer dashpot at every offset/component (see the table below).
 - `cpml_thickness_m`
 	Target PML thickness in metres. When `> 0`, this value is used directly.
 	When `0` or unset (the default), the solver falls back to `cpml_layers ×
-	(global max element edgesize)`, which is logged at startup so you can
-	confirm the realized thickness. The face mask is computed independently
-	per element from this thickness, so every rank must agree on the value;
-	the fallback uses an MPI max-reduce to keep ranks consistent.
+	(max element edgesize among elements on an absorbing face)`, which is
+	logged at startup so you can confirm the realized thickness. The
+	boundary max — rather than the global element max — is used because
+	octree meshes refine by local Vs, so the global max is usually a
+	coarse interior element that would over-thicken the PML and push its
+	inner edge deep into the model; the boundary max makes `cpml_layers`
+	mean "this many element layers at the boundary". The face mask is
+	computed independently per element from this thickness, so every rank
+	must agree on the value; the fallback uses an MPI max-reduce over the
+	boundary elements to keep ranks consistent.
 - `cpml_layers`
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is `0`.
 	Provides a coarse "this many element layers deep" specification without

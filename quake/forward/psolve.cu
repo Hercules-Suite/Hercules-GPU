@@ -6964,32 +6964,75 @@ static void solver_init() {
     g_cpmlBuild.acoustic_count = 0;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
-     * cpml_layers × (global max element edgesize). The max is taken across
-     * all elements on all ranks so the realized thickness is identical
-     * everywhere — necessary because face_mask is computed independently
-     * per element and must agree on shared corners across partitions. */
+     * cpml_layers × (max edgesize among elements ON an absorbing face).
+     *
+     * Octree meshes refine by local Vs, so the global max element size is
+     * usually a coarse *interior* element (deep fast rock) that is NOT
+     * representative of the boundary. Sizing the PML from the global max
+     * over-thickens it and pushes the inner edge deep into the model.
+     * The PML thickness should instead span cpml_layers element layers
+     * AT THE BOUNDARY, so the max is taken only over elements touching
+     * one of the five absorbing faces (x_min, x_max, y_min, y_max,
+     * z_max); z_min is the free surface and is excluded. The MPI max-
+     * reduce keeps the realized thickness identical on every rank, which
+     * face_mask (computed independently per element) requires for shared
+     * corners across partitions. (Mirrors the v3-branch behaviour.) */
     if (Param.theCpmlThicknessM > 0.0) {
       g_cpmlBuild.thickness_m = Param.theCpmlThicknessM;
     } else {
-      double local_max_h = 0.0;
+      const double ticksize = Global.myOctree->ticksize;
+      const double eps = ticksize * 0.25;
+      const double lo[3] = {
+          (double)Global.myOctree->nearendp[0] * ticksize,
+          (double)Global.myOctree->nearendp[1] * ticksize,
+          (double)Global.myOctree->nearendp[2] * ticksize};
+      const double hi[3] = {
+          (double)Global.myOctree->farendp[0] * ticksize,
+          (double)Global.myOctree->farendp[1] * ticksize,
+          (double)Global.myOctree->farendp[2] * ticksize};
+      double local_bnd_h = 0.0;   /* max edgesize on an absorbing face */
+      double local_any_h = 0.0;   /* global max (defensive fallback)   */
       for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
-        edata_t* ed = (edata_t*)Global.myMesh->elemTable[ei].data;
+        elem_t* ep = &Global.myMesh->elemTable[ei];
+        edata_t* ed = (edata_t*)ep->data;
         double h = (double)ed->edgesize;
-        if (h > local_max_h) local_max_h = h;
+        if (h <= 0.0) continue;
+        if (h > local_any_h) local_any_h = h;
+        int32_t lnid0 = ep->lnid[0];
+        const double c0[3] = {
+            (double)Global.myMesh->nodeTable[lnid0].x * ticksize,
+            (double)Global.myMesh->nodeTable[lnid0].y * ticksize,
+            (double)Global.myMesh->nodeTable[lnid0].z * ticksize};
+        int on_face = 0;
+        /* x, y: both min and max faces are absorbing. */
+        for (int ax = 0; ax < 2; ax++) {
+          if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
+          if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
+        }
+        /* z: only z_max (deep/far) absorbs; z_min is the free surface. */
+        if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
+        if (on_face && h > local_bnd_h) local_bnd_h = h;
       }
-      double global_max_h = 0.0;
-      MPI_Allreduce(&local_max_h, &global_max_h, 1, MPI_DOUBLE, MPI_MAX,
+      double global_bnd_h = 0.0, global_any_h = 0.0;
+      MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
                     comm_solver);
-      g_cpmlBuild.thickness_m =
-          (double)Param.theCpmlLayers * global_max_h;
+      MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
+                    comm_solver);
+      /* Defensive: a non-empty domain always has boundary elements, but
+       * if the boundary scan somehow found none, fall back to the global
+       * element max rather than abort with a zero-thickness PML. */
+      int used_fallback = (global_bnd_h <= 0.0);
+      double basis_h = used_fallback ? global_any_h : global_bnd_h;
+      g_cpmlBuild.thickness_m = (double)Param.theCpmlLayers * basis_h;
       /* Cache the realized thickness so the log line and the MPI broadcast
        * (if a checkpoint or replay needs it later) reflect what was used. */
       Param.theCpmlThicknessM = g_cpmlBuild.thickness_m;
       if (Global.myID == 0) {
         fprintf(stdout,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
-                "(global max element edgesize)\n",
-                g_cpmlBuild.thickness_m, Param.theCpmlLayers, global_max_h);
+                "(%s max element edgesize)\n",
+                g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
+                used_fallback ? "global-fallback" : "boundary");
       }
     }
 
