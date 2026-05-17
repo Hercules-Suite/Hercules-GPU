@@ -7239,6 +7239,70 @@ static void solver_init() {
           pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
         }
       }
+
+#ifdef BOUNDARY
+      /* Step A -- ACTIVATE acoustic CPML. Acoustic elements 'continue'
+       * below before ever reaching the CPML face-mask / coefficient
+       * build (the elastic-path block ~150 lines down), so until now
+       * g_cpmlBuild.acoustic_count stayed 0, pmlAcousticElemCount was 0,
+       * and kernelPMLAcousticStep was never launched -- the acoustic PML
+       * (gradient-side psi included) was entirely inactive. Enroll the
+       * acoustic PML element here. The math is byte-identical to the
+       * acoustic branch of the elastic-path CPML block; it is just
+       * relocated so acoustic elements actually reach it. Runs only for
+       * ABC_CPML acoustic elements that fall in the PML zone; otherwise
+       * a strict no-op (dashpot / non-PML / non-BOUNDARY unaffected, so
+       * every previously-validated configuration is bit-identical). */
+      if (Param.theAbcType == ABC_CPML) {
+        lnid0 = elemp->lnid[0];
+        ldb[0] = Global.myMesh->nodeTable[lnid0].x;
+        ldb[1] = Global.myMesh->nodeTable[lnid0].y;
+        ldb[2] = Global.myMesh->nodeTable[lnid0].z;
+        edgeticks = (tick_t)1 << (PIXELLEVEL - elemp->level);
+        ruf[0] = ldb[0] + edgeticks;
+        ruf[1] = ldb[1] + edgeticks;
+        ruf[2] = ldb[2] + edgeticks;
+        pml_face_mask = compute_pml_face_mask(
+            ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
+            Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+        g_cpmlBuild.face_mask[eindex] = pml_face_mask;
+        if (pml_face_mask != 0) {
+          double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
+          double alpha_axis[3], kappa_axis[3];
+          compute_pml_profile_coeffs(
+              pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
+              Global.myOctree->farendp, Global.myOctree->ticksize,
+              g_cpmlBuild.thickness_m, (double)edata->Vp, Param.theDeltaT,
+              Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+              Param.theCpmlMpmlCrossFraction,
+              Param.theCpmlAlphaFloorFraction,
+              a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
+          /* d/alpha/kappa are for the Step-B divergence side (damping,
+           * CFS, kappa-inertia); unused in this gradient-side-only
+           * activation. */
+          (void)d_axis;
+          (void)alpha_axis;
+          (void)kappa_axis;
+          const double h = (double)edata->edgesize;
+          const double inv4h = 1.0 / (4.0 * h);
+          const double dt2 = Param.theDeltaTSquared;
+          const double h2_over_4 = h * h * 0.25;
+          int32_t pml_idx = g_cpmlBuild.acoustic_count++;
+          g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+          for (int axis = 0; axis < 3; axis++) {
+            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis] * inv4h;
+            g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
+            g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
+                invKappa_axis[axis] * inv4h;
+          }
+          const double rho = (double)edata->rho;
+          /* dt^2 * h^2 / (4 * rho); rho > 0 guaranteed by mesh validation. */
+          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h2_over_4 / rho;
+        }
+      }
+#endif /* BOUNDARY */
+
       localPressureElements++;
       continue;
     }
