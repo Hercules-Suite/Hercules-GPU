@@ -1034,6 +1034,10 @@ static struct Param_t {
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
   noyesflag_t theCpmlClampOuter;
+  /* YES = native effective stiffness + CPML correction (default);
+   * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
+   * AFTER theCpmlClampOuter to preserve C++ designated-init order. */
+  noyesflag_t theCpmlNativeStiffness;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1085,7 +1089,8 @@ static struct Param_t {
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
-           .theCpmlClampOuter = NO};
+           .theCpmlClampOuter = NO,
+           .theCpmlNativeStiffness = YES};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1373,7 +1378,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  44 /* Must adjust this if adding int params */
+  45 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1512,6 +1517,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[41] = Param.theCpmlLayers;
   int_message[42] = Param.theCpmlPolyOrder;
   int_message[43] = (int)Param.theCpmlClampOuter;
+  int_message[44] = (int)Param.theCpmlNativeStiffness;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1561,6 +1567,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlLayers = int_message[41];
   Param.theCpmlPolyOrder = int_message[42];
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
+  Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1984,6 +1991,25 @@ static int32_t parse_parameters(const char* numericalin) {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_clamp_outer must be 'yes' or 'no': got '%s'\n",
                        cpml_clamp_outer);
+        }
+      }
+
+      /* Elastic PML stiffness mode (default native). 'native' = full
+       * native effective stiffness + CPML correction (exact interior
+       * operator at the inner edge, native hourglass control). 'reduced'
+       * = standalone 1-point reduced CPML stiffness (no higher modes;
+       * the pre-a1c0fb8 behaviour, kept for comparison). */
+      char cpml_stiffness_mode[64] = "";
+      if (parsetext(fp, "cpml_stiffness_mode", 's',
+                    &cpml_stiffness_mode) == 0) {
+        if (strcasecmp(cpml_stiffness_mode, "native") == 0) {
+          Param.theCpmlNativeStiffness = YES;
+        } else if (strcasecmp(cpml_stiffness_mode, "reduced") == 0) {
+          Param.theCpmlNativeStiffness = NO;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_stiffness_mode must be 'native' or "
+                       "'reduced': got '%s'\n", cpml_stiffness_mode);
         }
       }
 
@@ -2746,6 +2772,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlCflSafety);
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
+    monitor_print("PML stiffness mode:                 %s\n",
+                  (Param.theCpmlNativeStiffness == YES)
+                      ? "native+correction"
+                      : "reduced (standalone 1-pt)");
     monitor_print("PML formulation:                    "
                   "two-sided CFS-CPML (Matzen 2011)\n");
   }
@@ -6995,6 +7025,11 @@ static void solver_init() {
   if (Param.theAbcType == ABC_CPML) {
     g_cpmlBuild.elastic_count = 0;
     g_cpmlBuild.acoustic_count = 0;
+
+    /* Publish the elastic PML stiffness mode to the device (read by
+     * kernelStiffnessCalcLocal's PML skip and kernelPMLElasticStep). */
+    Global.gpuData.pmlNativeStiffness =
+        (Param.theCpmlNativeStiffness == YES) ? 1 : 0;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
      * cpml_layers × (max edgesize among elements ON an absorbing face).

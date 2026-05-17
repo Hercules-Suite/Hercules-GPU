@@ -327,14 +327,23 @@ void kernelStiffnessCalcLocal(int32_t lenum,
 
     eindex = myLinearElementsMapperDevice[lin_eindex];
 
-    /* CPML: elastic PML elements now receive the FULL native effective
-     * stiffness here, byte-identical to interior elements (no skip).
-     * kernelPMLElasticStep then adds only the CPML correction
-     * -(sigma_pml - sigma_raw) + CFS on top, which is exactly zero where
-     * d=0 -- so the PML<->interior operator is continuous and the higher
-     * (hourglass-resisting) modes in PML elements are the native ones.
-     * (pmlFlagArrayDevice is still used by the acoustic-pressure and BKT
-     * kernels, which keep their skips.) */
+    /* CPML elastic PML stiffness mode (gpuData->pmlNativeStiffness):
+     *  - native (1, default): do NOT skip -- PML elements get the FULL
+     *    native effective stiffness here, byte-identical to interior;
+     *    kernelPMLElasticStep then adds only the CPML correction
+     *    -(sigma_pml - sigma_raw) + CFS (zero where d=0, so the
+     *    PML<->interior operator is continuous and PML elements keep the
+     *    native higher / hourglass-resisting modes).
+     *  - reduced (0): SKIP PML elements here; kernelPMLElasticStep then
+     *    supplies the full standalone 1-point reduced CPML stiffness.
+     * pmlFlagArrayDevice is NULL in dashpot mode (no skip either way),
+     * and is still used unconditionally by the acoustic-pressure and BKT
+     * kernels (their skips are unchanged). */
+    if (gpuData->pmlFlagArrayDevice != NULL &&
+        gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+        gpuData->pmlNativeStiffness == 0) {
+      return;
+    }
 
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
@@ -1924,11 +1933,16 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         cfs[i] = restoreCoeff * ubar[i] - fmem;
     }
 
-    /* Assemble: CPML stiffness delta -(nodalPml - nodalRaw) + CFS pair,
-     * with the SAME centre derivatives dN_n,axis = 0.25*sgn used for the
-     * gradient. The native full stiffness is added by
-     * kernelStiffnessCalcLocal; at d=0 sigmaPml==sigmaRaw and cfs==0 so
-     * only the native operator remains (exact PML<->interior match). */
+    /* Assemble (centre derivatives dN_n,axis = 0.25*sgn) + CFS pair.
+     * Mode (gpuData->pmlNativeStiffness):
+     *  - native (1): add the CPML delta -(nodalPml - nodalRaw); the FULL
+     *    native stiffness was added by kernelStiffnessCalcLocal. At d=0
+     *    sigmaPml==sigmaRaw and cfs==0, so only the native operator
+     *    remains -> exact PML<->interior match.
+     *  - reduced (0): kernelStiffnessCalcLocal skipped this element, so
+     *    add the FULL standalone 1-point reduced CPML stiffness -nodalPml
+     *    (no native higher modes; the pre-a1c0fb8 behaviour). */
+    const int native = gpuData->pmlNativeStiffness;
     for (int n = 0; n < 8; n++) {
         const double gN[3] = { (n & 1) ? 0.25 : -0.25,
                                (n & 2) ? 0.25 : -0.25,
@@ -1936,13 +1950,18 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         const int32_t lnid = lnid_base[n * lenum];
         fvector_t* nodalForce = gpuData->forceDevice + lnid;
         for (int a = 0; a < 3; a++) {
-            const double nodalRaw = gN[0] * sigmaRaw[a][0] +
-                                    gN[1] * sigmaRaw[a][1] +
-                                    gN[2] * sigmaRaw[a][2];
             const double nodalPml = gN[0] * sigmaPml[a][0] +
                                     gN[1] * sigmaPml[a][1] +
                                     gN[2] * sigmaPml[a][2];
-            const double f = -(nodalPml - nodalRaw) + cfs[a];
+            double f;
+            if (native) {
+                const double nodalRaw = gN[0] * sigmaRaw[a][0] +
+                                        gN[1] * sigmaRaw[a][1] +
+                                        gN[2] * sigmaRaw[a][2];
+                f = -(nodalPml - nodalRaw) + cfs[a];
+            } else {
+                f = -nodalPml + cfs[a];
+            }
             atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
         }
     }

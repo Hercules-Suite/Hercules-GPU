@@ -410,6 +410,26 @@ the Lysmer dashpot at every offset/component (see the table below).
 	when very thin PMLs or very long simulations leak round-trip
 	reflections. Default `no` preserves the K&M-style free outer face,
 	which is what most pre-2010 CPML papers assume.
+- `cpml_stiffness_mode`
+	Optional. `native` (default) or `reduced`. Selects how the elastic
+	PML element stiffness is formed.
+	* `native` — the PML element gets the **full native effective
+		stiffness** (the same `aTransposeU/firstVector/au` operator as
+		interior elements) **plus** a CPML correction `-(sigma_pml -
+		sigma_raw)` evaluated at the element centre in the native
+		(`mu = 9*c1`, `lambda = 9*c2`) normalization. The correction is
+		exactly zero where `d = 0`, so the PML↔interior operator is
+		continuous (patch-test exact) and PML elements retain the native
+		higher (hourglass-resisting) modes. Recommended.
+	* `reduced` — the PML element gets a **standalone 1-point reduced
+		CPML stiffness** only (no native higher modes; the pre-`a1c0fb8`
+		behaviour). Kept for comparison/debugging. Validated to differ
+		from `native` by only ~0.2–0.4% on the homogeneous CPS benchmark
+		(the operator mismatch is an O((h/λ)²) higher-order effect), but
+		`native` is preferred for coarser/heterogeneous meshes and very
+		long runs because it removes the inner-edge operator discontinuity
+		and is not rank-deficient. Both modes share the same coefficient
+		pipeline and the same divergence-side damping + CFS terms.
 
 Notes on C-PML behavior:
 
@@ -501,6 +521,7 @@ abc_type = cpml
 cpml_kappa_max = 3.0        # real-coordinate stretch: kills grazing residual
 cpml_clamp_outer = yes      # single-pass absorption (Dirichlet outer face)
 cpml_layers = 10            # ~1 PML; raise for stronger low-freq absorption
+# cpml_stiffness_mode: leave at default 'native' (recommended)
 # cpml_alpha_max_hz: leave at default unless source f_dominant != f_max
 # cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1
 ```

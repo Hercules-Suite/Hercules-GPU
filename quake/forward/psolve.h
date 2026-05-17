@@ -567,6 +567,14 @@ typedef struct gpu_data_t {
      * free surface and is never clamped. NULL otherwise. */
     uint8_t*      pmlClampNodeMaskDevice;
 
+    /* Elastic PML stiffness mode (set from Param.theCpmlNativeStiffness
+     * at CPML setup). 1 = native effective stiffness + CPML correction
+     * (kernelStiffnessCalcLocal processes PML elements; kernelPMLElastic-
+     * Step adds -(nodalPml-nodalRaw)). 0 = standalone 1-pt reduced
+     * (kernelStiffnessCalcLocal skips PML; kernelPMLElasticStep adds the
+     * full -nodalPml). Irrelevant in dashpot mode. */
+    int           pmlNativeStiffness;
+
 } gpu_data_t;
 
 
