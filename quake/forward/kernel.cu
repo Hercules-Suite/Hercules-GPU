@@ -327,12 +327,14 @@ void kernelStiffnessCalcLocal(int32_t lenum,
 
     eindex = myLinearElementsMapperDevice[lin_eindex];
 
-    /* CPML: PML elements are handled by kernelPMLElasticStep, so skip them
-     * here when abc_type=cpml. pmlFlagArrayDevice is NULL in dashpot mode. */
-    if (gpuData->pmlFlagArrayDevice != NULL &&
-        gpuData->pmlFlagArrayDevice[eindex] != 0) {
-      return;
-    }
+    /* CPML: elastic PML elements now receive the FULL native effective
+     * stiffness here, byte-identical to interior elements (no skip).
+     * kernelPMLElasticStep then adds only the CPML correction
+     * -(sigma_pml - sigma_raw) + CFS on top, which is exactly zero where
+     * d=0 -- so the PML<->interior operator is continuous and the higher
+     * (hourglass-resisting) modes in PML elements are the native ones.
+     * (pmlFlagArrayDevice is still used by the acoustic-pressure and BKT
+     * kernels, which keep their skips.) */
 
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
@@ -1784,22 +1786,51 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         u[n][2] = gpuData->tm1Device[lnid].f[2];
     }
 
-    /* Signed sums S[j][alpha] = sum_n s_j(n) * u_alpha^(n).
-     * du_alpha/dx_j = S[j][alpha] / (4h); the 1/(4h) factor is absorbed
-     * into the per-element a and 1/kappa coefficients. */
-    double S[3][3];
-    for (int j = 0; j < 3; j++) {
-        for (int a = 0; a < 3; a++) {
-            double s = 0.0;
-            for (int n = 0; n < 8; n++) {
-                const double sign = ((n >> j) & 1) ? 1.0 : -1.0;
-                s += sign * u[n][a];
-            }
-            S[j][a] = s;
+    /* === CPML stiffness CORRECTION (native + delta) ===
+     * The FULL native effective stiffness for this element is added
+     * separately by kernelStiffnessCalcLocal (its PML skip was removed),
+     * byte-identical to the interior. Here we add only the CPML delta
+     *   -(sigma_pml - sigma_raw)
+     * evaluated at the 1-point element centre in the SAME native
+     * normalization (mu = 9*c1, lambda = 9*c2, dN = 0.25*sign), so
+     * sigma_raw is exactly the constant-strain projection the native
+     * operator contains. Where d=0 the psi memory stays 0 and
+     * sigma_pml == sigma_raw, so the delta is exactly zero: no operator
+     * discontinuity at the PML inner edge, and PML elements keep the
+     * native higher (hourglass-resisting) modes. This mirrors the codex
+     * v3 reduced-correction (gradient-side psi only -- no stress
+     * convolution). */
+    const double mu     = 9.0 * gpuData->c1ArrayDevice[eindex];
+    const double lambda = 9.0 * gpuData->c2ArrayDevice[eindex];
+
+    /* Natural-coord gradient at the centre: dN_n,axis = 0.25 * sgn.
+     * grad[i][j] = sum_n u_i^(n) * dN_n,j  (= du_i/dx_j in this norm). */
+    double grad[3][3] = {{0.0, 0.0, 0.0},
+                         {0.0, 0.0, 0.0},
+                         {0.0, 0.0, 0.0}};
+    for (int n = 0; n < 8; n++) {
+        const double gN[3] = { (n & 1) ? 0.25 : -0.25,
+                               (n & 2) ? 0.25 : -0.25,
+                               (n & 4) ? 0.25 : -0.25 };
+        for (int i = 0; i < 3; i++) {
+            grad[i][0] += u[n][i] * gN[0];
+            grad[i][1] += u[n][i] * gN[1];
+            grad[i][2] += u[n][i] * gN[2];
         }
     }
 
-    /* Per-axis ADE coefficients (a and 1/kappa already pre-divided by 4h). */
+    /* Raw (un-stretched) stress. */
+    const double traceRaw = grad[0][0] + grad[1][1] + grad[2][2];
+    double sigmaRaw[3][3];
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            sigmaRaw[a][b] = mu * (grad[a][b] + grad[b][a]);
+        }
+        sigmaRaw[a][a] += lambda * traceRaw;
+    }
+
+    /* Gradient-side CPML psi memory (raw a / 1/kappa; b = exp decay).
+     * psi[i][j] convolves the j-axis gradient of u_i. */
     const double aJ[3] = { gpuData->pml_elastic_a_xArrayDevice[pml_idx],
                            gpuData->pml_elastic_a_yArrayDevice[pml_idx],
                            gpuData->pml_elastic_a_zArrayDevice[pml_idx] };
@@ -1810,46 +1841,24 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         gpuData->pml_elastic_invKappa_xArrayDevice[pml_idx],
         gpuData->pml_elastic_invKappa_yArrayDevice[pml_idx],
         gpuData->pml_elastic_invKappa_zArrayDevice[pml_idx] };
-
-    /* ADE recurrence + modified partial derivative.
-     *   psi_new        = b_j * psi_old + a_j * S[j][i]
-     *   partial[j][i]  = invK_j * S[j][i] + psi_new
-     * Index convention: psi[i][j] holds the j-axis convolution of d/dx_j u_i.
-     * partial[j][i] is the CPML-modified du_i/dx_j. */
-    double partial[3][3];
+    double gradPml[3][3];
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             const double psi_old =
                 (double)gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx];
-            const double psi_new = bJ[j] * psi_old + aJ[j] * S[j][i];
+            const double psi_new = bJ[j] * psi_old + aJ[j] * grad[i][j];
             gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx] =
                 (solver_float)psi_new;
-            partial[j][i] = invKJ[j] * S[j][i] + psi_new;
+            gradPml[i][j] = invKJ[j] * grad[i][j] + psi_new;
         }
     }
-
-    /* Strain eps_ab = 1/2 ( du_a/dx_b + du_b/dx_a ) using CPML-modified partials.
-     * (partial[j][i] = du_i/dx_j, so du_a/dx_b = partial[b][a].) */
-    double eps[3][3];
-    double trace = 0.0;
+    const double tracePml = gradPml[0][0] + gradPml[1][1] + gradPml[2][2];
+    double sigmaPml[3][3];
     for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {
-            eps[a][b] = 0.5 * (partial[b][a] + partial[a][b]);
+            sigmaPml[a][b] = mu * (gradPml[a][b] + gradPml[b][a]);
         }
-        trace += eps[a][a];
-    }
-
-    /* Pre-scaled stress (sigma * dt^2 * h^2 / 4). */
-    const double muCoeff =
-        gpuData->pml_elastic_muCoeffArrayDevice[pml_idx];
-    const double lambdaCoeff =
-        gpuData->pml_elastic_lambdaCoeffArrayDevice[pml_idx];
-    double sigma[3][3];
-    for (int a = 0; a < 3; a++) {
-        for (int b = 0; b < 3; b++) {
-            sigma[a][b] = 2.0 * muCoeff * eps[a][b];
-        }
-        sigma[a][a] += lambdaCoeff * trace;
+        sigmaPml[a][a] += lambda * tracePml;
     }
 
     /* Divergence-side CPML, correct 2nd-order displacement form (Matzen
@@ -1915,18 +1924,25 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
         cfs[i] = restoreCoeff * ubar[i] - fmem;
     }
 
-    /* Nodal force: f_alpha^(n) = - sum_beta s_beta(n) * sigma_{alpha,beta}
-     * (gradient-side stretched stress)  +  cfs_alpha (CFS pair). */
+    /* Assemble: CPML stiffness delta -(nodalPml - nodalRaw) + CFS pair,
+     * with the SAME centre derivatives dN_n,axis = 0.25*sgn used for the
+     * gradient. The native full stiffness is added by
+     * kernelStiffnessCalcLocal; at d=0 sigmaPml==sigmaRaw and cfs==0 so
+     * only the native operator remains (exact PML<->interior match). */
     for (int n = 0; n < 8; n++) {
-        const double sx = (n & 1) ? 1.0 : -1.0;
-        const double sy = (n & 2) ? 1.0 : -1.0;
-        const double sz = (n & 4) ? 1.0 : -1.0;
+        const double gN[3] = { (n & 1) ? 0.25 : -0.25,
+                               (n & 2) ? 0.25 : -0.25,
+                               (n & 4) ? 0.25 : -0.25 };
         const int32_t lnid = lnid_base[n * lenum];
         fvector_t* nodalForce = gpuData->forceDevice + lnid;
         for (int a = 0; a < 3; a++) {
-            const double f = -(sx * sigma[a][0] +
-                               sy * sigma[a][1] +
-                               sz * sigma[a][2]) + cfs[a];
+            const double nodalRaw = gN[0] * sigmaRaw[a][0] +
+                                    gN[1] * sigmaRaw[a][1] +
+                                    gN[2] * sigmaRaw[a][2];
+            const double nodalPml = gN[0] * sigmaPml[a][0] +
+                                    gN[1] * sigmaPml[a][1] +
+                                    gN[2] * sigmaPml[a][2];
+            const double f = -(nodalPml - nodalRaw) + cfs[a];
             atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
         }
     }

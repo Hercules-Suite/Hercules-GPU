@@ -438,11 +438,13 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
 typedef struct cpml_build_s {
   uint8_t* face_mask;            /* [lenum], NULL when abc_type != cpml */
 
-  /* Elastic PML build state. Coefficients are stored already-scaled:
-   *   a[j]        = a_raw_j / (4h)
-   *   invKappa[j] = (1/kappa_j) / (4h)
-   *   muCoeff     = dt^2 * h^2 * mu / 4
-   *   lambdaCoeff = dt^2 * h^2 * lambda / 4
+  /* Elastic PML build state. The elastic PML runs as native effective
+   * stiffness + a CPML correction in the native (c1,c2) normalization
+   * (mu=9*c1, lambda=9*c2, dN=0.25*sign), so:
+   *   a[j]        = raw a_j        (no 1/(4h) prescale)
+   *   invKappa[j] = raw 1/kappa_j  (no 1/(4h) prescale)
+   *   b[j]        = exp() decay, dimensionless (unchanged)
+   *   muCoeff/lambdaCoeff = unused now (kept allocated; cleanup later)
    */
   int32_t  elastic_count;
   int32_t* elastic_elem_list;    /* sized [lenum] during build */
@@ -7297,11 +7299,24 @@ static void solver_init() {
           int32_t pml_idx = g_cpmlBuild.elastic_count++;
           g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;
           for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.elastic_a[axis][pml_idx] = a_axis[axis] * inv4h;
+            /* RAW a / 1/kappa (no 1/(4h) prescale). The elastic PML now
+             * runs as native effective stiffness + a CPML correction
+             * evaluated in the native (c1,c2) normalization with
+             * dN = 0.25*sign centre derivatives, so the psi recurrence
+             * convolves the natural-coord gradient with the raw a, and
+             * the modified gradient uses the raw 1/kappa -- matching the
+             * codex v3 reduced-correction (which is proven self-
+             * consistent with aTransposeU/firstVector/au). b is the
+             * dimensionless exp() decay, unchanged. (Acoustic PML still
+             * uses the 1-pt /(4h) form above.) */
+            g_cpmlBuild.elastic_a[axis][pml_idx] = a_axis[axis];
             g_cpmlBuild.elastic_b[axis][pml_idx] = b_axis[axis];
             g_cpmlBuild.elastic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis] * inv4h;
+                invKappa_axis[axis];
           }
+          /* muCoeff/lambdaCoeff are no longer read by kernelPMLElasticStep
+           * (it uses mu = 9*c1, lambda = 9*c2 like the native operator);
+           * kept allocated for now, slated for cleanup. */
           g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
           g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
           /* Matzen second-order divergence-side term: total volumetric

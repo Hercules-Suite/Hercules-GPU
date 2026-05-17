@@ -492,14 +492,14 @@ typedef struct gpu_data_t {
     double*       pml_elastic_b_xArrayDevice;
     double*       pml_elastic_b_yArrayDevice;
     double*       pml_elastic_b_zArrayDevice;
-    double*       pml_elastic_a_xArrayDevice;        /* a / (4h) */
+    double*       pml_elastic_a_xArrayDevice;        /* raw a (native norm) */
     double*       pml_elastic_a_yArrayDevice;
     double*       pml_elastic_a_zArrayDevice;
-    double*       pml_elastic_invKappa_xArrayDevice; /* (1/kappa) / (4h) */
+    double*       pml_elastic_invKappa_xArrayDevice; /* raw 1/kappa */
     double*       pml_elastic_invKappa_yArrayDevice;
     double*       pml_elastic_invKappa_zArrayDevice;
-    double*       pml_elastic_muCoeffArrayDevice;
-    double*       pml_elastic_lambdaCoeffArrayDevice;
+    double*       pml_elastic_muCoeffArrayDevice;    /* unused (cleanup) */
+    double*       pml_elastic_lambdaCoeffArrayDevice;/* unused (cleanup) */
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
     /* Divergence-side CPML, correct 2nd-order displacement form
      * (Matzen 2011; Xie et al. 2014). Multiplying the momentum equation
