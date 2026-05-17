@@ -14692,7 +14692,7 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
    * zero at xi = L. */
   const double alpha_floor = alpha_floor_fraction * alpha_max;
   double d_raw[3] = {0.0, 0.0, 0.0};
-  double kappa_arr[3] = {1.0, 1.0, 1.0};
+  double poly_arr[3] = {0.0, 0.0, 0.0}; /* per-axis normalized profile (xi/L)^p */
   double alpha_arr[3] = {0.0, 0.0, 0.0};
 
   for (int j = 0; j < 3; j++) {
@@ -14712,7 +14712,7 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
       double xi_norm = xi / L;
       double poly = pow(xi_norm, (double)p);
       d_raw[j] = d_max_pre * poly;
-      kappa_arr[j] = 1.0 + (kappa_max - 1.0) * poly;
+      poly_arr[j] = poly;
       alpha_arr[j] = alpha_max * (1.0 - xi_norm);
       if (alpha_arr[j] < alpha_floor) alpha_arr[j] = alpha_floor;
     }
@@ -14749,7 +14749,21 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     int k1 = (j + 1) % 3;
     int k2 = (j + 2) % 3;
     double d_total = d_raw[j] + mpml_p * (d_raw[k1] + d_raw[k2]);
-    double kappa_j = kappa_arr[j];
+    /* Formal-multiaxial kappa (Meza-Fajardo & Papageorgiou 2008; the
+     * same profile-cross-mixing the v3 "formal multiaxial PML" uses, and
+     * what SPECFEM-class codes ship -- the full Pi=s_x s_y s_z double/
+     * triple-delta cross-convolution form is theoretical and not used in
+     * production). The normalized profile is cross-mixed exactly like
+     * d_total, then kappa is derived from it, so at an edge/corner kappa_j
+     * reflects ALL active damping directions (consistent with the
+     * cross-coupled d_total and with the matched kappa-inertia). Clamp to
+     * [0,1] keeps kappa in [1, kappa_max]. Reduces EXACTLY to the per-axis
+     * profile when mpml_p = 0, kappa_max = 1, or on a face element
+     * (transverse poly = 0) -> the validated face/kappa=1 results are
+     * bit-identical. d_total and alpha_j keep their validated treatment. */
+    double prof_mix = poly_arr[j] + mpml_p * (poly_arr[k1] + poly_arr[k2]);
+    if (prof_mix > 1.0) prof_mix = 1.0;
+    double kappa_j = 1.0 + (kappa_max - 1.0) * prof_mix;
     double alpha_j = alpha_arr[j];
 
     /* For axes inheriting damping only via M-PML cross-coupling

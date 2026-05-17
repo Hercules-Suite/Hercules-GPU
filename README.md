@@ -366,17 +366,28 @@ the Lysmer dashpot at every offset/component (see the table below).
 	pair restores `rho*c0` (no reflection) and *raises* the local CFL
 	margin (heavier elements). `kappa=1` at the inner edge keeps the
 	PML↔interior interface exact.
+	Multi-axis (edge/corner): `kappa` is **formal-multiaxial** — the
+	normalized profile is cross-mixed with the transverse axes (the same
+	M-PML mechanism as `cpml_mpml_cross_fraction`, and what the v3
+	"formal multiaxial PML" / SPECFEM-class codes ship) and `kappa` is
+	derived from the mixed profile, so a corner element's `kappa`
+	reflects all active damping directions, consistent with the
+	cross-coupled `d` and the matched `kappa`-inertia. Note: the full
+	`Pi = s_x s_y s_z` double/triple-delta cross-convolution form is a
+	theoretical construct **not implemented by any production seismic
+	code (including the v3 reference and SPECFEM3D)**; M-PML
+	cross-mixing is the accepted practical multi-axis treatment and is
+	what is implemented here.
 	History/caveat: an earlier build applied only the `1/kappa` strain
 	stretch without the matched inertia, so `kappa_max>1` was
 	*inconsistent* (this is why v15 at `kappa=3` only marginally helped
-	and perturbed the direct window). With the matched-inertia fix
-	`kappa_max` in the range `2-3` is expected to deliver the full
-	grazing benefit, but **the consistent version still needs
-	re-validation** before a firm production recommendation; until then
-	the safest setting is `1.0`, and the deep-corner vertical residual
-	is most reliably reduced by a **thicker PML** (`cpml_layers` ~30-50,
-	which is what actually drove the v12 Z-16 km improvement) plus
-	M-PML. Values above `3` remain untested.
+	and perturbed the direct window). With the matched-inertia +
+	formal-multiaxial-`kappa` fixes `kappa_max` in `2-3` is expected to
+	deliver the grazing benefit, but **still needs re-validation** before
+	a firm production recommendation; until then the safest setting is
+	`1.0`, and the deep-corner vertical residual is most reliably reduced
+	by a **thicker PML** (`cpml_layers` ~30-50, which is what actually
+	drove the v12 Z-16 km improvement). Values above `3` remain untested.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
 	rad/s. When `< 0` or unset (default), the solver uses
