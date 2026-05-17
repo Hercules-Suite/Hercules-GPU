@@ -366,18 +366,13 @@ the Lysmer dashpot at every offset/component (see the table below).
 	pair restores `rho*c0` (no reflection) and *raises* the local CFL
 	margin (heavier elements). `kappa=1` at the inner edge keeps the
 	PML↔interior interface exact.
-	Multi-axis (edge/corner): `kappa` is **formal-multiaxial** — the
-	normalized profile is cross-mixed with the transverse axes (the same
-	M-PML mechanism as `cpml_mpml_cross_fraction`, and what the v3
-	"formal multiaxial PML" / SPECFEM-class codes ship) and `kappa` is
-	derived from the mixed profile, so a corner element's `kappa`
-	reflects all active damping directions, consistent with the
-	cross-coupled `d` and the matched `kappa`-inertia. Note: the full
-	`Pi = s_x s_y s_z` double/triple-delta cross-convolution form is a
-	theoretical construct **not implemented by any production seismic
-	code (including the v3 reference and SPECFEM3D)**; M-PML
-	cross-mixing is the accepted practical multi-axis treatment and is
-	what is implemented here.
+	Default multi-axis (edge/corner) behavior is **formal-multiaxial**:
+	the normalized `kappa` profile is cross-mixed with the transverse
+	axes using the same M-PML mechanism as `cpml_mpml_cross_fraction`.
+	For experiments, `cpml_kappa_mode = transverse` leaves `kappa`
+	axis-local in the gradient/inertia terms and applies explicit
+	transverse `kappa` products only to the divergence-side damping/CFS
+	terms; see `cpml_kappa_mode` below.
 	History/caveat: an earlier build applied only the `1/kappa` strain
 	stretch without the matched inertia, so `kappa_max>1` was
 	*inconsistent* (this is why v15 at `kappa=3` only marginally helped
@@ -388,6 +383,19 @@ the Lysmer dashpot at every offset/component (see the table below).
 	`1.0`, and the deep-corner vertical residual is most reliably reduced
 	by a **thicker PML** (`cpml_layers` ~30-50, which is what actually
 	drove the v12 Z-16 km improvement). Values above `3` remain untested.
+- `cpml_kappa_mode`
+	Optional. `formal` (default) or `transverse`.
+	* `formal` preserves the current branch behavior: `kappa_j` is
+		cross-mixed with the M-PML profile, so edge/corner cells use the
+		same multiaxial profile for `d` and `kappa`.
+	* `transverse` is an experimental comparison mode: `kappa_j` remains
+		axis-local for the gradient-side ADE and matched inertia, while
+		the divergence-side mass damping and CFS terms use explicit
+		transverse products
+		`d_x*kappa_y*kappa_z`, `d_y*kappa_x*kappa_z`,
+		`d_z*kappa_x*kappa_y`.
+	This option is useful for directly comparing the formal M-PML
+	interpretation against the explicit product-form weighting.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
 	rad/s. When `< 0` or unset (default), the solver uses
@@ -549,6 +557,8 @@ cpml_layers = 30            # thicker PML closes the deep-corner Z residual
 # cpml_kappa_max: 1.0 is the validated setting; 2-3 (now consistently
 #   implemented via the matched kappa-inertia) is promising but pending
 #   re-validation -- see the cpml_kappa_max entry above
+# cpml_kappa_mode: leave at default 'formal'; use 'transverse' only for
+#   the explicit transverse-weighting comparison test
 # cpml_stiffness_mode: leave at default 'native' (recommended)
 # cpml_alpha_max_hz: leave at default unless source f_dominant != f_max
 # cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1

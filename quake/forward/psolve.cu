@@ -404,6 +404,11 @@ static int32_t messenger_detect_duplicate_offsets(messenger_t* messenger);
 static void compute_K(void);
 static void constract_Quality_Factor_Table(void);
 
+typedef enum {
+  CPML_KAPPA_FORMAL = 0,
+  CPML_KAPPA_TRANSVERSE
+} cpml_kappa_mode_t;
+
 #ifdef BOUNDARY
 static char compute_setflag(tick_t ldb[3], tick_t ruf[3], tick_t nearendp[3],
                             tick_t farendp[3]);
@@ -420,6 +425,7 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double kappa_max, double alpha_max,
                                        double mpml_cross_fraction,
                                        double alpha_floor_fraction,
+                                       cpml_kappa_mode_t kappa_mode,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
                                        double d_out[3],
@@ -1039,6 +1045,7 @@ static struct Param_t {
    * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
    * AFTER theCpmlClampOuter to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffness;
+  cpml_kappa_mode_t theCpmlKappaMode;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1091,7 +1098,8 @@ static struct Param_t {
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlClampOuter = NO,
-           .theCpmlNativeStiffness = YES};
+           .theCpmlNativeStiffness = YES,
+           .theCpmlKappaMode = CPML_KAPPA_FORMAL};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1379,7 +1387,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  45 /* Must adjust this if adding int params */
+  46 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1519,6 +1527,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[42] = Param.theCpmlPolyOrder;
   int_message[43] = (int)Param.theCpmlClampOuter;
   int_message[44] = (int)Param.theCpmlNativeStiffness;
+  int_message[45] = (int)Param.theCpmlKappaMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1569,6 +1578,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlPolyOrder = int_message[42];
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
+  Param.theCpmlKappaMode = (cpml_kappa_mode_t)int_message[45];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2011,6 +2021,28 @@ static int32_t parse_parameters(const char* numericalin) {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_stiffness_mode must be 'native' or "
                        "'reduced': got '%s'\n", cpml_stiffness_mode);
+        }
+      }
+
+      /* Kappa treatment in multi-axis CPML cells. 'formal' preserves the
+       * current cross-mixed M-PML kappa profile. 'transverse' keeps kappa
+       * axis-local and applies the transverse product explicitly to the
+       * divergence-side damping/CFS terms, for comparison. */
+      char cpml_kappa_mode[64] = "";
+      if (parsetext(fp, "cpml_kappa_mode", 's', &cpml_kappa_mode) == 0) {
+        if ((strcasecmp(cpml_kappa_mode, "formal") == 0) ||
+            (strcasecmp(cpml_kappa_mode, "cross_mixed") == 0) ||
+            (strcasecmp(cpml_kappa_mode, "multiaxial") == 0)) {
+          Param.theCpmlKappaMode = CPML_KAPPA_FORMAL;
+        } else if ((strcasecmp(cpml_kappa_mode, "transverse") == 0) ||
+                   (strcasecmp(cpml_kappa_mode, "explicit") == 0) ||
+                   (strcasecmp(cpml_kappa_mode,
+                               "explicit_transverse") == 0)) {
+          Param.theCpmlKappaMode = CPML_KAPPA_TRANSVERSE;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_kappa_mode must be 'formal' or "
+                       "'transverse': got '%s'\n", cpml_kappa_mode);
         }
       }
 
@@ -2758,6 +2790,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlPolyOrder);
     monitor_print("PML kappa max:                      %f\n",
                   Param.theCpmlKappaMax);
+    monitor_print("PML kappa mode:                     %s\n",
+                  (Param.theCpmlKappaMode == CPML_KAPPA_TRANSVERSE)
+                      ? "transverse"
+                      : "formal");
     if (Param.theCpmlAlphaMaxHz > 0.0) {
       monitor_print("PML alpha max (Hz):                 %f\n",
                     Param.theCpmlAlphaMaxHz);
@@ -7202,6 +7238,7 @@ static void solver_init() {
      * build the Matzen second-order divergence-side mass-proportional
      * damping rho*d*du/dt. Non-zero only for elastic CPML elements. */
     double cpml_damp_rate = 0.0;
+    double cpml_d_mass_axis[3] = {0.0, 0.0, 0.0};
 #endif
 
     double zeta, a, b;
@@ -7321,6 +7358,7 @@ static void solver_init() {
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
             Param.theCpmlAlphaFloorFraction,
+            Param.theCpmlKappaMode,
             a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
 
         /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
@@ -7368,14 +7406,6 @@ static void solver_init() {
            * kept allocated for now, slated for cleanup. */
           g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
           g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
-          /* Matzen second-order divergence-side term: total volumetric
-           * CPML damping rate sum_j d_j (1/s). Injected below as the
-           * mass-proportional damping rho*d*du/dt at this element's
-           * nodes, exactly mirroring the Lysmer dashpot discretization
-           * (mass_minusaM / mass2_minusaM -= dt * C). Elastic only;
-           * the acoustic-pressure update path is left gradient-side
-           * only for now (documented asymmetry). */
-          cpml_damp_rate = d_axis[0] + d_axis[1] + d_axis[2];
           /* Matched kappa-scaled inertia (rho*kappa_prod*d2u/dt2). For a
            * face element the two transverse kappa are 1; at the inner
            * edge (xi=0) all kappa=1 so kappa_prod=1 -> reduces to the
@@ -7383,6 +7413,25 @@ static void solver_init() {
            * kappa_prod=1 everywhere (exact no-op, back-compat). */
           cpml_kappa_prod =
               kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
+
+          /* Matzen second-order divergence-side term. In formal mode this
+           * uses the same cross-mixed d_axis currently validated in this
+           * branch. In transverse mode the product-form comparison weights
+           * each damping axis by the two transverse kappa factors:
+           *   d_x*kappa_y*kappa_z, d_y*kappa_x*kappa_z, d_z*kappa_x*kappa_y.
+           * This is intentionally limited to the divergence-side damping
+           * and CFS terms; the gradient-side ADE still uses per-axis
+           * 1/kappa_j from compute_pml_profile_coeffs(). */
+          for (int axis = 0; axis < 3; axis++) {
+            cpml_d_mass_axis[axis] = d_axis[axis];
+          }
+          if (Param.theCpmlKappaMode == CPML_KAPPA_TRANSVERSE) {
+            cpml_d_mass_axis[0] *= kappa_axis[1] * kappa_axis[2];
+            cpml_d_mass_axis[1] *= kappa_axis[0] * kappa_axis[2];
+            cpml_d_mass_axis[2] *= kappa_axis[0] * kappa_axis[1];
+          }
+          cpml_damp_rate = cpml_d_mass_axis[0] + cpml_d_mass_axis[1] +
+                           cpml_d_mass_axis[2];
 
           /* CFS sub-terms (Matzen 2011; Xie et al. 2014). Per damping
            * axis a the divergence-side stretch also contributes
@@ -7407,7 +7456,7 @@ static void solver_init() {
           const double M_node = rho_e * h * h * h / 8.0;
           double restore = 0.0;
           for (int axis = 0; axis < 3; axis++) {
-            const double da = d_axis[axis];
+            const double da = cpml_d_mass_axis[axis];
             const double aa = alpha_axis[axis];
             const double decay = exp(-aa * dt);
             g_cpmlBuild.elastic_zetaDecay[axis][pml_idx] = decay;
@@ -8019,7 +8068,8 @@ static void solver_init() {
             Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
-            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
+            Param.theCpmlAlphaFloorFraction,
+            Param.theCpmlKappaMode, a3, b3, iK3, d3, al3, ka3);
         (void)d3;
         (void)al3;
         (void)ka3;
@@ -14664,6 +14714,7 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double kappa_max, double alpha_max,
                                        double mpml_cross_fraction,
                                        double alpha_floor_fraction,
+                                       cpml_kappa_mode_t kappa_mode,
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
                                        double d_out[3],
@@ -14749,21 +14800,20 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     int k1 = (j + 1) % 3;
     int k2 = (j + 2) % 3;
     double d_total = d_raw[j] + mpml_p * (d_raw[k1] + d_raw[k2]);
-    /* Formal-multiaxial kappa (Meza-Fajardo & Papageorgiou 2008; the
-     * same profile-cross-mixing the v3 "formal multiaxial PML" uses, and
-     * what SPECFEM-class codes ship -- the full Pi=s_x s_y s_z double/
-     * triple-delta cross-convolution form is theoretical and not used in
-     * production). The normalized profile is cross-mixed exactly like
-     * d_total, then kappa is derived from it, so at an edge/corner kappa_j
-     * reflects ALL active damping directions (consistent with the
-     * cross-coupled d_total and with the matched kappa-inertia). Clamp to
-     * [0,1] keeps kappa in [1, kappa_max]. Reduces EXACTLY to the per-axis
-     * profile when mpml_p = 0, kappa_max = 1, or on a face element
-     * (transverse poly = 0) -> the validated face/kappa=1 results are
-     * bit-identical. d_total and alpha_j keep their validated treatment. */
-    double prof_mix = poly_arr[j] + mpml_p * (poly_arr[k1] + poly_arr[k2]);
-    if (prof_mix > 1.0) prof_mix = 1.0;
-    double kappa_j = 1.0 + (kappa_max - 1.0) * prof_mix;
+    /* Kappa profile mode:
+     *   formal      -- kappa is cross-mixed with the same M-PML profile as
+     *                  d_total; this is the current/default branch behavior.
+     *   transverse  -- kappa stays axis-local here. The caller applies the
+     *                  explicit transverse kappa products to the
+     *                  divergence-side damping/CFS terms. This provides the
+     *                  product-form comparison without changing the
+     *                  gradient-side ADE stretch. */
+    double prof = poly_arr[j];
+    if (kappa_mode == CPML_KAPPA_FORMAL) {
+      prof += mpml_p * (poly_arr[k1] + poly_arr[k2]);
+    }
+    if (prof > 1.0) prof = 1.0;
+    double kappa_j = 1.0 + (kappa_max - 1.0) * prof;
     double alpha_j = alpha_arr[j];
 
     /* For axes inheriting damping only via M-PML cross-coupling
