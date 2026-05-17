@@ -526,7 +526,7 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
    *    behaviour, bit-identical). */
   if (gpuData->pmlFlagArrayDevice != NULL &&
       gpuData->pmlFlagArrayDevice[eindex] != 0 &&
-      gpuData->pmlNativeStiffness == 0) {
+      gpuData->pmlNativeStiffnessAcoustic == 0) {
     return;
   }
 
@@ -2124,7 +2124,7 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
      *   algebraic identity with the old inv4h / dt^2 h^2/4 form). */
     const double Cstiff =
         gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
-    const int native = gpuData->pmlNativeStiffness;
+    const int native = gpuData->pmlNativeStiffnessAcoustic;
     for (int n = 0; n < 8; n++) {
         const double sx = (n & 1) ? 1.0 : -1.0;
         const double sy = (n & 2) ? 1.0 : -1.0;

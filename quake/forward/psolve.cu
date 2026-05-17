@@ -1048,6 +1048,11 @@ static struct Param_t {
    * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
    * AFTER theCpmlClampOuter to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffness;
+  /* Acoustic PML stiffness mode. Defaults to theCpmlNativeStiffness
+   * (so existing configs are bit-unchanged); overridable independently
+   * via cpml_stiffness_mode_acoustic. Declared AFTER theCpmlNativeStiffness
+   * to preserve C++ designated-init order. */
+  noyesflag_t theCpmlNativeStiffnessAcoustic;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1100,7 +1105,8 @@ static struct Param_t {
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlClampOuter = NO,
-           .theCpmlNativeStiffness = YES};
+           .theCpmlNativeStiffness = YES,
+           .theCpmlNativeStiffnessAcoustic = YES};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1388,7 +1394,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  45 /* Must adjust this if adding int params */
+  46 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1528,6 +1534,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[42] = Param.theCpmlPolyOrder;
   int_message[43] = (int)Param.theCpmlClampOuter;
   int_message[44] = (int)Param.theCpmlNativeStiffness;
+  int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1578,6 +1585,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlPolyOrder = int_message[42];
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
+  Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2020,6 +2028,27 @@ static int32_t parse_parameters(const char* numericalin) {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_stiffness_mode must be 'native' or "
                        "'reduced': got '%s'\n", cpml_stiffness_mode);
+        }
+      }
+
+      /* Acoustic PML stiffness mode. Defaults to the (resolved) elastic
+       * value so existing configs are bit-unchanged, but can be set
+       * independently via cpml_stiffness_mode_acoustic -- e.g. run the
+       * acoustic PML 'native' (consistent base + CPML correction, fixes
+       * the lossless-fluid reduced-operator hourglass) while keeping the
+       * elastic PML 'reduced'. */
+      Param.theCpmlNativeStiffnessAcoustic = Param.theCpmlNativeStiffness;
+      char cpml_stiffness_mode_ac[64] = "";
+      if (parsetext(fp, "cpml_stiffness_mode_acoustic", 's',
+                    &cpml_stiffness_mode_ac) == 0) {
+        if (strcasecmp(cpml_stiffness_mode_ac, "native") == 0) {
+          Param.theCpmlNativeStiffnessAcoustic = YES;
+        } else if (strcasecmp(cpml_stiffness_mode_ac, "reduced") == 0) {
+          Param.theCpmlNativeStiffnessAcoustic = NO;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_stiffness_mode_acoustic must be 'native' or "
+                       "'reduced': got '%s'\n", cpml_stiffness_mode_ac);
         }
       }
 
@@ -2782,8 +2811,12 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlCflSafety);
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
-    monitor_print("PML stiffness mode:                 %s\n",
+    monitor_print("PML stiffness mode (elastic):       %s\n",
                   (Param.theCpmlNativeStiffness == YES)
+                      ? "native+correction"
+                      : "reduced (standalone 1-pt)");
+    monitor_print("PML stiffness mode (acoustic):      %s\n",
+                  (Param.theCpmlNativeStiffnessAcoustic == YES)
                       ? "native+correction"
                       : "reduced (standalone 1-pt)");
     monitor_print("PML formulation:                    "
@@ -7055,6 +7088,8 @@ static void solver_init() {
      * kernelStiffnessCalcLocal's PML skip and kernelPMLElasticStep). */
     Global.gpuData.pmlNativeStiffness =
         (Param.theCpmlNativeStiffness == YES) ? 1 : 0;
+    Global.gpuData.pmlNativeStiffnessAcoustic =
+        (Param.theCpmlNativeStiffnessAcoustic == YES) ? 1 : 0;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
      * cpml_layers × (max edgesize among elements ON an absorbing face).

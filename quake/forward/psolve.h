@@ -585,6 +585,17 @@ typedef struct gpu_data_t {
      * full -nodalPml). Irrelevant in dashpot mode. */
     int           pmlNativeStiffness;
 
+    /* Acoustic PML stiffness mode (set from
+     * Param.theCpmlNativeStiffnessAcoustic at CPML setup). Independent of
+     * pmlNativeStiffness so the acoustic PML can run native+correction
+     * while the elastic PML stays reduced (or vice versa). 1 = native
+     * (kernelAcousticPressureForce processes PML acoustic elements;
+     * kernelPMLAcousticStep adds -(P_pml-P_raw)+cfs). 0 = standalone
+     * 1-pt reduced (kernelAcousticPressureForce skips PML acoustic;
+     * kernelPMLAcousticStep adds full -P_pml+cfs). Irrelevant without
+     * acoustic CPML. */
+    int           pmlNativeStiffnessAcoustic;
+
 } gpu_data_t;
 
 
