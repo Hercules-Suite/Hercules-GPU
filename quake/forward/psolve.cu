@@ -8939,8 +8939,23 @@ static void solver_init() {
 
     if (acoustic_pressure_enabled() && element_is_acoustic(edata)) {
       acousticElementFlagsArray[i] = 1;
+      /* Interior acoustic stiffness coefficient for the consistent
+       * (fully integrated) trilinear-hex Laplacian assembled in
+       * kernelAcousticPressureForce as -coeff * sum_j shape(i,j)*p[j],
+       * where acoustic_scalar_stiffness_shape(i,j) = 8 * \int_ref
+       * grad(N_i).grad(N_j).  The physical consistent stiffness for a
+       * cube of edge h with density rho is
+       *   K_ij = (1/rho) \int_phys grad(N_i).grad(N_j) dV
+       *        = (1/rho) * (h/2) * (shape/8) = shape * h / (16 rho),
+       * cross-checked by the tensor product Kx (x) My (x) Mz which gives
+       * the exact K_00 = h/(3 rho) = [h/(16 rho)] * shape(0,0)=16/3.
+       * The lumped (1/kappa) mass volume/(8*kappa) is exact, so the
+       * stiffness prefactor alone sets the discrete wave speed.  The
+       * original /(32 rho) was a factor of 2 too small, giving a
+       * discrete acoustic speed of Vp/sqrt(2) (~0.707 Vp); /(16 rho)
+       * restores the correct leading-order speed Vp. */
       acousticPressureCoeffArray[i] =
-          Param.theDeltaTSquared * edata->edgesize / (32.0 * edata->rho);
+          Param.theDeltaTSquared * edata->edgesize / (16.0 * edata->rho);
       acousticPressureBoundaryCoeffArray[i] =
           0.25 * edata->edgesize * edata->edgesize;
     }
