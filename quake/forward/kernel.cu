@@ -676,6 +676,19 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
             mass;
   }
 
+  /* CPML outer-face Dirichlet clamp -- acoustic field. The clamp mask
+   * is geometric (any node on an x_min/x_max/y_min/y_max/z_max domain-
+   * extent face), so acoustic-PML outer-face nodes are already flagged;
+   * kernelDispCalc zeros u there, and we must likewise zero the acoustic
+   * pressure (the primary field in the fluid) so the outgoing wave is
+   * terminated single-pass instead of reflecting off the outer face.
+   * Mirrors the elastic clamp exactly; no-op when cpml_clamp_outer=no
+   * (mask NULL). */
+  if (gpuData->pmlClampNodeMaskDevice != NULL &&
+      gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
+    p_new = 0.0;
+  }
+
   gpuData->pressureTm2Device[nindex] = p_new;
   gpuData->pressureForceDevice[nindex] = 0.0;
 }
