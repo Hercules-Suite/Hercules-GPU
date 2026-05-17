@@ -8028,6 +8028,7 @@ static void solver_init() {
      * kernels apply to the strain/gradient. No-op when there are no
      * interface faces or none of them touch the PML. */
     Global.acousticInterfacePmlFaceCount = 0;
+    int64_t pml_face_count = 0;
     if (Global.acousticInterfaceFaces > 0) {
       int64_t nface = Global.acousticInterfaceFaces;
       uint8_t* iface_flag = (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
@@ -8046,7 +8047,6 @@ static void solver_init() {
         iface_b[i] = 1.0;
         iface_iK[i] = 1.0;
       }
-      int64_t pml_face_count = 0;
       for (int64_t i = 0; i < nface; i++) {
         int32_t ea = Global.acousticInterfaceElementIds[i];
         int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
@@ -8115,15 +8115,20 @@ static void solver_init() {
         free(iface_b);
         free(iface_iK);
       }
-      int64_t global_pml_iface = 0;
-      MPI_Reduce(&pml_face_count, &global_pml_iface, 1, MPI_LONG_LONG,
-                 MPI_SUM, 0, comm_solver);
-      if (Global.myID == 0 && global_pml_iface > 0) {
-        fprintf(stdout,
-                "CPML: %lld acoustic-elastic interface faces lie inside the "
-                "PML zone; applying unsplit-CPML interface correction\n",
-                (long long)global_pml_iface);
-      }
+    }
+
+    /* All solver ranks must enter this collective. Many 3D decompositions have
+     * ranks with no local water-solid interface faces, especially for a flat
+     * water layer, and letting those ranks skip the reduction deadlocks the
+     * interface-owning ranks during Phase B startup. */
+    int64_t global_pml_iface = 0;
+    MPI_Reduce(&pml_face_count, &global_pml_iface, 1, MPI_LONG_LONG,
+               MPI_SUM, 0, comm_solver);
+    if (Global.myID == 0 && global_pml_iface > 0) {
+      fprintf(stdout,
+              "CPML: %lld acoustic-elastic interface faces lie inside the "
+              "PML zone; applying unsplit-CPML interface correction\n",
+              (long long)global_pml_iface);
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
