@@ -354,20 +354,29 @@ the Lysmer dashpot at every offset/component (see the table below).
 	`p` in the spatial profile `d_j(xi) ~ (xi/L)^p`. `p = 2` is the standard
 	K&M/SPECFEM3D choice.
 - `cpml_kappa_max`
-	Optional. Default `1.0` (no real stretch, kept for backward
-	compatibility). **`cpml_kappa_max = 3.0` is the recommended
-	production value** and the validated best configuration: with the
-	complete two-sided CFS-CPML it is stable for long elastic runs and
-	resolves the deep-corner grazing residual (the `kappa` real-
-	coordinate stretch is the textbook remedy for grazing incidence,
-	K&M 2007 §"importance of kappa"; it only acts deep in the layer —
-	`kappa(xi) = 1 + (kappa_max-1)(xi/L)^p` is 1 at the inner edge, so
-	it adds no interface reflection). Earlier guidance to "stick with
-	1.0" referred to an incorrect single-sided/stress-convolution build
-	in which `kappa_max > 1` destabilised; that build was replaced. With
-	the corrected formulation, raising `kappa_max` to `3` improved every
-	near-PML metric (notably the vertical 16 km late coda) without any
-	instability. Values much higher than `3` are still untested here.
+	Optional. Default `1.0` (no real-coordinate stretch). The `kappa`
+	stretch (`kappa(xi) = 1 + (kappa_max-1)(xi/L)^p`, 1 at the inner
+	edge) improves evanescent/grazing absorption. **It is now
+	consistently implemented:** the gradient side stretches strain by
+	`1/kappa` *and* the element inertia is scaled by the matched
+	`kappa_x*kappa_y*kappa_z` (the leading term of the second-order
+	displacement CFS-CPML, Matzen 2011). Without that matched inertia
+	the effective impedance would be `rho*c0/sqrt(kappa) != rho*c0`,
+	i.e. a spurious inner-edge reflection for `kappa>1`; the matched
+	pair restores `rho*c0` (no reflection) and *raises* the local CFL
+	margin (heavier elements). `kappa=1` at the inner edge keeps the
+	PML↔interior interface exact.
+	History/caveat: an earlier build applied only the `1/kappa` strain
+	stretch without the matched inertia, so `kappa_max>1` was
+	*inconsistent* (this is why v15 at `kappa=3` only marginally helped
+	and perturbed the direct window). With the matched-inertia fix
+	`kappa_max` in the range `2-3` is expected to deliver the full
+	grazing benefit, but **the consistent version still needs
+	re-validation** before a firm production recommendation; until then
+	the safest setting is `1.0`, and the deep-corner vertical residual
+	is most reliably reduced by a **thicker PML** (`cpml_layers` ~30-50,
+	which is what actually drove the v12 Z-16 km improvement) plus
+	M-PML. Values above `3` remain untested.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets `alpha_max = 2 * pi * cpml_alpha_max_hz` in
 	rad/s. When `< 0` or unset (default), the solver uses
@@ -485,8 +494,14 @@ CPS analytical validation (elastic half-space, dip-slip point source,
 misfit vs the CPS analytic, normalised by the CPS RMS — `0` = perfect,
 lower = better. The **late coda (25–40 s)** isolates absorbing-boundary
 quality (the direct arrival is gone; only boundary reflections remain).
-Configuration: `abc_type=cpml`, `cpml_kappa_max=3`, `cpml_clamp_outer=yes`,
-other defaults.
+Configuration that produced the table: `abc_type=cpml`,
+`cpml_clamp_outer=yes`, a thick PML (`cpml_layers ≈ 50`), and
+`cpml_kappa_max=3` in the *earlier inconsistent* form (strain-only
+`1/kappa`, no matched inertia). The matched `kappa`-inertia has since
+been added; the numbers below are therefore a conservative reference —
+re-validation of the consistent `kappa` build (and of the
+native+correction stiffness) is pending. The thick PML is the main
+driver of the deep-corner Z accuracy here.
 
 Late-coda RMS misfit, near-PML receivers (where ABC quality matters):
 
@@ -518,9 +533,11 @@ the table above:
 
 ```
 abc_type = cpml
-cpml_kappa_max = 3.0        # real-coordinate stretch: kills grazing residual
 cpml_clamp_outer = yes      # single-pass absorption (Dirichlet outer face)
-cpml_layers = 10            # ~1 PML; raise for stronger low-freq absorption
+cpml_layers = 30            # thicker PML closes the deep-corner Z residual
+# cpml_kappa_max: 1.0 is the validated setting; 2-3 (now consistently
+#   implemented via the matched kappa-inertia) is promising but pending
+#   re-validation -- see the cpml_kappa_max entry above
 # cpml_stiffness_mode: leave at default 'native' (recommended)
 # cpml_alpha_max_hz: leave at default unless source f_dominant != f_max
 # cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1
@@ -528,15 +545,19 @@ cpml_layers = 10            # ~1 PML; raise for stronger low-freq absorption
 
 Notes:
 
-- `cpml_kappa_max = 3.0` is the single most important non-default knob:
-	it is what closed the deep-corner vertical grazing residual and is
-	stable with the corrected two-sided formulation. The legacy default
-	stays `1.0` only for backward compatibility.
+- The **validated** configuration is `cpml_kappa_max = 1` (this is what
+	the table above and the v9–v14 runs used). `kappa_max > 1` is now
+	*consistently* implemented (matched `1/kappa` strain + `kappa`
+	inertia) but has not yet been re-validated in the consistent form;
+	treat `2-3` as promising-but-unconfirmed.
+- The deep-corner vertical (Z, 16 km) residual is **thickness-driven**:
+	v12 reached Z-16 km ≈ 1.1 because it used `cpml_layers ≈ 50`, not
+	because of `kappa`. For that residual prefer `cpml_layers` 30–50.
 - `cpml_clamp_outer = yes` converts round-trip to single-pass
 	absorption and is recommended for long runs / thinner PMLs.
-- Bumping `cpml_layers` higher (e.g. 30–50) further improves absorption
-	of low-frequency Rayleigh waves at lateral faces; `10` already beats
-	the Lysmer dashpot by 2–5× in the validation above.
+- `cpml_layers = 10` already beats the Lysmer dashpot by 2–5× on the
+	horizontal components; raise it (30–50) for the deep-corner Z and
+	for stronger low-frequency Rayleigh absorption at lateral faces.
 - For double-precision correctness checks build with `solver_float =
 	double`; production single-precision runs are verified back-to-back.
 

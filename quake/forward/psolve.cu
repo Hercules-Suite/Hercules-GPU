@@ -423,7 +423,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
                                        double d_out[3],
-                                       double alpha_out[3]);
+                                       double alpha_out[3],
+                                       double kappa_out[3]);
 #endif /* BOUNDARY */
 
 /* CPML build-time context. Populated by solver_init() while iterating
@@ -7177,6 +7178,19 @@ static void solver_init() {
     double mass, M, mu, lambda;
     int j;
 
+    /* Product of kappa over the element's active stretch axes
+     * (kappa_x*kappa_y*kappa_z; the two transverse factors are 1 for a
+     * face element). The matched kappa-scaled inertia: the gradient side
+     * stretches strain by 1/kappa, so the second-order displacement
+     * CFS-CPML requires rho*kappa_prod*d2u/dt2 (leading term of
+     * multiplying the momentum eq by s_x s_y s_z). 1.0 for non-PML and
+     * dashpot (exact no-op; kappa_max=1 -> kappa_prod=1 everywhere, so
+     * runs that never raised kappa are bit-identical). Elastic CPML
+     * only. Scaling inertia up also raises the local CFL margin.
+     * Declared OUTSIDE #ifdef BOUNDARY because it scales the
+     * unconditional nodal inertia accumulation below. */
+    double cpml_kappa_prod = 1.0;
+
 #ifdef BOUNDARY
     tick_t edgeticks;
     tick_t ldb[3], ruf[3];
@@ -7298,7 +7312,7 @@ static void solver_init() {
       g_cpmlBuild.face_mask[eindex] = pml_face_mask;
       if (pml_face_mask != 0) {
         double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
-        double alpha_axis[3];
+        double alpha_axis[3], kappa_axis[3];
         compute_pml_profile_coeffs(
             pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7307,7 +7321,7 @@ static void solver_init() {
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
             Param.theCpmlAlphaFloorFraction,
-            a_axis, b_axis, invKappa_axis, d_axis, alpha_axis);
+            a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
 
         /* Pre-scaling factor for the hex8 1-pt B-matrix entry:
          * dN_i/dx_j(center) = s_j(i) / (4h). Absorbing 1/(4h) into a and
@@ -7362,6 +7376,13 @@ static void solver_init() {
            * the acoustic-pressure update path is left gradient-side
            * only for now (documented asymmetry). */
           cpml_damp_rate = d_axis[0] + d_axis[1] + d_axis[2];
+          /* Matched kappa-scaled inertia (rho*kappa_prod*d2u/dt2). For a
+           * face element the two transverse kappa are 1; at the inner
+           * edge (xi=0) all kappa=1 so kappa_prod=1 -> reduces to the
+           * native operator (continuous interface). kappa_max=1 ->
+           * kappa_prod=1 everywhere (exact no-op, back-compat). */
+          cpml_kappa_prod =
+              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
 
           /* CFS sub-terms (Matzen 2011; Xie et al. 2014). Per damping
            * axis a the divergence-side stretch also contributes
@@ -7447,7 +7468,15 @@ static void solver_init() {
 
       M = nodesMass[j];
 
-      np->mass_simple += M;
+      /* Matched kappa-scaled inertia (rho*kappa_prod*d2u/dt2). Only the
+       * INERTIA contributions (mass_simple and the +M / +2M below) are
+       * scaled; the Rayleigh/dashpot/CPML-damping terms stay on plain M
+       * (they come from the d-part of s, not the kappa-part). For
+       * non-PML / dashpot / kappa_max=1, cpml_kappa_prod == 1.0 -> exact
+       * no-op (bit-identical). */
+      const double Mk = M * cpml_kappa_prod;
+
+      np->mass_simple += Mk;
 
       /* loop for each axis */
       for (axis = 0; axis < 3; axis++) {
@@ -7490,8 +7519,8 @@ static void solver_init() {
          * kernelPMLElasticStep.) */
 #endif /* BOUNDARY */
 
-        np->mass_minusaM[axis] += M;
-        np->mass2_minusaM[axis] += (M * 2);
+        np->mass_minusaM[axis] += Mk;
+        np->mass2_minusaM[axis] += (Mk * 2);
 
       } /* end loop for each axis */
 
@@ -7982,7 +8011,7 @@ static void solver_init() {
         tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
                          ldb[2] + edgeticks};
         double a3[3], b3[3], iK3[3], d3[3]; /* d3 unused at interface */
-        double al3[3]; /* alpha unused at interface */
+        double al3[3], ka3[3]; /* alpha/kappa unused at interface */
         compute_pml_profile_coeffs(
             (ma != 0) ? ma : me, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
@@ -7990,9 +8019,10 @@ static void solver_init() {
             Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
             Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
-            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3);
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
         (void)d3;
         (void)al3;
+        (void)ka3;
 
         /* Pick the axis most aligned with the interface normal. */
         double nx = fabs(Global.acousticInterfaceFaceNormals[3 * i + 0]);
@@ -14637,7 +14667,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double a_out[3], double b_out[3],
                                        double invKappa_out[3],
                                        double d_out[3],
-                                       double alpha_out[3]) {
+                                       double alpha_out[3],
+                                       double kappa_out[3]) {
   const double c[3] = {
       0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize,
       0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize,
@@ -14737,6 +14768,16 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     a_out[j] = a_j;
     b_out[j] = b_j;
     invKappa_out[j] = 1.0 / kappa_j;
+    /* kappa_j itself, exported so the caller can apply the matched
+     * kappa-scaled inertia. The gradient side stretches the strain by
+     * 1/kappa_j (invKappa_out); the second-order displacement CFS-CPML
+     * requires the inertia to be scaled by the product of kappa over the
+     * element's active stretch axes (rho*kappa*d2u/dt2, the leading term
+     * of multiplying the momentum eq by s_x s_y s_z). Without it the
+     * effective impedance is rho*c0/sqrt(kappa) != rho*c0 -> a spurious
+     * reflection at the inner edge for kappa>1. kappa_j = 1 at the inner
+     * edge (xi=0) so the matched pair reduces to the native operator. */
+    kappa_out[j] = kappa_j;
     /* d_total (M-PML-coupled damping rate, units 1/s) is exported so the
      * caller can build the Matzen second-order divergence-side term:
      * the mass-proportional CPML damping rho * d_j * du/dt injected into
