@@ -1,0 +1,15 @@
+MODEL.01
+Flat water layer over homogeneous elastic halfspace, no attenuation
+ISOTROPIC
+KGS
+FLAT EARTH
+1-D
+CONSTANT VELOCITY
+LINE08
+LINE09
+LINE10
+LINE11
+ H(KM)  VP(KM/S) VS(KM/S) RHO(GM/CC) QP QS ETAP ETAS FREFP FREFS
+ 0.9375 1.5000   0.0000   1.0000     0  0  0    0    1     1
+ 0.0000 2.0000   1.0000   2.0000     0  0  0    0    1     1
+
