@@ -2716,6 +2716,37 @@ static int32_t parse_parameters(const char* numericalin) {
       monitor_print("Acoustic interface max level:       disabled\n");
     }
   }
+  monitor_print("Include PML:                        %s\n",
+                (Param.theAbcType == ABC_CPML) ? "yes" : "no");
+  if (Param.theAbcType == ABC_CPML) {
+    monitor_print("PML layers:                         %d\n",
+                  Param.theCpmlLayers);
+    monitor_print("PML thickness override (m):         %f\n",
+                  Param.theCpmlThicknessM);
+    monitor_print("PML reflection coefficient:         %e\n",
+                  Param.theCpmlReflectionTarget);
+    monitor_print("PML polynomial order:               %d\n",
+                  Param.theCpmlPolyOrder);
+    monitor_print("PML kappa max:                      %f\n",
+                  Param.theCpmlKappaMax);
+    if (Param.theCpmlAlphaMaxHz > 0.0) {
+      monitor_print("PML alpha max (Hz):                 %f\n",
+                    Param.theCpmlAlphaMaxHz);
+    } else {
+      monitor_print("PML alpha max (Hz):                 auto "
+                    "(pi * simulation_wave_max_freq_hz)\n");
+    }
+    monitor_print("PML multiaxial cross fraction:      %f\n",
+                  Param.theCpmlMpmlCrossFraction);
+    monitor_print("PML alpha floor fraction:           %f\n",
+                  Param.theCpmlAlphaFloorFraction);
+    monitor_print("PML CFL safety factor:              %f\n",
+                  Param.theCpmlCflSafety);
+    monitor_print("PML outer Dirichlet clamp:          %s\n",
+                  (Param.theCpmlClampOuter == YES) ? "yes" : "no");
+    monitor_print("PML formulation:                    "
+                  "two-sided CFS-CPML (Matzen 2011)\n");
+  }
   monitor_print("Include Incident Plane Waves:       %s\n",
                 include_incident_planewaves);
   monitor_print("Include Homogeneous Halfspace:      %s\n",
