@@ -8,14 +8,12 @@
 # offsets 0/4/8/12 km. Only MODEL -> flat_water_elastic_no_atten.mod and
 # the receiver depths (the four Hercules station depths) differ.
 #
-# *** SOURCE-TIME FUNCTION MUST MATCH THE HERCULES slipfunction ***
-# There are two matched pairs:
-#   0.5 s : Hercules slipfunction.in     <-> cps_quadratic_rate.txt    (51 pts)
-#   2.0 s : Hercules slipfunction_2s.in  <-> cps_quadratic_rate_2s.txt (201 pts)
-# The 16-station elastic script uses the 0.5 s STF, so that is the default
-# here. If your Hercules flat-water input instead uses slipfunction_2s.in,
-# change SOURCE_FILE to cps_quadratic_rate_2s.txt before running -- a
-# mismatched STF silently invalidates the comparison.
+# *** SOURCE-TIME FUNCTION ***
+# The Hercules flat-water input uses slipfunction_2s.in (2.0 s, 201 pts),
+# CONFIRMED by the user, so the matching CPS STF is cps_quadratic_rate_2s.txt.
+# (The other matched pair is the 0.5 s slipfunction.in <-> cps_quadratic_rate.txt
+# used by the 16-station *elastic* script; do NOT use that here.)
+# A mismatched STF silently invalidates the comparison.
 set -eu
 
 need() {
@@ -43,9 +41,8 @@ DIP_DEG="90"
 RAKE_DEG="90"
 M0_DYNE_CM="1.0e22"
 AZIMUTH_DEG="90"
-# 0.5 s STF (matches Hercules slipfunction.in). Switch to
-# cps_quadratic_rate_2s.txt iff your Hercules input uses slipfunction_2s.in.
-SOURCE_FILE="../../../../hercules_discrete_source/cps_quadratic_rate.txt"
+# 2.0 s STF -- matches the Hercules slipfunction_2s.in (user-confirmed).
+SOURCE_FILE="../../../../hercules_discrete_source/cps_quadratic_rate_2s.txt"
 
 OUT_BASE="runs/flat_water_no_atten_dipslip/displacement"
 mkdir -p "${OUT_BASE}"
