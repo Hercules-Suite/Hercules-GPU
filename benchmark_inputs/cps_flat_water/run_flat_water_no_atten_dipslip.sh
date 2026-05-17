@@ -2,17 +2,20 @@
 # CPS analytical reference for the 937.5 m WATER (acoustic) layer over an
 # elastic halfspace, no attenuation -- used to validate the acoustic CPML.
 #
-# IMPORTANT: this MUST use the SAME source as the Hercules run and as the
-# elastic CPS reference (run_elastic_halfspace_no_atten_dipslip_5offsets.sh),
-# otherwise the comparison is meaningless. The previously generated water
-# reference (runs/hercules_match_no_atten, from run_moment_source_no_atten.sh)
-# used rake=0 + a triangular hpulse96 -t -l 25 pulse and is NOT comparable to
-# the Hercules dip-slip / 2 s run. This script mirrors the elastic 5-offsets
-# generator exactly:
-#   strike 0, dip 90, RAKE 90, M0 1e22, azimuth 90, -ROT,
-#   STF = the 2 s quadratic slip-rate (cps_quadratic_rate_2s.txt) with -STEP,
-#   source depth 5 km.
-# Only MODEL, the receiver depths, the dfile, and the output dir differ.
+# This mirrors run_elastic_halfspace_no_atten_dipslip_16stations.sh EXACTLY
+# (the 16-station elastic test the user's Hercules run matches): strike 0,
+# dip 90, rake 90, M0 1e22, azimuth 90, -ROT, source depth 5 km, dfile
+# offsets 0/4/8/12 km. Only MODEL -> flat_water_elastic_no_atten.mod and
+# the receiver depths (the four Hercules station depths) differ.
+#
+# *** SOURCE-TIME FUNCTION MUST MATCH THE HERCULES slipfunction ***
+# There are two matched pairs:
+#   0.5 s : Hercules slipfunction.in     <-> cps_quadratic_rate.txt    (51 pts)
+#   2.0 s : Hercules slipfunction_2s.in  <-> cps_quadratic_rate_2s.txt (201 pts)
+# The 16-station elastic script uses the 0.5 s STF, so that is the default
+# here. If your Hercules flat-water input instead uses slipfunction_2s.in,
+# change SOURCE_FILE to cps_quadratic_rate_2s.txt before running -- a
+# mismatched STF silently invalidates the comparison.
 set -eu
 
 need() {
@@ -31,9 +34,8 @@ need f96tosac
 MODEL="flat_water_elastic_no_atten.mod"
 DFILE="dfile_flat_water"
 SOURCE_DEPTH_KM="5.0"
-# Hercules station depths: 0 m (surface), 917.5 m (IN the water column),
-# 957.5 m (just below the 937.5 m water/solid interface, in the elastic
-# halfspace), 1500 m (deeper in the elastic halfspace).
+# Hercules station depths: 0 m (surface), 917.5 m (IN the 937.5 m water
+# column), 957.5 m and 1500 m (in the elastic halfspace).
 RECEIVER_DEPTHS_KM="0.0000 0.9175 0.9575 1.5000"
 
 STRIKE_DEG="0"
@@ -41,7 +43,9 @@ DIP_DEG="90"
 RAKE_DEG="90"
 M0_DYNE_CM="1.0e22"
 AZIMUTH_DEG="90"
-SOURCE_FILE="../../../../hercules_discrete_source/cps_quadratic_rate_2s.txt"
+# 0.5 s STF (matches Hercules slipfunction.in). Switch to
+# cps_quadratic_rate_2s.txt iff your Hercules input uses slipfunction_2s.in.
+SOURCE_FILE="../../../../hercules_discrete_source/cps_quadratic_rate.txt"
 
 OUT_BASE="runs/flat_water_no_atten_dipslip/displacement"
 mkdir -p "${OUT_BASE}"
