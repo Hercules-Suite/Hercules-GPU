@@ -7715,10 +7715,33 @@ static void solver_init() {
 
       np->mass_simple += Mk;
 
+      /* Material mass-proportional Rayleigh damping a*M. In CPML mode
+       * this is now skipped on PML elements, CONSISTENTLY with the BKT/Q,
+       * stiffness-proportional (b*K), and Lysmer-dashpot material-damping
+       * skips already applied there: the CPML ADE recurrence + the
+       * divergence-side mass-proportional damping/CFS provide the PML
+       * elements' attenuation, and layering physical Rayleigh damping
+       * into the same mass_minusaM/mass2_minusaM arrays double-counts
+       * decay and perturbs the delicate divergence-side/CFS DC balance.
+       * Predicate mirrors the adjacent dashpot skip exactly (minus the
+       * dashpot-only flag!=13). Dashpot mode, non-PML elements, and
+       * BOUNDARY-undefined builds are bit-identical; only attenuating-
+       * CPML PML elements change (and become consistent/correct).
+       * Acoustic elements have zeta=0 (a=0) so this is an elastic-PML
+       * concern; no-attenuation runs (a~0) are unaffected. */
+      int apply_material_mass_damping = 1;
+#ifdef BOUNDARY
+      if ((Param.theAbcType != ABC_DASHPOT) && (pml_face_mask != 0)) {
+        apply_material_mass_damping = 0;
+      }
+#endif
+
       /* loop for each axis */
       for (axis = 0; axis < 3; axis++) {
-        np->mass_minusaM[axis] -= (Param.theDeltaT * a * M);
-        np->mass2_minusaM[axis] -= (Param.theDeltaT * a * M);
+        if (apply_material_mass_damping) {
+          np->mass_minusaM[axis] -= (Param.theDeltaT * a * M);
+          np->mass2_minusaM[axis] -= (Param.theDeltaT * a * M);
+        }
 
 #ifdef BOUNDARY
         if ((flag != 13) &&

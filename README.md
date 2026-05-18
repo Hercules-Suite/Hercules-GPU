@@ -564,9 +564,20 @@ Notes on C-PML behavior:
 	uses, so heterogeneous models and acoustic/elastic coupling work without
 	extra configuration. Each PML element appears in exactly one of two
 	per-type mappers (elastic or acoustic).
-- BKT visco-elastic (Q-attenuation) damping is automatically skipped on
-	PML elements when `abc_type=cpml`; the CPML ADE recurrence handles
-	their attenuation. Non-PML elements continue to use BKT as usual.
+- **All material damping is consistently skipped on PML elements when
+	`abc_type=cpml`**; the CPML ADE recurrence + divergence-side
+	mass-proportional damping/CFS handle their attenuation. This now
+	covers every contribution uniformly: BKT/Q convolution memory,
+	stiffness-proportional Rayleigh `b*K`, the Lysmer dashpot, **and the
+	mass-proportional Rayleigh `a*M` term** (the last was previously
+	applied to PML elements while the others were skipped — an
+	inconsistency that double-counted decay and perturbed the delicate
+	divergence-side/CFS DC balance in exactly those elements; now fixed).
+	Non-PML elements continue to use material damping as usual. Dashpot
+	mode, non-PML elements, `BOUNDARY`-undefined builds, and
+	no-attenuation runs are bit-identical; only attenuating-CPML PML
+	elements change (and become consistent). Acoustic elements have
+	`zeta=0`, so this is an elastic-PML concern.
 - The startup log prints
 	`CPML: N elastic + M acoustic PML elements globally (thickness X m, alpha_max Y rad/s)`,
 	and the derived thickness when `cpml_thickness_m` was zero. Use this to
