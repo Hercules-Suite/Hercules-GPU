@@ -595,6 +595,10 @@ typedef struct gpu_data_t {
      * kernelPMLAcousticStep adds full -P_pml+cfs). Irrelevant without
      * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
+    /* Opt-in material damping inside the elastic PML zone (viscoelastic
+     * CFS-CPML). 0 none (default; 5d91b09 skip, bit-identical), 1 bkt,
+     * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
+    int           cpmlPmlMaterialDamping;
 
     /* Velocity-potential acoustic-elastic coupling (independent
      * reimplementation, gated). 0 = pressure (default, bit-identical to

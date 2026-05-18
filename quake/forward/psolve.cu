@@ -1043,6 +1043,7 @@ static struct Param_t {
   double theCpmlCflSafety;
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
+  int theCpmlPmlMaterialDamping;        /* 0 none(default) 1 bkt 2 rayleigh */
   noyesflag_t theCpmlClampOuter;
   /* YES = native effective stiffness + CPML correction (default);
    * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
@@ -1114,6 +1115,7 @@ static struct Param_t {
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
+           .theCpmlPmlMaterialDamping = 0,
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
@@ -1409,7 +1411,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   39 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  48 /* Must adjust this if adding int params */
+  49 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1558,6 +1560,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
   int_message[46] = Param.theAcousticVelocityPotential;
   int_message[47] = (int)Param.theAcousticInterfaceFilter;
+  int_message[48] = Param.theCpmlPmlMaterialDamping;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1611,6 +1614,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
   Param.theAcousticVelocityPotential = int_message[46];
   Param.theAcousticInterfaceFilter = (noyesflag_t)int_message[47];
+  Param.theCpmlPmlMaterialDamping = int_message[48];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2123,6 +2127,29 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlCflSafety = cpml_cfl_safety;
       Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
+
+      /* Opt-in material damping inside the elastic PML zone (viscoelastic
+       * CFS-CPML). Default "none" => all material damping skipped on PML
+       * elements (the 5d91b09 baseline, byte-identical). "bkt"/"rayleigh"
+       * feed the BKT / Rayleigh anelastic-displacement vectors through
+       * the unsplit-displacement CPML stretch (stretch-consistent,
+       * centroid-projected). Staged: parsed/plumbed here; only "none" is
+       * wired in this commit (kernels added in later stages). */
+      {
+        char cpml_pml_mat[32] = "none";
+        (void)parsetext(fp, "cpml_pml_material_damping", 's', &cpml_pml_mat);
+        if (strcasecmp(cpml_pml_mat, "none") == 0) {
+          Param.theCpmlPmlMaterialDamping = 0;
+        } else if (strcasecmp(cpml_pml_mat, "bkt") == 0) {
+          Param.theCpmlPmlMaterialDamping = 1;
+        } else if (strcasecmp(cpml_pml_mat, "rayleigh") == 0) {
+          Param.theCpmlPmlMaterialDamping = 2;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_pml_material_damping must be none|bkt|"
+                       "rayleigh: got '%s'\n", cpml_pml_mat);
+        }
+      }
 
       /* The CPML kernels and time-loop wiring are not yet committed; the
        * solver aborts just before the time-stepping loop in phase B so that
@@ -2874,6 +2901,10 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.theAbcType == ABC_CPML) {
     monitor_print("PML layers:                         %d\n",
                   Param.theCpmlLayers);
+    monitor_print("PML material damping:               %s\n",
+                  (Param.theCpmlPmlMaterialDamping == 1)   ? "bkt"
+                  : (Param.theCpmlPmlMaterialDamping == 2) ? "rayleigh"
+                  : "none (skipped; baseline)");
     monitor_print("PML thickness override (m):         %f\n",
                   Param.theCpmlThicknessM);
     monitor_print("PML reflection coefficient:         %e\n",
@@ -7176,6 +7207,9 @@ static void solver_init() {
         (Param.theCpmlNativeStiffness == YES) ? 1 : 0;
     Global.gpuData.pmlNativeStiffnessAcoustic =
         (Param.theCpmlNativeStiffnessAcoustic == YES) ? 1 : 0;
+    /* Stage-1 plumbing: 0 none (default; PML material-damping skip
+     * unchanged, byte-identical baseline). Consumed from Stage 2 on. */
+    Global.gpuData.cpmlPmlMaterialDamping = Param.theCpmlPmlMaterialDamping;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
      * cpml_layers × (max edgesize among elements ON an absorbing face).
