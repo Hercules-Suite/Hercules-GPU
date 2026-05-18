@@ -2777,6 +2777,26 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theTypeOfDamping = typeOfDamping;
   Param.useInfQk = useInfQk;
 
+  /* Stage-2 viscoelastic CPML cross-validation: cpml_pml_material_damping
+   * only does something if the interior actually carries the matching
+   * material damping (so the PML elements have nonzero anelastic vectors
+   * to stretch). Fail fast on a misconfiguration rather than waste a run
+   * (the kernel NULL-guard would otherwise silently no-op it). Both
+   * params are set by here (CPML parse ~line 2140; typeOfDamping above). */
+  if (Param.theCpmlPmlMaterialDamping == 1 && Param.theTypeOfDamping < BKT) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "cpml_pml_material_damping=bkt requires a BKT "
+                 "type_of_damping (bkt/bkt2/bkt3); got type_of_damping "
+                 "enum %d\n", (int)Param.theTypeOfDamping);
+  }
+  if (Param.theCpmlPmlMaterialDamping == 2 &&
+      Param.theTypeOfDamping != RAYLEIGH) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "cpml_pml_material_damping=rayleigh requires "
+                 "type_of_damping=rayleigh; got enum %d\n",
+                 (int)Param.theTypeOfDamping);
+  }
+
   Param.theRate = rate;
 
   Param.theNumberOfPlanes = number_output_planes;
@@ -7950,6 +7970,32 @@ static void solver_init() {
                        (size_t)pmlN * sizeof(solver_float));
           }
         }
+        /* Stage-2 viscoelastic CPML: relaxed-strain psi memory for the
+         * BKT shear/kappa anelastic vectors. Allocated unconditionally
+         * (so cudaFree stays symmetric); zeroed; used by
+         * kernelPMLElasticStep only when cpmlPmlMaterialDamping==1. */
+        for (int i = 0; i < 3; i++) {
+          for (int jx = 0; jx < 3; jx++) {
+            if (cudaMalloc(
+                    (void**)&(Global.gpuData
+                                  .pml_elastic_psiShearArrayDevice[i][jx]),
+                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess ||
+                cudaMalloc(
+                    (void**)&(Global.gpuData
+                                  .pml_elastic_psiKappaArrayDevice[i][jx]),
+                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
+              fprintf(stderr,
+                      "Thread %d: cudaMalloc pml_elastic_psiShear/Kappa"
+                      "[%d][%d] failed\n",
+                      Global.myID, i, jx);
+              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+            }
+            cudaMemset(Global.gpuData.pml_elastic_psiShearArrayDevice[i][jx],
+                       0, (size_t)pmlN * sizeof(solver_float));
+            cudaMemset(Global.gpuData.pml_elastic_psiKappaArrayDevice[i][jx],
+                       0, (size_t)pmlN * sizeof(solver_float));
+          }
+        }
 
         if (cudaMemcpy(Global.gpuData.pmlElasticElemMapperDevice,
                        g_cpmlBuild.elastic_elem_list,
@@ -10028,6 +10074,8 @@ static void solver_delete() {
     for (int jx = 0; jx < 3; jx++) {
       cudaFree(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]);
       cudaFree(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]);
+      cudaFree(Global.gpuData.pml_elastic_psiShearArrayDevice[i][jx]);
+      cudaFree(Global.gpuData.pml_elastic_psiKappaArrayDevice[i][jx]);
     }
   }
   for (int axis = 0; axis < 3; axis++) {

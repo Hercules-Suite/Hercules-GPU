@@ -832,9 +832,14 @@ __global__  void kernelDampingCalcConvBkt2(int32_t lenum,
 
   eindex = dampingElemMapperDevice[lin_eindex];
 
-  /* CPML: skip BKT damping on PML elements. */
+  /* CPML: skip BKT memory on PML elements UNLESS viscoelastic PML
+   * (cpml_pml_material_damping = bkt, ==1) is requested -- then the SLS
+   * memory IS advanced for PML elements so the relaxed anelastic vectors
+   * exist there (Stage 2). none(0)/rayleigh(2): unchanged skip ->
+   * byte-identical baseline. */
   if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+      gpuData->cpmlPmlMaterialDamping != 1) {
     return;
   }
 
@@ -1304,9 +1309,15 @@ void kernelDampingCalcLocal(int32_t lenum,
 
   eindex = dampingElemMapperDevice[lin_eindex];
 
-  /* CPML: skip BKT damping force on PML elements. */
+  /* CPML: skip BKT damping force on PML elements UNLESS viscoelastic PML
+   * (==1) -- then PML elements get the FULL native modal relaxed force,
+   * identical to interior (the "native" half of the native+delta; it is
+   * continuous at the inner edge by construction). The CPML stretch
+   * correction on the relaxed constant-strain part is added separately
+   * in kernelPMLElasticStep. none/rayleigh: unchanged skip. */
   if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+      gpuData->cpmlPmlMaterialDamping != 1) {
     return;
   }
 
@@ -1999,6 +2010,89 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
             sigmaPml[a][b] = mu * (gradPml[a][b] + gradPml[b][a]);
         }
         sigmaPml[a][a] += lambda * tracePml;
+    }
+
+    /* === Stage 2: viscoelastic (BKT) CPML, gradient side ===
+     * cpml_pml_material_damping == bkt (1): OVERWRITE the elastic
+     * constant-strain stress used in the CPML delta with the RELAXED
+     * one, built from the BKT anelastic-displacement vectors
+     *   g_s = grad(shearVector)  (deviatoric/mu relaxation)
+     *   g_k = grad(kappaVector)  (bulk/K relaxation)
+     * each carried through the SAME stretch (aJ,bJ,invKJ) as the elastic
+     * psi but with its own psi family.  Constant-strain relaxed stress:
+     *   sigma_re = mu*(g_s+g_s^T) - (2/3)*mu*tr(g_s)*I
+     *              + (lambda + (2/3)*mu)*tr(g_k)*I
+     * which reduces EXACTLY to mu*(g+g^T)+lambda*tr*I when there is no
+     * relaxation (g_s=g_k=grad u), so the d=0 delta cancellation against
+     * the (now un-skipped) native modal elastic + BKT force is preserved
+     * -> inner edge stays reflectionless (the v10-safe property).
+     * Downstream assembly + the divergence-side CFS/zeta pair are
+     * UNCHANGED (constitutive-agnostic). gate!=1 -> this block is
+     * skipped, sigmaRaw/sigmaPml keep their elastic values -> result is
+     * byte-identical to the validated baseline. */
+    if (gpuData->cpmlPmlMaterialDamping == 1 &&
+        gpuData->shearVectorDevice != NULL &&
+        gpuData->kappaVectorDevice != NULL) {
+        const int numcomp = lenum * 8;
+        const solver_float* shV =
+            (const solver_float*)gpuData->shearVectorDevice;
+        const solver_float* kaV =
+            (const solver_float*)gpuData->kappaVectorDevice;
+        double gS[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+        double gK[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+        for (int n = 0; n < 8; n++) {
+            const int32_t bidx = eindex + n * lenum;
+            const double sv[3] = { (double)shV[bidx],
+                                   (double)shV[bidx + numcomp],
+                                   (double)shV[bidx + 2 * numcomp] };
+            const double kv[3] = { (double)kaV[bidx],
+                                   (double)kaV[bidx + numcomp],
+                                   (double)kaV[bidx + 2 * numcomp] };
+            const double gN[3] = { (n & 1) ? 0.25 : -0.25,
+                                   (n & 2) ? 0.25 : -0.25,
+                                   (n & 4) ? 0.25 : -0.25 };
+            for (int i = 0; i < 3; i++) {
+                gS[i][0] += sv[i]*gN[0]; gS[i][1] += sv[i]*gN[1];
+                gS[i][2] += sv[i]*gN[2];
+                gK[i][0] += kv[i]*gN[0]; gK[i][1] += kv[i]*gN[1];
+                gK[i][2] += kv[i]*gN[2];
+            }
+        }
+        const double Kbulk = lambda + (2.0/3.0) * mu;
+        /* raw (unstretched) relaxed stress */
+        const double trSr = gS[0][0] + gS[1][1] + gS[2][2];
+        const double trKr = gK[0][0] + gK[1][1] + gK[2][2];
+        for (int a = 0; a < 3; a++) {
+            for (int c = 0; c < 3; c++)
+                sigmaRaw[a][c] = mu * (gS[a][c] + gS[c][a]);
+            sigmaRaw[a][a] += -(2.0/3.0) * mu * trSr + Kbulk * trKr;
+        }
+        /* psi-stretched relaxed strain (separate shear/kappa psi memory,
+         * SAME stretch coefficients aJ/bJ/invKJ as the elastic psi). */
+        double gSp[3][3], gKp[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                const double pS_old = (double)
+                    gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx];
+                const double pS_new = bJ[j]*pS_old + aJ[j]*gS[i][j];
+                gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx] =
+                    (solver_float)pS_new;
+                gSp[i][j] = invKJ[j]*gS[i][j] + pS_new;
+                const double pK_old = (double)
+                    gpuData->pml_elastic_psiKappaArrayDevice[i][j][pml_idx];
+                const double pK_new = bJ[j]*pK_old + aJ[j]*gK[i][j];
+                gpuData->pml_elastic_psiKappaArrayDevice[i][j][pml_idx] =
+                    (solver_float)pK_new;
+                gKp[i][j] = invKJ[j]*gK[i][j] + pK_new;
+            }
+        }
+        const double trSp = gSp[0][0] + gSp[1][1] + gSp[2][2];
+        const double trKp = gKp[0][0] + gKp[1][1] + gKp[2][2];
+        for (int a = 0; a < 3; a++) {
+            for (int c = 0; c < 3; c++)
+                sigmaPml[a][c] = mu * (gSp[a][c] + gSp[c][a]);
+            sigmaPml[a][a] += -(2.0/3.0) * mu * trSp + Kbulk * trKp;
+        }
     }
 
     /* Divergence-side CPML, correct 2nd-order displacement form (Matzen
