@@ -8737,19 +8737,47 @@ static void solver_init() {
       Param.theAcousticInterfaceFilterAlpha;
   Global.gpuData.acousticInterfaceFilterStrength =
       Param.theAcousticInterfaceFilterStrength;
-  /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient.
-   * Mirrors the elastic stiffness-damping calibration b = zeta*theBBase
-   * (psolve.cu:7523) but uses ONLY theBBase (never theABase), so it is
-   * purely stiffness-proportional -- no mass-proportional a*M
-   * contamination -- with zeta = 1/(2Q). Q unset / <= 0 => beta = 0 =>
-   * acoustic stays exactly lossless (validated baseline bit-identical).
-   * theBBase is set by compute_setab() near the top of solver_init()
-   * (~psolve.cu:6968), earlier in this same function, so it is valid
-   * here. */
-  Global.gpuData.acousticStiffnessDampingBeta =
-      (Param.theAcousticQualityFactor > 0.0)
-          ? (Global.theBBase / (2.0 * Param.theAcousticQualityFactor))
-          : 0.0;
+  /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
+   * derived self-containedly from the target quality factor Q -- it must
+   * NOT depend on theBBase: compute_setab() zeroes theBBase for every
+   * non-RAYLEIGH/MASS run (NONE and all BKT*, psolve.cu:15312), which is
+   * exactly the no-attenuation lossless benchmark this knob targets, so
+   * a theBBase-scaled beta silently no-ops there (observed: Q=500 v22 ==
+   * v20 within GPU atomic float noise).
+   *
+   * The acoustic force adds  -coeff*beta*K*(p^n - p^{n-1}). With the
+   * leapfrog M(p^{n+1}-2p^n+p^{n-1})/dt^2 = F and modal cK = w^2 M, the
+   * added term gives modal EOM  p'' + (beta*w^2*dt) p' + w^2 p = 0, i.e.
+   * damping ratio  zeta(w) = beta*w*dt/2  and  Q(w) = 1/(beta*w*dt).
+   * Pinning Q at the simulation reference angular frequency
+   * w_ref = 2*pi*Param.theFreq (the same freq compute_setab uses, always
+   * set regardless of damping type) gives
+   *     beta = 1 / (Q * 2*pi*theFreq * theDeltaT).
+   * zeta ~ w, so the high-frequency lossless-cavity ring is damped far
+   * more strongly than the sub-reference-band physical signal. Q unset
+   * / <= 0 (or degenerate freq/dt) => beta = 0 => acoustic stays exactly
+   * lossless and bit-identical to the validated baseline. */
+  {
+    double q_ac = Param.theAcousticQualityFactor;
+    double w_ref = 2.0 * PI * Param.theFreq;
+    Global.gpuData.acousticStiffnessDampingBeta =
+        (q_ac > 0.0 && Param.theFreq > 0.0 && Param.theDeltaT > 0.0)
+            ? (1.0 / (q_ac * w_ref * Param.theDeltaT))
+            : 0.0;
+    if (Global.myID == 0) {
+      double bA = Global.gpuData.acousticStiffnessDampingBeta;
+      if (bA != 0.0) {
+        monitor_print(
+            "Acoustic stiffness damping:         Q=%.3f -> beta=%.6e "
+            "(zeta@%.3fHz=%.3e; ACTIVE)\n",
+            q_ac, bA, Param.theFreq,
+            0.5 * bA * w_ref * Param.theDeltaT);
+      } else {
+        monitor_print("Acoustic stiffness damping:         beta=0 "
+                      "(lossless; baseline bit-identical)\n");
+      }
+    }
+  }
   Global.gpuData.acousticInterfaceFilterStateDevice = NULL;
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;

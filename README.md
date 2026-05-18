@@ -351,16 +351,22 @@ Acoustic-elastic input flags (input file):
 	quality factor `Q`, acoustic (water) elements get a small
 	**stiffness-proportional (Kelvin–Voigt)** damping added directly in
 	the acoustic force kernel: `f -= coeff · beta · K · (pⁿ − pⁿ⁻¹)`,
-	with the same stiffness operator `K` the acoustic force already uses
-	and `beta = theBBase / (2·Q)` (the same band-fitted `theBBase` the
-	elastic stiffness damping uses, so the calibration is consistent;
-	**only** `theBBase` — never `theABase` — so it is purely
-	stiffness-proportional with no mass-proportional `a·M` contamination).
-	This is deliberately **not** the elastic `zeta` route: acoustic
-	elements never traverse the elastic `c3/c4` `b·K` path (verified —
-	`kernel.cu` does not reference `c3/c4`), so un-zeroing the shared
-	`zeta` would add only the wrong-sign mass-proportional `a·M` and no
-	stiffness damping. The damping rate ∝ ω² (Q ∝ 1/ω, high-frequency
+	with the same stiffness operator `K` the acoustic force already uses.
+	`beta` is derived self-containedly from `Q`: the leapfrog modal EOM
+	for this term is `p'' + (beta·ω²·Δt)·p' + ω²·p = 0`, i.e. damping
+	ratio `ζ(ω) = beta·ω·Δt/2` and `Q(ω) = 1/(beta·ω·Δt)`; pinning `Q`
+	at the simulation reference frequency `theFreq` gives
+	**`beta = 1 / (Q · 2π·theFreq · Δt)`**. It deliberately does **not**
+	depend on `theBBase`: `compute_setab` zeroes `theBBase` for every
+	non-`RAYLEIGH`/`MASS` run (`NONE` and all `BKT*`) — exactly the
+	no-attenuation lossless benchmark this knob targets — so an earlier
+	`theBBase`-scaled `beta` silently no-op'd there (caught when the
+	`Q=500` run reproduced the no-damping baseline within GPU float
+	noise; fixed). It is also deliberately **not** the elastic `zeta`
+	route: acoustic elements never traverse the elastic `c3/c4` `b·K`
+	path (verified — `kernel.cu` does not reference `c3/c4`), and the
+	shared `zeta` would add only the wrong-sign mass-proportional `a·M`.
+	The damping ratio ∝ ω (Q ∝ 1/ω, high-frequency
 	selective): it attenuates the lossless-cavity `~c/4h` (~4.6 Hz) grid
 	ring while barely touching the sub-source-band physical signal.
 	Applies to **interior** acoustic elements only — it is skipped on

@@ -555,7 +555,9 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
    * the per-step field increment, so the damping rate ~ omega^2
    * (Q ~ 1/omega: high-frequency selective -- attenuates the lossless-
    * cavity c/4h grid ring while barely touching the source-band
-   * signal). beta = theBBase/(2 Q_user). When beta == 0 (Q unset/<=0)
+   * signal). zeta(w) = beta*w*dt/2, so beta = 1/(Q*2*pi*theFreq*dt)
+   * (host-side, damping-type independent; see solver_init). When
+   * beta == 0 (Q unset/<=0)
    * the off branch runs the byte-identical original expression with no
    * pTm2 loads -> validated lossless baseline is bit-identical. Skipped
    * on CPML PML elements so the PML zone stays pure CPML (consistent
