@@ -461,17 +461,17 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
 
-    /* Change 2: solid forced by chi_ddot at the centered level n via the
-     * leapfrog predictor chi_ddot^n ~ 2*chi_ddot^{n-1} - chi_ddot^{n-2}
-     * (chiAccDevice = chi_ddot^{n-1}, chiAccPrevDevice = chi_ddot^{n-2}).
-     * Paired with Change 1 (fluid <- u_s^n), both coupling directions
-     * are centered at n -> discrete skew-symmetry restored. p = -chi_ddot
-     * keeps the existing normal-sign convention. */
-    const double chiacc_pred =
-        2.0 * (double)gpuData->chiAccDevice[lnid] -
-        (double)gpuData->chiAccPrevDevice[lnid];
+    /* Conservative-leapfrog reorder: the fluid sub-step now runs BEFORE
+     * this acoustic->elastic coupling within the same iteration, so
+     * chiAccDevice already holds the EXACT same-iteration chi_ddot^n
+     * (no lag, no extrapolation). Paired with Change 1 (fluid <- u_s^n)
+     * the two coupling directions are an exact discrete transpose at the
+     * centered level n -> energy-conserving, no predictor. The Change-2
+     * predictor (2*chiAcc - chiAccPrev) is therefore reverted; chiAccPrev
+     * is left allocated/rolled but unused. p = -chi_ddot preserves the
+     * existing normal-sign convention. */
     pressure += weight * (potential
-                              ? -chiacc_pred
+                              ? -(double)gpuData->chiAccDevice[lnid]
                               : (double)gpuData->pressureTm1Device[lnid]);
   }
 

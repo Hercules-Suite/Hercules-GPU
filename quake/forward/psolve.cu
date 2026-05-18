@@ -13069,6 +13069,21 @@ static void solver_run() {
     }
     Timer_Stop("Physics Force Prep");
 
+    /* SPECFEM chi (potential) conservative-leapfrog reorder: run the
+     * fluid sub-step HERE -- after step-top buffer load + station/plane
+     * output sampling, before the elastic stiffness force and before the
+     * acoustic->elastic coupling deposit. It uses chi^n and u_s^n (tm1,
+     * Change 1), both already on device, and is self-contained
+     * (pressureForce/pressure/tm1 only; own sync+MPI). The acoustic->
+     * elastic coupling at solver_compute_force_acoustic_pressure then
+     * reads the EXACT same-iteration chi_ddot^n, and the solid update
+     * consumes -G^T chi_ddot^n: exact discrete skew pair, no predictor.
+     * Pressure mode is unaffected -- it keeps the original late call
+     * site below (bit-identical to the validated v6 baseline). */
+    if (Param.theAcousticFormulation == 1) {
+      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+    }
+
     Timer_Start("Physics Force Kernels Enqueue");
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
                      Global.theK2);
@@ -13135,7 +13150,13 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Wait/Post");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-    solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+    /* Pressure mode (default): original late call site (after the solid
+     * update) -> bit-identical to the validated v6 baseline. Potential
+     * mode runs the fluid sub-step early (see the gated call above), so
+     * skip it here to avoid running it twice. */
+    if (Param.theAcousticFormulation != 1) {
+      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+    }
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Physics Displacement Wait/Post");
