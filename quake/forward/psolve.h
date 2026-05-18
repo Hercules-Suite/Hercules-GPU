@@ -504,6 +504,12 @@ typedef struct gpu_data_t {
     double*       pml_elastic_muCoeffArrayDevice;    /* unused (cleanup) */
     double*       pml_elastic_lambdaCoeffArrayDevice;/* unused (cleanup) */
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
+    /* Stage-2 viscoelastic CPML: separate gradient-side psi memory for the
+     * BKT anelastic-displacement vectors (shear=deviatoric, kappa=bulk),
+     * carried through the SAME stretch (a/b/invKappa) as the elastic psi.
+     * Allocated/used only when cpmlPmlMaterialDamping==1. */
+    solver_float* pml_elastic_psiShearArrayDevice[3][3];
+    solver_float* pml_elastic_psiKappaArrayDevice[3][3];
     /* Divergence-side CPML, correct 2nd-order displacement form
      * (Matzen 2011; Xie et al. 2014). Multiplying the momentum equation
      * by s_j turns the divergence-side stretch into, per damping axis a:
@@ -595,6 +601,10 @@ typedef struct gpu_data_t {
      * kernelPMLAcousticStep adds full -P_pml+cfs). Irrelevant without
      * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
+    /* Opt-in material damping inside the elastic PML zone (viscoelastic
+     * CFS-CPML). 0 none (default; 5d91b09 skip, bit-identical), 1 bkt,
+     * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
+    int           cpmlPmlMaterialDamping;
 
     /* Velocity-potential acoustic-elastic coupling (independent
      * reimplementation, gated). 0 = pressure (default, bit-identical to

@@ -384,6 +384,18 @@ Acoustic-elastic input flags (input file):
 	before relying on it: long-run stable, displacement still corr ~0.997
 	vs CPS (damping small enough not to perturb the validated physics),
 	and quantified ring reduction.
+	**Empirically-determined sweet spot: `acoustic_quality_factor = 100`**
+	for the flat-water no-attenuation lossless benchmark. A Q sweep
+	(500 → 100 → 50, the v23/v24/v25 runs) located the knee at Q≈100:
+	at the diagnostic far water stations it removes ~50–82 % of the
+	>2 Hz ring energy and lifts the pressure correlation with the exact
+	ring-free CPS to ~0.86 (from ~0.68 lossless), while Z-displacement
+	corr vs CPS stays bit-for-bit-identical at 0.9965 (mean perturbation
+	≤ 0.5 %) and the run is stable. Q=50 doubles the perturbation cost
+	for ≲1 % additional ring removal (the remaining high-frequency
+	content is physical reverberation that CPS also has, and correctly
+	does not respond to more damping); Q=500 under-damps. Sensible band
+	Q ∈ [100, 200].
 
 Acoustic-pressure formulation — correctness fix & known limitation:
 
@@ -566,6 +578,52 @@ offset/component (see the table below).
 	keeps a non-zero decay rate everywhere in the PML. Set to `0` to
 	disable the floor (only safe with explicit M-PML cross-coupling).
 	Valid range `[0, 1]`.
+- `cpml_pml_material_damping`
+	Optional. `none` (default) | `bkt` | `rayleigh`. Selects whether the
+	elastic PML zone is **physically attenuating** (viscoelastic
+	CFS-CPML) or lossless-elastic. `none` is the historical behavior:
+	all material damping skipped on PML elements (bit-identical to the
+	pre-feature baseline; this is what every prior `type_of_damping=none`
+	CPML validation used). **Important — a previously-hidden critical
+	bug:** `type_of_damping=bkt*` **with** `abc_type=cpml` is
+	*catastrophically unstable* under `none` — the field diverges to NaN
+	by t≈40 s. It was never caught because all earlier CPML validation
+	used `type_of_damping=none`, which never exercises the BKT+CPML path.
+	`bkt` is the validated fix: the BKT SLS relaxation is carried into
+	the PML *stretch-consistently* (native+delta; the relaxed stress
+	reduces exactly to the elastic stress at the inner edge, `d=0`, so
+	the boundary stays reflectionless). Validated: stable to 240 s, no
+	growth, correct physical static offset, and corr **0.994 (Z) /
+	0.992 (R)** vs the matching-attenuation CPS analytic. **Resolution
+	policy:** with `abc_type=cpml` and an attenuating interior
+	(`type_of_damping` BKT-family or `rayleigh`) —
+	(1) **unset** → auto-promoted to the matching viscoelastic PML
+	(`bkt`/`rayleigh`) with a loud startup log: safe by default, no user
+	action; (2) **explicit `none`** → *honored* (not overridden) with a
+	loud KNOWN-UNSTABLE warning — a deliberate escape hatch to run the
+	raw NaN-prone baseline for attribution/regression (this is how the
+	`bkt` instability was proven via v3/v5; it likewise re-enables the
+	`rayleigh` attribution control); (3) **explicit `bkt`/`rayleigh`** →
+	used as set, with a mismatched value (e.g. `=rayleigh` over a BKT
+	interior) still a hard error. So the knob is meaningful again: unset
+	= safe auto, explicit `none` = "give me the raw unstable baseline,
+	I know what I'm doing", explicit `bkt`/`rayleigh` = force that path.
+	`rayleigh` (stiffness-proportional `b*K`, same native+delta path,
+	single effective displacement `u_eff=(1+b/Δt)uⁿ−(b/Δt)uⁿ⁻¹`,
+	reusing the relaxed-ψ memory) is **implemented (Stage 3)** and
+	pending the user's `type_of_damping=rayleigh` validation run; `bkt`
+	is fully validated.
+	**Behavior change — Rayleigh `b·K` ported to the GPU:** Stage-3 recon
+	found stiffness-proportional `b·K` was *never applied on the main
+	(non-topography) GPU stiffness path* — `kernelStiffnessCalcLocal`
+	used `tm1` only, so `type_of_damping=rayleigh` GPU runs silently lost
+	`b·K` (only mass-proportional `a·M` was active). That is now fixed
+	(`u_eff` fed to the same operator, matching the CPU conventional and
+	GPU-topo paths). Consequence: **existing `type_of_damping=rayleigh`
+	GPU results change** — they gain the previously-missing `b·K` and now
+	match the CPU path. This is a correctness fix, independent of CPML.
+	Every non-Rayleigh run is byte-identical (`c3=0` ⇒ `u_eff≡tm1`), so
+	all BKT/none CPML validation (incl. Stage 2) is unaffected.
 - `cpml_clamp_outer`
 	Optional. `yes` or `no`, default `no`. When `yes`, forces `u = 0` at
 	every node sitting on a domain-extent face that is part of the PML
@@ -616,20 +674,29 @@ Notes on C-PML behavior:
 	uses, so heterogeneous models and acoustic/elastic coupling work without
 	extra configuration. Each PML element appears in exactly one of two
 	per-type mappers (elastic or acoustic).
-- **All material damping is consistently skipped on PML elements when
-	`abc_type=cpml`**; the CPML ADE recurrence + divergence-side
-	mass-proportional damping/CFS handle their attenuation. This now
-	covers every contribution uniformly: BKT/Q convolution memory,
-	stiffness-proportional Rayleigh `b*K`, the Lysmer dashpot, **and the
-	mass-proportional Rayleigh `a*M` term** (the last was previously
-	applied to PML elements while the others were skipped — an
-	inconsistency that double-counted decay and perturbed the delicate
-	divergence-side/CFS DC balance in exactly those elements; now fixed).
-	Non-PML elements continue to use material damping as usual. Dashpot
-	mode, non-PML elements, `BOUNDARY`-undefined builds, and
-	no-attenuation runs are bit-identical; only attenuating-CPML PML
-	elements change (and become consistent). Acoustic elements have
-	`zeta=0`, so this is an elastic-PML concern.
+- **Material damping on PML elements — `cpml_pml_material_damping`
+	dependent.** With the default `cpml_pml_material_damping=none`, all
+	material damping is skipped on PML elements when `abc_type=cpml`
+	(BKT/Q convolution memory, stiffness-proportional Rayleigh `b*K`,
+	the Lysmer dashpot, **and** mass-proportional Rayleigh `a*M` — the
+	last was previously applied to PML while the others were skipped, an
+	inconsistency that double-counted decay and perturbed the
+	divergence-side/CFS DC balance; now uniformly skipped). This was
+	believed to be the correct treatment, but it is **only valid when
+	the interior is non-attenuating** (`type_of_damping=none`, which is
+	what all prior CPML validation used). With an attenuating BKT
+	interior the elastic-PML/viscoelastic-interior mismatch makes the
+	`none` path **catastrophically unstable (NaN by t≈40 s)** — see the
+	`cpml_pml_material_damping` flag entry. The fix is to carry the
+	material damping *into* the PML stretch-consistently (viscoelastic
+	CFS-CPML), which is **auto-enabled for BKT+CPML**. So: `none` skips
+	everything (correct only for a lossless interior, bit-identical
+	baseline there); `bkt`/`rayleigh` carry BKT/Rayleigh relaxation
+	through the CPML stretch (native+delta, reflectionless at `d=0`).
+	Non-PML elements always use material damping as usual. Dashpot mode,
+	`BOUNDARY`-undefined builds, and no-attenuation runs are
+	bit-identical. Acoustic elements have `zeta=0`, so this is an
+	elastic-PML concern.
 - The startup log prints
 	`CPML: N elastic + M acoustic PML elements globally (thickness X m, alpha_max Y rad/s)`,
 	and the derived thickness when `cpml_thickness_m` was zero. Use this to
