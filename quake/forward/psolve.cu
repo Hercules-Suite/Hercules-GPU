@@ -15300,8 +15300,23 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
 int cpml_pml_flattened_element(int32_t eindex) {
   if (Param.theAbcType != ABC_CPML) return 0;
   if (Param.includeTopography != YES) return 0;
+  /* VT-only. FEM topography is a regular Cartesian mesh + air elements
+   * (Vp=-1) above the free surface (embedded boundary): solid PML
+   * elements are ALREADY regular cubes in the linear path
+   * (BelongstoTopography()==NO for FEM solid), so there is no
+   * native+delta mismatch to fix and this must be a strict no-op for
+   * FEM. Only VT body-fits/deforms surface elements
+   * (BelongstoTopography()==YES, routed to the curvilinear topo kernel)
+   * -- that is the case the flatten re-route targets. */
+  if (get_topo_meth() != VT) return 0;
   if (g_cpmlBuild.face_mask == NULL) return 0;
   if (eindex < 0 || eindex >= Global.myMesh->lenum) return 0;
+  /* Never re-route an air element (Vp=-1) into the solid stiffness
+   * mapper -- it must stay excluded as the original predicate had it. */
+  {
+    edata_t* ed = (edata_t*)Global.myMesh->elemTable[eindex].data;
+    if (ed->Vp == -1) return 0; /* air element (topography.cc convention) */
+  }
   return (g_cpmlBuild.face_mask[eindex] != 0) ? 1 : 0;
 }
 
