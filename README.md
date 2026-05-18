@@ -287,25 +287,32 @@ Acoustic-elastic input flags (input file):
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`.
 - `acoustic_formulation`
-	Optional. `pressure` (default) or `velocity_potential`. Selects the
-	acoustic-elastic interface coupling variable. `pressure` is the
-	historical path (bit-identical to all earlier validated runs): the
-	fluid feels the solid normal **acceleration** (a 2nd time-difference,
-	`~omega^2`) and the solid feels the fluid pressure. `velocity_potential`
-	reinterprets the acoustic field as a velocity potential `phi` (the bulk
-	solver — Laplacian, lumped mass, central difference — is reused
-	unchanged): the interface exchanges the solid normal **velocity**
-	`(u^{n+1}-u^n)/dt . n` (a 1st time-difference, `~omega`) and the solid
-	feels `p = -dphi/dt`; the pressure-release free surface becomes
-	`phi^{n+1}=phi^n`; station pressure value/gradient output is recovered
-	as `-dphi/dt`. The milder first-order-in-time coupling removes the
-	explicit added-mass / CFL instability and the 0 km symmetry-axis
-	secular growth that the `pressure` path exhibits for a thin stiff water
-	layer over an elastic halfspace, with displacement validated against
-	CPS at corr ~0.99–0.998. Requires `include_acoustic=yes` and
+	Optional. **`velocity_potential` (default)** or `pressure`. Selects the
+	acoustic-elastic interface coupling variable. `velocity_potential` is
+	now the default because it is the cross-validated, stable coupling;
+	`pressure` is the legacy path, retained as an explicit opt-in
+	(`acoustic_formulation = pressure`) and bit-identical to all earlier
+	validated pressure runs. This parameter only affects simulations with
+	acoustic elements / acoustic-elastic interfaces — **pure-elastic runs
+	are unaffected and bit-identical** regardless of the setting.
+	`pressure` (legacy): the fluid feels the solid normal **acceleration**
+	(a 2nd time-difference, `~omega^2`) and the solid feels the fluid
+	pressure. `velocity_potential` (default) reinterprets the acoustic
+	field as a velocity potential `phi` (the bulk solver — Laplacian,
+	lumped mass, central difference — is reused unchanged): the interface
+	exchanges the solid normal **velocity** `(u^{n+1}-u^n)/dt . n` (a 1st
+	time-difference, `~omega`) and the solid feels `p = -dphi/dt`; the
+	pressure-release free surface becomes `phi^{n+1}=phi^n`; station
+	pressure value/gradient output is recovered as `-dphi/dt`. The milder
+	first-order-in-time coupling removes the explicit added-mass / CFL
+	instability and the 0 km symmetry-axis secular growth that the
+	`pressure` path exhibits for a thin stiff water layer over an elastic
+	halfspace, with displacement validated against CPS at corr
+	~0.99–0.998. Requires `include_acoustic=yes` and
 	`acoustic_pressure_formulation=yes`. (Independently reproduces the
 	`acoustic-pressure-pml-gpu-v3` branch's `velocity_potential` result —
-	used as a cross-validation.)
+	used as a cross-validation.) To restore the exact legacy behavior of
+	pre-default-flip runs, set `acoustic_formulation = pressure`.
 - `acoustic_interface_filter`
 	Optional. `no` (default) or `yes`. Enables a per-face 1-pole IIR /
 	exponential-moving-average low-pass on the acoustic-elastic interface
@@ -616,6 +623,33 @@ Stability fixes baked in (tunable via the fractions above):
 	therefore evaluated together from the same element-centroid
 	displacement in the PML kernel, which makes the per-element net CFS
 	force an exact discrete null at DC. No-op where `d = 0`.
+- **Inner-edge half-cell sampling (known bounded residual; centroid kept
+	by design).** PML membership and the `(d, kappa, alpha)` profile are
+	evaluated at the element **centroid**, so the first PML layer samples
+	`xi = h/2` and lumps a small non-zero damping onto the nodes that lie
+	exactly on the regular/PML interface, where continuum CPML wants
+	`d = 0`. This is the standard, well-characterised cell-centred
+	discrete-PML reflection: bounded, second-order, and controlled by the
+	**existing knobs** — more `cpml_layers` (smaller `h/L`) or higher
+	`cpml_poly_order` shrink it with no code change. The
+	`acoustic-pressure-pml-gpu-v3` branch's commit `4a75279` ("shift CPML
+	profile samples to the PML inner face", `xi -> xi - h/2`) was
+	cross-validated against the CPS analytic solution on the 25-station
+	homogeneous elastic half-space: it is **stable** (it stays
+	element-level, so it does *not* break the centroid-paired DC balance
+	above) and **systematically improves the vertical component** (lower
+	L2 and late-coda misfit at 20/20 meaningful stations, ≈ −4 % L2 /
+	−7 % late-misfit), but as committed it also renormalises the profile
+	to a thinner `active_L = L - h` and **mildly regresses the radial
+	component at the grazing far offsets** (12/16 km) by reducing total
+	grazing absorption. Net it is a bounded second-order refinement, not a
+	correctness fix; the centroid baseline is already validation-grade
+	(Z corr 0.992, R 0.990 vs CPS). **Decision: not adopted on this
+	branch.** Revisit only for long-duration, very-few-layer, or
+	tight-reflection-budget studies — and then as the *compensated*
+	face-shift (inner-edge `xi=0` fix **without** the `L-h`
+	renormalisation, or `+1–2` layers) with full elastic + acoustic +
+	corner-stability re-validation.
 
 CPS analytical validation (elastic half-space, dip-slip point source,
 2 s source, 60 s simulation, depth 1500 m). Metric: per-component RMS

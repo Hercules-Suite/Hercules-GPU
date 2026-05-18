@@ -1053,10 +1053,12 @@ static struct Param_t {
    * via cpml_stiffness_mode_acoustic. Declared AFTER theCpmlNativeStiffness
    * to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffnessAcoustic;
-  /* Independent velocity-potential acoustic-elastic coupling + interface
-   * source filter (gated; defaults reproduce the validated pressure run
-   * bit-identically). */
-  int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot */
+  /* Acoustic-elastic coupling formulation + interface source filter.
+   * DEFAULT is velocity_potential (1) — the cross-validated stable
+   * coupling; pressure (0) is the legacy explicit opt-in. Only affects
+   * acoustic / acoustic-elastic runs; pure-elastic is unaffected. The
+   * interface source filter stays gated off (found destabilizing). */
+  int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   noyesflag_t theAcousticInterfaceFilter;    /* EMA low-pass on/off */
   double theAcousticInterfaceFilterAlpha;    /* EMA coeff (0,1]      */
   double theAcousticInterfaceFilterStrength; /* blend [0,1]          */
@@ -1114,7 +1116,7 @@ static struct Param_t {
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
-           .theAcousticVelocityPotential = 0,
+           .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceFilter = NO,
            .theAcousticInterfaceFilterAlpha = 0.15,
            .theAcousticInterfaceFilterStrength = 1.0};
@@ -2221,11 +2223,16 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
   hu_config_get_int_opt(fp, "mesh_input_mode", &Param.theMeshInputMode);
 
-  /* Independent velocity-potential acoustic-elastic coupling + interface
-   * source filter (gated; defaults reproduce the validated pressure run
-   * bit-identically). */
+  /* Acoustic-elastic coupling formulation. DEFAULT = velocity_potential:
+   * it is the cross-validated, stable coupling (Z-disp corr 0.99-0.998 vs
+   * CPS, eliminates the 0 km secular growth the pressure form exhibited).
+   * The legacy pressure formulation remains available as an explicit
+   * opt-in via `acoustic_formulation = pressure`. This flag only affects
+   * simulations with acoustic elements / acoustic-elastic interfaces;
+   * pure-elastic runs are unaffected and bit-identical. The interface
+   * source filter stays gated off (found destabilizing). */
   {
-    char acform[64] = "pressure";
+    char acform[64] = "velocity_potential";
     char afilt[64] = "no";
     (void)parsetext(fp, "acoustic_formulation", 's', &acform);
     if (strcasecmp(acform, "pressure") == 0) {
@@ -2819,8 +2826,8 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theAcousticMeshRefinementFactor);
     monitor_print("Acoustic formulation:               %s\n",
                   (Param.theAcousticVelocityPotential == 1)
-                      ? "velocity_potential (p = -dphi/dt; vel continuity)"
-                      : "pressure (validated default)");
+                      ? "velocity_potential (p = -dphi/dt; vel continuity) [DEFAULT]"
+                      : "pressure (legacy; explicit opt-in)");
     monitor_print("Acoustic interface source filter:   %s",
                   (Param.theAcousticInterfaceFilter == YES) ? "yes" : "no");
     if (Param.theAcousticInterfaceFilter == YES) {
