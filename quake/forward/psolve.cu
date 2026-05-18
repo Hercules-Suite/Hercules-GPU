@@ -1874,6 +1874,12 @@ static int32_t parse_parameters(const char* numericalin) {
 
   damping_type_t typeOfDamping = UNSET_DAMP;
   stiffness_type_t stiffness_method = UNSET_STIFF;
+  /* Whether cpml_pml_material_damping was EXPLICITLY present in the
+   * input (vs defaulted). Lets the auto-enable distinguish "unset"
+   * (-> auto-promote to the validated viscoelastic PML) from an
+   * explicit "none" (-> honored as a deliberate escape hatch for the
+   * known-unstable raw baseline, with a loud warning). */
+  int cpml_pml_damp_explicit = 0;
   noyesflag_t have_buildings = UNSET;
   noyesflag_t have_parametricq = UNSET;
   noyesflag_t includeNonlinear = UNSET;
@@ -2137,7 +2143,9 @@ static int32_t parse_parameters(const char* numericalin) {
        * wired in this commit (kernels added in later stages). */
       {
         char cpml_pml_mat[32] = "none";
-        (void)parsetext(fp, "cpml_pml_material_damping", 's', &cpml_pml_mat);
+        cpml_pml_damp_explicit =
+            (parsetext(fp, "cpml_pml_material_damping", 's',
+                       &cpml_pml_mat) == 0);
         if (strcasecmp(cpml_pml_mat, "none") == 0) {
           Param.theCpmlPmlMaterialDamping = 0;
         } else if (strcasecmp(cpml_pml_mat, "bkt") == 0) {
@@ -2777,42 +2785,58 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theTypeOfDamping = typeOfDamping;
   Param.useInfQk = useInfQk;
 
-  /* Auto-enable viscoelastic PML for the {BKT*, Rayleigh} + CPML combos.
-   * Material damping skipped on PML over an ATTENUATING interior is
+  /* Auto-enable viscoelastic PML for the {BKT*, Rayleigh} + CPML combos
+   * -- but ONLY when cpml_pml_material_damping was left UNSET. Material
+   * damping skipped on PML over an ATTENUATING interior is
    * catastrophically unstable: bkt(2/3)+cpml diverges to NaN by t~40s
    * (confirmed v5 @23f58bf == v3, byte-identical blow-up). rayleigh+cpml
    * has the IDENTICAL mechanism now that b*K is on the GPU stiffness
-   * path (this commit), so it is expected to fail the same way. The
-   * viscoelastic CFS-CPML is the fix: bkt(1) is fully validated (Stage
-   * 2: stable 240s, corr 0.994 vs matching-attenuation CPS); rayleigh(2)
-   * is implemented the same native+delta way (Stage 3, pending the
-   * user's validation run). There is no valid reason to run these combos
-   * without it, so when cpml_pml_material_damping is unset/none(0) we
-   * auto-promote (BKT-family -> bkt(1), RAYLEIGH -> rayleigh(2)) and log
-   * loudly. An explicit matching value is a no-op here; an explicit
-   * mismatched value still hits the cross-validation abort below. Only
-   * the previously-broken combos change; type_of_damping that is neither
-   * BKT-family nor RAYLEIGH (incl. all prior =none CPML validation) and
-   * all non-CPML runs are untouched. */
+   * path, so it is expected to fail the same way. The viscoelastic
+   * CFS-CPML is the fix: bkt(1) fully validated (Stage 2: stable 240s,
+   * corr 0.994 vs matching-attenuation CPS); rayleigh(2) implemented the
+   * same native+delta way (Stage 3, pending validation).
+   *
+   * unset             -> auto-promote (BKT-family -> bkt, RAYLEIGH ->
+   *                      rayleigh), log loudly. Safe by default.
+   * explicit "none"   -> HONORED as a deliberate escape hatch (run the
+   *                      known-unstable raw baseline for attribution /
+   *                      regression, mirroring how v3/v5 proved the bkt
+   *                      case) -- not overridden, but a LOUD warning.
+   * explicit bkt/rayl -> as set; a mismatched explicit value still hits
+   *                      the cross-validation abort below.
+   * type_of_damping neither BKT-family nor RAYLEIGH (incl. all prior
+   * =none CPML validation) and all non-CPML runs are untouched. */
   if (Param.theAbcType == ABC_CPML &&
       Param.theCpmlPmlMaterialDamping == 0) {
-    int promoted = 0;
-    if (Param.theTypeOfDamping >= BKT) {
-      Param.theCpmlPmlMaterialDamping = 1;
-      promoted = 1;
-    } else if (Param.theTypeOfDamping == RAYLEIGH) {
-      Param.theCpmlPmlMaterialDamping = 2;
-      promoted = 2;
-    }
-    if (promoted != 0 && Global.myID == 0) {
+    int wouldPromote = (Param.theTypeOfDamping >= BKT)            ? 1
+                       : (Param.theTypeOfDamping == RAYLEIGH)     ? 2
+                                                                  : 0;
+    if (wouldPromote != 0 && !cpml_pml_damp_explicit) {
+      Param.theCpmlPmlMaterialDamping = wouldPromote;
+      if (Global.myID == 0) {
+        monitor_print(
+            "CPML: auto-enabled viscoelastic PML "
+            "(cpml_pml_material_damping=%s) -- type_of_damping is %s "
+            "with abc_type=cpml, which is numerically unstable "
+            "(material damping skipped on PML over an attenuating "
+            "interior, field -> NaN) without it; using the "
+            "viscoelastic CFS-CPML.\n",
+            (wouldPromote == 1) ? "bkt" : "rayleigh",
+            (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
+      }
+    } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
+               Global.myID == 0) {
       monitor_print(
-          "CPML: auto-enabled viscoelastic PML "
-          "(cpml_pml_material_damping=%s) -- type_of_damping is %s with "
-          "abc_type=cpml, which is numerically unstable (material "
-          "damping skipped on PML over an attenuating interior, "
-          "field -> NaN) without it; using the viscoelastic CFS-CPML.\n",
-          (promoted == 1) ? "bkt" : "rayleigh",
-          (promoted == 1) ? "BKT-family" : "Rayleigh");
+          "CPML WARNING: cpml_pml_material_damping=none was set "
+          "EXPLICITLY with type_of_damping=%s + abc_type=cpml. This "
+          "configuration is KNOWN NUMERICALLY UNSTABLE -- material "
+          "damping is skipped on PML over an attenuating interior and "
+          "the field diverges to NaN (confirmed for bkt: v5==v3, "
+          "blow-up by t~40s). Honoring the explicit request as a "
+          "deliberate escape hatch (attribution / regression only). "
+          "OMIT the parameter to auto-use the validated viscoelastic "
+          "CFS-CPML.\n",
+          (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
     }
   }
 

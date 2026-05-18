@@ -594,12 +594,20 @@ offset/component (see the table below).
 	reduces exactly to the elastic stress at the inner edge, `d=0`, so
 	the boundary stays reflectionless). Validated: stable to 240 s, no
 	growth, correct physical static offset, and corr **0.994 (Z) /
-	0.992 (R)** vs the matching-attenuation CPS analytic. **Auto-enable:
-	if `type_of_damping` is BKT-family → `bkt`, or `rayleigh` →
-	`rayleigh`, with `abc_type=cpml`, this is automatically promoted when
-	left unset/`none`** (loud startup log) — so both unstable combos are
-	safe by default with no user action. An explicit mismatched value
-	(e.g. `=rayleigh` with a BKT interior) is a hard error.
+	0.992 (R)** vs the matching-attenuation CPS analytic. **Resolution
+	policy:** with `abc_type=cpml` and an attenuating interior
+	(`type_of_damping` BKT-family or `rayleigh`) —
+	(1) **unset** → auto-promoted to the matching viscoelastic PML
+	(`bkt`/`rayleigh`) with a loud startup log: safe by default, no user
+	action; (2) **explicit `none`** → *honored* (not overridden) with a
+	loud KNOWN-UNSTABLE warning — a deliberate escape hatch to run the
+	raw NaN-prone baseline for attribution/regression (this is how the
+	`bkt` instability was proven via v3/v5; it likewise re-enables the
+	`rayleigh` attribution control); (3) **explicit `bkt`/`rayleigh`** →
+	used as set, with a mismatched value (e.g. `=rayleigh` over a BKT
+	interior) still a hard error. So the knob is meaningful again: unset
+	= safe auto, explicit `none` = "give me the raw unstable baseline,
+	I know what I'm doing", explicit `bkt`/`rayleigh` = force that path.
 	`rayleigh` (stiffness-proportional `b*K`, same native+delta path,
 	single effective displacement `u_eff=(1+b/Δt)uⁿ−(b/Δt)uⁿ⁻¹`,
 	reusing the relaxed-ψ memory) is **implemented (Stage 3)** and
