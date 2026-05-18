@@ -97,7 +97,8 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 						     double deltaT2);
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-					     gpu_data_t* gpuData);
+					     gpu_data_t* gpuData,
+					     double deltaT2);
 
 /* SPECFEM-spirit consistent-mass dispersion correction (beta>0 only). */
 __global__ void kernelAcousticMassCorrG(int32_t nharbored,

@@ -406,6 +406,15 @@ typedef struct gpu_data_t {
     double*       acousticHFDampCoeffArrayDevice;   // per-elem gamma*dt*h/(16 rho)
                                        // (Kelvin-Voigt HF damping; gamma=0
                                        // -> kernel not launched -> identical)
+    int           acousticFormulation; // 0 = pressure (default, bit-identical
+                                       // to all validated runs); 1 = SPECFEM
+                                       // displacement-potential chi (the
+                                       // pressure field buffers hold chi;
+                                       // p = -chi_ddot is a derived output)
+    solver_float* chiAccDevice;        // chi_ddot at the last completed
+                                       // acoustic step (potential mode only):
+                                       // = (chi^{n+1}-2chi^n+chi^{n-1})/dt^2,
+                                       // = -p. Smooth (chi is resolved).
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -641,6 +650,9 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    solver_float* pressure_chiacc; /* host mirror of chiAccDevice = chi_ddot
+                                    * = -p (potential mode only); used for
+                                    * station pressure value/gradient output */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

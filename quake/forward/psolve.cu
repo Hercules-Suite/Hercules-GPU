@@ -940,6 +940,13 @@ static struct Param_t {
    * gamma = 0 (default) -> no damping (bit-identical). Attenuates the
    * trapped kh~pi grid-edge branch a conservative scheme cannot move. */
   double theAcousticHFDampGamma;
+  /* Acoustic fluid formulation: 0 = pressure (default; bit-identical to
+   * every validated run), 1 = SPECFEM displacement-potential chi (the
+   * acoustic field buffers hold chi; coupling exchanges solid
+   * displacement <-> fluid chi_ddot so the grid-amplified solid
+   * acceleration is never injected -> removes the lossless-fluid pump;
+   * p = -chi_ddot is a derived output). */
+  int theAcousticFormulation;
   double theFreq;
   double theFreq_Vel;
   double theDeltaT;
@@ -1076,6 +1083,7 @@ static struct Param_t {
            .theAcousticMeshRefinementFactor = 1.0,
            .theAcousticMassCorrBeta = 0.0,
            .theAcousticHFDampGamma = 0.0,
+           .theAcousticFormulation = 0,
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1406,7 +1414,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  46 /* Must adjust this if adding int params */
+  47 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1551,6 +1559,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[43] = (int)Param.theCpmlClampOuter;
   int_message[44] = (int)Param.theCpmlNativeStiffness;
   int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
+  int_message[46] = Param.theAcousticFormulation;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1602,6 +1611,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
   Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
+  Param.theAcousticFormulation = int_message[46];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1852,6 +1862,7 @@ static int32_t parse_parameters(const char* numericalin) {
        implement_drm[64] = "no", include_topography[64] = "no",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
+       acoustic_formulation[64] = "pressure",
        reconstruct_acoustic_plane_displacements[64] = "no",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
@@ -2234,6 +2245,7 @@ static int32_t parse_parameters(const char* numericalin) {
                            &acoustic_mass_correction_beta);
   hu_config_get_double_opt(fp, "acoustic_hf_damping_gamma",
                            &acoustic_hf_damping_gamma);
+  parsetext(fp, "acoustic_formulation", 's', &acoustic_formulation);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -2717,6 +2729,15 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theAcousticMeshRefinementFactor = acoustic_mesh_refinement_factor;
   Param.theAcousticMassCorrBeta = acoustic_mass_correction_beta;
   Param.theAcousticHFDampGamma = acoustic_hf_damping_gamma;
+  if (strcasecmp(acoustic_formulation, "pressure") == 0) {
+    Param.theAcousticFormulation = 0;
+  } else if (strcasecmp(acoustic_formulation, "potential") == 0) {
+    Param.theAcousticFormulation = 1;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_formulation must be 'pressure' or 'potential': "
+                 "got '%s'\n", acoustic_formulation);
+  }
   Param.theThresholdDamping = threshold_damping;
   Param.theThresholdVpVs = threshold_VpVs;
   Param.theDampingStatisticsFlag = damping_statistics;
@@ -2806,6 +2827,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   (Param.theAcousticHFDampGamma > 0.0)
                       ? "  (stiffness-proportional HF damping ON)"
                       : "  (off)");
+    monitor_print("Acoustic formulation:               %s\n",
+                  (Param.theAcousticFormulation == 1)
+                      ? "potential (SPECFEM chi; p = -chi_ddot)"
+                      : "pressure (validated default)");
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -7032,9 +7057,22 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    /* Host mirror of chiAccDevice (= chi_ddot = -p) for station pressure
+     * value/gradient output in potential mode. */
+    if (cudaMallocHost(&(Global.mySolver->pressure_chiacc),
+                       Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic chi_ddot pinned memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     memset(Global.mySolver->pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_tm2, 0,
+           Global.myMesh->nharbored * sizeof(solver_float));
+    memset(Global.mySolver->pressure_chiacc, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_force, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
@@ -8697,6 +8735,22 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    /* SPECFEM potential mode: chi_ddot (= -p) at the last completed
+     * acoustic step. Allocated whenever acoustic is enabled; only
+     * written/read when acousticFormulation==1, so pressure mode is
+     * bit-identical. */
+    Global.gpuData.acousticFormulation = Param.theAcousticFormulation;
+    if (cudaMalloc((void**)&(Global.gpuData.chiAccDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic chi_ddot buffer\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    cudaMemset(Global.gpuData.chiAccDevice, 0,
+               Global.myMesh->nharbored * sizeof(solver_float));
     /* Targeted HF Kelvin-Voigt damping: per-element gamma*dt*h/(16 rho).
      * No scratch -- reads p^n (Tm1), p^{n-1} (Tm2) directly. */
     if (cudaMalloc(
@@ -9852,6 +9906,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
   cudaFree(Global.gpuData.pressureMassCorrDevice);
+  cudaFree(Global.gpuData.chiAccDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -10085,6 +10140,9 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_damp != NULL) {
     cudaFreeHost(Global.mySolver->pressure_damp);
+  }
+  if (Global.mySolver->pressure_chiacc != NULL) {
+    cudaFreeHost(Global.mySolver->pressure_chiacc);
   }
 
   if (Param.theTypeOfDamping >= BKT) {
@@ -11399,7 +11457,7 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
   kernelAcousticPressureUpdate<<<gridsize, blocksize, 0,
                                  solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice);
+      mesh->nharbored, solver->gpuDataDevice, Param.theDeltaTSquared);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -11414,6 +11472,15 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
+  /* Potential mode: also mirror chi_ddot (= -p) to host for station
+   * pressure output. Not copied in pressure mode -> identical PCIe path. */
+  if (Param.theAcousticFormulation == 1) {
+    cudaMemcpyAsync(solver->pressure_chiacc, solver->gpuData->chiAccDevice,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
   memset(solver->pressure_force, 0,
@@ -17995,9 +18062,15 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
+  /* Potential mode: the output pressure is p = -chi_ddot (pressure_tm1
+   * holds chi); use the host chi_ddot mirror. Pressure mode unchanged. */
+  const int potential_out = (Param.theAcousticFormulation == 1) &&
+                            (Global.mySolver->pressure_chiacc != NULL);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const double pressure =
-        Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+        potential_out
+            ? -(double)Global.mySolver->pressure_chiacc[nodesToInterpolate[iPhi]]
+            : (double)Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
     const double dphidx =
         sx[iPhi] * (1.0 + sy[iPhi] * eta) *
         (1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -18295,11 +18368,18 @@ static double interpolate_station_pressure_value(int32_t iStation) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
+  /* Potential mode: p = -chi_ddot (pressure_tm1 holds chi). */
+  const int potential_out = (Param.theAcousticFormulation == 1) &&
+                            (Global.mySolver->pressure_chiacc != NULL);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
                        (1 + xi[1][iPhi] * localCoords.x[1]) *
                        (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-    pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+    pressure += phi * (potential_out
+                           ? -(double)Global.mySolver
+                                  ->pressure_chiacc[nodesToInterpolate[iPhi]]
+                           : (double)Global.mySolver
+                                  ->pressure_tm1[nodesToInterpolate[iPhi]]);
   }
 
   return pressure;
