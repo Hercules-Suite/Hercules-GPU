@@ -2777,6 +2777,32 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theTypeOfDamping = typeOfDamping;
   Param.useInfQk = useInfQk;
 
+  /* Auto-enable viscoelastic (BKT) PML for the BKT*+CPML combination.
+   * type_of_damping=bkt(2/3) + abc_type=cpml is catastrophically
+   * UNSTABLE on the material-damping-skipped-on-PML baseline: the field
+   * diverges to NaN by t~40s (confirmed: v5 @23f58bf == v3, byte-
+   * identical blow-up). The viscoelastic CFS-CPML
+   * (cpml_pml_material_damping=bkt) is the validated fix (Stage 2:
+   * stable to 240s, corr 0.994 vs the matching-attenuation CPS). There
+   * is no valid reason to run bkt*+cpml without it, so when it is left
+   * unset/none(0) for that combo we auto-promote to bkt(1) and log
+   * loudly. Explicit =bkt is already 1 (no-op); explicit =rayleigh(2)
+   * with BKT damping stays a real misconfig caught by the abort below.
+   * Only the previously-NaN combo changes behavior; type_of_damping<BKT
+   * (incl. all prior =none CPML validation) is untouched. */
+  if (Param.theAbcType == ABC_CPML && Param.theTypeOfDamping >= BKT &&
+      Param.theCpmlPmlMaterialDamping == 0) {
+    Param.theCpmlPmlMaterialDamping = 1;
+    if (Global.myID == 0) {
+      monitor_print(
+          "CPML: auto-enabled viscoelastic PML "
+          "(cpml_pml_material_damping=bkt) -- type_of_damping is "
+          "BKT-family with abc_type=cpml, which is numerically unstable "
+          "(field -> NaN ~t40s) without it; using the validated "
+          "viscoelastic CFS-CPML.\n");
+    }
+  }
+
   /* Stage-2 viscoelastic CPML cross-validation: cpml_pml_material_damping
    * only does something if the interior actually carries the matching
    * material damping (so the PML elements have nonzero anelastic vectors
