@@ -7788,6 +7788,18 @@ static void solver_init() {
           const double dt = Param.theDeltaT;
           const double rho_e = (double)edata->rho;
           const double M_node = rho_e * h * h * h / 8.0;
+          /* Stage 4b: stretch-consistent Rayleigh a*M cross-pair, FOLDED
+           * into the SAME CFS restore/memForce arrays -> reuses the
+           * validated centroid-zeta convolution in kernelPMLElasticStep
+           * (no new memory, no kernel change). The d^1 stretch of
+           * a*M*u_dot is  +a*M*sum(d_j)*u  - a*M*sum(d_j*alpha_j)*zeta,
+           * structurally identical to the rho-side pair (same d_j,
+           * alpha_j, same zeta). It cancels at DC by the SAME mechanism
+           * (zeta -> u/alpha => sum memForce_aM*zeta = restoreCoeff_aM*u),
+           * so it inherits the v10-safe exact DC cancellation. Gated on
+           * cpml_pml_material_damping==2; a==0 for BKT/none so all other
+           * runs are byte-identical regardless. */
+          const int aM_visco = (Param.theCpmlPmlMaterialDamping == 2);
           double restore = 0.0;
           for (int axis = 0; axis < 3; axis++) {
             const double da = d_axis[axis];
@@ -7796,9 +7808,11 @@ static void solver_init() {
             g_cpmlBuild.elastic_zetaDecay[axis][pml_idx] = decay;
             g_cpmlBuild.elastic_zetaGain[axis][pml_idx] =
                 (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
-            g_cpmlBuild.elastic_memForce[axis][pml_idx] =
-                dt2 * M_node * da * aa * aa;
-            restore += da * aa;
+            double mf = dt2 * M_node * da * aa * aa;        /* rho-side  */
+            if (aM_visco) mf += dt2 * M_node * a * da * aa; /* a*M cross */
+            g_cpmlBuild.elastic_memForce[axis][pml_idx] = mf;
+            restore += da * aa;                              /* rho-side  */
+            if (aM_visco) restore += a * da;                 /* a*M cross */
           }
           g_cpmlBuild.elastic_restoreCoeff[pml_idx] = dt2 * M_node * restore;
         }
@@ -7877,7 +7891,18 @@ static void solver_init() {
        * concern; no-attenuation runs (a~0) are unaffected. */
       int apply_material_mass_damping = 1;
 #ifdef BOUNDARY
-      if ((Param.theAbcType != ABC_DASHPOT) && (pml_face_mask != 0)) {
+      /* Stage 4a: the bare material Rayleigh a*M*u_dot is skipped on CPML
+       * PML elements (5d91b09) EXCEPT when the viscoelastic Rayleigh PML
+       * is active (cpml_pml_material_damping==2) -- then a*M IS carried
+       * into the PML. It is the leading (d^0) material-damping term; the
+       * d^1 stretch cross-pair is folded into the CFS restore/memForce
+       * below. a*M is a DC-safe velocity damping, Lysmer-discretised
+       * exactly like the stable cpml_C, and is distinct physics from
+       * cpml_C (material Q vs numerical absorption) -- not a double-count.
+       * a = zeta*theABase = 0 for BKT/none, so this changes only
+       * rayleigh+cpml+viscoelastic; everything else is bit-identical. */
+      if ((Param.theAbcType != ABC_DASHPOT) && (pml_face_mask != 0) &&
+          (Param.theCpmlPmlMaterialDamping != 2)) {
         apply_material_mass_damping = 0;
       }
 #endif
