@@ -347,14 +347,50 @@ void kernelStiffnessCalcLocal(int32_t lenum,
 
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
+    /* Rayleigh stiffness-proportional damping b*K, ported to the main
+     * GPU stiffness path. It was previously only in the CPU conventional
+     * path (stiffness.cu) and the GPU topo kernel -- absent here, so
+     * type_of_damping=rayleigh GPU (non-topo) runs silently lost b*K.
+     * Effective displacement  u_eff = (1 + b/dt) u^n - (b/dt) u^{n-1},
+     * b/dt = c3/c1, fed to the SAME operator => K u^n + b K u_dot.
+     * c3 == 0 for every non-Rayleigh damping (compute_setab zeroes bBase
+     * for NONE/BKT/MASS) => sd_b_over_dt == 0 => u_eff == tm1 EXACTLY
+     * (the else branch is the byte-identical original) => bit-identical
+     * for all non-Rayleigh runs incl. every BKT/none CPML validation.
+     * For CPML, b*K is skipped on PML elements (5d91b09 material-damping-
+     * on-PML policy) UNLESS the viscoelastic Rayleigh PML is requested
+     * (cpmlPmlMaterialDamping==2) -- then PML gets the full native b*K
+     * and kernelPMLElasticStep adds the CPML stretch delta. */
+    double sd_b_over_dt = 0.0;
+    {
+      const double c1v = gpuData->c1ArrayDevice[eindex];
+      if (c1v != 0.0) sd_b_over_dt = gpuData->c3ArrayDevice[eindex] / c1v;
+      if (sd_b_over_dt != 0.0 &&
+          gpuData->pmlFlagArrayDevice != NULL &&
+          gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+          gpuData->cpmlPmlMaterialDamping != 2) {
+        sd_b_over_dt = 0.0;
+      }
+    }
+
     for (i = 0; i < 8; i++) {
       const __restrict__ fvector_t *tm1Disp = gpuData->tm1Device + *lnid;
 
-      localForce[i].f[0] = tm1Disp->f[0];
+      if (sd_b_over_dt != 0.0) {
+        const __restrict__ fvector_t *tm2Disp = gpuData->tm2Device + *lnid;
+        localForce[i].f[0] = tm1Disp->f[0] * (1.0 + sd_b_over_dt) -
+                             sd_b_over_dt * tm2Disp->f[0];
+        localForce[i].f[1] = tm1Disp->f[1] * (1.0 + sd_b_over_dt) -
+                             sd_b_over_dt * tm2Disp->f[1];
+        localForce[i].f[2] = tm1Disp->f[2] * (1.0 + sd_b_over_dt) -
+                             sd_b_over_dt * tm2Disp->f[2];
+      } else {
+        localForce[i].f[0] = tm1Disp->f[0];
+        localForce[i].f[1] = tm1Disp->f[1];
+        localForce[i].f[2] = tm1Disp->f[2];
+      }
       do_contrib = ( fabs(localForce[i].f[0]) > UNDERFLOW_CAP_STIFFNESS ) ? 1 : do_contrib;
-      localForce[i].f[1] = tm1Disp->f[1];
       do_contrib = ( fabs(localForce[i].f[1]) > UNDERFLOW_CAP_STIFFNESS ) ? 1 : do_contrib;
-      localForce[i].f[2] = tm1Disp->f[2];
       do_contrib = ( fabs(localForce[i].f[2]) > UNDERFLOW_CAP_STIFFNESS ) ? 1 : do_contrib;
 
       lnid += lenum;
@@ -2092,6 +2128,67 @@ __global__ void kernelPMLElasticStep(int32_t lenum,
             for (int c = 0; c < 3; c++)
                 sigmaPml[a][c] = mu * (gSp[a][c] + gSp[c][a]);
             sigmaPml[a][a] += -(2.0/3.0) * mu * trSp + Kbulk * trKp;
+        }
+    }
+    /* === Stage 3: Rayleigh stiffness-proportional (b*K) viscoelastic
+     * CPML, gradient side === Single effective displacement (no
+     * shear/kappa split, unlike BKT):
+     *   u_eff = (1 + b/dt) u^n - (b/dt) u^{n-1},   b/dt = c3/c1
+     * relaxed constant-strain stress is the plain elastic form on u_eff
+     *   sigma_re = mu*(g_e+g_e^T) + lambda*tr(g_e)*I,  g_e = grad(u_eff)
+     * which reduces EXACTLY to the elastic stress when b/dt==0
+     * (u_eff==u^n), so the d=0 delta cancellation against the native
+     * (now b*K-inclusive, kernelStiffnessCalcLocal) modal force holds ->
+     * inner edge reflectionless (v10-safe). Reuses the psiShear memory
+     * family (bkt(1) and rayleigh(2) modes are mutually exclusive).
+     * b/dt==0 (any non-Rayleigh, or zeta=0) -> block skipped, sigma
+     * stays elastic -> byte-identical. */
+    else if (gpuData->cpmlPmlMaterialDamping == 2) {
+        double bod = 0.0;
+        const double c1v = gpuData->c1ArrayDevice[eindex];
+        if (c1v != 0.0) bod = gpuData->c3ArrayDevice[eindex] / c1v;
+        if (bod != 0.0) {
+            double gE[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+            for (int n = 0; n < 8; n++) {
+                const int32_t ln = lnid_base[n * lenum];
+                const double ue[3] = {
+                    (double)gpuData->tm1Device[ln].f[0]*(1.0+bod) -
+                        bod*(double)gpuData->tm2Device[ln].f[0],
+                    (double)gpuData->tm1Device[ln].f[1]*(1.0+bod) -
+                        bod*(double)gpuData->tm2Device[ln].f[1],
+                    (double)gpuData->tm1Device[ln].f[2]*(1.0+bod) -
+                        bod*(double)gpuData->tm2Device[ln].f[2] };
+                const double gN[3] = { (n & 1) ? 0.25 : -0.25,
+                                       (n & 2) ? 0.25 : -0.25,
+                                       (n & 4) ? 0.25 : -0.25 };
+                for (int i = 0; i < 3; i++) {
+                    gE[i][0] += ue[i]*gN[0]; gE[i][1] += ue[i]*gN[1];
+                    gE[i][2] += ue[i]*gN[2];
+                }
+            }
+            const double trEr = gE[0][0] + gE[1][1] + gE[2][2];
+            for (int a = 0; a < 3; a++) {
+                for (int c = 0; c < 3; c++)
+                    sigmaRaw[a][c] = mu * (gE[a][c] + gE[c][a]);
+                sigmaRaw[a][a] += lambda * trEr;
+            }
+            double gEp[3][3];
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    const double p_old = (double)
+                        gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx];
+                    const double p_new = bJ[j]*p_old + aJ[j]*gE[i][j];
+                    gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx] =
+                        (solver_float)p_new;
+                    gEp[i][j] = invKJ[j]*gE[i][j] + p_new;
+                }
+            }
+            const double trEp = gEp[0][0] + gEp[1][1] + gEp[2][2];
+            for (int a = 0; a < 3; a++) {
+                for (int c = 0; c < 3; c++)
+                    sigmaPml[a][c] = mu * (gEp[a][c] + gEp[c][a]);
+                sigmaPml[a][a] += lambda * trEp;
+            }
         }
     }
 

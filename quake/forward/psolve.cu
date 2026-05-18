@@ -2777,29 +2777,42 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theTypeOfDamping = typeOfDamping;
   Param.useInfQk = useInfQk;
 
-  /* Auto-enable viscoelastic (BKT) PML for the BKT*+CPML combination.
-   * type_of_damping=bkt(2/3) + abc_type=cpml is catastrophically
-   * UNSTABLE on the material-damping-skipped-on-PML baseline: the field
-   * diverges to NaN by t~40s (confirmed: v5 @23f58bf == v3, byte-
-   * identical blow-up). The viscoelastic CFS-CPML
-   * (cpml_pml_material_damping=bkt) is the validated fix (Stage 2:
-   * stable to 240s, corr 0.994 vs the matching-attenuation CPS). There
-   * is no valid reason to run bkt*+cpml without it, so when it is left
-   * unset/none(0) for that combo we auto-promote to bkt(1) and log
-   * loudly. Explicit =bkt is already 1 (no-op); explicit =rayleigh(2)
-   * with BKT damping stays a real misconfig caught by the abort below.
-   * Only the previously-NaN combo changes behavior; type_of_damping<BKT
-   * (incl. all prior =none CPML validation) is untouched. */
-  if (Param.theAbcType == ABC_CPML && Param.theTypeOfDamping >= BKT &&
+  /* Auto-enable viscoelastic PML for the {BKT*, Rayleigh} + CPML combos.
+   * Material damping skipped on PML over an ATTENUATING interior is
+   * catastrophically unstable: bkt(2/3)+cpml diverges to NaN by t~40s
+   * (confirmed v5 @23f58bf == v3, byte-identical blow-up). rayleigh+cpml
+   * has the IDENTICAL mechanism now that b*K is on the GPU stiffness
+   * path (this commit), so it is expected to fail the same way. The
+   * viscoelastic CFS-CPML is the fix: bkt(1) is fully validated (Stage
+   * 2: stable 240s, corr 0.994 vs matching-attenuation CPS); rayleigh(2)
+   * is implemented the same native+delta way (Stage 3, pending the
+   * user's validation run). There is no valid reason to run these combos
+   * without it, so when cpml_pml_material_damping is unset/none(0) we
+   * auto-promote (BKT-family -> bkt(1), RAYLEIGH -> rayleigh(2)) and log
+   * loudly. An explicit matching value is a no-op here; an explicit
+   * mismatched value still hits the cross-validation abort below. Only
+   * the previously-broken combos change; type_of_damping that is neither
+   * BKT-family nor RAYLEIGH (incl. all prior =none CPML validation) and
+   * all non-CPML runs are untouched. */
+  if (Param.theAbcType == ABC_CPML &&
       Param.theCpmlPmlMaterialDamping == 0) {
-    Param.theCpmlPmlMaterialDamping = 1;
-    if (Global.myID == 0) {
+    int promoted = 0;
+    if (Param.theTypeOfDamping >= BKT) {
+      Param.theCpmlPmlMaterialDamping = 1;
+      promoted = 1;
+    } else if (Param.theTypeOfDamping == RAYLEIGH) {
+      Param.theCpmlPmlMaterialDamping = 2;
+      promoted = 2;
+    }
+    if (promoted != 0 && Global.myID == 0) {
       monitor_print(
           "CPML: auto-enabled viscoelastic PML "
-          "(cpml_pml_material_damping=bkt) -- type_of_damping is "
-          "BKT-family with abc_type=cpml, which is numerically unstable "
-          "(field -> NaN ~t40s) without it; using the validated "
-          "viscoelastic CFS-CPML.\n");
+          "(cpml_pml_material_damping=%s) -- type_of_damping is %s with "
+          "abc_type=cpml, which is numerically unstable (material "
+          "damping skipped on PML over an attenuating interior, "
+          "field -> NaN) without it; using the viscoelastic CFS-CPML.\n",
+          (promoted == 1) ? "bkt" : "rayleigh",
+          (promoted == 1) ? "BKT-family" : "Rayleigh");
     }
   }
 

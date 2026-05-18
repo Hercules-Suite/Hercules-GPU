@@ -595,12 +595,27 @@ offset/component (see the table below).
 	the boundary stays reflectionless). Validated: stable to 240 s, no
 	growth, correct physical static offset, and corr **0.994 (Z) /
 	0.992 (R)** vs the matching-attenuation CPS analytic. **Auto-enable:
-	if `type_of_damping` is BKT-family and `abc_type=cpml`, this is
-	automatically promoted to `bkt` when left unset/`none`** (with a loud
-	startup log) — so the BKT+CPML combination is safe by default and
-	needs no user action. An explicit `=rayleigh` with BKT interior (or
-	vice-versa) is a hard error. `rayleigh` (stiffness-proportional
-	`b*K`, same native+delta path) is in progress; `bkt` is validated.
+	if `type_of_damping` is BKT-family → `bkt`, or `rayleigh` →
+	`rayleigh`, with `abc_type=cpml`, this is automatically promoted when
+	left unset/`none`** (loud startup log) — so both unstable combos are
+	safe by default with no user action. An explicit mismatched value
+	(e.g. `=rayleigh` with a BKT interior) is a hard error.
+	`rayleigh` (stiffness-proportional `b*K`, same native+delta path,
+	single effective displacement `u_eff=(1+b/Δt)uⁿ−(b/Δt)uⁿ⁻¹`,
+	reusing the relaxed-ψ memory) is **implemented (Stage 3)** and
+	pending the user's `type_of_damping=rayleigh` validation run; `bkt`
+	is fully validated.
+	**Behavior change — Rayleigh `b·K` ported to the GPU:** Stage-3 recon
+	found stiffness-proportional `b·K` was *never applied on the main
+	(non-topography) GPU stiffness path* — `kernelStiffnessCalcLocal`
+	used `tm1` only, so `type_of_damping=rayleigh` GPU runs silently lost
+	`b·K` (only mass-proportional `a·M` was active). That is now fixed
+	(`u_eff` fed to the same operator, matching the CPU conventional and
+	GPU-topo paths). Consequence: **existing `type_of_damping=rayleigh`
+	GPU results change** — they gain the previously-missing `b·K` and now
+	match the CPU path. This is a correctness fix, independent of CPML.
+	Every non-Rayleigh run is byte-identical (`c3=0` ⇒ `u_eff≡tm1`), so
+	all BKT/none CPML validation (incl. Stage 2) is unaffected.
 - `cpml_clamp_outer`
 	Optional. `yes` or `no`, default `no`. When `yes`, forces `u = 0` at
 	every node sitting on a domain-extent face that is part of the PML
