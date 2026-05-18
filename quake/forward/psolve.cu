@@ -8751,6 +8751,20 @@ static void solver_init() {
     }
     cudaMemset(Global.gpuData.chiAccDevice, 0,
                Global.myMesh->nharbored * sizeof(solver_float));
+    /* chi_ddot one step older, for the Change-2 leapfrog predictor
+     * (acoustic->elastic forces the solid with 2*chiAcc - chiAccPrev =
+     * chi_ddot^n at the centered level). Potential mode only. */
+    if (cudaMalloc((void**)&(Global.gpuData.chiAccPrevDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic chi_ddot prev buffer\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    cudaMemset(Global.gpuData.chiAccPrevDevice, 0,
+               Global.myMesh->nharbored * sizeof(solver_float));
     /* Targeted HF Kelvin-Voigt damping: per-element gamma*dt*h/(16 rho).
      * No scratch -- reads p^n (Tm1), p^{n-1} (Tm2) directly. */
     if (cudaMalloc(
@@ -9907,6 +9921,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureMassDevice);
   cudaFree(Global.gpuData.pressureMassCorrDevice);
   cudaFree(Global.gpuData.chiAccDevice);
+  cudaFree(Global.gpuData.chiAccPrevDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);

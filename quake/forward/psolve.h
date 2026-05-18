@@ -415,6 +415,13 @@ typedef struct gpu_data_t {
                                        // acoustic step (potential mode only):
                                        // = (chi^{n+1}-2chi^n+chi^{n-1})/dt^2,
                                        // = -p. Smooth (chi is resolved).
+    solver_float* chiAccPrevDevice;    // chi_ddot one step older (potential
+                                       // mode): the acoustic->elastic
+                                       // coupling uses the leapfrog
+                                       // predictor 2*chiAcc - chiAccPrev to
+                                       // force the solid with chi_ddot at
+                                       // the centered level n (Change 2),
+                                       // restoring discrete skew-symmetry.
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;

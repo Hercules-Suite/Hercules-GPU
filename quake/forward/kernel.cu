@@ -461,8 +461,17 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
 
+    /* Change 2: solid forced by chi_ddot at the centered level n via the
+     * leapfrog predictor chi_ddot^n ~ 2*chi_ddot^{n-1} - chi_ddot^{n-2}
+     * (chiAccDevice = chi_ddot^{n-1}, chiAccPrevDevice = chi_ddot^{n-2}).
+     * Paired with Change 1 (fluid <- u_s^n), both coupling directions
+     * are centered at n -> discrete skew-symmetry restored. p = -chi_ddot
+     * keeps the existing normal-sign convention. */
+    const double chiacc_pred =
+        2.0 * (double)gpuData->chiAccDevice[lnid] -
+        (double)gpuData->chiAccPrevDevice[lnid];
     pressure += weight * (potential
-                              ? -(double)gpuData->chiAccDevice[lnid]
+                              ? -chiacc_pred
                               : (double)gpuData->pressureTm1Device[lnid]);
   }
 
@@ -699,8 +708,10 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
       (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
     gpuData->pressureTm2Device[nindex] = 0.0;
     gpuData->pressureForceDevice[nindex] = 0.0;
-    /* Potential mode: chi=0 free surface => p = -chi_ddot = 0 there. */
+    /* Potential mode: chi=0 free surface => p = -chi_ddot = 0 there.
+     * Keep the chi_ddot history consistent (both levels 0). */
     if (potential) {
+      gpuData->chiAccPrevDevice[nindex] = gpuData->chiAccDevice[nindex];
       gpuData->chiAccDevice[nindex] = 0.0;
     }
     return;
@@ -750,6 +761,9 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   if (potential) {
     const solver_float chi_n   = gpuData->pressureTm1Device[nindex];
     const solver_float chi_nm1 = gpuData->pressureTm2Device[nindex];
+    /* Roll the chi_ddot history one step (Change 2): the value being
+     * overwritten becomes chi_ddot^{n-2} for next step's predictor. */
+    gpuData->chiAccPrevDevice[nindex] = gpuData->chiAccDevice[nindex];
     gpuData->chiAccDevice[nindex] =
         (solver_float)((p_new - (solver_float)2.0 * chi_n + chi_nm1) /
                        deltaT2);
