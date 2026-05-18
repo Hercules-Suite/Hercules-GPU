@@ -769,6 +769,18 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
 int32_t search_point( vector3D_t point, octant_t **octant );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
+/* SPECFEM-style flat/regular PML: returns 1 iff element `eindex` is a
+ * CPML PML element whose topographic deformation must be suppressed
+ * (abc_type=cpml AND include_topography=yes AND pml_face_mask!=0).
+ * Single source of truth for the linear/topo mapper partition
+ * (stiffness.cu), the topo GPU mapper filter and the toponodes_mass
+ * gate. Returns 0 whenever CPML is off OR topography is off (so every
+ * flat-surface CPML run -- all Stage 1-4 validation -- is byte-
+ * identical). g_cpmlBuild.face_mask is populated by solver_init()
+ * before stiffness_init()/the topo mapper run, so this is valid at all
+ * call sites. */
+int cpml_pml_flattened_element( int32_t eindex );
+
 
 #ifdef __cplusplus
 }

@@ -7846,9 +7846,14 @@ static void solver_init() {
     double yo = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].y;
     double zo = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z;
 
-    if (Param.includeTopography == YES) {
+    if (Param.includeTopography == YES &&
+        !cpml_pml_flattened_element(eindex)) {
       toponodes_mass(eindex, nodesMass, M, xo, yo, zo);
     } else {
+      /* Flat regular nodal mass. Includes SPECFEM-style flattened CPML
+       * PML elements: their topographic deformation is suppressed so
+       * they stay axis-aligned cubes (consistent with the cube stiffness
+       * path + CPML delta they are re-routed to). */
       for (j = 0; j < 8; j++) {
         nodesMass[j] = M;
       }
@@ -11232,6 +11237,7 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
   int32_t writeIdx = 0;
   int32_t skippedNonlinear = 0;
   int32_t skippedTopoBkt = 0;
+  int32_t skippedFlattenedPml = 0;
   noyesflag_t topoNonlinFlag;
 
   if (g_topoElemCountGPU >= 0) {
@@ -11275,6 +11281,15 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
       skippedTopoBkt++;
       continue;
     }
+    /* SPECFEM-style flat PML: a CPML PML element that also belongs to
+     * topography is re-routed to the cube linear stiffness path
+     * (kernelStiffnessCalcLocal + CPML delta), so it must NOT also be
+     * processed by the curvilinear topo kernel -- exclude it here. The
+     * count is the PML-cap-topography overlap exposed at startup. */
+    if (cpml_pml_flattened_element(eindex)) {
+      skippedFlattenedPml++;
+      continue;
+    }
 
     filteredMapperHost[writeIdx] = eindex;
     filteredConstantsHost[writeIdx] = *topo_ec;
@@ -11287,8 +11302,8 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
     free(filteredConstantsHost);
     if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
       monitor_print(
-          "Topography force path: gpu (eligible=0, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
-          topoCount, skippedNonlinear, skippedTopoBkt);
+          "Topography force path: gpu (eligible=0, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d, flattened-pml-skipped=%d)\n",
+          topoCount, skippedNonlinear, skippedTopoBkt, skippedFlattenedPml);
       g_topoForcePathReported = 1;
     }
     return;
@@ -11341,8 +11356,8 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
     monitor_print(
-        "Topography force path: gpu (eligible=%d, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
-        g_topoElemCountGPU, topoCount, skippedNonlinear, skippedTopoBkt);
+        "Topography force path: gpu (eligible=%d, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d, flattened-pml-skipped=%d)\n",
+        g_topoElemCountGPU, topoCount, skippedNonlinear, skippedTopoBkt, skippedFlattenedPml);
     g_topoForcePathReported = 1;
   }
 }
@@ -15266,6 +15281,28 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
   }
 
   return;
+}
+
+/* SPECFEM-style flat/regular PML. A CPML PML element that also belongs
+ * to topography would otherwise get a curvilinear native force (topo
+ * kernel) plus the cube-based CPML delta -- a native+delta mismatch.
+ * SPECFEM3D builds the C-PML as a regular axis-aligned extruded buffer
+ * (topography not carried into it); we achieve the same by treating
+ * such elements as flat regular cubes: re-routed into the linear cube
+ * stiffness path (kernelStiffnessCalcLocal + the CPML delta), excluded
+ * from the topo GPU mapper, and given flat nodal mass. This predicate
+ * is the single source of truth. Returns 0 unless CPML is on AND
+ * include_topography is on AND this is a PML element, so every
+ * flat-surface CPML run (all Stage 1-4 validation) is byte-identical
+ * and every non-CPML run is untouched. g_cpmlBuild.face_mask is filled
+ * by solver_init() before stiffness_init() and the topo GPU mapper, so
+ * this is valid at all call sites; NULL-guarded for safety. */
+int cpml_pml_flattened_element(int32_t eindex) {
+  if (Param.theAbcType != ABC_CPML) return 0;
+  if (Param.includeTopography != YES) return 0;
+  if (g_cpmlBuild.face_mask == NULL) return 0;
+  if (eindex < 0 || eindex >= Global.myMesh->lenum) return 0;
+  return (g_cpmlBuild.face_mask[eindex] != 0) ? 1 : 0;
 }
 
 /* CPML face-mask: which of the 5 absorbing faces an element touches.
