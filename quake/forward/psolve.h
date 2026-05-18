@@ -398,6 +398,11 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
+    solver_float* pressureMassCorrDevice; // scratch g = M_l^-1 F for the
+                                       // SPECFEM-spirit consistent-mass
+                                       // dispersion correction (NULL/beta=0
+                                       // -> correction skipped, bit-identical)
+    double*       acousticMassCorrCoeffArrayDevice; // per-elem beta*h^3/(16 kappa)
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;

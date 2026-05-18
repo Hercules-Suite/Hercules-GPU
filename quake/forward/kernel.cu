@@ -707,6 +707,79 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 }
 
 
+/* === SPECFEM-spirit consistent-mass dispersion correction ===
+ * The validated acoustic scheme is lumped-mass M_l + consistent-stiffness
+ * K + central difference, which has a spurious high-frequency branch
+ * (~c/4h) that, in a lossless fluid, never decays. The consistent mass
+ * obeys the exact identity  M_c = M_l - (beta h^2/c^2) K  (beta=1/6 for
+ * the 1D-linear element). Substituting into M_c p_tt + K p = 0 and using
+ * the leading-order p_tt ~ -M_l^-1 K p gives the 4th-order, ENERGY-
+ * CONSERVING (no damping) effective force
+ *     F_eff = F + (beta h^2/c^2) K (M_l^-1 F).
+ * Realized in two matrix-free passes on the already-assembled total
+ * force F (interior + PML + interface), using only p^n (no extra stored
+ * level): (1) g = M_l^-1 F at every node; (2) add  +corr * sum_j
+ * shape(i,j) g_j  per acoustic element, corr = beta h^3/(16 kappa).
+ * beta = 0 -> these kernels are not launched (bit-identical to v3).
+ * Note: the corrector's element->node sum is applied on-device without
+ * its own halo (exact on 1 rank; an O(beta (h/lambda)^2) boundary
+ * approximation on multi-rank, far below the validation tolerance --
+ * upgrade to a second force halo if this fix is adopted). */
+__global__ void kernelAcousticMassCorrG(int32_t nharbored,
+                                        gpu_data_t* gpuData)
+{
+  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (nindex >= nharbored) {
+    return;
+  }
+  /* p is Dirichlet 0 at the acoustic free surface and at CPML outer-face
+   * clamped nodes; M_l^-1 F must not drive a correction there. */
+  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL &&
+       gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0) ||
+      (gpuData->pmlClampNodeMaskDevice != NULL &&
+       gpuData->pmlClampNodeMaskDevice[nindex] != 0)) {
+    gpuData->pressureMassCorrDevice[nindex] = 0.0;
+    return;
+  }
+  const solver_float m = gpuData->pressureMassDevice[nindex];
+  gpuData->pressureMassCorrDevice[nindex] =
+      (m > 0.0) ? (gpuData->pressureForceDevice[nindex] / m)
+                : (solver_float)0.0;
+}
+
+__global__ void kernelAcousticMassCorrApply(int32_t lenum,
+                                            gpu_data_t* gpuData)
+{
+  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (eindex >= lenum) {
+    return;
+  }
+  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
+    return;
+  }
+  const double corr = gpuData->acousticMassCorrCoeffArrayDevice[eindex];
+  if (corr == 0.0) {            /* beta = 0 -> strict no-op */
+    return;
+  }
+  solver_float g[8];
+  for (int i = 0; i < 8; i++) {
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    g[i] = gpuData->pressureMassCorrDevice[lnid];
+  }
+  for (int i = 0; i < 8; i++) {
+    double local = 0.0;
+    for (int j = 0; j < 8; j++) {
+      local += acoustic_scalar_stiffness_shape(i, j) * (double)g[j];
+    }
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    /* + sign: F_eff = F + corr * K (M_l^-1 F); the base force uses
+     * -Cstiff * sum shape * p in kernelAcousticPressureForce. */
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)(corr * local));
+  }
+}
+
+
 /* Damping Calc-Conv Kernel
    FLOPs: 63M + 54A + 4T
    MEM  : 4 + 8*(48 + 1) + 2*(8*5 + 8*(6*2 + 3)) = 716

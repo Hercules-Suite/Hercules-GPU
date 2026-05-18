@@ -930,6 +930,11 @@ static struct Param_t {
   double theVsCut;
   double theFactor;
   double theAcousticMeshRefinementFactor;
+  /* SPECFEM-spirit consistent-mass dispersion correction strength beta.
+   * F_eff = F + (beta*h^2/c^2) K M_l^-1 F. beta = 0 (default) -> no
+   * correction (bit-identical to the validated lumped-mass scheme);
+   * beta = 1/6 = 1D-linear consistent-mass value (recommended test). */
+  double theAcousticMassCorrBeta;
   double theFreq;
   double theFreq_Vel;
   double theDeltaT;
@@ -1064,6 +1069,7 @@ static struct Param_t {
            .theStationMediumsFile = "",
            .theAcousticInterfaceDiagnosticsFile = "",
            .theAcousticMeshRefinementFactor = 1.0,
+           .theAcousticMassCorrBeta = 0.0,
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1392,7 +1398,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  36 /* Must adjust this if adding double params */
+  37 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   46 /* Must adjust this if adding int params */
 
@@ -1440,6 +1446,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[26] = Param.basinWaterVp;
   double_message[27] = Param.basinWaterRho;
   double_message[28] = Param.theAcousticMeshRefinementFactor;
+  double_message[36] = Param.theAcousticMassCorrBeta;
   double_message[29] = Param.theCpmlThicknessM;
   double_message[30] = Param.theCpmlReflectionTarget;
   double_message[31] = Param.theCpmlKappaMax;
@@ -1480,6 +1487,7 @@ static void read_parameters(int argc, char** argv) {
   Param.basinWaterVp = double_message[26];
   Param.basinWaterRho = double_message[27];
   Param.theAcousticMeshRefinementFactor = double_message[28];
+  Param.theAcousticMassCorrBeta = double_message[36];
   Param.theCpmlThicknessM = double_message[29];
   Param.theCpmlReflectionTarget = double_message[30];
   Param.theCpmlKappaMax = double_message[31];
@@ -1826,7 +1834,8 @@ static int32_t parse_parameters(const char* numericalin) {
       damping_statistics = 0, use_checkpoint = 0, checkpointing_rate = 0,
       step_meshing = 1, acoustic_interface_max_level = -1;
   double freq_vel = 0., softening_factor = 0, startT = 0.,
-         acoustic_mesh_refinement_factor = 1.0;
+         acoustic_mesh_refinement_factor = 1.0,
+         acoustic_mass_correction_beta = 0.0;
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
        print_station_pressures[64] = "no",
@@ -2212,6 +2221,8 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_double_opt(fp, "basin_water_rho", &Param.basinWaterRho);
   hu_config_get_double_opt(fp, "acoustic_mesh_refinement_factor",
                            &acoustic_mesh_refinement_factor);
+  hu_config_get_double_opt(fp, "acoustic_mass_correction_beta",
+                           &acoustic_mass_correction_beta);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -2693,6 +2704,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theStepMeshingFactor = step_meshing;
   Param.theAcousticInterfaceMaxLevel = acoustic_interface_max_level;
   Param.theAcousticMeshRefinementFactor = acoustic_mesh_refinement_factor;
+  Param.theAcousticMassCorrBeta = acoustic_mass_correction_beta;
   Param.theThresholdDamping = threshold_damping;
   Param.theThresholdVpVs = threshold_VpVs;
   Param.theDampingStatisticsFlag = damping_statistics;
@@ -2772,6 +2784,11 @@ static int32_t parse_parameters(const char* numericalin) {
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
                   Param.theAcousticMeshRefinementFactor);
+    monitor_print("Acoustic mass-corr beta (SPECFEM):  %f%s\n",
+                  Param.theAcousticMassCorrBeta,
+                  (Param.theAcousticMassCorrBeta > 0.0)
+                      ? "  (consistent-mass dispersion correction ON)"
+                      : "  (off -> validated lumped-mass scheme)");
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -8643,6 +8660,26 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    /* SPECFEM-spirit consistent-mass dispersion correction: per-element
+     * coeff beta*h^3/(16 kappa) and a scratch nodal g = M_l^-1 F. */
+    if (cudaMalloc(
+            (void**)&(Global.gpuData.acousticMassCorrCoeffArrayDevice),
+            Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic mass-corr coeff memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.pressureMassCorrDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate acoustic mass-corr scratch\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     if (cudaMalloc(
             (void**)&(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice),
             Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
@@ -8891,6 +8928,7 @@ static void solver_init() {
   uint8_t* pressureFreeSurfaceNodeFlagsArray = NULL;
   double* acousticPressureCoeffArray = NULL;
   double* acousticPressureBoundaryCoeffArray = NULL;
+  double* acousticMassCorrCoeffArray = NULL;
   if (acoustic_pressure_enabled()) {
     acousticElementFlagsArray =
         (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
@@ -8900,9 +8938,12 @@ static void solver_init() {
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     acousticPressureBoundaryCoeffArray =
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
+    acousticMassCorrCoeffArray =
+        (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     if ((acousticElementFlagsArray == NULL) ||
         (pressureFreeSurfaceNodeFlagsArray == NULL) ||
         (acousticPressureCoeffArray == NULL) ||
+        (acousticMassCorrCoeffArray == NULL) ||
         (acousticPressureBoundaryCoeffArray == NULL)) {
       fprintf(stderr,
               "Thread %d: Failed to allocate acoustic pressure host arrays\n",
@@ -9008,6 +9049,16 @@ static void solver_init() {
        * restores the correct leading-order speed Vp. */
       acousticPressureCoeffArray[i] =
           Param.theDeltaTSquared * edata->edgesize / (16.0 * edata->rho);
+      /* SPECFEM-spirit consistent-mass correction coeff:
+       * corr = beta * h^3 / (16 kappa),  kappa = rho * Vp^2.
+       * The correction force is +corr * sum_j shape(i,j) * g_j with
+       * g = M_l^-1 F (so F_eff = F + beta*h^2/c^2 * K M_l^-1 F, the
+       * 4th-order consistent-mass dispersion match). beta = 0 -> 0 ->
+       * correction kernel is a strict no-op (bit-identical to v3). */
+      acousticMassCorrCoeffArray[i] =
+          Param.theAcousticMassCorrBeta * edata->edgesize *
+          edata->edgesize * edata->edgesize /
+          (16.0 * edata->rho * edata->Vp * edata->Vp);
       acousticPressureBoundaryCoeffArray[i] =
           0.25 * edata->edgesize * edata->edgesize;
     }
@@ -9106,6 +9157,16 @@ static void solver_init() {
                    cudaMemcpyHostToDevice) != cudaSuccess) {
       fprintf(stderr,
               "Thread %d: Failed to copy acoustic pressure boundary coefficients\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMemcpy(Global.gpuData.acousticMassCorrCoeffArrayDevice,
+                   acousticMassCorrCoeffArray,
+                   Global.myMesh->lenum * sizeof(double),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to copy acoustic mass-corr coefficients\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -9438,6 +9499,7 @@ static void solver_init() {
   free(pressureFreeSurfaceNodeFlagsArray);
   free(acousticPressureCoeffArray);
   free(acousticPressureBoundaryCoeffArray);
+  free(acousticMassCorrCoeffArray);
   free(pressureFreeSurfaceHost);
   free(g0_shearArray);
   free(g1_shearArray);
@@ -9740,6 +9802,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
+  cudaFree(Global.gpuData.pressureMassCorrDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -9776,6 +9839,7 @@ static void solver_delete() {
   Global.acousticInterfacePml_invKappa = NULL;
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
+  cudaFree(Global.gpuData.acousticMassCorrCoeffArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
   cudaFree(Global.gpuData.g1_shearArrayDevice);
   cudaFree(Global.gpuData.g2_shearArrayDevice);
@@ -11239,6 +11303,28 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
+
+  /* SPECFEM-spirit consistent-mass dispersion correction on the fully
+   * assembled total force F (interior + PML + interface). beta = 0 ->
+   * not launched -> bit-identical to the validated lumped-mass scheme. */
+  if (Param.theAcousticMassCorrBeta > 0.0) {
+    blocksize = 256;
+    gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
+    kernelAcousticMassCorrG<<<gridsize, blocksize, 0,
+                              solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->nharbored, solver->gpuDataDevice);
+    gridsize = (mesh->lenum + blocksize - 1) / blocksize;
+    kernelAcousticMassCorrApply<<<gridsize, blocksize, 0,
+                                  solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: acoustic mass-corr kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
 
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
