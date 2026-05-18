@@ -621,10 +621,17 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const int32_t lnid =
         gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
     if (potential) {
-      const fvector_t u_np1 = gpuData->tm2Device[lnid];   /* u_s^{n+1} */
-      coupling_q += weight * ((double)u_np1.f[0] * normal[0] +
-                              (double)u_np1.f[1] * normal[1] +
-                              (double)u_np1.f[2] * normal[2]);
+      /* Conservative coupling, Change 1: force the fluid with u_s^n
+       * (tm1), the level CENTERED with this fluid update's K_a*chi^n
+       * term -- NOT u_s^{n+1} (tm2). u_s^n is available at the acoustic
+       * step, so this is exact (no predictor) and removes the fluid-side
+       * level mismatch that made the v13 explicit coupling non-skew /
+       * unstable. (Solid-side predictor deferred -- testing Change 1
+       * alone first.) */
+      const fvector_t u_n = gpuData->tm1Device[lnid];   /* u_s^n */
+      coupling_q += weight * ((double)u_n.f[0] * normal[0] +
+                              (double)u_n.f[1] * normal[1] +
+                              (double)u_n.f[2] * normal[2]);
     } else {
       const fvector_t u_next = gpuData->tm2Device[lnid];
       const fvector_t u_curr = gpuData->tm1Device[lnid];
