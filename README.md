@@ -312,7 +312,23 @@ Acoustic-elastic input flags (input file):
 	source term, intended to attenuate the grid-scale (`~c/4h ~ 4.6 Hz` in
 	the flat-water benchmark) content that pumps the lossless water-column
 	eigenmode while passing the physical sub-1 Hz band. Default `no` is
-	bit-identical to earlier runs. Composable with `acoustic_formulation`.
+	bit-identical to earlier runs.
+	**NOT RECOMMENDED — found destabilizing.** Empirically (independent
+	test, default `alpha=0.15`/`strength=1.0`), enabling this on top of
+	`acoustic_formulation=velocity_potential` makes the run physical for
+	~25 s and then diverge exponentially (e-fold ~1.5 s; `|p|` -> 1e16).
+	The filter inserts a stateful IIR pole onto the coupling source
+	*inside* the two-way fluid-solid feedback loop, adding a destabilizing
+	lag to the (delicate, explicit, loosely-coupled but otherwise stable)
+	`velocity_potential` scheme — the same class of in-loop-extra-dynamics
+	instability seen with the chi predictor/lagged-coupling experiments.
+	The residual lossless-fluid pressure ring is better treated as the
+	documented fundamental limitation (it damps physically with any
+	realistic Q) or, for a clean lossless-benchmark *comparison*, by a
+	post-processing low-pass on the OUTPUT pressure (outside the solver
+	loop, cannot affect stability) — not by this in-loop filter. Kept
+	in-tree (default off, code is a faithful EMA) for the record / future
+	passive-form experiments.
 - `acoustic_interface_filter_alpha`
 	Optional. Default `0.15`. EMA coefficient in `filtered = old +
 	alpha*(source - old)`; smaller `alpha` = stronger low-pass (lower
@@ -349,9 +365,15 @@ Acoustic-pressure formulation — correctness fix & known limitation:
 	pressure formulation, not a code bug. `acoustic_formulation=
 	velocity_potential` removes the associated instability/growth and
 	weakens the pump (`~omega` vs `~omega^2`) but does not eliminate the
-	ring in a strictly lossless fluid; the `acoustic_interface_filter`
-	is the targeted suppressor. With any realistic Q (attenuating ocean)
-	the ring damps physically. SPECFEM-spirit conservative-mass and
+	ring in a strictly lossless fluid. The in-loop `acoustic_interface_
+	filter` was tried as a targeted suppressor and **rejected — it
+	destabilizes `velocity_potential`** (an IIR lag inside the FSI
+	feedback loop; see that flag's entry). The residual ring is therefore
+	left as a documented fundamental limitation: with any realistic Q
+	(attenuating ocean) it damps physically, and for a clean lossless-
+	benchmark comparison a post-processing low-pass on the OUTPUT pressure
+	(outside the solver loop) is the safe route. SPECFEM-spirit
+	conservative-mass and
 	displacement-potential alternatives were tried and rejected (the
 	latter is explicit-CFL-unstable here); see the git history /
 	`visualizations/` for the full v3→v19 diagnostic chain.
