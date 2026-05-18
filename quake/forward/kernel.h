@@ -104,6 +104,8 @@ __global__ void kernelAcousticMassCorrG(int32_t nharbored,
 					gpu_data_t* gpuData);
 __global__ void kernelAcousticMassCorrApply(int32_t lenum,
 					    gpu_data_t* gpuData);
+/* Targeted high-frequency stiffness-proportional damping (gamma>0). */
+__global__ void kernelAcousticHFDamp(int32_t lenum, gpu_data_t* gpuData);
 
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,

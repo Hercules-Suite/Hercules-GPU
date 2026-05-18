@@ -403,6 +403,9 @@ typedef struct gpu_data_t {
                                        // dispersion correction (NULL/beta=0
                                        // -> correction skipped, bit-identical)
     double*       acousticMassCorrCoeffArrayDevice; // per-elem beta*h^3/(16 kappa)
+    double*       acousticHFDampCoeffArrayDevice;   // per-elem gamma*dt*h/(16 rho)
+                                       // (Kelvin-Voigt HF damping; gamma=0
+                                       // -> kernel not launched -> identical)
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;

@@ -780,6 +780,51 @@ __global__ void kernelAcousticMassCorrApply(int32_t lenum,
 }
 
 
+/* === Targeted high-frequency (Kelvin-Voigt / stiffness-proportional)
+ * damping ===  M_l p_tt + gamma K p_t + K p = 0. Central difference adds
+ *   F_damp = -gamma*dt * K (p^n - p^{n-1})
+ * to the assembled force. Damping ~ omega^2: it strongly attenuates the
+ * trapped grid-edge branch (kh~pi, ~c/4h ~ 4.6 Hz here; zero group
+ * velocity by lattice symmetry so NO conservative scheme can evacuate it
+ * from the lossless fluid) while leaving the CPS-validated 0-1 Hz band
+ * essentially untouched. This is the acoustic analog of the BKT/Q that
+ * keeps the elastic path stable. p^n = pressureTm1, p^{n-1} =
+ * pressureTm2 (already stored -- no extra state). Per-element coeff
+ * acousticHFDampCoeffArray = gamma*dt*h/(16 rho); gamma = 0 -> kernel
+ * not launched -> bit-identical to the validated scheme. */
+__global__ void kernelAcousticHFDamp(int32_t lenum, gpu_data_t* gpuData)
+{
+  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (eindex >= lenum) {
+    return;
+  }
+  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
+    return;
+  }
+  const double dc = gpuData->acousticHFDampCoeffArrayDevice[eindex];
+  if (dc == 0.0) {              /* gamma = 0 -> strict no-op */
+    return;
+  }
+  solver_float dp[8];           /* p^n - p^{n-1} per node */
+  for (int i = 0; i < 8; i++) {
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    dp[i] = gpuData->pressureTm1Device[lnid] -
+            gpuData->pressureTm2Device[lnid];
+  }
+  for (int i = 0; i < 8; i++) {
+    double local = 0.0;
+    for (int j = 0; j < 8; j++) {
+      local += acoustic_scalar_stiffness_shape(i, j) * (double)dp[j];
+    }
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    /* - sign: F_damp = -gamma*dt * K (p^n - p^{n-1}); same sign
+     * convention as the base -Cstiff*sum shape*p stiffness force. */
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)(-dc * local));
+  }
+}
+
+
 /* Damping Calc-Conv Kernel
    FLOPs: 63M + 54A + 4T
    MEM  : 4 + 8*(48 + 1) + 2*(8*5 + 8*(6*2 + 3)) = 716
