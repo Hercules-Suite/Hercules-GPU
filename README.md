@@ -384,6 +384,18 @@ Acoustic-elastic input flags (input file):
 	before relying on it: long-run stable, displacement still corr ~0.997
 	vs CPS (damping small enough not to perturb the validated physics),
 	and quantified ring reduction.
+	**Empirically-determined sweet spot: `acoustic_quality_factor = 100`**
+	for the flat-water no-attenuation lossless benchmark. A Q sweep
+	(500 → 100 → 50, the v23/v24/v25 runs) located the knee at Q≈100:
+	at the diagnostic far water stations it removes ~50–82 % of the
+	>2 Hz ring energy and lifts the pressure correlation with the exact
+	ring-free CPS to ~0.86 (from ~0.68 lossless), while Z-displacement
+	corr vs CPS stays bit-for-bit-identical at 0.9965 (mean perturbation
+	≤ 0.5 %) and the run is stable. Q=50 doubles the perturbation cost
+	for ≲1 % additional ring removal (the remaining high-frequency
+	content is physical reverberation that CPS also has, and correctly
+	does not respond to more damping); Q=500 under-damps. Sensible band
+	Q ∈ [100, 200].
 
 Acoustic-pressure formulation — correctness fix & known limitation:
 
