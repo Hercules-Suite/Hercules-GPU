@@ -345,6 +345,39 @@ Acoustic-elastic input flags (input file):
 	`source += strength*(filtered - source)`. `1.0` fully replaces the raw
 	source with the filtered one; `0.0` is a no-op. Only used when
 	`acoustic_interface_filter=yes`.
+- `acoustic_quality_factor`
+	Optional. Default unset / `<= 0` ⇒ acoustic is **exactly lossless and
+	bit-identical** to the validated baseline. When set to a positive
+	quality factor `Q`, acoustic (water) elements get a small
+	**stiffness-proportional (Kelvin–Voigt)** damping added directly in
+	the acoustic force kernel: `f -= coeff · beta · K · (pⁿ − pⁿ⁻¹)`,
+	with the same stiffness operator `K` the acoustic force already uses
+	and `beta = theBBase / (2·Q)` (the same band-fitted `theBBase` the
+	elastic stiffness damping uses, so the calibration is consistent;
+	**only** `theBBase` — never `theABase` — so it is purely
+	stiffness-proportional with no mass-proportional `a·M` contamination).
+	This is deliberately **not** the elastic `zeta` route: acoustic
+	elements never traverse the elastic `c3/c4` `b·K` path (verified —
+	`kernel.cu` does not reference `c3/c4`), so un-zeroing the shared
+	`zeta` would add only the wrong-sign mass-proportional `a·M` and no
+	stiffness damping. The damping rate ∝ ω² (Q ∝ 1/ω, high-frequency
+	selective): it attenuates the lossless-cavity `~c/4h` (~4.6 Hz) grid
+	ring while barely touching the sub-source-band physical signal.
+	Applies to **interior** acoustic elements only — it is skipped on
+	CPML PML elements so the PML zone stays pure CPML (consistent with
+	the material-damping skip in commit `5d91b09`). Works for both
+	`pressure` and `velocity_potential`. **Framing (important):** this is
+	a *numerical regularizer for a low-order-discretisation artifact, not
+	physical ocean attenuation* — real seawater Q at the seismic band is
+	~1e5 (PREM ocean Qκ ≈ 5.8e4), which would change nothing observable —
+	and it is **non-SPECFEM**: SPECFEM3D treats the acoustic/fluid domain
+	as lossless (no SLS, no artificial viscosity) and avoids this ring
+	via high-order spectral elements, not fluid damping. Use it only to
+	clean the synthetic no-attenuation lossless benchmark; any run with a
+	realistically attenuating solid Earth does not need it. Validate
+	before relying on it: long-run stable, displacement still corr ~0.997
+	vs CPS (damping small enough not to perturb the validated physics),
+	and quantified ring reduction.
 
 Acoustic-pressure formulation — correctness fix & known limitation:
 
@@ -379,7 +412,13 @@ Acoustic-pressure formulation — correctness fix & known limitation:
 	left as a documented fundamental limitation: with any realistic Q
 	(attenuating ocean) it damps physically, and for a clean lossless-
 	benchmark comparison a post-processing low-pass on the OUTPUT pressure
-	(outside the solver loop) is the safe route. SPECFEM-spirit
+	(outside the solver loop) is the safe route. An opt-in in-model
+	alternative also exists — `acoustic_quality_factor` adds a small
+	stiffness-proportional (Kelvin–Voigt) damping that attenuates the
+	ring at source (high-frequency selective; default off / lossless;
+	see that flag's entry) — but it is a non-SPECFEM numerical
+	regularizer, so the post-processing route remains the conservative
+	default. SPECFEM-spirit
 	conservative-mass and
 	displacement-potential alternatives were tried and rejected (the
 	latter is explicit-CFL-unstable here); see the git history /

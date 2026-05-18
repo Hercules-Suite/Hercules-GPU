@@ -610,6 +610,7 @@ typedef struct gpu_data_t {
     double        acousticInterfaceFilterAlpha;    /* EMA coeff (0,1] */
     double        acousticInterfaceFilterStrength; /* blend [0,1] */
     solver_float* acousticInterfaceFilterStateDevice; /* per-face EMA */
+    double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
 } gpu_data_t;
 

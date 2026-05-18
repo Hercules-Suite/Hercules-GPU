@@ -1062,6 +1062,7 @@ static struct Param_t {
   noyesflag_t theAcousticInterfaceFilter;    /* EMA low-pass on/off */
   double theAcousticInterfaceFilterAlpha;    /* EMA coeff (0,1]      */
   double theAcousticInterfaceFilterStrength; /* blend [0,1]          */
+  double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1119,7 +1120,8 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceFilter = NO,
            .theAcousticInterfaceFilterAlpha = 0.15,
-           .theAcousticInterfaceFilterStrength = 1.0};
+           .theAcousticInterfaceFilterStrength = 1.0,
+           .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1405,7 +1407,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  38 /* Must adjust this if adding double params */
+  39 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   48 /* Must adjust this if adding int params */
 
@@ -1462,6 +1464,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticInterfaceFilterAlpha;
   double_message[37] = Param.theAcousticInterfaceFilterStrength;
+  double_message[38] = Param.theAcousticQualityFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1504,6 +1507,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticInterfaceFilterAlpha = double_message[36];
   Param.theAcousticInterfaceFilterStrength = double_message[37];
+  Param.theAcousticQualityFactor = double_message[38];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2252,6 +2256,16 @@ static int32_t parse_parameters(const char* numericalin) {
                              &Param.theAcousticInterfaceFilterAlpha);
     hu_config_get_double_opt(fp, "acoustic_interface_filter_strength",
                              &Param.theAcousticInterfaceFilterStrength);
+    /* Opt-in acoustic (water) attenuation. acoustic_quality_factor = a
+     * quality factor Q for acoustic elements; > 0 enables a small
+     * stiffness-proportional (Kelvin-Voigt) damping in the acoustic
+     * force kernel (NOT the elastic zeta/a*M route). Unset / <= 0 keeps
+     * acoustic exactly lossless and bit-identical to the validated
+     * baseline. A numerical regularizer for the lossless-cavity grid
+     * ring; not physical ocean attenuation (real seawater Q at the
+     * seismic band is ~1e5). See README. */
+    hu_config_get_double_opt(fp, "acoustic_quality_factor",
+                             &Param.theAcousticQualityFactor);
   }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
@@ -2828,6 +2842,14 @@ static int32_t parse_parameters(const char* numericalin) {
                   (Param.theAcousticVelocityPotential == 1)
                       ? "velocity_potential (p = -dphi/dt; vel continuity) [DEFAULT]"
                       : "pressure (legacy; explicit opt-in)");
+    if (Param.theAcousticQualityFactor > 0.0) {
+      monitor_print("Acoustic quality factor Q:          %.3f "
+                    "(stiffness-proportional; numerical regularizer)\n",
+                    Param.theAcousticQualityFactor);
+    } else {
+      monitor_print("Acoustic quality factor Q:          %s\n",
+                    "lossless (default; bit-identical baseline)");
+    }
     monitor_print("Acoustic interface source filter:   %s",
                   (Param.theAcousticInterfaceFilter == YES) ? "yes" : "no");
     if (Param.theAcousticInterfaceFilter == YES) {
@@ -8715,6 +8737,19 @@ static void solver_init() {
       Param.theAcousticInterfaceFilterAlpha;
   Global.gpuData.acousticInterfaceFilterStrength =
       Param.theAcousticInterfaceFilterStrength;
+  /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient.
+   * Mirrors the elastic stiffness-damping calibration b = zeta*theBBase
+   * (psolve.cu:7523) but uses ONLY theBBase (never theABase), so it is
+   * purely stiffness-proportional -- no mass-proportional a*M
+   * contamination -- with zeta = 1/(2Q). Q unset / <= 0 => beta = 0 =>
+   * acoustic stays exactly lossless (validated baseline bit-identical).
+   * theBBase is set by compute_setab() near the top of solver_init()
+   * (~psolve.cu:6968), earlier in this same function, so it is valid
+   * here. */
+  Global.gpuData.acousticStiffnessDampingBeta =
+      (Param.theAcousticQualityFactor > 0.0)
+          ? (Global.theBBase / (2.0 * Param.theAcousticQualityFactor))
+          : 0.0;
   Global.gpuData.acousticInterfaceFilterStateDevice = NULL;
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;

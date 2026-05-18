@@ -549,6 +549,31 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
   const double stiffness_coeff =
       gpuData->acousticPressureCoeffArrayDevice[eindex];
 
+  /* Optional stiffness-proportional (Kelvin-Voigt) acoustic damping.
+   * Adds -coeff*beta*K*(p^n - p^{n-1}) to the acoustic force: the same
+   * stiffness operator K (acoustic_scalar_stiffness_shape) applied to
+   * the per-step field increment, so the damping rate ~ omega^2
+   * (Q ~ 1/omega: high-frequency selective -- attenuates the lossless-
+   * cavity c/4h grid ring while barely touching the source-band
+   * signal). beta = theBBase/(2 Q_user). When beta == 0 (Q unset/<=0)
+   * the off branch runs the byte-identical original expression with no
+   * pTm2 loads -> validated lossless baseline is bit-identical. Skipped
+   * on CPML PML elements so the PML zone stays pure CPML (consistent
+   * with the material-damping skip in commit 5d91b09). Non-SPECFEM
+   * numerical regularizer; see README. */
+  const double damp_beta = gpuData->acousticStiffnessDampingBeta;
+  const int damp_on =
+      (damp_beta != 0.0) &&
+      !(gpuData->pmlFlagArrayDevice != NULL &&
+        gpuData->pmlFlagArrayDevice[eindex] != 0);
+  solver_float pressure_prev[8];
+  if (damp_on) {
+    for (int i = 0; i < 8; i++) {
+      const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+      pressure_prev[i] = gpuData->pressureTm2Device[lnid];
+    }
+  }
+
   for (int i = 0; i < 8; i++) {
     double local = 0.0;
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
@@ -557,8 +582,19 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
       local += acoustic_scalar_stiffness_shape(i, j) * pressure[j];
     }
 
-    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(-stiffness_coeff * local));
+    if (!damp_on) {
+      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                (solver_float)(-stiffness_coeff * local));
+    } else {
+      double dlocal = 0.0;
+      for (int j = 0; j < 8; j++) {
+        dlocal += acoustic_scalar_stiffness_shape(i, j) *
+                  ((double)pressure[j] - (double)pressure_prev[j]);
+      }
+      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                (solver_float)(-stiffness_coeff * local -
+                               stiffness_coeff * damp_beta * dlocal));
+    }
   }
 }
 
