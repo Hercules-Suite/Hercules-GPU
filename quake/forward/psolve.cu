@@ -930,23 +930,6 @@ static struct Param_t {
   double theVsCut;
   double theFactor;
   double theAcousticMeshRefinementFactor;
-  /* SPECFEM-spirit consistent-mass dispersion correction strength beta.
-   * F_eff = F + (beta*h^2/c^2) K M_l^-1 F. beta = 0 (default) -> no
-   * correction (bit-identical to the validated lumped-mass scheme);
-   * beta = 1/6 = 1D-linear consistent-mass value (recommended test). */
-  double theAcousticMassCorrBeta;
-  /* Targeted high-frequency Kelvin-Voigt (stiffness-proportional)
-   * damping strength gamma. F_damp = -gamma*dt K (p^n - p^{n-1}).
-   * gamma = 0 (default) -> no damping (bit-identical). Attenuates the
-   * trapped kh~pi grid-edge branch a conservative scheme cannot move. */
-  double theAcousticHFDampGamma;
-  /* Acoustic fluid formulation: 0 = pressure (default; bit-identical to
-   * every validated run), 1 = SPECFEM displacement-potential chi (the
-   * acoustic field buffers hold chi; coupling exchanges solid
-   * displacement <-> fluid chi_ddot so the grid-amplified solid
-   * acceleration is never injected -> removes the lossless-fluid pump;
-   * p = -chi_ddot is a derived output). */
-  int theAcousticFormulation;
   double theFreq;
   double theFreq_Vel;
   double theDeltaT;
@@ -1081,9 +1064,6 @@ static struct Param_t {
            .theStationMediumsFile = "",
            .theAcousticInterfaceDiagnosticsFile = "",
            .theAcousticMeshRefinementFactor = 1.0,
-           .theAcousticMassCorrBeta = 0.0,
-           .theAcousticHFDampGamma = 0.0,
-           .theAcousticFormulation = 0,
            .theFreq_Vel = 0,
            .monitor_stats_rate = 50,
            .theSofteningFactor = 0,
@@ -1412,9 +1392,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  38 /* Must adjust this if adding double params */
+  36 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  47 /* Must adjust this if adding int params */
+  46 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1460,8 +1440,6 @@ static void read_parameters(int argc, char** argv) {
   double_message[26] = Param.basinWaterVp;
   double_message[27] = Param.basinWaterRho;
   double_message[28] = Param.theAcousticMeshRefinementFactor;
-  double_message[36] = Param.theAcousticMassCorrBeta;
-  double_message[37] = Param.theAcousticHFDampGamma;
   double_message[29] = Param.theCpmlThicknessM;
   double_message[30] = Param.theCpmlReflectionTarget;
   double_message[31] = Param.theCpmlKappaMax;
@@ -1502,8 +1480,6 @@ static void read_parameters(int argc, char** argv) {
   Param.basinWaterVp = double_message[26];
   Param.basinWaterRho = double_message[27];
   Param.theAcousticMeshRefinementFactor = double_message[28];
-  Param.theAcousticMassCorrBeta = double_message[36];
-  Param.theAcousticHFDampGamma = double_message[37];
   Param.theCpmlThicknessM = double_message[29];
   Param.theCpmlReflectionTarget = double_message[30];
   Param.theCpmlKappaMax = double_message[31];
@@ -1559,7 +1535,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[43] = (int)Param.theCpmlClampOuter;
   int_message[44] = (int)Param.theCpmlNativeStiffness;
   int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
-  int_message[46] = Param.theAcousticFormulation;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1611,7 +1586,6 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
   Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
-  Param.theAcousticFormulation = int_message[46];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1852,9 +1826,7 @@ static int32_t parse_parameters(const char* numericalin) {
       damping_statistics = 0, use_checkpoint = 0, checkpointing_rate = 0,
       step_meshing = 1, acoustic_interface_max_level = -1;
   double freq_vel = 0., softening_factor = 0, startT = 0.,
-         acoustic_mesh_refinement_factor = 1.0,
-         acoustic_mass_correction_beta = 0.0,
-         acoustic_hf_damping_gamma = 0.0;
+         acoustic_mesh_refinement_factor = 1.0;
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
        print_station_pressures[64] = "no",
@@ -1862,7 +1834,6 @@ static int32_t parse_parameters(const char* numericalin) {
        implement_drm[64] = "no", include_topography[64] = "no",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
-       acoustic_formulation[64] = "pressure",
        reconstruct_acoustic_plane_displacements[64] = "no",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
@@ -2241,11 +2212,6 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_double_opt(fp, "basin_water_rho", &Param.basinWaterRho);
   hu_config_get_double_opt(fp, "acoustic_mesh_refinement_factor",
                            &acoustic_mesh_refinement_factor);
-  hu_config_get_double_opt(fp, "acoustic_mass_correction_beta",
-                           &acoustic_mass_correction_beta);
-  hu_config_get_double_opt(fp, "acoustic_hf_damping_gamma",
-                           &acoustic_hf_damping_gamma);
-  parsetext(fp, "acoustic_formulation", 's', &acoustic_formulation);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -2727,17 +2693,6 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theStepMeshingFactor = step_meshing;
   Param.theAcousticInterfaceMaxLevel = acoustic_interface_max_level;
   Param.theAcousticMeshRefinementFactor = acoustic_mesh_refinement_factor;
-  Param.theAcousticMassCorrBeta = acoustic_mass_correction_beta;
-  Param.theAcousticHFDampGamma = acoustic_hf_damping_gamma;
-  if (strcasecmp(acoustic_formulation, "pressure") == 0) {
-    Param.theAcousticFormulation = 0;
-  } else if (strcasecmp(acoustic_formulation, "potential") == 0) {
-    Param.theAcousticFormulation = 1;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_formulation must be 'pressure' or 'potential': "
-                 "got '%s'\n", acoustic_formulation);
-  }
   Param.theThresholdDamping = threshold_damping;
   Param.theThresholdVpVs = threshold_VpVs;
   Param.theDampingStatisticsFlag = damping_statistics;
@@ -2817,20 +2772,6 @@ static int32_t parse_parameters(const char* numericalin) {
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
                   Param.theAcousticMeshRefinementFactor);
-    monitor_print("Acoustic mass-corr beta (SPECFEM):  %f%s\n",
-                  Param.theAcousticMassCorrBeta,
-                  (Param.theAcousticMassCorrBeta > 0.0)
-                      ? "  (consistent-mass dispersion correction ON)"
-                      : "  (off -> validated lumped-mass scheme)");
-    monitor_print("Acoustic HF damping gamma (K-Voigt): %f%s\n",
-                  Param.theAcousticHFDampGamma,
-                  (Param.theAcousticHFDampGamma > 0.0)
-                      ? "  (stiffness-proportional HF damping ON)"
-                      : "  (off)");
-    monitor_print("Acoustic formulation:               %s\n",
-                  (Param.theAcousticFormulation == 1)
-                      ? "potential (SPECFEM chi; p = -chi_ddot)"
-                      : "pressure (validated default)");
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -7057,22 +6998,9 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    /* Host mirror of chiAccDevice (= chi_ddot = -p) for station pressure
-     * value/gradient output in potential mode. */
-    if (cudaMallocHost(&(Global.mySolver->pressure_chiacc),
-                       Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic chi_ddot pinned memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     memset(Global.mySolver->pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_tm2, 0,
-           Global.myMesh->nharbored * sizeof(solver_float));
-    memset(Global.mySolver->pressure_chiacc, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_force, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
@@ -8715,67 +8643,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    /* SPECFEM-spirit consistent-mass dispersion correction: per-element
-     * coeff beta*h^3/(16 kappa) and a scratch nodal g = M_l^-1 F. */
-    if (cudaMalloc(
-            (void**)&(Global.gpuData.acousticMassCorrCoeffArrayDevice),
-            Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic mass-corr coeff memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureMassCorrDevice),
-                   Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic mass-corr scratch\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    /* SPECFEM potential mode: chi_ddot (= -p) at the last completed
-     * acoustic step. Allocated whenever acoustic is enabled; only
-     * written/read when acousticFormulation==1, so pressure mode is
-     * bit-identical. */
-    Global.gpuData.acousticFormulation = Param.theAcousticFormulation;
-    if (cudaMalloc((void**)&(Global.gpuData.chiAccDevice),
-                   Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic chi_ddot buffer\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    cudaMemset(Global.gpuData.chiAccDevice, 0,
-               Global.myMesh->nharbored * sizeof(solver_float));
-    /* chi_ddot one step older, for the Change-2 leapfrog predictor
-     * (acoustic->elastic forces the solid with 2*chiAcc - chiAccPrev =
-     * chi_ddot^n at the centered level). Potential mode only. */
-    if (cudaMalloc((void**)&(Global.gpuData.chiAccPrevDevice),
-                   Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic chi_ddot prev buffer\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    cudaMemset(Global.gpuData.chiAccPrevDevice, 0,
-               Global.myMesh->nharbored * sizeof(solver_float));
-    /* Targeted HF Kelvin-Voigt damping: per-element gamma*dt*h/(16 rho).
-     * No scratch -- reads p^n (Tm1), p^{n-1} (Tm2) directly. */
-    if (cudaMalloc(
-            (void**)&(Global.gpuData.acousticHFDampCoeffArrayDevice),
-            Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic HF-damp coeff memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     if (cudaMalloc(
             (void**)&(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice),
             Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
@@ -9024,8 +8891,6 @@ static void solver_init() {
   uint8_t* pressureFreeSurfaceNodeFlagsArray = NULL;
   double* acousticPressureCoeffArray = NULL;
   double* acousticPressureBoundaryCoeffArray = NULL;
-  double* acousticMassCorrCoeffArray = NULL;
-  double* acousticHFDampCoeffArray = NULL;
   if (acoustic_pressure_enabled()) {
     acousticElementFlagsArray =
         (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
@@ -9035,15 +8900,9 @@ static void solver_init() {
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     acousticPressureBoundaryCoeffArray =
         (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
-    acousticMassCorrCoeffArray =
-        (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
-    acousticHFDampCoeffArray =
-        (double*)calloc((size_t)Global.myMesh->lenum, sizeof(double));
     if ((acousticElementFlagsArray == NULL) ||
         (pressureFreeSurfaceNodeFlagsArray == NULL) ||
         (acousticPressureCoeffArray == NULL) ||
-        (acousticMassCorrCoeffArray == NULL) ||
-        (acousticHFDampCoeffArray == NULL) ||
         (acousticPressureBoundaryCoeffArray == NULL)) {
       fprintf(stderr,
               "Thread %d: Failed to allocate acoustic pressure host arrays\n",
@@ -9149,22 +9008,6 @@ static void solver_init() {
        * restores the correct leading-order speed Vp. */
       acousticPressureCoeffArray[i] =
           Param.theDeltaTSquared * edata->edgesize / (16.0 * edata->rho);
-      /* SPECFEM-spirit consistent-mass correction coeff:
-       * corr = beta * h^3 / (16 kappa),  kappa = rho * Vp^2.
-       * The correction force is +corr * sum_j shape(i,j) * g_j with
-       * g = M_l^-1 F (so F_eff = F + beta*h^2/c^2 * K M_l^-1 F, the
-       * 4th-order consistent-mass dispersion match). beta = 0 -> 0 ->
-       * correction kernel is a strict no-op (bit-identical to v3). */
-      acousticMassCorrCoeffArray[i] =
-          Param.theAcousticMassCorrBeta * edata->edgesize *
-          edata->edgesize * edata->edgesize /
-          (16.0 * edata->rho * edata->Vp * edata->Vp);
-      /* Targeted HF Kelvin-Voigt damping coeff: gamma*dt*h/(16 rho).
-       * Force = -coeff * sum_j shape(i,j) (p^n_j - p^{n-1}_j), damping
-       * ~ omega^2. gamma = 0 -> 0 -> kernel a strict no-op. */
-      acousticHFDampCoeffArray[i] =
-          Param.theAcousticHFDampGamma * Param.theDeltaT *
-          edata->edgesize / (16.0 * edata->rho);
       acousticPressureBoundaryCoeffArray[i] =
           0.25 * edata->edgesize * edata->edgesize;
     }
@@ -9263,26 +9106,6 @@ static void solver_init() {
                    cudaMemcpyHostToDevice) != cudaSuccess) {
       fprintf(stderr,
               "Thread %d: Failed to copy acoustic pressure boundary coefficients\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    if (cudaMemcpy(Global.gpuData.acousticMassCorrCoeffArrayDevice,
-                   acousticMassCorrCoeffArray,
-                   Global.myMesh->lenum * sizeof(double),
-                   cudaMemcpyHostToDevice) != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to copy acoustic mass-corr coefficients\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-    if (cudaMemcpy(Global.gpuData.acousticHFDampCoeffArrayDevice,
-                   acousticHFDampCoeffArray,
-                   Global.myMesh->lenum * sizeof(double),
-                   cudaMemcpyHostToDevice) != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to copy acoustic HF-damp coefficients\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -9615,8 +9438,6 @@ static void solver_init() {
   free(pressureFreeSurfaceNodeFlagsArray);
   free(acousticPressureCoeffArray);
   free(acousticPressureBoundaryCoeffArray);
-  free(acousticMassCorrCoeffArray);
-  free(acousticHFDampCoeffArray);
   free(pressureFreeSurfaceHost);
   free(g0_shearArray);
   free(g1_shearArray);
@@ -9919,9 +9740,6 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
-  cudaFree(Global.gpuData.pressureMassCorrDevice);
-  cudaFree(Global.gpuData.chiAccDevice);
-  cudaFree(Global.gpuData.chiAccPrevDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -9958,8 +9776,6 @@ static void solver_delete() {
   Global.acousticInterfacePml_invKappa = NULL;
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
-  cudaFree(Global.gpuData.acousticMassCorrCoeffArrayDevice);
-  cudaFree(Global.gpuData.acousticHFDampCoeffArrayDevice);
   cudaFree(Global.gpuData.g0_shearArrayDevice);
   cudaFree(Global.gpuData.g1_shearArrayDevice);
   cudaFree(Global.gpuData.g2_shearArrayDevice);
@@ -10155,9 +9971,6 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_damp != NULL) {
     cudaFreeHost(Global.mySolver->pressure_damp);
-  }
-  if (Global.mySolver->pressure_chiacc != NULL) {
-    cudaFreeHost(Global.mySolver->pressure_chiacc);
   }
 
   if (Param.theTypeOfDamping >= BKT) {
@@ -11427,52 +11240,11 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
 
-  /* SPECFEM-spirit consistent-mass dispersion correction on the fully
-   * assembled total force F (interior + PML + interface). beta = 0 ->
-   * not launched -> bit-identical to the validated lumped-mass scheme. */
-  if (Param.theAcousticMassCorrBeta > 0.0) {
-    blocksize = 256;
-    gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-    kernelAcousticMassCorrG<<<gridsize, blocksize, 0,
-                              solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->nharbored, solver->gpuDataDevice);
-    gridsize = (mesh->lenum + blocksize - 1) / blocksize;
-    kernelAcousticMassCorrApply<<<gridsize, blocksize, 0,
-                                  solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->lenum, solver->gpuDataDevice);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: acoustic mass-corr kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
-  /* Targeted HF Kelvin-Voigt damping on the assembled total force F
-   * (reads p^n=Tm1, p^{n-1}=Tm2). gamma = 0 -> not launched ->
-   * bit-identical to the validated scheme. Independent of / composable
-   * with the beta consistent-mass correction above. */
-  if (Param.theAcousticHFDampGamma > 0.0) {
-    blocksize = 256;
-    gridsize = (mesh->lenum + blocksize - 1) / blocksize;
-    kernelAcousticHFDamp<<<gridsize, blocksize, 0,
-                           solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->lenum, solver->gpuDataDevice);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: acoustic HF-damp kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
   kernelAcousticPressureUpdate<<<gridsize, blocksize, 0,
                                  solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice, Param.theDeltaTSquared);
+      mesh->nharbored, solver->gpuDataDevice);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -11487,15 +11259,6 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
-  /* Potential mode: also mirror chi_ddot (= -p) to host for station
-   * pressure output. Not copied in pressure mode -> identical PCIe path. */
-  if (Param.theAcousticFormulation == 1) {
-    cudaMemcpyAsync(solver->pressure_chiacc, solver->gpuData->chiAccDevice,
-                    mesh->nharbored * sizeof(solver_float),
-                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-    solver->gpu_spec->numbytespci +=
-        mesh->nharbored * (int64_t)sizeof(solver_float);
-  }
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
   memset(solver->pressure_force, 0,
@@ -13069,21 +12832,6 @@ static void solver_run() {
     }
     Timer_Stop("Physics Force Prep");
 
-    /* SPECFEM chi (potential) conservative-leapfrog reorder: run the
-     * fluid sub-step HERE -- after step-top buffer load + station/plane
-     * output sampling, before the elastic stiffness force and before the
-     * acoustic->elastic coupling deposit. It uses chi^n and u_s^n (tm1,
-     * Change 1), both already on device, and is self-contained
-     * (pressureForce/pressure/tm1 only; own sync+MPI). The acoustic->
-     * elastic coupling at solver_compute_force_acoustic_pressure then
-     * reads the EXACT same-iteration chi_ddot^n, and the solid update
-     * consumes -G^T chi_ddot^n: exact discrete skew pair, no predictor.
-     * Pressure mode is unaffected -- it keeps the original late call
-     * site below (bit-identical to the validated v6 baseline). */
-    if (Param.theAcousticFormulation == 1) {
-      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
-    }
-
     Timer_Start("Physics Force Kernels Enqueue");
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
                      Global.theK2);
@@ -13150,13 +12898,7 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Wait/Post");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-    /* Pressure mode (default): original late call site (after the solid
-     * update) -> bit-identical to the validated v6 baseline. Potential
-     * mode runs the fluid sub-step early (see the gated call above), so
-     * skip it here to avoid running it twice. */
-    if (Param.theAcousticFormulation != 1) {
-      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
-    }
+    solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Physics Displacement Wait/Post");
@@ -18098,15 +17840,9 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
-  /* Potential mode: the output pressure is p = -chi_ddot (pressure_tm1
-   * holds chi); use the host chi_ddot mirror. Pressure mode unchanged. */
-  const int potential_out = (Param.theAcousticFormulation == 1) &&
-                            (Global.mySolver->pressure_chiacc != NULL);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const double pressure =
-        potential_out
-            ? -(double)Global.mySolver->pressure_chiacc[nodesToInterpolate[iPhi]]
-            : (double)Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+        Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
     const double dphidx =
         sx[iPhi] * (1.0 + sy[iPhi] * eta) *
         (1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -18404,18 +18140,11 @@ static double interpolate_station_pressure_value(int32_t iStation) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
-  /* Potential mode: p = -chi_ddot (pressure_tm1 holds chi). */
-  const int potential_out = (Param.theAcousticFormulation == 1) &&
-                            (Global.mySolver->pressure_chiacc != NULL);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
                        (1 + xi[1][iPhi] * localCoords.x[1]) *
                        (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-    pressure += phi * (potential_out
-                           ? -(double)Global.mySolver
-                                  ->pressure_chiacc[nodesToInterpolate[iPhi]]
-                           : (double)Global.mySolver
-                                  ->pressure_tm1[nodesToInterpolate[iPhi]]);
+    pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
   }
 
   return pressure;

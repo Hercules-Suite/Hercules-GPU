@@ -447,32 +447,15 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           : center[2]};
   const int32_t force_eindex = (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* force_center = (adjacent_eindex >= 0) ? adjacent_center : center;
-  const int potential = (gpuData->acousticFormulation == 1);
   double pressure = 0.0;
 
-  /* Solid feels sigma.n = -p n. Pressure mode: p = pressureTm1 (the
-   * primary field). Potential mode: p = -chi_ddot, with chi_ddot the
-   * SMOOTH lagged value from the previous acoustic step (chiAccDevice,
-   * written by kernelAcousticPressureUpdate). The p = -chi_ddot
-   * substitution preserves the existing normal-sign convention exactly. */
   for (int i = 0; i < 8; i++) {
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
 
-    /* Conservative-leapfrog reorder: the fluid sub-step now runs BEFORE
-     * this acoustic->elastic coupling within the same iteration, so
-     * chiAccDevice already holds the EXACT same-iteration chi_ddot^n
-     * (no lag, no extrapolation). Paired with Change 1 (fluid <- u_s^n)
-     * the two coupling directions are an exact discrete transpose at the
-     * centered level n -> energy-conserving, no predictor. The Change-2
-     * predictor (2*chiAcc - chiAccPrev) is therefore reverted; chiAccPrev
-     * is left allocated/rolled but unused. p = -chi_ddot preserves the
-     * existing normal-sign convention. */
-    pressure += weight * (potential
-                              ? -(double)gpuData->chiAccDevice[lnid]
-                              : (double)gpuData->pressureTm1Device[lnid]);
+    pressure += weight * (double)gpuData->pressureTm1Device[lnid];
   }
 
   /* CPML-aware interface correction. On interface faces inside the PML
@@ -480,7 +463,7 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
    * CPML stretches gradients: p~ = invKappa_n*p + psi, with
    * psi <- b_n*psi + a_n*p along the face-normal axis. Identity (no-op)
    * on non-PML faces (flag=0) and at the PML inner edge (a=0,b=1,iK=1). */
-  if (!potential && gpuData->acousticInterfacePmlFlagDevice != NULL &&
+  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
       gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
     const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
     const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
@@ -609,16 +592,8 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* accel_center =
       (adjacent_eindex >= 0) ? adjacent_center : center;
-  const int potential = (gpuData->acousticFormulation == 1);
+  double accel_n = 0.0;
 
-  /* coupling_q is what the fluid RHS sees from the solid:
-   *  - pressure mode (default): accel_n = (d^2 u_s/dt^2).n, the raw 2nd
-   *    time-difference -> the validated path (and the omega^2 grid pump).
-   *  - potential mode (SPECFEM chi): disp_n = u_s^{n+1}.n, the SMOOTH
-   *    solid displacement (tm2 = freshly-updated u_s; no time
-   *    difference). The acoustic RHS term is +G u_s (not -C u_s_ddot),
-   *    so the grid-amplified solid acceleration is never injected. */
-  double coupling_q = 0.0;
   for (int i = 0; i < 8; i++) {
     const double weight =
         acoustic_shape_value_at(i, accel_center[0], accel_center[1],
@@ -629,56 +604,38 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 
     const int32_t lnid =
         gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
-    if (potential) {
-      /* Conservative coupling, Change 1: force the fluid with u_s^n
-       * (tm1), the level CENTERED with this fluid update's K_a*chi^n
-       * term -- NOT u_s^{n+1} (tm2). u_s^n is available at the acoustic
-       * step, so this is exact (no predictor) and removes the fluid-side
-       * level mismatch that made the v13 explicit coupling non-skew /
-       * unstable. (Solid-side predictor deferred -- testing Change 1
-       * alone first.) */
-      const fvector_t u_n = gpuData->tm1Device[lnid];   /* u_s^n */
-      coupling_q += weight * ((double)u_n.f[0] * normal[0] +
-                              (double)u_n.f[1] * normal[1] +
-                              (double)u_n.f[2] * normal[2]);
-    } else {
-      const fvector_t u_next = gpuData->tm2Device[lnid];
-      const fvector_t u_curr = gpuData->tm1Device[lnid];
-      const fvector_t u_prev = gpuData->tm3Device[lnid];
-      coupling_q += weight *
-                 ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-                    (double)u_prev.f[0]) *
-                       invDeltaT2 * normal[0]) +
-                  (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-                    (double)u_prev.f[1]) *
-                       invDeltaT2 * normal[1]) +
-                  (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-                    (double)u_prev.f[2]) *
-                       invDeltaT2 * normal[2]));
-    }
+    const fvector_t u_next = gpuData->tm2Device[lnid];
+    const fvector_t u_curr = gpuData->tm1Device[lnid];
+    const fvector_t u_prev = gpuData->tm3Device[lnid];
+
+    accel_n += weight *
+               ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
+                  (double)u_prev.f[0]) *
+                     invDeltaT2 * normal[0]) +
+                (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
+                  (double)u_prev.f[1]) *
+                     invDeltaT2 * normal[1]) +
+                (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
+                  (double)u_prev.f[2]) *
+                     invDeltaT2 * normal[2]));
   }
 
   /* CPML-aware interface correction (mirror of the pressure->force path,
    * with its own memory variable so the two coupling directions stay
-   * symmetric). Identity on non-PML faces / at the PML inner edge.
-   * Pressure mode only; the chi-coupling CPML-interface correction is
-   * re-derived in Phase B (most flat-water interface faces are interior
-   * -> flag=0 -> this block is already a no-op there). */
-  if (!potential && gpuData->acousticInterfacePmlFlagDevice != NULL &&
+   * symmetric). Identity on non-PML faces / at the PML inner edge. */
+  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
       gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
     const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
     const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
     const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
     const double psi_old =
         (double)gpuData->acousticInterfacePsiAccelDevice[faceIndex];
-    const double psi_new = b * psi_old + a * coupling_q;
+    const double psi_new = b * psi_old + a * accel_n;
     gpuData->acousticInterfacePsiAccelDevice[faceIndex] =
         (solver_float)psi_new;
-    coupling_q = iK * coupling_q + psi_new;
+    accel_n = iK * accel_n + psi_new;
   }
 
-  /* pressure: -C u_s_ddot ; potential: +G u_s (sign flip, same |coeff|). */
-  const double s = potential ? 1.0 : -1.0;
   for (int i = 0; i < 8; i++) {
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
@@ -689,16 +646,14 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
     atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(s * face_coeff * weight * deltaT2 * coupling_q));
+              (solver_float)(-face_coeff * weight * deltaT2 * accel_n));
   }
 }
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-                                             gpu_data_t* gpuData,
-                                             double deltaT2)
+                                             gpu_data_t* gpuData)
 {
   lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  const int potential = (gpuData->acousticFormulation == 1);
 
   if (nindex >= nharbored) {
     return;
@@ -708,12 +663,6 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
       (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
     gpuData->pressureTm2Device[nindex] = 0.0;
     gpuData->pressureForceDevice[nindex] = 0.0;
-    /* Potential mode: chi=0 free surface => p = -chi_ddot = 0 there.
-     * Keep the chi_ddot history consistent (both levels 0). */
-    if (potential) {
-      gpuData->chiAccPrevDevice[nindex] = gpuData->chiAccDevice[nindex];
-      gpuData->chiAccDevice[nindex] = 0.0;
-    }
     return;
   }
 
@@ -753,142 +702,8 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
     p_new = 0.0;
   }
 
-  /* Potential mode: store chi_ddot = (chi^{n+1}-2chi^n+chi^{n-1})/dt^2
-   * (= -p, the derived pressure output and the smooth quantity the
-   * elastic coupling reads next step). chi^n = Tm1, chi^{n-1} = Tm2
-   * (read before the store below). chi is smooth (driven by the smooth
-   * solid displacement), so chi_ddot is clean -- no grid pump. */
-  if (potential) {
-    const solver_float chi_n   = gpuData->pressureTm1Device[nindex];
-    const solver_float chi_nm1 = gpuData->pressureTm2Device[nindex];
-    /* Roll the chi_ddot history one step (Change 2): the value being
-     * overwritten becomes chi_ddot^{n-2} for next step's predictor. */
-    gpuData->chiAccPrevDevice[nindex] = gpuData->chiAccDevice[nindex];
-    gpuData->chiAccDevice[nindex] =
-        (solver_float)((p_new - (solver_float)2.0 * chi_n + chi_nm1) /
-                       deltaT2);
-  }
-
   gpuData->pressureTm2Device[nindex] = p_new;
   gpuData->pressureForceDevice[nindex] = 0.0;
-}
-
-
-/* === SPECFEM-spirit consistent-mass dispersion correction ===
- * The validated acoustic scheme is lumped-mass M_l + consistent-stiffness
- * K + central difference, which has a spurious high-frequency branch
- * (~c/4h) that, in a lossless fluid, never decays. The consistent mass
- * obeys the exact identity  M_c = M_l - (beta h^2/c^2) K  (beta=1/6 for
- * the 1D-linear element). Substituting into M_c p_tt + K p = 0 and using
- * the leading-order p_tt ~ -M_l^-1 K p gives the 4th-order, ENERGY-
- * CONSERVING (no damping) effective force
- *     F_eff = F + (beta h^2/c^2) K (M_l^-1 F).
- * Realized in two matrix-free passes on the already-assembled total
- * force F (interior + PML + interface), using only p^n (no extra stored
- * level): (1) g = M_l^-1 F at every node; (2) add  +corr * sum_j
- * shape(i,j) g_j  per acoustic element, corr = beta h^3/(16 kappa).
- * beta = 0 -> these kernels are not launched (bit-identical to v3).
- * Note: the corrector's element->node sum is applied on-device without
- * its own halo (exact on 1 rank; an O(beta (h/lambda)^2) boundary
- * approximation on multi-rank, far below the validation tolerance --
- * upgrade to a second force halo if this fix is adopted). */
-__global__ void kernelAcousticMassCorrG(int32_t nharbored,
-                                        gpu_data_t* gpuData)
-{
-  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (nindex >= nharbored) {
-    return;
-  }
-  /* p is Dirichlet 0 at the acoustic free surface and at CPML outer-face
-   * clamped nodes; M_l^-1 F must not drive a correction there. */
-  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL &&
-       gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0) ||
-      (gpuData->pmlClampNodeMaskDevice != NULL &&
-       gpuData->pmlClampNodeMaskDevice[nindex] != 0)) {
-    gpuData->pressureMassCorrDevice[nindex] = 0.0;
-    return;
-  }
-  const solver_float m = gpuData->pressureMassDevice[nindex];
-  gpuData->pressureMassCorrDevice[nindex] =
-      (m > 0.0) ? (gpuData->pressureForceDevice[nindex] / m)
-                : (solver_float)0.0;
-}
-
-__global__ void kernelAcousticMassCorrApply(int32_t lenum,
-                                            gpu_data_t* gpuData)
-{
-  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (eindex >= lenum) {
-    return;
-  }
-  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
-    return;
-  }
-  const double corr = gpuData->acousticMassCorrCoeffArrayDevice[eindex];
-  if (corr == 0.0) {            /* beta = 0 -> strict no-op */
-    return;
-  }
-  solver_float g[8];
-  for (int i = 0; i < 8; i++) {
-    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    g[i] = gpuData->pressureMassCorrDevice[lnid];
-  }
-  for (int i = 0; i < 8; i++) {
-    double local = 0.0;
-    for (int j = 0; j < 8; j++) {
-      local += acoustic_scalar_stiffness_shape(i, j) * (double)g[j];
-    }
-    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    /* + sign: F_eff = F + corr * K (M_l^-1 F); the base force uses
-     * -Cstiff * sum shape * p in kernelAcousticPressureForce. */
-    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(corr * local));
-  }
-}
-
-
-/* === Targeted high-frequency (Kelvin-Voigt / stiffness-proportional)
- * damping ===  M_l p_tt + gamma K p_t + K p = 0. Central difference adds
- *   F_damp = -gamma*dt * K (p^n - p^{n-1})
- * to the assembled force. Damping ~ omega^2: it strongly attenuates the
- * trapped grid-edge branch (kh~pi, ~c/4h ~ 4.6 Hz here; zero group
- * velocity by lattice symmetry so NO conservative scheme can evacuate it
- * from the lossless fluid) while leaving the CPS-validated 0-1 Hz band
- * essentially untouched. This is the acoustic analog of the BKT/Q that
- * keeps the elastic path stable. p^n = pressureTm1, p^{n-1} =
- * pressureTm2 (already stored -- no extra state). Per-element coeff
- * acousticHFDampCoeffArray = gamma*dt*h/(16 rho); gamma = 0 -> kernel
- * not launched -> bit-identical to the validated scheme. */
-__global__ void kernelAcousticHFDamp(int32_t lenum, gpu_data_t* gpuData)
-{
-  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (eindex >= lenum) {
-    return;
-  }
-  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
-    return;
-  }
-  const double dc = gpuData->acousticHFDampCoeffArrayDevice[eindex];
-  if (dc == 0.0) {              /* gamma = 0 -> strict no-op */
-    return;
-  }
-  solver_float dp[8];           /* p^n - p^{n-1} per node */
-  for (int i = 0; i < 8; i++) {
-    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    dp[i] = gpuData->pressureTm1Device[lnid] -
-            gpuData->pressureTm2Device[lnid];
-  }
-  for (int i = 0; i < 8; i++) {
-    double local = 0.0;
-    for (int j = 0; j < 8; j++) {
-      local += acoustic_scalar_stiffness_shape(i, j) * (double)dp[j];
-    }
-    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    /* - sign: F_damp = -gamma*dt * K (p^n - p^{n-1}); same sign
-     * convention as the base -Cstiff*sum shape*p stiffness force. */
-    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(-dc * local));
-  }
 }
 
 

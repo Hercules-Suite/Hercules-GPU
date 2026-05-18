@@ -97,16 +97,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 						     double deltaT2);
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-					     gpu_data_t* gpuData,
-					     double deltaT2);
-
-/* SPECFEM-spirit consistent-mass dispersion correction (beta>0 only). */
-__global__ void kernelAcousticMassCorrG(int32_t nharbored,
-					gpu_data_t* gpuData);
-__global__ void kernelAcousticMassCorrApply(int32_t lenum,
-					    gpu_data_t* gpuData);
-/* Targeted high-frequency stiffness-proportional damping (gamma>0). */
-__global__ void kernelAcousticHFDamp(int32_t lenum, gpu_data_t* gpuData);
+					     gpu_data_t* gpuData);
 
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,

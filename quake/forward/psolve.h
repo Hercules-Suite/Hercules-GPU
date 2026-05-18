@@ -398,30 +398,6 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
-    solver_float* pressureMassCorrDevice; // scratch g = M_l^-1 F for the
-                                       // SPECFEM-spirit consistent-mass
-                                       // dispersion correction (NULL/beta=0
-                                       // -> correction skipped, bit-identical)
-    double*       acousticMassCorrCoeffArrayDevice; // per-elem beta*h^3/(16 kappa)
-    double*       acousticHFDampCoeffArrayDevice;   // per-elem gamma*dt*h/(16 rho)
-                                       // (Kelvin-Voigt HF damping; gamma=0
-                                       // -> kernel not launched -> identical)
-    int           acousticFormulation; // 0 = pressure (default, bit-identical
-                                       // to all validated runs); 1 = SPECFEM
-                                       // displacement-potential chi (the
-                                       // pressure field buffers hold chi;
-                                       // p = -chi_ddot is a derived output)
-    solver_float* chiAccDevice;        // chi_ddot at the last completed
-                                       // acoustic step (potential mode only):
-                                       // = (chi^{n+1}-2chi^n+chi^{n-1})/dt^2,
-                                       // = -p. Smooth (chi is resolved).
-    solver_float* chiAccPrevDevice;    // chi_ddot one step older (potential
-                                       // mode): the acoustic->elastic
-                                       // coupling uses the leapfrog
-                                       // predictor 2*chiAcc - chiAccPrev to
-                                       // force the solid with chi_ddot at
-                                       // the centered level n (Change 2),
-                                       // restoring discrete skew-symmetry.
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -657,9 +633,6 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
-    solver_float* pressure_chiacc; /* host mirror of chiAccDevice = chi_ddot
-                                    * = -p (potential mode only); used for
-                                    * station pressure value/gradient output */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
