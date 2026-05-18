@@ -286,6 +286,75 @@ Acoustic-elastic input flags (input file):
 	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`.
+- `acoustic_formulation`
+	Optional. `pressure` (default) or `velocity_potential`. Selects the
+	acoustic-elastic interface coupling variable. `pressure` is the
+	historical path (bit-identical to all earlier validated runs): the
+	fluid feels the solid normal **acceleration** (a 2nd time-difference,
+	`~omega^2`) and the solid feels the fluid pressure. `velocity_potential`
+	reinterprets the acoustic field as a velocity potential `phi` (the bulk
+	solver — Laplacian, lumped mass, central difference — is reused
+	unchanged): the interface exchanges the solid normal **velocity**
+	`(u^{n+1}-u^n)/dt . n` (a 1st time-difference, `~omega`) and the solid
+	feels `p = -dphi/dt`; the pressure-release free surface becomes
+	`phi^{n+1}=phi^n`; station pressure value/gradient output is recovered
+	as `-dphi/dt`. The milder first-order-in-time coupling removes the
+	explicit added-mass / CFL instability and the 0 km symmetry-axis
+	secular growth that the `pressure` path exhibits for a thin stiff water
+	layer over an elastic halfspace, with displacement validated against
+	CPS at corr ~0.99–0.998. Requires `include_acoustic=yes` and
+	`acoustic_pressure_formulation=yes`. (Independently reproduces the
+	`acoustic-pressure-pml-gpu-v3` branch's `velocity_potential` result —
+	used as a cross-validation.)
+- `acoustic_interface_filter`
+	Optional. `no` (default) or `yes`. Enables a per-face 1-pole IIR /
+	exponential-moving-average low-pass on the acoustic-elastic interface
+	source term, intended to attenuate the grid-scale (`~c/4h ~ 4.6 Hz` in
+	the flat-water benchmark) content that pumps the lossless water-column
+	eigenmode while passing the physical sub-1 Hz band. Default `no` is
+	bit-identical to earlier runs. Composable with `acoustic_formulation`.
+- `acoustic_interface_filter_alpha`
+	Optional. Default `0.15`. EMA coefficient in `filtered = old +
+	alpha*(source - old)`; smaller `alpha` = stronger low-pass (lower
+	corner frequency). Only used when `acoustic_interface_filter=yes`.
+- `acoustic_interface_filter_strength`
+	Optional. Default `1.0`. Blend toward the low-passed value:
+	`source += strength*(filtered - source)`. `1.0` fully replaces the raw
+	source with the filtered one; `0.0` is a no-op. Only used when
+	`acoustic_interface_filter=yes`.
+
+Acoustic-pressure formulation — correctness fix & known limitation:
+
+- **Interior stiffness factor-of-2 correction.** The consistent
+	trilinear-hex acoustic Laplacian coefficient was `dt^2*h/(32*rho)`,
+	a factor of two too small, which made the discrete acoustic speed
+	`Vp/sqrt(2)` (~0.707 Vp) everywhere in acoustic media. It is now
+	`dt^2*h/(16*rho)` (derived two independent ways; the lumped `1/kappa`
+	mass is exact, so the stiffness prefactor alone sets the speed). This
+	**changes all acoustic-pressure results** versus pre-fix builds:
+	against the flat-water CPS analytic reference the in-water vertical
+	displacement correlation went from ~0.83 to ~0.997 and a ~1.75x
+	amplitude overshoot was eliminated. Elastic-only / dashpot /
+	non-acoustic runs are unaffected (the change is gated by
+	`element_is_acoustic`).
+- **Lossless in-water pressure-coda ring (known limitation).** In the
+	no-attenuation flat-water benchmark, the in-water *pressure* coda
+	carries a non-decaying `~c/4h` (~4.6 Hz) ring absent from the exact
+	CPS solution. Root cause (diagnosed in depth): the interface coupling
+	injects the solid's discrete acceleration, which is intrinsically
+	grid-amplified (`M^-1 K u`), into a zero-loss resonator. It is
+	*displacement-invisible* (the validated 0.997 displacement is
+	unaffected) and is reproduced identically by two independent
+	implementations, i.e. it is a fundamental property of the lossless
+	pressure formulation, not a code bug. `acoustic_formulation=
+	velocity_potential` removes the associated instability/growth and
+	weakens the pump (`~omega` vs `~omega^2`) but does not eliminate the
+	ring in a strictly lossless fluid; the `acoustic_interface_filter`
+	is the targeted suppressor. With any realistic Q (attenuating ocean)
+	the ring damps physically. SPECFEM-spirit conservative-mass and
+	displacement-potential alternatives were tried and rejected (the
+	latter is explicit-CFL-unstable here); see the git history /
+	`visualizations/` for the full v3→v19 diagnostic chain.
 
 Absorbing boundary input flags (input file):
 
@@ -319,9 +388,13 @@ cross-axis coupling (Meza-Fajardo & Papageorgiou, 2008). The C-PML
 implementation is per-element (each element appears in exactly one
 elastic or acoustic mapper), wraps the five absorbing faces (`x_min`,
 `x_max`, `y_min`, `y_max`, `z_max`), and leaves `z_min` as the free
-surface. The acoustic-pressure PML path is gradient-side only. Validated
-against CPS analytical seismograms it is uniformly more accurate than
-the Lysmer dashpot at every offset/component (see the table below).
+surface. The acoustic-pressure PML path carries the same two-sided
+treatment (a scalar mirror of the validated elastic form): a gradient-
+side `psi` on the pressure Laplacian plus the divergence-side
+matched-`kappa` inertia, mass-proportional damping, and centroid-paired
+CFS terms. Validated against CPS analytical seismograms the elastic
+C-PML is uniformly more accurate than the Lysmer dashpot at every
+offset/component (see the table below).
 
 - `abc_type`
 	Optional. `dashpot` (default) selects the legacy Lysmer dashpot path
@@ -450,6 +523,17 @@ the Lysmer dashpot at every offset/component (see the table below).
 		long runs because it removes the inner-edge operator discontinuity
 		and is not rank-deficient. Both modes share the same coefficient
 		pipeline and the same divergence-side damping + CFS terms.
+- `cpml_stiffness_mode_acoustic`
+	Optional. `native` or `reduced`. Independent override of the PML
+	stiffness mode for **acoustic** PML elements, decoupled from
+	`cpml_stiffness_mode` (which then governs only the elastic PML). If
+	unset it **inherits the resolved `cpml_stiffness_mode` value**, so
+	existing configs are bit-unchanged. This split exists because the
+	elastic and acoustic PML operators have different maturity: it lets
+	you run, e.g., elastic `reduced` while exercising the acoustic
+	`native+correction` path (or vice versa) without confounding the two.
+	The startup log prints the elastic and acoustic PML stiffness modes
+	on separate lines so the active configuration is verifiable.
 
 Notes on C-PML behavior:
 
