@@ -596,6 +596,21 @@ typedef struct gpu_data_t {
      * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
 
+    /* Velocity-potential acoustic-elastic coupling (independent
+     * reimplementation, gated). 0 = pressure (default, bit-identical to
+     * the validated runs); 1 = the acoustic buffers hold a velocity
+     * potential phi, the interface exchanges solid normal VELOCITY
+     * (1st time-difference, ~omega) and the solid feels p = -dphi/dt,
+     * and station pressure output = -dphi/dt. */
+    int           acousticVelocityPotential;
+    /* Temporal low-pass (1-pole IIR / EMA) on the interface source term
+     * in kernelAcousticPressureInterfaceForce. 0 = off (default,
+     * bit-identical). State is per interface face. */
+    int           acousticInterfaceFilterEnabled;
+    double        acousticInterfaceFilterAlpha;    /* EMA coeff (0,1] */
+    double        acousticInterfaceFilterStrength; /* blend [0,1] */
+    solver_float* acousticInterfaceFilterStateDevice; /* per-face EMA */
+
 } gpu_data_t;
 
 

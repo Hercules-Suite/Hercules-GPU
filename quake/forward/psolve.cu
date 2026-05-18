@@ -1053,6 +1053,13 @@ static struct Param_t {
    * via cpml_stiffness_mode_acoustic. Declared AFTER theCpmlNativeStiffness
    * to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffnessAcoustic;
+  /* Independent velocity-potential acoustic-elastic coupling + interface
+   * source filter (gated; defaults reproduce the validated pressure run
+   * bit-identically). */
+  int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot */
+  noyesflag_t theAcousticInterfaceFilter;    /* EMA low-pass on/off */
+  double theAcousticInterfaceFilterAlpha;    /* EMA coeff (0,1]      */
+  double theAcousticInterfaceFilterStrength; /* blend [0,1]          */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1106,7 +1113,11 @@ static struct Param_t {
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
-           .theCpmlNativeStiffnessAcoustic = YES};
+           .theCpmlNativeStiffnessAcoustic = YES,
+           .theAcousticVelocityPotential = 0,
+           .theAcousticInterfaceFilter = NO,
+           .theAcousticInterfaceFilterAlpha = 0.15,
+           .theAcousticInterfaceFilterStrength = 1.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1392,9 +1403,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  36 /* Must adjust this if adding double params */
+  38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  46 /* Must adjust this if adding int params */
+  48 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1447,6 +1458,8 @@ static void read_parameters(int argc, char** argv) {
   double_message[33] = Param.theCpmlCflSafety;
   double_message[34] = Param.theCpmlMpmlCrossFraction;
   double_message[35] = Param.theCpmlAlphaFloorFraction;
+  double_message[36] = Param.theAcousticInterfaceFilterAlpha;
+  double_message[37] = Param.theAcousticInterfaceFilterStrength;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1487,6 +1500,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlCflSafety = double_message[33];
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
+  Param.theAcousticInterfaceFilterAlpha = double_message[36];
+  Param.theAcousticInterfaceFilterStrength = double_message[37];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1535,6 +1550,8 @@ static void read_parameters(int argc, char** argv) {
   int_message[43] = (int)Param.theCpmlClampOuter;
   int_message[44] = (int)Param.theCpmlNativeStiffness;
   int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
+  int_message[46] = Param.theAcousticVelocityPotential;
+  int_message[47] = (int)Param.theAcousticInterfaceFilter;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1586,6 +1603,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlClampOuter = (noyesflag_t)int_message[43];
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
   Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
+  Param.theAcousticVelocityPotential = int_message[46];
+  Param.theAcousticInterfaceFilter = (noyesflag_t)int_message[47];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2201,6 +2220,32 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "output_mesh", &Param.theMeshOutFlag);
   hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
   hu_config_get_int_opt(fp, "mesh_input_mode", &Param.theMeshInputMode);
+
+  /* Independent velocity-potential acoustic-elastic coupling + interface
+   * source filter (gated; defaults reproduce the validated pressure run
+   * bit-identically). */
+  {
+    char acform[64] = "pressure";
+    char afilt[64] = "no";
+    (void)parsetext(fp, "acoustic_formulation", 's', &acform);
+    if (strcasecmp(acform, "pressure") == 0) {
+      Param.theAcousticVelocityPotential = 0;
+    } else if ((strcasecmp(acform, "velocity_potential") == 0) ||
+               (strcasecmp(acform, "potential") == 0)) {
+      Param.theAcousticVelocityPotential = 1;
+    } else {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "acoustic_formulation must be 'pressure' or "
+                   "'velocity_potential': got '%s'\n", acform);
+    }
+    (void)parsetext(fp, "acoustic_interface_filter", 's', &afilt);
+    Param.theAcousticInterfaceFilter =
+        (strcasecmp(afilt, "yes") == 0) ? YES : NO;
+    hu_config_get_double_opt(fp, "acoustic_interface_filter_alpha",
+                             &Param.theAcousticInterfaceFilterAlpha);
+    hu_config_get_double_opt(fp, "acoustic_interface_filter_strength",
+                             &Param.theAcousticInterfaceFilterStrength);
+  }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
   hu_config_get_int_opt(fp, "enable_timing_barriers",
@@ -2772,6 +2817,18 @@ static int32_t parse_parameters(const char* numericalin) {
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
                   Param.theAcousticMeshRefinementFactor);
+    monitor_print("Acoustic formulation:               %s\n",
+                  (Param.theAcousticVelocityPotential == 1)
+                      ? "velocity_potential (p = -dphi/dt; vel continuity)"
+                      : "pressure (validated default)");
+    monitor_print("Acoustic interface source filter:   %s",
+                  (Param.theAcousticInterfaceFilter == YES) ? "yes" : "no");
+    if (Param.theAcousticInterfaceFilter == YES) {
+      monitor_print(" (alpha=%.4f strength=%.4f)",
+                    Param.theAcousticInterfaceFilterAlpha,
+                    Param.theAcousticInterfaceFilterStrength);
+    }
+    monitor_print("\n");
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -8619,6 +8676,16 @@ static void solver_init() {
     exit(1);
   }
   Global.gpuData.acousticInterfaceFaceCount = 0;
+  /* Independent velocity-potential coupling + interface source filter. */
+  Global.gpuData.acousticVelocityPotential =
+      Param.theAcousticVelocityPotential;
+  Global.gpuData.acousticInterfaceFilterEnabled =
+      (Param.theAcousticInterfaceFilter == YES) ? 1 : 0;
+  Global.gpuData.acousticInterfaceFilterAlpha =
+      Param.theAcousticInterfaceFilterAlpha;
+  Global.gpuData.acousticInterfaceFilterStrength =
+      Param.theAcousticInterfaceFilterStrength;
+  Global.gpuData.acousticInterfaceFilterStateDevice = NULL;
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
@@ -8657,6 +8724,20 @@ static void solver_init() {
     if (Global.gpuData.acousticInterfaceFaceCount > 0) {
       size_t face_count =
           (size_t)Global.gpuData.acousticInterfaceFaceCount;
+
+      /* Per-face EMA state for the interface source filter (gated; only
+       * read/written when acousticInterfaceFilterEnabled). */
+      if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceFilterStateDevice),
+              face_count * sizeof(solver_float)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface filter "
+                "state memory\n", Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      cudaMemset(Global.gpuData.acousticInterfaceFilterStateDevice, 0,
+                 face_count * sizeof(solver_float));
 
       if (cudaMalloc(
               (void**)&(Global.gpuData.acousticInterfaceElementIdsDevice),
@@ -9755,6 +9836,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticFaceFlagsArrayDevice);
   cudaFree(Global.gpuData.acousticInterfaceElementIdsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceIdsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFilterStateDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
@@ -11144,7 +11226,8 @@ static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
   gridsize = (face_count + blocksize - 1) / blocksize;
   kernelAcousticPressureDisplacementCoupling<<<
       gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-      face_count, solver->gpuDataDevice, Param.theDeltaTSquared);
+      face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
+      Param.theDeltaT);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -11209,7 +11292,8 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
     gridsize = (face_count + blocksize - 1) / blocksize;
     kernelAcousticPressureInterfaceForce<<<
         gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        face_count, solver->gpuDataDevice, Param.theDeltaTSquared);
+        face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
+        Param.theDeltaT);
 
     cerror = cudaGetLastError();
     if (cerror != cudaSuccess) {
@@ -17840,9 +17924,17 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
+  /* velocity_potential: the field is phi; p = -dphi/dt
+   * = -(phi^n - phi^{n-1})/dt. pressure mode: field is p directly. */
+  const int vp_out = (Param.theAcousticVelocityPotential == 1) &&
+                     (Param.theDeltaT > 0.0);
   for (iPhi = 0; iPhi < 8; iPhi++) {
+    const int nd = nodesToInterpolate[iPhi];
     const double pressure =
-        Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+        vp_out ? (-(double)(Global.mySolver->pressure_tm1[nd] -
+                            Global.mySolver->pressure_tm2[nd]) /
+                  Param.theDeltaT)
+               : (double)Global.mySolver->pressure_tm1[nd];
     const double dphidx =
         sx[iPhi] * (1.0 + sy[iPhi] * eta) *
         (1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -18141,10 +18233,18 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   }
 
   for (iPhi = 0; iPhi < 8; iPhi++) {
-    const double phi = (1 + xi[0][iPhi] * localCoords.x[0]) *
-                       (1 + xi[1][iPhi] * localCoords.x[1]) *
-                       (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-    pressure += phi * Global.mySolver->pressure_tm1[nodesToInterpolate[iPhi]];
+    const double sh = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                      (1 + xi[1][iPhi] * localCoords.x[1]) *
+                      (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+    const int nd = nodesToInterpolate[iPhi];
+    /* velocity_potential: p = -dphi/dt = -(phi^n - phi^{n-1})/dt. */
+    const double val =
+        ((Param.theAcousticVelocityPotential == 1) && (Param.theDeltaT > 0.0))
+            ? (-(double)(Global.mySolver->pressure_tm1[nd] -
+                         Global.mySolver->pressure_tm2[nd]) /
+               Param.theDeltaT)
+            : (double)Global.mySolver->pressure_tm1[nd];
+    pressure += sh * val;
   }
 
   return pressure;

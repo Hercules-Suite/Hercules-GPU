@@ -411,8 +411,11 @@ void kernelStiffnessCalcLocal(int32_t lenum,
 
 __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                                                            gpu_data_t* gpuData,
-                                                           double deltaT2)
+                                                           double deltaT2,
+                                                           double deltaT)
 {
+  const int vp = (gpuData->acousticVelocityPotential == 1);
+  const double invDt = (deltaT > 0.0) ? (1.0 / deltaT) : 0.0;
   int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
   if (faceIndex >= faceCount) {
@@ -455,7 +458,15 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
 
-    pressure += weight * (double)gpuData->pressureTm1Device[lnid];
+    /* velocity_potential: the solid feels p = -dphi/dt
+     * = -(phi^n - phi^{n-1})/dt. pressure mode: field IS p. */
+    if (vp) {
+      pressure += weight *
+                  (-((double)gpuData->pressureTm1Device[lnid] -
+                     (double)gpuData->pressureTm2Device[lnid]) * invDt);
+    } else {
+      pressure += weight * (double)gpuData->pressureTm1Device[lnid];
+    }
   }
 
   /* CPML-aware interface correction. On interface faces inside the PML
@@ -553,10 +564,13 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
 
 __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
                                                      gpu_data_t* gpuData,
-                                                     double deltaT2)
+                                                     double deltaT2,
+                                                     double deltaT)
 {
   int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
   const double invDeltaT2 = 1.0 / deltaT2;
+  const int vp = (gpuData->acousticVelocityPotential == 1);
+  const double invDt = (deltaT > 0.0) ? (1.0 / deltaT) : 0.0;
 
   if ((faceIndex >= faceCount) || (gpuData->tm3Device == NULL)) {
     return;
@@ -592,7 +606,12 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* accel_center =
       (adjacent_eindex >= 0) ? adjacent_center : center;
-  double accel_n = 0.0;
+  /* source_n is the scalar exchanged into the acoustic RHS:
+   *  - pressure mode: solid normal ACCELERATION (2nd time-difference,
+   *    ~omega^2) -- the validated path (and the grid pump);
+   *  - velocity_potential: solid normal VELOCITY (uⁿ⁺¹-uⁿ)/dt . n
+   *    (1st time-difference, ~omega) -- the milder, stable coupling. */
+  double source_n = 0.0;
 
   for (int i = 0; i < 8; i++) {
     const double weight =
@@ -606,23 +625,50 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
         gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
     const fvector_t u_next = gpuData->tm2Device[lnid];
     const fvector_t u_curr = gpuData->tm1Device[lnid];
-    const fvector_t u_prev = gpuData->tm3Device[lnid];
+    if (vp) {
+      source_n += weight *
+                  (((double)u_next.f[0] - (double)u_curr.f[0]) * invDt *
+                       normal[0] +
+                   ((double)u_next.f[1] - (double)u_curr.f[1]) * invDt *
+                       normal[1] +
+                   ((double)u_next.f[2] - (double)u_curr.f[2]) * invDt *
+                       normal[2]);
+    } else {
+      const fvector_t u_prev = gpuData->tm3Device[lnid];
+      source_n += weight *
+                  ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
+                     (double)u_prev.f[0]) *
+                        invDeltaT2 * normal[0]) +
+                   (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
+                     (double)u_prev.f[1]) *
+                        invDeltaT2 * normal[1]) +
+                   (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
+                     (double)u_prev.f[2]) *
+                        invDeltaT2 * normal[2]));
+    }
+  }
 
-    accel_n += weight *
-               ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-                  (double)u_prev.f[0]) *
-                     invDeltaT2 * normal[0]) +
-                (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-                  (double)u_prev.f[1]) *
-                     invDeltaT2 * normal[1]) +
-                (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-                  (double)u_prev.f[2]) *
-                     invDeltaT2 * normal[2]));
+  /* Interface source filter: 1-pole IIR / EMA low-pass on the exchanged
+   * source, per face. Gated (off by default -> bit-identical). Attenuates
+   * the grid-scale (~4.6 Hz) content that pumps the lossless water mode
+   * while passing the physical <1 Hz band. */
+  if (gpuData->acousticInterfaceFilterEnabled != 0 &&
+      gpuData->acousticInterfaceFilterStateDevice != NULL) {
+    const double fa = gpuData->acousticInterfaceFilterAlpha;
+    const double fs = gpuData->acousticInterfaceFilterStrength;
+    const double prev =
+        (double)gpuData->acousticInterfaceFilterStateDevice[faceIndex];
+    const double filt = prev + fa * (source_n - prev);
+    gpuData->acousticInterfaceFilterStateDevice[faceIndex] =
+        (solver_float)filt;
+    source_n += fs * (filt - source_n);
   }
 
   /* CPML-aware interface correction (mirror of the pressure->force path,
    * with its own memory variable so the two coupling directions stay
-   * symmetric). Identity on non-PML faces / at the PML inner edge. */
+   * symmetric). Identity on non-PML faces / at the PML inner edge.
+   * Exchanged scalar is normal acceleration (pressure) or normal
+   * velocity (potential). */
   if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
       gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
     const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
@@ -630,12 +676,15 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
     const double psi_old =
         (double)gpuData->acousticInterfacePsiAccelDevice[faceIndex];
-    const double psi_new = b * psi_old + a * accel_n;
+    const double psi_new = b * psi_old + a * source_n;
     gpuData->acousticInterfacePsiAccelDevice[faceIndex] =
         (solver_float)psi_new;
-    accel_n = iK * accel_n + psi_new;
+    source_n = iK * source_n + psi_new;
   }
 
+  /* pressure: acoustic RHS += -C u_s_ddot ; velocity_potential:
+   * phi-RHS += +G v_s (sign flip; same |coeff|). */
+  const double sgn = vp ? 1.0 : -1.0;
   for (int i = 0; i < 8; i++) {
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
@@ -646,7 +695,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
     atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(-face_coeff * weight * deltaT2 * accel_n));
+              (solver_float)(sgn * face_coeff * weight * deltaT2 * source_n));
   }
 }
 
@@ -661,7 +710,12 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 
   if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
       (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
-    gpuData->pressureTm2Device[nindex] = 0.0;
+    /* Pressure-release free surface, p = 0. Pressure mode: field=p, set
+     * 0. velocity_potential: p = -dphi/dt = 0  ->  phi^{n+1} = phi^n. */
+    gpuData->pressureTm2Device[nindex] =
+        (gpuData->acousticVelocityPotential == 1)
+            ? gpuData->pressureTm1Device[nindex]
+            : (solver_float)0.0;
     gpuData->pressureForceDevice[nindex] = 0.0;
     return;
   }
