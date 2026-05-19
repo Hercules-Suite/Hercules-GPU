@@ -93,6 +93,27 @@ static int32_t* g_dampingElemMapperDevice = NULL;
 static int32_t g_topoElemCountGPU = -1;
 static int32_t* g_topoElemMapperDevice = NULL;
 static topoconstants_t* g_topoConstantsDevice = NULL;
+
+/* --- VT + BKT GPU stabilization (topography_bkt_gpu_stabilize=yes) ---
+ * Faithful CUDA port of the CPU cut-cell visco-elastic operator
+ * TetraForcesBKT. mu_bkt/kappa_bkt computed HOST-side with the exact CPU
+ * expression (bit-identical moduli); tetraVol/cube_part/edgesize mirror
+ * the topoconstants. Default -1/NULL; built only when the gate is YES so
+ * every other configuration (incl. all CPML / flat-PML paths) is
+ * bit-identical to the validated v2 baseline. */
+typedef struct topo_bkt_const_t {
+  double tetraVol[5];
+  double edgesize;
+  double mu_bkt;
+  double kappa_bkt;
+  int    cube_part;
+} topo_bkt_const_t;
+static int32_t           g_topoBktElemCountGPU = -1;
+static int32_t*          g_topoBktElemMapperDevice = NULL;
+static topo_bkt_const_t* g_topoBktConstDevice = NULL;
+static int32_t           g_dampingForceCountGPU = -1;
+static int32_t*          g_dampingForceMapperDevice = NULL;
+
 static int32_t g_topoForceMode = -1;
 static int32_t g_topoForceModeReported = 0;
 static int32_t g_topoForcePathReported = 0;
@@ -505,6 +526,7 @@ static int32_t topography_has_host_force_path(void);
 static void solver_report_force_paths_once(void);
 static int32_t need_host_force_upload(void);
 static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh);
+static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
                            int32_t how);
 static void compute_adjust_cache_build(void);
@@ -790,6 +812,416 @@ __global__ static void kernelTopoForceEffective(int32_t lenum,
   }
 }
 
+/* ----------------------------------------------------------------------- *
+ *  VT + BKT GPU stabilization: faithful CUDA port of the CPU cut-cell
+ *  visco-elastic operator TetraForcesBKT (topography.cc). The body below
+ *  is copied VERBATIM from the CPU source (the per-tet topoC1/C2/C3 / prs
+ *  / resVec algebra, both cube_part variants, all 5 tetrahedra) so the
+ *  GPU result matches the validated CPU reference to ported-kernel float
+ *  tolerance. un/un_kappa are the same damping_vector_shear/kappa the BKT
+ *  conv kernel already produces; mu/kappa are the CPU rho*Vs^2 /
+ *  rho*(Vp^2-4/3 Vs^2) moduli (computed host-side, bit-identical).
+ * ----------------------------------------------------------------------- */
+__device__ static void topoTetraForcesBKT(const fvector_t* un,
+                                           const fvector_t* un_kappa,
+                                           fvector_t* resVec,
+                                           double edgesize,
+                                           double mu, double kappa,
+                                           const double* tetraVol,
+                                           int cube_part) {
+  int k;
+  int32_t N0, N1, N2, N3;
+  double prs;
+    double VTetr = edgesize * edgesize * edgesize / 6.0; /* full tetrahedron volume */
+
+    /*  distribution for the first and third quadrants */
+    if ( cube_part == 1 )
+    {
+        for ( k = 0; k < 5; k++ ) { /* for each tetrahedron */
+
+            if ( k == 4 )
+                VTetr = 2.0 * VTetr;
+
+            if ( tetraVol[k] != 0 ) {
+
+                double topoC1 = tetraVol[k] * VTetr * kappa / ( edgesize * edgesize );
+                double topoC2 = tetraVol[k] * VTetr * mu / ( edgesize * edgesize );
+                double topoC3 = tetraVol[k] * VTetr * ( -2. * mu / 3. ) / ( edgesize * edgesize );
+
+                switch ( k ) {
+
+                case ( 0 ):
+                N0 = 0;
+                N1 = 2;
+                N2 = 1;
+                N3 = 4;
+
+                prs = topoC3 * (       un[N0].f[0] +       un[N0].f[1] +       un[N0].f[2] -       un[N1].f[1] -       un[N2].f[0] -       un[N3].f[2] ) +
+                      topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] + un_kappa[N0].f[2] - un_kappa[N1].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] - un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
+                resVec[N0].f[1] +=  prs + topoC2 * ( un[N0].f[0] + 4.  * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2.  * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
+                resVec[N0].f[2] +=  prs + topoC2 * ( un[N0].f[0] + un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
+                resVec[N1].f[1] += -prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
+                resVec[N1].f[2] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
+                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
+                resVec[N2].f[2] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0]  );
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0]  );
+                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] += -prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
+                break;
+
+                case ( 1 ):
+                N0 = 3;
+                N1 = 1;
+                N2 = 2;
+                N3 = 7;
+
+                prs              = topoC3 * (       un[N0].f[0]       + un[N0].f[1]       - un[N0].f[2]       - un[N1].f[1]       - un[N2].f[0]       + un[N3].f[2] ) +
+                                   topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] - un_kappa[N0].f[2] - un_kappa[N1].f[1] - un_kappa[N2].f[0] + un_kappa[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] + un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] - un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
+                resVec[N0].f[1] +=  prs + topoC2 * ( un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
+                resVec[N0].f[2] += -prs + topoC2 * ( -un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] + un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
+                resVec[N1].f[1] += -prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
+                resVec[N1].f[2] +=        topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
+                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
+                resVec[N2].f[2] +=        topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
+                /* ================ */
+                resVec[N3].f[0] +=       -topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
+                resVec[N3].f[1] +=       -topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
+                resVec[N3].f[2] +=  prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
+                break;
+
+                case ( 2 ):
+                N0 = 6;
+                N1 = 4;
+                N2 = 7;
+                N3 = 2;
+
+                prs              = topoC3 * (       un[N0].f[0] -       un[N0].f[1] -       un[N0].f[2] +       un[N1].f[1] -       un[N2].f[0] +       un[N3].f[2] ) +
+                                   topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] - un_kappa[N0].f[2] + un_kappa[N1].f[1] - un_kappa[N2].f[0] + un_kappa[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
+
+                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] + un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
+                resVec[N0].f[2] += -prs + topoC2 * ( -un[N0].f[0] + un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] + un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
+                resVec[N1].f[1] +=  prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
+                resVec[N1].f[2] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
+                resVec[N2].f[1] +=       -topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
+                resVec[N2].f[2] +=        topoC2 * (  un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
+                /* ================ */
+                resVec[N3].f[0] +=       -topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
+                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] +=  prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
+                break;
+
+                case ( 3 ):
+                N0 = 5;
+                N1 = 7;
+                N2 = 4;
+                N3 = 1;
+
+                prs              = topoC3 * (       un[N0].f[0] -       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[1] -       un[N2].f[0] -       un[N3].f[2] ) +
+                                   topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
+                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
+                resVec[N0].f[2] +=  prs + topoC2 * (  un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] - un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
+                resVec[N1].f[1] +=  prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
+                resVec[N1].f[2] +=        topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs - topoC2 * ( un[N0].f[0] - un[N2].f[0] ) * 2.0;
+                resVec[N2].f[1] +=       -topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
+                resVec[N2].f[2] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0] );
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0] );
+                resVec[N3].f[1] +=       -topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
+                resVec[N3].f[2] += -prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
+                break;
+
+                case ( 4 ):
+                N0 = 2;
+                N1 = 4;
+                N2 = 7;
+                N3 = 1;
+
+                topoC1 = topoC1 / 4.;
+                topoC2 = topoC2 / 4.;
+                topoC3 = topoC3 / 4.;
+
+                prs              = topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[0] + un_kappa[N1].f[1] - un_kappa[N1].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] - un_kappa[N2].f[2] - un_kappa[N3].f[0] + un_kappa[N3].f[1] + un_kappa[N3].f[2] ) +
+                                   topoC3 * (       un[N0].f[0] -       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[0] +       un[N1].f[1] -       un[N1].f[2] -       un[N2].f[0] -       un[N2].f[1] -       un[N2].f[2] -       un[N3].f[0] +       un[N3].f[1] +       un[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[1] + un[N1].f[2] - 2. * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - 2. * un[N3].f[0] + un[N3].f[1] - un[N3].f[2] );
+                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] - 2. * un[N3].f[1] + un[N3].f[2] );
+                resVec[N0].f[2] +=  prs + topoC2 * ( un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[0] + un[N1].f[1] - 2. * un[N1].f[2] - un[N2].f[0] + un[N2].f[1] - 2. * un[N2].f[2] + un[N3].f[0] - un[N3].f[1] );
+                /* ================ */
+                resVec[N1].f[0] +=  prs + topoC2 * (  un[N0].f[1] - un[N0].f[2] + 4. * un[N1].f[0] + un[N1].f[1] - un[N1].f[2] - 2. * un[N2].f[0] - un[N2].f[1] + un[N2].f[2] - 2. * un[N3].f[0] - un[N3].f[1] + un[N3].f[2]  );
+                resVec[N1].f[1] +=  prs + topoC2 * ( -un[N0].f[0] - 2. * un[N0].f[1] + un[N0].f[2] + un[N1].f[0] + 4. * un[N1].f[1] - un[N1].f[2] - un[N2].f[0] - 2. * un[N2].f[1] + un[N2].f[2] + un[N3].f[0] - un[N3].f[2]  );
+                resVec[N1].f[2] += -prs + topoC2 * (  un[N0].f[0] + un[N0].f[1] - 2. * un[N0].f[2] - un[N1].f[0] - un[N1].f[1] + 4. * un[N1].f[2] - un[N2].f[0]  - un[N2].f[1] + un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 *  ( - 2. * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - 2. * un[N1].f[0] - un[N1].f[1] - un[N1].f[2] + 4. * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] + un[N3].f[1] + un[N3].f[2] );
+                resVec[N2].f[1] += -prs + topoC2 *  (  un[N0].f[0] + un[N0].f[2] - un[N1].f[0] - 2. * un[N1].f[1] - un[N1].f[2] + un[N2].f[0] + 4. * un[N2].f[1] + un[N2].f[2] - un[N3].f[0] - 2. * un[N3].f[1] - un[N3].f[2] );
+                resVec[N2].f[2] += -prs + topoC2 *  ( -un[N0].f[0] - un[N0].f[1] - 2. * un[N0].f[2] + un[N1].f[0] + un[N1].f[1] + un[N2].f[0] + un[N2].f[1] + 4. * un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
+                /* ================ */
+                resVec[N3].f[0] += -prs + topoC2 *  ( - 2. * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - 2. * un[N1].f[0] + un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + 4. * un[N3].f[0] - un[N3].f[1] - un[N3].f[2] );
+                resVec[N3].f[1] +=  prs + topoC2 *  (  un[N0].f[0] - 2. * un[N0].f[1] - un[N0].f[2] - un[N1].f[0] + un[N1].f[2] + un[N2].f[0] - 2. * un[N2].f[1] - un[N2].f[2] - un[N3].f[0] + 4. * un[N3].f[1] + un[N3].f[2] );
+                resVec[N3].f[2] +=  prs + topoC2 *  ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N1].f[1] - 2.0 * un[N1].f[2] + un[N2].f[0] - un[N2].f[1] - 2.0 * un[N2].f[2] - un[N3].f[0] + un[N3].f[1] + 4.0 * un[N3].f[2] );
+                break;
+                }
+            }
+        }
+    }  else  {
+        /*  distribution for the second and fourth quadrants */
+        for ( k = 0; k < 5; k++ ) { /* for each tetrahedron */
+
+            if ( k == 4 )
+                VTetr = 2.0 * VTetr;
+
+            if ( tetraVol[k] != 0 ) {
+
+                double topoC1 = tetraVol[k] * VTetr * kappa / ( edgesize * edgesize );
+                double topoC2 = tetraVol[k] * VTetr * mu / ( edgesize * edgesize );
+                double topoC3 = tetraVol[k] * VTetr * ( -2. * mu / 3. ) / ( edgesize * edgesize );
+
+                switch ( k ) {
+
+                case ( 0 ):
+                N0 = 0;
+                N1 = 3;
+                N2 = 1;
+                N3 = 5;
+
+                prs              = topoC1 * ( un_kappa[N0].f[0] - un_kappa[N1].f[1] - un_kappa[N3].f[2] - un_kappa[N2].f[0] + un_kappa[N2].f[1] + un_kappa[N2].f[2] ) +
+                                   topoC3 * (       un[N0].f[0] -       un[N1].f[1] -       un[N3].f[2] -       un[N2].f[0] +       un[N2].f[1] +       un[N2].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * 2.0 * ( un[N0].f[0] - un[N2].f[0] );
+                resVec[N0].f[1] +=        topoC2 * ( un[N0].f[1] - un[N1].f[0] + un[N2].f[0] - un[N2].f[1] );
+                resVec[N0].f[2] +=        topoC2 * ( un[N0].f[2]  + un[N2].f[0] - un[N2].f[2] - un[N3].f[0] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[1] + un[N1].f[0] - un[N2].f[0] + un[N2].f[1] );
+                resVec[N1].f[1] += -prs + topoC2 * 2.0 * ( un[N1].f[1] - un[N2].f[1] );
+                resVec[N1].f[2] +=        topoC2 * ( un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( -2.0 * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - un[N1].f[0] + 4.0 * un[N2].f[0] - un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
+                resVec[N2].f[1] +=  prs + topoC2 * ( -un[N0].f[1] + un[N1].f[0] - 2.0 * un[N1].f[1] - un[N1].f[2] - un[N2].f[0] + 4.0 * un[N2].f[1] + un[N2].f[2] - un[N3].f[1] );
+                resVec[N2].f[2] +=  prs + topoC2 * ( -un[N0].f[2] - un[N1].f[2] - un[N2].f[0] + un[N2].f[1] + 4.0 * un[N2].f[2] + un[N3].f[0] - un[N3].f[1] - 2.0 * un[N3].f[2] );
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[2] - un[N2].f[0] + un[N2].f[2] + un[N3].f[0] );
+                resVec[N3].f[1] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] += -prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N2].f[2] );
+
+                /* ================ */
+                break;
+
+                case ( 1 ):
+                N0 = 0;
+                N1 = 2;
+                N2 = 3;
+                N3 = 6;
+
+                prs              = topoC1 * ( un_kappa[N0].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] + un_kappa[N1].f[0] - un_kappa[N1].f[1] + un_kappa[N1].f[2] ) +
+                                   topoC3 * (       un[N0].f[1] -       un[N2].f[0] -       un[N3].f[2] +       un[N1].f[0] -       un[N1].f[1] +       un[N1].f[2] );
+
+                resVec[N0].f[0] +=        topoC2 * ( un[N0].f[0] - un[N1].f[0] + un[N1].f[1] - un[N2].f[1] );
+                resVec[N0].f[1] +=  prs + topoC2 * 2.0 * ( un[N0].f[1] - un[N1].f[1] );
+                resVec[N0].f[2] +=        topoC2 * ( un[N0].f[2] + un[N1].f[1] - un[N1].f[2] - un[N3].f[1] );
+                /* ================ */
+                resVec[N1].f[0] +=  prs + topoC2 * ( -un[N0].f[0] + 4.0 * un[N1].f[0] - un[N1].f[1] + un[N1].f[2] - 2.0 * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
+                resVec[N1].f[1] += -prs + topoC2 * ( un[N0].f[0] - 2.0 * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] + 4.0 * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
+                resVec[N1].f[2] +=  prs + topoC2 * ( -un[N0].f[2] + un[N1].f[0] - un[N1].f[1] + 4.0 * un[N1].f[2] - un[N2].f[2] - un[N3].f[0] + un[N3].f[1] - 2.0 * un[N3].f[2] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * 2.0 * ( un[N2].f[0] - un[N1].f[0] );
+                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] + un[N1].f[0] - un[N1].f[1] + un[N2].f[1] );
+                resVec[N2].f[2] +=        topoC2 * ( -un[N1].f[0] - un[N1].f[2] + un[N2].f[2] + un[N3].f[0] );
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * ( -un[N1].f[0] - un[N1].f[2] + un[N2].f[2] + un[N3].f[0] );
+                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[2] - un[N1].f[1] + un[N1].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] += -prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N1].f[2] );
+                break;
+
+                case ( 2 ):
+                N0 = 4;
+                N1 = 5;
+                N2 = 6;
+                N3 = 0;
+
+                prs              = topoC1 * ( un_kappa[N3].f[2] - un_kappa[N2].f[1] - un_kappa[N1].f[0] + un_kappa[N0].f[0] + un_kappa[N0].f[1] - un_kappa[N0].f[2] ) +
+                                   topoC3 * (       un[N3].f[2] -       un[N2].f[1] -       un[N1].f[0] +       un[N0].f[0] +       un[N0].f[1] -       un[N0].f[2] );
+
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4.0 * un[N0].f[0] + un[N0].f[1] - un[N0].f[2] - 2.0 * un[N1].f[0] - un[N1].f[1] + un[N1].f[2] - un[N2].f[0] - un[N3].f[0] );
+                resVec[N0].f[1] +=  prs + topoC2 * ( 4.0 * un[N0].f[1] + un[N0].f[0] - un[N0].f[2] - un[N1].f[1] - 2.0 * un[N2].f[1] - un[N2].f[0] + un[N2].f[2] - un[N3].f[1] );
+                resVec[N0].f[2] += -prs + topoC2 * ( 4.0 * un[N0].f[2] - un[N0].f[0] - un[N0].f[1] - un[N1].f[2] - un[N2].f[2] - 2.0 * un[N3].f[2] + un[N3].f[0] + un[N3].f[1] );
+                /* ================ */
+                resVec[N1].f[0] += -prs + topoC2 * 2.0 * ( un[N1].f[0] - un[N0].f[0] );
+                resVec[N1].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[1] + un[N2].f[0] );
+                resVec[N1].f[2] +=        topoC2 * (  un[N0].f[0] - un[N0].f[2] + un[N1].f[2] - un[N3].f[0] );
+                /* ================ */
+                resVec[N2].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[1] + un[N2].f[0] );
+                resVec[N2].f[1] += -prs + topoC2 * 2.0 * ( un[N2].f[1] - un[N0].f[1] );
+                resVec[N2].f[2] +=        topoC2 * (  un[N0].f[1] - un[N0].f[2] + un[N2].f[2] - un[N3].f[1] );
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[2] - un[N1].f[2] + un[N3].f[0] );
+                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] + un[N0].f[2] - un[N2].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] +=  prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N0].f[2] );
+                break;
+
+                case ( 3 ):
+                N0 = 6;
+                N1 = 5;
+                N2 = 7;
+                N3 = 3;
+
+                prs              = topoC1 * ( un_kappa[N0].f[0] + un_kappa[N1].f[1] + un_kappa[N3].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] - un_kappa[N2].f[2] ) +
+                                   topoC3 * (       un[N0].f[0] +       un[N1].f[1] +       un[N3].f[2] -       un[N2].f[0] -       un[N2].f[1] -       un[N2].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * 2.0 * ( un[N0].f[0] - un[N2].f[0] );
+                resVec[N0].f[1] +=        topoC2 * (  un[N0].f[1] + un[N1].f[0] - un[N2].f[0] - un[N2].f[1] );
+                resVec[N0].f[2] +=        topoC2 * (  un[N0].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] );
+                /* ================ */
+                resVec[N1].f[0] +=        topoC2 * (  un[N0].f[1] + un[N1].f[0] - un[N2].f[0] - un[N2].f[1] );
+                resVec[N1].f[1] +=  prs + topoC2 * 2.0 * ( un[N1].f[1] - un[N2].f[1] );
+                resVec[N1].f[2] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( -2.0 * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - un[N1].f[0] + 4.0 * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
+                resVec[N2].f[1] += -prs + topoC2 * ( -un[N0].f[1] - un[N1].f[0] - 2.0 * un[N1].f[1] - un[N1].f[2] + un[N2].f[0] + 4.0 * un[N2].f[1] + un[N2].f[2] - un[N3].f[1] );
+                resVec[N2].f[2] += -prs + topoC2 * ( -un[N0].f[2] - un[N1].f[2] + un[N2].f[0] + un[N2].f[1] + 4.0 * un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2.0 * un[N3].f[2] );
+
+                /* ================ */
+                resVec[N3].f[0] +=        topoC2 * (  un[N0].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] );
+                resVec[N3].f[1] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
+                resVec[N3].f[2] +=  prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N2].f[2] );
+                break;
+
+                case ( 4 ):
+                N0 = 0;
+                N1 = 6;
+                N2 = 3;
+                N3 = 5;
+
+                topoC1 = topoC1 / 4.0;
+                topoC2 = topoC2 / 4.0;
+                topoC3 = topoC3 / 4.0;
+
+                prs              = topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[0] - un_kappa[N1].f[1] - un_kappa[N1].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] + un_kappa[N2].f[2] - un_kappa[N3].f[0] + un_kappa[N3].f[1] - un_kappa[N3].f[2] ) +
+                                   topoC3 * (       un[N0].f[0] +       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[0] -       un[N1].f[1] -       un[N1].f[2] -       un[N2].f[0] -       un[N2].f[1] +       un[N2].f[2] -       un[N3].f[0] +       un[N3].f[1] -       un[N3].f[2] );
+
+                resVec[N0].f[0] +=  prs + topoC2 * ( 4.0 * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] + un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N2].f[2] - un[N3].f[1] - un[N3].f[2] - 2.0 * ( un[N2].f[0] + un[N3].f[0] ) );
+                resVec[N0].f[1] +=  prs + topoC2 * (  un[N0].f[0] + 4.0 * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - un[N1].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] + un[N3].f[2] - 2.0 * ( un[N1].f[1] + un[N2].f[1] ) );
+                resVec[N0].f[2] +=  prs + topoC2 * (  un[N0].f[0] + un[N0].f[1] + 4.0 * un[N0].f[2] - un[N1].f[0] - un[N1].f[1] + un[N2].f[0] + un[N2].f[1] - un[N3].f[0] - un[N3].f[1] - 2.0 * ( un[N1].f[2] + un[N3].f[2] ) );
+                /* ================ */
+                resVec[N1].f[0] +=  prs + topoC2 * ( -un[N0].f[1] - un[N0].f[2] + 4.0 * un[N1].f[0] -       un[N1].f[1] -       un[N1].f[2] + un[N2].f[1] + un[N2].f[2] + un[N3].f[1] + un[N3].f[2] - 2.0 * ( un[N3].f[0] + un[N2].f[0] ) );
+                resVec[N1].f[1] += -prs + topoC2 * (  un[N0].f[0] - un[N0].f[2] -       un[N1].f[0] + 4.0 * un[N1].f[1] +       un[N1].f[2] - un[N2].f[0] + un[N2].f[2] + un[N3].f[0] - un[N3].f[2] - 2.0 * ( un[N3].f[1] + un[N0].f[1] ) );
+                resVec[N1].f[2] += -prs + topoC2 * (  un[N0].f[0] - un[N0].f[1] -       un[N1].f[0] +       un[N1].f[1] + 4.0 * un[N1].f[2] +  un[N2].f[0] - un[N2].f[1] - un[N3].f[0] + un[N3].f[1] - 2.0 * ( un[N0].f[2] + un[N2].f[2] ) );
+                /* ================ */
+                resVec[N2].f[0] += -prs + topoC2 * ( 4.0 * un[N2].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[1] + un[N1].f[2] + un[N2].f[1] - un[N2].f[2] + un[N3].f[1] - un[N3].f[2] - 2.0 * ( un[N0].f[0] + un[N1].f[0] ) );
+                resVec[N2].f[1] += -prs + topoC2 * ( 4.0 * un[N2].f[1] - un[N0].f[0] + un[N0].f[2] + un[N1].f[0] - un[N1].f[2] + un[N2].f[0] - un[N2].f[2] - un[N3].f[0] + un[N3].f[2] - 2.0 * ( un[N0].f[1] + un[N3].f[1] ) );
+                resVec[N2].f[2] +=  prs + topoC2 * ( 4.0 * un[N2].f[2] - un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N1].f[1] - un[N2].f[0] - un[N2].f[1] + un[N3].f[0] + un[N3].f[1] - 2.0 * ( un[N3].f[2] + un[N1].f[2] ) );
+                /* ================ */
+                resVec[N3].f[0] += -prs + topoC2 * ( 4.0 * un[N3].f[0] + un[N0].f[1] - un[N0].f[2] + un[N1].f[1] - un[N1].f[2] - un[N2].f[1] + un[N2].f[2] - un[N3].f[1] + un[N3].f[2] - 2.0 * ( un[N0].f[0] + un[N1].f[0] ) );
+                resVec[N3].f[1] +=  prs + topoC2 * ( 4.0 * un[N3].f[1] - un[N0].f[0] - un[N0].f[2] + un[N1].f[0] + un[N1].f[2] + un[N2].f[0] + un[N2].f[2] - un[N3].f[0] - un[N3].f[2] - 2.0 * ( un[N1].f[1] + un[N2].f[1] ) );
+                resVec[N3].f[2] += -prs + topoC2 * ( 4.0 * un[N3].f[2] - un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N1].f[1] - un[N2].f[0] + un[N2].f[1] + un[N3].f[0] - un[N3].f[1] - 2.0 * ( un[N0].f[2] + un[N2].f[2] ) );
+                break;
+
+                }
+            }
+        }
+    }
+}
+
+/* GPU port of the CPU topoBkt branch (damping.cc): for each VT cut cell
+ * flagged edata->topoBkt, apply the fill-scaled 5-tet visco-elastic force
+ * from the BKT damping vectors. shear/kappa vectors are read with the SAME
+ * indexing kernelDampingCalcLocal uses (numcomp = lenum*8), so they are the
+ * bit-identical damping_vector_shear/kappa the conv kernel already wrote.
+ * Force sign mirrors the CPU: nodalForce -= localForce * dt^2.
+ * CPML: defensive PML skip mirrors kernelDampingCalcConvBkt2/Local -- a
+ * PML-flagged cell had its shear/kappa vectors skipped by the conv kernel,
+ * so it must not get a force here (its attenuation is the CPML viscoelastic
+ * path's job). No-op under dashpot (pmlFlagArrayDevice == NULL). The builder
+ * additionally excludes cpml_pml_flattened_element cells, so this is
+ * belt-and-suspenders. */
+__global__ static void kernelTopoBktForceEffective(
+    int32_t lenum, gpu_data_t* gpuData, int32_t topoBktCount,
+    const int32_t* topoBktMapper, const topo_bkt_const_t* topoBktConst,
+    double dt2) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= topoBktCount) {
+    return;
+  }
+
+  int32_t eindex = topoBktMapper[idx];
+
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+    return;
+  }
+
+  topo_bkt_const_t tc = topoBktConst[idx];
+  int numcomp = lenum * 8;
+  fvector_t un[8];
+  fvector_t un_kappa[8];
+  fvector_t localForce[8];
+  int do_contrib = 0;
+
+  solver_float* sVec = (solver_float*)gpuData->shearVectorDevice + eindex;
+  solver_float* kVec = (solver_float*)gpuData->kappaVectorDevice + eindex;
+  for (int i = 0; i < 8; i++) {
+    un[i].f[0] = sVec[0];
+    un[i].f[1] = sVec[numcomp];
+    un[i].f[2] = sVec[2 * numcomp];
+    un_kappa[i].f[0] = kVec[0];
+    un_kappa[i].f[1] = kVec[numcomp];
+    un_kappa[i].f[2] = kVec[2 * numcomp];
+    localForce[i].f[0] = 0;
+    localForce[i].f[1] = 0;
+    localForce[i].f[2] = 0;
+    do_contrib = (fabs(un[i].f[0]) > 1e-20) ? 1 : do_contrib;
+    do_contrib = (fabs(un[i].f[1]) > 1e-20) ? 1 : do_contrib;
+    do_contrib = (fabs(un[i].f[2]) > 1e-20) ? 1 : do_contrib;
+    do_contrib = (fabs(un_kappa[i].f[0]) > 1e-20) ? 1 : do_contrib;
+    do_contrib = (fabs(un_kappa[i].f[1]) > 1e-20) ? 1 : do_contrib;
+    do_contrib = (fabs(un_kappa[i].f[2]) > 1e-20) ? 1 : do_contrib;
+    sVec += lenum;
+    kVec += lenum;
+  }
+
+  if (!do_contrib) {
+    return;
+  }
+
+  topoTetraForcesBKT(un, un_kappa, localForce, tc.edgesize, tc.mu_bkt,
+                     tc.kappa_bkt, tc.tetraVol, tc.cube_part);
+
+  for (int i = 0; i < 8; i++) {
+    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
+    fvector_t* nodalForce = gpuData->forceDevice + lnid;
+    atomicAdd((solver_float*)&(nodalForce->f[0]),
+              (solver_float)(-localForce[i].f[0] * dt2));
+    atomicAdd((solver_float*)&(nodalForce->f[1]),
+              (solver_float)(-localForce[i].f[1] * dt2));
+    atomicAdd((solver_float*)&(nodalForce->f[2]),
+              (solver_float)(-localForce[i].f[2] * dt2));
+  }
+}
+
 double** malloc2dDouble(int n, int m) {
   /* NOTE: To MPI_Bcast a 2D array, the pre-allocated memory blocks have to be
   continuous. That's why this function should be used to do the pre-allocation.
@@ -1054,6 +1486,13 @@ static struct Param_t {
    * via cpml_stiffness_mode_acoustic. Declared AFTER theCpmlNativeStiffness
    * to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffnessAcoustic;
+  /* VT + BKT GPU stabilization (default NO -> strict no-op, bit-identical
+   * to the validated v2/CPML baseline). YES enables the faithful CUDA
+   * port of the CPU cut-cell visco-elastic operator TetraForcesBKT for
+   * VT topography under bkt* damping. Declared AFTER
+   * theCpmlNativeStiffnessAcoustic to preserve C++ designated-init
+   * order. */
+  noyesflag_t theTopoBktGpuStabilize;
   /* Acoustic-elastic coupling formulation + interface source filter.
    * DEFAULT is velocity_potential (1) — the cross-validated stable
    * coupling; pressure (0) is the legacy explicit opt-in. Only affects
@@ -1119,6 +1558,7 @@ static struct Param_t {
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
+           .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceFilter = NO,
            .theAcousticInterfaceFilterAlpha = 0.15,
@@ -1411,7 +1851,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   39 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  49 /* Must adjust this if adding int params */
+  50 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1561,6 +2001,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[46] = Param.theAcousticVelocityPotential;
   int_message[47] = (int)Param.theAcousticInterfaceFilter;
   int_message[48] = Param.theCpmlPmlMaterialDamping;
+  int_message[49] = (int)Param.theTopoBktGpuStabilize;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -1615,6 +2056,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticVelocityPotential = int_message[46];
   Param.theAcousticInterfaceFilter = (noyesflag_t)int_message[47];
   Param.theCpmlPmlMaterialDamping = int_message[48];
+  Param.theTopoBktGpuStabilize = (noyesflag_t)int_message[49];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -1861,6 +2303,7 @@ static int32_t parse_parameters(const char* numericalin) {
        print_station_pressures[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
+       topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2235,6 +2678,8 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_buildings", 's', &include_buildings);
   parsetext(fp, "implement_drm", 's', &implement_drm);
   parsetext(fp, "include_topography", 's', &include_topography);
+  parsetext(fp, "topography_bkt_gpu_stabilize", 's',
+            &topography_bkt_gpu_stabilize);
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
@@ -2560,6 +3005,26 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Unknown response for include_topography (yes or no): %s\n",
                  include_topography);
+  }
+
+  /* VT + BKT GPU stabilization. Tri-state, default "auto":
+   *   auto (or key absent) -> UNSET -> auto-enabled iff
+   *        computation_method=vt + type_of_damping=bkt* (the only case
+   *        the fix applies to); strict no-op / bit-identical baseline
+   *        for every other configuration.
+   *   yes  -> force ON.   no -> explicit escape hatch, force OFF
+   *        (restores the pre-fix behaviour incl. the VT+BKT NaN). */
+  if (strcasecmp(topography_bkt_gpu_stabilize, "yes") == 0) {
+    Param.theTopoBktGpuStabilize = YES;
+  } else if (strcasecmp(topography_bkt_gpu_stabilize, "no") == 0) {
+    Param.theTopoBktGpuStabilize = NO;
+  } else if (strcasecmp(topography_bkt_gpu_stabilize, "auto") == 0) {
+    Param.theTopoBktGpuStabilize = UNSET;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for topography_bkt_gpu_stabilize "
+                 "(yes, no, or auto): %s\n",
+                 topography_bkt_gpu_stabilize);
   }
 
   if (strcasecmp(include_acoustic, "yes") == 0) {
@@ -7846,9 +8311,14 @@ static void solver_init() {
     double yo = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].y;
     double zo = Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z;
 
-    if (Param.includeTopography == YES) {
+    if (Param.includeTopography == YES &&
+        !cpml_pml_flattened_element(eindex)) {
       toponodes_mass(eindex, nodesMass, M, xo, yo, zo);
     } else {
+      /* Flat regular nodal mass. Includes SPECFEM-style flattened CPML
+       * PML elements: their topographic deformation is suppressed so
+       * they stay axis-aligned cubes (consistent with the cube stiffness
+       * path + CPML delta they are re-routed to). */
       for (j = 0; j < 8; j++) {
         nodesMass[j] = M;
       }
@@ -10223,6 +10693,20 @@ static void solver_delete() {
     cudaFree(g_topoConstantsDevice);
     g_topoConstantsDevice = NULL;
   }
+  if (g_topoBktElemMapperDevice != NULL) {
+    cudaFree(g_topoBktElemMapperDevice);
+    g_topoBktElemMapperDevice = NULL;
+  }
+  if (g_topoBktConstDevice != NULL) {
+    cudaFree(g_topoBktConstDevice);
+    g_topoBktConstDevice = NULL;
+  }
+  if (g_dampingForceMapperDevice != NULL) {
+    cudaFree(g_dampingForceMapperDevice);
+    g_dampingForceMapperDevice = NULL;
+  }
+  g_topoBktElemCountGPU = -1;
+  g_dampingForceCountGPU = -1;
   g_topoElemCountGPU = -1;
   g_topoForceMode = -1;
   g_topoForceModeReported = 0;
@@ -11070,9 +11554,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
                                              mesh_t* mesh, double theFreq,
                                              double theDeltaT,
                                              double theDeltaTSquared) {
-  (void)theDeltaTSquared;
-
   solver_init_damping_gpu_mapper(myID, mesh);
+  solver_init_topo_bkt_gpu(myID, mesh);
   if (g_dampingElemCountGPU <= 0) {
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
                             "force damping conv");
@@ -11131,11 +11614,27 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   gridsize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].gridsize;
   sharedmem = solver->gpu_kernel[CUDA_KERNEL_DAMPING_FORCE].sharedmem;
 
+  /* VT+BKT GPU stabilization: when ON and there are eligible topoBkt
+   * cut cells, exclude them from the full-cube BKT force
+   * (kernelDampingCalcLocal) and instead apply the validated fill-scaled
+   * 5-tet visco-elastic operator (kernelTopoBktForceEffective below).
+   * The conv kernel above already ran on the FULL damping mapper, so the
+   * cut cells' shear/kappa vectors and conv memory are advanced exactly
+   * as on the CPU. When OFF, dampingForce{Count,Mapper} are the original
+   * values, so the launch is bit-identical to the validated v2
+   * baseline. */
+  int32_t dampingForceCount = g_dampingElemCountGPU;
+  int32_t* dampingForceMapper = g_dampingElemMapperDevice;
+  if (g_topoBktElemCountGPU > 0) {
+    dampingForceCount = g_dampingForceCountGPU;
+    dampingForceMapper = g_dampingForceMapperDevice;
+  }
+
   cudaGetLastError();
   kernelDampingCalcLocal<<<gridsize, blocksize, sharedmem,
                            solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, solver->gpuDataDevice, g_dampingElemCountGPU,
-      g_dampingElemMapperDevice);
+      mesh->lenum, solver->gpuDataDevice, dampingForceCount,
+      dampingForceMapper);
 
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
@@ -11144,6 +11643,24 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  if (g_topoBktElemCountGPU > 0) {
+    int tbBlock = 128;
+    int tbGrid = (g_topoBktElemCountGPU + tbBlock - 1) / tbBlock;
+    cudaGetLastError();
+    kernelTopoBktForceEffective<<<tbGrid, tbBlock, 0,
+                                  solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, g_topoBktElemCountGPU,
+        g_topoBktElemMapperDevice, g_topoBktConstDevice, theDeltaTSquared);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: topo-bkt force kernel - %s\n", myID,
+              cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
   solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
                           "force damping local");
 
@@ -11232,6 +11749,7 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
   int32_t writeIdx = 0;
   int32_t skippedNonlinear = 0;
   int32_t skippedTopoBkt = 0;
+  int32_t skippedFlattenedPml = 0;
   noyesflag_t topoNonlinFlag;
 
   if (g_topoElemCountGPU >= 0) {
@@ -11275,6 +11793,15 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
       skippedTopoBkt++;
       continue;
     }
+    /* SPECFEM-style flat PML: a CPML PML element that also belongs to
+     * topography is re-routed to the cube linear stiffness path
+     * (kernelStiffnessCalcLocal + CPML delta), so it must NOT also be
+     * processed by the curvilinear topo kernel -- exclude it here. The
+     * count is the PML-cap-topography overlap exposed at startup. */
+    if (cpml_pml_flattened_element(eindex)) {
+      skippedFlattenedPml++;
+      continue;
+    }
 
     filteredMapperHost[writeIdx] = eindex;
     filteredConstantsHost[writeIdx] = *topo_ec;
@@ -11287,8 +11814,8 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
     free(filteredConstantsHost);
     if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
       monitor_print(
-          "Topography force path: gpu (eligible=0, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
-          topoCount, skippedNonlinear, skippedTopoBkt);
+          "Topography force path: gpu (eligible=0, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d, flattened-pml-skipped=%d)\n",
+          topoCount, skippedNonlinear, skippedTopoBkt, skippedFlattenedPml);
       g_topoForcePathReported = 1;
     }
     return;
@@ -11341,10 +11868,256 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   if ((Global.myID == 0) && (g_topoForcePathReported == 0)) {
     monitor_print(
-        "Topography force path: gpu (eligible=%d, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d)\n",
-        g_topoElemCountGPU, topoCount, skippedNonlinear, skippedTopoBkt);
+        "Topography force path: gpu (eligible=%d, total=%d, nonlinear-skipped=%d, topo-bkt-skipped=%d, flattened-pml-skipped=%d)\n",
+        g_topoElemCountGPU, topoCount, skippedNonlinear, skippedTopoBkt, skippedFlattenedPml);
     g_topoForcePathReported = 1;
   }
+}
+
+/* VT + BKT GPU stabilization builder (topography_bkt_gpu_stabilize=yes).
+ * Builds, once and lazily, the VT cut-cell mapper/consts for the
+ * faithful CPU-TetraForcesBKT port plus a topoBkt-excluded damping-force
+ * mapper. Hard VT-only guard + CPML flat-PML skip: flat-PML topo cells
+ * (cpml_pml_flattened_element) stay on the SPECFEM-style cube+CPML path
+ * exactly as on the v2 baseline and are NOT taken over by the new
+ * kernel. Strict no-op when the gate is NO -> v2 baseline bit-identical. */
+static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
+  if (g_topoBktElemCountGPU >= 0) {
+    return;
+  }
+
+  /* Auto-enable. topography_bkt_gpu_stabilize is tri-state:
+   *   NO    -> explicit escape hatch: force OFF (restores the pre-fix
+   *            behaviour, incl. the VT+BKT NaN, for A/B comparison).
+   *   YES   -> explicit force ON.
+   *   UNSET -> AUTO (the default): ON iff computation_method=vt AND
+   *            type_of_damping=bkt* -- the only configuration the fix
+   *            applies to. A strict no-op for everything else, so every
+   *            non-(VT+BKT) validated baseline stays bit-identical. */
+  if (Param.theTopoBktGpuStabilize == NO) {
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    if (Global.myID == 0) {
+      monitor_print(
+          "VT+BKT GPU stabilization: DISABLED (explicit "
+          "topography_bkt_gpu_stabilize=no escape hatch)\n");
+    }
+    return;
+  }
+
+  int bktDamping = (Param.theTypeOfDamping >= BKT);
+  int autoOn = (get_topo_meth() == VT) && bktDamping;
+  if ((Param.theTopoBktGpuStabilize != YES) && !autoOn) {
+    /* UNSET and not (vt & bkt*) -> nothing to do; silent strict no-op
+     * (this is the common path for every non-VT/non-BKT run, so it must
+     * not log). */
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    return;
+  }
+
+  if (get_topo_meth() != VT) {
+    /* Explicit YES on a non-VT run: the cut-cell operator is VT-only. */
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    if (Global.myID == 0) {
+      monitor_print(
+          "VT+BKT GPU stabilization: requested but computation_method is "
+          "not vt -> INACTIVE (strict no-op, baseline unchanged)\n");
+    }
+    return;
+  }
+
+  if (Global.myID == 0) {
+    monitor_print(
+        "VT+BKT GPU stabilization: %s (computation_method=vt, "
+        "type_of_damping=bkt*)\n",
+        (Param.theTopoBktGpuStabilize == YES)
+            ? "ON (explicit topography_bkt_gpu_stabilize=yes)"
+            : "AUTO-ENABLED by default (set topography_bkt_gpu_stabilize=no "
+              "to disable)");
+  }
+
+  int32_t topoCount = topo_get_elements_count();
+  const int32_t* topoMapperHost = topo_get_elements_mapping();
+  const topoconstants_t* topoConstantsHost = topo_get_constants();
+  noyesflag_t topoNonlinFlag = get_topo_nonlin_flag();
+
+  if ((topoCount <= 0) || (topoMapperHost == NULL) ||
+      (topoConstantsHost == NULL)) {
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    /* Ranks that own no topography are silent (in an MPI run most ranks
+     * have no topo elements; one line each is pure log noise). */
+    return;
+  }
+
+  /* Accounting broken down so the cause is visible per rank:
+   *  topoBkt-flagged   = VT topo cells with edata->topoBkt set
+   *  flat-PML-skipped  = of those, ones on the SPECFEM cube+CPML path
+   *  eligible          = cut cells the new visco-elastic kernel takes */
+  int32_t nTopoBktFlagged = 0;
+  int32_t nFlatPmlSkipped = 0;
+  int32_t cntBkt = 0;
+  for (int32_t topoIdx = 0; topoIdx < topoCount; topoIdx++) {
+    int32_t eindex = topoMapperHost[topoIdx];
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    const topoconstants_t* topo_ec = topoConstantsHost + topoIdx;
+    if ((topo_ec->isTopoNonlin != 0) && (topoNonlinFlag == YES)) {
+      continue;
+    }
+    if (edata->topoBkt == 0) {
+      continue;
+    }
+    nTopoBktFlagged++;
+    /* CPML flat-PML: a PML element that also belongs to topography is
+     * handled by the cube stiffness + CPML path on v2 (and the
+     * curvilinear topo mapper already excludes it). Keep it there --
+     * the new visco-elastic kernel must not also force it. */
+    if (cpml_pml_flattened_element(eindex)) {
+      nFlatPmlSkipped++;
+      continue;
+    }
+    cntBkt++;
+  }
+
+  if (cntBkt == 0) {
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    /* Anomaly worth one line: this rank owns topography but no cut cell
+     * is eligible (e.g. all consumed by flat-PML under CPML). */
+    fprintf(stderr,
+            "VT+BKT GPU stabilization [rank %d]: INACTIVE -- topoCount=%d "
+            "topoBkt-flagged=%d flat-PML-skipped=%d eligible=0\n",
+            myID, topoCount, nTopoBktFlagged, nFlatPmlSkipped);
+    return;
+  }
+
+  int32_t* bktMapperHost = (int32_t*)malloc((size_t)cntBkt * sizeof(int32_t));
+  topo_bkt_const_t* bktConstHost =
+      (topo_bkt_const_t*)malloc((size_t)cntBkt * sizeof(topo_bkt_const_t));
+  if ((bktMapperHost == NULL) || (bktConstHost == NULL)) {
+    free(bktMapperHost);
+    free(bktConstHost);
+    fprintf(stderr, "Thread %d: topo-bkt host allocation failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  int32_t w = 0;
+  for (int32_t topoIdx = 0; topoIdx < topoCount; topoIdx++) {
+    int32_t eindex = topoMapperHost[topoIdx];
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    const topoconstants_t* topo_ec = topoConstantsHost + topoIdx;
+    if ((topo_ec->isTopoNonlin != 0) && (topoNonlinFlag == YES)) {
+      continue;
+    }
+    if (edata->topoBkt == 0) {
+      continue;
+    }
+    if (cpml_pml_flattened_element(eindex)) {
+      continue;
+    }
+    bktMapperHost[w] = eindex;
+    for (int t = 0; t < 5; t++) {
+      bktConstHost[w].tetraVol[t] = topo_ec->tetraVol[t];
+    }
+    bktConstHost[w].edgesize = topo_ec->h;
+    bktConstHost[w].cube_part = topo_ec->cube_part;
+    /* EXACT CPU expression (damping.cc topoBkt branch) -- edata fields
+     * are float, so this reproduces the CPU float arithmetic before the
+     * promotion to double: bit-identical material moduli. */
+    bktConstHost[w].mu_bkt = edata->rho * edata->Vs * edata->Vs;
+    bktConstHost[w].kappa_bkt =
+        edata->rho *
+        (edata->Vp * edata->Vp - 4. / 3. * edata->Vs * edata->Vs);
+    w++;
+  }
+
+  if (cudaMalloc((void**)&g_topoBktElemMapperDevice,
+                  (size_t)cntBkt * sizeof(int32_t)) != cudaSuccess ||
+      cudaMalloc((void**)&g_topoBktConstDevice,
+                 (size_t)cntBkt * sizeof(topo_bkt_const_t)) != cudaSuccess) {
+    free(bktMapperHost);
+    free(bktConstHost);
+    fprintf(stderr, "Thread %d: topo-bkt device allocation failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (cudaMemcpy(g_topoBktElemMapperDevice, bktMapperHost,
+                 (size_t)cntBkt * sizeof(int32_t),
+                 cudaMemcpyHostToDevice) != cudaSuccess ||
+      cudaMemcpy(g_topoBktConstDevice, bktConstHost,
+                 (size_t)cntBkt * sizeof(topo_bkt_const_t),
+                 cudaMemcpyHostToDevice) != cudaSuccess) {
+    free(bktMapperHost);
+    free(bktConstHost);
+    fprintf(stderr, "Thread %d: topo-bkt device copy failed\n", myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  free(bktMapperHost);
+  free(bktConstHost);
+  g_topoBktElemCountGPU = cntBkt;
+
+  /* Damping-force mapper = damping mapper minus the topoBkt cut cells.
+   * Same predicate as solver_init_damping_gpu_mapper (incl. the
+   * acoustic_sanitize_element + IsDampingElement side effects); flat-PML
+   * non-topoBkt cells stay (kernelDampingCalcLocal PML-skips them
+   * internally exactly as on the v2 baseline). */
+  int32_t cntForce = 0;
+  for (int32_t eindex = 0; eindex < mesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    acoustic_sanitize_element(edata);
+    if ((isThisElementNonLinear(mesh, eindex) == NO) &&
+        (IsDampingElement(mesh, eindex) == YES) && (edata->topoBkt == 0)) {
+      cntForce++;
+    }
+  }
+
+  int32_t* forceMapperHost =
+      (int32_t*)malloc((size_t)(cntForce > 0 ? cntForce : 1) *
+                       sizeof(int32_t));
+  if (forceMapperHost == NULL) {
+    fprintf(stderr, "Thread %d: topo-bkt force-mapper host alloc failed\n",
+            myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  int32_t fw = 0;
+  for (int32_t eindex = 0; eindex < mesh->lenum; eindex++) {
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    acoustic_sanitize_element(edata);
+    if ((isThisElementNonLinear(mesh, eindex) == NO) &&
+        (IsDampingElement(mesh, eindex) == YES) && (edata->topoBkt == 0)) {
+      forceMapperHost[fw++] = eindex;
+    }
+  }
+  g_dampingForceCountGPU = cntForce;
+  if (cntForce > 0) {
+    if (cudaMalloc((void**)&g_dampingForceMapperDevice,
+                   (size_t)cntForce * sizeof(int32_t)) != cudaSuccess ||
+        cudaMemcpy(g_dampingForceMapperDevice, forceMapperHost,
+                   (size_t)cntForce * sizeof(int32_t),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      free(forceMapperHost);
+      fprintf(stderr,
+              "Thread %d: topo-bkt force-mapper device alloc/copy failed\n",
+              myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  free(forceMapperHost);
+
+  /* One concise line per topo-bearing rank (rank 0 usually owns no
+   * topography, so a rank-0-only print would never fire for localized
+   * topography). Idle ranks stay silent. */
+  fprintf(stderr,
+          "VT+BKT GPU stabilization [rank %d]: ON -- visco-elastic 5-tet "
+          "cut cells=%d (flat-PML-skipped=%d), full-cube BKT elements=%d\n",
+          myID, g_topoBktElemCountGPU, nFlatPmlSkipped,
+          g_dampingForceCountGPU);
 }
 
 static void solver_compute_force_topography_gpu(mysolver_t* solver, mesh_t* mesh,
@@ -15266,6 +16039,43 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
   }
 
   return;
+}
+
+/* SPECFEM-style flat/regular PML. A CPML PML element that also belongs
+ * to topography would otherwise get a curvilinear native force (topo
+ * kernel) plus the cube-based CPML delta -- a native+delta mismatch.
+ * SPECFEM3D builds the C-PML as a regular axis-aligned extruded buffer
+ * (topography not carried into it); we achieve the same by treating
+ * such elements as flat regular cubes: re-routed into the linear cube
+ * stiffness path (kernelStiffnessCalcLocal + the CPML delta), excluded
+ * from the topo GPU mapper, and given flat nodal mass. This predicate
+ * is the single source of truth. Returns 0 unless CPML is on AND
+ * include_topography is on AND this is a PML element, so every
+ * flat-surface CPML run (all Stage 1-4 validation) is byte-identical
+ * and every non-CPML run is untouched. g_cpmlBuild.face_mask is filled
+ * by solver_init() before stiffness_init() and the topo GPU mapper, so
+ * this is valid at all call sites; NULL-guarded for safety. */
+int cpml_pml_flattened_element(int32_t eindex) {
+  if (Param.theAbcType != ABC_CPML) return 0;
+  if (Param.includeTopography != YES) return 0;
+  /* VT-only. FEM topography is a regular Cartesian mesh + air elements
+   * (Vp=-1) above the free surface (embedded boundary): solid PML
+   * elements are ALREADY regular cubes in the linear path
+   * (BelongstoTopography()==NO for FEM solid), so there is no
+   * native+delta mismatch to fix and this must be a strict no-op for
+   * FEM. Only VT body-fits/deforms surface elements
+   * (BelongstoTopography()==YES, routed to the curvilinear topo kernel)
+   * -- that is the case the flatten re-route targets. */
+  if (get_topo_meth() != VT) return 0;
+  if (g_cpmlBuild.face_mask == NULL) return 0;
+  if (eindex < 0 || eindex >= Global.myMesh->lenum) return 0;
+  /* Never re-route an air element (Vp=-1) into the solid stiffness
+   * mapper -- it must stay excluded as the original predicate had it. */
+  {
+    edata_t* ed = (edata_t*)Global.myMesh->elemTable[eindex].data;
+    if (ed->Vp == -1) return 0; /* air element (topography.cc convention) */
+  }
+  return (g_cpmlBuild.face_mask[eindex] != 0) ? 1 : 0;
 }
 
 /* CPML face-mask: which of the 5 absorbing faces an element touches.

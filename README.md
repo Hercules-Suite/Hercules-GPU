@@ -666,6 +666,90 @@ offset/component (see the table below).
 	`native+correction` path (or vice versa) without confounding the two.
 	The startup log prints the elastic and acoustic PML stiffness modes
 	on separate lines so the active configuration is verifiable.
+- `topography_bkt_gpu_stabilize`
+	Optional, tri-state: `auto` (default), `yes`, or `no`.
+	**`auto` (default) = correct-by-default:** the fix auto-enables
+	exactly when `computation_method=vt` **and** `type_of_damping=bkt*`
+	(the only configuration it applies to), and is a **strict no-op,
+	bit-identical** to the validated baseline for every other
+	configuration (FEM topography, flat/no-topography, non-VT, non-BKT,
+	and every CPML/flat-PML path — the builder hard-guards
+	`computation_method=vt` and never builds a mapper or launches the
+	new kernel otherwise). `yes` forces it on (VT-guard still applies).
+	**`no` is an explicit escape hatch** that forces it fully off,
+	restoring the pre-fix behaviour — i.e. the VT+BKT NaN — for A/B
+	comparison or bisection; with `no`, *every* configuration including
+	non-VT/non-BKT is bit-identical to the pre-fix baseline. Validated
+	configs are unaffected by the default flip: the only behaviour change
+	vs. the old default is that `vt`+`bkt*` (previously an unconditional
+	NaN, no valid result to preserve) now produces the correct
+	visco-elastic solution. The startup log states the resolved mode:
+	`AUTO-ENABLED by default`, `ON (explicit ...=yes)`, or
+	`DISABLED (explicit ...=no escape hatch)`. This mirrors the in-tree
+	precedent `a36b27e` (auto-enable viscoelastic PML for BKT*+CPML once
+	validated, with an explicit opt-out).
+	**Pre-existing VT + BKT GPU instability.** With
+	`computation_method=vt` (Virtual Topography, Restrepo & Bielak 2014)
+	**and** any `type_of_damping=bkt*`, the GPU solver diverges to NaN
+	(25-station hill case: blow-up at the hill peak ~t≈2.7 s, NaN by
+	≈8.8 s). It is **ABC-independent** (dashpot and cpml alike) and
+	**pre-existing** (independent of the C-PML work). Root cause: the GPU
+	port never implemented the CPU cut-cell visco-elastic operator. On
+	the CPU, VT cut cells flagged `topoBkt` are handled by
+	`TetraForcesBKT` — the 5-tet operator with every term scaled by the
+	per-tet solid fill fraction. On the GPU the BKT damping kernels have
+	only the full-cube operator (plus the PML skip) and no `topoBkt`/
+	5-tet branch, while `kernelTopoForceEffective` excludes `topoBkt`
+	cells. The cut cell therefore got a **full-cube** force on its
+	**fill-fraction-scaled (tiny) lumped mass**; the explicit
+	central-difference update divides full-cube force by tiny mass →
+	CFL collapse → blow-up.
+	When active (default `auto` resolves to on for `vt`+`bkt*`, or
+	explicit `yes`), the missing operator is supplied: a faithful CUDA
+	port of the CPU `TetraForcesBKT` (`topoTetraForcesBKT` /
+	`kernelTopoBktForceEffective` in `psolve.cu`, per-tet algebra copied
+	verbatim from the CPU source, both `cube_part` variants, all five
+	tets) computes the fill-scaled 5-tet **visco-elastic** force for the
+	`topoBkt` cut cells. Its shear/kappa inputs are the **same**
+	`damping_vector_shear/kappa` the BKT conv kernel already writes (the
+	cut cells stay in the full damping mapper for the conv kernel, so the
+	SLS convolution memory is advanced exactly as on the CPU); the
+	`mu = rho·Vs²`, `kappa = rho·(Vp²−4/3 Vs²)` moduli are computed
+	host-side with the exact CPU expression (bit-identical). The cut
+	cells are excluded only from the full-cube force kernel
+	(`kernelDampingCalcLocal` is launched with a `topoBkt`-removed
+	mapper), so each is processed by exactly one internal-force path.
+	GPU `VT`+`BKT` then matches the validated CPU `TetraForcesBKT`
+	reference to the usual ported-kernel float tolerance, with Q retained
+	in the cut cells.
+	**CPML interaction (this branch).** Flat-PML topo cells
+	(`cpml_pml_flattened_element`, the SPECFEM-style PML∩topography
+	overlap) are **excluded** from the new kernel and left on the
+	cube-stiffness + CPML path exactly as on the v2 baseline; the new
+	kernel additionally early-exits on any PML-flagged element (mirrors
+	the BKT conv/local kernels' PML skip; a strict no-op under dashpot
+	where `pmlFlagArrayDevice` is NULL). No `kernel.cu` / `psolve.h` /
+	gpu_data_t changes; `solver_init_damping_gpu_mapper` and
+	`solver_init_topography_gpu_mapper` are byte-identical to the v2
+	baseline; the gate-off path launches the damping kernels with the
+	original mappers — so every existing CPML/non-VT/non-BKT
+	configuration is bit-identical to the validated v2 baseline by
+	construction.
+	Startup (rank 0) prints the resolved mode — `AUTO-ENABLED by default`
+	/ `ON (explicit ...=yes)` / `DISABLED (explicit ...=no escape hatch)`
+	/ `requested but computation_method is not vt -> INACTIVE` — and each
+	topo-bearing rank prints one line `VT+BKT GPU stabilization [rank R]:
+	ON -- visco-elastic 5-tet cut cells=K (flat-PML-skipped=F), full-cube
+	BKT elements=M`.
+	Validated (`vt-bkt-cpml`, Vista): `computation_method=vt`,
+	`type_of_damping=bkt2` converges under both `abc_type=dashpot` and
+	`abc_type=cpml`; the explicit escape hatch `=no` still NaNs
+	(pre-fix baseline preserved); FEM+bkt2+cpml on this branch matches
+	the latest v2 baseline to within run-to-run non-determinism
+	(~1e-10); and the GPU port matches the CPU `TetraForcesBKT` reference
+	(`HERCULES_TOPO_FORCE_MODE=cpu`) to the same ~1e-10 / ~1e-9-relative
+	floor — i.e. numerically equivalent to the validated CPU operator,
+	not merely stable.
 
 Notes on C-PML behavior:
 
@@ -702,6 +786,104 @@ Notes on C-PML behavior:
 	and the derived thickness when `cpml_thickness_m` was zero. Use this to
 	confirm the PML zone is non-empty and split between materials the way you
 	expect.
+- **Topography + C-PML — taper your relief to flat before the PML
+	(recommended workflow), do not rely on flatten-PML alone.** The C-PML
+	buffer is, by construction, a regular axis-aligned flat-topped layer
+	(this is also how SPECFEM3D builds its FE-PML): real free-surface
+	relief is not carried into the PML. For `computation_method=vt`
+	Hercules has a *flatten-PML re-route* (`cpml_pml_flattened_element`)
+	that forces the lateral-PML elements flat so VT+topography+C-PML stays
+	stable; the startup log reports how many elements it skipped as
+	`Topography force path: gpu (... flattened-pml-skipped=N)`. **This is
+	a stability backstop, not a substitute for tapering.** If your
+	topography is still tens-to-hundreds of metres high *at the PML inner
+	edge*, flattening it there manufactures an artificial step (a
+	several-hundred-metre "cliff" for steep boundary relief) that is a
+	strong spurious scatterer; the residual is only small/bounded when the
+	boundary relief is already near-flat. **Recommended setup for real
+	models:** smoothly taper your `topography.in` down to a flat reference
+	inside an interior buffer that ends flat — with margin — *before* the
+	PML inner edge (flat collar ≥ PML thickness; a multi-km smooth ramp).
+	Then the PML and the flatten-PML re-route see no relief and there is
+	no cliff. The helper `benchmark_inputs/taper_topography.py` applies
+	exactly this 2-D raised-cosine (Tukey) edge taper to any
+	`topography.in` (incl. real DEM-derived); the two example generators
+	also take `--edge-taper`. (FEM is a strict no-op for flatten-PML;
+	non-CPML / non-VT / flat / air runs are byte-identical — the re-route
+	never fires. The `benchmark_inputs/topography_tilt_boundary` example
+	is a *deliberate boundary-reaching worst-case* to functionally
+	exercise the re-route, **not** a model-setup template.)
+
+Using `benchmark_inputs/taper_topography.py` (the recommended
+preprocessing step for any real topography + C-PML run):
+
+- **What it is.** A standalone, dependency-free Python 3 script (stdlib
+	only — runs anywhere Hercules builds, including the cluster login
+	node). It reads a `topography.in`, multiplies the *deviation from a
+	flat reference* by a 2-D raised-cosine (Tukey) edge window, and writes
+	a new `topography.in` that is **bit-flat in (and well before) the PML
+	band** while leaving the deep interior untouched. It does **not**
+	change the file format or the solver — `topography.in` in, the same
+	format out.
+- **Basic use** (defaults target the 40 km × 40 km benchmark domain;
+	spacing is read from the file's line 1):
+
+	```
+	cd benchmark_inputs
+	python3 taper_topography.py path/to/topography.in --out topography_tapered.in
+	```
+
+	Then point Hercules at the tapered file — set
+	`topography_directory` to the directory containing
+	`topography_tapered.in` renamed to `topography.in` (Hercules expects
+	exactly that filename), e.g.:
+
+	```
+	mkdir -p model/topo_tapered
+	python3 taper_topography.py raw/topography.in \
+	    --out model/topo_tapered/topography.in --force
+	# parameters.in:  topography_directory = .../model/topo_tapered
+	```
+
+- **Domain / PML options** (tune to your model, not the 40 km default):
+	* `--lx` / `--ly` — domain extent S–N (x) and W–E (y) in metres
+		(defaults 40000 / 40000). The script infers the grid from these +
+		the file's spacing and **errors out** if the point count does not
+		match, so a wrong `--lx/--ly` is caught immediately.
+	* `--buffer` — total taper band width inward from each lateral
+		boundary (m), = flat collar + ramp (default 6000).
+	* `--flat-margin` — width of the **guaranteed-dead-flat collar**
+		adjacent to every boundary (default 1500). **Set this ≥ your PML
+		thickness with margin** (the startup log line
+		`CPML: … (thickness X m …)` gives X; the example domain's ~10-layer
+		PML is ≈ 780 m). The script warns if `--flat-margin` is below
+		`--pml-thickness`.
+	* `--pml-thickness` — PML band thickness (m) used only for that
+		safety warning (default 780).
+	* `--z-ref` — the flat reference: a number in metres (default `0.0`),
+		or `auto` to use the mean elevation of the first interior ring just
+		inside the taper band. Use `auto` for real DEMs that sit at a large
+		offset (e.g. a plateau at +1500 m) so the taper ramps to a
+		representative interior level instead of an arbitrary 0, which
+		minimises the tapered amplitude and the ramp's own gradient.
+	* `--force` — allow overwriting the output (or in-place when `--out`
+		equals the input).
+- **What it prints** — the resolved grid, the buffer/collar/ramp widths,
+	`z_ref` (and its source), how many points were modified vs left
+	untouched, the max elevation change, and a **perimeter-flatness
+	self-check** (`max |z_boundary − z_ref|` must be `0` → prints `OK`).
+	If that check is not `OK`, do not use the file.
+- **`--help`** lists every option with its default
+	(`python3 taper_topography.py --help`).
+- **Alternative for the two bundled examples.** Instead of running the
+	utility you can regenerate either example surface already tapered:
+	`python3 gen_topography_tilt.py --edge-taper` (or
+	`gen_topography_gaussian_hill.py --edge-taper`), with matching
+	`--taper-buffer` / `--taper-flat-margin` / `--taper-zref` options. The
+	`--edge-taper` output is bit-identical to running the standalone
+	utility on the un-tapered surface (same window math); the flag is
+	**off by default** so the committed example `topography.in` files stay
+	byte-reproducible.
 
 Stability fixes baked in (tunable via the fractions above):
 

@@ -769,6 +769,24 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
 int32_t search_point( vector3D_t point, octant_t **octant );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
+/* SPECFEM-style flat/regular PML: returns 1 iff element `eindex` is a
+ * VT-topography CPML PML solid element whose body-fitted deformation
+ * must be suppressed (abc_type=cpml AND include_topography=yes AND
+ * computation_method=VT AND pml_face_mask!=0 AND not an air element).
+ * VT body-fits/deforms surface elements (-> curvilinear topo kernel),
+ * which mismatches the cube CPML delta; this re-routes them to the
+ * regular cube path. FEM topography is a regular Cartesian mesh + air
+ * elements (no element deformation), so this is a strict NO-OP for FEM
+ * -- and 0 whenever CPML or topography is off, so every flat-surface
+ * CPML run (all Stage 1-4 validation) and every FEM/dashpot run is
+ * byte-identical. Air elements (Vp=-1) always return 0 (must not enter
+ * the solid stiffness mapper). Single source of truth for the
+ * linear/topo mapper partition (stiffness.cu), the topo GPU mapper
+ * filter and the toponodes_mass gate. g_cpmlBuild.face_mask is filled
+ * by solver_init() before stiffness_init()/the topo mapper, so it is
+ * valid at all call sites. */
+int cpml_pml_flattened_element( int32_t eindex );
+
 
 #ifdef __cplusplus
 }

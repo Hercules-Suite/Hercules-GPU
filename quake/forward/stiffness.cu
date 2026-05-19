@@ -61,7 +61,8 @@ void linear_elements_count(int32_t myID, mesh_t *myMesh) {
 
     for (eindex = 0; eindex < myMesh->lenum; eindex++) {
         if ( ( isThisElementNonLinear(myMesh, eindex) == NO ) &&
-        	 ( BelongstoTopography   (myMesh, eindex) == NO )  ) {
+        	 ( ( BelongstoTopography(myMesh, eindex) == NO ) ||
+        	   cpml_pml_flattened_element(eindex) ) ) {
             count++;
         }
     }
@@ -93,7 +94,8 @@ void linear_elements_mapping(int32_t myID, mesh_t *myMesh) {
 
     for (eindex = 0; eindex < myMesh->lenum; eindex++) {
         if ( ( isThisElementNonLinear(myMesh, eindex) == NO ) &&
-        	 ( BelongstoTopography(myMesh, eindex)    == NO ) ) {
+        	 ( ( BelongstoTopography(myMesh, eindex) == NO ) ||
+        	   cpml_pml_flattened_element(eindex) ) ) {
             myLinearElementsMapper[count] = eindex;
             count++;
         }
