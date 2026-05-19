@@ -1067,11 +1067,18 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
 
   eindex = dampingElemMapperDevice[lin_eindex];
 
-  /* CPML: PML elements run their own elastic/acoustic memory recurrence;
-   * the BKT (Q-attenuation) memory variables are skipped on PML elements
-   * to keep the two memory-variable systems decoupled. */
+  /* CPML: skip BKT memory on PML elements UNLESS viscoelastic PML
+   * (cpml_pml_material_damping = bkt, ==1) is requested -- then the SLS
+   * memory IS advanced for PML elements so the relaxed anelastic vectors
+   * exist there for kernelPMLElasticStep's Stage-2 branch. This mirrors
+   * kernelDampingCalcConvBkt2's gate exactly; without the
+   * cpmlPmlMaterialDamping!=1 exception, BKT/BKT3 + cpml (auto-enabled to
+   * viscoelastic CFS-CPML) would feed stale/zero anelastic vectors to the
+   * PML elements. none(0)/rayleigh(2): unchanged skip -> byte-identical
+   * baseline. */
   if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0) {
+      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+      gpuData->cpmlPmlMaterialDamping != 1) {
     return;
   }
 
@@ -1298,6 +1305,200 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
 
     }
 
+  }
+
+  return;
+}
+
+
+/* Damping Calc-Conv Kernel -- BKT3/BKT3F fast path (3 Maxwell
+ * mechanisms). Numerically a faithful, bit-identical specialization of
+ * the generic kernelDampingCalcConv for the spatially-uniform-g case:
+ * the 18 spectral coefficients are hoisted to scalar kernel args
+ * (computed once on the host -> no per-element/-node exp() and no
+ * g0/g1/g2 array traffic), while the per-element weights a*/b* are
+ * still read per element. Gates and arithmetic order match the generic
+ * kernel exactly. Dispatched only when g_dampingGUniform==1; the
+ * generic kernel is the heterogeneous-g fallback. */
+__global__ void kernelDampingCalcConvBkt3(int32_t lenum,
+                                          int32_t numcomp,
+                                          gpu_data_t *gpuData,
+                                          double rmax,
+                                          double shear_coef_1,
+                                          double shear_coef_2,
+                                          double shear_exp_coef_0,
+                                          double shear_coef_3,
+                                          double shear_coef_4,
+                                          double shear_exp_coef_1,
+                                          double shear_coef_5,
+                                          double shear_coef_6,
+                                          double shear_exp_coef_2,
+                                          double kappa_coef_1,
+                                          double kappa_coef_2,
+                                          double kappa_exp_coef_0,
+                                          double kappa_coef_3,
+                                          double kappa_coef_4,
+                                          double kappa_exp_coef_1,
+                                          double kappa_coef_5,
+                                          double kappa_coef_6,
+                                          double kappa_exp_coef_2,
+                                          int32_t dampingElemCount,
+                                          int32_t* dampingElemMapperDevice)
+{
+  int i;
+  int32_t lin_eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  int32_t eindex;
+
+  if (lin_eindex >= dampingElemCount) {
+    return;
+  }
+
+  eindex = dampingElemMapperDevice[lin_eindex];
+
+  /* CPML: skip BKT memory on PML elements UNLESS viscoelastic PML
+   * (cpml_pml_material_damping = bkt, ==1) -- then the SLS memory IS
+   * advanced for PML elements so the relaxed anelastic vectors exist
+   * there for kernelPMLElasticStep's Stage-2 branch. Mirrors
+   * kernelDampingCalcConvBkt2 / the generic kernel exactly.
+   * none(0)/rayleigh(2): unchanged skip -> byte-identical baseline. */
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
+      gpuData->cpmlPmlMaterialDamping != 1) {
+    return;
+  }
+
+  const double a0_shear = gpuData->a0_shearArrayDevice[eindex];
+  const double a1_shear = gpuData->a1_shearArrayDevice[eindex];
+  const double a2_shear = gpuData->a2_shearArrayDevice[eindex];
+  const double b_shear = gpuData->b_shearArrayDevice[eindex];
+  const double coef_shear = (rmax != 0.0) ? (b_shear / rmax) : 0.0;
+  const int do_conv_update_shear =
+      ((shear_coef_1 != 0.0) && (shear_coef_3 != 0.0));
+  const int do_damping_calc_shear =
+      ((a0_shear + a1_shear + a2_shear + b_shear) != 0.0);
+
+  const double a0_kappa = gpuData->a0_kappaArrayDevice[eindex];
+  const double a1_kappa = gpuData->a1_kappaArrayDevice[eindex];
+  const double a2_kappa = gpuData->a2_kappaArrayDevice[eindex];
+  const double b_kappa = gpuData->b_kappaArrayDevice[eindex];
+  const double coef_kappa = (rmax != 0.0) ? (b_kappa / rmax) : 0.0;
+  const int do_conv_update_kappa =
+      ((kappa_coef_1 != 0.0) && (kappa_coef_3 != 0.0));
+  const int do_damping_calc_kappa =
+      ((a0_kappa + a1_kappa + a2_kappa + b_kappa) != 0.0);
+
+  fvector_t tm1Disp, tm2Disp;
+  solver_float *f0_tm1[3], *f1_tm1[3], *f2_tm1[3], *convVec[3];
+  int32_t offset0;
+
+  for (i = 0, offset0 = eindex; i < 8; i++, offset0 += lenum) {
+    int32_t offset1 = offset0 + numcomp;
+    int32_t offset2 = offset1 + numcomp;
+    int32_t lnid = *(gpuData->lnidArrayDevice + offset0);
+
+    const __restrict__ fvector_t *disp = gpuData->tm1Device + lnid;
+    tm1Disp.f[0] = disp->f[0];
+    tm1Disp.f[1] = disp->f[1];
+    tm1Disp.f[2] = disp->f[2];
+
+    disp = gpuData->tm2Device + lnid;
+    tm2Disp.f[0] = disp->f[0];
+    tm2Disp.f[1] = disp->f[1];
+    tm2Disp.f[2] = disp->f[2];
+
+    /* SHEAR convolution (3 mechanisms) */
+    f0_tm1[0] = (solver_float *)gpuData->conv_shear_1Device + offset0;
+    f0_tm1[1] = (solver_float *)gpuData->conv_shear_1Device + offset1;
+    f0_tm1[2] = (solver_float *)gpuData->conv_shear_1Device + offset2;
+    f1_tm1[0] = (solver_float *)gpuData->conv_shear_2Device + offset0;
+    f1_tm1[1] = (solver_float *)gpuData->conv_shear_2Device + offset1;
+    f1_tm1[2] = (solver_float *)gpuData->conv_shear_2Device + offset2;
+    f2_tm1[0] = (solver_float *)gpuData->conv_shear_3Device + offset0;
+    f2_tm1[1] = (solver_float *)gpuData->conv_shear_3Device + offset1;
+    f2_tm1[2] = (solver_float *)gpuData->conv_shear_3Device + offset2;
+
+    if (do_conv_update_shear) {
+      *f0_tm1[0] = shear_coef_2 * tm1Disp.f[0] + shear_coef_1 * tm2Disp.f[0] + shear_exp_coef_0 * (*f0_tm1[0]);
+      *f1_tm1[0] = shear_coef_4 * tm1Disp.f[0] + shear_coef_3 * tm2Disp.f[0] + shear_exp_coef_1 * (*f1_tm1[0]);
+
+      *f0_tm1[1] = shear_coef_2 * tm1Disp.f[1] + shear_coef_1 * tm2Disp.f[1] + shear_exp_coef_0 * (*f0_tm1[1]);
+      *f1_tm1[1] = shear_coef_4 * tm1Disp.f[1] + shear_coef_3 * tm2Disp.f[1] + shear_exp_coef_1 * (*f1_tm1[1]);
+
+      *f0_tm1[2] = shear_coef_2 * tm1Disp.f[2] + shear_coef_1 * tm2Disp.f[2] + shear_exp_coef_0 * (*f0_tm1[2]);
+      *f1_tm1[2] = shear_coef_4 * tm1Disp.f[2] + shear_coef_3 * tm2Disp.f[2] + shear_exp_coef_1 * (*f1_tm1[2]);
+
+      *f2_tm1[0] = shear_coef_6 * tm1Disp.f[0] + shear_coef_5 * tm2Disp.f[0] + shear_exp_coef_2 * (*f2_tm1[0]);
+      *f2_tm1[1] = shear_coef_6 * tm1Disp.f[1] + shear_coef_5 * tm2Disp.f[1] + shear_exp_coef_2 * (*f2_tm1[1]);
+      *f2_tm1[2] = shear_coef_6 * tm1Disp.f[2] + shear_coef_5 * tm2Disp.f[2] + shear_exp_coef_2 * (*f2_tm1[2]);
+    }
+
+    convVec[0] = (solver_float *)gpuData->shearVectorDevice + offset0;
+    convVec[1] = (solver_float *)gpuData->shearVectorDevice + offset1;
+    convVec[2] = (solver_float *)gpuData->shearVectorDevice + offset2;
+
+    if (do_damping_calc_shear) {
+      *convVec[0] = coef_shear * (tm1Disp.f[0] - tm2Disp.f[0])
+          - (a0_shear * (*f0_tm1[0]) + a1_shear * (*f1_tm1[0])) + tm1Disp.f[0];
+      *convVec[1] = coef_shear * (tm1Disp.f[1] - tm2Disp.f[1])
+          - (a0_shear * (*f0_tm1[1]) + a1_shear * (*f1_tm1[1])) + tm1Disp.f[1];
+      *convVec[2] = coef_shear * (tm1Disp.f[2] - tm2Disp.f[2])
+          - (a0_shear * (*f0_tm1[2]) + a1_shear * (*f1_tm1[2])) + tm1Disp.f[2];
+
+      *convVec[0] -= a2_shear * (*f2_tm1[0]);
+      *convVec[1] -= a2_shear * (*f2_tm1[1]);
+      *convVec[2] -= a2_shear * (*f2_tm1[2]);
+    } else {
+      *convVec[0] = tm1Disp.f[0];
+      *convVec[1] = tm1Disp.f[1];
+      *convVec[2] = tm1Disp.f[2];
+    }
+
+    /* DILATATION (kappa) convolution (3 mechanisms) */
+    f0_tm1[0] = (solver_float *)gpuData->conv_kappa_1Device + offset0;
+    f0_tm1[1] = (solver_float *)gpuData->conv_kappa_1Device + offset1;
+    f0_tm1[2] = (solver_float *)gpuData->conv_kappa_1Device + offset2;
+    f1_tm1[0] = (solver_float *)gpuData->conv_kappa_2Device + offset0;
+    f1_tm1[1] = (solver_float *)gpuData->conv_kappa_2Device + offset1;
+    f1_tm1[2] = (solver_float *)gpuData->conv_kappa_2Device + offset2;
+    f2_tm1[0] = (solver_float *)gpuData->conv_kappa_3Device + offset0;
+    f2_tm1[1] = (solver_float *)gpuData->conv_kappa_3Device + offset1;
+    f2_tm1[2] = (solver_float *)gpuData->conv_kappa_3Device + offset2;
+
+    if (do_conv_update_kappa) {
+      *f0_tm1[0] = kappa_coef_2 * tm1Disp.f[0] + kappa_coef_1 * tm2Disp.f[0] + kappa_exp_coef_0 * (*f0_tm1[0]);
+      *f1_tm1[0] = kappa_coef_4 * tm1Disp.f[0] + kappa_coef_3 * tm2Disp.f[0] + kappa_exp_coef_1 * (*f1_tm1[0]);
+
+      *f0_tm1[1] = kappa_coef_2 * tm1Disp.f[1] + kappa_coef_1 * tm2Disp.f[1] + kappa_exp_coef_0 * (*f0_tm1[1]);
+      *f1_tm1[1] = kappa_coef_4 * tm1Disp.f[1] + kappa_coef_3 * tm2Disp.f[1] + kappa_exp_coef_1 * (*f1_tm1[1]);
+
+      *f0_tm1[2] = kappa_coef_2 * tm1Disp.f[2] + kappa_coef_1 * tm2Disp.f[2] + kappa_exp_coef_0 * (*f0_tm1[2]);
+      *f1_tm1[2] = kappa_coef_4 * tm1Disp.f[2] + kappa_coef_3 * tm2Disp.f[2] + kappa_exp_coef_1 * (*f1_tm1[2]);
+
+      *f2_tm1[0] = kappa_coef_6 * tm1Disp.f[0] + kappa_coef_5 * tm2Disp.f[0] + kappa_exp_coef_2 * (*f2_tm1[0]);
+      *f2_tm1[1] = kappa_coef_6 * tm1Disp.f[1] + kappa_coef_5 * tm2Disp.f[1] + kappa_exp_coef_2 * (*f2_tm1[1]);
+      *f2_tm1[2] = kappa_coef_6 * tm1Disp.f[2] + kappa_coef_5 * tm2Disp.f[2] + kappa_exp_coef_2 * (*f2_tm1[2]);
+    }
+
+    convVec[0] = (solver_float *)gpuData->kappaVectorDevice + offset0;
+    convVec[1] = (solver_float *)gpuData->kappaVectorDevice + offset1;
+    convVec[2] = (solver_float *)gpuData->kappaVectorDevice + offset2;
+
+    if (do_damping_calc_kappa) {
+      *convVec[0] = coef_kappa * (tm1Disp.f[0] - tm2Disp.f[0])
+          - (a0_kappa * (*f0_tm1[0]) + a1_kappa * (*f1_tm1[0])) + tm1Disp.f[0];
+      *convVec[1] = coef_kappa * (tm1Disp.f[1] - tm2Disp.f[1])
+          - (a0_kappa * (*f0_tm1[1]) + a1_kappa * (*f1_tm1[1])) + tm1Disp.f[1];
+      *convVec[2] = coef_kappa * (tm1Disp.f[2] - tm2Disp.f[2])
+          - (a0_kappa * (*f0_tm1[2]) + a1_kappa * (*f1_tm1[2])) + tm1Disp.f[2];
+
+      *convVec[0] -= a2_kappa * (*f2_tm1[0]);
+      *convVec[1] -= a2_kappa * (*f2_tm1[1]);
+      *convVec[2] -= a2_kappa * (*f2_tm1[2]);
+    } else {
+      *convVec[0] = tm1Disp.f[0];
+      *convVec[1] = tm1Disp.f[1];
+      *convVec[2] = tm1Disp.f[2];
+    }
   }
 
   return;
