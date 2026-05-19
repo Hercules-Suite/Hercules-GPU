@@ -39,8 +39,28 @@ lateral PML bands are clearly topography-deformed.
 Optional interior Gaussian bump (default OFF, --bump-h 0) if you also
 want an interior feature; for a clean re-route mechanism test leave it
 off (pure tilt = simplest to interpret).
+
+Optional --edge-taper (default OFF) smoothly brings the surface to a
+flat reference inside an interior buffer, so it is already flat -- with
+margin -- BEFORE the PML inner edge (the recommended real-model
+workflow; see ../taper_topography.py). Default OFF keeps this file's
+deliberate worst-case (boundary-reaching) test surface exactly
+reproducible.
 """
 import argparse, math
+
+
+def _edge_taper_factor(x, y, lx, ly, buffer_w, flat_margin):
+    """2-D raised-cosine edge window: 0 in the boundary collar, smoothly
+    up to 1 at the taper-start, exactly 1 in the interior. See
+    ../taper_topography.py for the standalone (real-DEM) version."""
+    r = min(x, lx - x, y, ly - y)
+    if r >= buffer_w:
+        return 1.0
+    if r <= flat_margin:
+        return 0.0
+    s = (r - flat_margin) / (buffer_w - flat_margin)
+    return 0.5 - 0.5 * math.cos(math.pi * s)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -59,6 +79,19 @@ def main():
     ap.add_argument("--bump-sigma", type=float, default=3000.0)
     ap.add_argument("--bump-x0", type=float, default=20000.0)
     ap.add_argument("--bump-y0", type=float, default=20000.0)
+    ap.add_argument("--edge-taper", action="store_true",
+                    help="taper the surface to a flat reference before "
+                         "the PML (recommended real-model workflow; "
+                         "OFF by default so the worst-case test surface "
+                         "stays reproducible)")
+    ap.add_argument("--taper-buffer", type=float, default=6000.0,
+                    help="total taper band width from each lateral "
+                         "boundary inward (m): flat collar + cosine ramp")
+    ap.add_argument("--taper-flat-margin", type=float, default=1500.0,
+                    help="guaranteed-flat collar width (m); must be >= "
+                         "the PML thickness, with margin")
+    ap.add_argument("--taper-zref", type=float, default=0.0,
+                    help="flat reference elevation (m) the taper goes to")
     ap.add_argument("--out", default="topography.in")
     a = ap.parse_args()
 
@@ -79,6 +112,11 @@ def main():
                 if a.bump_h != 0.0:
                     z += a.bump_h * math.exp(
                         -(((x - a.bump_x0) ** 2) + ((y - a.bump_y0) ** 2)) * binv)
+                if a.edge_taper:
+                    fac = _edge_taper_factor(x, y, a.lx, a.ly,
+                                             a.taper_buffer,
+                                             a.taper_flat_margin)
+                    z = a.taper_zref + fac * (z - a.taper_zref)
                 f.write(f"{z:.4f}\n")
 
     ne = a.z0 + a.sx * a.lx + a.sy * a.ly
@@ -87,9 +125,20 @@ def main():
     print(f"plane: z0={a.z0:g}  sx={a.sx:g}  sy={a.sy:g} m/m  "
           f"=> SW={a.z0:g} m, NE={ne:g} m, slope ~ {slope_deg:.2f} deg"
           + (f"  + interior bump H={a.bump_h:g} m" if a.bump_h else ""))
-    print("Non-zero & sloping along ALL four lateral boundaries -> the "
-          "flatten-PML re-route (computation_method=vt) is fully exercised "
-          "(expect a LARGE flattened-pml-skipped count).")
+    if a.edge_taper:
+        print(f"EDGE-TAPER ON: flat to z={a.taper_zref:g} m within "
+              f"buffer={a.taper_buffer:g} m (collar={a.taper_flat_margin:g} m "
+              f"+ ramp={a.taper_buffer - a.taper_flat_margin:g} m) of every "
+              f"lateral boundary -> surface is flat BEFORE the PML "
+              f"(recommended real-model setup; the boundary is no longer a "
+              f"flatten-PML stress test).")
+    else:
+        print("Non-zero & sloping along ALL four lateral boundaries -> the "
+              "flatten-PML re-route (computation_method=vt) is fully "
+              "exercised (expect a LARGE flattened-pml-skipped count). "
+              "This is a DELIBERATE worst-case test, NOT a model-setup "
+              "template -- for real models add --edge-taper (or run "
+              "../taper_topography.py).")
     print("ordering: line1=spacing; OUTER y(W->E), INNER x(S->N); "
           "first point = SW corner (x=0,y=0)")
 

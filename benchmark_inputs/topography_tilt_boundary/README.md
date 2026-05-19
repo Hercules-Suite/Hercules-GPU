@@ -1,5 +1,16 @@
 # Topography example: boundary-reaching gentle tilt (flatten-PML test)
 
+> ⚠️ **This is a deliberate worst-case TEST surface, NOT a model-setup
+> template.** It intentionally drives non-zero relief into all four
+> lateral PML bands to *functionally exercise* the flatten-PML re-route.
+> Doing this in a real model manufactures an artificial step at the PML
+> inner edge (a "cliff" for steep boundary relief — a strong spurious
+> scatterer). **For real models, taper your topography to flat before
+> the PML** (flatten-PML is a stability backstop, **not** a substitute
+> for tapering): run `../taper_topography.py` on your `topography.in`,
+> or regenerate this surface with `--edge-taper`. See the repo
+> `README.md` → "Topography + C-PML" note for the rationale.
+
 Purpose-built to **actually exercise the C-PML flatten-PML re-route**
 (`cpml_pml_flattened_element`), which the earlier Gaussian-hill example
 **cannot** test: that hill decays to ~0 over the PML band, so no PML
@@ -22,10 +33,33 @@ the functional test.
 
 Regenerate / reparameterize:
 ```
-python3 gen_topography_tilt.py                     # defaults below
+python3 gen_topography_tilt.py                     # defaults below (worst-case test surface)
 python3 gen_topography_tilt.py --sx 0.02 --sy 0    # steeper, W-E flat
 python3 gen_topography_tilt.py --bump-h 400        # + interior bump too
+python3 gen_topography_tilt.py --edge-taper        # REAL-MODEL form: flat before the PML
 ```
+
+### Recommended real-model workflow (taper to flat before the PML)
+
+The bare tilt is a worst-case stress test. For an actual simulation you
+almost always want the surface **flat — with margin — before the PML
+inner edge**, so the absorbing layer (and the VT flatten-PML re-route)
+sees no relief and there is no artificial inner-edge step:
+
+```
+# regenerate this surface already tapered:
+python3 gen_topography_tilt.py --edge-taper
+
+# or taper ANY existing topography.in (incl. real DEM-derived):
+python3 ../taper_topography.py topography.in --out topography_tapered.in
+```
+
+Both apply the same 2-D raised-cosine (Tukey) edge window: a
+guaranteed-flat collar (default 1500 m ≥ the ~780 m PML band, with
+margin) adjacent to every lateral boundary, a smooth multi-km cosine
+ramp inside it, and the deep interior left untouched. Tune
+`--taper-buffer` / `--taper-flat-margin` (generator) or
+`--buffer` / `--flat-margin` (utility) to your domain and PML thickness.
 
 ## The surface
 

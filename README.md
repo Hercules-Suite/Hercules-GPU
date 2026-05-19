@@ -702,6 +702,33 @@ Notes on C-PML behavior:
 	and the derived thickness when `cpml_thickness_m` was zero. Use this to
 	confirm the PML zone is non-empty and split between materials the way you
 	expect.
+- **Topography + C-PML — taper your relief to flat before the PML
+	(recommended workflow), do not rely on flatten-PML alone.** The C-PML
+	buffer is, by construction, a regular axis-aligned flat-topped layer
+	(this is also how SPECFEM3D builds its FE-PML): real free-surface
+	relief is not carried into the PML. For `computation_method=vt`
+	Hercules has a *flatten-PML re-route* (`cpml_pml_flattened_element`)
+	that forces the lateral-PML elements flat so VT+topography+C-PML stays
+	stable; the startup log reports how many elements it skipped as
+	`Topography force path: gpu (... flattened-pml-skipped=N)`. **This is
+	a stability backstop, not a substitute for tapering.** If your
+	topography is still tens-to-hundreds of metres high *at the PML inner
+	edge*, flattening it there manufactures an artificial step (a
+	several-hundred-metre "cliff" for steep boundary relief) that is a
+	strong spurious scatterer; the residual is only small/bounded when the
+	boundary relief is already near-flat. **Recommended setup for real
+	models:** smoothly taper your `topography.in` down to a flat reference
+	inside an interior buffer that ends flat — with margin — *before* the
+	PML inner edge (flat collar ≥ PML thickness; a multi-km smooth ramp).
+	Then the PML and the flatten-PML re-route see no relief and there is
+	no cliff. The helper `benchmark_inputs/taper_topography.py` applies
+	exactly this 2-D raised-cosine (Tukey) edge taper to any
+	`topography.in` (incl. real DEM-derived); the two example generators
+	also take `--edge-taper`. (FEM is a strict no-op for flatten-PML;
+	non-CPML / non-VT / flat / air runs are byte-identical — the re-route
+	never fires. The `benchmark_inputs/topography_tilt_boundary` example
+	is a *deliberate boundary-reaching worst-case* to functionally
+	exercise the re-route, **not** a model-setup template.)
 
 Stability fixes baked in (tunable via the fractions above):
 

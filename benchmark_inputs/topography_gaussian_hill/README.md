@@ -18,7 +18,29 @@ Regenerate / reparameterize:
 ```
 python3 gen_topography_gaussian_hill.py            # defaults below
 python3 gen_topography_gaussian_hill.py --height 1500 --sigma 2000   # steeper
+python3 gen_topography_gaussian_hill.py --edge-taper                  # force flat before the PML
 ```
+
+### Recommended real-model workflow (taper to flat before the PML)
+
+For the **default** interior hill `--edge-taper` is essentially a no-op
+— the Gaussian already decays to ~0 well before the lateral boundaries,
+which is exactly why this is the *well-behaved* example. But the moment
+you widen `σ`, raise `H`, or move the centre so the hill **reaches a
+boundary**, you should taper it back to flat before the PML inner edge
+(the C-PML buffer is a flat axis-aligned layer; the VT flatten-PML
+re-route is a stability backstop, **not** a substitute for tapering — a
+boundary-reaching hill flattened in-place becomes an artificial
+inner-edge step). Either regenerate with `--edge-taper`, or taper any
+existing `topography.in` (incl. real DEM-derived):
+
+```
+python3 ../taper_topography.py topography.in --out topography_tapered.in
+```
+
+Both apply the same 2-D raised-cosine (Tukey) edge window (flat collar
+≥ PML thickness + smooth multi-km ramp; interior untouched). See the
+repo `README.md` → "Topography + C-PML" note for the full rationale.
 
 ## `topography.in` format (as implemented here)
 
@@ -52,7 +74,9 @@ lateral boundaries** (edge elevations are 0.0000). This is deliberate:
 
 For a flatten-PML **stress test**, widen `σ` / raise `H` / move the
 centre so the hill reaches a lateral boundary, and watch
-`flattened-pml-skipped` rise.
+`flattened-pml-skipped` rise. (That is a *test* configuration only — for
+a real run of a boundary-reaching surface, taper it first: see
+"Recommended real-model workflow" above.)
 
 ## Enabling it in the parameter file
 

@@ -33,8 +33,29 @@ Defaults: H=800 m, sigma=3000 m, centre=(20000,20000), d=100 m
 => 401 x 401 = 160801 points; max slope ~ H/(sigma*sqrt(e)) ~ 9.2 deg
 (gentle/moderate -- safe for a first VT+CPML example).  Increase H or
 decrease sigma for a steeper stress test; keep the feature interior.
+
+Optional --edge-taper (default OFF) smoothly forces the surface to a
+flat reference inside an interior buffer so it is flat -- with margin --
+BEFORE the PML inner edge (the recommended real-model workflow; see
+../taper_topography.py). For THIS default interior hill it is a near
+no-op (the hill already decays to ~0 well before the boundary); it
+matters once you widen/relocate the hill so it reaches the boundary.
+Default OFF keeps this example's topography.in exactly reproducible.
 """
 import argparse, math
+
+
+def _edge_taper_factor(x, y, lx, ly, buffer_w, flat_margin):
+    """2-D raised-cosine edge window: 0 in the boundary collar, smoothly
+    up to 1 at the taper-start, exactly 1 in the interior. See
+    ../taper_topography.py for the standalone (real-DEM) version."""
+    r = min(x, lx - x, y, ly - y)
+    if r >= buffer_w:
+        return 1.0
+    if r <= flat_margin:
+        return 0.0
+    s = (r - flat_margin) / (buffer_w - flat_margin)
+    return 0.5 - 0.5 * math.cos(math.pi * s)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -50,6 +71,18 @@ def main():
                     help="Gaussian half-width sigma (m)")
     ap.add_argument("--x0", type=float, default=20000.0, help="hill centre x (m)")
     ap.add_argument("--y0", type=float, default=20000.0, help="hill centre y (m)")
+    ap.add_argument("--edge-taper", action="store_true",
+                    help="taper the surface to a flat reference before "
+                         "the PML (recommended real-model workflow; OFF "
+                         "by default so this example stays reproducible)")
+    ap.add_argument("--taper-buffer", type=float, default=6000.0,
+                    help="total taper band width from each lateral "
+                         "boundary inward (m): flat collar + cosine ramp")
+    ap.add_argument("--taper-flat-margin", type=float, default=1500.0,
+                    help="guaranteed-flat collar width (m); must be >= "
+                         "the PML thickness, with margin")
+    ap.add_argument("--taper-zref", type=float, default=0.0,
+                    help="flat reference elevation (m) the taper goes to")
     ap.add_argument("--out", default="topography.in")
     a = ap.parse_args()
 
@@ -69,12 +102,24 @@ def main():
             for i in range(nx):                         # x: south -> north
                 x = i * a.spacing
                 z = a.height * math.exp(-((x - a.x0) ** 2 + dy2) * inv)
+                if a.edge_taper:
+                    fac = _edge_taper_factor(x, y, a.lx, a.ly,
+                                             a.taper_buffer,
+                                             a.taper_flat_margin)
+                    z = a.taper_zref + fac * (z - a.taper_zref)
                 f.write(f"{z:.4f}\n")
 
     print(f"wrote {a.out}: spacing={a.spacing:g} m, grid {nx} x {ny} "
           f"= {nx*ny} points (+1 spacing line)")
     print(f"Gaussian hill: H={a.height:g} m, sigma={a.sigma:g} m, "
           f"centre=({a.x0:g},{a.y0:g}); max slope ~ {math.degrees(math.atan(max_slope)):.2f} deg")
+    if a.edge_taper:
+        print(f"EDGE-TAPER ON: flat to z={a.taper_zref:g} m within "
+              f"buffer={a.taper_buffer:g} m (collar={a.taper_flat_margin:g} m "
+              f"+ ramp={a.taper_buffer - a.taper_flat_margin:g} m) of every "
+              f"lateral boundary -> surface is flat BEFORE the PML "
+              f"(near no-op for the default interior hill; matters once "
+              f"the hill reaches the boundary).")
     print("ordering: line1=spacing; then OUTER y(W->E), INNER x(S->N); "
           "first point = SW corner (x=0,y=0)")
 
