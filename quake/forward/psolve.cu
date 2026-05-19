@@ -11907,15 +11907,21 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
       (topoConstantsHost == NULL)) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    if (Global.myID == 0) {
-      monitor_print(
-          "VT+BKT GPU stabilization: gate ON, VT, but no topo elements "
-          "(topoCount=%d) -> INACTIVE (no-op)\n",
-          topoCount);
-    }
+    /* Per-rank (stderr) so MPI runs with localized topography are
+     * diagnosable -- rank 0 frequently owns no topo elements. */
+    fprintf(stderr,
+            "VT+BKT GPU stabilization [rank %d]: no topo elements "
+            "(topoCount=%d) -> INACTIVE on this rank\n",
+            myID, topoCount);
     return;
   }
 
+  /* Accounting broken down so the cause is visible per rank:
+   *  topoBkt-flagged   = VT topo cells with edata->topoBkt set
+   *  flat-PML-skipped  = of those, ones on the SPECFEM cube+CPML path
+   *  eligible          = cut cells the new visco-elastic kernel takes */
+  int32_t nTopoBktFlagged = 0;
+  int32_t nFlatPmlSkipped = 0;
   int32_t cntBkt = 0;
   for (int32_t topoIdx = 0; topoIdx < topoCount; topoIdx++) {
     int32_t eindex = topoMapperHost[topoIdx];
@@ -11927,25 +11933,31 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     if (edata->topoBkt == 0) {
       continue;
     }
+    nTopoBktFlagged++;
     /* CPML flat-PML: a PML element that also belongs to topography is
      * handled by the cube stiffness + CPML path on v2 (and the
      * curvilinear topo mapper already excludes it). Keep it there --
      * the new visco-elastic kernel must not also force it. */
     if (cpml_pml_flattened_element(eindex)) {
+      nFlatPmlSkipped++;
       continue;
     }
     cntBkt++;
   }
 
+  fprintf(stderr,
+          "VT+BKT GPU stabilization [rank %d]: topoCount=%d "
+          "topoBkt-flagged=%d flat-PML-skipped=%d eligible-cut-cells=%d\n",
+          myID, topoCount, nTopoBktFlagged, nFlatPmlSkipped, cntBkt);
+
   if (cntBkt == 0) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    if (Global.myID == 0) {
-      monitor_print(
-          "VT+BKT GPU stabilization: gate ON, VT, topoCount=%d, but no "
-          "eligible topoBkt cut cells -> INACTIVE (no-op)\n",
-          topoCount);
-    }
+    fprintf(stderr,
+            "VT+BKT GPU stabilization [rank %d]: no eligible topoBkt cut "
+            "cells -> INACTIVE on this rank (topoBkt-flagged=%d, "
+            "flat-PML-skipped=%d)\n",
+            myID, nTopoBktFlagged, nFlatPmlSkipped);
     return;
   }
 
