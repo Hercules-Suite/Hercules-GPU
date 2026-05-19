@@ -75,6 +75,19 @@ Advanced/diagnostic toggles:
 	Default is `cursor`, which streams saved mesh leaves from the etree and
 	imports them directly into the local octor tree. Set to `refine` to restore
 	the older recursive `octor_refinetree()` search path.
+- `HERCULES_FORCE_GENERIC_DAMPING=0|1`
+	Diagnostic/validation override for the viscoelastic damping kernels.
+	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
+	hoisted-coefficient convolution kernels (bit-identical to leaving it
+	unset). Set to `1` to force the generic per-element
+	`kernelDampingCalcConv` for all BKT-family damping, bypassing the
+	fast kernels. Use it to produce a generic-kernel reference from an
+	otherwise-identical run and verify the fast kernels — they must match
+	the generic kernel to single-precision tolerance for a
+	spatially-uniform relaxation spectrum (the auto-detected common
+	case). A one-time rank-0 line is printed to the monitor/stderr when
+	the override is active so a forced run cannot be mistaken for a
+	normal one. Read once at startup; production runs leave it unset.
 - `OCTOR_IMPORT_PATH_CACHE=0|1`
 	Controls a small parent-path cache used by cursor mesh import.
 	Default is `1`, which reuses the shared root-to-leaf prefix between
@@ -166,6 +179,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_CONTRIB_RECV_MODE=waitall
 # export HERCULES_REPRO_MODE=1
 # export HERCULES_MESH_IMPORT_VERIFY=1
+# export HERCULES_FORCE_GENERIC_DAMPING=1
 # export PHASE_B_MAP_MODE=numa
 
 PSOLVE_BIN=<path to psolve> \
