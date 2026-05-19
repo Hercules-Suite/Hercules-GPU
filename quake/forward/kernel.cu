@@ -722,22 +722,6 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     }
   }
 
-  /* Interface source filter: 1-pole IIR / EMA low-pass on the exchanged
-   * source, per face. Gated (off by default -> bit-identical). Attenuates
-   * the grid-scale (~4.6 Hz) content that pumps the lossless water mode
-   * while passing the physical <1 Hz band. */
-  if (gpuData->acousticInterfaceFilterEnabled != 0 &&
-      gpuData->acousticInterfaceFilterStateDevice != NULL) {
-    const double fa = gpuData->acousticInterfaceFilterAlpha;
-    const double fs = gpuData->acousticInterfaceFilterStrength;
-    const double prev =
-        (double)gpuData->acousticInterfaceFilterStateDevice[faceIndex];
-    const double filt = prev + fa * (source_n - prev);
-    gpuData->acousticInterfaceFilterStateDevice[faceIndex] =
-        (solver_float)filt;
-    source_n += fs * (filt - source_n);
-  }
-
   /* CPML-aware interface correction (mirror of the pressure->force path,
    * with its own memory variable so the two coupling directions stay
    * symmetric). Identity on non-PML faces / at the PML inner edge.

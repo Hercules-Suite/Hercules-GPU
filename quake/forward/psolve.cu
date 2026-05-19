@@ -1493,15 +1493,11 @@ static struct Param_t {
    * theCpmlNativeStiffnessAcoustic to preserve C++ designated-init
    * order. */
   noyesflag_t theTopoBktGpuStabilize;
-  /* Acoustic-elastic coupling formulation + interface source filter.
-   * DEFAULT is velocity_potential (1) — the cross-validated stable
-   * coupling; pressure (0) is the legacy explicit opt-in. Only affects
-   * acoustic / acoustic-elastic runs; pure-elastic is unaffected. The
-   * interface source filter stays gated off (found destabilizing). */
+  /* Acoustic-elastic coupling formulation. DEFAULT is velocity_potential
+   * (1) — the cross-validated stable coupling; pressure (0) is the legacy
+   * explicit opt-in. Only affects acoustic / acoustic-elastic runs;
+   * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
-  noyesflag_t theAcousticInterfaceFilter;    /* EMA low-pass on/off */
-  double theAcousticInterfaceFilterAlpha;    /* EMA coeff (0,1]      */
-  double theAcousticInterfaceFilterStrength; /* blend [0,1]          */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -1560,9 +1556,6 @@ static struct Param_t {
            .theCpmlNativeStiffnessAcoustic = YES,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
-           .theAcousticInterfaceFilter = NO,
-           .theAcousticInterfaceFilterAlpha = 0.15,
-           .theAcousticInterfaceFilterStrength = 1.0,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
@@ -1849,9 +1842,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  39 /* Must adjust this if adding double params */
+  37 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  50 /* Must adjust this if adding int params */
+  49 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1904,9 +1897,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[33] = Param.theCpmlCflSafety;
   double_message[34] = Param.theCpmlMpmlCrossFraction;
   double_message[35] = Param.theCpmlAlphaFloorFraction;
-  double_message[36] = Param.theAcousticInterfaceFilterAlpha;
-  double_message[37] = Param.theAcousticInterfaceFilterStrength;
-  double_message[38] = Param.theAcousticQualityFactor;
+  double_message[36] = Param.theAcousticQualityFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -1947,9 +1938,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlCflSafety = double_message[33];
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
-  Param.theAcousticInterfaceFilterAlpha = double_message[36];
-  Param.theAcousticInterfaceFilterStrength = double_message[37];
-  Param.theAcousticQualityFactor = double_message[38];
+  Param.theAcousticQualityFactor = double_message[36];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -1999,9 +1988,8 @@ static void read_parameters(int argc, char** argv) {
   int_message[44] = (int)Param.theCpmlNativeStiffness;
   int_message[45] = (int)Param.theCpmlNativeStiffnessAcoustic;
   int_message[46] = Param.theAcousticVelocityPotential;
-  int_message[47] = (int)Param.theAcousticInterfaceFilter;
-  int_message[48] = Param.theCpmlPmlMaterialDamping;
-  int_message[49] = (int)Param.theTopoBktGpuStabilize;
+  int_message[47] = Param.theCpmlPmlMaterialDamping;
+  int_message[48] = (int)Param.theTopoBktGpuStabilize;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2054,9 +2042,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlNativeStiffness = (noyesflag_t)int_message[44];
   Param.theCpmlNativeStiffnessAcoustic = (noyesflag_t)int_message[45];
   Param.theAcousticVelocityPotential = int_message[46];
-  Param.theAcousticInterfaceFilter = (noyesflag_t)int_message[47];
-  Param.theCpmlPmlMaterialDamping = int_message[48];
-  Param.theTopoBktGpuStabilize = (noyesflag_t)int_message[49];
+  Param.theCpmlPmlMaterialDamping = int_message[47];
+  Param.theTopoBktGpuStabilize = (noyesflag_t)int_message[48];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2713,11 +2700,9 @@ static int32_t parse_parameters(const char* numericalin) {
    * The legacy pressure formulation remains available as an explicit
    * opt-in via `acoustic_formulation = pressure`. This flag only affects
    * simulations with acoustic elements / acoustic-elastic interfaces;
-   * pure-elastic runs are unaffected and bit-identical. The interface
-   * source filter stays gated off (found destabilizing). */
+   * pure-elastic runs are unaffected and bit-identical. */
   {
     char acform[64] = "velocity_potential";
-    char afilt[64] = "no";
     (void)parsetext(fp, "acoustic_formulation", 's', &acform);
     if (strcasecmp(acform, "pressure") == 0) {
       Param.theAcousticVelocityPotential = 0;
@@ -2729,13 +2714,6 @@ static int32_t parse_parameters(const char* numericalin) {
                    "acoustic_formulation must be 'pressure' or "
                    "'velocity_potential': got '%s'\n", acform);
     }
-    (void)parsetext(fp, "acoustic_interface_filter", 's', &afilt);
-    Param.theAcousticInterfaceFilter =
-        (strcasecmp(afilt, "yes") == 0) ? YES : NO;
-    hu_config_get_double_opt(fp, "acoustic_interface_filter_alpha",
-                             &Param.theAcousticInterfaceFilterAlpha);
-    hu_config_get_double_opt(fp, "acoustic_interface_filter_strength",
-                             &Param.theAcousticInterfaceFilterStrength);
     /* Opt-in acoustic (water) attenuation. acoustic_quality_factor = a
      * quality factor Q for acoustic elements; > 0 enables a small
      * stiffness-proportional (Kelvin-Voigt) damping in the acoustic
@@ -3425,14 +3403,6 @@ static int32_t parse_parameters(const char* numericalin) {
       monitor_print("Acoustic quality factor Q:          %s\n",
                     "lossless (default; bit-identical baseline)");
     }
-    monitor_print("Acoustic interface source filter:   %s",
-                  (Param.theAcousticInterfaceFilter == YES) ? "yes" : "no");
-    if (Param.theAcousticInterfaceFilter == YES) {
-      monitor_print(" (alpha=%.4f strength=%.4f)",
-                    Param.theAcousticInterfaceFilterAlpha,
-                    Param.theAcousticInterfaceFilterStrength);
-    }
-    monitor_print("\n");
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
                     Param.theAcousticInterfaceDiagnosticsFile);
@@ -9366,15 +9336,9 @@ static void solver_init() {
     exit(1);
   }
   Global.gpuData.acousticInterfaceFaceCount = 0;
-  /* Independent velocity-potential coupling + interface source filter. */
+  /* Independent velocity-potential coupling. */
   Global.gpuData.acousticVelocityPotential =
       Param.theAcousticVelocityPotential;
-  Global.gpuData.acousticInterfaceFilterEnabled =
-      (Param.theAcousticInterfaceFilter == YES) ? 1 : 0;
-  Global.gpuData.acousticInterfaceFilterAlpha =
-      Param.theAcousticInterfaceFilterAlpha;
-  Global.gpuData.acousticInterfaceFilterStrength =
-      Param.theAcousticInterfaceFilterStrength;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -9416,7 +9380,6 @@ static void solver_init() {
       }
     }
   }
-  Global.gpuData.acousticInterfaceFilterStateDevice = NULL;
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
@@ -9455,20 +9418,6 @@ static void solver_init() {
     if (Global.gpuData.acousticInterfaceFaceCount > 0) {
       size_t face_count =
           (size_t)Global.gpuData.acousticInterfaceFaceCount;
-
-      /* Per-face EMA state for the interface source filter (gated; only
-       * read/written when acousticInterfaceFilterEnabled). */
-      if (cudaMalloc(
-              (void**)&(Global.gpuData.acousticInterfaceFilterStateDevice),
-              face_count * sizeof(solver_float)) != cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic interface filter "
-                "state memory\n", Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      cudaMemset(Global.gpuData.acousticInterfaceFilterStateDevice, 0,
-                 face_count * sizeof(solver_float));
 
       if (cudaMalloc(
               (void**)&(Global.gpuData.acousticInterfaceElementIdsDevice),
@@ -10567,7 +10516,6 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticFaceFlagsArrayDevice);
   cudaFree(Global.gpuData.acousticInterfaceElementIdsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceIdsDevice);
-  cudaFree(Global.gpuData.acousticInterfaceFilterStateDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);

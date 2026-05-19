@@ -613,13 +613,6 @@ typedef struct gpu_data_t {
      * (1st time-difference, ~omega) and the solid feels p = -dphi/dt,
      * and station pressure output = -dphi/dt. */
     int           acousticVelocityPotential;
-    /* Temporal low-pass (1-pole IIR / EMA) on the interface source term
-     * in kernelAcousticPressureInterfaceForce. 0 = off (default,
-     * bit-identical). State is per interface face. */
-    int           acousticInterfaceFilterEnabled;
-    double        acousticInterfaceFilterAlpha;    /* EMA coeff (0,1] */
-    double        acousticInterfaceFilterStrength; /* blend [0,1] */
-    solver_float* acousticInterfaceFilterStateDevice; /* per-face EMA */
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
 } gpu_data_t;

@@ -306,21 +306,6 @@ Acoustic-elastic input flags (input file):
 	corr ~0.99–0.998). Requires `include_acoustic=yes` and
 	`acoustic_pressure_formulation=yes`. Set `= pressure` to restore the
 	exact legacy behavior.
-- `acoustic_interface_filter`
-	Optional. `no` (default) or `yes`. A low-pass filter on the
-	acoustic–elastic coupling term, intended to suppress the grid-scale
-	water-column ring. **NOT RECOMMENDED — found destabilizing:** enabling
-	it makes `velocity_potential` runs diverge after ~25 s. Kept in-tree
-	(default off) for the record only; treat the residual ring with a
-	realistic Q or a post-processing low-pass on the output pressure
-	instead. Default `no` is bit-identical to earlier runs.
-- `acoustic_interface_filter_alpha`
-	Optional. Default `0.15`. Filter strength (smaller = stronger
-	low-pass). Only used when `acoustic_interface_filter=yes`.
-- `acoustic_interface_filter_strength`
-	Optional. Default `1.0`. Blend toward the filtered value (`1.0` =
-	fully filtered, `0.0` = no-op). Only used when
-	`acoustic_interface_filter=yes`.
 - `acoustic_quality_factor`
 	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
 	bit-identical to the validated baseline. A positive quality factor
