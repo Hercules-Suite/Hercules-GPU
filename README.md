@@ -730,6 +730,77 @@ Notes on C-PML behavior:
 	is a *deliberate boundary-reaching worst-case* to functionally
 	exercise the re-route, **not** a model-setup template.)
 
+Using `benchmark_inputs/taper_topography.py` (the recommended
+preprocessing step for any real topography + C-PML run):
+
+- **What it is.** A standalone, dependency-free Python 3 script (stdlib
+	only — runs anywhere Hercules builds, including the cluster login
+	node). It reads a `topography.in`, multiplies the *deviation from a
+	flat reference* by a 2-D raised-cosine (Tukey) edge window, and writes
+	a new `topography.in` that is **bit-flat in (and well before) the PML
+	band** while leaving the deep interior untouched. It does **not**
+	change the file format or the solver — `topography.in` in, the same
+	format out.
+- **Basic use** (defaults target the 40 km × 40 km benchmark domain;
+	spacing is read from the file's line 1):
+
+	```
+	cd benchmark_inputs
+	python3 taper_topography.py path/to/topography.in --out topography_tapered.in
+	```
+
+	Then point Hercules at the tapered file — set
+	`topography_directory` to the directory containing
+	`topography_tapered.in` renamed to `topography.in` (Hercules expects
+	exactly that filename), e.g.:
+
+	```
+	mkdir -p model/topo_tapered
+	python3 taper_topography.py raw/topography.in \
+	    --out model/topo_tapered/topography.in --force
+	# parameters.in:  topography_directory = .../model/topo_tapered
+	```
+
+- **Domain / PML options** (tune to your model, not the 40 km default):
+	* `--lx` / `--ly` — domain extent S–N (x) and W–E (y) in metres
+		(defaults 40000 / 40000). The script infers the grid from these +
+		the file's spacing and **errors out** if the point count does not
+		match, so a wrong `--lx/--ly` is caught immediately.
+	* `--buffer` — total taper band width inward from each lateral
+		boundary (m), = flat collar + ramp (default 6000).
+	* `--flat-margin` — width of the **guaranteed-dead-flat collar**
+		adjacent to every boundary (default 1500). **Set this ≥ your PML
+		thickness with margin** (the startup log line
+		`CPML: … (thickness X m …)` gives X; the example domain's ~10-layer
+		PML is ≈ 780 m). The script warns if `--flat-margin` is below
+		`--pml-thickness`.
+	* `--pml-thickness` — PML band thickness (m) used only for that
+		safety warning (default 780).
+	* `--z-ref` — the flat reference: a number in metres (default `0.0`),
+		or `auto` to use the mean elevation of the first interior ring just
+		inside the taper band. Use `auto` for real DEMs that sit at a large
+		offset (e.g. a plateau at +1500 m) so the taper ramps to a
+		representative interior level instead of an arbitrary 0, which
+		minimises the tapered amplitude and the ramp's own gradient.
+	* `--force` — allow overwriting the output (or in-place when `--out`
+		equals the input).
+- **What it prints** — the resolved grid, the buffer/collar/ramp widths,
+	`z_ref` (and its source), how many points were modified vs left
+	untouched, the max elevation change, and a **perimeter-flatness
+	self-check** (`max |z_boundary − z_ref|` must be `0` → prints `OK`).
+	If that check is not `OK`, do not use the file.
+- **`--help`** lists every option with its default
+	(`python3 taper_topography.py --help`).
+- **Alternative for the two bundled examples.** Instead of running the
+	utility you can regenerate either example surface already tapered:
+	`python3 gen_topography_tilt.py --edge-taper` (or
+	`gen_topography_gaussian_hill.py --edge-taper`), with matching
+	`--taper-buffer` / `--taper-flat-margin` / `--taper-zref` options. The
+	`--edge-taper` output is bit-identical to running the standalone
+	utility on the un-tapered surface (same window math); the flag is
+	**off by default** so the committed example `topography.in` files stay
+	byte-reproducible.
+
 Stability fixes baked in (tunable via the fractions above):
 
 - **Alpha floor** (`cpml_alpha_floor_fraction`, default `0.1`). The K&M
