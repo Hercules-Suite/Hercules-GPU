@@ -666,6 +666,68 @@ offset/component (see the table below).
 	`native+correction` path (or vice versa) without confounding the two.
 	The startup log prints the elastic and acoustic PML stiffness modes
 	on separate lines so the active configuration is verifiable.
+- `topography_bkt_gpu_stabilize`
+	Optional. `no` (default) or `yes`. Default `no` is a **strict no-op,
+	bit-identical** to the validated baseline for every configuration
+	(FEM topography, flat/no-topography, non-VT, non-BKT, and every
+	CPML/flat-PML path are unaffected even with it `yes` — the builder
+	hard-guards on `computation_method=vt` and never builds a mapper or
+	launches the new kernel otherwise).
+	**Pre-existing VT + BKT GPU instability.** With
+	`computation_method=vt` (Virtual Topography, Restrepo & Bielak 2014)
+	**and** any `type_of_damping=bkt*`, the GPU solver diverges to NaN
+	(25-station hill case: blow-up at the hill peak ~t≈2.7 s, NaN by
+	≈8.8 s). It is **ABC-independent** (dashpot and cpml alike) and
+	**pre-existing** (independent of the C-PML work). Root cause: the GPU
+	port never implemented the CPU cut-cell visco-elastic operator. On
+	the CPU, VT cut cells flagged `topoBkt` are handled by
+	`TetraForcesBKT` — the 5-tet operator with every term scaled by the
+	per-tet solid fill fraction. On the GPU the BKT damping kernels have
+	only the full-cube operator (plus the PML skip) and no `topoBkt`/
+	5-tet branch, while `kernelTopoForceEffective` excludes `topoBkt`
+	cells. The cut cell therefore got a **full-cube** force on its
+	**fill-fraction-scaled (tiny) lumped mass**; the explicit
+	central-difference update divides full-cube force by tiny mass →
+	CFL collapse → blow-up.
+	When `yes`, the missing operator is supplied: a faithful CUDA port of
+	the CPU `TetraForcesBKT` (`topoTetraForcesBKT` /
+	`kernelTopoBktForceEffective` in `psolve.cu`, per-tet algebra copied
+	verbatim from the CPU source, both `cube_part` variants, all five
+	tets) computes the fill-scaled 5-tet **visco-elastic** force for the
+	`topoBkt` cut cells. Its shear/kappa inputs are the **same**
+	`damping_vector_shear/kappa` the BKT conv kernel already writes (the
+	cut cells stay in the full damping mapper for the conv kernel, so the
+	SLS convolution memory is advanced exactly as on the CPU); the
+	`mu = rho·Vs²`, `kappa = rho·(Vp²−4/3 Vs²)` moduli are computed
+	host-side with the exact CPU expression (bit-identical). The cut
+	cells are excluded only from the full-cube force kernel
+	(`kernelDampingCalcLocal` is launched with a `topoBkt`-removed
+	mapper), so each is processed by exactly one internal-force path.
+	GPU `VT`+`BKT` then matches the validated CPU `TetraForcesBKT`
+	reference to the usual ported-kernel float tolerance, with Q retained
+	in the cut cells.
+	**CPML interaction (this branch).** Flat-PML topo cells
+	(`cpml_pml_flattened_element`, the SPECFEM-style PML∩topography
+	overlap) are **excluded** from the new kernel and left on the
+	cube-stiffness + CPML path exactly as on the v2 baseline; the new
+	kernel additionally early-exits on any PML-flagged element (mirrors
+	the BKT conv/local kernels' PML skip; a strict no-op under dashpot
+	where `pmlFlagArrayDevice` is NULL). No `kernel.cu` / `psolve.h` /
+	gpu_data_t changes; `solver_init_damping_gpu_mapper` and
+	`solver_init_topography_gpu_mapper` are byte-identical to the v2
+	baseline; the gate-off path launches the damping kernels with the
+	original mappers — so every existing CPML/non-VT/non-BKT
+	configuration is bit-identical to the validated v2 baseline by
+	construction.
+	With the gate `yes` and `computation_method=vt`, startup prints
+	`VT+BKT GPU stabilization: ON (visco-elastic 5-tet cut cells=N,
+	full-cube BKT elements=M)`; for any non-VT run it prints
+	`... gate ON but computation_method is not vt -> INACTIVE`.
+	Validate: `computation_method=vt`, `type_of_damping=bkt2` with
+	`abc_type=dashpot` (NaN by ≈8.8 s at `no`, stable at `yes`) and with
+	`abc_type=cpml` (this branch has the viscoelastic-CPML stack);
+	regression: FEM / flat / non-VT / non-BKT runs bit-identical with or
+	without the flag.
 
 Notes on C-PML behavior:
 
