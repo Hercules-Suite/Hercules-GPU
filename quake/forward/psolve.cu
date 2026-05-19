@@ -1420,6 +1420,12 @@ static struct Param_t {
   noyesflag_t printK;
   noyesflag_t printStationAccelerations;
   noyesflag_t printStationPressures;
+  /* Linear-analysis strain/stress station output (6 tensor components
+   * each, contiguous block XX,YY,ZZ,XY,YZ,XZ; tensor strain). For
+   * reciprocity / fault inversion. Elastic stations only; default no
+   * -> byte-identical. */
+  noyesflag_t printStationStrains;
+  noyesflag_t printStationStresses;
   noyesflag_t includeBuildings;
   noyesflag_t includeTopography;
   noyesflag_t useParametricQ;
@@ -1553,6 +1559,8 @@ static struct Param_t {
            .theMeshStatFilename = NULL,
            .theTopoStatFilename = NULL,
            .printStationPressures = NO,
+           .printStationStrains = NO,
+           .printStationStresses = NO,
            .includeAcoustic = NO,
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
@@ -1874,7 +1882,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   37 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  49 /* Must adjust this if adding int params */
+  51 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2020,6 +2028,8 @@ static void read_parameters(int argc, char** argv) {
   int_message[46] = Param.theAcousticVelocityPotential;
   int_message[47] = Param.theCpmlPmlMaterialDamping;
   int_message[48] = (int)Param.theTopoBktGpuStabilize;
+  int_message[49] = (int)Param.printStationStrains;
+  int_message[50] = (int)Param.printStationStresses;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2074,6 +2084,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticVelocityPotential = int_message[46];
   Param.theCpmlPmlMaterialDamping = int_message[47];
   Param.theTopoBktGpuStabilize = (noyesflag_t)int_message[48];
+  Param.printStationStrains = (noyesflag_t)int_message[49];
+  Param.printStationStresses = (noyesflag_t)int_message[50];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2350,6 +2362,7 @@ static int32_t parse_parameters(const char* numericalin) {
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
        print_station_pressures[64] = "no",
+       print_station_strains[64] = "no", print_station_stresses[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
        topography_bkt_gpu_stabilize[64] = "auto",
@@ -2379,6 +2392,8 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t printStationVels = UNSET;
   noyesflag_t printStationAccs = UNSET;
   noyesflag_t printStationPressures = NO;
+  noyesflag_t printStationStrains = NO;
+  noyesflag_t printStationStresses = NO;
   noyesflag_t useInfQk = UNSET;
 
   noyesflag_t meshCoordinatesForMatlab = UNSET;
@@ -2722,6 +2737,8 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "print_station_accelerations", 's',
             &print_station_accelerations);
   parsetext(fp, "print_station_pressures", 's', &print_station_pressures);
+  parsetext(fp, "print_station_strains", 's', &print_station_strains);
+  parsetext(fp, "print_station_stresses", 's', &print_station_stresses);
   parsetext(fp, "mesh_coordinates_for_matlab", 's',
             &mesh_coordinates_for_matlab);
   parsetext(fp, "include_buildings", 's', &include_buildings);
@@ -2982,6 +2999,28 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for printing"
                  "station pressures (yes or no): %s\n",
                  print_station_pressures);
+  }
+
+  if (strcasecmp(print_station_strains, "yes") == 0) {
+    printStationStrains = YES;
+  } else if (strcasecmp(print_station_strains, "no") == 0) {
+    printStationStrains = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for printing "
+                 "station strains (yes or no): %s\n",
+                 print_station_strains);
+  }
+
+  if (strcasecmp(print_station_stresses, "yes") == 0) {
+    printStationStresses = YES;
+  } else if (strcasecmp(print_station_stresses, "no") == 0) {
+    printStationStresses = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for printing "
+                 "station stresses (yes or no): %s\n",
+                 print_station_stresses);
   }
 
   if (strcasecmp(mesh_coordinates_for_matlab, "yes") == 0) {
@@ -3389,6 +3428,8 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.printStationVelocities = printStationVels;
   Param.printStationAccelerations = printStationAccs;
   Param.printStationPressures = printStationPressures;
+  Param.printStationStrains = printStationStrains;
+  Param.printStationStresses = printStationStresses;
 
   Param.includeBuildings = have_buildings;
   Param.useParametricQ = have_parametricq;
@@ -18923,6 +18964,17 @@ void setup_stations_data() {
         (stationMaterial != NULL) ? stationMaterial->edgesize : 0.0;
     Param.myStations[iLCStation].rho =
         (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
+    /* Lame parameters for linear strain/stress station output
+     * (print_station_strains/stresses). mu=0 for acoustic/fluid; the
+     * strain/stress writer is gated to elastic stations anyway. */
+    {
+      double stMu = 0.0, stLambda = 0.0;
+      if (stationMaterial != NULL) {
+        mu_and_lambda(&stMu, &stLambda, stationMaterial, stationElementIndex);
+      }
+      Param.myStations[iLCStation].mu = stMu;
+      Param.myStations[iLCStation].lambda = stLambda;
+    }
     sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
     Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
@@ -19006,6 +19058,33 @@ void setup_stations_data() {
 
     if (Param.printStationPressures == YES) {
       fputs("      Pressure(Pa)",
+            Param.myStations[iLCStation].fpoutputfile);
+    }
+
+    /*
+     * Linear strain/stress columns (reciprocity / fault inversion).
+     * Elastic stations only (pressure_is_defined==0); contiguous
+     * 6-block per tensor, order XX,YY,ZZ,XY,YZ,XZ; tensor strain
+     * (eps_ij = 1/2(du_i/dx_j + du_j/dx_i) for i!=j). The row writer
+     * appends the same columns under the SAME condition/order. v1
+     * limitation: disabled when include_topography=yes (the VT cut-cell
+     * topography branch cannot produce a correct regular-hex strain, and
+     * gating it per station would mismatch this fixed header) -- keep
+     * header and row gates identical to avoid column misalignment.
+     */
+    if ((Param.printStationStrains == YES) &&
+        (Param.myStations[iLCStation].pressure_is_defined == 0) &&
+        (Param.includeTopography != YES)) {
+      fputs("        Eps_XX        Eps_YY        Eps_ZZ"
+            "        Eps_XY        Eps_YZ        Eps_XZ",
+            Param.myStations[iLCStation].fpoutputfile);
+    }
+
+    if ((Param.printStationStresses == YES) &&
+        (Param.myStations[iLCStation].pressure_is_defined == 0) &&
+        (Param.includeTopography != YES)) {
+      fputs("        Sig_XX        Sig_YY        Sig_ZZ"
+            "        Sig_XY        Sig_YZ        Sig_XZ",
             Param.myStations[iLCStation].fpoutputfile);
     }
 
@@ -19386,6 +19465,40 @@ static int interpolate_station_displacements(int32_t step) {
       if (Param.printStationPressures == YES) {
         fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
                 interpolate_station_pressure_value(iStation));
+      }
+
+      /*
+       * Linear strain/stress (reciprocity / fault inversion). Elastic
+       * (this branch => pressure_is_defined==0); !topography (v1; see
+       * the matching header gate). Strain is recovered from the owning
+       * element's 8 nodal displacements (tm1) at the station's local
+       * coords via the shared linear-elastic helpers (tensor strain;
+       * sigma = 2*mu*eps + lambda*tr(eps)*I). Same condition/order as
+       * the header so the columns stay aligned.
+       */
+      if (((Param.printStationStrains == YES) ||
+           (Param.printStationStresses == YES)) &&
+          (Param.includeTopography != YES)) {
+        fvector_t ue[8];
+        for (iPhi = 0; iPhi < 8; iPhi++) {
+          ue[iPhi] = Global.mySolver->tm1[nodesToInterpolate[iPhi]];
+        }
+        tensor_t st_eps =
+            point_strain(ue, localCoords.x[0], localCoords.x[1],
+                         localCoords.x[2], Param.myStations[iStation].h);
+        if (Param.printStationStrains == YES) {
+          fprintf(Param.myStations[iStation].fpoutputfile,
+                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
+                  st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
+        }
+        if (Param.printStationStresses == YES) {
+          tensor_t st_sig =
+              point_stress(st_eps, Param.myStations[iStation].mu,
+                           Param.myStations[iStation].lambda);
+          fprintf(Param.myStations[iStation].fpoutputfile,
+                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
+                  st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+        }
       }
 
       /* TODO: Have this 10 as a parameter with a default value */
