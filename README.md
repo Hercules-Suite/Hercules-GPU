@@ -667,12 +667,27 @@ offset/component (see the table below).
 	The startup log prints the elastic and acoustic PML stiffness modes
 	on separate lines so the active configuration is verifiable.
 - `topography_bkt_gpu_stabilize`
-	Optional. `no` (default) or `yes`. Default `no` is a **strict no-op,
-	bit-identical** to the validated baseline for every configuration
-	(FEM topography, flat/no-topography, non-VT, non-BKT, and every
-	CPML/flat-PML path are unaffected even with it `yes` — the builder
-	hard-guards on `computation_method=vt` and never builds a mapper or
-	launches the new kernel otherwise).
+	Optional, tri-state: `auto` (default), `yes`, or `no`.
+	**`auto` (default) = correct-by-default:** the fix auto-enables
+	exactly when `computation_method=vt` **and** `type_of_damping=bkt*`
+	(the only configuration it applies to), and is a **strict no-op,
+	bit-identical** to the validated baseline for every other
+	configuration (FEM topography, flat/no-topography, non-VT, non-BKT,
+	and every CPML/flat-PML path — the builder hard-guards
+	`computation_method=vt` and never builds a mapper or launches the
+	new kernel otherwise). `yes` forces it on (VT-guard still applies).
+	**`no` is an explicit escape hatch** that forces it fully off,
+	restoring the pre-fix behaviour — i.e. the VT+BKT NaN — for A/B
+	comparison or bisection; with `no`, *every* configuration including
+	non-VT/non-BKT is bit-identical to the pre-fix baseline. Validated
+	configs are unaffected by the default flip: the only behaviour change
+	vs. the old default is that `vt`+`bkt*` (previously an unconditional
+	NaN, no valid result to preserve) now produces the correct
+	visco-elastic solution. The startup log states the resolved mode:
+	`AUTO-ENABLED by default`, `ON (explicit ...=yes)`, or
+	`DISABLED (explicit ...=no escape hatch)`. This mirrors the in-tree
+	precedent `a36b27e` (auto-enable viscoelastic PML for BKT*+CPML once
+	validated, with an explicit opt-out).
 	**Pre-existing VT + BKT GPU instability.** With
 	`computation_method=vt` (Virtual Topography, Restrepo & Bielak 2014)
 	**and** any `type_of_damping=bkt*`, the GPU solver diverges to NaN
@@ -689,8 +704,9 @@ offset/component (see the table below).
 	**fill-fraction-scaled (tiny) lumped mass**; the explicit
 	central-difference update divides full-cube force by tiny mass →
 	CFL collapse → blow-up.
-	When `yes`, the missing operator is supplied: a faithful CUDA port of
-	the CPU `TetraForcesBKT` (`topoTetraForcesBKT` /
+	When active (default `auto` resolves to on for `vt`+`bkt*`, or
+	explicit `yes`), the missing operator is supplied: a faithful CUDA
+	port of the CPU `TetraForcesBKT` (`topoTetraForcesBKT` /
 	`kernelTopoBktForceEffective` in `psolve.cu`, per-tet algebra copied
 	verbatim from the CPU source, both `cube_part` variants, all five
 	tets) computes the fill-scaled 5-tet **visco-elastic** force for the
@@ -719,15 +735,21 @@ offset/component (see the table below).
 	original mappers — so every existing CPML/non-VT/non-BKT
 	configuration is bit-identical to the validated v2 baseline by
 	construction.
-	With the gate `yes` and `computation_method=vt`, startup prints
-	`VT+BKT GPU stabilization: ON (visco-elastic 5-tet cut cells=N,
-	full-cube BKT elements=M)`; for any non-VT run it prints
-	`... gate ON but computation_method is not vt -> INACTIVE`.
-	Validate: `computation_method=vt`, `type_of_damping=bkt2` with
-	`abc_type=dashpot` (NaN by ≈8.8 s at `no`, stable at `yes`) and with
-	`abc_type=cpml` (this branch has the viscoelastic-CPML stack);
-	regression: FEM / flat / non-VT / non-BKT runs bit-identical with or
-	without the flag.
+	Startup (rank 0) prints the resolved mode — `AUTO-ENABLED by default`
+	/ `ON (explicit ...=yes)` / `DISABLED (explicit ...=no escape hatch)`
+	/ `requested but computation_method is not vt -> INACTIVE` — and each
+	topo-bearing rank prints one line `VT+BKT GPU stabilization [rank R]:
+	ON -- visco-elastic 5-tet cut cells=K (flat-PML-skipped=F), full-cube
+	BKT elements=M`.
+	Validated (`vt-bkt-cpml`, Vista): `computation_method=vt`,
+	`type_of_damping=bkt2` converges under both `abc_type=dashpot` and
+	`abc_type=cpml`; the explicit escape hatch `=no` still NaNs
+	(pre-fix baseline preserved); FEM+bkt2+cpml on this branch matches
+	the latest v2 baseline to within run-to-run non-determinism
+	(~1e-10); and the GPU port matches the CPU `TetraForcesBKT` reference
+	(`HERCULES_TOPO_FORCE_MODE=cpu`) to the same ~1e-10 / ~1e-9-relative
+	floor — i.e. numerically equivalent to the validated CPU operator,
+	not merely stable.
 
 Notes on C-PML behavior:
 

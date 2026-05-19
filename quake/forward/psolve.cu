@@ -1558,7 +1558,7 @@ static struct Param_t {
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
-           .theTopoBktGpuStabilize = NO,
+           .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceFilter = NO,
            .theAcousticInterfaceFilterAlpha = 0.15,
@@ -2303,7 +2303,7 @@ static int32_t parse_parameters(const char* numericalin) {
        print_station_pressures[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
-       topography_bkt_gpu_stabilize[64] = "no",
+       topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -3007,18 +3007,23 @@ static int32_t parse_parameters(const char* numericalin) {
                  include_topography);
   }
 
-  /* VT + BKT GPU stabilization gate. Default "no" ->
-   * Param.theTopoBktGpuStabilize stays NO (initializer) -> strict no-op,
-   * v2/CPML baseline bit-identical. Only relevant for
-   * computation_method=vt + type_of_damping=bkt*; inert otherwise. */
+  /* VT + BKT GPU stabilization. Tri-state, default "auto":
+   *   auto (or key absent) -> UNSET -> auto-enabled iff
+   *        computation_method=vt + type_of_damping=bkt* (the only case
+   *        the fix applies to); strict no-op / bit-identical baseline
+   *        for every other configuration.
+   *   yes  -> force ON.   no -> explicit escape hatch, force OFF
+   *        (restores the pre-fix behaviour incl. the VT+BKT NaN). */
   if (strcasecmp(topography_bkt_gpu_stabilize, "yes") == 0) {
     Param.theTopoBktGpuStabilize = YES;
   } else if (strcasecmp(topography_bkt_gpu_stabilize, "no") == 0) {
     Param.theTopoBktGpuStabilize = NO;
+  } else if (strcasecmp(topography_bkt_gpu_stabilize, "auto") == 0) {
+    Param.theTopoBktGpuStabilize = UNSET;
   } else {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Unknown response for topography_bkt_gpu_stabilize "
-                 "(yes or no): %s\n",
+                 "(yes, no, or auto): %s\n",
                  topography_bkt_gpu_stabilize);
   }
 
@@ -11620,7 +11625,7 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
    * baseline. */
   int32_t dampingForceCount = g_dampingElemCountGPU;
   int32_t* dampingForceMapper = g_dampingElemMapperDevice;
-  if ((Param.theTopoBktGpuStabilize == YES) && (g_topoBktElemCountGPU > 0)) {
+  if (g_topoBktElemCountGPU > 0) {
     dampingForceCount = g_dampingForceCountGPU;
     dampingForceMapper = g_dampingForceMapperDevice;
   }
@@ -11639,7 +11644,7 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
     exit(1);
   }
 
-  if ((Param.theTopoBktGpuStabilize == YES) && (g_topoBktElemCountGPU > 0)) {
+  if (g_topoBktElemCountGPU > 0) {
     int tbBlock = 128;
     int tbGrid = (g_topoBktElemCountGPU + tbBlock - 1) / tbBlock;
     cudaGetLastError();
@@ -11881,21 +11886,56 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     return;
   }
 
-  if (Param.theTopoBktGpuStabilize != YES) {
+  /* Auto-enable. topography_bkt_gpu_stabilize is tri-state:
+   *   NO    -> explicit escape hatch: force OFF (restores the pre-fix
+   *            behaviour, incl. the VT+BKT NaN, for A/B comparison).
+   *   YES   -> explicit force ON.
+   *   UNSET -> AUTO (the default): ON iff computation_method=vt AND
+   *            type_of_damping=bkt* -- the only configuration the fix
+   *            applies to. A strict no-op for everything else, so every
+   *            non-(VT+BKT) validated baseline stays bit-identical. */
+  if (Param.theTopoBktGpuStabilize == NO) {
+    g_topoBktElemCountGPU = 0;
+    g_dampingForceCountGPU = 0;
+    if (Global.myID == 0) {
+      monitor_print(
+          "VT+BKT GPU stabilization: DISABLED (explicit "
+          "topography_bkt_gpu_stabilize=no escape hatch)\n");
+    }
+    return;
+  }
+
+  int bktDamping = (Param.theTypeOfDamping >= BKT);
+  int autoOn = (get_topo_meth() == VT) && bktDamping;
+  if ((Param.theTopoBktGpuStabilize != YES) && !autoOn) {
+    /* UNSET and not (vt & bkt*) -> nothing to do; silent strict no-op
+     * (this is the common path for every non-VT/non-BKT run, so it must
+     * not log). */
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
     return;
   }
 
   if (get_topo_meth() != VT) {
+    /* Explicit YES on a non-VT run: the cut-cell operator is VT-only. */
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
     if (Global.myID == 0) {
       monitor_print(
-          "VT+BKT GPU stabilization: gate ON but computation_method is not "
-          "vt -> INACTIVE (strict no-op, baseline unchanged)\n");
+          "VT+BKT GPU stabilization: requested but computation_method is "
+          "not vt -> INACTIVE (strict no-op, baseline unchanged)\n");
     }
     return;
+  }
+
+  if (Global.myID == 0) {
+    monitor_print(
+        "VT+BKT GPU stabilization: %s (computation_method=vt, "
+        "type_of_damping=bkt*)\n",
+        (Param.theTopoBktGpuStabilize == YES)
+            ? "ON (explicit topography_bkt_gpu_stabilize=yes)"
+            : "AUTO-ENABLED by default (set topography_bkt_gpu_stabilize=no "
+              "to disable)");
   }
 
   int32_t topoCount = topo_get_elements_count();
