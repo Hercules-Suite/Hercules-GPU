@@ -2286,6 +2286,22 @@ static int read_config_string(FILE* fp, const char* key, char* value_ptr,
   return ret;
 }
 
+/* Canonical lowercase name of a damping model, matching the
+ * type_of_damping input parser. Used for clear stderr/monitor logging
+ * (so e.g. BKT2/BKT3 are reported as such rather than a generic "bkt"). */
+static const char* damping_type_name(damping_type_t t) {
+  switch (t) {
+    case RAYLEIGH: return "rayleigh";
+    case MASS:     return "mass";
+    case NONE:     return "none";
+    case BKT:      return "bkt";
+    case BKT2:     return "bkt2";
+    case BKT3:     return "bkt3";
+    case BKT3F:    return "bkt3f";
+    default:       return "unset";
+  }
+}
+
 /**
  * Open material database and initialize various static global variables.
  *
@@ -3294,7 +3310,8 @@ static int32_t parse_parameters(const char* numericalin) {
             "(material damping skipped on PML over an attenuating "
             "interior, field -> NaN) without it; using the "
             "viscoelastic CFS-CPML.\n",
-            (wouldPromote == 1) ? "bkt" : "rayleigh",
+            (wouldPromote == 1) ? damping_type_name(Param.theTypeOfDamping)
+                                : "rayleigh",
             (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
       }
     } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
@@ -3394,6 +3411,8 @@ static int32_t parse_parameters(const char* numericalin) {
                 Param.theNumberOfPlanes);
   monitor_print("Stiffness calculation method:       %s\n",
                 stiffness_calculation_method);
+  monitor_print("Type of damping:                    %s\n",
+                damping_type_name(Param.theTypeOfDamping));
   monitor_print("Include buildings:                  %s\n", include_buildings);
   monitor_print("Include nonlinear analysis:         %s\n",
                 include_nonlinear_analysis);
@@ -3450,7 +3469,8 @@ static int32_t parse_parameters(const char* numericalin) {
     monitor_print("PML layers:                         %d\n",
                   Param.theCpmlLayers);
     monitor_print("PML material damping:               %s\n",
-                  (Param.theCpmlPmlMaterialDamping == 1)   ? "bkt"
+                  (Param.theCpmlPmlMaterialDamping == 1)
+                      ? damping_type_name(Param.theTypeOfDamping)
                   : (Param.theCpmlPmlMaterialDamping == 2) ? "rayleigh"
                   : "none (skipped; baseline)");
     monitor_print("PML thickness override (m):         %f\n",
