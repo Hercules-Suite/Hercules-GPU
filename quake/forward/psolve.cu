@@ -18609,7 +18609,7 @@ extern int compute_csi_eta_dzeta(octant_t* octant, vector3D_t pointcoords,
     int cube_part = get_cube_partition(eindex);
 
     compute_tetra_localcoord(pointcoords, elemp, localNodeID, aux, xo, yo, zo,
-                             h, cube_part);
+                             h, cube_part, NULL);
 
     localcoords->x[0] = aux[0];
     localcoords->x[1] = aux[1];
@@ -19066,23 +19066,22 @@ void setup_stations_data() {
      * Elastic stations only (pressure_is_defined==0); contiguous
      * 6-block per tensor, order XX,YY,ZZ,XY,YZ,XZ; tensor strain
      * (eps_ij = 1/2(du_i/dx_j + du_j/dx_i) for i!=j). The row writer
-     * appends the same columns under the SAME condition/order. v1
-     * limitation: disabled when include_topography=yes (the VT cut-cell
-     * topography branch cannot produce a correct regular-hex strain, and
-     * gating it per station would mismatch this fixed header) -- keep
-     * header and row gates identical to avoid column misalignment.
+     * appends the same columns under the SAME condition/order; under
+     * include_topography=yes the topography (VT cut-cell) branch uses
+     * the constant-per-tet point_strain_tetrah (via topography.cc's
+     * compute_tetra_strain), consistent with how compute_tetra_displ
+     * interpolates the displacement column at those stations, while
+     * regular-cube stations use the hex8 point_strain.
      */
     if ((Param.printStationStrains == YES) &&
-        (Param.myStations[iLCStation].pressure_is_defined == 0) &&
-        (Param.includeTopography != YES)) {
+        (Param.myStations[iLCStation].pressure_is_defined == 0)) {
       fputs("        Eps_XX        Eps_YY        Eps_ZZ"
             "        Eps_XY        Eps_YZ        Eps_XZ",
             Param.myStations[iLCStation].fpoutputfile);
     }
 
     if ((Param.printStationStresses == YES) &&
-        (Param.myStations[iLCStation].pressure_is_defined == 0) &&
-        (Param.includeTopography != YES)) {
+        (Param.myStations[iLCStation].pressure_is_defined == 0)) {
       fputs("        Sig_XX        Sig_YY        Sig_ZZ"
             "        Sig_XY        Sig_YZ        Sig_XZ",
             Param.myStations[iLCStation].fpoutputfile);
@@ -19380,6 +19379,49 @@ static int interpolate_station_displacements(int32_t step) {
                 interpolate_station_pressure_value(iStation));
       }
 
+      /*
+       * Topography (VT cut-cell) strain/stress -- constant per tet,
+       * derived from the SAME tet-linear kinematic field that
+       * compute_tetra_displ uses for the displacement column above.
+       * cubeU[8] are the OWNING-CUBE's 8 nodal displacements (the
+       * cube whose 4 tet vertices are myTopoStations[].nodes_to_
+       * interpolate; psolve's station setup already stored the 8
+       * cube lnids in Param.myStations[].nodestointerpolate). The
+       * defensive fallback to point_strain (cube hex8) is a no-op
+       * for genuine cut-cell stations (teth_i was set at setup) but
+       * keeps the row column-count locked to the header in any
+       * pathological case. Same XX,YY,ZZ,XY,YZ,XZ order as the
+       * regular-cube elastic branch below.
+       */
+      if ((Param.printStationStrains == YES) ||
+          (Param.printStationStresses == YES)) {
+        fvector_t cubeU[8];
+        int32_t* cubeLnid =
+            Param.myStations[iStation].nodestointerpolate;
+        for (iPhi = 0; iPhi < 8; iPhi++) {
+          cubeU[iPhi] = Global.mySolver->tm1[cubeLnid[iPhi]];
+        }
+        tensor_t st_eps;
+        const double hcube = Param.myStations[iStation].h;
+        if (!compute_tetra_strain(iStation, cubeU, hcube, &st_eps)) {
+          st_eps = point_strain(cubeU, localCoords.x[0], localCoords.x[1],
+                                localCoords.x[2], hcube);
+        }
+        if (Param.printStationStrains == YES) {
+          fprintf(Param.myStations[iStation].fpoutputfile,
+                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
+                  st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
+        }
+        if (Param.printStationStresses == YES) {
+          tensor_t st_sig =
+              point_stress(st_eps, Param.myStations[iStation].mu,
+                           Param.myStations[iStation].lambda);
+          fprintf(Param.myStations[iStation].fpoutputfile,
+                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
+                  st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+        }
+      }
+
       if ((step % (Param.theStationsPrintRate * 10)) == 0) {
         fflush(Param.myStations[iStation].fpoutputfile);
       }
@@ -19469,16 +19511,14 @@ static int interpolate_station_displacements(int32_t step) {
 
       /*
        * Linear strain/stress (reciprocity / fault inversion). Elastic
-       * (this branch => pressure_is_defined==0); !topography (v1; see
-       * the matching header gate). Strain is recovered from the owning
-       * element's 8 nodal displacements (tm1) at the station's local
-       * coords via the shared linear-elastic helpers (tensor strain;
-       * sigma = 2*mu*eps + lambda*tr(eps)*I). Same condition/order as
-       * the header so the columns stay aligned.
+       * (this branch => pressure_is_defined==0); cube-trilinear strain
+       * from the 8 nodal displacements (tm1) at the station's local
+       * coords via point_strain (tensor strain; sigma = 2*mu*eps +
+       * lambda*tr(eps)*I). Topography cut-cell stations are handled in
+       * the (above) topography branch via compute_tetra_strain.
        */
-      if (((Param.printStationStrains == YES) ||
-           (Param.printStationStresses == YES)) &&
-          (Param.includeTopography != YES)) {
+      if ((Param.printStationStrains == YES) ||
+          (Param.printStationStresses == YES)) {
         fvector_t ue[8];
         for (iPhi = 0; iPhi < 8; iPhi++) {
           ue[iPhi] = Global.mySolver->tm1[nodesToInterpolate[iPhi]];

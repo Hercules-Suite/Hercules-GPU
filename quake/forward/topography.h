@@ -61,6 +61,12 @@ typedef struct topostation_t {
     int32_t   nodes_to_interpolate[4];
     double    local_coord[3];
     double    prev_disp[3];
+    /* For compute_tetra_strain (linear strain station output under VT
+     * topography). Captured by compute_tetra_localcoord at setup;
+     * teth_i = -1 marks "not in a cut tet". cube_part mirrors the
+     * topoconstants_t->cube_part for the owning cut cube. */
+    int       teth_i;
+    int       cube_part;
 
 } topostation_t;
 
@@ -85,7 +91,14 @@ void   TetraForces              ( fvector_t* un, fvector_t* resVec, double tetra
 void   compute_addforce_topoEffective    ( mesh_t *myMesh, mysolver_t *mySolver, double theDeltaTSquared );
 void   compute_tetra_localcoord ( vector3D_t point, elem_t *elemp, int32_t *localNode,
 		                          double *localCoord, double xo, double yo, double zo,
-		                          double h, int cube_part );
+		                          double h, int cube_part, int *out_teth_i );
+/* Returns 1 and writes the tensor strain into *out_strain for a topo
+ * cut-cell station (myTopoStations[statID].TopoStation==1), using the
+ * stored teth_i/cube_part and the 8 cube nodal displacements; returns
+ * 0 for non-cut-cell stations. Strain is constant per tet, consistent
+ * with compute_tetra_displ's linear interpolation. */
+int    compute_tetra_strain     ( int32_t statID, fvector_t cubeU[8],
+                                  double h, tensor_t *out_strain );
 
 void   topography_stations_init ( mesh_t    *myMesh, station_t *myStations, int32_t    myNumberOfStations);
 void   topography_snapshot_station_history(mysolver_t *mySolver);

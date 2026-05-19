@@ -2972,6 +2972,8 @@ void topography_stations_init( mesh_t    *myMesh,
         myTopoStations[iStation].nodes_to_interpolate[1] = 0;
         myTopoStations[iStation].nodes_to_interpolate[2] = 0;
         myTopoStations[iStation].nodes_to_interpolate[3] = 0;
+        myTopoStations[iStation].teth_i                  = -1;
+        myTopoStations[iStation].cube_part               = 0;
     }
 
 
@@ -3026,7 +3028,9 @@ void topography_stations_init( mesh_t    *myMesh,
                 compute_tetra_localcoord ( point, elemp,
                                            myTopoStations[iStation].nodes_to_interpolate,
                                            myTopoStations[iStation].local_coord,
-                                           xo, yo, zo, ecp->h, ecp->cube_part );
+                                           xo, yo, zo, ecp->h, ecp->cube_part,
+                                           &myTopoStations[iStation].teth_i );
+                myTopoStations[iStation].cube_part = ecp->cube_part;
 
                 myNumberOfTopoStations++;
 
@@ -3090,8 +3094,13 @@ void topography_snapshot_station_history(mysolver_t *mySolver) {
 
 void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                                 int32_t *localNode, double *localCoord,
-                                double xo, double yo, double zo, double h, int cube_part )
+                                double xo, double yo, double zo, double h,
+                                int cube_part, int *out_teth_i )
 {
+    /* If out_teth_i != NULL, each successful per-tet return below writes
+     * the tet index (loop i, 0..4) -- captured for compute_tetra_strain
+     * to later look up the right point_strain_tetrah variant. */
+    if (out_teth_i) *out_teth_i = -1;
     int i;
     double eta, psi, gamma;
     double xp1, yp1, zp1, tol=-1.0e-5;
@@ -3125,6 +3134,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 1 ];
                     *(localNode + 3)  = elemp->lnid[ 4 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3151,6 +3161,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 2 ];
                     *(localNode + 3)  = elemp->lnid[ 7 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3177,6 +3188,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 7 ];
                     *(localNode + 3)  = elemp->lnid[ 2 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3203,6 +3215,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 4 ];
                     *(localNode + 3)  = elemp->lnid[ 1 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3229,6 +3242,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 7 ];
                     *(localNode + 3)  = elemp->lnid[ 1 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3264,6 +3278,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 1 ];
                     *(localNode + 3)  = elemp->lnid[ 5 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3290,6 +3305,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 3 ];
                     *(localNode + 3)  = elemp->lnid[ 6 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3316,6 +3332,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 6 ];
                     *(localNode + 3)  = elemp->lnid[ 0 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3342,6 +3359,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 7 ];
                     *(localNode + 3)  = elemp->lnid[ 3 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
                 }
                 break;
@@ -3368,6 +3386,7 @@ void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                     *(localNode + 2)  = elemp->lnid[ 3 ];
                     *(localNode + 3)  = elemp->lnid[ 5 ];
 
+                    if (out_teth_i) *out_teth_i = i;
                     return;
 
                 }
@@ -3490,4 +3509,36 @@ int compute_tetra_displ (double *dis_x, double *dis_y, double *dis_z,
 
 return 0;
 
+}
+
+
+/* Compute the (constant-per-tet) strain tensor at a topography
+ * cut-cell station, mirroring compute_tetra_displ's tet-linear
+ * interpolation so the strain and the displacement output are
+ * derived from the same kinematic field. Returns 1 and fills
+ * *out_strain on success; returns 0 (and leaves *out_strain
+ * untouched) when the station is not in a cut tet -- caller should
+ * then fall back to the regular hex8 path.
+ *
+ * cubeU[8] are the OWNING-CUBE's 8 nodal displacements (the same
+ * tm1 nodal layout psolve's station setup already keeps in
+ * Param.myStations[].nodestointerpolate). h is the cube edge. The
+ * stored teth_i and cube_part (captured by compute_tetra_localcoord
+ * at setup) select the correct point_strain_tetrah variant. */
+int compute_tetra_strain ( int32_t statID, fvector_t cubeU[8],
+                           double h, tensor_t *out_strain )
+{
+    if ( theTopoMethod == FEM )
+        return 0;
+    if ( myTopoStations[statID].TopoStation == 0 )
+        return 0;
+    if ( myTopoStations[statID].teth_i < 0 )
+        return 0;          /* defensive: cut-cell flagged but no tet was matched */
+    if ( out_strain == NULL )
+        return 0;
+
+    *out_strain = point_strain_tetrah( cubeU, h,
+                                       myTopoStations[statID].teth_i,
+                                       myTopoStations[statID].cube_part );
+    return 1;
 }

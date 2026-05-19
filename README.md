@@ -303,11 +303,14 @@ Acoustic-elastic input flags (input file):
 	coordinates (no extra GPU transfer; uses the shared
 	`point_strain`/`point_stress` helpers). Elastic stations only —
 	acoustic/fluid stations (which instead have `print_station_
-	pressures`) get no strain/stress columns. **v1 limitation:**
-	disabled when `include_topography=yes` (the VT cut-cell topography
-	station path cannot yield a correct regular-hex strain; the header
-	and row gates are kept identical so columns never misalign). No GPU
-	or kernel changes; pure host-side post-processing at the existing
+	pressures`) get no strain/stress columns. **Topography is
+	supported**: stations in VT cut-cells go through a constant-per-tet
+	strain (`point_strain_tetrah` via `compute_tetra_strain`) consistent
+	with how `compute_tetra_displ` interpolates the displacement column
+	at those stations, while regular-cube stations (in flat or
+	topographic runs) use the hex8 `point_strain`. Same column count
+	and order in both cases — header and row stay aligned. No GPU or
+	kernel changes; pure host-side post-processing at the existing
 	station-write site.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
