@@ -120,6 +120,36 @@ static int32_t g_topoForcePathReported = 0;
 static int64_t g_acousticPressureElementCount = 0;
 static int64_t g_acousticPressureNodeCount = 0;
 static int64_t g_acousticPressureFreeSurfaceNodeCount = 0;
+/* Hoisted spectral conv coefficients for the fast damping kernels.
+ * The g_dampingBkt2* set holds the active 2-MECHANISM model (BKT *or*
+ * BKT2 -- identical kernel shape, only rmax differs: BKT uses
+ * 2*pi*f*dt, BKT2 uses dt). The g_dampingBkt3* set holds the
+ * 3-mechanism model (BKT3/BKT3F, rmax=dt). They are valid only when
+ * g_dampingGUniform==1 (the relaxation g's are spatially uniform --
+ * auto-detected by scanning every damping element); otherwise the
+ * dispatch falls back to the generic per-element kernelDampingCalcConv.
+ * Only the spectral g's are hoisted; the per-element weights a*,b* are
+ * always read per element from the device arrays in every kernel. */
+static int32_t g_dampingGUniform = 1;
+static int32_t g_dampingBkt3CoeffsReady = 0;
+static double g_dampingBkt3ShearCoef1 = 0.0;
+static double g_dampingBkt3ShearCoef2 = 0.0;
+static double g_dampingBkt3ShearExpCoef0 = 0.0;
+static double g_dampingBkt3ShearCoef3 = 0.0;
+static double g_dampingBkt3ShearCoef4 = 0.0;
+static double g_dampingBkt3ShearExpCoef1 = 0.0;
+static double g_dampingBkt3ShearCoef5 = 0.0;
+static double g_dampingBkt3ShearCoef6 = 0.0;
+static double g_dampingBkt3ShearExpCoef2 = 0.0;
+static double g_dampingBkt3KappaCoef1 = 0.0;
+static double g_dampingBkt3KappaCoef2 = 0.0;
+static double g_dampingBkt3KappaExpCoef0 = 0.0;
+static double g_dampingBkt3KappaCoef3 = 0.0;
+static double g_dampingBkt3KappaCoef4 = 0.0;
+static double g_dampingBkt3KappaExpCoef1 = 0.0;
+static double g_dampingBkt3KappaCoef5 = 0.0;
+static double g_dampingBkt3KappaCoef6 = 0.0;
+static double g_dampingBkt3KappaExpCoef2 = 0.0;
 static int32_t g_dampingBkt2CoeffsReady = 0;
 static double g_dampingBkt2ShearCoef1 = 0.0;
 static double g_dampingBkt2ShearCoef2 = 0.0;
@@ -2256,6 +2286,38 @@ static int read_config_string(FILE* fp, const char* key, char* value_ptr,
   return ret;
 }
 
+/* Canonical lowercase name of a damping model, matching the
+ * type_of_damping input parser. Used for clear stderr/monitor logging
+ * (so e.g. BKT2/BKT3 are reported as such rather than a generic "bkt"). */
+static const char* damping_type_name(damping_type_t t) {
+  switch (t) {
+    case RAYLEIGH: return "rayleigh";
+    case MASS:     return "mass";
+    case NONE:     return "none";
+    case BKT:      return "bkt";
+    case BKT2:     return "bkt2";
+    case BKT3:     return "bkt3";
+    case BKT3F:    return "bkt3f";
+    default:       return "unset";
+  }
+}
+
+/* Debug/validation override. HERCULES_FORCE_GENERIC_DAMPING=1 forces the
+ * generic per-element kernelDampingCalcConv for BKT/BKT2/BKT3/BKT3F,
+ * bypassing the fast hoisted-coefficient kernels. Lets you produce a
+ * generic-kernel reference from an OTHERWISE-IDENTICAL run to verify the
+ * fast kernels (they must match the generic kernel to float tolerance
+ * for a spatially-uniform relaxation spectrum). Read once and cached;
+ * unset/0 -> normal fast-path behaviour (bit-identical to before). */
+static int damping_force_generic(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("HERCULES_FORCE_GENERIC_DAMPING");
+    v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return v;
+}
+
 /**
  * Open material database and initialize various static global variables.
  *
@@ -3264,7 +3326,8 @@ static int32_t parse_parameters(const char* numericalin) {
             "(material damping skipped on PML over an attenuating "
             "interior, field -> NaN) without it; using the "
             "viscoelastic CFS-CPML.\n",
-            (wouldPromote == 1) ? "bkt" : "rayleigh",
+            (wouldPromote == 1) ? damping_type_name(Param.theTypeOfDamping)
+                                : "rayleigh",
             (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
       }
     } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
@@ -3364,6 +3427,8 @@ static int32_t parse_parameters(const char* numericalin) {
                 Param.theNumberOfPlanes);
   monitor_print("Stiffness calculation method:       %s\n",
                 stiffness_calculation_method);
+  monitor_print("Type of damping:                    %s\n",
+                damping_type_name(Param.theTypeOfDamping));
   monitor_print("Include buildings:                  %s\n", include_buildings);
   monitor_print("Include nonlinear analysis:         %s\n",
                 include_nonlinear_analysis);
@@ -3420,7 +3485,8 @@ static int32_t parse_parameters(const char* numericalin) {
     monitor_print("PML layers:                         %d\n",
                   Param.theCpmlLayers);
     monitor_print("PML material damping:               %s\n",
-                  (Param.theCpmlPmlMaterialDamping == 1)   ? "bkt"
+                  (Param.theCpmlPmlMaterialDamping == 1)
+                      ? damping_type_name(Param.theTypeOfDamping)
                   : (Param.theCpmlPmlMaterialDamping == 2) ? "rayleigh"
                   : "none (skipped; baseline)");
     monitor_print("PML thickness override (m):         %f\n",
@@ -10326,12 +10392,34 @@ static void solver_init() {
   k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
+  /* Blocksize/handle picked by damping model for the common
+   * spatially-uniform-g fast path (BKT/BKT2 -> Bkt2 kernel, BKT3/BKT3F
+   * -> Bkt3 kernel). g_dampingGUniform is not yet known here (it is set
+   * later in solver_init_damping_gpu_mapper), so this is the optimistic
+   * choice; the launch site is authoritative and will fall back to the
+   * generic kernel for heterogeneous-g runs, reusing this blocksize
+   * (correct, just possibly non-optimal occupancy in that rare case). */
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_CONV];
-  if (Param.theTypeOfDamping == BKT2) {
+  if (damping_force_generic() && Global.myID == 0) {
+    monitor_print(
+        "DAMPING: HERCULES_FORCE_GENERIC_DAMPING set -> using the generic "
+        "kernelDampingCalcConv for BKT/BKT2/BKT3 (fast hoisted-coefficient "
+        "kernels disabled; debug/validation override -- NOT a normal "
+        "run).\n");
+  }
+  if (!damping_force_generic() &&
+      ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2))) {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT2);
     k->handle = (char*)kernelDampingCalcConvBkt2;
     k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                      (char*)kernelDampingCalcConvBkt2, 0);
+  } else if (!damping_force_generic() &&
+             ((Param.theTypeOfDamping == BKT3) ||
+              (Param.theTypeOfDamping == BKT3F))) {
+    strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT3);
+    k->handle = (char*)kernelDampingCalcConvBkt3;
+    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
+                                     (char*)kernelDampingCalcConvBkt3, 0);
   } else {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV);
     k->handle = (char*)kernelDampingCalcConv;
@@ -11121,17 +11209,35 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
   int32_t eindex;
   int32_t count;
   int32_t* mapperHost;
-  const int need_bkt2_coeffs =
-      ((Param.theTypeOfDamping == BKT2) && (g_dampingBkt2CoeffsReady == 0));
-  const double bkt2_rmax = Param.theDeltaT;
-  int have_bkt2_shear = 0;
-  int have_bkt2_kappa = 0;
+  /* Fast-path spectral coeffs + spatially-uniform-g auto-detect.
+   * 2-mech models (BKT, BKT2) -> g_dampingBkt2*; 3-mech (BKT3, BKT3F)
+   * -> g_dampingBkt3*. rmax: BKT uses 2*pi*f*dt, the rest use dt
+   * (matches calc_conv and the launch site). We hoist the spectral g's
+   * from the FIRST qualifying damping element AND verify every other
+   * qualifying element has identical raw g's; if any differ,
+   * g_dampingGUniform=0 and the dispatch falls back to the generic
+   * per-element kernel (correct for heterogeneous relaxation spectra).
+   * Only g's are hoisted; a*,b* stay per-element in every kernel. */
+  const damping_type_t dtype = Param.theTypeOfDamping;
+  const int is_2mech = ((dtype == BKT) || (dtype == BKT2));
+  const int is_3mech = ((dtype == BKT3) || (dtype == BKT3F));
+  const int need_conv_coeffs =
+      ((is_2mech || is_3mech) && (g_dampingBkt2CoeffsReady == 0) &&
+       (g_dampingBkt3CoeffsReady == 0));
+  const double conv_rmax =
+      (dtype == BKT) ? (2.0 * M_PI * Param.theFreq * Param.theDeltaT)
+                     : Param.theDeltaT;
+  int have_ref_shear = 0;
+  int have_ref_kappa = 0;
+  float ref_g0_shear = 0.0f, ref_g1_shear = 0.0f, ref_g2_shear = 0.0f;
+  float ref_g0_kappa = 0.0f, ref_g1_kappa = 0.0f, ref_g2_kappa = 0.0f;
 
   if (g_dampingElemCountGPU >= 0) {
     return;
   }
 
-  if (need_bkt2_coeffs) {
+  if (need_conv_coeffs) {
+    g_dampingGUniform = 1;
     g_dampingBkt2ShearCoef1 = 0.0;
     g_dampingBkt2ShearCoef2 = 0.0;
     g_dampingBkt2ShearExpCoef0 = 0.0;
@@ -11144,6 +11250,24 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
     g_dampingBkt2KappaCoef3 = 0.0;
     g_dampingBkt2KappaCoef4 = 0.0;
     g_dampingBkt2KappaExpCoef1 = 0.0;
+    g_dampingBkt3ShearCoef1 = 0.0;
+    g_dampingBkt3ShearCoef2 = 0.0;
+    g_dampingBkt3ShearExpCoef0 = 0.0;
+    g_dampingBkt3ShearCoef3 = 0.0;
+    g_dampingBkt3ShearCoef4 = 0.0;
+    g_dampingBkt3ShearExpCoef1 = 0.0;
+    g_dampingBkt3ShearCoef5 = 0.0;
+    g_dampingBkt3ShearCoef6 = 0.0;
+    g_dampingBkt3ShearExpCoef2 = 0.0;
+    g_dampingBkt3KappaCoef1 = 0.0;
+    g_dampingBkt3KappaCoef2 = 0.0;
+    g_dampingBkt3KappaExpCoef0 = 0.0;
+    g_dampingBkt3KappaCoef3 = 0.0;
+    g_dampingBkt3KappaCoef4 = 0.0;
+    g_dampingBkt3KappaExpCoef1 = 0.0;
+    g_dampingBkt3KappaCoef5 = 0.0;
+    g_dampingBkt3KappaCoef6 = 0.0;
+    g_dampingBkt3KappaExpCoef2 = 0.0;
   }
 
   count = 0;
@@ -11154,42 +11278,88 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
     if ((isThisElementNonLinear(mesh, eindex) == NO) &&
         (IsDampingElement(mesh, eindex) == YES)) {
-      if (need_bkt2_coeffs) {
-        if ((!have_bkt2_shear) &&
-            ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f))) {
-          const double g0 = edata->g0_shear * bkt2_rmax;
-          const double g1 = edata->g1_shear * bkt2_rmax;
-          g_dampingBkt2ShearCoef1 = g0 / 2.0;
-          g_dampingBkt2ShearCoef2 =
-              g_dampingBkt2ShearCoef1 * (1.0 - g0);
-          g_dampingBkt2ShearExpCoef0 = exp(-g0);
-          g_dampingBkt2ShearCoef3 = g1 / 2.0;
-          g_dampingBkt2ShearCoef4 =
-              g_dampingBkt2ShearCoef3 * (1.0 - g1);
-          g_dampingBkt2ShearExpCoef1 = exp(-g1);
-          have_bkt2_shear = 1;
+      if (need_conv_coeffs) {
+        const int shear_q =
+            ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f) ||
+             (edata->a2_shear != 0.0f));
+        const int kappa_q =
+            ((edata->a0_kappa != 0.0f) || (edata->a1_kappa != 0.0f) ||
+             (edata->a2_kappa != 0.0f));
+        if (shear_q) {
+          if (!have_ref_shear) {
+            ref_g0_shear = edata->g0_shear;
+            ref_g1_shear = edata->g1_shear;
+            ref_g2_shear = edata->g2_shear;
+            const double g0 = (double)edata->g0_shear * conv_rmax;
+            const double g1 = (double)edata->g1_shear * conv_rmax;
+            g_dampingBkt2ShearCoef1 = g0 / 2.0;
+            g_dampingBkt2ShearCoef2 = g_dampingBkt2ShearCoef1 * (1.0 - g0);
+            g_dampingBkt2ShearExpCoef0 = exp(-g0);
+            g_dampingBkt2ShearCoef3 = g1 / 2.0;
+            g_dampingBkt2ShearCoef4 = g_dampingBkt2ShearCoef3 * (1.0 - g1);
+            g_dampingBkt2ShearExpCoef1 = exp(-g1);
+            if (is_3mech) {
+              const double g2 = (double)edata->g2_shear * conv_rmax;
+              g_dampingBkt3ShearCoef1 = g_dampingBkt2ShearCoef1;
+              g_dampingBkt3ShearCoef2 = g_dampingBkt2ShearCoef2;
+              g_dampingBkt3ShearExpCoef0 = g_dampingBkt2ShearExpCoef0;
+              g_dampingBkt3ShearCoef3 = g_dampingBkt2ShearCoef3;
+              g_dampingBkt3ShearCoef4 = g_dampingBkt2ShearCoef4;
+              g_dampingBkt3ShearExpCoef1 = g_dampingBkt2ShearExpCoef1;
+              g_dampingBkt3ShearCoef5 = g2 / 2.0;
+              g_dampingBkt3ShearCoef6 = g_dampingBkt3ShearCoef5 * (1.0 - g2);
+              g_dampingBkt3ShearExpCoef2 = exp(-g2);
+            }
+            have_ref_shear = 1;
+          } else if ((edata->g0_shear != ref_g0_shear) ||
+                     (edata->g1_shear != ref_g1_shear) ||
+                     (is_3mech && (edata->g2_shear != ref_g2_shear))) {
+            g_dampingGUniform = 0;
+          }
         }
-        if ((!have_bkt2_kappa) &&
-            ((edata->a0_kappa != 0.0f) || (edata->a1_kappa != 0.0f))) {
-          const double g0 = edata->g0_kappa * bkt2_rmax;
-          const double g1 = edata->g1_kappa * bkt2_rmax;
-          g_dampingBkt2KappaCoef1 = g0 / 2.0;
-          g_dampingBkt2KappaCoef2 =
-              g_dampingBkt2KappaCoef1 * (1.0 - g0);
-          g_dampingBkt2KappaExpCoef0 = exp(-g0);
-          g_dampingBkt2KappaCoef3 = g1 / 2.0;
-          g_dampingBkt2KappaCoef4 =
-              g_dampingBkt2KappaCoef3 * (1.0 - g1);
-          g_dampingBkt2KappaExpCoef1 = exp(-g1);
-          have_bkt2_kappa = 1;
+        if (kappa_q) {
+          if (!have_ref_kappa) {
+            ref_g0_kappa = edata->g0_kappa;
+            ref_g1_kappa = edata->g1_kappa;
+            ref_g2_kappa = edata->g2_kappa;
+            const double g0 = (double)edata->g0_kappa * conv_rmax;
+            const double g1 = (double)edata->g1_kappa * conv_rmax;
+            g_dampingBkt2KappaCoef1 = g0 / 2.0;
+            g_dampingBkt2KappaCoef2 = g_dampingBkt2KappaCoef1 * (1.0 - g0);
+            g_dampingBkt2KappaExpCoef0 = exp(-g0);
+            g_dampingBkt2KappaCoef3 = g1 / 2.0;
+            g_dampingBkt2KappaCoef4 = g_dampingBkt2KappaCoef3 * (1.0 - g1);
+            g_dampingBkt2KappaExpCoef1 = exp(-g1);
+            if (is_3mech) {
+              const double g2 = (double)edata->g2_kappa * conv_rmax;
+              g_dampingBkt3KappaCoef1 = g_dampingBkt2KappaCoef1;
+              g_dampingBkt3KappaCoef2 = g_dampingBkt2KappaCoef2;
+              g_dampingBkt3KappaExpCoef0 = g_dampingBkt2KappaExpCoef0;
+              g_dampingBkt3KappaCoef3 = g_dampingBkt2KappaCoef3;
+              g_dampingBkt3KappaCoef4 = g_dampingBkt2KappaCoef4;
+              g_dampingBkt3KappaExpCoef1 = g_dampingBkt2KappaExpCoef1;
+              g_dampingBkt3KappaCoef5 = g2 / 2.0;
+              g_dampingBkt3KappaCoef6 = g_dampingBkt3KappaCoef5 * (1.0 - g2);
+              g_dampingBkt3KappaExpCoef2 = exp(-g2);
+            }
+            have_ref_kappa = 1;
+          } else if ((edata->g0_kappa != ref_g0_kappa) ||
+                     (edata->g1_kappa != ref_g1_kappa) ||
+                     (is_3mech && (edata->g2_kappa != ref_g2_kappa))) {
+            g_dampingGUniform = 0;
+          }
         }
       }
       count++;
     }
   }
 
-  if (need_bkt2_coeffs) {
-    g_dampingBkt2CoeffsReady = 1;
+  if (need_conv_coeffs) {
+    if (is_3mech) {
+      g_dampingBkt3CoeffsReady = 1;
+    } else {
+      g_dampingBkt2CoeffsReady = 1;
+    }
   }
 
   g_dampingElemCountGPU = count;
@@ -11523,8 +11693,25 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   int gridsize = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].gridsize;
   int sharedmem = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].sharedmem;
 
+  /* Dispatch: when the relaxation g's are spatially uniform
+   * (g_dampingGUniform, auto-detected in solver_init_damping_gpu_mapper)
+   * use the fast hoisted-coefficient kernels -- Bkt2 for the 2-mechanism
+   * models (BKT *and* BKT2; rmax already set by type above) and Bkt3 for
+   * the 3-mechanism models (BKT3/BKT3F). Otherwise (heterogeneous
+   * relaxation spectrum) fall back to the generic per-element
+   * kernelDampingCalcConv, which is numerically identical and correct
+   * for spatially varying g's. NOTE: this also makes BKT2 fall back to
+   * the generic kernel for heterogeneous-g models -- a latent
+   * correctness fix; for the common uniform-g case BKT2 is bit-identical
+   * to before. The HERCULES_FORCE_GENERIC_DAMPING debug override also
+   * routes everything to the generic kernel (fast-vs-generic
+   * verification). */
+  const int dconv_2mech =
+      ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2));
+  const int dconv_3mech = ((Param.theTypeOfDamping == BKT3) ||
+                           (Param.theTypeOfDamping == BKT3F));
   cudaGetLastError();
-  if (Param.theTypeOfDamping == BKT2) {
+  if (!damping_force_generic() && g_dampingGUniform && dconv_2mech) {
     kernelDampingCalcConvBkt2<<<gridsize, blocksize, sharedmem,
                                 solver->streams[CUDA_STREAM_MAIN]>>>(
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
@@ -11534,6 +11721,20 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
         g_dampingBkt2KappaCoef1, g_dampingBkt2KappaCoef2,
         g_dampingBkt2KappaExpCoef0, g_dampingBkt2KappaCoef3,
         g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
+        g_dampingElemCountGPU, g_dampingElemMapperDevice);
+  } else if (!damping_force_generic() && g_dampingGUniform && dconv_3mech) {
+    kernelDampingCalcConvBkt3<<<gridsize, blocksize, sharedmem,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
+        g_dampingBkt3ShearCoef1, g_dampingBkt3ShearCoef2,
+        g_dampingBkt3ShearExpCoef0, g_dampingBkt3ShearCoef3,
+        g_dampingBkt3ShearCoef4, g_dampingBkt3ShearExpCoef1,
+        g_dampingBkt3ShearCoef5, g_dampingBkt3ShearCoef6,
+        g_dampingBkt3ShearExpCoef2, g_dampingBkt3KappaCoef1,
+        g_dampingBkt3KappaCoef2, g_dampingBkt3KappaExpCoef0,
+        g_dampingBkt3KappaCoef3, g_dampingBkt3KappaCoef4,
+        g_dampingBkt3KappaExpCoef1, g_dampingBkt3KappaCoef5,
+        g_dampingBkt3KappaCoef6, g_dampingBkt3KappaExpCoef2,
         g_dampingElemCountGPU, g_dampingElemMapperDevice);
   } else {
     kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,

@@ -418,7 +418,15 @@ every offset/component (see the summary below).
 	→ used as set (a mismatched value is a hard error). `bkt` is fully
 	validated (stable, correct, corr ~0.99 vs the matching-attenuation
 	CPS analytic); `rayleigh` is implemented and pending a validation
-	run. Note: a related correctness fix ported stiffness-proportional
+	run. The viscoelastic `bkt` path applies to **every BKT-family
+	`type_of_damping`** (`bkt`, `bkt2`, `bkt3`, `bkt3f`): all four
+	advance their SLS memory on PML elements and feed the Stage-2
+	viscoelastic CFS-CPML. (Previously only `bkt2`'s GPU conv kernel
+	carried the SLS memory into the PML, so `bkt`/`bkt3`/`bkt3f` +
+	`cpml` silently fed stale/zero anelastic vectors to the PML and
+	could diverge — fixed; `kernelPMLElasticStep` itself is
+	mechanism-count-agnostic.) Note: a related correctness fix ported
+	stiffness-proportional
 	Rayleigh damping to the GPU, so **existing `type_of_damping=rayleigh`
 	GPU results change** (they now match the CPU path); every
 	non-Rayleigh run stays byte-identical.
@@ -473,6 +481,23 @@ Notes on C-PML behavior:
 	interior; `bkt`/`rayleigh` carry the attenuation into the PML
 	consistently. Non-PML elements always use material damping as usual;
 	dashpot mode and no-attenuation runs are bit-identical.
+- **Viscoelastic damping runs on the GPU for all BKT-family models**
+	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). When the relaxation spectrum is
+	spatially uniform — the usual case: fixed relaxation frequencies,
+	per-element weights vary with Q — the solver uses fast convolution
+	kernels with the spectral coefficients hoisted to scalars (computed
+	once on the host, no per-element/-node `exp()`, no `g`-array
+	traffic): `bkt`/`bkt2` share the 2-mechanism kernel (they differ
+	only in the time-scale factor), `bkt3`/`bkt3f` use a 3-mechanism
+	kernel. If the relaxation spectrum is spatially **heterogeneous**,
+	the solver auto-detects this at setup (it scans every damping
+	element) and falls back to a generic per-element kernel that is
+	numerically identical (bit-for-bit for the uniform case). Both
+	paths feed the viscoelastic CFS-CPML correctly. **Behavior change:**
+	a heterogeneous-spectrum `bkt2` model now uses the generic kernel —
+	previously it silently applied the first element's coefficients to
+	all elements (a latent bug). Spatially-uniform `bkt2` (every
+	validated run) is bit-identical to before and unaffected.
 - The startup log prints how many elastic/acoustic PML elements were
 	found and the realized PML thickness — use it to confirm the PML zone
 	is non-empty and split between materials as expected.
