@@ -683,11 +683,10 @@ offset/component (see the table below).
 	configs are unaffected by the default flip: the only behaviour change
 	vs. the old default is that `vt`+`bkt*` (previously an unconditional
 	NaN, no valid result to preserve) now produces the correct
-	visco-elastic solution. The startup log states the resolved mode:
-	`AUTO-ENABLED by default`, `ON (explicit ...=yes)`, or
-	`DISABLED (explicit ...=no escape hatch)`. This mirrors the in-tree
-	precedent `a36b27e` (auto-enable viscoelastic PML for BKT*+CPML once
-	validated, with an explicit opt-out).
+	visco-elastic solution. (No status logging is emitted — the
+	stabilization runs silently.) This mirrors the in-tree precedent
+	`a36b27e` (auto-enable viscoelastic PML for BKT*+CPML once validated,
+	with an explicit opt-out).
 	**Pre-existing VT + BKT GPU instability.** With
 	`computation_method=vt` (Virtual Topography, Restrepo & Bielak 2014)
 	**and** any `type_of_damping=bkt*`, the GPU solver diverges to NaN
@@ -735,12 +734,8 @@ offset/component (see the table below).
 	original mappers — so every existing CPML/non-VT/non-BKT
 	configuration is bit-identical to the validated v2 baseline by
 	construction.
-	Startup (rank 0) prints the resolved mode — `AUTO-ENABLED by default`
-	/ `ON (explicit ...=yes)` / `DISABLED (explicit ...=no escape hatch)`
-	/ `requested but computation_method is not vt -> INACTIVE` — and each
-	topo-bearing rank prints one line `VT+BKT GPU stabilization [rank R]:
-	ON -- visco-elastic 5-tet cut cells=K (flat-PML-skipped=F), full-cube
-	BKT elements=M`.
+	The stabilization runs silently (no per-rank or mode status
+	logging); fatal allocation/CUDA errors still abort with a message.
 	Validated (`vt-bkt-cpml`, Vista): `computation_method=vt`,
 	`type_of_damping=bkt2` converges under both `abc_type=dashpot` and
 	`abc_type=cpml`; the explicit escape hatch `=no` still NaNs
