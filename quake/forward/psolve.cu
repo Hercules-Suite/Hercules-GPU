@@ -11907,12 +11907,8 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
       (topoConstantsHost == NULL)) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    /* Per-rank (stderr) so MPI runs with localized topography are
-     * diagnosable -- rank 0 frequently owns no topo elements. */
-    fprintf(stderr,
-            "VT+BKT GPU stabilization [rank %d]: no topo elements "
-            "(topoCount=%d) -> INACTIVE on this rank\n",
-            myID, topoCount);
+    /* Ranks that own no topography are silent (in an MPI run most ranks
+     * have no topo elements; one line each is pure log noise). */
     return;
   }
 
@@ -11945,19 +11941,15 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     cntBkt++;
   }
 
-  fprintf(stderr,
-          "VT+BKT GPU stabilization [rank %d]: topoCount=%d "
-          "topoBkt-flagged=%d flat-PML-skipped=%d eligible-cut-cells=%d\n",
-          myID, topoCount, nTopoBktFlagged, nFlatPmlSkipped, cntBkt);
-
   if (cntBkt == 0) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
+    /* Anomaly worth one line: this rank owns topography but no cut cell
+     * is eligible (e.g. all consumed by flat-PML under CPML). */
     fprintf(stderr,
-            "VT+BKT GPU stabilization [rank %d]: no eligible topoBkt cut "
-            "cells -> INACTIVE on this rank (topoBkt-flagged=%d, "
-            "flat-PML-skipped=%d)\n",
-            myID, nTopoBktFlagged, nFlatPmlSkipped);
+            "VT+BKT GPU stabilization [rank %d]: INACTIVE -- topoCount=%d "
+            "topoBkt-flagged=%d flat-PML-skipped=%d eligible=0\n",
+            myID, topoCount, nTopoBktFlagged, nFlatPmlSkipped);
     return;
   }
 
@@ -12078,12 +12070,14 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
   }
   free(forceMapperHost);
 
-  if ((Global.myID == 0)) {
-    monitor_print(
-        "VT+BKT GPU stabilization: ON (visco-elastic 5-tet cut cells=%d, "
-        "full-cube BKT elements=%d)\n",
-        g_topoBktElemCountGPU, g_dampingForceCountGPU);
-  }
+  /* One concise line per topo-bearing rank (rank 0 usually owns no
+   * topography, so a rank-0-only print would never fire for localized
+   * topography). Idle ranks stay silent. */
+  fprintf(stderr,
+          "VT+BKT GPU stabilization [rank %d]: ON -- visco-elastic 5-tet "
+          "cut cells=%d (flat-PML-skipped=%d), full-cube BKT elements=%d\n",
+          myID, g_topoBktElemCountGPU, nFlatPmlSkipped,
+          g_dampingForceCountGPU);
 }
 
 static void solver_compute_force_topography_gpu(mysolver_t* solver, mesh_t* mesh,
