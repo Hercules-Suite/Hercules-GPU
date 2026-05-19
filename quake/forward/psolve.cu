@@ -13573,6 +13573,22 @@ static void solver_output_wavefield_close(void) {
   }
 }
 
+static void solver_reduce_timer_if_any(const char* timerName, TimerKind kind) {
+  int localExists = Timer_Exists(timerName);
+  int anyExists = 0;
+
+  MPI_Allreduce(&localExists, &anyExists, 1, MPI_INT, MPI_MAX, comm_solver);
+  if (anyExists == 0) {
+    return;
+  }
+
+  if (!localExists) {
+    Timer_Start(timerName);
+    Timer_Stop(timerName);
+  }
+  Timer_Reduce(timerName, kind, comm_solver);
+}
+
 static void solver_run_collect_timers(void) {
   /* Get min and max of individual cumulative times.
    * this is NOT best and worst single step times
@@ -13626,18 +13642,12 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Solver drm force compute", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
-  if (Timer_Exists("Sparse force upload build")) {
-    Timer_Reduce("Sparse force upload build", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Sparse force upload memcpy")) {
-    Timer_Reduce("Sparse force upload memcpy", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Sparse force upload scatter")) {
-    Timer_Reduce("Sparse force upload scatter",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
+  solver_reduce_timer_if_any("Sparse force upload build",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Sparse force upload memcpy",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Sparse force upload scatter",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   if (Timer_Exists("Load Fixedbase Disps")) {
     Timer_Reduce("Load Fixedbase Disps", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
