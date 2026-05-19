@@ -2302,6 +2302,22 @@ static const char* damping_type_name(damping_type_t t) {
   }
 }
 
+/* Debug/validation override. HERCULES_FORCE_GENERIC_DAMPING=1 forces the
+ * generic per-element kernelDampingCalcConv for BKT/BKT2/BKT3/BKT3F,
+ * bypassing the fast hoisted-coefficient kernels. Lets you produce a
+ * generic-kernel reference from an OTHERWISE-IDENTICAL run to verify the
+ * fast kernels (they must match the generic kernel to float tolerance
+ * for a spatially-uniform relaxation spectrum). Read once and cached;
+ * unset/0 -> normal fast-path behaviour (bit-identical to before). */
+static int damping_force_generic(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("HERCULES_FORCE_GENERIC_DAMPING");
+    v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return v;
+}
+
 /**
  * Open material database and initialize various static global variables.
  *
@@ -10384,13 +10400,22 @@ static void solver_init() {
    * generic kernel for heterogeneous-g runs, reusing this blocksize
    * (correct, just possibly non-optimal occupancy in that rare case). */
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_CONV];
-  if ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2)) {
+  if (damping_force_generic() && Global.myID == 0) {
+    monitor_print(
+        "DAMPING: HERCULES_FORCE_GENERIC_DAMPING set -> using the generic "
+        "kernelDampingCalcConv for BKT/BKT2/BKT3 (fast hoisted-coefficient "
+        "kernels disabled; debug/validation override -- NOT a normal "
+        "run).\n");
+  }
+  if (!damping_force_generic() &&
+      ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2))) {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT2);
     k->handle = (char*)kernelDampingCalcConvBkt2;
     k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                      (char*)kernelDampingCalcConvBkt2, 0);
-  } else if ((Param.theTypeOfDamping == BKT3) ||
-             (Param.theTypeOfDamping == BKT3F)) {
+  } else if (!damping_force_generic() &&
+             ((Param.theTypeOfDamping == BKT3) ||
+              (Param.theTypeOfDamping == BKT3F))) {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT3);
     k->handle = (char*)kernelDampingCalcConvBkt3;
     k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
@@ -11678,13 +11703,15 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
    * for spatially varying g's. NOTE: this also makes BKT2 fall back to
    * the generic kernel for heterogeneous-g models -- a latent
    * correctness fix; for the common uniform-g case BKT2 is bit-identical
-   * to before. */
+   * to before. The HERCULES_FORCE_GENERIC_DAMPING debug override also
+   * routes everything to the generic kernel (fast-vs-generic
+   * verification). */
   const int dconv_2mech =
       ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2));
   const int dconv_3mech = ((Param.theTypeOfDamping == BKT3) ||
                            (Param.theTypeOfDamping == BKT3F));
   cudaGetLastError();
-  if (g_dampingGUniform && dconv_2mech) {
+  if (!damping_force_generic() && g_dampingGUniform && dconv_2mech) {
     kernelDampingCalcConvBkt2<<<gridsize, blocksize, sharedmem,
                                 solver->streams[CUDA_STREAM_MAIN]>>>(
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
@@ -11695,7 +11722,7 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
         g_dampingBkt2KappaExpCoef0, g_dampingBkt2KappaCoef3,
         g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
         g_dampingElemCountGPU, g_dampingElemMapperDevice);
-  } else if (g_dampingGUniform && dconv_3mech) {
+  } else if (!damping_force_generic() && g_dampingGUniform && dconv_3mech) {
     kernelDampingCalcConvBkt3<<<gridsize, blocksize, sharedmem,
                                 solver->streams[CUDA_STREAM_MAIN]>>>(
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
