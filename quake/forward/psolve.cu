@@ -11897,11 +11897,6 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
   if (Param.theTopoBktGpuStabilize == NO) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    if (Global.myID == 0) {
-      monitor_print(
-          "VT+BKT GPU stabilization: DISABLED (explicit "
-          "topography_bkt_gpu_stabilize=no escape hatch)\n");
-    }
     return;
   }
 
@@ -11920,22 +11915,7 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     /* Explicit YES on a non-VT run: the cut-cell operator is VT-only. */
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    if (Global.myID == 0) {
-      monitor_print(
-          "VT+BKT GPU stabilization: requested but computation_method is "
-          "not vt -> INACTIVE (strict no-op, baseline unchanged)\n");
-    }
     return;
-  }
-
-  if (Global.myID == 0) {
-    monitor_print(
-        "VT+BKT GPU stabilization: %s (computation_method=vt, "
-        "type_of_damping=bkt*)\n",
-        (Param.theTopoBktGpuStabilize == YES)
-            ? "ON (explicit topography_bkt_gpu_stabilize=yes)"
-            : "AUTO-ENABLED by default (set topography_bkt_gpu_stabilize=no "
-              "to disable)");
   }
 
   int32_t topoCount = topo_get_elements_count();
@@ -11952,12 +11932,6 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     return;
   }
 
-  /* Accounting broken down so the cause is visible per rank:
-   *  topoBkt-flagged   = VT topo cells with edata->topoBkt set
-   *  flat-PML-skipped  = of those, ones on the SPECFEM cube+CPML path
-   *  eligible          = cut cells the new visco-elastic kernel takes */
-  int32_t nTopoBktFlagged = 0;
-  int32_t nFlatPmlSkipped = 0;
   int32_t cntBkt = 0;
   for (int32_t topoIdx = 0; topoIdx < topoCount; topoIdx++) {
     int32_t eindex = topoMapperHost[topoIdx];
@@ -11969,13 +11943,11 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     if (edata->topoBkt == 0) {
       continue;
     }
-    nTopoBktFlagged++;
     /* CPML flat-PML: a PML element that also belongs to topography is
      * handled by the cube stiffness + CPML path on v2 (and the
      * curvilinear topo mapper already excludes it). Keep it there --
      * the new visco-elastic kernel must not also force it. */
     if (cpml_pml_flattened_element(eindex)) {
-      nFlatPmlSkipped++;
       continue;
     }
     cntBkt++;
@@ -11984,12 +11956,6 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
   if (cntBkt == 0) {
     g_topoBktElemCountGPU = 0;
     g_dampingForceCountGPU = 0;
-    /* Anomaly worth one line: this rank owns topography but no cut cell
-     * is eligible (e.g. all consumed by flat-PML under CPML). */
-    fprintf(stderr,
-            "VT+BKT GPU stabilization [rank %d]: INACTIVE -- topoCount=%d "
-            "topoBkt-flagged=%d flat-PML-skipped=%d eligible=0\n",
-            myID, topoCount, nTopoBktFlagged, nFlatPmlSkipped);
     return;
   }
 
@@ -12109,15 +12075,6 @@ static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh) {
     }
   }
   free(forceMapperHost);
-
-  /* One concise line per topo-bearing rank (rank 0 usually owns no
-   * topography, so a rank-0-only print would never fire for localized
-   * topography). Idle ranks stay silent. */
-  fprintf(stderr,
-          "VT+BKT GPU stabilization [rank %d]: ON -- visco-elastic 5-tet "
-          "cut cells=%d (flat-PML-skipped=%d), full-cube BKT elements=%d\n",
-          myID, g_topoBktElemCountGPU, nFlatPmlSkipped,
-          g_dampingForceCountGPU);
 }
 
 static void solver_compute_force_topography_gpu(mysolver_t* solver, mesh_t* mesh,
@@ -13573,6 +13530,22 @@ static void solver_output_wavefield_close(void) {
   }
 }
 
+static void solver_reduce_timer_if_any(const char* timerName, TimerKind kind) {
+  int localExists = Timer_Exists(timerName);
+  int anyExists = 0;
+
+  MPI_Allreduce(&localExists, &anyExists, 1, MPI_INT, MPI_MAX, comm_solver);
+  if (anyExists == 0) {
+    return;
+  }
+
+  if (!localExists) {
+    Timer_Start(timerName);
+    Timer_Stop(timerName);
+  }
+  Timer_Reduce(timerName, kind, comm_solver);
+}
+
 static void solver_run_collect_timers(void) {
   /* Get min and max of individual cumulative times.
    * this is NOT best and worst single step times
@@ -13626,18 +13599,12 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Solver drm force compute", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
   }
-  if (Timer_Exists("Sparse force upload build")) {
-    Timer_Reduce("Sparse force upload build", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Sparse force upload memcpy")) {
-    Timer_Reduce("Sparse force upload memcpy", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Sparse force upload scatter")) {
-    Timer_Reduce("Sparse force upload scatter",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
+  solver_reduce_timer_if_any("Sparse force upload build",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Sparse force upload memcpy",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Sparse force upload scatter",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   if (Timer_Exists("Load Fixedbase Disps")) {
     Timer_Reduce("Load Fixedbase Disps", (TimerKind)(MAX | MIN | AVERAGE),
                  comm_solver);
