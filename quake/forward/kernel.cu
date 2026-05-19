@@ -1316,7 +1316,7 @@ __global__  void kernelDampingCalcConv(int32_t lenum,
  * the generic kernelDampingCalcConv for the spatially-uniform-g case:
  * the 18 spectral coefficients are hoisted to scalar kernel args
  * (computed once on the host -> no per-element/-node exp() and no
- * g0/g1/g2 array traffic), while the per-element weights a*/b* are
+ * g0/g1/g2 array traffic), while the per-element weights a*,b* are
  * still read per element. Gates and arithmetic order match the generic
  * kernel exactly. Dispatched only when g_dampingGUniform==1; the
  * generic kernel is the heterogeneous-g fallback. */

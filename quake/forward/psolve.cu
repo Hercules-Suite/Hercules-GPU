@@ -128,7 +128,7 @@ static int64_t g_acousticPressureFreeSurfaceNodeCount = 0;
  * g_dampingGUniform==1 (the relaxation g's are spatially uniform --
  * auto-detected by scanning every damping element); otherwise the
  * dispatch falls back to the generic per-element kernelDampingCalcConv.
- * Only the spectral g's are hoisted; the per-element weights a*/b* are
+ * Only the spectral g's are hoisted; the per-element weights a*,b* are
  * always read per element from the device arrays in every kernel. */
 static int32_t g_dampingGUniform = 1;
 static int32_t g_dampingBkt3CoeffsReady = 0;
@@ -11217,7 +11217,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
    * qualifying element has identical raw g's; if any differ,
    * g_dampingGUniform=0 and the dispatch falls back to the generic
    * per-element kernel (correct for heterogeneous relaxation spectra).
-   * Only g's are hoisted; a*/b* stay per-element in every kernel. */
+   * Only g's are hoisted; a*,b* stay per-element in every kernel. */
   const damping_type_t dtype = Param.theTypeOfDamping;
   const int is_2mech = ((dtype == BKT) || (dtype == BKT2));
   const int is_3mech = ((dtype == BKT3) || (dtype == BKT3F));
