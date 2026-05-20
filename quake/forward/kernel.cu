@@ -2803,6 +2803,44 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
     int32_t lin = blockIdx.x * blockDim.x + threadIdx.x;
     if (lin >= stationCount) return;
 
+    /* DEFENSIVE: every memory access below is gated on a valid struct
+     * field and an in-bounds index. On out-of-bounds / NULL ptr we
+     * printf the offending value and exit cleanly (write zeros), so we
+     * pinpoint the cause instead of letting CUDA report a generic
+     * "illegal memory access". */
+    double* out = gpuData->stationVEStressArrayDevice + (size_t)lin * 6;
+    if (gpuData->stationVEStressArrayDevice == NULL) {
+        printf("v3 KERNEL ERR: lin=%d stationVEStressArrayDevice == NULL\n", lin);
+        return;
+    }
+    if (gpuData->stationGatherEindexDevice == NULL ||
+        gpuData->stationGatherCsiDevice    == NULL ||
+        gpuData->stationGatherHDevice      == NULL ||
+        gpuData->stationGatherMuDevice     == NULL ||
+        gpuData->stationGatherLambdaDevice == NULL ||
+        gpuData->stationGatherTethIDevice  == NULL ||
+        gpuData->stationGatherCubePartDevice == NULL) {
+        printf("v3 KERNEL ERR: lin=%d a stationGather*Device is NULL "
+               "(eindex=%p csi=%p h=%p mu=%p lambda=%p teth=%p cp=%p)\n",
+               lin,
+               gpuData->stationGatherEindexDevice,
+               gpuData->stationGatherCsiDevice,
+               gpuData->stationGatherHDevice,
+               gpuData->stationGatherMuDevice,
+               gpuData->stationGatherLambdaDevice,
+               gpuData->stationGatherTethIDevice,
+               gpuData->stationGatherCubePartDevice);
+        for (int j = 0; j < 6; j++) out[j] = 0.0;
+        return;
+    }
+    if (gpuData->shearVectorDevice == NULL ||
+        gpuData->kappaVectorDevice == NULL) {
+        printf("v3 KERNEL ERR: lin=%d shearVectorDevice=%p kappaVectorDevice=%p\n",
+               lin, gpuData->shearVectorDevice, gpuData->kappaVectorDevice);
+        for (int j = 0; j < 6; j++) out[j] = 0.0;
+        return;
+    }
+
     const int32_t eindex = gpuData->stationGatherEindexDevice[lin];
     const double  csi    = gpuData->stationGatherCsiDevice[lin];
     const double  eta    = gpuData->stationGatherEtaDevice[lin];
@@ -2815,6 +2853,36 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
 
     const int32_t lenum   = gpuData->lenum;
     const int32_t numcomp = lenum * 8;
+
+    if (eindex < 0 || eindex >= lenum) {
+        printf("v3 KERNEL ERR: lin=%d eindex=%d out of [0, lenum=%d)\n",
+               lin, eindex, lenum);
+        for (int j = 0; j < 6; j++) out[j] = 0.0;
+        return;
+    }
+    if (lenum <= 0 || numcomp <= 0) {
+        printf("v3 KERNEL ERR: lin=%d lenum=%d numcomp=%d invalid\n",
+               lin, lenum, numcomp);
+        for (int j = 0; j < 6; j++) out[j] = 0.0;
+        return;
+    }
+    if (h <= 0.0) {
+        printf("v3 KERNEL ERR: lin=%d h=%.6e invalid (eindex=%d)\n",
+               lin, h, eindex);
+        for (int j = 0; j < 6; j++) out[j] = 0.0;
+        return;
+    }
+
+    if (lin == 0) {
+        printf("v3 KERNEL DIAG: N=%d lenum=%d numcomp=%d "
+               "eindex[0]=%d h=%.4e mu=%.4e lambda=%.4e teth=%d cp=%d "
+               "shear=%p kappa=%p ve=%p\n",
+               stationCount, lenum, numcomp,
+               eindex, h, mu, lambda, teth_i, cp,
+               gpuData->shearVectorDevice,
+               gpuData->kappaVectorDevice,
+               gpuData->stationVEStressArrayDevice);
+    }
 
     /* Gather 8 cube nodes x 3 components of shearVector and
      * kappaVector at the station's owning element. */
@@ -2863,8 +2931,9 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
     const double sig_yz = two_mu * esyz;
     const double sig_xz = two_mu * esxz;
 
-    /* Write 6 sigma components per station, XX,YY,ZZ,XY,YZ,XZ. */
-    double* out = gpuData->stationVEStressArrayDevice + lin * 6;
+    /* Write 6 sigma components per station, XX,YY,ZZ,XY,YZ,XZ.
+     * 'out' was already bound at the top of the kernel for the early
+     * error-return paths; reuse it here. */
     out[0] = sig_xx;
     out[1] = sig_yy;
     out[2] = sig_zz;
