@@ -11610,6 +11610,18 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
     }
     memset(g_stationVEStressHost, 0, 6 * N * sizeof(double));
 
+    /* Push the freshly-populated v3 pointers (which are zero-initialized
+     * in Global.gpuData on program start) into the device-side
+     * gpu_data_t. The initial alloc-time cudaMemcpy of Global.gpuData ->
+     * gpuDataDevice runs BEFORE this setup function, so without this
+     * one-shot sync the very first kick would dereference NULL v3
+     * pointers on the GPU and crash. solver_reset_gpu's per-step async
+     * sync will keep them current after this. */
+    if (Global.mySolver != NULL && Global.mySolver->gpuDataDevice != NULL) {
+        cudaMemcpy(Global.mySolver->gpuDataDevice, &Global.gpuData,
+                   sizeof(gpu_data_t), cudaMemcpyHostToDevice);
+    }
+
     if (myID == 0) {
         monitor_print("V3 station viscoelastic-stress gather enabled "
                       "(%d stations).\n", (int)N);
