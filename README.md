@@ -283,6 +283,35 @@ Acoustic-elastic input flags (input file):
 	elastic displacement field. The pressure column is `nan` for stations whose
 	containing element is elastic, because scalar acoustic pressure is not
 	defined there.
+- `print_station_strains` / `print_station_stresses`
+	Optional, independent (`yes`/`no`, default `no` → byte-identical to
+	before). For **linear** analysis, append the 6 strain and/or 6 stress
+	tensor components per station per output step — the linear-analysis
+	counterpart of the strain/stress columns that `include_nonlinear_
+	analysis=yes` already produces. Intended for reciprocity-based fault
+	inversion (strain Green's tensors). Each is a **contiguous 6-column
+	block** in the order `XX, YY, ZZ, XY, YZ, XZ`, appended to the normal
+	`station.N` files after any displacement/velocity/acceleration/
+	pressure columns (header labels `Eps_*` / `Sig_*`); if both flags are
+	set, the strain block precedes the stress block. **Tensor strain
+	convention:** `eps_ij = ½(∂u_i/∂x_j + ∂u_j/∂x_i)` for the
+	off-diagonals (the true strain tensor, matching Hercules' existing
+	nonlinear output — *not* engineering shear). Stress is the linear
+	isotropic law `sigma = 2·mu·eps + lambda·tr(eps)·I` using the
+	station element's Lamé parameters. Strain is recovered from the
+	owning element's 8 nodal displacements at the station's local
+	coordinates (no extra GPU transfer; uses the shared
+	`point_strain`/`point_stress` helpers). Elastic stations only —
+	acoustic/fluid stations (which instead have `print_station_
+	pressures`) get no strain/stress columns. **Topography is
+	supported**: stations in VT cut-cells go through a constant-per-tet
+	strain (`point_strain_tetrah` via `compute_tetra_strain`) consistent
+	with how `compute_tetra_displ` interpolates the displacement column
+	at those stations, while regular-cube stations (in flat or
+	topographic runs) use the hex8 `point_strain`. Same column count
+	and order in both cases — header and row stay aligned. No GPU or
+	kernel changes; pure host-side post-processing at the existing
+	station-write site.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
