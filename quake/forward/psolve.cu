@@ -20045,7 +20045,6 @@ void output_stations_init(const char* numericalin) {
   Timer_Stop("Stations Broadcast");
 
   setup_stations_data();
-  solver_init_station_ve_stress_gpu(Global.myID);
 
   t1 = MPI_Wtime();
   setupSeconds = t1 - t0;
@@ -21473,6 +21472,7 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  solver_init_station_ve_stress_gpu(Global.myID);
   Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");
   solver_printstat(Global.mySolver);
