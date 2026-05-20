@@ -743,4 +743,24 @@ frame (`x = north`, `y = east`, `z = downwards`). Internally the FORCE
 path reuses the same file-based per-step force pipeline as POINT — no
 new MPI traffic, no new GPU plumbing.
 
+`source_function_type = discrete` (tabulated waveform). For non-analytical
+STFs — e.g., a recorded velocity pulse used as the excitation for a
+reciprocity Green's function — drop a `forcefunction.in` file alongside
+`source.in` in the source directory with this format:
+
+```
+<nt1>             # number of samples (int)
+<tinit>           # initial delay before the pulse begins (s)
+<dt>              # sampling interval (s)
+<s[0]>            # nt1 unit-amplitude STF samples (double, one per line)
+...
+<s[nt1-1]>
+```
+
+The instantaneous force is `F_vec * interp(t - tinit, s, dt)`. Normalize
+the samples to peak 1 and carry the physical amplitude in
+`force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
+path that SRFH already uses for `slipfunction.in`, so it is bit-identical
+to the SRFH discrete-STF math.
+
 

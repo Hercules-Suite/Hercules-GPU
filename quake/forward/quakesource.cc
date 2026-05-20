@@ -185,6 +185,11 @@ static double theSourceStrikeDeg, theSourceDipDeg, theSourceRakeDeg;
 
 /* Force variables (single-point body-force source) */
 static double theForceVecN_x, theForceVecN_y, theForceVecN_z;
+/* FORCE + source_function_type = discrete : tabulated unit STF. */
+static int     theForceNt1   = 0;
+static double  theForceTinit = 0.0;
+static double  theForceDt    = 0.0;
+static double *theForceSlipFun = NULL;
 
 /* Plane variables */
 static double theExtendedCellSizeAlongStrikeM, theExtendedCellSizeDownDipM;
@@ -2338,6 +2343,70 @@ static int read_force_source(FILE *fp){
 
 
 /*
+ *  read_force_function_file : Read a tabulated unit STF used by
+ *  type_of_source = force together with source_function_type = discrete.
+ *
+ *  File format (whitespace-separated, same convention as one block of
+ *  SRFH's slipfunction.in):
+ *      <nt1>             # number of samples (int)
+ *      <tinit>           # initial delay before pulse begins (s, double)
+ *      <dt>              # sampling interval (s, double)
+ *      <s[0]>            # nt1 unit-amplitude STF samples (double)
+ *      <s[1]>
+ *      ...
+ *      <s[nt1-1]>
+ *
+ *  The physical force at time T is then F_vec * interp(T - tinit, s, dt).
+ *  F_vec carries amplitude (Newtons); s should typically be unit-normalized
+ *  (peak 1) but any scaling that the user prefers is mathematically equivalent.
+ *
+ *  Output: -1 on failure, 1 on success. On success theForceNt1, theForceTinit,
+ *  theForceDt, theForceSlipFun are populated (rank-0 only; broadcast happens
+ *  in broadcast_force_source_parameters).
+ */
+static int read_force_function_file ( FILE *fp )
+{
+    int    nt1 = 0;
+    double tinit = 0.0, dt = 0.0;
+
+    if ( fscanf(fp, " %d ",  &nt1)   != 1 ||
+	 fscanf(fp, " %lf ", &tinit) != 1 ||
+	 fscanf(fp, " %lf ", &dt)    != 1 ) {
+	fprintf(stderr, "Err read_force_function_file: missing nt1/tinit/dt header\n");
+	return -1;
+    }
+
+    if (nt1 <= 1 || dt <= 0.0) {
+	fprintf(stderr, "Err read_force_function_file: invalid nt1=%d dt=%g "
+		"(need nt1 >= 2 and dt > 0)\n", nt1, dt);
+	return -1;
+    }
+
+    double *samples = (double *) malloc(sizeof(double) * nt1);
+    if (samples == NULL) {
+	fprintf(stderr, "Err read_force_function_file: out of memory (nt1=%d)\n", nt1);
+	return -1;
+    }
+
+    for (int i = 0; i < nt1; i++) {
+	if ( fscanf(fp, " %lf ", &samples[i]) != 1 ) {
+	    fprintf(stderr, "Err read_force_function_file: missing sample %d/%d\n",
+		    i, nt1);
+	    free(samples);
+	    return -1;
+	}
+    }
+
+    theForceNt1      = nt1;
+    theForceTinit    = tinit;
+    theForceDt       = dt;
+    theForceSlipFun  = samples;
+
+    return 1;
+}
+
+
+/*
  *  read_plane_source :
  *
  *           input :    fp  -  to source.in
@@ -3494,6 +3563,17 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
     pntSrc.Tp  = theRickerTp;
     pntSrc.Ts  = theRickerTs;
 
+    /* DISCRETE STF for FORCE: hand the tabulated unit waveform to
+     * compute_source_function via the same fields SRFH uses. tinit
+     * shifts the pulse start in absolute simulation time. */
+    if (theTypeOfSource == FORCE &&
+	theSourceFunctionType == DISCRETE) {
+	pntSrc.nt1             = theForceNt1;
+	pntSrc.dtfunction      = theForceDt;
+	pntSrc.slipfundiscrete = theForceSlipFun;
+	pntSrc.delayTime       = theForceTinit;
+    }
+
     pntSrc.displacement
 	= (double*)calloc (theNumberOfTimeSteps, sizeof (double));
 
@@ -4115,6 +4195,23 @@ broadcast_force_source_parameters( void )
     theForceVecN_x       = d_buf[3];
     theForceVecN_y       = d_buf[4];
     theForceVecN_z       = d_buf[5];
+
+    /* DISCRETE STF: nt1/tinit/dt header + the sample array. */
+    if (theSourceFunctionType == DISCRETE) {
+	MPI_Bcast( &theForceNt1,   1, MPI_INT,    0, comm_solver );
+	MPI_Bcast( &theForceTinit, 1, MPI_DOUBLE, 0, comm_solver );
+	MPI_Bcast( &theForceDt,    1, MPI_DOUBLE, 0, comm_solver );
+
+	if (myID != 0) {
+	    theForceSlipFun = (double *) malloc(sizeof(double) * theForceNt1);
+	    if (theForceSlipFun == NULL) {
+		fprintf(stderr, "Thread %d: out of memory for theForceSlipFun"
+			" (nt1=%d)\n", myID, theForceNt1);
+		MPI_Abort(MPI_COMM_WORLD, ERROR);
+	    }
+	}
+	MPI_Bcast( theForceSlipFun, theForceNt1, MPI_DOUBLE, 0, comm_solver );
+    }
 }
 
 
@@ -4359,6 +4456,24 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
     if ( theTypeOfSource == FORCE ) {
 	if( read_force_source( fpsrc ) == -1 ) {
 	    return -1;
+	}
+
+	/* DISCRETE source-time function: pull the tabulated unit STF from
+	 * forcefunction.in in the source directory. */
+	if (theSourceFunctionType == DISCRETE) {
+	    FILE *fpff = open_file_in_dir( source_dir, "forcefunction.in", "r" );
+	    if (fpff == NULL) {
+		fprintf(stderr, "Err: type_of_source=force with "
+			"source_function_type=discrete requires "
+			"%s/forcefunction.in\n", source_dir);
+		return -1;
+	    }
+	    source_set_file_buffer(fpff);
+	    if (read_force_function_file(fpff) == -1) {
+		close_file(&fpff);
+		return -1;
+	    }
+	    close_file(&fpff);
 	}
     }
 

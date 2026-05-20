@@ -17,11 +17,33 @@ number_of_poles     = 22
 type_of_source      = force
 
 #
-# Source time function (same options as point sources):
-# ramp | sine | quadratic | ricker | exponential | discrete
+# Source time function:
+#   ramp | sine | quadratic | exponential : analytical, parameterized by
+#       average_risetime_sec
+#   ricker                                : parameterized by ricker_Ts / ricker_Tp
+#   discrete                              : tabulated waveform read from
+#       forcefunction.in in this directory (format below)
 #
 source_function_type = quadratic
 average_risetime_sec = .5
+
+# Ricker example:
+# source_function_type = ricker
+# ricker_Ts            = 1.0          # peak time (s)
+# ricker_Tp            = 1.0          # pulse period (s); peak freq f ~= 1/Tp
+
+# Discrete example (uncomment and provide forcefunction.in alongside this file):
+# source_function_type = discrete
+#
+# forcefunction.in format (whitespace-separated):
+#   <nt1>             # number of samples (int)
+#   <tinit>           # initial delay before pulse begins (s)
+#   <dt>              # sampling interval (s)
+#   <s[0]>            # nt1 unit-amplitude STF samples
+#   ...
+#   <s[nt1-1]>
+# The physical force at time t is F_vec * interp(t - tinit, s, dt). Normalize
+# the samples to peak 1 and carry the amplitude in force_{x,y,z}_n.
 
 #
 # Source Location (same keys as point source)
