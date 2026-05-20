@@ -88,6 +88,20 @@ Advanced/diagnostic toggles:
 	case). A one-time rank-0 line is printed to the monitor/stderr when
 	the override is active so a forced run cannot be mistaken for a
 	normal one. Read once at startup; production runs leave it unset.
+- `HERCULES_SRC_DEBUG=0|1`
+	Diagnostic logging for the source-application path (POINT, FORCE,
+	SRFH, PLANE, PLANEWITHKINKS). Default unset/`0`: no output. Set to
+	`1` to have the owning rank print, per source-application call,
+	one `[SRC DEBUG <type>]` line with the source amplitude inputs
+	(`mu`, `area`, `maxSlip`, `muArea`, `M0`, source local
+	coordinates, `strike/dip/rake`, `forceVec`) plus eight further
+	lines giving the 24 entries of the `nodalForce[8][3]` weighting
+	array. Useful for validating reciprocity-based Green's-tensor
+	workflows: lets you read off the **effective** strike Hercules
+	applied after the UTM grid-convergence correction (which differs
+	from the user-input `strike.in` value for SRFH). See
+	`doc/reciprocity_workflow.md` for the full kernel-construction
+	workflow.
 - `OCTOR_IMPORT_PATH_CACHE=0|1`
 	Controls a small parent-path cache used by cursor mesh import.
 	Default is `1`, which reuses the shared root-to-leaf prefix between
@@ -180,6 +194,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_REPRO_MODE=1
 # export HERCULES_MESH_IMPORT_VERIFY=1
 # export HERCULES_FORCE_GENERIC_DAMPING=1
+# export HERCULES_SRC_DEBUG=1
 # export PHASE_B_MAP_MODE=numa
 
 PSOLVE_BIN=<path to psolve> \

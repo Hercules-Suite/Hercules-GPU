@@ -1394,25 +1394,34 @@ load_myForces_with_point_source(
 
     pointSource->edgesize = myMesh->ticksize * edgeticks;
 
-    /* --- diagnostic: source amplitude inputs --------------------------- */
+    /* --- diagnostic prints, gated by HERCULES_SRC_DEBUG env var (default off) -
+     * Set HERCULES_SRC_DEBUG=1 to log per-source amplitude inputs (mu, area,
+     * maxSlip, muArea, M0, strike/dip/rake, forceVec) and the 24 entries of the
+     * nodalForce[8][3] weighting array. Useful for reciprocity Green's-tensor
+     * validation: lets you read off the effective strike Hercules applied
+     * after any internal corrections (e.g., UTM grid-convergence rotation).
+     */
     {
-	const char *srcname = (theTypeOfSource==POINT  ? "POINT" :
-			       theTypeOfSource==FORCE  ? "FORCE" :
-			       theTypeOfSource==PLANE  ? "PLANE" :
-			       theTypeOfSource==SRFH   ? "SRFH"  :
-			       theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
-	fprintf(stderr,
-	    "[SRC DEBUG %s] rank=%d eindex=%d  mu=%.6e  area=%.6e  maxSlip=%.6e  "
-	    "muArea=%.6e  M0=%.6e  edgesize=%.6e  src_local=(%.4e,%.4e,%.4e)  "
-	    "strike=%.3f dip=%.3f rake=%.3f  "
-	    "forceVec=(%.6e,%.6e,%.6e)\n",
-	    srcname, myID, eindex,
-	    mu, pointSource->area, pointSource->maxSlip,
-	    pointSource->muArea, pointSource->M0,
-	    pointSource->edgesize,
-	    pointSource->x, pointSource->y, pointSource->z,
-	    pointSource->strike, pointSource->dip, pointSource->rake,
-	    pointSource->forceVec.x[0], pointSource->forceVec.x[1], pointSource->forceVec.x[2]);
+	const char *src_dbg = getenv("HERCULES_SRC_DEBUG");
+	if (src_dbg && atoi(src_dbg) != 0) {
+	    const char *srcname = (theTypeOfSource==POINT  ? "POINT" :
+				   theTypeOfSource==FORCE  ? "FORCE" :
+				   theTypeOfSource==PLANE  ? "PLANE" :
+				   theTypeOfSource==SRFH   ? "SRFH"  :
+				   theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
+	    fprintf(stderr,
+		"[SRC DEBUG %s] rank=%d eindex=%d  mu=%.6e  area=%.6e  maxSlip=%.6e  "
+		"muArea=%.6e  M0=%.6e  edgesize=%.6e  src_local=(%.4e,%.4e,%.4e)  "
+		"strike=%.3f dip=%.3f rake=%.3f  "
+		"forceVec=(%.6e,%.6e,%.6e)\n",
+		srcname, myID, eindex,
+		mu, pointSource->area, pointSource->maxSlip,
+		pointSource->muArea, pointSource->M0,
+		pointSource->edgesize,
+		pointSource->x, pointSource->y, pointSource->z,
+		pointSource->strike, pointSource->dip, pointSource->rake,
+		pointSource->forceVec.x[0], pointSource->forceVec.x[1], pointSource->forceVec.x[2]);
+	}
     }
 
     /* set the nodal forces */
@@ -1422,21 +1431,23 @@ load_myForces_with_point_source(
 	source_initnodalforce( pointSource );  /* get the weight for each node */
     }
 
-    /* --- diagnostic: nodal force weights (×muArea gives applied moment/force) */
     {
-	const char *srcname = (theTypeOfSource==POINT  ? "POINT" :
-			       theTypeOfSource==FORCE  ? "FORCE" :
-			       theTypeOfSource==PLANE  ? "PLANE" :
-			       theTypeOfSource==SRFH   ? "SRFH"  :
-			       theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
-	for (int a = 0; a < 8; a++) {
-	    fprintf(stderr,
-		"[SRC DEBUG %s] rank=%d eindex=%d node=%d  lnid=%d  "
-		"nodalForce=(%.6e, %.6e, %.6e)\n",
-		srcname, myID, eindex, a, pointSource->lnid[a],
-		pointSource->nodalForce[a][0],
-		pointSource->nodalForce[a][1],
-		pointSource->nodalForce[a][2]);
+	const char *src_dbg = getenv("HERCULES_SRC_DEBUG");
+	if (src_dbg && atoi(src_dbg) != 0) {
+	    const char *srcname = (theTypeOfSource==POINT  ? "POINT" :
+				   theTypeOfSource==FORCE  ? "FORCE" :
+				   theTypeOfSource==PLANE  ? "PLANE" :
+				   theTypeOfSource==SRFH   ? "SRFH"  :
+				   theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
+	    for (int a = 0; a < 8; a++) {
+		fprintf(stderr,
+		    "[SRC DEBUG %s] rank=%d eindex=%d node=%d  lnid=%d  "
+		    "nodalForce=(%.6e, %.6e, %.6e)\n",
+		    srcname, myID, eindex, a, pointSource->lnid[a],
+		    pointSource->nodalForce[a][0],
+		    pointSource->nodalForce[a][1],
+		    pointSource->nodalForce[a][2]);
+	    }
 	}
     }
 
