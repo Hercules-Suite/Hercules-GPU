@@ -2800,8 +2800,33 @@ __device__ static inline void v3_tet_strain(
 __global__ void kernelStationVEStressGather(int32_t stationCount,
                                             gpu_data_t* gpuData)
 {
+    /* PHASE-1 DIAG KERNEL: stripped to the minimum possible work to
+     * isolate the in-kernel illegal-memory-access. Only writes 6 zeros
+     * to gpuData->stationVEStressArrayDevice[lin*6 .. +5]. No reads
+     * from shearVector/kappaVector, no strain math, no printf.
+     *
+     * If THIS runs cleanly -> the bug is in the shearVector/kappaVector
+     *   indexing or the strain math (will restore + bisect next).
+     * If this STILL crashes -> the bug is at the most fundamental
+     *   level: stationVEStressArrayDevice itself is invalid, or
+     *   gpuData (the kernel arg) is wrong, or the launch config is
+     *   bad, or the gpu_data_t layout is mismatched between host and
+     *   device (e.g., stale kernel.o linked against an older
+     *   psolve.h). That would prompt a full `make clean && make`. */
     int32_t lin = blockIdx.x * blockDim.x + threadIdx.x;
     if (lin >= stationCount) return;
+    if (gpuData == NULL) return;
+    if (gpuData->stationVEStressArrayDevice == NULL) return;
+    {
+        double* out_p1 = gpuData->stationVEStressArrayDevice + (size_t)lin * 6;
+        out_p1[0] = 0.0; out_p1[1] = 0.0; out_p1[2] = 0.0;
+        out_p1[3] = 0.0; out_p1[4] = 0.0; out_p1[5] = 0.0;
+    }
+    return;
+
+    /* ----- ORIGINAL BODY BELOW (intentionally unreachable for the
+     * phase-1 isolation test; will be restored after the diagnostic
+     * pass confirms which side of the bisection the bug is on). ----- */
 
     /* DEFENSIVE: every memory access below is gated on a valid struct
      * field and an in-bounds index. On out-of-bounds / NULL ptr we
