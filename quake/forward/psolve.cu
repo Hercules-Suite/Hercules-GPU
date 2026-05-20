@@ -163,6 +163,10 @@ static double g_dampingBkt2KappaExpCoef0 = 0.0;
 static double g_dampingBkt2KappaCoef3 = 0.0;
 static double g_dampingBkt2KappaCoef4 = 0.0;
 static double g_dampingBkt2KappaExpCoef1 = 0.0;
+/* v3 station VE-stress gather state (set by solver_init_station_ve_stress_gpu,
+ * read by solver_station_ve_stress_kick and interpolate_station_displacements). */
+static int32_t g_v3StationGatherInit = 0;
+static double* g_stationVEStressHost = NULL;
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
@@ -10486,6 +10490,17 @@ static void solver_init() {
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
+  /* v3 station VE stress gather kernel: blocksize sized for the
+   * (small) per-rank station count. Grid is computed at launch when
+   * the active station count is known. */
+  k = &Global.gpu_kernel[CUDA_KERNEL_STATION_VE_STRESS];
+  strcpy(k->name, CUDA_KERNEL_NAME_STATION_VE_STRESS);
+  k->handle = (char*)kernelStationVEStressGather;
+  k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
+                                   (char*)kernelStationVEStressGather, 0);
+  k->gridsize = 0;     /* set per launch from stationGatherCount */
+  k->sharedmem = 0;
+
   /* Save reference to kernel data in solver */
   Global.mySolver->gpu_kernel = &(Global.gpu_kernel[0]);
 
@@ -10637,6 +10652,18 @@ static void solver_delete() {
   cudaFree(Global.gpuData.conv_kappa_1Device);
   cudaFree(Global.gpuData.conv_kappa_2Device);
   cudaFree(Global.gpuData.conv_kappa_3Device);
+  /* v3 station VE-stress gather (all NULL when v3 inactive). */
+  cudaFree(Global.gpuData.stationGatherEindexDevice);
+  cudaFree(Global.gpuData.stationGatherCsiDevice);
+  cudaFree(Global.gpuData.stationGatherEtaDevice);
+  cudaFree(Global.gpuData.stationGatherDzetaDevice);
+  cudaFree(Global.gpuData.stationGatherHDevice);
+  cudaFree(Global.gpuData.stationGatherMuDevice);
+  cudaFree(Global.gpuData.stationGatherLambdaDevice);
+  cudaFree(Global.gpuData.stationGatherTethIDevice);
+  cudaFree(Global.gpuData.stationGatherCubePartDevice);
+  cudaFree(Global.gpuData.stationVEStressArrayDevice);
+  if (g_stationVEStressHost) { free(g_stationVEStressHost); g_stationVEStressHost = NULL; }
   cudaFree(Global.gpuData.c1ArrayDevice);
   cudaFree(Global.gpuData.c2ArrayDevice);
   cudaFree(Global.gpuData.c3ArrayDevice);
@@ -11448,6 +11475,255 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   free(mapperHost);
 }
+
+
+/* v3 station viscoelastic-stress gather setup. Idempotent. Active
+ * iff (print_station_strains||print_station_stresses)=yes AND
+ * type_of_damping >= BKT (BKT-family); otherwise sets stationGatherCount=0
+ * and leaves all device pointers NULL -- the kick / row writer then no-op
+ * and the row writer falls back to v2 elastic-on-strain. Populates the
+ * per-station gather arrays from Param.myStations and (under topography)
+ * topography.cc's get_topo_station_tet. Called from main() right after
+ * setup_stations_data; the per-step solver_reset_gpu cudaMemcpyAsync
+ * propagates the new gpu_data_t pointers to gpuDataDevice on the next
+ * timestep. */
+static void solver_init_station_ve_stress_gpu(int32_t myID)
+{
+    if (g_v3StationGatherInit) return;
+    g_v3StationGatherInit = 1;
+
+    Global.gpuData.stationGatherCount = 0;
+    Global.gpuData.stationGatherEindexDevice    = NULL;
+    Global.gpuData.stationGatherCsiDevice       = NULL;
+    Global.gpuData.stationGatherEtaDevice       = NULL;
+    Global.gpuData.stationGatherDzetaDevice     = NULL;
+    Global.gpuData.stationGatherHDevice         = NULL;
+    Global.gpuData.stationGatherMuDevice        = NULL;
+    Global.gpuData.stationGatherLambdaDevice    = NULL;
+    Global.gpuData.stationGatherTethIDevice     = NULL;
+    Global.gpuData.stationGatherCubePartDevice  = NULL;
+    Global.gpuData.stationVEStressArrayDevice   = NULL;
+
+    const int active =
+        ((Param.printStationStrains == YES) || (Param.printStationStresses == YES))
+        && (Param.theTypeOfDamping >= BKT)
+        && (Param.myNumberOfStations > 0);
+    if (!active) return;
+
+    const int32_t N = Param.myNumberOfStations;
+    Global.gpuData.stationGatherCount = N;
+
+    int32_t* h_eidx = (int32_t*)malloc(N * sizeof(int32_t));
+    double*  h_csi  = (double*) malloc(N * sizeof(double));
+    double*  h_eta  = (double*) malloc(N * sizeof(double));
+    double*  h_dze  = (double*) malloc(N * sizeof(double));
+    double*  h_h    = (double*) malloc(N * sizeof(double));
+    double*  h_mu   = (double*) malloc(N * sizeof(double));
+    double*  h_lam  = (double*) malloc(N * sizeof(double));
+    int*     h_teth = (int*)    malloc(N * sizeof(int));
+    int*     h_cp   = (int*)    malloc(N * sizeof(int));
+    if (!h_eidx || !h_csi || !h_eta || !h_dze || !h_h || !h_mu || !h_lam ||
+        !h_teth || !h_cp) {
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress host allocation failed\n",
+                myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    for (int32_t i = 0; i < N; i++) {
+        h_eidx[i] = Param.myStations[i].owningElementIndex;
+        h_csi[i]  = Param.myStations[i].localcoords.x[0];
+        h_eta[i]  = Param.myStations[i].localcoords.x[1];
+        h_dze[i]  = Param.myStations[i].localcoords.x[2];
+        h_h[i]    = Param.myStations[i].h;
+        h_mu[i]   = Param.myStations[i].mu;
+        h_lam[i]  = Param.myStations[i].lambda;
+        h_teth[i] = -1;
+        h_cp[i]   = 0;
+        if (Param.includeTopography == YES) {
+            int t = -1, c = 0;
+            if (get_topo_station_tet(i, &t, &c)) {
+                h_teth[i] = t;
+                h_cp[i]   = c;
+            }
+        }
+    }
+
+    if (cudaMalloc((void**)&Global.gpuData.stationGatherEindexDevice,
+                   N * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherCsiDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherEtaDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherDzetaDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherHDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherMuDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherLambdaDevice,
+                   N * sizeof(double)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherTethIDevice,
+                   N * sizeof(int)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationGatherCubePartDevice,
+                   N * sizeof(int)) != cudaSuccess ||
+        cudaMalloc((void**)&Global.gpuData.stationVEStressArrayDevice,
+                   6 * N * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress device allocation failed\n",
+                myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    cudaMemcpy(Global.gpuData.stationGatherEindexDevice, h_eidx,
+               N * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherCsiDevice, h_csi,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherEtaDevice, h_eta,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherDzetaDevice, h_dze,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherHDevice, h_h,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherMuDevice, h_mu,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherLambdaDevice, h_lam,
+               N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherTethIDevice, h_teth,
+               N * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Global.gpuData.stationGatherCubePartDevice, h_cp,
+               N * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemset(Global.gpuData.stationVEStressArrayDevice, 0,
+               6 * N * sizeof(double));
+
+    free(h_eidx); free(h_csi); free(h_eta); free(h_dze);
+    free(h_h);    free(h_mu);  free(h_lam); free(h_teth); free(h_cp);
+
+    g_stationVEStressHost = (double*)malloc(6 * N * sizeof(double));
+    if (g_stationVEStressHost == NULL) {
+        fprintf(stderr, "Thread %d: v3 VE-stress host buffer alloc failed\n",
+                myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+    memset(g_stationVEStressHost, 0, 6 * N * sizeof(double));
+
+    /* Push the freshly-populated v3 pointers (which are zero-initialized
+     * in Global.gpuData on program start) into the device-side
+     * gpu_data_t. The initial alloc-time cudaMemcpy of Global.gpuData ->
+     * gpuDataDevice runs BEFORE this setup function, so without this
+     * one-shot sync the very first kick would dereference NULL v3
+     * pointers on the GPU and crash. solver_reset_gpu's per-step async
+     * sync will keep them current after this. */
+    if (Global.mySolver != NULL && Global.mySolver->gpuDataDevice != NULL) {
+        cudaMemcpy(Global.mySolver->gpuDataDevice, &Global.gpuData,
+                   sizeof(gpu_data_t), cudaMemcpyHostToDevice);
+    }
+
+    if (myID == 0) {
+        monitor_print("V3 station viscoelastic-stress gather enabled "
+                      "(%d stations).\n", (int)N);
+    }
+}
+
+
+/* Per-step kick. Launches the gather kernel and blocks the host on the
+ * tiny memcpy-back so the host buffer is ready when
+ * interpolate_station_displacements reads it. NOTE: the shearVector/
+ * kappaVector on the GPU at this point reflect the PREVIOUS step's
+ * damping conv (step N's solver_output_stations runs before step N's
+ * physics phase) -- so the Sig_* column is offset by one timestep
+ * relative to Eps_*. Negligible for the typical inversion use case
+ * (one sample of phase lag at the simulation dt); documented in the
+ * README. */
+static void solver_station_ve_stress_kick(int step)
+{
+    if (Global.gpuData.stationGatherCount <= 0) return;
+    if (Param.theNumberOfStations == 0) return;
+    if (step % Param.theStationsPrintRate != 0) return;
+
+    /* Defensive guards: NULL device pointers would NULL-deref on the
+     * GPU and put CUDA in a sticky-error state -- which would then
+     * surface later as unrelated "device alloc failed" / "illegal
+     * memory access" reports from the next CUDA call. Bail cleanly
+     * here instead. */
+    if (Global.gpuData.shearVectorDevice == NULL ||
+        Global.gpuData.kappaVectorDevice == NULL ||
+        Global.gpuData.stationGatherEindexDevice == NULL ||
+        Global.gpuData.stationVEStressArrayDevice == NULL) {
+        if (Global.myID == 0) {
+            static int warned = 0;
+            if (!warned) {
+                fprintf(stderr,
+                        "v3 station VE-stress kick: skipped step %d "
+                        "(shearVector/kappaVector/gatherEindex/VEStress "
+                        "device array is NULL).\n", step);
+                warned = 1;
+            }
+        }
+        return;
+    }
+
+    const int32_t N = Global.gpuData.stationGatherCount;
+    int blocksize =
+        Global.mySolver->gpu_kernel[CUDA_KERNEL_STATION_VE_STRESS].blocksize;
+    if (blocksize <= 0) blocksize = 64;     /* fallback if registration query returned 0 */
+    int gridsize = (N + blocksize - 1) / blocksize;
+    if (gridsize < 1) gridsize = 1;
+
+    /* Clear any previously-pending CUDA error so we can detect a fault
+     * specifically from our launch path. */
+    (void)cudaGetLastError();
+
+    kernelStationVEStressGather<<<gridsize, blocksize, 0,
+                                  Global.mySolver->streams[CUDA_STREAM_MAIN]>>>(
+        N, Global.mySolver->gpuDataDevice);
+
+    /* Launch-time error (e.g., invalid configuration). */
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress kernel LAUNCH error at "
+                "step %d (grid=%d block=%d N=%d): %s\n",
+                Global.myID, step, gridsize, blocksize, (int)N,
+                cudaGetErrorString(launchErr));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    cudaMemcpyAsync(g_stationVEStressHost,
+                    Global.gpuData.stationVEStressArrayDevice,
+                    6 * N * sizeof(double),
+                    cudaMemcpyDeviceToHost,
+                    Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    cudaError_t syncErr =
+        cudaStreamSynchronize(Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    if (syncErr != cudaSuccess) {
+        /* This surfaces any in-kernel fault (illegal address, out-of-bounds
+         * read, etc.) that the asynchronous launch hid -- catching it here
+         * pins the blame on the v3 path instead of letting it cascade
+         * into a misleading "source node list device alloc failed" later. */
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress sync error at step %d "
+                "(N=%d): %s\n",
+                Global.myID, step, (int)N, cudaGetErrorString(syncErr));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+}
+
+
+/* Returns NULL when v3 is inactive; otherwise the 6 sigma components
+ * (XX,YY,ZZ,XY,YZ,XZ) for station iStation, from the most recent kick. */
+static inline const double* solver_station_ve_stress_get(int iStation)
+{
+    if (g_stationVEStressHost == NULL) return NULL;
+    if (Global.gpuData.stationGatherCount <= 0) return NULL;
+    return g_stationVEStressHost + (size_t)iStation * 6;
+}
+
 
 /** Compute the force due to the earthquake source. */
 static void solver_compute_force_source(int step) {
@@ -14063,6 +14339,7 @@ static void solver_run() {
     // at high frequencies, and it is not clear its purpose.
     // solver_output_wavefield( step );
     solver_output_planes(Global.mySolver, Global.myID, step);
+    solver_station_ve_stress_kick(step);
     solver_output_stations(step);
     solver_output_drm_nodes(Global.mySolver, step, Param.theTotalSteps);
     solver_read_source_forces(step, Param.theDeltaT);
@@ -18964,6 +19241,7 @@ void setup_stations_data() {
         (stationMaterial != NULL) ? stationMaterial->edgesize : 0.0;
     Param.myStations[iLCStation].rho =
         (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
+    Param.myStations[iLCStation].owningElementIndex = stationElementIndex;
     /* Lame parameters for linear strain/stress station output
      * (print_station_strains/stresses). mu=0 for acoustic/fluid; the
      * strain/stress writer is gated to elastic stations anyway. */
@@ -19413,12 +19691,25 @@ static int interpolate_station_displacements(int32_t step) {
                   st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
         }
         if (Param.printStationStresses == YES) {
-          tensor_t st_sig =
-              point_stress(st_eps, Param.myStations[iStation].mu,
-                           Param.myStations[iStation].lambda);
-          fprintf(Param.myStations[iStation].fpoutputfile,
-                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
-                  st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+          /* v3: prefer the GPU-gathered viscoelastic stress (correct
+           * under BKT-family damping); fall back to v2's elastic
+           * constitutive on the kinematic strain otherwise. Both paths
+           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
+          const double* st_sig_v3 =
+              solver_station_ve_stress_get(iStation);
+          if (st_sig_v3 != NULL) {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e",
+                    st_sig_v3[0], st_sig_v3[1], st_sig_v3[2],
+                    st_sig_v3[3], st_sig_v3[4], st_sig_v3[5]);
+          } else {
+            tensor_t st_sig =
+                point_stress(st_eps, Param.myStations[iStation].mu,
+                             Param.myStations[iStation].lambda);
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
+                    st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+          }
         }
       }
 
@@ -19532,12 +19823,25 @@ static int interpolate_station_displacements(int32_t step) {
                   st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
         }
         if (Param.printStationStresses == YES) {
-          tensor_t st_sig =
-              point_stress(st_eps, Param.myStations[iStation].mu,
-                           Param.myStations[iStation].lambda);
-          fprintf(Param.myStations[iStation].fpoutputfile,
-                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
-                  st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+          /* v3: prefer the GPU-gathered viscoelastic stress (correct
+           * under BKT-family damping); fall back to v2's elastic
+           * constitutive on the kinematic strain otherwise. Both paths
+           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
+          const double* st_sig_v3 =
+              solver_station_ve_stress_get(iStation);
+          if (st_sig_v3 != NULL) {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e",
+                    st_sig_v3[0], st_sig_v3[1], st_sig_v3[2],
+                    st_sig_v3[3], st_sig_v3[4], st_sig_v3[5]);
+          } else {
+            tensor_t st_sig =
+                point_stress(st_eps, Param.myStations[iStation].mu,
+                             Param.myStations[iStation].lambda);
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e", st_sig.xx, st_sig.yy,
+                    st_sig.zz, st_sig.xy, st_sig.yz, st_sig.xz);
+          }
         }
       }
 
@@ -21168,6 +21472,7 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  solver_init_station_ve_stress_gpu(Global.myID);
   Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");
   solver_printstat(Global.mySolver);

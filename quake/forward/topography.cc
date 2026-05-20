@@ -3542,3 +3542,23 @@ int compute_tetra_strain ( int32_t statID, fvector_t cubeU[8],
                                        myTopoStations[statID].cube_part );
     return 1;
 }
+
+
+/* Per-station getter for the v3 viscoelastic-stress gather. Returns 1
+ * iff the station is in a VT cut-cell (so the GPU kernel should use
+ * the per-tet point_strain_tetrah dispatch); else 0 -- regular cube
+ * station. */
+int get_topo_station_tet ( int32_t statID, int *out_teth_i, int *out_cube_part )
+{
+    if ( theTopoMethod == FEM )
+        return 0;
+    if ( myTopoStations == NULL )
+        return 0;
+    if ( myTopoStations[statID].TopoStation == 0 )
+        return 0;
+    if ( myTopoStations[statID].teth_i < 0 )
+        return 0;
+    if ( out_teth_i )    *out_teth_i    = myTopoStations[statID].teth_i;
+    if ( out_cube_part ) *out_cube_part = myTopoStations[statID].cube_part;
+    return 1;
+}

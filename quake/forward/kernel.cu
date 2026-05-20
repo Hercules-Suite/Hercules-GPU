@@ -2612,3 +2612,263 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
                   (solver_float)f);
     }
 }
+
+
+/* ---------------------------------------------------------------------
+ * v3 station viscoelastic stress gather.
+ *
+ * One thread per station. Reads the 8 cube nodes x 3 components of the
+ * modified-displacement vectors shearVectorDevice (deviatoric channel)
+ * and kappaVectorDevice (volumetric channel) -- written by the damping
+ * conv kernel each timestep for BKT-family runs -- and forms the
+ * viscoelastic stress tensor at the station, using the same dev/vol
+ * split that the damping force kernel uses internally:
+ *
+ *   sigma_visco_ij = 2*mu * (eps^s_ij - 1/3 tr(eps^s) delta_ij)
+ *                  + K   * tr(eps^k) delta_ij     (K = lambda + 2*mu/3)
+ *
+ * where eps^s, eps^k are the strains derived from shearVector and
+ * kappaVector respectively. This reduces to the elastic constitutive
+ * when shearVector = kappaVector = u (no SLS memory), so the value
+ * the host writes for the Sig_* columns is the same as v2's elastic
+ * point_stress in the no-damping limit; under BKT-family it carries
+ * the full SLS-memory contribution.
+ *
+ * For regular (non-cut) cube stations the strain at the station's
+ * local coords is the trilinear-hex point_dxi + point_strain (same as
+ * nonlinear.cc's point_strain). For VT cut-cell stations (teth_i>=0)
+ * the constant-per-tet strain is computed via the same algebra as
+ * point_strain_tetrah (nonlinear.cc), ported here inline so the kernel
+ * needs no host call.
+ *
+ * Output array: gpuData->stationVEStressArrayDevice[6 * stationCount]
+ * -- 6 sigma components per station in XX,YY,ZZ,XY,YZ,XZ order. The
+ * Eps_* columns are still computed host-side from tm1 (the kinematic
+ * strain), so the kernel only needs to produce sigma.
+ *
+ * Acoustic stations are processed too but their shearVector/kappaVector
+ * slots were never written by the BKT conv kernel (acoustic elements
+ * are excluded from the damping mapper) -- they are cudaMemset-zeroed
+ * at allocation, so the kernel writes zeros, which the host row writer
+ * ignores (the acoustic branch returns before the stress columns).
+ * --------------------------------------------------------------------- */
+
+__device__ static inline void v3_cube_strain(
+    const double *ux, const double *uy, const double *uz,
+    double csi, double eta, double dze, double h,
+    double *exx, double *eyy, double *ezz,
+    double *exy, double *eyz, double *exz)
+{
+    /* mirror nonlinear.cc point_dxi + point_strain (trilinear hex8). */
+    const int xi0[8] = {-1, 1,-1, 1,-1, 1,-1, 1};
+    const int xi1[8] = {-1,-1, 1, 1,-1,-1, 1, 1};
+    const int xi2[8] = {-1,-1,-1,-1, 1, 1, 1, 1};
+    const double Jij = 0.25 / h;
+    double Exx=0, Eyy=0, Ezz=0, Exy=0, Eyz=0, Exz=0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        double dx = Jij * (double)xi0[i] * (1.0 + xi1[i]*eta) * (1.0 + xi2[i]*dze);
+        double dy = Jij * (1.0 + xi0[i]*csi) * (double)xi1[i] * (1.0 + xi2[i]*dze);
+        double dz = Jij * (1.0 + xi0[i]*csi) * (1.0 + xi1[i]*eta) * (double)xi2[i];
+        Exx += dx * ux[i];
+        Eyy += dy * uy[i];
+        Ezz += dz * uz[i];
+        Exy += 0.5 * (dy * ux[i] + dx * uy[i]);
+        Eyz += 0.5 * (dz * uy[i] + dy * uz[i]);
+        Exz += 0.5 * (dz * ux[i] + dx * uz[i]);
+    }
+    *exx = Exx; *eyy = Eyy; *ezz = Ezz;
+    *exy = Exy; *eyz = Eyz; *exz = Exz;
+}
+
+__device__ static inline void v3_tet_strain(
+    const double *ux, const double *uy, const double *uz,
+    double h, int teth_i, int cube_part,
+    double *exx, double *eyy, double *ezz,
+    double *exy, double *eyz, double *exz)
+{
+    /* Faithful port of nonlinear.cc point_strain_tetrah. 5 tets x 2
+     * cube_parts = 10 cases. The N0..N3 picks specific cube nodes for
+     * each tet (the same indexing the CPU function uses). All cases
+     * yield the constant-per-tet strain (linear shape functions over
+     * the tet). Cube node ordering is the standard Hercules hex8
+     * (xi[3][8] sign-table). */
+    double a_xx=0, a_yy=0, a_zz=0, a_xy=0, a_yz=0, a_xz=0;
+    int N0=0, N1=0, N2=0, N3=0;
+    if (cube_part == 1) {
+        switch (teth_i) {
+            case 0:
+                N0=0; N1=2; N2=1; N3=4;
+                a_xx = -(ux[N0] - ux[N2]) / h;
+                a_yy = -(uy[N0] - uy[N1]) / h;
+                a_zz = -(uz[N0] - uz[N3]) / h;
+                a_xy = -0.5*(ux[N0]-ux[N1] + uy[N0]-uy[N2]) / h;
+                a_yz = -0.5*(uy[N0]-uy[N3] + uz[N0]-uz[N1]) / h;
+                a_xz = -0.5*(ux[N0]-ux[N3] + uz[N0]-uz[N2]) / h;
+                break;
+            case 1:
+                N0=3; N1=1; N2=2; N3=7;
+                a_xx =  (ux[N0] - ux[N2]) / h;
+                a_yy =  (uy[N0] - uy[N1]) / h;
+                a_zz = -(uz[N0] - uz[N3]) / h;
+                a_xy =  0.5*(ux[N0]-ux[N1] + uy[N0]-uy[N2]) / h;
+                a_yz = -0.5*(uy[N0]-uy[N3] - uz[N0]+uz[N1]) / h;
+                a_xz = -0.5*(ux[N0]-ux[N3] - uz[N0]+uz[N2]) / h;
+                break;
+            case 2:
+                N0=6; N1=4; N2=7; N3=2;
+                a_xx = -(ux[N0] - ux[N2]) / h;
+                a_yy =  (uy[N0] - uy[N1]) / h;
+                a_zz =  (uz[N0] - uz[N3]) / h;
+                a_xy =  0.5*(ux[N0]-ux[N1] - uy[N0]+uy[N2]) / h;
+                a_yz =  0.5*(uy[N0]-uy[N3] + uz[N0]-uz[N1]) / h;
+                a_xz =  0.5*(ux[N0]-ux[N3] - uz[N0]+uz[N2]) / h;
+                break;
+            case 3:
+                N0=5; N1=7; N2=4; N3=1;
+                a_xx =  (ux[N0] - ux[N2]) / h;
+                a_yy = -(uy[N0] - uy[N1]) / h;
+                a_zz =  (uz[N0] - uz[N3]) / h;
+                a_xy = -0.5*(ux[N0]-ux[N1] - uy[N0]+uy[N2]) / h;
+                a_yz =  0.5*(uy[N0]-uy[N3] - uz[N0]+uz[N1]) / h;
+                a_xz =  0.5*(ux[N0]-ux[N3] + uz[N0]-uz[N2]) / h;
+                break;
+            case 4:
+                N0=2; N1=4; N2=7; N3=1;
+                a_xx = -0.5*(ux[N0]+ux[N1]-ux[N2]-ux[N3]) / h;
+                a_yy =  0.5*(uy[N0]-uy[N1]+uy[N2]-uy[N3]) / h;
+                a_zz = -0.5*(uz[N0]-uz[N1]-uz[N2]+uz[N3]) / h;
+                a_xy =  0.25*(ux[N0]-ux[N1]+ux[N2]-ux[N3] - uy[N0]-uy[N1]+uy[N2]+uy[N3]) / h;
+                a_yz = -0.25*(uy[N0]-uy[N1]-uy[N2]+uy[N3] - uz[N0]+uz[N1]-uz[N2]+uz[N3]) / h;
+                a_xz = -0.25*(ux[N0]-ux[N1]-ux[N2]+ux[N3] + uz[N0]+uz[N1]-uz[N2]-uz[N3]) / h;
+                break;
+            default: break;
+        }
+    } else {
+        switch (teth_i) {
+            case 0:
+                N0=0; N1=3; N2=1; N3=5;
+                a_xx = -(ux[N0] - ux[N2]) / h;
+                a_yy =  (uy[N1] - uy[N2]) / h;
+                a_zz = -(uz[N2] - uz[N3]) / h;
+                a_xy =  0.5*(ux[N1]-ux[N2] - uy[N0]+uy[N2]) / h;
+                a_yz = -0.5*(uy[N2]-uy[N3] - uz[N1]+uz[N2]) / h;
+                a_xz = -0.5*(ux[N2]-ux[N3] + uz[N0]-uz[N2]) / h;
+                break;
+            case 1:
+                N0=0; N1=2; N2=3; N3=6;
+                a_xx = -(ux[N1] - ux[N2]) / h;
+                a_yy = -(uy[N0] - uy[N1]) / h;
+                a_zz = -(uz[N1] - uz[N3]) / h;
+                a_xy = -0.5*(ux[N0]-ux[N1] + uy[N1]-uy[N2]) / h;
+                a_yz = -0.5*(uy[N1]-uy[N3] + uz[N0]-uz[N1]) / h;
+                a_xz = -0.5*(ux[N1]-ux[N3] + uz[N1]-uz[N2]) / h;
+                break;
+            case 2:
+                N0=4; N1=5; N2=6; N3=0;
+                a_xx = -(ux[N0] - ux[N1]) / h;
+                a_yy = -(uy[N0] - uy[N2]) / h;
+                a_zz =  (uz[N0] - uz[N3]) / h;
+                a_xy = -0.5*(ux[N0]-ux[N2] + uy[N0]-uy[N1]) / h;
+                a_yz =  0.5*(uy[N0]-uy[N3] - uz[N0]+uz[N2]) / h;
+                a_xz =  0.5*(ux[N0]-ux[N3] - uz[N0]+uz[N1]) / h;
+                break;
+            case 3:
+                N0=6; N1=5; N2=7; N3=3;
+                a_xx = -(ux[N0] - ux[N2]) / h;
+                a_yy = -(uy[N1] - uy[N2]) / h;
+                a_zz =  (uz[N2] - uz[N3]) / h;
+                a_xy = -0.5*(ux[N1]-ux[N2] + uy[N0]-uy[N2]) / h;
+                a_yz =  0.5*(uy[N2]-uy[N3] - uz[N1]+uz[N2]) / h;
+                a_xz =  0.5*(ux[N2]-ux[N3] - uz[N0]+uz[N2]) / h;
+                break;
+            case 4:
+                N0=0; N1=6; N2=3; N3=5;
+                a_xx = -0.5*(ux[N0]+ux[N1]-ux[N2]-ux[N3]) / h;
+                a_yy = -0.5*(uy[N0]-uy[N1]-uy[N2]+uy[N3]) / h;
+                a_zz = -0.5*(uz[N0]-uz[N1]+uz[N2]-uz[N3]) / h;
+                a_xy = -0.25*(ux[N0]-ux[N1]-ux[N2]+ux[N3] + uy[N0]+uy[N1]-uy[N2]-uy[N3]) / h;
+                a_yz = -0.25*(uy[N0]-uy[N1]+uy[N2]-uy[N3] + uz[N0]-uz[N1]-uz[N2]+uz[N3]) / h;
+                a_xz = -0.25*(ux[N0]-ux[N1]+ux[N2]-ux[N3] + uz[N0]+uz[N1]-uz[N2]-uz[N3]) / h;
+                break;
+            default: break;
+        }
+    }
+    *exx=a_xx; *eyy=a_yy; *ezz=a_zz; *exy=a_xy; *eyz=a_yz; *exz=a_xz;
+}
+
+__global__ void kernelStationVEStressGather(int32_t stationCount,
+                                            gpu_data_t* gpuData)
+{
+    int32_t lin = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lin >= stationCount) return;
+
+    const int32_t eindex = gpuData->stationGatherEindexDevice[lin];
+    const double  csi    = gpuData->stationGatherCsiDevice[lin];
+    const double  eta    = gpuData->stationGatherEtaDevice[lin];
+    const double  dze    = gpuData->stationGatherDzetaDevice[lin];
+    const double  h      = gpuData->stationGatherHDevice[lin];
+    const double  mu     = gpuData->stationGatherMuDevice[lin];
+    const double  lambda = gpuData->stationGatherLambdaDevice[lin];
+    const int     teth_i = gpuData->stationGatherTethIDevice[lin];
+    const int     cp     = gpuData->stationGatherCubePartDevice[lin];
+
+    const int32_t lenum   = gpuData->lenum;
+    const int32_t numcomp = lenum * 8;
+
+    /* Gather 8 cube nodes x 3 components of shearVector and
+     * kappaVector at the station's owning element. */
+    double sx[8], sy[8], sz[8], kx[8], ky[8], kz[8];
+    const solver_float* sh = (const solver_float*)gpuData->shearVectorDevice;
+    const solver_float* ka = (const solver_float*)gpuData->kappaVectorDevice;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        const int32_t o0 = eindex + i * lenum;
+        const int32_t o1 = o0 + numcomp;
+        const int32_t o2 = o1 + numcomp;
+        sx[i] = (double)sh[o0]; sy[i] = (double)sh[o1]; sz[i] = (double)sh[o2];
+        kx[i] = (double)ka[o0]; ky[i] = (double)ka[o1]; kz[i] = (double)ka[o2];
+    }
+
+    double esxx, esyy, eszz, esxy, esyz, esxz;
+    double ekxx, ekyy, ekzz, ekxy, ekyz, ekxz;
+
+    if (teth_i < 0) {
+        /* regular cube station */
+        v3_cube_strain(sx, sy, sz, csi, eta, dze, h,
+                       &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
+        v3_cube_strain(kx, ky, kz, csi, eta, dze, h,
+                       &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
+    } else {
+        /* VT cut-cell station */
+        v3_tet_strain(sx, sy, sz, h, teth_i, cp,
+                      &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
+        v3_tet_strain(kx, ky, kz, h, teth_i, cp,
+                      &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
+    }
+
+    /* Viscoelastic stress (deviatoric/volumetric split, consistent
+     * with Hercules' damping force operator): */
+    const double tr_s     = esxx + esyy + eszz;
+    const double tr_k     = ekxx + ekyy + ekzz;
+    const double K_bulk   = lambda + (2.0/3.0) * mu;
+    const double Ktr_k    = K_bulk * tr_k;
+    const double dev_off  = (1.0/3.0) * tr_s;
+    const double two_mu   = 2.0 * mu;
+
+    const double sig_xx = two_mu * (esxx - dev_off) + Ktr_k;
+    const double sig_yy = two_mu * (esyy - dev_off) + Ktr_k;
+    const double sig_zz = two_mu * (eszz - dev_off) + Ktr_k;
+    const double sig_xy = two_mu * esxy;
+    const double sig_yz = two_mu * esyz;
+    const double sig_xz = two_mu * esxz;
+
+    /* Write 6 sigma components per station, XX,YY,ZZ,XY,YZ,XZ. */
+    double* out = gpuData->stationVEStressArrayDevice + (size_t)lin * 6;
+    out[0] = sig_xx;
+    out[1] = sig_yy;
+    out[2] = sig_zz;
+    out[3] = sig_xy;
+    out[4] = sig_yz;
+    out[5] = sig_xz;
+}
