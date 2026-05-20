@@ -1,0 +1,46 @@
+# source.in:  Single-point body-force source.
+# Lines starting with # are comments. Empty lines are ignored.
+#
+# A FORCE source applies a time-varying body force F(t) = (Fx,Fy,Fz)*stf(t)
+# at a single point, instead of the moment-tensor representation used by
+# point/plane/srfh sources. Useful for reciprocity-based Green's function
+# computations (Aki & Richards 2002, ch. 2.6): three runs with unit forces
+# in x, y, z at the receiver location give the strain Green's tensor used
+# to invert finite-fault slip from observed seismograms.
+#
+# Force components are in Newtons in the simulation Cartesian frame:
+#   x = north, y = east, z = downwards.
+
+source_is_filtered  = 0
+threshold_frequency = 1.2
+number_of_poles     = 22
+type_of_source      = force
+
+#
+# Source time function (same options as point sources):
+# ramp | sine | quadratic | ricker | exponential | discrete
+#
+source_function_type = quadratic
+average_risetime_sec = .5
+
+#
+# Source Location (same keys as point source)
+#
+lonlat_or_cartesian = 0
+hypocenter_lat_deg  = 34.0
+hypocenter_long_deg = -118.5
+hypocenter_depth_m  = 1000
+
+#
+# Body-force components in Newtons (Cartesian, simulation frame).
+# Example below: a 1e15 N impulse pointing downwards (positive z).
+#
+force_x_n = 0.0
+force_y_n = 0.0
+force_z_n = 1.0e15
+
+domain_surface_corners =
+ -118.699997 33.580002
+ -118.699997 34.481534
+ -117.617528 34.481534
+ -117.617528 33.580002

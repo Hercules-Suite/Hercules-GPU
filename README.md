@@ -701,3 +701,46 @@ Notes:
 	double`; production single-precision runs are verified back-to-back.
 
 
+Single-point body-force source (`type_of_source = force`):
+
+In addition to the moment-tensor `point`, `plane`, `planewithkinks`, and
+`srfh` source types, Hercules supports a single-point body-force source
+analogous to SPECFEM3D's `FORCESOLUTION`. It applies a Cartesian force
+`F(t) = (Fx, Fy, Fz) * stf(t)` at a single point inside one element,
+distributed to the 8 nodes via the trilinear hex8 shape functions
+`f_a^i = F_i * N_a(x,y,z)`. No moment tensor, strike, dip, or rake is
+needed.
+
+Use cases:
+
+- **Reciprocity-based Green's tensor computation** for finite-fault slip
+	inversion. Three runs with unit forces along x, y, z at the receiver
+	location give the three strain Green's tensors needed to map an
+	arbitrary moment-tensor source on the fault to the receiver.
+- **Single-impulse studies** (e.g., hammer source, acoustic transducer
+	calibration) where a body force is the physical excitation.
+
+`source.in` keys (see `examples/test1/sourceforce/source.in` for a full
+example):
+
+```
+type_of_source       = force
+source_function_type = quadratic     # ramp | sine | quadratic | ricker | exponential | discrete
+average_risetime_sec = 0.5           # (or ricker_Ts/ricker_Tp for ricker)
+lonlat_or_cartesian  = 0             # 0 = lon/lat, 1 = cartesian
+hypocenter_lat_deg   = 34.0
+hypocenter_long_deg  = -118.5
+hypocenter_depth_m   = 1000
+force_x_n            = 0.0           # F_x in Newtons (north)
+force_y_n            = 0.0           # F_y in Newtons (east)
+force_z_n            = 1.0e15        # F_z in Newtons (downwards)
+```
+
+The source-time-function (`source_function_type`, `average_risetime_sec`,
+`ricker_Ts`, `ricker_Tp`) keys are shared with the moment-tensor point
+source. Force components are in Newtons in the simulation Cartesian
+frame (`x = north`, `y = east`, `z = downwards`). Internally the FORCE
+path reuses the same file-based per-step force pipeline as POINT — no
+new MPI traffic, no new GPU plumbing.
+
+

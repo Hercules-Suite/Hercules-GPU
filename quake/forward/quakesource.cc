@@ -183,6 +183,9 @@ static int theLonlatOrCartesian;
 static double theHypocenterLatDeg, theHypocenterLongDeg, theHypocenterDepthM;
 static double theSourceStrikeDeg, theSourceDipDeg, theSourceRakeDeg;
 
+/* Force variables (single-point body-force source) */
+static double theForceVecN_x, theForceVecN_y, theForceVecN_z;
+
 /* Plane variables */
 static double theExtendedCellSizeAlongStrikeM, theExtendedCellSizeDownDipM;
 static double theExtendedLatDeg, theExtendedLongDeg;
@@ -598,6 +601,45 @@ static void source_initnodalforce ( ptsrc_t *sourcePtr )
     }
 
     return;
+}
+
+
+/**
+ * Body-force variant of source_initnodalforce: distribute a single-point
+ * body force F (in Newtons, sourcePtr->forceVec) to the 8 nodes of the
+ * containing hex8 element via the trilinear shape functions:
+ *
+ *     f_a^i = F_i * N_a(x,y,z),    a = 0..7, i = 0..2
+ *
+ * where N_a(x,y,z) = (h + 2*xi_a*x)(h + 2*eta_a*y)(h + 2*zeta_a*z)/(8*h^3).
+ * No strike/dip/rake or moment tensor is used.
+ */
+static void source_initnodalforce_body ( ptsrc_t *sourcePtr )
+{
+    double  xi[3][8]={ {-1,  1, -1,  1, -1,  1, -1, 1} ,
+		       {-1, -1,  1,  1, -1, -1,  1, 1} ,
+		       {-1, -1, -1, -1,  1,  1,  1, 1} };
+
+    double x = sourcePtr->x;
+    double y = sourcePtr->y;
+    double z = sourcePtr->z;
+    double h = sourcePtr->edgesize;
+    double hcube = h * h * h;
+
+    double Fx = sourcePtr->forceVec.x[0];
+    double Fy = sourcePtr->forceVec.x[1];
+    double Fz = sourcePtr->forceVec.x[2];
+
+    for (int j = 0; j < 8; j++) {
+	double Na = (h + 2 * xi[0][j] * x)
+	          * (h + 2 * xi[1][j] * y)
+	          * (h + 2 * xi[2][j] * z)
+	          / (8 * hcube);
+
+	sourcePtr->nodalForce[j][0] = Fx * Na;
+	sourcePtr->nodalForce[j][1] = Fy * Na;
+	sourcePtr->nodalForce[j][2] = Fz * Na;
+    }
 }
 
 
@@ -1331,6 +1373,12 @@ load_myForces_with_point_source(
 	/* notice that this is a fake slip to obtain the M0 given as data */
 	pointSource->maxSlip  = 1;
     }
+    else if (theTypeOfSource == FORCE) {
+	/* The amplitude is carried by forceVec (Newtons); the time history
+	 * is the unit-amplitude STF. */
+	pointSource->muArea  = 1.0;
+	pointSource->maxSlip = 1.0;
+    }
     else{
 	pointSource->muArea =  mu * pointSource->area;
 
@@ -1342,7 +1390,11 @@ load_myForces_with_point_source(
     pointSource->edgesize = myMesh->ticksize * edgeticks;
 
     /* set the nodal forces */
-    source_initnodalforce( pointSource );  /* get the weight for each node */
+    if (theTypeOfSource == FORCE) {
+	source_initnodalforce_body( pointSource );
+    } else {
+	source_initnodalforce( pointSource );  /* get the weight for each node */
+    }
 
     int isinprocessor = 0; /* if 8 will update the search */
     for (iNode = 0; iNode < 8; iNode++) {
@@ -2221,6 +2273,67 @@ static int read_point_source(FILE *fp){
 
   return 1;
 
+}
+
+
+/*
+ *  read_force_source : Single-point body-force source (FORCESOLUTION-style).
+ *  Reuses the point-source location keys; reads three Cartesian Newton
+ *  components instead of strike/dip/rake/M0.
+ *
+ *                     input : fp  - to source.in
+ *                    output :  -1 fail
+ *                               1 success
+ */
+
+static int read_force_source(FILE *fp){
+
+  double hypocenter_lat_deg, hypocenter_long_deg, hypocenter_depth_m;
+  double force_x_n, force_y_n, force_z_n;
+
+  if ( (parsetext(fp,"lonlat_or_cartesian", 'i',&theLonlatOrCartesian) != 0) ){
+    fprintf(stderr,
+	    "Err lonlat_or_cartesian in source.in force source parameters\n");
+    return -1;
+  }
+
+  if( theLonlatOrCartesian == 0 ){
+    if ( (parsetext(fp,"hypocenter_lat_deg", 'd',&hypocenter_lat_deg) != 0) ||
+	 (parsetext(fp,"hypocenter_long_deg",'d',&hypocenter_long_deg)!= 0)){
+      fprintf(stderr, "Err in hypocenter lon or lat:read_force_source\n");
+      return -1;
+    }
+  }
+
+  if( theLonlatOrCartesian == 1 )
+    if ( (parsetext(fp,"hypocenter_x",'d',&hypocenter_lat_deg ) != 0) ||
+	 (parsetext(fp,"hypocenter_y",'d',&hypocenter_long_deg)!= 0)  ){
+      fprintf(stderr, "Err hypocenter x or y:read_force_source\n");
+      return -1;
+    }
+
+  if ( (parsetext(fp,"hypocenter_depth_m", 'd',&hypocenter_depth_m) != 0) ) {
+    fprintf(stderr, "Err hypocenter_depth_m:read_force_source\n");
+    return -1;
+  }
+
+  /* Body-force components in Newtons (Cartesian, in the simulation frame:
+   * x = north, y = east, z = downwards). */
+  if ( (parsetext(fp,"force_x_n", 'd',&force_x_n) != 0) ||
+       (parsetext(fp,"force_y_n", 'd',&force_y_n) != 0) ||
+       (parsetext(fp,"force_z_n", 'd',&force_z_n) != 0) ) {
+    fprintf(stderr, "Err force_{x,y,z}_n:read_force_source\n");
+    return -1;
+  }
+
+  theHypocenterLatDeg  = hypocenter_lat_deg;
+  theHypocenterLongDeg = hypocenter_long_deg;
+  theHypocenterDepthM  = hypocenter_depth_m;
+  theForceVecN_x       = force_x_n;
+  theForceVecN_y       = force_y_n;
+  theForceVecN_z       = force_z_n;
+
+  return 1;
 }
 
 
@@ -3353,17 +3466,27 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
 
     /* first we build the source */
 
-    pntSrc.strike = theSourceStrikeDeg;
+    if (theTypeOfSource == FORCE) {
+	/* Body-force: no strike/dip/rake; carry Fx,Fy,Fz instead. */
+	pntSrc.strike = 0;
+	pntSrc.dip    = 0;
+	pntSrc.rake   = 0;
+	pntSrc.M0     = 0;
+	pntSrc.forceVec.x[0] = theForceVecN_x;
+	pntSrc.forceVec.x[1] = theForceVecN_y;
+	pntSrc.forceVec.x[2] = theForceVecN_z;
+    } else {
+	pntSrc.strike = theSourceStrikeDeg;
+	compute_point_source_strike(&pntSrc, utmZone);
+	pntSrc.dip    = theSourceDipDeg;
+	pntSrc.rake   = theSourceRakeDeg;
+	pntSrc.M0     = theMomentAmplitude;
+    }
 
-    compute_point_source_strike(&pntSrc, utmZone);
-
-    pntSrc.dip		      = theSourceDipDeg;
-    pntSrc.rake		      = theSourceRakeDeg;
     pntSrc.sourceFunctionType = (source_function_t)theSourceFunctionType;
     pntSrc.T0		      = theAverageRisetimeSec;
     pntSrc.delayTime	      = 0;
     pntSrc.maxSlip	      = 1;
-    pntSrc.M0		      = theMomentAmplitude;
     pntSrc.dt		      = theDeltaT;
     pntSrc.numberOfTimeSteps  = theNumberOfTimeSteps;
 
@@ -3962,6 +4085,40 @@ broadcast_point_source_parameters( void )
 
 
 /**
+ * broadcast information that only applies to FORCE (single-point body force)
+ * sources, otherwise it doesn't do anything.
+ */
+static void
+broadcast_force_source_parameters( void )
+{
+    double    d_buf[6];
+    const int d_len = DOUBLE_ARRAY_LENGTH( d_buf );
+
+    if (theTypeOfSource != FORCE) {
+	return;
+    }
+
+    MPI_Bcast( &theLonlatOrCartesian, 1, MPI_INT, 0, comm_solver );
+
+    d_buf[0] = theHypocenterLatDeg;
+    d_buf[1] = theHypocenterLongDeg;
+    d_buf[2] = theHypocenterDepthM;
+    d_buf[3] = theForceVecN_x;
+    d_buf[4] = theForceVecN_y;
+    d_buf[5] = theForceVecN_z;
+
+    MPI_Bcast( d_buf, d_len, MPI_DOUBLE, 0, comm_solver );
+
+    theHypocenterLatDeg  = d_buf[0];
+    theHypocenterLongDeg = d_buf[1];
+    theHypocenterDepthM  = d_buf[2];
+    theForceVecN_x       = d_buf[3];
+    theForceVecN_y       = d_buf[4];
+    theForceVecN_z       = d_buf[5];
+}
+
+
+/**
  * broadcast information that only applies to plane (and plane with kinks)
  * types of sources, otherwise it doesn't do anything.
  */
@@ -4081,6 +4238,8 @@ source_broadcast_parameters( void )
     /* broadcast source-type-specific parameters */
     broadcast_point_source_parameters();
 
+    broadcast_force_source_parameters();
+
     broadcast_plane_source_parameters();
 
     broadcast_srfh_parameters();
@@ -4116,6 +4275,10 @@ source_read_type( FILE* fpsrc )
 
     else if (strcasecmp( type_of_source, "srfh" ) == 0) {
 	source_type = SRFH;
+    }
+
+    else if (strcasecmp( type_of_source, "force" ) == 0) {
+	source_type = FORCE;
     }
 
     else {
@@ -4189,6 +4352,12 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 
     if ( theTypeOfSource == POINT ) {
 	if( read_point_source( fpsrc ) == -1 ) {
+	    return -1;
+	}
+    }
+
+    if ( theTypeOfSource == FORCE ) {
+	if( read_force_source( fpsrc ) == -1 ) {
 	    return -1;
 	}
     }
@@ -4321,6 +4490,16 @@ int compute_print_source(const char *physicsin, const char *source_directory_out
     if ( theTypeOfSource == POINT )
 	if ( compute_myForces_point(physicsin, utmZone) == -1 ){
 	    fprintf(stdout,"Err compute_myForces_point failed");
+	    ABORTEXIT;
+	}
+
+    /* FORCE: single-point body-force source. Reuses compute_myForces_point —
+     * the same coordinate lookup, element search, octree cycle plumbing,
+     * and STF evaluator apply; only the nodal force weighting differs
+     * (handled by source_initnodalforce_body inside load_myForces_with_point_source). */
+    if ( theTypeOfSource == FORCE )
+	if ( compute_myForces_point(physicsin, utmZone) == -1 ){
+	    fprintf(stdout,"Err compute_myForces_point (FORCE) failed");
 	    ABORTEXIT;
 	}
 
