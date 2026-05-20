@@ -11644,22 +11644,74 @@ static void solver_station_ve_stress_kick(int step)
     if (Param.theNumberOfStations == 0) return;
     if (step % Param.theStationsPrintRate != 0) return;
 
+    /* Defensive guards: NULL device pointers would NULL-deref on the
+     * GPU and put CUDA in a sticky-error state -- which would then
+     * surface later as unrelated "device alloc failed" / "illegal
+     * memory access" reports from the next CUDA call. Bail cleanly
+     * here instead. */
+    if (Global.gpuData.shearVectorDevice == NULL ||
+        Global.gpuData.kappaVectorDevice == NULL ||
+        Global.gpuData.stationGatherEindexDevice == NULL ||
+        Global.gpuData.stationVEStressArrayDevice == NULL) {
+        if (Global.myID == 0) {
+            static int warned = 0;
+            if (!warned) {
+                fprintf(stderr,
+                        "v3 station VE-stress kick: skipped step %d "
+                        "(shearVector/kappaVector/gatherEindex/VEStress "
+                        "device array is NULL).\n", step);
+                warned = 1;
+            }
+        }
+        return;
+    }
+
     const int32_t N = Global.gpuData.stationGatherCount;
-    const int blocksize =
+    int blocksize =
         Global.mySolver->gpu_kernel[CUDA_KERNEL_STATION_VE_STRESS].blocksize;
+    if (blocksize <= 0) blocksize = 64;     /* fallback if registration query returned 0 */
     int gridsize = (N + blocksize - 1) / blocksize;
     if (gridsize < 1) gridsize = 1;
+
+    /* Clear any previously-pending CUDA error so we can detect a fault
+     * specifically from our launch path. */
+    (void)cudaGetLastError();
 
     kernelStationVEStressGather<<<gridsize, blocksize, 0,
                                   Global.mySolver->streams[CUDA_STREAM_MAIN]>>>(
         N, Global.mySolver->gpuDataDevice);
+
+    /* Launch-time error (e.g., invalid configuration). */
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress kernel LAUNCH error at "
+                "step %d (grid=%d block=%d N=%d): %s\n",
+                Global.myID, step, gridsize, blocksize, (int)N,
+                cudaGetErrorString(launchErr));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
 
     cudaMemcpyAsync(g_stationVEStressHost,
                     Global.gpuData.stationVEStressArrayDevice,
                     6 * N * sizeof(double),
                     cudaMemcpyDeviceToHost,
                     Global.mySolver->streams[CUDA_STREAM_MAIN]);
-    cudaStreamSynchronize(Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    cudaError_t syncErr =
+        cudaStreamSynchronize(Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    if (syncErr != cudaSuccess) {
+        /* This surfaces any in-kernel fault (illegal address, out-of-bounds
+         * read, etc.) that the asynchronous launch hid -- catching it here
+         * pins the blame on the v3 path instead of letting it cascade
+         * into a misleading "source node list device alloc failed" later. */
+        fprintf(stderr,
+                "Thread %d: v3 station VE-stress sync error at step %d "
+                "(N=%d): %s\n",
+                Global.myID, step, (int)N, cudaGetErrorString(syncErr));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
 }
 
 
