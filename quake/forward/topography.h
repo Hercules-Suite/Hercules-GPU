@@ -99,6 +99,13 @@ void   compute_tetra_localcoord ( vector3D_t point, elem_t *elemp, int32_t *loca
  * with compute_tetra_displ's linear interpolation. */
 int    compute_tetra_strain     ( int32_t statID, fvector_t cubeU[8],
                                   double h, tensor_t *out_strain );
+/* Returns 1 and writes the cut-tet identifiers (teth_i in 0..4,
+ * cube_part in {1,2}) for a topo cut-cell station; returns 0 and
+ * leaves outputs untouched otherwise. Used by the v3 station VE
+ * stress gather kernel setup so the GPU kernel can dispatch per
+ * station between the regular-cube path and the tet path. */
+int    get_topo_station_tet     ( int32_t statID, int *out_teth_i,
+                                  int *out_cube_part );
 
 void   topography_stations_init ( mesh_t    *myMesh, station_t *myStations, int32_t    myNumberOfStations);
 void   topography_snapshot_station_history(mysolver_t *mySolver);

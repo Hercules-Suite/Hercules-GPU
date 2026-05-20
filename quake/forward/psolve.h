@@ -62,11 +62,12 @@
 #define CUDA_STREAM_SECONDARY 1
 
 /* Maximum number of kernels */
-#define MAX_CUDA_KERNEL             4
+#define MAX_CUDA_KERNEL             5
 #define CUDA_KERNEL_STIFFNESS_FORCE 0
 #define CUDA_KERNEL_DAMPING_CONV    1
 #define CUDA_KERNEL_DAMPING_FORCE   2
 #define CUDA_KERNEL_DISPLACEMENT    3
+#define CUDA_KERNEL_STATION_VE_STRESS 4  /* v3 station viscoelastic stress gather */
 
 /* Kernel names */
 #define CUDA_KERNEL_NAME_STIFFNESS_FORCE       "kernelStiffnessCalcLocal"
@@ -75,6 +76,7 @@
 #define CUDA_KERNEL_NAME_DAMPING_CONV_BKT3     "kernelDampingCalcConvBkt3"
 #define CUDA_KERNEL_NAME_DAMPING_FORCE         "kernelDampingCalcLocal"
 #define CUDA_KERNEL_NAME_DISPLACEMENT          "kernelDispCalc"
+#define CUDA_KERNEL_NAME_STATION_VE_STRESS     "kernelStationVEStressGather"
 
 /* Maximum simultaneous CUDA events */
 #define MAX_CUDA_EVENT                   6
@@ -616,6 +618,28 @@ typedef struct gpu_data_t {
     int           acousticVelocityPotential;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
+    /* v3 station viscoelastic stress gather (print_station_strains /
+     * print_station_stresses under BKT-family damping). Populated only
+     * when the v3 path is enabled; otherwise all NULL / zero. The
+     * gather kernel computes per-station tensor strain from the
+     * modified-displacement shearVectorDevice / kappaVectorDevice
+     * (deviatoric channel / volumetric channel) and forms the
+     * viscoelastic stress sigma_visco = 2*mu*dev(eps^s) + K*tr(eps^k)*I
+     * (K = lambda + 2*mu/3); writes 12 doubles (6 eps^s + 6 sigma)
+     * per station into stationVEStressArrayDevice for a single
+     * cudaMemcpyAsync back to host each station-output step. */
+    int32_t       stationGatherCount;        /* # elastic non-acoustic stations on this rank */
+    int32_t*      stationGatherEindexDevice; /* owning element id, per station */
+    double*       stationGatherCsiDevice;    /* local coord x (cube case), per station */
+    double*       stationGatherEtaDevice;
+    double*       stationGatherDzetaDevice;
+    double*       stationGatherHDevice;      /* owning cube edge size, per station */
+    double*       stationGatherMuDevice;     /* per-station Lame mu */
+    double*       stationGatherLambdaDevice; /* per-station Lame lambda */
+    int*          stationGatherTethIDevice;  /* tet index (0..4) or -1 for regular cube */
+    int*          stationGatherCubePartDevice; /* 1 or 2 (VT cut pattern); 0 ignored */
+    double*       stationVEStressArrayDevice;  /* 12 * stationGatherCount: [eps,sig]*6 */
+
 } gpu_data_t;
 
 
@@ -723,6 +747,7 @@ struct station_t {
     double     rho;
     double     mu;
     double     lambda;
+    int32_t    owningElementIndex; /* eindex of owning octree element (v3 gather) */
 
     vector3D_t coords;        /* cartesian */
     vector3D_t localcoords;   /* csi, eta, dzeta in (-1,1) x (-1,1) x (-1,1) */
