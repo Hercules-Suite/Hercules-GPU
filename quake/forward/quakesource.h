@@ -90,7 +90,7 @@ typedef enum {
 
 typedef enum {
 
-  POINT = 0, PLANE, SRFH, PLANEWITHKINKS
+  POINT = 0, PLANE, SRFH, PLANEWITHKINKS, FORCE
 
 } source_type_t;
 
@@ -120,6 +120,10 @@ typedef struct ptsrc_t {
   double edgesize;                  /* Edge size of the containing element */
 
   double nodalForce[8][3];          /* nodal forces on the containing elem */
+
+  vector3D_t forceVec;              /* For FORCE: single-point body force
+                                       components (Fx,Fy,Fz) in Newtons.
+                                       Unused for moment-tensor sources. */
 
   double *displacement;              /* Displacement vector time dependant  */
 

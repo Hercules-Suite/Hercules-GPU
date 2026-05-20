@@ -88,6 +88,20 @@ Advanced/diagnostic toggles:
 	case). A one-time rank-0 line is printed to the monitor/stderr when
 	the override is active so a forced run cannot be mistaken for a
 	normal one. Read once at startup; production runs leave it unset.
+- `HERCULES_SRC_DEBUG=0|1`
+	Diagnostic logging for the source-application path (POINT, FORCE,
+	SRFH, PLANE, PLANEWITHKINKS). Default unset/`0`: no output. Set to
+	`1` to have the owning rank print, per source-application call,
+	one `[SRC DEBUG <type>]` line with the source amplitude inputs
+	(`mu`, `area`, `maxSlip`, `muArea`, `M0`, source local
+	coordinates, `strike/dip/rake`, `forceVec`) plus eight further
+	lines giving the 24 entries of the `nodalForce[8][3]` weighting
+	array. Useful for validating reciprocity-based Green's-tensor
+	workflows: lets you read off the **effective** strike Hercules
+	applied after the UTM grid-convergence correction (which differs
+	from the user-input `strike.in` value for SRFH). See
+	`doc/reciprocity_workflow.md` for the full kernel-construction
+	workflow.
 - `OCTOR_IMPORT_PATH_CACHE=0|1`
 	Controls a small parent-path cache used by cursor mesh import.
 	Default is `1`, which reuses the shared root-to-leaf prefix between
@@ -180,6 +194,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_REPRO_MODE=1
 # export HERCULES_MESH_IMPORT_VERIFY=1
 # export HERCULES_FORCE_GENERIC_DAMPING=1
+# export HERCULES_SRC_DEBUG=1
 # export PHASE_B_MAP_MODE=numa
 
 PSOLVE_BIN=<path to psolve> \
@@ -699,5 +714,68 @@ Notes:
 	absorption.
 - For double-precision correctness checks build with `solver_float =
 	double`; production single-precision runs are verified back-to-back.
+
+
+Single-point body-force source (`type_of_source = force`):
+
+In addition to the moment-tensor `point`, `plane`, `planewithkinks`, and
+`srfh` source types, Hercules supports a single-point body-force source
+analogous to SPECFEM3D's `FORCESOLUTION`. It applies a Cartesian force
+`F(t) = (Fx, Fy, Fz) * stf(t)` at a single point inside one element,
+distributed to the 8 nodes via the trilinear hex8 shape functions
+`f_a^i = F_i * N_a(x,y,z)`. No moment tensor, strike, dip, or rake is
+needed.
+
+Use cases:
+
+- **Reciprocity-based Green's tensor computation** for finite-fault slip
+	inversion. Three runs with unit forces along x, y, z at the receiver
+	location give the three strain Green's tensors needed to map an
+	arbitrary moment-tensor source on the fault to the receiver.
+- **Single-impulse studies** (e.g., hammer source, acoustic transducer
+	calibration) where a body force is the physical excitation.
+
+`source.in` keys (see `examples/test1/sourceforce/source.in` for a full
+example):
+
+```
+type_of_source       = force
+source_function_type = quadratic     # ramp | sine | quadratic | ricker | exponential | discrete
+average_risetime_sec = 0.5           # (or ricker_Ts/ricker_Tp for ricker)
+lonlat_or_cartesian  = 0             # 0 = lon/lat, 1 = cartesian
+hypocenter_lat_deg   = 34.0
+hypocenter_long_deg  = -118.5
+hypocenter_depth_m   = 1000
+force_x_n            = 0.0           # F_x in Newtons (north)
+force_y_n            = 0.0           # F_y in Newtons (east)
+force_z_n            = 1.0e15        # F_z in Newtons (downwards)
+```
+
+The source-time-function (`source_function_type`, `average_risetime_sec`,
+`ricker_Ts`, `ricker_Tp`) keys are shared with the moment-tensor point
+source. Force components are in Newtons in the simulation Cartesian
+frame (`x = north`, `y = east`, `z = downwards`). Internally the FORCE
+path reuses the same file-based per-step force pipeline as POINT — no
+new MPI traffic, no new GPU plumbing.
+
+`source_function_type = discrete` (tabulated waveform). For non-analytical
+STFs — e.g., a recorded velocity pulse used as the excitation for a
+reciprocity Green's function — drop a `forcefunction.in` file alongside
+`source.in` in the source directory with this format:
+
+```
+<nt1>             # number of samples (int)
+<tinit>           # initial delay before the pulse begins (s)
+<dt>              # sampling interval (s)
+<s[0]>            # nt1 unit-amplitude STF samples (double, one per line)
+...
+<s[nt1-1]>
+```
+
+The instantaneous force is `F_vec * interp(t - tinit, s, dt)`. Normalize
+the samples to peak 1 and carry the physical amplitude in
+`force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
+path that SRFH already uses for `slipfunction.in`, so it is bit-identical
+to the SRFH discrete-STF math.
 
 
