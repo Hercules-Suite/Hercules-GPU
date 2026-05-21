@@ -440,6 +440,19 @@ every offset/component (see the summary below).
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is
 	`0` — "this many element layers deep" at the boundary, without needing
 	to know the local mesh resolution.
+- `cpml_partition_weight`
+	Optional. Default `1.0`, which preserves the standard equal-leaf-count
+	octree partition. Values `> 1.0` make the partitioner count future
+	CPML elements as heavier work, so boundary-heavy ranks may receive
+	fewer total elements. This is a performance tuning knob only: it does
+	not refine/remesh the model, does not change `mesh.e`, and can be
+	changed for Phase B runs that import an existing mesh. Use it only when
+	the `CPML rank/load diagnostics` show that the same ranks have high
+	`pml_total` and high `core_wait`; otherwise leave it at `1.0`.
+	Moderate values (`1.25`-`1.5`) are the useful range seen so far.
+	Larger values can reduce CPML compute skew but also increase MPI /
+	patch imbalance, so they may slow the full run even when the PML
+	kernel load looks better.
 - `cpml_reflection_target`
 	Optional. Target theoretical reflection coefficient. Default `1.0e-3`.
 	Smaller = stronger absorption but tighter stability margins.
@@ -701,6 +714,7 @@ cpml_layers = 30            # raise to 30–50 to close the deep-corner Z residu
 # cpml_stiffness_mode:      leave at native (recommended)
 # cpml_alpha_max_hz:        leave default unless the source peak freq differs
 # cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1
+# cpml_partition_weight:    leave at 1.0 unless CPML rank/load diagnostics justify tuning
 ```
 
 Notes:
@@ -712,6 +726,10 @@ Notes:
 - `cpml_layers = 10` already beats the dashpot 2–5× on the horizontal
 	components; 30–50 helps the deep-corner vertical and low-frequency
 	absorption.
+- `cpml_partition_weight` affects only how elements are assigned to MPI
+	ranks. It is useful for diagnostics/tuning, but the default `1.0` is
+	the safest production setting unless a specific case shows CPML-heavy
+	ranks pacing the solve.
 - For double-precision correctness checks build with `solver_float =
 	double`; production single-precision runs are verified back-to-back.
 
@@ -777,5 +795,4 @@ the samples to peak 1 and carry the physical amplitude in
 `force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
-
 
