@@ -536,8 +536,40 @@ typedef struct cpml_build_s {
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
+  int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
+
+static int cpml_active_axis_count(uint8_t face_mask) {
+  int count = 0;
+  if (face_mask & (PML_FACE_X_MIN | PML_FACE_X_MAX)) count++;
+  if (face_mask & (PML_FACE_Y_MIN | PML_FACE_Y_MAX)) count++;
+  if (face_mask & PML_FACE_Z_MAX) count++;
+  return count;
+}
+
+enum cpml_rank_diag_count_idx_t {
+  CPML_RANK_DIAG_LOCAL_ELEMS = 0,
+  CPML_RANK_DIAG_ELASTIC_ELEMS,
+  CPML_RANK_DIAG_ACOUSTIC_ELEMS,
+  CPML_RANK_DIAG_TOTAL_ELEMS,
+  CPML_RANK_DIAG_ACTIVE_AXES,
+  CPML_RANK_DIAG_COUNT_STRIDE
+};
+
+enum cpml_rank_diag_time_idx_t {
+  CPML_RANK_DIAG_FORCE_CORE_WAIT = 0,
+  CPML_RANK_DIAG_FORCE_KERNEL_WAIT,
+  CPML_RANK_DIAG_FORCE_STREAM_SYNC,
+  CPML_RANK_DIAG_SCHEDULE_WAIT_RECV,
+  CPML_RANK_DIAG_COMM_FORCE_EXCHANGE,
+  CPML_RANK_DIAG_TIME_STRIDE
+};
+
+static int g_cpmlRankDiagReady = 0;
+static int g_cpmlRankDiagSize = 0;
+static long long* g_cpmlRankDiagCounts = NULL;
+static double* g_cpmlRankDiagTimes = NULL;
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static int32_t mesh_element_index_for_octant(octant_t* octant,
@@ -7829,6 +7861,7 @@ static void solver_init() {
   if (Param.theAbcType == ABC_CPML) {
     g_cpmlBuild.elastic_count = 0;
     g_cpmlBuild.acoustic_count = 0;
+    g_cpmlBuild.active_axis_count = 0;
 
     /* Publish the elastic PML stiffness mode to the device (read by
      * kernelStiffnessCalcLocal's PML skip and kernelPMLElasticStep). */
@@ -8079,6 +8112,8 @@ static void solver_init() {
             Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
         g_cpmlBuild.face_mask[eindex] = pml_face_mask;
         if (pml_face_mask != 0) {
+          g_cpmlBuild.active_axis_count +=
+              cpml_active_axis_count(pml_face_mask);
           double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
           double alpha_axis[3], kappa_axis[3];
           compute_pml_profile_coeffs(
@@ -8234,6 +8269,8 @@ static void solver_init() {
           Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
       g_cpmlBuild.face_mask[eindex] = pml_face_mask;
       if (pml_face_mask != 0) {
+        g_cpmlBuild.active_axis_count +=
+            cpml_active_axis_count(pml_face_mask);
         double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
         double alpha_axis[3], kappa_axis[3];
         compute_pml_profile_coeffs(
@@ -14012,6 +14049,248 @@ static void solver_reduce_timer_if_any(const char* timerName, TimerKind kind) {
   Timer_Reduce(timerName, kind, comm_solver);
 }
 
+static double solver_local_timer_elapsed_or_zero(const char* timerName) {
+  return Timer_Exists(timerName) ? Timer_Value(timerName, (TimerKind)0) : 0.0;
+}
+
+static void solver_cpml_rank_diag_collect(void) {
+#ifdef BOUNDARY
+  if (Param.theAbcType != ABC_CPML) {
+    return;
+  }
+
+  int commSize = 0;
+  MPI_Comm_size(comm_solver, &commSize);
+
+  long long localCounts[CPML_RANK_DIAG_COUNT_STRIDE];
+  double localTimes[CPML_RANK_DIAG_TIME_STRIDE];
+
+  localCounts[CPML_RANK_DIAG_LOCAL_ELEMS] =
+      (long long)Global.myMesh->lenum;
+  localCounts[CPML_RANK_DIAG_ELASTIC_ELEMS] =
+      (long long)Global.mySolver->pmlElasticElemCount;
+  localCounts[CPML_RANK_DIAG_ACOUSTIC_ELEMS] =
+      (long long)Global.mySolver->pmlAcousticElemCount;
+  localCounts[CPML_RANK_DIAG_TOTAL_ELEMS] =
+      localCounts[CPML_RANK_DIAG_ELASTIC_ELEMS] +
+      localCounts[CPML_RANK_DIAG_ACOUSTIC_ELEMS];
+  localCounts[CPML_RANK_DIAG_ACTIVE_AXES] =
+      (long long)g_cpmlBuild.active_axis_count;
+
+  localTimes[CPML_RANK_DIAG_FORCE_CORE_WAIT] =
+      solver_local_timer_elapsed_or_zero("Force stiffness core wait only");
+  localTimes[CPML_RANK_DIAG_FORCE_KERNEL_WAIT] =
+      solver_local_timer_elapsed_or_zero("Force kernel wait only");
+  localTimes[CPML_RANK_DIAG_FORCE_STREAM_SYNC] =
+      solver_local_timer_elapsed_or_zero("Force Stream Sync");
+  localTimes[CPML_RANK_DIAG_SCHEDULE_WAIT_RECV] =
+      solver_local_timer_elapsed_or_zero("Schedule Wait Recv");
+  localTimes[CPML_RANK_DIAG_COMM_FORCE_EXCHANGE] =
+      solver_local_timer_elapsed_or_zero("Comm Force Exchange");
+
+  if (Global.myID == 0) {
+    free(g_cpmlRankDiagCounts);
+    free(g_cpmlRankDiagTimes);
+    g_cpmlRankDiagCounts = (long long*)malloc(
+        (size_t)commSize * CPML_RANK_DIAG_COUNT_STRIDE * sizeof(long long));
+    g_cpmlRankDiagTimes = (double*)malloc(
+        (size_t)commSize * CPML_RANK_DIAG_TIME_STRIDE * sizeof(double));
+    if ((g_cpmlRankDiagCounts == NULL) || (g_cpmlRankDiagTimes == NULL)) {
+      fprintf(stderr, "Thread 0: out of memory for CPML rank diagnostics\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  MPI_Gather(localCounts, CPML_RANK_DIAG_COUNT_STRIDE, MPI_LONG_LONG,
+             g_cpmlRankDiagCounts, CPML_RANK_DIAG_COUNT_STRIDE, MPI_LONG_LONG,
+             0, comm_solver);
+  MPI_Gather(localTimes, CPML_RANK_DIAG_TIME_STRIDE, MPI_DOUBLE,
+             g_cpmlRankDiagTimes, CPML_RANK_DIAG_TIME_STRIDE, MPI_DOUBLE, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    g_cpmlRankDiagReady = 1;
+    g_cpmlRankDiagSize = commSize;
+  }
+#endif /* BOUNDARY */
+}
+
+static int solver_cpml_rank_diag_pick_top_count(const unsigned char* used,
+                                                int countIdx) {
+  int bestRank = -1;
+  long long bestValue = -1;
+  for (int rank = 0; rank < g_cpmlRankDiagSize; rank++) {
+    if (used[rank]) continue;
+    const long long value =
+        g_cpmlRankDiagCounts[rank * CPML_RANK_DIAG_COUNT_STRIDE + countIdx];
+    if ((bestRank < 0) || (value > bestValue)) {
+      bestRank = rank;
+      bestValue = value;
+    }
+  }
+  return bestRank;
+}
+
+static int solver_cpml_rank_diag_pick_top_time(const unsigned char* used,
+                                               int timeIdx) {
+  int bestRank = -1;
+  double bestValue = -1.0;
+  for (int rank = 0; rank < g_cpmlRankDiagSize; rank++) {
+    if (used[rank]) continue;
+    const double value =
+        g_cpmlRankDiagTimes[rank * CPML_RANK_DIAG_TIME_STRIDE + timeIdx];
+    if ((bestRank < 0) || (value > bestValue)) {
+      bestRank = rank;
+      bestValue = value;
+    }
+  }
+  return bestRank;
+}
+
+static void solver_cpml_rank_diag_print_row(int rank) {
+  const long long* counts =
+      &g_cpmlRankDiagCounts[rank * CPML_RANK_DIAG_COUNT_STRIDE];
+  const double* times = &g_cpmlRankDiagTimes[rank * CPML_RANK_DIAG_TIME_STRIDE];
+  const double localElems =
+      (counts[CPML_RANK_DIAG_LOCAL_ELEMS] > 0)
+          ? (double)counts[CPML_RANK_DIAG_LOCAL_ELEMS]
+          : 1.0;
+  const double pmlElems = (double)counts[CPML_RANK_DIAG_TOTAL_ELEMS];
+  const double pmlFraction = pmlElems / localElems;
+  const double activeAxesPerPml =
+      (counts[CPML_RANK_DIAG_TOTAL_ELEMS] > 0)
+          ? ((double)counts[CPML_RANK_DIAG_ACTIVE_AXES] / pmlElems)
+          : 0.0;
+
+  printf(
+      "      %4d %11lld %11lld %11lld %11lld %8.3f %8.3f "
+      "%10.2f %10.2f %10.2f %10.2f\n",
+      rank, counts[CPML_RANK_DIAG_LOCAL_ELEMS],
+      counts[CPML_RANK_DIAG_TOTAL_ELEMS],
+      counts[CPML_RANK_DIAG_ELASTIC_ELEMS],
+      counts[CPML_RANK_DIAG_ACOUSTIC_ELEMS], pmlFraction,
+      activeAxesPerPml, times[CPML_RANK_DIAG_FORCE_CORE_WAIT],
+      times[CPML_RANK_DIAG_FORCE_KERNEL_WAIT],
+      times[CPML_RANK_DIAG_SCHEDULE_WAIT_RECV],
+      times[CPML_RANK_DIAG_COMM_FORCE_EXCHANGE]);
+}
+
+static void solver_cpml_rank_diag_print(void) {
+#ifdef BOUNDARY
+  if ((Global.myID != 0) || !g_cpmlRankDiagReady ||
+      (g_cpmlRankDiagCounts == NULL) || (g_cpmlRankDiagTimes == NULL)) {
+    return;
+  }
+
+  long long sumLocal = 0;
+  long long sumPml = 0;
+  long long minPml = 0;
+  long long maxPml = 0;
+  int maxPmlRank = 0;
+  double sumCore = 0.0;
+  double maxCore = 0.0;
+  int maxCoreRank = 0;
+
+  for (int rank = 0; rank < g_cpmlRankDiagSize; rank++) {
+    const long long* counts =
+        &g_cpmlRankDiagCounts[rank * CPML_RANK_DIAG_COUNT_STRIDE];
+    const double* times =
+        &g_cpmlRankDiagTimes[rank * CPML_RANK_DIAG_TIME_STRIDE];
+    const long long pml = counts[CPML_RANK_DIAG_TOTAL_ELEMS];
+    const double core = times[CPML_RANK_DIAG_FORCE_CORE_WAIT];
+
+    sumLocal += counts[CPML_RANK_DIAG_LOCAL_ELEMS];
+    sumPml += pml;
+    sumCore += core;
+
+    if ((rank == 0) || (pml < minPml)) minPml = pml;
+    if ((rank == 0) || (pml > maxPml)) {
+      maxPml = pml;
+      maxPmlRank = rank;
+    }
+    if ((rank == 0) || (core > maxCore)) {
+      maxCore = core;
+      maxCoreRank = rank;
+    }
+  }
+
+  const double avgLocal =
+      (g_cpmlRankDiagSize > 0) ? ((double)sumLocal / g_cpmlRankDiagSize) : 0.0;
+  const double avgPml =
+      (g_cpmlRankDiagSize > 0) ? ((double)sumPml / g_cpmlRankDiagSize) : 0.0;
+  const double avgCore =
+      (g_cpmlRankDiagSize > 0) ? (sumCore / g_cpmlRankDiagSize) : 0.0;
+  const double pmlSkew = (avgPml > 0.0) ? ((double)maxPml / avgPml) : 0.0;
+  const double coreSkew = (avgCore > 0.0) ? (maxCore / avgCore) : 0.0;
+
+  printf("    CPML rank/load diagnostics\n");
+  printf(
+      "      Local elements/rank           : %.1f (Average)\n",
+      avgLocal);
+  printf(
+      "      PML elements/rank             : %.1f (Average)   %lld "
+      "(Max, rank %d) %lld (Min)  [skew %.2f]\n",
+      avgPml, maxPml, maxPmlRank, minPml, pmlSkew);
+  printf(
+      "      Force stiffness core wait     : %.2f (Average)   %.2f "
+      "(Max, rank %d)  [skew %.2f]\n",
+      avgCore, maxCore, maxCoreRank, coreSkew);
+
+  printf("      Top ranks by PML element count\n");
+  printf(
+      "      rank local_elems   pml_total pml_elastic pml_acoustic "
+      "pml_frac axes/pml core_wait kernel_wait wait_recv force_comm\n");
+
+  unsigned char* used =
+      (unsigned char*)calloc((size_t)g_cpmlRankDiagSize, sizeof(unsigned char));
+  if (used != NULL) {
+    const int topN = (g_cpmlRankDiagSize < 8) ? g_cpmlRankDiagSize : 8;
+    for (int i = 0; i < topN; i++) {
+      const int rank =
+          solver_cpml_rank_diag_pick_top_count(used,
+                                               CPML_RANK_DIAG_TOTAL_ELEMS);
+      if (rank < 0) break;
+      used[rank] = 1;
+      solver_cpml_rank_diag_print_row(rank);
+    }
+    memset(used, 0, (size_t)g_cpmlRankDiagSize * sizeof(unsigned char));
+
+    printf("      Top ranks by force stiffness core wait\n");
+    printf(
+        "      rank local_elems   pml_total pml_elastic pml_acoustic "
+        "pml_frac axes/pml core_wait kernel_wait wait_recv force_comm\n");
+    for (int i = 0; i < topN; i++) {
+      const int rank = solver_cpml_rank_diag_pick_top_time(
+          used, CPML_RANK_DIAG_FORCE_CORE_WAIT);
+      if (rank < 0) break;
+      used[rank] = 1;
+      solver_cpml_rank_diag_print_row(rank);
+    }
+    memset(used, 0, (size_t)g_cpmlRankDiagSize * sizeof(unsigned char));
+
+    printf("      Top ranks by total schedule wait-recv\n");
+    printf(
+        "      rank local_elems   pml_total pml_elastic pml_acoustic "
+        "pml_frac axes/pml core_wait kernel_wait wait_recv force_comm\n");
+    for (int i = 0; i < topN; i++) {
+      const int rank = solver_cpml_rank_diag_pick_top_time(
+          used, CPML_RANK_DIAG_SCHEDULE_WAIT_RECV);
+      if (rank < 0) break;
+      used[rank] = 1;
+      solver_cpml_rank_diag_print_row(rank);
+    }
+    free(used);
+  }
+
+  free(g_cpmlRankDiagCounts);
+  free(g_cpmlRankDiagTimes);
+  g_cpmlRankDiagCounts = NULL;
+  g_cpmlRankDiagTimes = NULL;
+  g_cpmlRankDiagReady = 0;
+#endif /* BOUNDARY */
+}
+
 static void solver_run_collect_timers(void) {
   /* Get min and max of individual cumulative times.
    * this is NOT best and worst single step times
@@ -14278,6 +14557,7 @@ static void solver_run_collect_timers(void) {
   Timer_Reduce("Communication", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
 
   solver_diag_reduce();
+  solver_cpml_rank_diag_collect();
 }
 
 /**
@@ -18508,6 +18788,8 @@ static void print_timing_stat() {
             }
 	    }
 	  }
+  solver_cpml_rank_diag_print();
+
   if (Timer_Exists("GPU Memory Copy") || Timer_Exists("GPU Load Disp") ||
       Timer_Exists("GPU Unload Forces") || Timer_Exists("GPU Load Forces") ||
       Timer_Exists("GPU Unload Disp") || Timer_Exists("GPU Patch Disp") ||
