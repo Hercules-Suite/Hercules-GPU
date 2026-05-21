@@ -188,6 +188,8 @@ typedef int32_t toexpand_t ( octant_t *leaf, double ticksize,
 typedef int32_t toshrink_t ( octant_t *leaf[8], double ticksize,
                              const void *data[8] );
 typedef void setrec_t ( octant_t *leaf, double ticksize, void *data );
+typedef int32_t partition_weight_t ( octant_t *leaf, double ticksize,
+                                     const void *data );
 
 typedef int bldgs_nodesearch_t ( tick_t x, tick_t y, tick_t z,
                                  double ticksize );
@@ -351,6 +353,12 @@ octor_carvebuildings(octree_t *octree, int flag,
 extern int32_t
 octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_com,
 		pushdowns_nodesearch_t *pushdowns_nodesearch);
+
+extern int32_t
+octor_partitiontree_weighted(octree_t *octree,
+		bldgs_nodesearch_com_t *bldgs_nodesearch_com,
+		pushdowns_nodesearch_t *pushdowns_nodesearch,
+		partition_weight_t *weightfunc);
 
 extern mesh_t *
 octor_extractmesh(octree_t *octree, bldgs_nodesearch_t *bldgs_nodesearch,

@@ -594,6 +594,8 @@ static oct_t * oct_shrink(oct_t *oct, tree_t *tree, unsigned char where,
 static int8_t  tree_getminleaflevel(const tree_t *tree);
 static int8_t  tree_getmaxleaflevel(const tree_t *tree);
 static int64_t tree_countleaves(tree_t *tree);
+static int64_t tree_partition_leaf_weight(tree_t *tree, oct_t *leaf,
+                                          partition_weight_t *weightfunc);
 static void    tree_setdistribution(tree_t *tree, int64_t **pCountTable,
                                     int64_t **pStartTable, int64_t mycount);
 
@@ -2339,6 +2341,21 @@ static int64_t tree_countleaves(tree_t *tree)
     }
 
     return localtotal;
+}
+
+static int64_t
+tree_partition_leaf_weight(tree_t *tree, oct_t *leaf,
+                           partition_weight_t *weightfunc)
+{
+    int32_t weight;
+
+    if (weightfunc == NULL) {
+        return 1;
+    }
+
+    weight = weightfunc((octant_t *)leaf, tree->ticksize,
+                        leaf->payload.leaf->data);
+    return (weight > 0) ? (int64_t)weight : 1;
 }
 
 
@@ -5849,6 +5866,339 @@ octor_partitiontree(octree_t *octree, bldgs_nodesearch_com_t *bldgs_nodesearch_c
 #ifdef TREE_VERBOSE
     /* tree_showstat(tree, BRIEF, "octor_partitiontree"); */
     tree_showstat(tree, DETAILS, "octor_partitiontree");
+#endif /* TREE_VERBOSE */
+
+    return 0;
+}
+
+/**
+ * octor_partitiontree_weighted: distribute octants by application-provided
+ * integer work weights while preserving the tree order. A weighted partition
+ * still assigns whole leaves, so load is approximate at the granularity of one
+ * leaf. Passing NULL weightfunc is identical to octor_partitiontree().
+ */
+extern int32_t
+octor_partitiontree_weighted(octree_t *octree,
+                             bldgs_nodesearch_com_t *bldgs_nodesearch_com,
+                             pushdowns_nodesearch_t *pushdowns_nodesearch,
+                             partition_weight_t *weightfunc)
+{
+    tree_t *tree = (tree_t *)octree;
+    int32_t addresssize = 3 * sizeof(tick_t) + sizeof(int8_t);
+    int32_t leafoctsize = addresssize + tree->recsize;
+    int64_t max_msg_elems = (int64_t)INT_MAX / (int64_t)leafoctsize;
+    const int64_t preferred_msg_elems = 262144;
+    int64_t localweight = 0;
+    int64_t totalweight = 0;
+    int64_t *weighttable = NULL;
+    int64_t *starttable = NULL;
+    int64_t *sendcounts = NULL;
+    int64_t *recvcounts = NULL;
+    MPI_Request *irecvreqs = NULL;
+    MPI_Status *irecvstats = NULL;
+    void **rcvleafoct_pool_list = NULL;
+    int32_t irecvcount = 0;
+    int32_t irecvnum = 0;
+    int sent_remote = 0;
+    oct_t *leaf;
+    int rank;
+
+    (void)bldgs_nodesearch_com;
+    (void)pushdowns_nodesearch;
+
+    if (weightfunc == NULL) {
+        return octor_partitiontree(octree, bldgs_nodesearch_com,
+                                   pushdowns_nodesearch);
+    }
+
+    if (max_msg_elems <= 0) {
+        fprintf(stderr,
+                "Thread %d: %s %d: invalid message chunk size\n",
+                tree->procid, __FILE__, __LINE__);
+        MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+        exit(1);
+    }
+    if (max_msg_elems > preferred_msg_elems) {
+        max_msg_elems = preferred_msg_elems;
+    }
+
+    if (tree->groupsize == 1) {
+        return 0;
+    }
+
+    for (leaf = tree->firstleaf; leaf != NULL; leaf = oct_getnextleaf(leaf)) {
+        localweight += tree_partition_leaf_weight(tree, leaf, weightfunc);
+    }
+
+    weighttable = (int64_t *)malloc((size_t)tree->groupsize * sizeof(int64_t));
+    starttable = (int64_t *)malloc((size_t)tree->groupsize * sizeof(int64_t));
+    sendcounts = (int64_t *)calloc((size_t)tree->groupsize, sizeof(int64_t));
+    recvcounts = (int64_t *)calloc((size_t)tree->groupsize, sizeof(int64_t));
+    if ((weighttable == NULL) || (starttable == NULL) ||
+        (sendcounts == NULL) || (recvcounts == NULL)) {
+        fprintf(stderr, "Thread %d: %s %d : out of memory\n",
+                tree->procid, __FILE__, __LINE__);
+        MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+        exit(1);
+    }
+
+    MPI_Allgather(&localweight, 1, MPI_LONG_LONG, weighttable, 1,
+                  MPI_LONG_LONG, tree->comm_tree);
+
+    starttable[0] = 0;
+    for (rank = 1; rank < tree->groupsize; rank++) {
+        starttable[rank] = starttable[rank - 1] + weighttable[rank - 1];
+    }
+    totalweight = starttable[tree->groupsize - 1] +
+                  weighttable[tree->groupsize - 1];
+    if (totalweight <= 0) {
+        free(weighttable);
+        free(starttable);
+        free(sendcounts);
+        free(recvcounts);
+        return octor_partitiontree(octree, bldgs_nodesearch_com,
+                                   pushdowns_nodesearch);
+    }
+
+    {
+        int64_t prefix = starttable[tree->procid];
+        for (leaf = tree->firstleaf; leaf != NULL;
+             leaf = oct_getnextleaf(leaf)) {
+            int64_t weight = tree_partition_leaf_weight(tree, leaf, weightfunc);
+            int64_t midpoint = prefix + (weight / 2);
+            unsigned int owner = BLOCK_OWNER(midpoint, tree->groupsize,
+                                             totalweight);
+            if (owner >= (unsigned int)tree->groupsize) {
+                owner = (unsigned int)(tree->groupsize - 1);
+            }
+            sendcounts[(int)owner]++;
+            prefix += weight;
+        }
+    }
+
+    MPI_Alltoall(sendcounts, 1, MPI_LONG_LONG, recvcounts, 1, MPI_LONG_LONG,
+                 tree->comm_tree);
+
+    for (rank = 0; rank < tree->groupsize; rank++) {
+        if ((rank != tree->procid) && (recvcounts[rank] > 0)) {
+            int64_t nchunks = (recvcounts[rank] + max_msg_elems - 1) /
+                              max_msg_elems;
+            if (nchunks > ((int64_t)INT_MAX - irecvcount)) {
+                fprintf(stderr,
+                        "Thread %d: %s %d: too many receive chunks (%"PRId64")\n",
+                        tree->procid, __FILE__, __LINE__, nchunks);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
+            }
+            irecvcount += (int32_t)nchunks;
+        }
+    }
+
+    if (irecvcount != 0) {
+        irecvreqs = (MPI_Request *)malloc((size_t)irecvcount *
+                                          sizeof(MPI_Request));
+        irecvstats = (MPI_Status *)malloc((size_t)irecvcount *
+                                          sizeof(MPI_Status));
+        rcvleafoct_pool_list = (void **)malloc((size_t)irecvcount *
+                                               sizeof(void *));
+        if ((irecvreqs == NULL) || (irecvstats == NULL) ||
+            (rcvleafoct_pool_list == NULL)) {
+            fprintf(stderr, "Thread %d: %s %d : out of memory\n",
+                    tree->procid, __FILE__, __LINE__);
+            MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+            exit(1);
+        }
+    }
+
+    for (rank = 0; rank < tree->groupsize; rank++) {
+        int64_t remaining = recvcounts[rank];
+        if (rank == tree->procid) {
+            continue;
+        }
+        while (remaining > 0) {
+            int64_t chunk_elems = (remaining > max_msg_elems) ?
+                                  max_msg_elems : remaining;
+            size_t rcvbytesize = (size_t)leafoctsize * (size_t)chunk_elems;
+            void *rcvleafoct_pool;
+
+            if (rcvbytesize > (size_t)INT_MAX) {
+                fprintf(stderr,
+                        "PE %d: %s %d: receive chunk too large (%zu bytes)\n",
+                        tree->procid, __FILE__, __LINE__, rcvbytesize);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
+            }
+
+            rcvleafoct_pool = malloc(rcvbytesize);
+            rcvleafoct_pool_list[irecvnum] = rcvleafoct_pool;
+            if (rcvleafoct_pool == NULL) {
+                fprintf(stderr,
+                        "PE %d: %s %d: out of memory\n"
+                        "Allocating %zu bytes for %"PRId64" elements\n",
+                        tree->procid, __FILE__, __LINE__,
+                        rcvbytesize, chunk_elems);
+                MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+                exit(1);
+            }
+
+            MPI_Irecv(rcvleafoct_pool, (int)rcvbytesize, MPI_CHAR, rank,
+                      OCT_MSG, tree->comm_tree, &irecvreqs[irecvnum]);
+            irecvnum++;
+            remaining -= chunk_elems;
+        }
+    }
+
+    MPI_Barrier(tree->comm_tree);
+
+    {
+        char *sndbuf = NULL;
+        int32_t current_dest = -1;
+        int64_t buffered = 0;
+        int64_t prefix = starttable[tree->procid];
+        int64_t remote_total = 0;
+
+        for (rank = 0; rank < tree->groupsize; rank++) {
+            if (rank != tree->procid) {
+                remote_total += sendcounts[rank];
+            }
+        }
+
+        if (remote_total > 0) {
+            sndbuf = (char *)malloc((size_t)leafoctsize *
+                                    (size_t)max_msg_elems);
+            if (sndbuf == NULL) {
+                fprintf(stderr, "Thread %d: %s %d: out of memory\n",
+                        tree->procid, __FILE__, __LINE__);
+                MPI_Abort(MPI_COMM_WORLD, OUTOFMEM_ERR);
+                exit(1);
+            }
+        }
+
+        leaf = tree->firstleaf;
+        while (leaf != NULL) {
+            oct_t *nextleaf = oct_getnextleaf(leaf);
+            int64_t weight = tree_partition_leaf_weight(tree, leaf, weightfunc);
+            int64_t midpoint = prefix + (weight / 2);
+            unsigned int owner = BLOCK_OWNER(midpoint, tree->groupsize,
+                                             totalweight);
+            if (owner >= (unsigned int)tree->groupsize) {
+                owner = (unsigned int)(tree->groupsize - 1);
+            }
+
+            if ((int)owner != tree->procid) {
+                char *ptr;
+                if ((current_dest >= 0) &&
+                    (current_dest != (int)owner) && (buffered > 0)) {
+                    size_t sndbytesize =
+                        (size_t)leafoctsize * (size_t)buffered;
+                    MPI_Send(sndbuf, (int)sndbytesize, MPI_CHAR,
+                             current_dest, OCT_MSG, tree->comm_tree);
+                    buffered = 0;
+                }
+                current_dest = (int)owner;
+
+                ptr = sndbuf + ((size_t)buffered * (size_t)leafoctsize);
+                memcpy(ptr, &leaf->level, addresssize);
+                ptr += addresssize;
+                memcpy(ptr, leaf->payload.leaf->data, tree->recsize);
+
+                tree->leafcount[(int32_t)leaf->level]--;
+                leaf->where = REMOTE;
+                sent_remote = 1;
+                buffered++;
+
+                if (buffered >= max_msg_elems) {
+                    size_t sndbytesize =
+                        (size_t)leafoctsize * (size_t)buffered;
+                    MPI_Send(sndbuf, (int)sndbytesize, MPI_CHAR,
+                             current_dest, OCT_MSG, tree->comm_tree);
+                    buffered = 0;
+                }
+            }
+
+            prefix += weight;
+            leaf = nextleaf;
+        }
+
+        if ((current_dest >= 0) && (buffered > 0)) {
+            size_t sndbytesize = (size_t)leafoctsize * (size_t)buffered;
+            MPI_Send(sndbuf, (int)sndbytesize, MPI_CHAR, current_dest,
+                     OCT_MSG, tree->comm_tree);
+        }
+        free(sndbuf);
+    }
+
+    if (sent_remote) {
+        oct_shrink(tree->root, tree, REMOTE, NULL, NULL);
+    }
+
+    if (irecvcount != 0) {
+        MPI_Waitall(irecvcount, irecvreqs, irecvstats);
+    }
+
+    for (irecvnum = 0; irecvnum < irecvcount; irecvnum++) {
+        int32_t received, index;
+        int32_t rcvbytesize;
+        char *ptr;
+
+        MPI_Get_count(&irecvstats[irecvnum], MPI_CHAR, &rcvbytesize);
+        received = rcvbytesize / leafoctsize;
+
+        ptr = (char *)rcvleafoct_pool_list[irecvnum];
+        for (index = 0; index < received; index++) {
+            tick_t lx, ly, lz;
+            int8_t level;
+            void *data;
+
+            level = *(int8_t *)ptr;
+            ptr += sizeof(int8_t);
+
+            lx = *(tick_t *)ptr;
+            ptr += sizeof(tick_t);
+
+            ly = *(tick_t *)ptr;
+            ptr += sizeof(tick_t);
+
+            lz = *(tick_t *)ptr;
+            ptr += sizeof(tick_t);
+
+            data = ptr;
+            ptr += tree->recsize;
+
+            if (oct_installleaf(lx, ly, lz, level, data, tree) != 0) {
+                fprintf(stderr, "Thread %d: %s %d: oct_installleaf error\n",
+                        tree->procid, __FILE__, __LINE__);
+                MPI_Abort(MPI_COMM_WORLD, INTERNAL_ERR);
+                exit(1);
+            }
+
+            tree->leafcount[(int32_t)level]++;
+        }
+
+        free(rcvleafoct_pool_list[irecvnum]);
+    }
+
+    tree->firstleaf = oct_getleftmost(tree->root);
+    if (tree->firstleaf == NULL) {
+        fprintf(stderr,
+                "Thread %d: %s %d: got a null first leaf \n",
+                tree->procid, __FILE__, __LINE__);
+        MPI_Abort(MPI_COMM_WORLD, COMM_ERR);
+        exit(1);
+    }
+
+    if (irecvcount != 0) {
+        free(rcvleafoct_pool_list);
+        free(irecvreqs);
+        free(irecvstats);
+    }
+    free(weighttable);
+    free(starttable);
+    free(sendcounts);
+    free(recvcounts);
+
+#ifdef TREE_VERBOSE
+    tree_showstat(tree, DETAILS, "octor_partitiontree_weighted");
 #endif /* TREE_VERBOSE */
 
     return 0;

@@ -571,6 +571,13 @@ static int g_cpmlRankDiagSize = 0;
 static long long* g_cpmlRankDiagCounts = NULL;
 static double* g_cpmlRankDiagTimes = NULL;
 
+#define CPML_PARTITION_BASE_WEIGHT 100
+static double g_cpmlPartitionThicknessM = 0.0;
+static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
+                                          const void* data);
+static int mesh_prepare_cpml_partition_weight(void);
+static int mesh_partitiontree(const char* context);
+
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static int32_t mesh_element_index_for_octant(octant_t* octant,
                                              const char* context);
@@ -1558,6 +1565,7 @@ static struct Param_t {
    * via cpml_stiffness_mode_acoustic. Declared AFTER theCpmlNativeStiffness
    * to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffnessAcoustic;
+  double theCpmlPartitionWeight;            /* 1.0 disables CPML load bias */
   /* VT + BKT GPU stabilization (default NO -> strict no-op, bit-identical
    * to the validated v2/CPML baseline). YES enables the faithful CUDA
    * port of the CPU cut-cell visco-elastic operator TetraForcesBKT for
@@ -1628,6 +1636,7 @@ static struct Param_t {
            .theCpmlClampOuter = NO,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
+           .theCpmlPartitionWeight = 1.0,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticQualityFactor = 0.0};
@@ -1916,7 +1925,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  37 /* Must adjust this if adding double params */
+  38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   51 /* Must adjust this if adding int params */
 
@@ -1972,6 +1981,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[34] = Param.theCpmlMpmlCrossFraction;
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
+  double_message[37] = Param.theCpmlPartitionWeight;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2013,6 +2023,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
+  Param.theCpmlPartitionWeight = double_message[37];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2563,6 +2574,7 @@ static int32_t parse_parameters(const char* numericalin) {
       double cpml_cfl_safety = Param.theCpmlCflSafety;
       double cpml_mpml_cross_fraction = Param.theCpmlMpmlCrossFraction;
       double cpml_alpha_floor_fraction = Param.theCpmlAlphaFloorFraction;
+      double cpml_partition_weight = Param.theCpmlPartitionWeight;
 
       (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
       (void)parsetext(fp, "cpml_layers", 'i', &cpml_layers);
@@ -2576,6 +2588,8 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_mpml_cross_fraction);
       (void)parsetext(fp, "cpml_alpha_floor_fraction", 'd',
                       &cpml_alpha_floor_fraction);
+      (void)parsetext(fp, "cpml_partition_weight", 'd',
+                      &cpml_partition_weight);
 
       char cpml_clamp_outer[64] = "";
       if (parsetext(fp, "cpml_clamp_outer", 's', &cpml_clamp_outer) == 0) {
@@ -2666,6 +2680,11 @@ static int32_t parse_parameters(const char* numericalin) {
                      "cpml_alpha_floor_fraction=%g must be in [0, 1].\n",
                      cpml_alpha_floor_fraction);
       }
+      if (cpml_partition_weight < 1.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_partition_weight=%g must be >= 1.0.\n",
+                     cpml_partition_weight);
+      }
 
       Param.theCpmlThicknessM = cpml_thickness_m;
       Param.theCpmlLayers = cpml_layers;
@@ -2676,6 +2695,7 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlCflSafety = cpml_cfl_safety;
       Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
+      Param.theCpmlPartitionWeight = cpml_partition_weight;
 
       /* Opt-in material damping inside the elastic PML zone (viscoelastic
        * CFS-CPML). Default "none" => all material damping skipped on PML
@@ -3587,6 +3607,8 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlAlphaFloorFraction);
     monitor_print("PML CFL safety factor:              %f\n",
                   Param.theCpmlCflSafety);
+    monitor_print("PML partition weight:               %f\n",
+                  Param.theCpmlPartitionWeight);
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
     monitor_print("PML stiffness mode (elastic):       %s\n",
@@ -5408,6 +5430,124 @@ void setrec(octant_t* leaf, double ticksize, void* data) {
 }
 #endif /* USECVMDB */
 
+static int mesh_prepare_cpml_partition_weight(void) {
+#ifdef BOUNDARY
+  if ((Param.theAbcType != ABC_CPML) || (Param.theCpmlPartitionWeight <= 1.0)) {
+    g_cpmlPartitionThicknessM = 0.0;
+    return 0;
+  }
+
+  if (Param.theCpmlThicknessM > 0.0) {
+    g_cpmlPartitionThicknessM = Param.theCpmlThicknessM;
+  } else {
+    const double ticksize = Global.myOctree->ticksize;
+    const double eps = ticksize * 0.25;
+    const double lo[3] = {
+        (double)Global.myOctree->nearendp[0] * ticksize,
+        (double)Global.myOctree->nearendp[1] * ticksize,
+        (double)Global.myOctree->nearendp[2] * ticksize};
+    const double hi[3] = {
+        (double)Global.myOctree->farendp[0] * ticksize,
+        (double)Global.myOctree->farendp[1] * ticksize,
+        (double)Global.myOctree->farendp[2] * ticksize};
+    double local_bnd_h = 0.0;
+    double local_any_h = 0.0;
+
+    for (octant_t* leaf = octor_getfirstleaf(Global.myOctree); leaf != NULL;
+         leaf = octor_getnextleaf(leaf)) {
+      const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
+      const double h = (double)edgeticks * ticksize;
+      const double c0[3] = {(double)leaf->lx * ticksize,
+                            (double)leaf->ly * ticksize,
+                            (double)leaf->lz * ticksize};
+      int on_face = 0;
+
+      if (h <= 0.0) continue;
+      if (h > local_any_h) local_any_h = h;
+
+      for (int ax = 0; ax < 2; ax++) {
+        if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
+        if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
+      }
+      if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
+      if (on_face && h > local_bnd_h) local_bnd_h = h;
+    }
+
+    double global_bnd_h = 0.0;
+    double global_any_h = 0.0;
+    MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
+                  comm_solver);
+    MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
+                  comm_solver);
+    const double basis_h =
+        (global_bnd_h > 0.0) ? global_bnd_h : global_any_h;
+    g_cpmlPartitionThicknessM = (double)Param.theCpmlLayers * basis_h;
+  }
+
+  if (g_cpmlPartitionThicknessM <= 0.0) {
+    g_cpmlPartitionThicknessM = 0.0;
+    return 0;
+  }
+
+  if (Global.myID == 0) {
+    monitor_print("CPML weighted partitioning: weight %.3f, thickness %.3f m\n",
+                  Param.theCpmlPartitionWeight, g_cpmlPartitionThicknessM);
+  }
+  return 1;
+#else
+  g_cpmlPartitionThicknessM = 0.0;
+  return 0;
+#endif
+}
+
+static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
+                                          const void* data) {
+  (void)data;
+
+#ifdef BOUNDARY
+  if ((Param.theAbcType != ABC_CPML) || (Param.theCpmlPartitionWeight <= 1.0) ||
+      (g_cpmlPartitionThicknessM <= 0.0)) {
+    return CPML_PARTITION_BASE_WEIGHT;
+  }
+
+  const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
+  tick_t ldb[3] = {leaf->lx, leaf->ly, leaf->lz};
+  tick_t ruf[3] = {leaf->lx + edgeticks, leaf->ly + edgeticks,
+                   leaf->lz + edgeticks};
+  const uint8_t face_mask =
+      compute_pml_face_mask(ldb, ruf, Global.myOctree->nearendp,
+                            Global.myOctree->farendp, ticksize,
+                            g_cpmlPartitionThicknessM);
+
+  if (face_mask == 0) {
+    return CPML_PARTITION_BASE_WEIGHT;
+  }
+
+  const long weighted =
+      lround((double)CPML_PARTITION_BASE_WEIGHT *
+             Param.theCpmlPartitionWeight);
+  return (weighted > CPML_PARTITION_BASE_WEIGHT)
+             ? (int32_t)weighted
+             : CPML_PARTITION_BASE_WEIGHT;
+#else
+  (void)leaf;
+  (void)ticksize;
+  return CPML_PARTITION_BASE_WEIGHT;
+#endif
+}
+
+static int mesh_partitiontree(const char* context) {
+  if (mesh_prepare_cpml_partition_weight()) {
+    return octor_partitiontree_weighted(Global.myOctree, bldgs_nodesearch_com,
+                                        pushdowns_nodesearch,
+                                        mesh_cpml_partition_weight);
+  }
+
+  (void)context;
+  return octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
+                             pushdowns_nodesearch);
+}
+
 /**
  * mesh_generate: Generate and partition an unstructured octree mesh.
  *
@@ -5566,8 +5706,7 @@ static void mesh_generate() {
       monitor_print("Partitioning ");
       fflush(stdout);
     }
-    if (octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
-                            pushdowns_nodesearch) != 0) {
+    if (mesh_partitiontree("mesh_generate") != 0) {
       fprintf(stderr, "Thread %d: mesh_generate: fail to balance load\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -5627,8 +5766,7 @@ static void mesh_generate() {
       monitor_print("Repartitioning");
       fflush(stdout);
     }
-    if (octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
-                            pushdowns_nodesearch) != 0) {
+    if (mesh_partitiontree("mesh_generate_repartition") != 0) {
       fprintf(stderr, "Thread %d: mesh_generate: fail to balance load\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -6437,8 +6575,7 @@ static void mesh_generate_from_etree(void) {
     monitor_print("Partitioning ");
     fflush(stdout);
   }
-  if (octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
-                          pushdowns_nodesearch) != 0) {
+  if (mesh_partitiontree("mesh_generate_from_etree") != 0) {
     fprintf(stderr,
             "Thread %d: mesh_generate_from_etree: fail to partition tree\n",
             Global.myID);
