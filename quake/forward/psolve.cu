@@ -4274,20 +4274,31 @@ static void mesh_release_acoustic_interface_data(void) {
   Global.acousticInterfaceFaces = 0;
 }
 
-static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
-                                                   int32_t* eindex_out) {
+static int mesh_find_octant_at_domain_point(const vector3D_t* point,
+                                            tick_t ldb_out[3],
+                                            tick_t ruf_out[3],
+                                            int8_t* level_out,
+                                            int* is_local_out,
+                                            int32_t* eindex_out) {
   octant_t* octant;
   tick_t xTick, yTick, zTick;
   int32_t eindex = -1;
+  int is_local = 0;
 
-  if ((Global.myMesh == NULL) || (Global.myOctree == NULL) || (point == NULL) ||
-      (eindex_out == NULL)) {
+  if ((Global.myMesh == NULL) || (Global.myOctree == NULL) ||
+      (point == NULL)) {
+    if (eindex_out != NULL) {
+      *eindex_out = -1;
+    }
     return 0;
   }
 
   if ((point->x[0] < 0.0) || (point->x[0] >= Param.theDomainX) ||
       (point->x[1] < 0.0) || (point->x[1] >= Param.theDomainY) ||
       (point->x[2] < 0.0) || (point->x[2] >= Param.theDomainZ)) {
+    if (eindex_out != NULL) {
+      *eindex_out = -1;
+    }
     return 0;
   }
 
@@ -4297,35 +4308,82 @@ static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
 
   octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
                               AGGREGATE_SEARCH);
-  if ((octant == NULL) || (octant->where == REMOTE)) {
+  if (octant == NULL) {
+    if (eindex_out != NULL) {
+      *eindex_out = -1;
+    }
     return 0;
   }
 
-  if (octant->appdata != NULL) {
-    int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
-    if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
-      eindex = cached;
-    }
+  if (ldb_out != NULL) {
+    ldb_out[0] = octant->lx;
+    ldb_out[1] = octant->ly;
+    ldb_out[2] = octant->lz;
+  }
+  if (ruf_out != NULL) {
+    tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - octant->level);
+    ruf_out[0] = octant->lx + edgeticks;
+    ruf_out[1] = octant->ly + edgeticks;
+    ruf_out[2] = octant->lz + edgeticks;
+  }
+  if (level_out != NULL) {
+    *level_out = octant->level;
   }
 
-  if (eindex < 0) {
-    for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-      int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
-
-      if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
-          (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
-          (Global.myMesh->nodeTable[lnid0].z == octant->lz) &&
-          (Global.myMesh->elemTable[eindex].level == octant->level)) {
-        break;
+  if (octant->where != REMOTE) {
+    is_local = 1;
+    if (octant->appdata != NULL) {
+      int32_t cached = (int32_t)((intptr_t)octant->appdata - 1);
+      if ((cached >= 0) && (cached < Global.myMesh->lenum)) {
+        eindex = cached;
       }
     }
+
+    if (eindex < 0) {
+      for (eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+        int32_t lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+
+        if ((Global.myMesh->nodeTable[lnid0].x == octant->lx) &&
+            (Global.myMesh->nodeTable[lnid0].y == octant->ly) &&
+            (Global.myMesh->nodeTable[lnid0].z == octant->lz) &&
+            (Global.myMesh->elemTable[eindex].level == octant->level)) {
+          break;
+        }
+      }
+    }
+
+    if ((eindex < 0) || (eindex >= Global.myMesh->lenum)) {
+      eindex = -1;
+      is_local = 0;
+    }
   }
 
-  if ((eindex < 0) || (eindex >= Global.myMesh->lenum)) {
+  if (is_local_out != NULL) {
+    *is_local_out = is_local;
+  }
+  if (eindex_out != NULL) {
+    *eindex_out = eindex;
+  }
+  return 1;
+}
+
+static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
+                                                   int32_t* eindex_out) {
+  int is_local = 0;
+  int32_t eindex = -1;
+
+  if (!mesh_find_octant_at_domain_point(point, NULL, NULL, NULL, &is_local,
+                                        &eindex) ||
+      !is_local || (eindex < 0)) {
+    if (eindex_out != NULL) {
+      *eindex_out = -1;
+    }
     return 0;
   }
 
-  *eindex_out = eindex;
+  if (eindex_out != NULL) {
+    *eindex_out = eindex;
+  }
   return 1;
 }
 
@@ -4340,8 +4398,10 @@ static int mesh_probe_face_elastic_info(
     const vector3D_t* threeDVelModel_origin, int32_t* neighbor_eindex_out,
     int32_t* neighbor_level_out, int64_t* neighbor_geid_out) {
   int32_t neighbor_eindex = -1;
+  int found_neighbor_octant = 0;
   int found_local_neighbor = 0;
   int local_neighbor_is_elastic = 0;
+  int8_t neighbor_level = -1;
   cvmpayload_t g_props;
   double north_m;
   double east_m;
@@ -4367,8 +4427,11 @@ static int mesh_probe_face_elastic_info(
     return 0;
   }
 
-  found_local_neighbor =
-      mesh_find_local_element_at_domain_point(domain_point, &neighbor_eindex);
+  found_neighbor_octant =
+      mesh_find_octant_at_domain_point(domain_point, NULL, NULL,
+                                       &neighbor_level,
+                                       &found_local_neighbor,
+                                       &neighbor_eindex);
   if (found_local_neighbor) {
     elem_t* neighbor_elemp = &Global.myMesh->elemTable[neighbor_eindex];
     edata_t* neighbor_edata = (edata_t*)neighbor_elemp->data;
@@ -4399,7 +4462,13 @@ static int mesh_probe_face_elastic_info(
   if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
                                          IstVelModel_origin, basinVelModel_origin,
                                          threeDVelModel_origin, &g_props) == 0) {
-    return material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
+    int remote_neighbor_is_elastic =
+        material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
+    if (remote_neighbor_is_elastic && found_neighbor_octant &&
+        (neighbor_level_out != NULL)) {
+      *neighbor_level_out = neighbor_level;
+    }
+    return remote_neighbor_is_elastic;
   }
 
   return 0;
@@ -4454,6 +4523,69 @@ static int mesh_query_material_at_model_point(
 
   return 1;
 }
+
+#ifdef BOUNDARY
+static int mesh_compute_elastic_side_pml_profile_at_domain_point(
+    const vector3D_t* domain_point, int axis,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, double* a_out, double* b_out,
+    double* invKappa_out, uint8_t* face_mask_out) {
+  tick_t ldb[3], ruf[3];
+  uint8_t face_mask;
+  cvmpayload_t g_props;
+  double north_m, east_m, depth_m;
+  double a3[3], b3[3], iK3[3], d3[3];
+  double al3[3], ka3[3];
+
+  if ((domain_point == NULL) || (axis < 0) || (axis > 2) ||
+      (a_out == NULL) || (b_out == NULL) || (invKappa_out == NULL)) {
+    return 0;
+  }
+
+  if (!mesh_find_octant_at_domain_point(domain_point, ldb, ruf, NULL, NULL,
+                                        NULL)) {
+    return 0;
+  }
+
+  face_mask = compute_pml_face_mask(
+      ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
+      Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+  if (face_mask_out != NULL) {
+    *face_mask_out = face_mask;
+  }
+  if (face_mask == 0) {
+    return 0;
+  }
+
+  north_m = Global.theXForMeshOrigin + domain_point->x[0];
+  east_m = Global.theYForMeshOrigin + domain_point->x[1];
+  depth_m = Global.theZForMeshOrigin + domain_point->x[2];
+  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
+                                         IstVelModel_origin,
+                                         basinVelModel_origin,
+                                         threeDVelModel_origin,
+                                         &g_props) != 0) {
+    return 0;
+  }
+  if (!material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho)) {
+    return 0;
+  }
+
+  compute_pml_profile_coeffs(
+      face_mask, ldb, ruf, Global.myOctree->nearendp,
+      Global.myOctree->farendp, Global.myOctree->ticksize,
+      g_cpmlBuild.thickness_m, (double)g_props.Vp, Param.theDeltaT,
+      Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+      Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+      Param.theCpmlMpmlCrossFraction, Param.theCpmlAlphaFloorFraction,
+      a3, b3, iK3, d3, al3, ka3);
+
+  *a_out = a3[axis];
+  *b_out = b3[axis];
+  *invKappa_out = iK3[axis];
+  return 1;
+}
+#endif /* BOUNDARY */
 
 static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
                                                       int64_t current_count,
@@ -9245,7 +9377,16 @@ static void solver_init() {
     int64_t pml_elastic_side_count = 0;
     int64_t pml_both_side_count = 0;
     int64_t remote_elastic_side_count = 0;
+    int64_t remote_elastic_pml_side_count = 0;
     if (Global.acousticInterfaceFaces > 0) {
+      vector3D_t cpmlIfaceBasinVelModel_origin;
+      vector3D_t cpmlIfaceThreeDVelModel_origin;
+      const vector3D_t* cpmlIfaceIstVelModel_origin =
+          (Param.IstanbulVelocityModel == YES && g_hasIstanbulVelModelOrigin)
+              ? &g_istanbulVelModelOrigin
+              : NULL;
+      const vector3D_t* cpmlIfaceBasinVelModel_origin_ptr = NULL;
+      const vector3D_t* cpmlIfaceThreeDVelModel_origin_ptr = NULL;
       int64_t nface = Global.acousticInterfaceFaces;
       uint8_t* iface_mask =
           (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
@@ -9264,6 +9405,21 @@ static void solver_init() {
                 "Thread %d: oom CPML interface-correction host arrays\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+      }
+      if (Param.basinVelocityModel == YES) {
+        cpmlIfaceBasinVelModel_origin = compute_domain_coords_linearinterp(
+            Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+            Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+            &Param.utmZone);
+        cpmlIfaceBasinVelModel_origin_ptr = &cpmlIfaceBasinVelModel_origin;
+      }
+      if (Param.threeDVelocityModel == YES) {
+        cpmlIfaceThreeDVelModel_origin = compute_domain_coords_linearinterp(
+            Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+            Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+            Param.theDomainY, Param.theDomainX, &Param.utmZone);
+        cpmlIfaceThreeDVelModel_origin_ptr =
+            &cpmlIfaceThreeDVelModel_origin;
       }
       /* Default = identity (no-op): b=1, a=0, invKappa=1. */
       for (int64_t i = 0; i < nface; i++) {
@@ -9346,6 +9502,44 @@ static void solver_init() {
           iface_el_b[i] = b3[axis];
           iface_el_iK[i] = iK3[axis];
           pml_elastic_side_count++;
+        } else if ((ee < 0) && (ea >= 0) && (ea < Global.myMesh->lenum)) {
+          /* The elastic neighbor is remote on this MPI rank.  Do not let
+           * that make the elastic-side CPML correction silently disappear:
+           * reconstruct the fragment's physical location from the local
+           * acoustic element, nudge it to the elastic side, then use the
+           * remote octant geometry plus a material query to compute the
+           * elastic-side coefficients. */
+          elem_t* pe = &Global.myMesh->elemTable[ea];
+          edata_t* ped = (edata_t*)pe->data;
+          int32_t pln0 = pe->lnid[0];
+          double ldb_m[3] = {
+              Global.myMesh->ticksize *
+                  (double)Global.myMesh->nodeTable[pln0].x,
+              Global.myMesh->ticksize *
+                  (double)Global.myMesh->nodeTable[pln0].y,
+              Global.myMesh->ticksize *
+                  (double)Global.myMesh->nodeTable[pln0].z};
+          double h = (double)ped->edgesize;
+          double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
+          vector3D_t elastic_probe;
+
+          for (int dim = 0; dim < 3; dim++) {
+            elastic_probe.x[dim] =
+                ldb_m[dim] +
+                0.5 * h *
+                    (Global.acousticInterfaceFaceCenters[3 * i + dim] + 1.0) +
+                Global.acousticInterfaceFaceNormals[3 * i + dim] * eps;
+          }
+
+          if (mesh_compute_elastic_side_pml_profile_at_domain_point(
+                  &elastic_probe, axis, cpmlIfaceIstVelModel_origin,
+                  cpmlIfaceBasinVelModel_origin_ptr,
+                  cpmlIfaceThreeDVelModel_origin_ptr, &iface_el_a[i],
+                  &iface_el_b[i], &iface_el_iK[i], NULL)) {
+            iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
+            pml_elastic_side_count++;
+            remote_elastic_pml_side_count++;
+          }
         }
 
         if (iface_mask[i] != 0) {
@@ -9383,22 +9577,25 @@ static void solver_init() {
      * ranks with no local water-solid interface faces, especially for a flat
      * water layer, and letting those ranks skip the reduction deadlocks the
      * interface-owning ranks during Phase B startup. */
-    int64_t local_iface_diag[5] = {
+    int64_t local_iface_diag[6] = {
         pml_face_count, pml_acoustic_side_count, pml_elastic_side_count,
-        pml_both_side_count, remote_elastic_side_count};
-    int64_t global_iface_diag[5] = {0, 0, 0, 0, 0};
-    MPI_Reduce(local_iface_diag, global_iface_diag, 5, MPI_LONG_LONG,
+        pml_both_side_count, remote_elastic_side_count,
+        remote_elastic_pml_side_count};
+    int64_t global_iface_diag[6] = {0, 0, 0, 0, 0, 0};
+    MPI_Reduce(local_iface_diag, global_iface_diag, 6, MPI_LONG_LONG,
                MPI_SUM, 0, comm_solver);
     if (Global.myID == 0 && global_iface_diag[0] > 0) {
       fprintf(stdout,
               "CPML: %lld acoustic-elastic interface faces lie inside the "
               "PML zone; side-specific correction acoustic=%lld, "
-              "elastic=%lld, both=%lld, remote-elastic=%lld\n",
+              "elastic=%lld, both=%lld, remote-elastic=%lld "
+              "(elastic-PML recovered=%lld)\n",
               (long long)global_iface_diag[0],
               (long long)global_iface_diag[1],
               (long long)global_iface_diag[2],
               (long long)global_iface_diag[3],
-              (long long)global_iface_diag[4]);
+              (long long)global_iface_diag[4],
+              (long long)global_iface_diag[5]);
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
