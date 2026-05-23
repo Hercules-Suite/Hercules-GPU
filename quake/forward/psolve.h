@@ -449,6 +449,7 @@ typedef struct gpu_data_t {
     solver_float* acousticInterfacePsiPressureDevice;
     solver_float* acousticInterfacePsiAccelDevice;
     solver_float* acousticInterfaceSourceFilterDevice;
+    solver_float* acousticInterfacePressureFilterDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
     double*      acousticPressureCoeffArrayDevice;
     double*      acousticPressureBoundaryCoeffArrayDevice;
@@ -629,6 +630,7 @@ typedef struct gpu_data_t {
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
     double        acousticInterfaceSourceFilterAlpha;
+    double        acousticInterfaceConjugateFilterAlpha;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
     /* v3 station viscoelastic stress gather (print_station_strains /

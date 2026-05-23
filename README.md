@@ -264,7 +264,20 @@ Acoustic-elastic input flags (input file):
 	traction applied back onto the elastic side. Set
 	`acoustic_interface_source_filter_freq_hz` to choose the cutoff; if omitted
 	while the filter is enabled, the solver uses
-	`simulation_wave_max_freq_hz`.
+	`simulation_wave_max_freq_hz`. This is mainly a diagnostic knob; for
+	regularization runs, prefer `acoustic_interface_conjugate_filter`.
+- `acoustic_interface_conjugate_filter`
+	Optional. `no` (default) keeps the interface exchange unfiltered. `yes`
+	applies the same first-order low-pass cutoff to both conjugate
+	velocity-potential interface quantities: the solid-side normal velocity
+	used as the acoustic source and the acoustic pressure traction applied back
+	to the elastic side. This is an experimental energy-consistent
+	regularization for high-frequency interface ringing in
+	`acoustic_formulation=velocity_potential`. Set
+	`acoustic_interface_conjugate_filter_freq_hz` to choose the cutoff; if
+	omitted while the filter is enabled, the solver uses
+	`simulation_wave_max_freq_hz`. Do not enable this together with
+	`acoustic_interface_source_filter`; the solver aborts if both are `yes`.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
