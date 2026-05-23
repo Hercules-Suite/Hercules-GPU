@@ -149,6 +149,8 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_FACE_Z_PLUS  0x20u
 #define ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE 0x01u
 #define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
+#define ACOUSTIC_INTERFACE_PROJECTION_POINT     0
+#define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -423,8 +425,10 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceFaceAreasDevice;
     double*      acousticInterfaceFaceCentersDevice;
     double*      acousticInterfaceFaceNormalsDevice;
+    double*      acousticInterfaceFaceHalfWidthsDevice;
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
+    double*      acousticInterfaceAdjacentHalfWidthsDevice;
     /* CPML-aware interface coupling correction. All NULL unless
      * abc_type=cpml AND at least one acoustic-elastic interface face has a
      * PML element on either side. Per-face sideMask bit 0 means the
@@ -614,13 +618,14 @@ typedef struct gpu_data_t {
      * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
     int           cpmlPmlMaterialDamping;
 
-    /* Velocity-potential acoustic-elastic coupling (independent
-     * reimplementation, gated). 0 = pressure (default, bit-identical to
-     * the validated runs); 1 = the acoustic buffers hold a velocity
-     * potential phi, the interface exchanges solid normal VELOCITY
-     * (1st time-difference, ~omega) and the solid feels p = -dphi/dt,
-     * and station pressure output = -dphi/dt. */
+    /* Velocity-potential acoustic-elastic coupling. 0 = pressure;
+     * 1 = the acoustic buffers hold a velocity potential phi, the interface
+     * exchanges solid normal VELOCITY (1st time-difference, ~omega) and
+     * the solid feels p = -dphi/dt, and station pressure output = -dphi/dt. */
     int           acousticVelocityPotential;
+    /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
+     * 1 = 2x2 face-mass projection over each interface fragment. */
+    int           acousticInterfaceProjectionMode;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
     /* v3 station viscoelastic stress gather (print_station_strains /

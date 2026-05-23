@@ -246,6 +246,15 @@ Acoustic-elastic input flags (input file):
 	Optional. `yes` enables the current normal-projected coupling treatment on
 	acoustic element faces adjacent to elastic material. Default is `yes`, but
 	it is only active when `include_acoustic=yes`.
+- `acoustic_interface_projection`
+	Optional. `point` (default) uses the legacy one-point quadrature on each
+	acoustic-elastic interface fragment. `face_mass` uses a 2x2 face quadrature
+	to weakly project the normal velocity/pressure traction over each fragment
+	before assembling nodal interface forces. This is an experimental diagnostic
+	option intended to reduce grid-scale interface forcing in
+	`acoustic_formulation=velocity_potential` runs. PML interface fragments
+	currently retain the `point` path so their one-memory-variable CPML
+	correction remains unchanged.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which

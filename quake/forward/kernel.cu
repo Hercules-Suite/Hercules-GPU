@@ -153,6 +153,24 @@ __host__ __device__ static inline double acoustic_shape_value_at(int node,
          (1.0 + sz[node] * dzeta);
 }
 
+__host__ __device__ static inline int acoustic_interface_face_axes(
+    const double normal[3], int tangent_axes[2])
+{
+  const double ax = fabs(normal[0]);
+  const double ay = fabs(normal[1]);
+  const double az = fabs(normal[2]);
+  int normal_axis = (ax >= ay && ax >= az) ? 0 : ((ay >= az) ? 1 : 2);
+  int cursor = 0;
+
+  for (int dim = 0; dim < 3; dim++) {
+    if (dim != normal_axis) {
+      tangent_axes[cursor++] = dim;
+    }
+  }
+
+  return normal_axis;
+}
+
 
 /* Flag denoting if kernel FLOP count cache initialized */
 static int kernel_cached_flag = 0;
@@ -486,6 +504,84 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           : center[2]};
   const int32_t force_eindex = (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* force_center = (adjacent_eindex >= 0) ? adjacent_center : center;
+  const int pml_face =
+      (gpuData->acousticInterfacePmlSideMaskDevice != NULL) &&
+      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] != 0);
+
+  if ((gpuData->acousticInterfaceProjectionMode ==
+       ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
+      (adjacent_eindex >= 0) && !pml_face &&
+      (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
+      (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
+    const double* half =
+        gpuData->acousticInterfaceFaceHalfWidthsDevice + 3 * faceIndex;
+    const double* adjacent_half =
+        gpuData->acousticInterfaceAdjacentHalfWidthsDevice + 3 * faceIndex;
+    const double gauss[2] = {-0.57735026918962576451,
+                              0.57735026918962576451};
+    const double q_coeff = face_coeff * 0.25;
+    int tangent_axes[2];
+
+    (void)acoustic_interface_face_axes(normal, tangent_axes);
+
+    for (int g0 = 0; g0 < 2; g0++) {
+      for (int g1 = 0; g1 < 2; g1++) {
+        double q_center[3] = {center[0], center[1], center[2]};
+        double q_force_center[3] = {adjacent_center[0], adjacent_center[1],
+                                    adjacent_center[2]};
+        double q_pressure = 0.0;
+
+        q_center[tangent_axes[0]] += half[tangent_axes[0]] * gauss[g0];
+        q_center[tangent_axes[1]] += half[tangent_axes[1]] * gauss[g1];
+        q_force_center[tangent_axes[0]] +=
+            adjacent_half[tangent_axes[0]] * gauss[g0];
+        q_force_center[tangent_axes[1]] +=
+            adjacent_half[tangent_axes[1]] * gauss[g1];
+
+        for (int i = 0; i < 8; i++) {
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+          const double weight =
+              acoustic_shape_value_at(i, q_center[0], q_center[1],
+                                      q_center[2]);
+
+          if (vp) {
+            q_pressure +=
+                weight *
+                (-((double)gpuData->pressureTm1Device[lnid] -
+                   (double)gpuData->pressureTm2Device[lnid]) * invDt);
+          } else {
+            q_pressure +=
+                weight * (double)gpuData->pressureTm1Device[lnid];
+          }
+        }
+
+        for (int i = 0; i < 8; i++) {
+          const double weight =
+              acoustic_shape_value_at(i, q_force_center[0],
+                                      q_force_center[1], q_force_center[2]);
+          if (weight == 0.0) {
+            continue;
+          }
+
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
+          fvector_t* nodalForce = gpuData->forceDevice + lnid;
+          atomicAdd((solver_float*)&nodalForce->f[0],
+                    (solver_float)(q_coeff * weight * q_pressure *
+                                   normal[0]));
+          atomicAdd((solver_float*)&nodalForce->f[1],
+                    (solver_float)(q_coeff * weight * q_pressure *
+                                   normal[1]));
+          atomicAdd((solver_float*)&nodalForce->f[2],
+                    (solver_float)(q_coeff * weight * q_pressure *
+                                   normal[2]));
+        }
+      }
+    }
+    return;
+  }
+
   double pressure = 0.0;
 
   for (int i = 0; i < 8; i++) {
@@ -684,6 +780,97 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* accel_center =
       (adjacent_eindex >= 0) ? adjacent_center : center;
+  const int pml_face =
+      (gpuData->acousticInterfacePmlSideMaskDevice != NULL) &&
+      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] != 0);
+
+  if ((gpuData->acousticInterfaceProjectionMode ==
+       ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
+      (adjacent_eindex >= 0) && !pml_face &&
+      (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
+      (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
+    const double* half =
+        gpuData->acousticInterfaceFaceHalfWidthsDevice + 3 * faceIndex;
+    const double* adjacent_half =
+        gpuData->acousticInterfaceAdjacentHalfWidthsDevice + 3 * faceIndex;
+    const double gauss[2] = {-0.57735026918962576451,
+                              0.57735026918962576451};
+    const double sgn = vp ? 1.0 : -1.0;
+    const double q_coeff = face_coeff * deltaT2 * 0.25;
+    int tangent_axes[2];
+
+    (void)acoustic_interface_face_axes(normal, tangent_axes);
+
+    for (int g0 = 0; g0 < 2; g0++) {
+      for (int g1 = 0; g1 < 2; g1++) {
+        double q_center[3] = {center[0], center[1], center[2]};
+        double q_accel_center[3] = {adjacent_center[0], adjacent_center[1],
+                                    adjacent_center[2]};
+        double q_source_n = 0.0;
+
+        q_center[tangent_axes[0]] += half[tangent_axes[0]] * gauss[g0];
+        q_center[tangent_axes[1]] += half[tangent_axes[1]] * gauss[g1];
+        q_accel_center[tangent_axes[0]] +=
+            adjacent_half[tangent_axes[0]] * gauss[g0];
+        q_accel_center[tangent_axes[1]] +=
+            adjacent_half[tangent_axes[1]] * gauss[g1];
+
+        for (int i = 0; i < 8; i++) {
+          const double weight =
+              acoustic_shape_value_at(i, q_accel_center[0],
+                                      q_accel_center[1],
+                                      q_accel_center[2]);
+          if (weight == 0.0) {
+            continue;
+          }
+
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
+          const fvector_t u_next = gpuData->tm2Device[lnid];
+          const fvector_t u_curr = gpuData->tm1Device[lnid];
+          if (vp) {
+            q_source_n +=
+                weight *
+                (((double)u_next.f[0] - (double)u_curr.f[0]) * invDt *
+                     normal[0] +
+                 ((double)u_next.f[1] - (double)u_curr.f[1]) * invDt *
+                     normal[1] +
+                 ((double)u_next.f[2] - (double)u_curr.f[2]) * invDt *
+                     normal[2]);
+          } else {
+            const fvector_t u_prev = gpuData->tm3Device[lnid];
+            q_source_n +=
+                weight *
+                ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
+                   (double)u_prev.f[0]) *
+                      invDeltaT2 * normal[0]) +
+                 (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
+                   (double)u_prev.f[1]) *
+                      invDeltaT2 * normal[1]) +
+                 (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
+                   (double)u_prev.f[2]) *
+                      invDeltaT2 * normal[2]));
+          }
+        }
+
+        for (int i = 0; i < 8; i++) {
+          const double weight =
+              acoustic_shape_value_at(i, q_center[0], q_center[1],
+                                      q_center[2]);
+          if (weight == 0.0) {
+            continue;
+          }
+
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+          atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                    (solver_float)(sgn * q_coeff * weight * q_source_n));
+        }
+      }
+    }
+    return;
+  }
+
   /* source_n is the scalar exchanged into the acoustic RHS:
    *  - pressure mode: solid normal ACCELERATION (2nd time-difference,
    *    ~omega^2) -- the validated path (and the grid pump);

@@ -1578,6 +1578,7 @@ static struct Param_t {
    * explicit opt-in. Only affects acoustic / acoustic-elastic runs;
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
+  int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -1639,6 +1640,8 @@ static struct Param_t {
            .theCpmlPartitionWeight = 1.0,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
+           .theAcousticInterfaceProjectionMode =
+               ACOUSTIC_INTERFACE_PROJECTION_POINT,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
@@ -1685,8 +1688,10 @@ static struct Global_t {
   double* acousticInterfaceFaceAreas;
   double* acousticInterfaceFaceCenters;
   double* acousticInterfaceFaceNormals;
+  double* acousticInterfaceFaceHalfWidths;
   int32_t* acousticInterfaceAdjacentElementIndexes;
   double* acousticInterfaceAdjacentCenters;
+  double* acousticInterfaceAdjacentHalfWidths;
   int64_t* acousticInterfaceAdjacentElementIds;
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
@@ -1930,7 +1935,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  51 /* Must adjust this if adding int params */
+  52 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2080,6 +2085,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[48] = (int)Param.theTopoBktGpuStabilize;
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
+  int_message[51] = Param.theAcousticInterfaceProjectionMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2136,6 +2142,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theTopoBktGpuStabilize = (noyesflag_t)int_message[48];
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
+  Param.theAcousticInterfaceProjectionMode = int_message[51];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2417,6 +2424,7 @@ static int32_t parse_parameters(const char* numericalin) {
        implement_drm[64] = "no", include_topography[64] = "no",
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
+       acoustic_interface_projection[64] = "point",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2456,6 +2464,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
+  int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -2811,6 +2820,8 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
+  parsetext(fp, "acoustic_interface_projection", 's',
+            &acoustic_interface_projection);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -3173,6 +3184,24 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_coupling);
   }
 
+  if ((strcasecmp(acoustic_interface_projection, "point") == 0) ||
+      (strcasecmp(acoustic_interface_projection, "legacy") == 0) ||
+      (strcasecmp(acoustic_interface_projection, "one_point") == 0)) {
+    acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
+  } else if ((strcasecmp(acoustic_interface_projection, "face_mass") == 0) ||
+             (strcasecmp(acoustic_interface_projection, "mass") == 0) ||
+             (strcasecmp(acoustic_interface_projection, "weak") == 0) ||
+             (strcasecmp(acoustic_interface_projection,
+                         "mass_projected") == 0)) {
+    acousticInterfaceProjectionMode =
+        ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_interface_projection "
+                 "(point or face_mass): %s\n",
+                 acoustic_interface_projection);
+  }
+
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -3533,6 +3562,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.includeAcoustic = includeAcoustic;
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
+  Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
@@ -3582,6 +3612,11 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.includeAcoustic == YES) {
     monitor_print("Acoustic interface coupling:        %s\n",
                   acoustic_interface_coupling);
+    monitor_print("Acoustic interface projection:      %s\n",
+                  (Param.theAcousticInterfaceProjectionMode ==
+                   ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
+                      ? "face_mass"
+                      : "point");
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
@@ -4258,8 +4293,10 @@ static void mesh_release_acoustic_interface_data(void) {
   free(Global.acousticInterfaceFaceAreas);
   free(Global.acousticInterfaceFaceCenters);
   free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceFaceHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIndexes);
   free(Global.acousticInterfaceAdjacentCenters);
+  free(Global.acousticInterfaceAdjacentHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIds);
   Global.acousticFaceFlags = NULL;
   Global.acousticInterfaceElementIds = NULL;
@@ -4267,8 +4304,10 @@ static void mesh_release_acoustic_interface_data(void) {
   Global.acousticInterfaceFaceAreas = NULL;
   Global.acousticInterfaceFaceCenters = NULL;
   Global.acousticInterfaceFaceNormals = NULL;
+  Global.acousticInterfaceFaceHalfWidths = NULL;
   Global.acousticInterfaceAdjacentElementIndexes = NULL;
   Global.acousticInterfaceAdjacentCenters = NULL;
+  Global.acousticInterfaceAdjacentHalfWidths = NULL;
   Global.acousticInterfaceAdjacentElementIds = NULL;
   Global.acousticInterfaceElements = 0;
   Global.acousticInterfaceFaces = 0;
@@ -4596,8 +4635,10 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   double* new_areas;
   double* new_centers;
   double* new_normals;
+  double* new_halfwidths;
   int32_t* new_adjacent_indexes;
   double* new_adjacent_centers;
+  double* new_adjacent_halfwidths;
   int64_t* new_adjacent;
 
   if ((capacity == NULL) || (needed <= *capacity)) {
@@ -4621,22 +4662,30 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   new_areas = (double*)malloc((size_t)new_capacity * sizeof(double));
   new_centers = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_normals = (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
+  new_halfwidths =
+      (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_adjacent_indexes =
       (int32_t*)malloc((size_t)new_capacity * sizeof(int32_t));
   new_adjacent_centers =
       (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
+  new_adjacent_halfwidths =
+      (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_adjacent = (int64_t*)malloc((size_t)new_capacity * sizeof(int64_t));
   if ((new_elements == NULL) || (new_faces == NULL) || (new_areas == NULL) ||
       (new_centers == NULL) || (new_normals == NULL) ||
+      (new_halfwidths == NULL) ||
       (new_adjacent_indexes == NULL) || (new_adjacent_centers == NULL) ||
+      (new_adjacent_halfwidths == NULL) ||
       (new_adjacent == NULL)) {
     free(new_elements);
     free(new_faces);
     free(new_areas);
     free(new_centers);
     free(new_normals);
+    free(new_halfwidths);
     free(new_adjacent_indexes);
     free(new_adjacent_centers);
+    free(new_adjacent_halfwidths);
     free(new_adjacent);
     fprintf(stderr,
             "Thread %d: failed to allocate acoustic interface fragment table\n",
@@ -4655,9 +4704,14 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
            3 * count * sizeof(double));
     memcpy(new_normals, Global.acousticInterfaceFaceNormals,
            3 * count * sizeof(double));
+    memcpy(new_halfwidths, Global.acousticInterfaceFaceHalfWidths,
+           3 * count * sizeof(double));
     memcpy(new_adjacent_indexes, Global.acousticInterfaceAdjacentElementIndexes,
            count * sizeof(int32_t));
     memcpy(new_adjacent_centers, Global.acousticInterfaceAdjacentCenters,
+           3 * count * sizeof(double));
+    memcpy(new_adjacent_halfwidths,
+           Global.acousticInterfaceAdjacentHalfWidths,
            3 * count * sizeof(double));
     memcpy(new_adjacent, Global.acousticInterfaceAdjacentElementIds,
            count * sizeof(int64_t));
@@ -4668,8 +4722,10 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   free(Global.acousticInterfaceFaceAreas);
   free(Global.acousticInterfaceFaceCenters);
   free(Global.acousticInterfaceFaceNormals);
+  free(Global.acousticInterfaceFaceHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIndexes);
   free(Global.acousticInterfaceAdjacentCenters);
+  free(Global.acousticInterfaceAdjacentHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIds);
 
   Global.acousticInterfaceElementIds = new_elements;
@@ -4677,8 +4733,10 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   Global.acousticInterfaceFaceAreas = new_areas;
   Global.acousticInterfaceFaceCenters = new_centers;
   Global.acousticInterfaceFaceNormals = new_normals;
+  Global.acousticInterfaceFaceHalfWidths = new_halfwidths;
   Global.acousticInterfaceAdjacentElementIndexes = new_adjacent_indexes;
   Global.acousticInterfaceAdjacentCenters = new_adjacent_centers;
+  Global.acousticInterfaceAdjacentHalfWidths = new_adjacent_halfwidths;
   Global.acousticInterfaceAdjacentElementIds = new_adjacent;
   *capacity = new_capacity;
 }
@@ -4686,8 +4744,9 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
 static void mesh_append_acoustic_interface_fragment(
     int64_t* count, int64_t* capacity, int32_t eindex, uint8_t face,
     double area, const double center[3], const double normal[3],
-    int32_t adjacent_eindex, int64_t adjacent_geid,
-    const double adjacent_center[3]) {
+    const double halfwidth[3], int32_t adjacent_eindex,
+    int64_t adjacent_geid, const double adjacent_center[3],
+    const double adjacent_halfwidth[3]) {
   int64_t index;
 
   mesh_reserve_acoustic_interface_fragments(*count + 1, *count, capacity);
@@ -4702,11 +4761,20 @@ static void mesh_append_acoustic_interface_fragment(
   Global.acousticInterfaceFaceNormals[3 * index + 0] = normal[0];
   Global.acousticInterfaceFaceNormals[3 * index + 1] = normal[1];
   Global.acousticInterfaceFaceNormals[3 * index + 2] = normal[2];
+  Global.acousticInterfaceFaceHalfWidths[3 * index + 0] = halfwidth[0];
+  Global.acousticInterfaceFaceHalfWidths[3 * index + 1] = halfwidth[1];
+  Global.acousticInterfaceFaceHalfWidths[3 * index + 2] = halfwidth[2];
   Global.acousticInterfaceAdjacentElementIndexes[index] = adjacent_eindex;
   Global.acousticInterfaceAdjacentElementIds[index] = adjacent_geid;
   Global.acousticInterfaceAdjacentCenters[3 * index + 0] = adjacent_center[0];
   Global.acousticInterfaceAdjacentCenters[3 * index + 1] = adjacent_center[1];
   Global.acousticInterfaceAdjacentCenters[3 * index + 2] = adjacent_center[2];
+  Global.acousticInterfaceAdjacentHalfWidths[3 * index + 0] =
+      adjacent_halfwidth[0];
+  Global.acousticInterfaceAdjacentHalfWidths[3 * index + 1] =
+      adjacent_halfwidth[1];
+  Global.acousticInterfaceAdjacentHalfWidths[3 * index + 2] =
+      adjacent_halfwidth[2];
   *count = index + 1;
 }
 
@@ -4923,6 +4991,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       int64_t adjacent_geid = -1;
       double center[3] = {0.0, 0.0, 0.0};
       double adjacent_center[3] = {0.0, 0.0, 0.0};
+      double halfwidth[3] = {0.0, 0.0, 0.0};
+      double adjacent_halfwidth[3] = {0.0, 0.0, 0.0};
       double u = ((double)iu + 0.5) / (double)split;
       double v = ((double)iv + 0.5) / (double)split;
 
@@ -4949,6 +5019,10 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
       if (append_fragments) {
         const double fragment_h = h / (double)split;
+        const double local_halfwidth = 1.0 / (double)split;
+
+        halfwidth[tangent_axes[0]] = local_halfwidth;
+        halfwidth[tangent_axes[1]] = local_halfwidth;
 
         if ((adjacent_eindex >= 0) && (adjacent_eindex < Global.myMesh->lenum)) {
           elem_t* adjacent_elemp = &Global.myMesh->elemTable[adjacent_eindex];
@@ -4977,11 +5051,14 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
               adjacent_center[dim] = -1.0;
             }
           }
+          adjacent_halfwidth[tangent_axes[0]] = fragment_h / adjacent_h;
+          adjacent_halfwidth[tangent_axes[1]] = fragment_h / adjacent_h;
         }
 
         mesh_append_acoustic_interface_fragment(
             table_count, table_capacity, eindex, face, fragment_h * fragment_h,
-            center, normal, adjacent_eindex, adjacent_geid, adjacent_center);
+            center, normal, halfwidth, adjacent_eindex, adjacent_geid,
+            adjacent_center, adjacent_halfwidth);
       }
     }
   }
@@ -9919,6 +9996,8 @@ static void solver_init() {
   /* Independent velocity-potential coupling. */
   Global.gpuData.acousticVelocityPotential =
       Param.theAcousticVelocityPotential;
+  Global.gpuData.acousticInterfaceProjectionMode =
+      Param.theAcousticInterfaceProjectionMode;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -9965,8 +10044,10 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
   Global.gpuData.acousticInterfaceFaceCentersDevice = NULL;
   Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
+  Global.gpuData.acousticInterfaceFaceHalfWidthsDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
+  Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
@@ -10043,6 +10124,15 @@ static void solver_init() {
         exit(1);
       }
       if (cudaMalloc(
+              (void**)&(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice),
+              3 * face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface face half widths\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
               (void**)&(
                   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice),
               face_count * sizeof(int32_t)) != cudaSuccess) {
@@ -10057,6 +10147,16 @@ static void solver_init() {
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to allocate acoustic interface adjacent centers\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc(
+              (void**)&(
+                  Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice),
+              3 * face_count * sizeof(double)) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic interface adjacent half widths\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -10688,6 +10788,16 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice,
+                     Global.acousticInterfaceFaceHalfWidths,
+                     3 * face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface face half widths\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
       if (cudaMemcpy(
               Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice,
               Global.acousticInterfaceAdjacentElementIndexes,
@@ -10705,6 +10815,16 @@ static void solver_init() {
                      cudaMemcpyHostToDevice) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to copy acoustic interface adjacent centers\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemcpy(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice,
+                     Global.acousticInterfaceAdjacentHalfWidths,
+                     3 * face_count * sizeof(double),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic interface adjacent half widths\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -11169,8 +11289,10 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceFaceAreasDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
+  cudaFree(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlSideMaskDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_aDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_bDevice);
