@@ -171,41 +171,27 @@ __host__ __device__ static inline int acoustic_interface_face_axes(
   return normal_axis;
 }
 
-__device__ static inline double acoustic_filter_interface_signal(
-    solver_float* history, double alpha, int32_t faceIndex, int slot,
-    double value)
+__device__ static inline double acoustic_filter_interface_source(
+    gpu_data_t* gpuData, int32_t faceIndex, int slot, double source_n)
 {
-  if ((history == NULL) || (alpha <= 0.0) || (alpha >= 1.0)) {
-    return value;
+  if ((gpuData->acousticInterfaceSourceFilterDevice == NULL) ||
+      (gpuData->acousticInterfaceSourceFilterAlpha <= 0.0) ||
+      (gpuData->acousticInterfaceSourceFilterAlpha >= 1.0)) {
+    return source_n;
   }
 
   const int64_t history_index =
       (int64_t)ACOUSTIC_INTERFACE_SOURCE_FILTER_SLOTS *
           (int64_t)faceIndex +
       (int64_t)slot;
-  solver_float* state = history + history_index;
-  const double old_value = (double)(*state);
-  const double filtered = old_value + alpha * (value - old_value);
+  solver_float* state =
+      gpuData->acousticInterfaceSourceFilterDevice + history_index;
+  const double old_source = (double)(*state);
+  const double alpha = gpuData->acousticInterfaceSourceFilterAlpha;
+  const double filtered = old_source + alpha * (source_n - old_source);
 
   *state = (solver_float)filtered;
   return filtered;
-}
-
-__device__ static inline double acoustic_filter_interface_source(
-    gpu_data_t* gpuData, int32_t faceIndex, int slot, double source_n)
-{
-  return acoustic_filter_interface_signal(
-      gpuData->acousticInterfaceSourceFilterDevice,
-      gpuData->acousticInterfaceSourceFilterAlpha, faceIndex, slot, source_n);
-}
-
-__device__ static inline double acoustic_filter_interface_pressure(
-    gpu_data_t* gpuData, int32_t faceIndex, int slot, double pressure)
-{
-  return acoustic_filter_interface_signal(
-      gpuData->acousticInterfacePressureFilterDevice,
-      gpuData->acousticInterfaceConjugateFilterAlpha, faceIndex, slot,
-      pressure);
 }
 
 
@@ -593,11 +579,6 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           }
         }
 
-        if (vp) {
-          q_pressure = acoustic_filter_interface_pressure(
-              gpuData, faceIndex, 2 * g0 + g1, q_pressure);
-        }
-
         for (int i = 0; i < 8; i++) {
           const double weight =
               acoustic_shape_value_at(i, q_force_center[0],
@@ -641,11 +622,6 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     } else {
       pressure += weight * (double)gpuData->pressureTm1Device[lnid];
     }
-  }
-
-  if (vp) {
-    pressure = acoustic_filter_interface_pressure(gpuData, faceIndex, 0,
-                                                  pressure);
   }
 
   /* CPML-aware interface correction for the pressure traction in the
