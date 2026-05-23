@@ -2418,6 +2418,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
+       acoustic_formulation[64] = "none",
        reconstruct_acoustic_plane_displacements[64] = "no",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
@@ -2435,6 +2436,8 @@ static int32_t parse_parameters(const char* numericalin) {
    * explicit "none" (-> honored as a deliberate escape hatch for the
    * known-unstable raw baseline, with a loud warning). */
   int cpml_pml_damp_explicit = 0;
+  int acoustic_formulation_explicit = 0;
+  int legacy_acoustic_pressure_formulation_explicit = 0;
   noyesflag_t have_buildings = UNSET;
   noyesflag_t have_parametricq = UNSET;
   noyesflag_t includeNonlinear = UNSET;
@@ -2808,8 +2811,12 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
-  parsetext(fp, "acoustic_pressure_formulation", 's',
-            &acoustic_pressure_formulation);
+  legacy_acoustic_pressure_formulation_explicit =
+      (parsetext(fp, "acoustic_pressure_formulation", 's',
+                 &acoustic_pressure_formulation) == 0);
+  acoustic_formulation_explicit =
+      (parsetext(fp, "acoustic_formulation", 's',
+                 &acoustic_formulation) == 0);
   parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
             &reconstruct_acoustic_plane_displacements);
   parsetext(fp, "acoustic_interface_diagnostics_file", 's',
@@ -2832,34 +2839,14 @@ static int32_t parse_parameters(const char* numericalin) {
   hu_config_get_int_opt(fp, "mesh_only_mode", &Param.theMeshOnlyMode);
   hu_config_get_int_opt(fp, "mesh_input_mode", &Param.theMeshInputMode);
 
-  /* Acoustic-elastic coupling formulation. DEFAULT = velocity_potential:
-   * it is the cross-validated, stable coupling (Z-disp corr 0.99-0.998 vs
-   * CPS, eliminates the 0 km secular growth the pressure form exhibited).
-   * The legacy pressure formulation remains available as an explicit
-   * opt-in via `acoustic_formulation = pressure`. This flag only affects
-   * simulations with acoustic elements / acoustic-elastic interfaces;
-   * pure-elastic runs are unaffected and bit-identical. */
+  /* Opt-in acoustic (water) attenuation. acoustic_quality_factor = a quality
+   * factor Q for acoustic elements; > 0 enables a small stiffness-proportional
+   * (Kelvin-Voigt) damping in the acoustic force kernel (NOT the elastic
+   * zeta/a*M route). Unset / <= 0 keeps acoustic exactly lossless and
+   * bit-identical to the validated baseline. A numerical regularizer for the
+   * lossless-cavity grid ring; not physical ocean attenuation (real seawater Q
+   * at the seismic band is ~1e5). See README. */
   {
-    char acform[64] = "velocity_potential";
-    (void)parsetext(fp, "acoustic_formulation", 's', &acform);
-    if (strcasecmp(acform, "pressure") == 0) {
-      Param.theAcousticVelocityPotential = 0;
-    } else if ((strcasecmp(acform, "velocity_potential") == 0) ||
-               (strcasecmp(acform, "potential") == 0)) {
-      Param.theAcousticVelocityPotential = 1;
-    } else {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "acoustic_formulation must be 'pressure' or "
-                   "'velocity_potential': got '%s'\n", acform);
-    }
-    /* Opt-in acoustic (water) attenuation. acoustic_quality_factor = a
-     * quality factor Q for acoustic elements; > 0 enables a small
-     * stiffness-proportional (Kelvin-Voigt) damping in the acoustic
-     * force kernel (NOT the elastic zeta/a*M route). Unset / <= 0 keeps
-     * acoustic exactly lossless and bit-identical to the validated
-     * baseline. A numerical regularizer for the lossless-cavity grid
-     * ring; not physical ocean attenuation (real seawater Q at the
-     * seismic band is ~1e5). See README. */
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
   }
@@ -3186,15 +3173,46 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_coupling);
   }
 
+  noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
-    acousticPressureFormulation = YES;
+    legacyAcousticPressureFormulation = YES;
   } else if (strcasecmp(acoustic_pressure_formulation, "no") == 0) {
-    acousticPressureFormulation = NO;
+    legacyAcousticPressureFormulation = NO;
   } else {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Unknown response for acoustic_pressure_formulation "
                  "(yes or no): %s\n",
                  acoustic_pressure_formulation);
+  }
+
+  /* acoustic_formulation is the single user-facing control. The legacy
+   * acoustic_pressure_formulation=yes key is accepted only when the new key is
+   * absent, and maps to the current stable velocity-potential path. */
+  if (acoustic_formulation_explicit) {
+    if (strcasecmp(acoustic_formulation, "none") == 0) {
+      acousticPressureFormulation = NO;
+      Param.theAcousticVelocityPotential = 1;
+    } else if (strcasecmp(acoustic_formulation, "pressure") == 0) {
+      acousticPressureFormulation = YES;
+      Param.theAcousticVelocityPotential = 0;
+    } else if ((strcasecmp(acoustic_formulation, "velocity_potential") == 0) ||
+               (strcasecmp(acoustic_formulation, "potential") == 0)) {
+      acousticPressureFormulation = YES;
+      Param.theAcousticVelocityPotential = 1;
+    } else {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "acoustic_formulation must be 'none', 'pressure', or "
+                   "'velocity_potential': got '%s'\n",
+                   acoustic_formulation);
+    }
+  } else if (legacyAcousticPressureFormulation == YES) {
+    acousticPressureFormulation = YES;
+    Param.theAcousticVelocityPotential = 1;
+    strcpy(acoustic_formulation, "velocity_potential");
+  } else {
+    acousticPressureFormulation = NO;
+    Param.theAcousticVelocityPotential = 1;
+    strcpy(acoustic_formulation, "none");
   }
 
   if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
@@ -3223,20 +3241,23 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if ((acousticPressureFormulation == YES) && (includeAcoustic != YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_pressure_formulation=yes requires "
-                 "include_acoustic=yes\n");
+                 "acoustic_formulation=%s requires "
+                 "include_acoustic=yes\n",
+                 acoustic_formulation);
   }
   if ((printStationPressures == YES) &&
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "print_station_pressures=yes requires include_acoustic=yes "
-                 "and acoustic_pressure_formulation=yes\n");
+                 "and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
   }
   if ((reconstructAcousticPlaneDisplacements == YES) &&
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
-                 "include_acoustic=yes and acoustic_pressure_formulation=yes\n");
+                 "include_acoustic=yes and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
   }
   if ((basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) &&
       (includeAcoustic != YES)) {
@@ -3550,16 +3571,21 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.includeAcoustic == YES) {
     monitor_print("Acoustic interface coupling:        %s\n",
                   acoustic_interface_coupling);
-    monitor_print("Acoustic pressure formulation:      %s\n",
-                  acoustic_pressure_formulation);
+    monitor_print("Acoustic formulation:               %s%s\n",
+                  (Param.acousticPressureFormulation != YES)
+                      ? "none"
+                      : ((Param.theAcousticVelocityPotential == 1)
+                             ? "velocity_potential (p = -dphi/dt; vel continuity)"
+                             : "pressure (legacy pressure variable)"),
+                  ((!acoustic_formulation_explicit) &&
+                   legacy_acoustic_pressure_formulation_explicit &&
+                   (legacyAcousticPressureFormulation == YES))
+                      ? " [from legacy acoustic_pressure_formulation=yes]"
+                      : "");
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
                   Param.theAcousticMeshRefinementFactor);
-    monitor_print("Acoustic formulation:               %s\n",
-                  (Param.theAcousticVelocityPotential == 1)
-                      ? "velocity_potential (p = -dphi/dt; vel continuity) [DEFAULT]"
-                      : "pressure (legacy; explicit opt-in)");
     if (Param.theAcousticQualityFactor > 0.0) {
       monitor_print("Acoustic quality factor Q:          %.3f "
                     "(stiffness-proportional; numerical regularizer)\n",
@@ -9498,7 +9524,7 @@ static void solver_init() {
     g_acousticPressureFreeSurfaceNodeCount = globalPressureFreeSurfaceNodes;
     if (Global.myID == 0) {
       monitor_print(
-          "Acoustic pressure formulation: pressure elements %.1fM, pressure nodes %.1fM, free-surface nodes %.1fM\n",
+          "Acoustic scalar formulation: %.1fM elements, %.1fM nodes, %.1fM free-surface nodes\n",
           (double)globalPressureElements / 1.0e6,
           (double)globalPressureNodes / 1.0e6,
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
