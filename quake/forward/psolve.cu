@@ -1579,8 +1579,6 @@ static struct Param_t {
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
-  noyesflag_t acousticInterfaceSourceFilter; /* filter vel-pot interface v_n */
-  double theAcousticInterfaceSourceFilterFreqHz;
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -1644,8 +1642,6 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
-           .acousticInterfaceSourceFilter = NO,
-           .theAcousticInterfaceSourceFilterFreqHz = 0.0,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
@@ -1937,9 +1933,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  39 /* Must adjust this if adding double params */
+  38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  53 /* Must adjust this if adding int params */
+  52 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1994,7 +1990,6 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
-  double_message[38] = Param.theAcousticInterfaceSourceFilterFreqHz;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2037,7 +2032,6 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
-  Param.theAcousticInterfaceSourceFilterFreqHz = double_message[38];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2092,7 +2086,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
-  int_message[52] = (int)Param.acousticInterfaceSourceFilter;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2150,7 +2143,6 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
-  Param.acousticInterfaceSourceFilter = (noyesflag_t)int_message[52];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2433,7 +2425,6 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_source_filter[64] = "no",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2474,7 +2465,6 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
-  noyesflag_t acousticInterfaceSourceFilter = NO;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -2832,8 +2822,6 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
-  parsetext(fp, "acoustic_interface_source_filter", 's',
-            &acoustic_interface_source_filter);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -2872,8 +2860,6 @@ static int32_t parse_parameters(const char* numericalin) {
   {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
-    hu_config_get_double_opt(fp, "acoustic_interface_source_filter_freq_hz",
-                             &Param.theAcousticInterfaceSourceFilterFreqHz);
   }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
@@ -3214,36 +3200,6 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_projection "
                  "(point or face_mass): %s\n",
                  acoustic_interface_projection);
-  }
-
-  if (strcasecmp(acoustic_interface_source_filter, "yes") == 0) {
-    acousticInterfaceSourceFilter = YES;
-  } else if (strcasecmp(acoustic_interface_source_filter, "no") == 0) {
-    acousticInterfaceSourceFilter = NO;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown response for acoustic_interface_source_filter "
-                 "(yes or no): %s\n",
-                 acoustic_interface_source_filter);
-  }
-  if (acousticInterfaceSourceFilter == YES) {
-    if (Param.theAcousticInterfaceSourceFilterFreqHz <= 0.0) {
-      Param.theAcousticInterfaceSourceFilterFreqHz = freq;
-    }
-    if (Param.theAcousticInterfaceSourceFilterFreqHz <= 0.0) {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "acoustic_interface_source_filter=yes requires "
-                   "acoustic_interface_source_filter_freq_hz > 0 or a "
-                   "positive simulation_wave_max_freq_hz.\n");
-    }
-    if (Param.theAcousticInterfaceSourceFilterFreqHz >=
-        (0.5 / deltaT)) {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "acoustic_interface_source_filter_freq_hz=%g must be "
-                   "below the Nyquist frequency %g.\n",
-                   Param.theAcousticInterfaceSourceFilterFreqHz,
-                   0.5 / deltaT);
-    }
   }
 
   noyesflag_t legacyAcousticPressureFormulation = NO;
@@ -3607,7 +3563,6 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
-  Param.acousticInterfaceSourceFilter = acousticInterfaceSourceFilter;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
@@ -3662,14 +3617,6 @@ static int32_t parse_parameters(const char* numericalin) {
                    ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
                       ? "face_mass"
                       : "point");
-    monitor_print("Acoustic interface source filter:   %s",
-                  (Param.acousticInterfaceSourceFilter == YES) ? "yes" : "no");
-    if (Param.acousticInterfaceSourceFilter == YES) {
-      monitor_print(" (fc=%.3f Hz; velocity_potential source only)\n",
-                    Param.theAcousticInterfaceSourceFilterFreqHz);
-    } else {
-      monitor_print("\n");
-    }
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
@@ -10051,31 +9998,6 @@ static void solver_init() {
       Param.theAcousticVelocityPotential;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
-  Global.gpuData.acousticInterfaceSourceFilterAlpha = 1.0;
-  if (acoustic_pressure_enabled() &&
-      (Param.acousticInterfaceSourceFilter == YES) &&
-      (Param.theAcousticVelocityPotential == 1)) {
-    const double omega =
-        2.0 * PI * Param.theAcousticInterfaceSourceFilterFreqHz;
-    Global.gpuData.acousticInterfaceSourceFilterAlpha =
-        1.0 - exp(-omega * Param.theDeltaT);
-    if (Global.gpuData.acousticInterfaceSourceFilterAlpha < 0.0) {
-      Global.gpuData.acousticInterfaceSourceFilterAlpha = 0.0;
-    } else if (Global.gpuData.acousticInterfaceSourceFilterAlpha > 1.0) {
-      Global.gpuData.acousticInterfaceSourceFilterAlpha = 1.0;
-    }
-    if (Global.myID == 0) {
-      monitor_print(
-          "Acoustic interface source filter:   active alpha=%.6e "
-          "(fc=%.3f Hz)\n",
-          Global.gpuData.acousticInterfaceSourceFilterAlpha,
-          Param.theAcousticInterfaceSourceFilterFreqHz);
-    }
-  } else if ((Param.acousticInterfaceSourceFilter == YES) &&
-             (Global.myID == 0)) {
-    monitor_print("Acoustic interface source filter:   requested but "
-                  "inactive unless acoustic velocity_potential is active\n");
-  }
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10126,7 +10048,6 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
-  Global.gpuData.acousticInterfaceSourceFilterDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
@@ -10239,23 +10160,6 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
-      }
-      if ((Param.acousticInterfaceSourceFilter == YES) &&
-          (Param.theAcousticVelocityPotential == 1)) {
-        if (cudaMalloc(
-                (void**)&(
-                    Global.gpuData.acousticInterfaceSourceFilterDevice),
-                ACOUSTIC_INTERFACE_SOURCE_FILTER_SLOTS * face_count *
-                    sizeof(solver_float)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface source filter history\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        cudaMemset(Global.gpuData.acousticInterfaceSourceFilterDevice, 0,
-                   ACOUSTIC_INTERFACE_SOURCE_FILTER_SLOTS * face_count *
-                       sizeof(solver_float));
       }
     }
   }
@@ -11398,7 +11302,6 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfacePmlElastic_invKappaDevice);
   cudaFree(Global.gpuData.acousticInterfacePsiPressureDevice);
   cudaFree(Global.gpuData.acousticInterfacePsiAccelDevice);
-  cudaFree(Global.gpuData.acousticInterfaceSourceFilterDevice);
   free(Global.acousticInterfacePmlSideMask);
   Global.acousticInterfacePmlSideMask = NULL;
   free(Global.acousticInterfacePmlAcoustic_a);
