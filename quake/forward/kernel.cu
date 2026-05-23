@@ -505,16 +505,20 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     }
   }
 
-  /* CPML-aware interface correction. On interface faces inside the PML
-   * zone, the exchanged pressure is stretched the same way the volume
-   * CPML stretches gradients: p~ = invKappa_n*p + psi, with
-   * psi <- b_n*psi + a_n*p along the face-normal axis. Identity (no-op)
-   * on non-PML faces (flag=0) and at the PML inner edge (a=0,b=1,iK=1). */
-  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
-      gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
-    const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
-    const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
-    const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
+  /* CPML-aware interface correction for the pressure traction in the
+   * elastic equation. Use the elastic-side stretch only; using the
+   * acoustic-side profile here would apply water Vp/sigma coefficients to
+   * the solid PML interface flux. Identity on non-elastic-PML faces and
+   * at the PML inner edge. */
+  if (gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
+      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] &
+       ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE) != 0) {
+    const double a =
+        gpuData->acousticInterfacePmlElastic_aDevice[faceIndex];
+    const double b =
+        gpuData->acousticInterfacePmlElastic_bDevice[faceIndex];
+    const double iK =
+        gpuData->acousticInterfacePmlElastic_invKappaDevice[faceIndex];
     const double psi_old =
         (double)gpuData->acousticInterfacePsiPressureDevice[faceIndex];
     const double psi_new = b * psi_old + a * pressure;
@@ -722,16 +726,19 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     }
   }
 
-  /* CPML-aware interface correction (mirror of the pressure->force path,
-   * with its own memory variable so the two coupling directions stay
-   * symmetric). Identity on non-PML faces / at the PML inner edge.
-   * Exchanged scalar is normal acceleration (pressure) or normal
-   * velocity (potential). */
-  if (gpuData->acousticInterfacePmlFlagDevice != NULL &&
-      gpuData->acousticInterfacePmlFlagDevice[faceIndex] != 0) {
-    const double a  = gpuData->acousticInterfacePml_aDevice[faceIndex];
-    const double b  = gpuData->acousticInterfacePml_bDevice[faceIndex];
-    const double iK = gpuData->acousticInterfacePml_invKappaDevice[faceIndex];
+  /* CPML-aware interface correction for the elastic normal-motion source in
+   * the acoustic equation. Use the acoustic-side stretch only; the acoustic
+   * RHS is the one being modified. Identity on non-acoustic-PML faces / at
+   * the PML inner edge. */
+  if (gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
+      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] &
+       ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE) != 0) {
+    const double a =
+        gpuData->acousticInterfacePmlAcoustic_aDevice[faceIndex];
+    const double b =
+        gpuData->acousticInterfacePmlAcoustic_bDevice[faceIndex];
+    const double iK =
+        gpuData->acousticInterfacePmlAcoustic_invKappaDevice[faceIndex];
     const double psi_old =
         (double)gpuData->acousticInterfacePsiAccelDevice[faceIndex];
     const double psi_new = b * psi_old + a * source_n;

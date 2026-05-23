@@ -147,6 +147,8 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_FACE_Y_PLUS  0x08u
 #define ACOUSTIC_FACE_Z_MINUS 0x10u
 #define ACOUSTIC_FACE_Z_PLUS  0x20u
+#define ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE 0x01u
+#define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -425,17 +427,20 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceAdjacentCentersDevice;
     /* CPML-aware interface coupling correction. All NULL unless
      * abc_type=cpml AND at least one acoustic-elastic interface face has a
-     * PML element on either side. Per-face: a 1/0 flag, the face-normal-axis
-     * ADE coefficients taken from the adjacent PML element, and two memory
-     * variables (one per coupling direction: pressure->force and
-     * accel->pressure). The coupling kernels replace the exchanged scalar q
-     * by q~ = invKappa_n*q + psi, psi <- b_n*psi + a_n*q, exactly mirroring
-     * the volume CPML treatment but on the interface flux. No-op at the PML
-     * inner edge (a=0, b=1, invKappa=1) and on non-PML faces (flag=0). */
-    uint8_t*     acousticInterfacePmlFlagDevice;
-    double*      acousticInterfacePml_aDevice;
-    double*      acousticInterfacePml_bDevice;
-    double*      acousticInterfacePml_invKappaDevice;
+     * PML element on either side. Per-face sideMask bit 0 means the
+     * acoustic side is in PML; bit 1 means the elastic side is in PML.
+     * Each side stores its own face-normal-axis ADE coefficients. The
+     * acoustic-side profile is used for the elastic->acoustic source term;
+     * the elastic-side profile is used for the acoustic-pressure traction
+     * on the solid. This avoids using water Vp/profile coefficients for an
+     * elastic PML face, or vice versa. */
+    uint8_t*     acousticInterfacePmlSideMaskDevice;
+    double*      acousticInterfacePmlAcoustic_aDevice;
+    double*      acousticInterfacePmlAcoustic_bDevice;
+    double*      acousticInterfacePmlAcoustic_invKappaDevice;
+    double*      acousticInterfacePmlElastic_aDevice;
+    double*      acousticInterfacePmlElastic_bDevice;
+    double*      acousticInterfacePmlElastic_invKappaDevice;
     solver_float* acousticInterfacePsiPressureDevice;
     solver_float* acousticInterfacePsiAccelDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
