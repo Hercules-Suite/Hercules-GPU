@@ -261,36 +261,51 @@ Acoustic-elastic input flags (input file):
 	water volume. When using a two-phase workflow, set this before generating
 	the mesh etree in phase A; importing an already-generated mesh preserves the
 	existing mesh resolution.
-- `acoustic_pressure_formulation`
-	Optional. `yes` enables the pressure-DOF acoustic solver path. Acoustic
-	elements assemble scalar pressure mass/stiffness instead of displacement
-	mass/stiffness, while elastic elements continue to use displacement DOFs.
-	This requires `include_acoustic=yes`. On a flat model surface, acoustic
-	pressure nodes on the top external domain face are constrained to `p=0`
-	for a pressure-release water surface. When `acoustic_interface_coupling=yes`,
-	the pressure formulation builds an explicit acoustic-solid interface table.
-	In octree meshes, nonconforming interface faces are split into area-weighted
-	fragments with fragment centers and normals, and CUDA kernels apply the
-	normal traction/acceleration coupling only on those fragments. Each fragment
-	interpolates pressure on the acoustic element and displacement acceleration
-	on the adjacent elastic element, so refined elastic neighbors can couple to
-	coarser acoustic faces. Fragment subdivision follows
-	`acoustic_interface_max_level` and finer local neighbors.
-	When the neighboring element is local, the table uses that element's
-	mesh-level acoustic/elastic classification, so mixed elements kept elastic
-	still couple to adjacent acoustic elements. Subdivision has a per-face cap of
+- `acoustic_formulation`
+	Optional. Single controlling variable for scalar acoustic physics:
+	`velocity_potential` (default), `pressure`, or `none` (`potential` is
+	accepted as an alias for `velocity_potential`). `velocity_potential`
+	enables the current validated potential formulation (`p = -dphi/dt`), which
+	is the recommended acoustic-elastic coupling path. `pressure` enables the
+	legacy pressure-variable acoustic solver. `none` is an explicit opt-out:
+	it keeps acoustic material handling and interface classification available,
+	but does not allocate scalar acoustic DOFs. `pressure` and
+	`velocity_potential` require `include_acoustic=yes`; when
+	`include_acoustic=no`, the acoustic module is inactive.
+	Acoustic elements assemble scalar acoustic mass/stiffness instead of
+	displacement mass/stiffness, while elastic elements continue to use
+	displacement DOFs. On a flat model surface, acoustic scalar nodes on the top
+	external domain face are constrained to enforce a pressure-release water
+	surface. When `acoustic_interface_coupling=yes`, scalar acoustic
+	formulations build an explicit acoustic-solid interface table. In octree
+	meshes, nonconforming interface faces are split into area-weighted fragments
+	with fragment centers and normals, and CUDA kernels apply the normal
+	traction/acceleration coupling only on those fragments. Each fragment
+	interpolates the scalar acoustic field on the acoustic element and
+	displacement acceleration on the adjacent elastic element, so refined elastic
+	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
+	`acoustic_interface_max_level` and finer local neighbors. When the
+	neighboring element is local, the table uses that element's mesh-level
+	acoustic/elastic classification, so mixed elements kept elastic still
+	couple to adjacent acoustic elements. Subdivision has a per-face cap of
 	`32 x 32` fragments to avoid accidental table blow-up.
+	The legacy `acoustic_pressure_formulation` key is still accepted as a
+	backward-compatibility alias only when `acoustic_formulation` is absent:
+	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
+	input files should use `acoustic_formulation`.
 - `acoustic_interface_diagnostics_file`
-	Optional pressure-interface diagnostic output path. When this path is set
-	and `acoustic_pressure_formulation=yes`, the solver writes one row per local
-	acoustic-solid interface fragment after mesh setup. The file records the
-	acoustic element id, face id, fragment area, fragment center in local and
-	model coordinates, outward normal, element level/size, and adjacent elastic
-	element local index/id and local fragment coordinates when the adjacent
-	element is local. This file can be very large, so it is disabled when unset.
+	Optional acoustic-interface diagnostic output path. When this path is set
+	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver
+	writes one row per local acoustic-solid interface fragment after mesh setup.
+	The file records the acoustic element id, face id, fragment area, fragment
+	center in local and model coordinates, outward normal, element level/size,
+	and adjacent elastic element local index/id and local fragment coordinates
+	when the adjacent element is local. This file can be very large, so it is
+	disabled when unset.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
-	`acoustic_pressure_formulation=yes`. Pressure is appended as a
+	`acoustic_formulation` is `pressure` or `velocity_potential`. Pressure is
+	appended as a
 	`Pressure(Pa)` column in the normal `station.N` files after any requested
 	displacement, velocity, and acceleration columns. For stations whose
 	containing element is acoustic, the motion columns are reconstructed from
@@ -351,8 +366,8 @@ Acoustic-elastic input flags (input file):
 	standard `planedisplacements.N` files. Elastic plane points continue to use
 	the elastic displacement field, so mixed water/solid planes remain a single
 	three-component displacement file. This requires `include_acoustic=yes` and
-	`acoustic_pressure_formulation=yes`. Default is `no`, which preserves the
-	legacy plane-output behavior.
+	`acoustic_formulation=pressure` or `acoustic_formulation=velocity_potential`.
+	Default is `no`, which preserves the legacy plane-output behavior.
 - `basin_material_type`
 	Optional. Controls material assigned inside `basin_velocity_model` geometry.
 	Default is `elastic`, which preserves the historical hard-coded basin
@@ -369,19 +384,6 @@ Acoustic-elastic input flags (input file):
 	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`.
-- `acoustic_formulation`
-	Optional. **`velocity_potential` (default)** or `pressure`. Selects
-	the acoustic–elastic interface coupling variable. `velocity_potential`
-	is the stable, cross-validated default; `pressure` is the legacy path,
-	kept as an explicit opt-in and bit-identical to earlier validated
-	pressure runs. Only affects simulations with acoustic elements /
-	acoustic–elastic interfaces — pure-elastic runs are unaffected and
-	bit-identical either way. The default removes the added-mass / CFL
-	instability the `pressure` path showed for a thin stiff water layer
-	over an elastic halfspace (displacement validated against CPS at
-	corr ~0.99–0.998). Requires `include_acoustic=yes` and
-	`acoustic_pressure_formulation=yes`. Set `= pressure` to restore the
-	exact legacy behavior.
 - `acoustic_quality_factor`
 	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
 	bit-identical to the validated baseline. A positive quality factor
@@ -397,7 +399,7 @@ Acoustic-elastic input flags (input file):
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
 
-Acoustic-pressure formulation — correctness fix & known limitation:
+Scalar acoustic formulation — correctness fix & known limitation:
 
 - **Interior stiffness factor-of-2 correction.** An earlier acoustic
 	Laplacian coefficient was a factor of two too small, making the
@@ -795,4 +797,3 @@ the samples to peak 1 and carry the physical amplitude in
 `force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
-
