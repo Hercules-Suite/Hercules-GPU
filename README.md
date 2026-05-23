@@ -263,13 +263,15 @@ Acoustic-elastic input flags (input file):
 	existing mesh resolution.
 - `acoustic_formulation`
 	Optional. Single controlling variable for scalar acoustic physics:
-	`none` (default), `pressure`, or `velocity_potential` (`potential` is
-	accepted as an alias). `none` keeps acoustic material handling and
-	interface classification available, but does not allocate scalar acoustic
-	DOFs. `pressure` enables the legacy pressure-variable acoustic solver.
-	`velocity_potential` enables the current validated potential formulation
-	(`p = -dphi/dt`), which is the recommended acoustic-elastic coupling path.
-	`pressure` and `velocity_potential` require `include_acoustic=yes`.
+	`velocity_potential` (default), `pressure`, or `none` (`potential` is
+	accepted as an alias for `velocity_potential`). `velocity_potential`
+	enables the current validated potential formulation (`p = -dphi/dt`), which
+	is the recommended acoustic-elastic coupling path. `pressure` enables the
+	legacy pressure-variable acoustic solver. `none` is an explicit opt-out:
+	it keeps acoustic material handling and interface classification available,
+	but does not allocate scalar acoustic DOFs. `pressure` and
+	`velocity_potential` require `include_acoustic=yes`; when
+	`include_acoustic=no`, the acoustic module is inactive.
 	Acoustic elements assemble scalar acoustic mass/stiffness instead of
 	displacement mass/stiffness, while elastic elements continue to use
 	displacement DOFs. On a flat model surface, acoustic scalar nodes on the top
@@ -287,9 +289,10 @@ Acoustic-elastic input flags (input file):
 	acoustic/elastic classification, so mixed elements kept elastic still
 	couple to adjacent acoustic elements. Subdivision has a per-face cap of
 	`32 x 32` fragments to avoid accidental table blow-up.
-	`acoustic_pressure_formulation=yes` is still accepted as a backward-
-	compatibility alias only when `acoustic_formulation` is absent; it maps to
-	`velocity_potential`. New input files should use `acoustic_formulation`.
+	The legacy `acoustic_pressure_formulation` key is still accepted as a
+	backward-compatibility alias only when `acoustic_formulation` is absent:
+	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
+	input files should use `acoustic_formulation`.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver

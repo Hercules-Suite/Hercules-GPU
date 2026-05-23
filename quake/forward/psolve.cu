@@ -2418,7 +2418,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_pressure_formulation[64] = "no",
-       acoustic_formulation[64] = "none",
+       acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
@@ -3185,9 +3185,10 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_pressure_formulation);
   }
 
-  /* acoustic_formulation is the single user-facing control. The legacy
-   * acoustic_pressure_formulation=yes key is accepted only when the new key is
-   * absent, and maps to the current stable velocity-potential path. */
+  /* acoustic_formulation is the single user-facing control. With
+   * include_acoustic=yes, the absent-key default is the current stable
+   * velocity-potential path. The legacy acoustic_pressure_formulation key is
+   * honored only when acoustic_formulation is absent. */
   if (acoustic_formulation_explicit) {
     if (strcasecmp(acoustic_formulation, "none") == 0) {
       acousticPressureFormulation = NO;
@@ -3205,14 +3206,24 @@ static int32_t parse_parameters(const char* numericalin) {
                    "'velocity_potential': got '%s'\n",
                    acoustic_formulation);
     }
-  } else if (legacyAcousticPressureFormulation == YES) {
+  } else if (legacy_acoustic_pressure_formulation_explicit) {
+    if (legacyAcousticPressureFormulation == YES) {
+      acousticPressureFormulation = YES;
+      Param.theAcousticVelocityPotential = 1;
+      strcpy(acoustic_formulation, "velocity_potential");
+    } else {
+      acousticPressureFormulation = NO;
+      Param.theAcousticVelocityPotential = 1;
+      strcpy(acoustic_formulation, "none");
+    }
+  } else if (includeAcoustic == YES) {
     acousticPressureFormulation = YES;
     Param.theAcousticVelocityPotential = 1;
     strcpy(acoustic_formulation, "velocity_potential");
   } else {
     acousticPressureFormulation = NO;
     Param.theAcousticVelocityPotential = 1;
-    strcpy(acoustic_formulation, "none");
+    strcpy(acoustic_formulation, "velocity_potential");
   }
 
   if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
