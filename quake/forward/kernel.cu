@@ -171,6 +171,29 @@ __host__ __device__ static inline int acoustic_interface_face_axes(
   return normal_axis;
 }
 
+__device__ static inline double acoustic_filter_interface_source(
+    gpu_data_t* gpuData, int32_t faceIndex, int slot, double source_n)
+{
+  if ((gpuData->acousticInterfaceSourceFilterDevice == NULL) ||
+      (gpuData->acousticInterfaceSourceFilterAlpha <= 0.0) ||
+      (gpuData->acousticInterfaceSourceFilterAlpha >= 1.0)) {
+    return source_n;
+  }
+
+  const int64_t history_index =
+      (int64_t)ACOUSTIC_INTERFACE_SOURCE_FILTER_SLOTS *
+          (int64_t)faceIndex +
+      (int64_t)slot;
+  solver_float* state =
+      gpuData->acousticInterfaceSourceFilterDevice + history_index;
+  const double old_source = (double)(*state);
+  const double alpha = gpuData->acousticInterfaceSourceFilterAlpha;
+  const double filtered = old_source + alpha * (source_n - old_source);
+
+  *state = (solver_float)filtered;
+  return filtered;
+}
+
 
 /* Flag denoting if kernel FLOP count cache initialized */
 static int kernel_cached_flag = 0;
@@ -853,6 +876,11 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
           }
         }
 
+        if (vp) {
+          q_source_n = acoustic_filter_interface_source(
+              gpuData, faceIndex, 2 * g0 + g1, q_source_n);
+        }
+
         for (int i = 0; i < 8; i++) {
           const double weight =
               acoustic_shape_value_at(i, q_center[0], q_center[1],
@@ -911,6 +939,11 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
                      (double)u_prev.f[2]) *
                         invDeltaT2 * normal[2]));
     }
+  }
+
+  if (vp) {
+    source_n = acoustic_filter_interface_source(gpuData, faceIndex, 0,
+                                                source_n);
   }
 
   /* CPML-aware interface correction for the elastic normal-motion source in

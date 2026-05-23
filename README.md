@@ -255,6 +255,16 @@ Acoustic-elastic input flags (input file):
 	`acoustic_formulation=velocity_potential` runs. PML interface fragments
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
+- `acoustic_interface_source_filter`
+	Optional. `no` (default) keeps the raw interface source. `yes` applies a
+	first-order causal low-pass filter only to the solid-side normal velocity
+	used as the elastic-to-acoustic source in
+	`acoustic_formulation=velocity_potential`. It does not filter station
+	output, the acoustic pressure field after the solve, or the pressure
+	traction applied back onto the elastic side. Set
+	`acoustic_interface_source_filter_freq_hz` to choose the cutoff; if omitted
+	while the filter is enabled, the solver uses
+	`simulation_wave_max_freq_hz`.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which

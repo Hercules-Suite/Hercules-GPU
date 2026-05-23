@@ -151,6 +151,7 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
 #define ACOUSTIC_INTERFACE_PROJECTION_POINT     0
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
+#define ACOUSTIC_INTERFACE_SOURCE_FILTER_SLOTS 4
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -447,6 +448,7 @@ typedef struct gpu_data_t {
     double*      acousticInterfacePmlElastic_invKappaDevice;
     solver_float* acousticInterfacePsiPressureDevice;
     solver_float* acousticInterfacePsiAccelDevice;
+    solver_float* acousticInterfaceSourceFilterDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
     double*      acousticPressureCoeffArrayDevice;
     double*      acousticPressureBoundaryCoeffArrayDevice;
@@ -626,6 +628,7 @@ typedef struct gpu_data_t {
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
+    double        acousticInterfaceSourceFilterAlpha;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
     /* v3 station viscoelastic stress gather (print_station_strains /
