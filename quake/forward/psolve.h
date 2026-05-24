@@ -431,6 +431,8 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceImpedanceDevice;
     double*      acousticInterfaceInvDensityDevice;
     double*      acousticInterfaceInvEdgeSizeDevice;
+    double*      acousticInterfaceElasticImpedanceDevice;
+    double*      acousticInterfaceElasticInvEdgeSizeDevice;
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
     double*      acousticInterfaceAdjacentHalfWidthsDevice;
@@ -631,8 +633,8 @@ typedef struct gpu_data_t {
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
-    /* Acoustic interface regularization. 0 = none; 1 = impedance/Riemann
-     * pressure correction p* = p + factor*Z*(v_acoustic_n-v_solid_n). */
+    /* Acoustic interface regularization. 0 = none; 1 = symmetric impedance
+     * Riemann flux blended by acousticInterfacePenaltyFactor in [0,1]. */
     int           acousticInterfaceRegularizationMode;
     double        acousticInterfacePenaltyFactor;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */

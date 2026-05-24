@@ -1580,7 +1580,7 @@ static struct Param_t {
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
   int theAcousticInterfaceRegularizationMode;/* none or impedance flux */
-  double theAcousticInterfacePenaltyFactor;  /* impedance multiplier */
+  double theAcousticInterfacePenaltyFactor;  /* passive flux blend in [0,1] */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -3236,6 +3236,14 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.theAcousticInterfacePenaltyFactor < 0.0) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "acoustic_interface_penalty_factor=%g must be >= 0.\n",
+                 Param.theAcousticInterfacePenaltyFactor);
+  }
+  if ((acousticInterfaceRegularizationMode ==
+       ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
+      (Param.theAcousticInterfacePenaltyFactor > 1.0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_interface_penalty_factor=%g must be <= 1 for "
+                 "the passive impedance flux.\n",
                  Param.theAcousticInterfacePenaltyFactor);
   }
 
@@ -10113,6 +10121,8 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceImpedanceDevice = NULL;
   Global.gpuData.acousticInterfaceInvDensityDevice = NULL;
   Global.gpuData.acousticInterfaceInvEdgeSizeDevice = NULL;
+  Global.gpuData.acousticInterfaceElasticImpedanceDevice = NULL;
+  Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
@@ -10228,6 +10238,26 @@ static void solver_init() {
                 face_count * sizeof(double)) != cudaSuccess) {
           fprintf(stderr,
                   "Thread %d: Failed to allocate acoustic interface inverse density table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMalloc(
+                (void**)&(
+                    Global.gpuData.acousticInterfaceElasticImpedanceDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface elastic impedance table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMalloc(
+                (void**)&(
+                    Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface elastic inverse edge-size table\n",
                   Global.myID);
           MPI_Abort(MPI_COMM_WORLD, ERROR);
           exit(1);
@@ -10905,8 +10935,14 @@ static void solver_init() {
         double* interface_inv_h = (double*)calloc(face_count, sizeof(double));
         double* interface_inv_rho =
             (double*)calloc(face_count, sizeof(double));
+        double* interface_elastic_impedance =
+            (double*)calloc(face_count, sizeof(double));
+        double* interface_elastic_inv_h =
+            (double*)calloc(face_count, sizeof(double));
         if ((interface_impedance == NULL) || (interface_inv_h == NULL) ||
-            (interface_inv_rho == NULL)) {
+            (interface_inv_rho == NULL) ||
+            (interface_elastic_impedance == NULL) ||
+            (interface_elastic_inv_h == NULL)) {
           fprintf(stderr,
                   "Thread %d: Failed to allocate acoustic interface impedance host tables\n",
                   Global.myID);
@@ -10924,6 +10960,22 @@ static void solver_init() {
               interface_impedance[iface] = edata->rho * edata->Vp;
               interface_inv_h[iface] = 1.0 / edata->edgesize;
               interface_inv_rho[iface] = 1.0 / edata->rho;
+            }
+          }
+
+          int32_t adjacent_eindex =
+              Global.acousticInterfaceAdjacentElementIndexes[iface];
+          if ((adjacent_eindex >= 0) &&
+              (adjacent_eindex < Global.myMesh->lenum)) {
+            edata_t* adjacent_edata =
+                (edata_t*)Global.myMesh->elemTable[adjacent_eindex].data;
+            if ((adjacent_edata->rho > 0.0) &&
+                (adjacent_edata->Vp > 0.0) &&
+                (adjacent_edata->edgesize > 0.0)) {
+              interface_elastic_impedance[iface] =
+                  adjacent_edata->rho * adjacent_edata->Vp;
+              interface_elastic_inv_h[iface] =
+                  1.0 / adjacent_edata->edgesize;
             }
           }
         }
@@ -10955,10 +11007,32 @@ static void solver_init() {
           MPI_Abort(MPI_COMM_WORLD, ERROR);
           exit(1);
         }
+        if (cudaMemcpy(Global.gpuData.acousticInterfaceElasticImpedanceDevice,
+                       interface_elastic_impedance,
+                       face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic interface elastic impedance table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMemcpy(
+                Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice,
+                interface_elastic_inv_h, face_count * sizeof(double),
+                cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic interface elastic inverse edge-size table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
 
         free(interface_impedance);
         free(interface_inv_h);
         free(interface_inv_rho);
+        free(interface_elastic_impedance);
+        free(interface_elastic_inv_h);
       }
       if (cudaMemcpy(
               Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice,
@@ -11455,6 +11529,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceImpedanceDevice);
   cudaFree(Global.gpuData.acousticInterfaceInvDensityDevice);
   cudaFree(Global.gpuData.acousticInterfaceInvEdgeSizeDevice);
+  cudaFree(Global.gpuData.acousticInterfaceElasticImpedanceDevice);
+  cudaFree(Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice);

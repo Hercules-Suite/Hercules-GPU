@@ -257,14 +257,17 @@ Acoustic-elastic input flags (input file):
 	correction remains unchanged.
 - `acoustic_interface_regularization`
 	Optional. `none` (default) keeps the central interface flux. `impedance`
-	enables an experimental passive pressure-flux correction for
-	`acoustic_formulation=velocity_potential`:
-	`p* = p + alpha * Z * (v_acoustic_n - v_solid_n)`, where
-	`Z = rho * Vp` is the acoustic-side impedance and `alpha` is
-	`acoustic_interface_penalty_factor` (default `1.0`). The correction is
-	applied to the pressure traction assembled onto the elastic side and is
-	intended to damp only normal-velocity mismatch at the acoustic-elastic
-	interface. `robin` and `upwind` are accepted as aliases for `impedance`.
+	enables a symmetric acoustic-elastic impedance/Riemann flux for
+	`acoustic_formulation=velocity_potential`. The flux samples both
+	conjugate interface quantities on both sides: acoustic pressure and
+	normal velocity, plus elastic normal stress and normal velocity. It then
+	blends the baseline flux with the two-impedance Riemann state using
+	`acoustic_interface_penalty_factor` in `[0, 1]` (`0` = baseline,
+	`1` = full Riemann flux). The same blended pressure is used for the
+	elastic traction and the same blended normal velocity is used for the
+	acoustic velocity-potential source, so the regularization is applied to
+	both sides consistently. `robin` and `upwind` are accepted as aliases for
+	`impedance`.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
