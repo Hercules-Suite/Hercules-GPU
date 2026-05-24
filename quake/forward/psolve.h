@@ -153,6 +153,9 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
 #define ACOUSTIC_INTERFACE_REGULARIZATION_NONE      0
 #define ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE 1
+#define ACOUSTIC_FORMULATION_PRESSURE               0
+#define ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL     1
+#define ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL 2
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -400,8 +403,9 @@ typedef struct gpu_data_t {
     fvector_t*   tm3Device; // GPU nodal tm3 displacements
     fvector_t*   forceDevice; // GPU nodal forces
 
-    solver_float* pressureTm1Device;   // GPU nodal acoustic pressure at t
-    solver_float* pressureTm2Device;   // GPU nodal acoustic pressure at t-dt/new
+    solver_float* pressureTm1Device;   // GPU nodal acoustic scalar at t
+    solver_float* pressureTm2Device;   // GPU nodal acoustic scalar at t-dt/new
+    solver_float* pressureTm3Device;   // GPU nodal acoustic scalar at t-2dt
     solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
     solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
@@ -625,10 +629,10 @@ typedef struct gpu_data_t {
      * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
     int           cpmlPmlMaterialDamping;
 
-    /* Velocity-potential acoustic-elastic coupling. 0 = pressure;
-     * 1 = the acoustic buffers hold a velocity potential phi, the interface
-     * exchanges solid normal VELOCITY (1st time-difference, ~omega) and
-     * the solid feels p = -dphi/dt, and station pressure output = -dphi/dt. */
+    /* Scalar acoustic formulation. 0 = pressure; 1 = velocity potential phi
+     * (p=-dphi/dt, interface source=solid normal velocity); 2 =
+     * displacement potential chi (p=-d2chi/dt2, interface source=solid
+     * normal displacement). */
     int           acousticVelocityPotential;
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
@@ -692,8 +696,9 @@ struct mysolver_t {
     fvector_t* tm3;           /* Displacements at time-step t - 3      */
     fvector_t* force;         /* Force accumulation at time-step t     */
 
-    solver_float* pressure_tm1;   /* Acoustic pressure at time-step t - 1 */
-    solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
+    solver_float* pressure_tm1;   /* Acoustic scalar at current time */
+    solver_float* pressure_tm2;   /* Acoustic scalar at previous/new time */
+    solver_float* pressure_tm3;   /* Acoustic scalar at t - 2dt */
     solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;

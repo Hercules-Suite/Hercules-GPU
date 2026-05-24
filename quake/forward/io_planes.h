@@ -29,6 +29,7 @@ extern void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlan
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-    UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements);
+    UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements,
+    int acousticFormulation);
 extern void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes);
 extern void planes_IO_PES_main(int32_t myID);
