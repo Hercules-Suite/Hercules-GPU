@@ -1597,6 +1597,7 @@ static struct Param_t {
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
+           .theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -1643,7 +1644,6 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
-           .theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
