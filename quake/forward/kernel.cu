@@ -311,7 +311,7 @@ __device__ static inline double acoustic_scalar_pressure_node(
 }
 
 __device__ static inline double acoustic_elastic_normal_pressure_at(
-    gpu_data_t* gpuData, int32_t eindex, const double point[3],
+    gpu_data_t* gpuData, int32_t faceIndex, int32_t eindex, const double point[3],
     const double normal[3], double inv_h)
 {
   double grad[3][3] = {{0.0, 0.0, 0.0},
@@ -339,8 +339,24 @@ __device__ static inline double acoustic_elastic_normal_pressure_at(
     }
   }
 
-  const double mu = 9.0 * gpuData->c1ArrayDevice[eindex];
-  const double lambda = 9.0 * gpuData->c2ArrayDevice[eindex];
+  double mu = 9.0 * gpuData->c1ArrayDevice[eindex];
+  double lambda = 9.0 * gpuData->c2ArrayDevice[eindex];
+
+  /* c1/c2 are stiffness-kernel coefficients, not physical Lamé moduli
+   * (they include dt^2 and h). Riemann/interface stress must be in Pa, so use
+   * the per-fragment physical solid-side moduli whenever available. */
+  if ((faceIndex >= 0) && (gpuData->acousticInterfaceElasticMuDevice != NULL) &&
+      (gpuData->acousticInterfaceElasticLambdaDevice != NULL)) {
+    const double physical_mu =
+        gpuData->acousticInterfaceElasticMuDevice[faceIndex];
+    const double physical_lambda =
+        gpuData->acousticInterfaceElasticLambdaDevice[faceIndex];
+    if ((physical_mu >= 0.0) && (physical_lambda >= 0.0)) {
+      mu = physical_mu;
+      lambda = physical_lambda;
+    }
+  }
+
   const double trace = grad[0][0] + grad[1][1] + grad[2][2];
   double normal_stress = 0.0;
 
@@ -410,7 +426,7 @@ __device__ static inline void acoustic_interface_symmetric_flux(
                                                   acoustic_point, normal,
                                                   acoustic_inv_h, inv_rho);
   const double p_solid = acoustic_elastic_normal_pressure_at(
-      gpuData, elastic_eindex, elastic_point, normal, elastic_inv_h);
+      gpuData, faceIndex, elastic_eindex, elastic_point, normal, elastic_inv_h);
   const double denom = acoustic_impedance + elastic_impedance;
 
   if (denom <= 0.0) {
@@ -477,7 +493,8 @@ __device__ static inline void acoustic_interface_pressure_velocity_flux(
     if ((elastic_impedance > 0.0) && (elastic_inv_h > 0.0) &&
         (denom > 0.0)) {
       const double p_solid = acoustic_elastic_normal_pressure_at(
-          gpuData, elastic_eindex, elastic_point, normal, elastic_inv_h);
+          gpuData, faceIndex, elastic_eindex, elastic_point, normal,
+          elastic_inv_h);
       v_star =
           (pressure_in - p_solid + acoustic_impedance * v_acoustic_n +
            elastic_impedance * solid_velocity_n_in) /
