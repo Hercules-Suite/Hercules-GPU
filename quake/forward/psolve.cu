@@ -1579,6 +1579,8 @@ static struct Param_t {
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
+  int theAcousticInterfaceRegularizationMode;/* none or impedance flux */
+  double theAcousticInterfacePenaltyFactor;  /* impedance multiplier */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -1642,6 +1644,9 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
+           .theAcousticInterfaceRegularizationMode =
+               ACOUSTIC_INTERFACE_REGULARIZATION_NONE,
+           .theAcousticInterfacePenaltyFactor = 1.0,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
@@ -1933,9 +1938,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  38 /* Must adjust this if adding double params */
+  39 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  52 /* Must adjust this if adding int params */
+  53 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1990,6 +1995,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
+  double_message[38] = Param.theAcousticInterfacePenaltyFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2032,6 +2038,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
+  Param.theAcousticInterfacePenaltyFactor = double_message[38];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2086,6 +2093,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
+  int_message[52] = Param.theAcousticInterfaceRegularizationMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2143,6 +2151,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
+  Param.theAcousticInterfaceRegularizationMode = int_message[52];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2425,6 +2434,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
+       acoustic_interface_regularization[64] = "none",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2465,6 +2475,8 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
+  int acousticInterfaceRegularizationMode =
+      ACOUSTIC_INTERFACE_REGULARIZATION_NONE;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -2822,6 +2834,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
+  parsetext(fp, "acoustic_interface_regularization", 's',
+            &acoustic_interface_regularization);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -2860,6 +2874,8 @@ static int32_t parse_parameters(const char* numericalin) {
   {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
+    hu_config_get_double_opt(fp, "acoustic_interface_penalty_factor",
+                             &Param.theAcousticInterfacePenaltyFactor);
   }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
@@ -3202,6 +3218,27 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_projection);
   }
 
+  if ((strcasecmp(acoustic_interface_regularization, "none") == 0) ||
+      (strcasecmp(acoustic_interface_regularization, "off") == 0)) {
+    acousticInterfaceRegularizationMode =
+        ACOUSTIC_INTERFACE_REGULARIZATION_NONE;
+  } else if ((strcasecmp(acoustic_interface_regularization, "impedance") == 0) ||
+             (strcasecmp(acoustic_interface_regularization, "robin") == 0) ||
+             (strcasecmp(acoustic_interface_regularization, "upwind") == 0)) {
+    acousticInterfaceRegularizationMode =
+        ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_interface_regularization "
+                 "(none or impedance): %s\n",
+                 acoustic_interface_regularization);
+  }
+  if (Param.theAcousticInterfacePenaltyFactor < 0.0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_interface_penalty_factor=%g must be >= 0.\n",
+                 Param.theAcousticInterfacePenaltyFactor);
+  }
+
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -3297,6 +3334,16 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
                  "include_acoustic=yes and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
+  }
+  if ((acousticInterfaceRegularizationMode ==
+       ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
+      (Param.theAcousticInterfacePenaltyFactor > 0.0) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES) ||
+       (Param.theAcousticVelocityPotential != 1))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_interface_regularization=impedance requires "
+                 "include_acoustic=yes and "
                  "acoustic_formulation=velocity_potential\n");
   }
   if ((basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) &&
@@ -3563,6 +3610,8 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
+  Param.theAcousticInterfaceRegularizationMode =
+      acousticInterfaceRegularizationMode;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
@@ -3617,6 +3666,18 @@ static int32_t parse_parameters(const char* numericalin) {
                    ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
                       ? "face_mass"
                       : "point");
+    monitor_print("Acoustic interface regularization:  %s",
+                  (Param.theAcousticInterfaceRegularizationMode ==
+                   ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE)
+                      ? "impedance"
+                      : "none");
+    if (Param.theAcousticInterfaceRegularizationMode ==
+        ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) {
+      monitor_print(" (factor=%.3f)\n",
+                    Param.theAcousticInterfacePenaltyFactor);
+    } else {
+      monitor_print("\n");
+    }
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
@@ -9998,6 +10059,10 @@ static void solver_init() {
       Param.theAcousticVelocityPotential;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
+  Global.gpuData.acousticInterfaceRegularizationMode =
+      Param.theAcousticInterfaceRegularizationMode;
+  Global.gpuData.acousticInterfacePenaltyFactor =
+      Param.theAcousticInterfacePenaltyFactor;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10045,6 +10110,9 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceFaceCentersDevice = NULL;
   Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceHalfWidthsDevice = NULL;
+  Global.gpuData.acousticInterfaceImpedanceDevice = NULL;
+  Global.gpuData.acousticInterfaceInvDensityDevice = NULL;
+  Global.gpuData.acousticInterfaceInvEdgeSizeDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
@@ -10131,6 +10199,39 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
+      }
+      if ((Param.theAcousticInterfaceRegularizationMode ==
+           ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
+          (Param.theAcousticInterfacePenaltyFactor > 0.0)) {
+        if (cudaMalloc(
+                (void**)&(Global.gpuData.acousticInterfaceImpedanceDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface impedance table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMalloc(
+                (void**)&(
+                    Global.gpuData.acousticInterfaceInvEdgeSizeDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface inverse edge-size table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMalloc(
+                (void**)&(
+                    Global.gpuData.acousticInterfaceInvDensityDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface inverse density table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
       }
       if (cudaMalloc(
               (void**)&(
@@ -10798,6 +10899,67 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      if (Global.gpuData.acousticInterfaceImpedanceDevice != NULL) {
+        double* interface_impedance =
+            (double*)calloc(face_count, sizeof(double));
+        double* interface_inv_h = (double*)calloc(face_count, sizeof(double));
+        double* interface_inv_rho =
+            (double*)calloc(face_count, sizeof(double));
+        if ((interface_impedance == NULL) || (interface_inv_h == NULL) ||
+            (interface_inv_rho == NULL)) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic interface impedance host tables\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+
+        for (size_t iface = 0; iface < face_count; iface++) {
+          int32_t eindex = Global.acousticInterfaceElementIds[iface];
+          if ((eindex >= 0) && (eindex < Global.myMesh->lenum)) {
+            edata_t* edata =
+                (edata_t*)Global.myMesh->elemTable[eindex].data;
+            if ((edata->rho > 0.0) && (edata->Vp > 0.0) &&
+                (edata->edgesize > 0.0)) {
+              interface_impedance[iface] = edata->rho * edata->Vp;
+              interface_inv_h[iface] = 1.0 / edata->edgesize;
+              interface_inv_rho[iface] = 1.0 / edata->rho;
+            }
+          }
+        }
+
+        if (cudaMemcpy(Global.gpuData.acousticInterfaceImpedanceDevice,
+                       interface_impedance, face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic interface impedance table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.acousticInterfaceInvEdgeSizeDevice,
+                       interface_inv_h, face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic interface inverse edge-size table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData.acousticInterfaceInvDensityDevice,
+                       interface_inv_rho, face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic interface inverse density table\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+
+        free(interface_impedance);
+        free(interface_inv_h);
+        free(interface_inv_rho);
+      }
       if (cudaMemcpy(
               Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice,
               Global.acousticInterfaceAdjacentElementIndexes,
@@ -11290,6 +11452,9 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceImpedanceDevice);
+  cudaFree(Global.gpuData.acousticInterfaceInvDensityDevice);
+  cudaFree(Global.gpuData.acousticInterfaceInvEdgeSizeDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice);
