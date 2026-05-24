@@ -151,6 +151,8 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
 #define ACOUSTIC_INTERFACE_PROJECTION_POINT     0
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
+#define ACOUSTIC_TIME_INTEGRATOR_LEAPFROG 0
+#define ACOUSTIC_TIME_INTEGRATOR_RK4      1
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -405,6 +407,10 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
+    solver_float* pressureRateDevice;  // RK4 nodal acoustic scalar time rate
+    solver_float* pressureStageDevice; // RK4 stage scalar q
+    solver_float* pressureRateStageDevice; // RK4 stage scalar rate
+    solver_float* pressureRateAccumDevice; // RK4 accumulated rate increment
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -626,6 +632,14 @@ typedef struct gpu_data_t {
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
+    /* Acoustic scalar time integration. 0 = central-difference/leapfrog
+     * (default), 1 = experimental explicit RK4 over scalar + scalar rate.
+     * acousticRkReadStage selects pressureStageDevice as the scalar read by
+     * acoustic force kernels; acousticRkCommitStage controls ADE/CPML memory
+     * writes during RK sub-stages. */
+    int           acousticTimeIntegrator;
+    int           acousticRkReadStage;
+    int           acousticRkCommitStage;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
     /* v3 station viscoelastic stress gather (print_station_strains /
@@ -687,6 +701,7 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    solver_float* pressure_rate;  /* RK4 acoustic scalar time rate */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

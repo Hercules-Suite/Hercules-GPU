@@ -1446,6 +1446,7 @@ static struct Param_t {
   double theSofteningFactor;
   int theStepMeshingFactor;
   int theAcousticInterfaceMaxLevel;
+  int theAcousticTimeIntegrator;
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
@@ -1596,6 +1597,7 @@ static struct Param_t {
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
+           .theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -1935,7 +1937,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  52 /* Must adjust this if adding int params */
+  53 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2086,6 +2088,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
+  int_message[52] = Param.theAcousticTimeIntegrator;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2143,6 +2146,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
+  Param.theAcousticTimeIntegrator = int_message[52];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2425,6 +2429,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
+       acoustic_time_integrator[64] = "leapfrog",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2822,6 +2827,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
+  parsetext(fp, "acoustic_time_integrator", 's',
+            &acoustic_time_integrator);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -3200,6 +3207,21 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_projection "
                  "(point or face_mass): %s\n",
                  acoustic_interface_projection);
+  }
+
+  if ((strcasecmp(acoustic_time_integrator, "leapfrog") == 0) ||
+      (strcasecmp(acoustic_time_integrator, "central_difference") == 0) ||
+      (strcasecmp(acoustic_time_integrator, "central-difference") == 0)) {
+    Param.theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG;
+  } else if ((strcasecmp(acoustic_time_integrator, "rk4") == 0) ||
+             (strcasecmp(acoustic_time_integrator, "runge_kutta_4") == 0) ||
+             (strcasecmp(acoustic_time_integrator, "runge-kutta-4") == 0)) {
+    Param.theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_RK4;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_time_integrator "
+                 "(leapfrog or rk4): %s\n",
+                 acoustic_time_integrator);
   }
 
   noyesflag_t legacyAcousticPressureFormulation = NO;
@@ -3627,6 +3649,15 @@ static int32_t parse_parameters(const char* numericalin) {
                    legacy_acoustic_pressure_formulation_explicit &&
                    (legacyAcousticPressureFormulation == YES))
                       ? " [from legacy acoustic_pressure_formulation=yes]"
+                      : "");
+    monitor_print("Acoustic time integrator:           %s%s\n",
+                  (Param.theAcousticTimeIntegrator ==
+                   ACOUSTIC_TIME_INTEGRATOR_RK4)
+                      ? "rk4"
+                      : "leapfrog",
+                  (Param.theAcousticTimeIntegrator ==
+                   ACOUSTIC_TIME_INTEGRATOR_RK4)
+                      ? " (experimental)"
                       : "");
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
@@ -8162,6 +8193,17 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) {
+      if (cudaMallocHost(&(Global.mySolver->pressure_rate),
+                         Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic pressure rate pinned memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
     memset(Global.mySolver->pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_tm2, 0,
@@ -8172,6 +8214,10 @@ static void solver_init() {
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_damp, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
+    if (Global.mySolver->pressure_rate != NULL) {
+      memset(Global.mySolver->pressure_rate, 0,
+             Global.myMesh->nharbored * sizeof(solver_float));
+    }
 
     pressureFreeSurfaceHost =
         (solver_float*)calloc(Global.myMesh->nharbored, sizeof(solver_float));
@@ -9901,6 +9947,42 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) {
+      if (cudaMalloc((void**)&(Global.gpuData.pressureRateDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr, "Thread %d: Failed to allocate pressure rate memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.pressureStageDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr, "Thread %d: Failed to allocate pressure stage memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.pressureRateStageDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate pressure rate stage memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.pressureRateAccumDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate pressure rate accumulator memory\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
     if (cudaMalloc(
             (void**)&Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
             Global.myMesh->nharbored * sizeof(uint8_t)) != cudaSuccess) {
@@ -9998,6 +10080,9 @@ static void solver_init() {
       Param.theAcousticVelocityPotential;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
+  Global.gpuData.acousticTimeIntegrator = Param.theAcousticTimeIntegrator;
+  Global.gpuData.acousticRkReadStage = 0;
+  Global.gpuData.acousticRkCommitStage = 1;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10724,6 +10809,23 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) {
+      if (cudaMemcpy(Global.gpuData.pressureRateDevice,
+                     Global.mySolver->pressure_rate,
+                     Global.myMesh->nharbored * sizeof(solver_float),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr, "Thread %d: Failed to copy pressure rate array\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      cudaMemset(Global.gpuData.pressureStageDevice, 0,
+                 Global.myMesh->nharbored * sizeof(solver_float));
+      cudaMemset(Global.gpuData.pressureRateStageDevice, 0,
+                 Global.myMesh->nharbored * sizeof(solver_float));
+      cudaMemset(Global.gpuData.pressureRateAccumDevice, 0,
+                 Global.myMesh->nharbored * sizeof(solver_float));
+    }
     if (cudaMemcpy(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
                    pressureFreeSurfaceNodeFlagsArray,
                    Global.myMesh->nharbored * sizeof(uint8_t),
@@ -11259,6 +11361,11 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
+  cudaFree(Global.gpuData.pressureDampDevice);
+  cudaFree(Global.gpuData.pressureRateDevice);
+  cudaFree(Global.gpuData.pressureStageDevice);
+  cudaFree(Global.gpuData.pressureRateStageDevice);
+  cudaFree(Global.gpuData.pressureRateAccumDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -11530,6 +11637,9 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_damp != NULL) {
     cudaFreeHost(Global.mySolver->pressure_damp);
+  }
+  if (Global.mySolver->pressure_rate != NULL) {
+    cudaFreeHost(Global.mySolver->pressure_rate);
   }
 
   if (Param.theTypeOfDamping >= BKT) {
@@ -13269,11 +13379,23 @@ static void solver_load_pressure_gpu(mysolver_t* solver, mesh_t* mesh) {
   cudaMemcpyAsync(solver->gpuData->pressureTm2Device, solver->pressure_tm2,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  if ((Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) &&
+      (solver->pressure_rate != NULL) &&
+      (solver->gpuData->pressureRateDevice != NULL)) {
+    cudaMemcpyAsync(solver->gpuData->pressureRateDevice,
+                    solver->pressure_rate,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  }
   cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
                   mesh->nharbored * sizeof(solver_float),
                   solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       2 * mesh->nharbored * (int64_t)sizeof(solver_float);
+  if (Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) {
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
 }
 
 static void solver_swap_pressure_buffers(mysolver_t* solver) {
@@ -13324,6 +13446,173 @@ static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
   Timer_Stop("Acoustic pressure traction");
 }
 
+static void solver_set_acoustic_rk_flags(mysolver_t* solver, int readStage,
+                                         int commitStage) {
+  solver->gpuData->acousticRkReadStage = readStage;
+  solver->gpuData->acousticRkCommitStage = commitStage;
+  cudaMemcpyAsync(solver->gpuDataDevice, solver->gpuData, sizeof(gpu_data_t),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci += sizeof(gpu_data_t);
+}
+
+static void solver_exchange_pressure_force(mysolver_t* solver, mesh_t* mesh) {
+  cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+  schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
+                    DN_PRESSURE_FORCE_MSG);
+  compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
+  schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
+                    AN_PRESSURE_FORCE_MSG);
+
+  cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+}
+
+static void solver_share_pressure_scalar(mysolver_t* solver, mesh_t* mesh,
+                                         solver_float* host,
+                                         solver_float* device) {
+  cudaMemcpyAsync(host, device, mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+  schedule_senddata(solver->an_sched, host, 1, SHARING, AN_PRESSURE_MSG);
+  compute_adjust(host, 1, ASSIGNMENT);
+  schedule_senddata(solver->dn_sched, host, 1, SHARING, DN_PRESSURE_MSG);
+
+  cudaMemcpyAsync(device, host, mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+}
+
+static void solver_assemble_acoustic_pressure_rhs(mysolver_t* solver,
+                                                  mesh_t* mesh) {
+  int blocksize = 256;
+  int gridsize = (mesh->lenum + blocksize - 1) / blocksize;
+  int32_t face_count;
+  cudaError_t cerror;
+
+  cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
+                  mesh->nharbored * sizeof(solver_float),
+                  solver->streams[CUDA_STREAM_MAIN]);
+  kernelAcousticPressureForce<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->lenum, solver->gpuDataDevice, Param.theDeltaTSquared);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: acoustic pressure force kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Param.theAbcType == ABC_CPML &&
+      solver->gpuData->pmlAcousticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
+    const int pmlBlock = 128;
+    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
+    kernelPMLAcousticStep<<<pmlGrid, pmlBlock, 0,
+                            solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: PML acoustic step kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  face_count = solver->gpuData->acousticInterfaceFaceCount;
+  if (face_count > 0) {
+    gridsize = (face_count + blocksize - 1) / blocksize;
+    kernelAcousticPressureInterfaceForce<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
+        Param.theDeltaT);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: acoustic pressure interface force kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+}
+
+static void solver_run_acoustic_pressure_rk4_step(mysolver_t* solver,
+                                                  mesh_t* mesh) {
+  const int blocksize = 256;
+  const int gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
+  cudaError_t cerror;
+
+  Timer_Start("Acoustic Pressure Step");
+
+  for (int stage = 0; stage < 4; stage++) {
+    const int readStage = (stage == 0) ? 0 : 1;
+    const int commitStage = (stage == 3) ? 1 : 0;
+
+    solver_set_acoustic_rk_flags(solver, readStage, commitStage);
+    solver_assemble_acoustic_pressure_rhs(solver, mesh);
+    solver_exchange_pressure_force(solver, mesh);
+
+    kernelAcousticRk4AdvanceStage<<<gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->nharbored, solver->gpuDataDevice, stage, Param.theDeltaT,
+        Param.theDeltaTSquared);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: acoustic RK4 stage %d kernel - %s\n",
+              Global.myID, stage + 1, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    if (stage < 3) {
+      solver_share_pressure_scalar(solver, mesh, solver->pressure_force,
+                                   solver->gpuData->pressureStageDevice);
+    }
+  }
+
+  solver_set_acoustic_rk_flags(solver, 0, 1);
+
+  cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  cudaMemcpyAsync(solver->pressure_rate, solver->gpuData->pressureRateDevice,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      2 * mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+  memset(solver->pressure_force, 0,
+         mesh->nharbored * sizeof(solver_float));
+  schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
+                    AN_PRESSURE_MSG);
+  compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
+  schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
+                    DN_PRESSURE_MSG);
+  schedule_senddata(solver->an_sched, solver->pressure_rate, 1, SHARING,
+                    AN_PRESSURE_MSG);
+  compute_adjust(solver->pressure_rate, 1, ASSIGNMENT);
+  schedule_senddata(solver->dn_sched, solver->pressure_rate, 1, SHARING,
+                    DN_PRESSURE_MSG);
+
+  Timer_Stop("Acoustic Pressure Step");
+}
+
 static void solver_run_acoustic_pressure_step(mysolver_t* solver,
                                               mesh_t* mesh) {
   int blocksize;
@@ -13332,6 +13621,10 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   cudaError_t cerror;
 
   if ((!acoustic_pressure_enabled()) || (g_acousticPressureElementCount <= 0)) {
+    return;
+  }
+  if (Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) {
+    solver_run_acoustic_pressure_rk4_step(solver, mesh);
     return;
   }
 
@@ -20342,15 +20635,20 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
 
   /* velocity_potential: the field is phi; p = -dphi/dt
    * = -(phi^n - phi^{n-1})/dt. pressure mode: field is p directly. */
-  const int vp_out = (Param.theAcousticVelocityPotential == 1) &&
-                     (Param.theDeltaT > 0.0);
+  const int vp_out = (Param.theAcousticVelocityPotential == 1);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const int nd = nodesToInterpolate[iPhi];
-    const double pressure =
-        vp_out ? (-(double)(Global.mySolver->pressure_tm1[nd] -
-                            Global.mySolver->pressure_tm2[nd]) /
-                  Param.theDeltaT)
-               : (double)Global.mySolver->pressure_tm1[nd];
+    double pressure = (double)Global.mySolver->pressure_tm1[nd];
+    if (vp_out) {
+      if ((Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) &&
+          (Global.mySolver->pressure_rate != NULL)) {
+        pressure = -(double)Global.mySolver->pressure_rate[nd];
+      } else if (Param.theDeltaT > 0.0) {
+        pressure = -((double)Global.mySolver->pressure_tm1[nd] -
+                     (double)Global.mySolver->pressure_tm2[nd]) /
+                   Param.theDeltaT;
+      }
+    }
     const double dphidx =
         sx[iPhi] * (1.0 + sy[iPhi] * eta) *
         (1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -20755,12 +21053,17 @@ static double interpolate_station_pressure_value(int32_t iStation) {
                       (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
     const int nd = nodesToInterpolate[iPhi];
     /* velocity_potential: p = -dphi/dt = -(phi^n - phi^{n-1})/dt. */
-    const double val =
-        ((Param.theAcousticVelocityPotential == 1) && (Param.theDeltaT > 0.0))
-            ? (-(double)(Global.mySolver->pressure_tm1[nd] -
-                         Global.mySolver->pressure_tm2[nd]) /
-               Param.theDeltaT)
-            : (double)Global.mySolver->pressure_tm1[nd];
+    double val = (double)Global.mySolver->pressure_tm1[nd];
+    if (Param.theAcousticVelocityPotential == 1) {
+      if ((Param.theAcousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK4) &&
+          (Global.mySolver->pressure_rate != NULL)) {
+        val = -(double)Global.mySolver->pressure_rate[nd];
+      } else if (Param.theDeltaT > 0.0) {
+        val = -((double)Global.mySolver->pressure_tm1[nd] -
+                (double)Global.mySolver->pressure_tm2[nd]) /
+              Param.theDeltaT;
+      }
+    }
     pressure += sh * val;
   }
 
