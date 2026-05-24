@@ -151,6 +151,8 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
 #define ACOUSTIC_INTERFACE_PROJECTION_POINT     0
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
+#define ACOUSTIC_TIME_INTEGRATOR_LEAPFROG       0
+#define ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT  1
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -405,6 +407,7 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
+    solver_float* pressureStiffDiagDevice; // GPU nodal dt^2*K diagonal approx
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -627,6 +630,8 @@ typedef struct gpu_data_t {
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
+    int           acousticTimeIntegrator;
+    double        acousticSemiImplicitTheta;
 
     /* v3 station viscoelastic stress gather (print_station_strains /
      * print_station_stresses under BKT-family damping). Populated only
@@ -687,6 +692,8 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    solver_float* pressure_stiff_diag; /* Nodal dt^2*K diagonal for the
+                                        * semi-implicit acoustic update */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

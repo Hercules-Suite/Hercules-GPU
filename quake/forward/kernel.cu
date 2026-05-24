@@ -985,14 +985,28 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   const solver_float cd = (gpuData->pressureDampDevice != NULL)
                               ? gpuData->pressureDampDevice[nindex]
                               : (solver_float)0.0;
+  const solver_float stiff_diag =
+      (gpuData->pressureStiffDiagDevice != NULL)
+          ? gpuData->pressureStiffDiagDevice[nindex]
+          : (solver_float)0.0;
+  const double theta =
+      (gpuData->acousticTimeIntegrator ==
+       ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT)
+          ? gpuData->acousticSemiImplicitTheta
+          : 0.0;
   solver_float p_new = 0.0;
 
   if (mass > 0.0) {
-    p_new = (gpuData->pressureForceDevice[nindex] +
-             ((solver_float)2.0 * mass - cd) *
-                 gpuData->pressureTm1Device[nindex] -
-             (mass - cd) * gpuData->pressureTm2Device[nindex]) /
-            mass;
+    const solver_float implicit_diag =
+        (solver_float)(theta * (double)stiff_diag);
+    const solver_float denom = mass + implicit_diag;
+
+    p_new =
+        (gpuData->pressureForceDevice[nindex] +
+         ((solver_float)2.0 * mass - cd + implicit_diag) *
+             gpuData->pressureTm1Device[nindex] -
+         (mass - cd) * gpuData->pressureTm2Device[nindex]) /
+        denom;
   }
 
   /* CPML outer-face Dirichlet clamp -- acoustic field. The clamp mask

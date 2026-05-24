@@ -302,6 +302,20 @@ Acoustic-elastic input flags (input file):
 	backward-compatibility alias only when `acoustic_formulation` is absent:
 	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
 	input files should use `acoustic_formulation`.
+- `acoustic_time_integrator`
+	Optional. `leapfrog` (default) keeps the validated central-difference
+	acoustic scalar update. `semi_implicit` enables an experimental diagonal
+	theta update for the acoustic scalar field: the existing acoustic force and
+	MPI exchange are unchanged, but the nodal update treats a lumped diagonal
+	approximation of `dt^2 K` implicitly. This is intended as a low-cost test
+	for damping grid-scale water-pressure ringing without adding a global
+	linear solve. It works for both `pressure` and `velocity_potential`, and is
+	ignored when `acoustic_formulation=none`.
+- `acoustic_semi_implicit_theta`
+	Optional. Theta value used only when
+	`acoustic_time_integrator=semi_implicit`. Valid range is `0.0` to `1.0`;
+	default is `0.5`. Larger values add stronger high-frequency numerical
+	damping but can also attenuate or phase-shift the physical acoustic signal.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver
