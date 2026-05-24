@@ -151,14 +151,6 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE  0x02u
 #define ACOUSTIC_INTERFACE_PROJECTION_POINT     0
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
-#define ACOUSTIC_INTERFACE_REGULARIZATION_NONE      0
-#define ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE 1
-#define ACOUSTIC_STABILIZATION_NONE                 0
-#define ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY   1
-#define ACOUSTIC_FORMULATION_PRESSURE               0
-#define ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL     1
-#define ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL 2
-#define ACOUSTIC_FORMULATION_PRESSURE_VELOCITY      3
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -406,19 +398,13 @@ typedef struct gpu_data_t {
     fvector_t*   tm3Device; // GPU nodal tm3 displacements
     fvector_t*   forceDevice; // GPU nodal forces
 
-    solver_float* pressureTm1Device;   // GPU nodal acoustic scalar at t
-    solver_float* pressureTm2Device;   // GPU nodal acoustic scalar at t-dt/new
-    solver_float* pressureTm3Device;   // GPU nodal acoustic scalar at t-2dt
+    solver_float* pressureTm1Device;   // GPU nodal acoustic pressure at t
+    solver_float* pressureTm2Device;   // GPU nodal acoustic pressure at t-dt/new
     solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
     solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
-    fvector_t*   acousticVelocityDevice;
-    fvector_t*   acousticVelocityPrevDevice;
-    fvector_t*   acousticVelocityForceDevice;
-    fvector_t*   acousticDisplacementDevice;
-    solver_float* acousticVelocityMassDevice;
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -440,13 +426,6 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceFaceCentersDevice;
     double*      acousticInterfaceFaceNormalsDevice;
     double*      acousticInterfaceFaceHalfWidthsDevice;
-    double*      acousticInterfaceImpedanceDevice;
-    double*      acousticInterfaceInvDensityDevice;
-    double*      acousticInterfaceInvEdgeSizeDevice;
-    double*      acousticInterfaceElasticImpedanceDevice;
-    double*      acousticInterfaceElasticInvEdgeSizeDevice;
-    double*      acousticInterfaceElasticMuDevice;
-    double*      acousticInterfaceElasticLambdaDevice;
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
     double*      acousticInterfaceAdjacentHalfWidthsDevice;
@@ -639,21 +618,15 @@ typedef struct gpu_data_t {
      * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
     int           cpmlPmlMaterialDamping;
 
-    /* Scalar acoustic formulation. 0 = pressure; 1 = velocity potential phi
-     * (p=-dphi/dt, interface source=solid normal velocity); 2 =
-     * displacement potential chi (p=-d2chi/dt2, interface source=solid
-     * normal displacement). */
+    /* Velocity-potential acoustic-elastic coupling. 0 = pressure;
+     * 1 = the acoustic buffers hold a velocity potential phi, the interface
+     * exchanges solid normal VELOCITY (1st time-difference, ~omega) and
+     * the solid feels p = -dphi/dt, and station pressure output = -dphi/dt. */
     int           acousticVelocityPotential;
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;
-    /* Acoustic interface regularization. 0 = none; 1 = symmetric impedance
-     * Riemann flux blended by acousticInterfacePenaltyFactor in [0,1]. */
-    int           acousticInterfaceRegularizationMode;
-    double        acousticInterfacePenaltyFactor;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
-    int           acousticStabilizationMode;
-    double        acousticSpectralViscosityStrength;
 
     /* v3 station viscoelastic stress gather (print_station_strains /
      * print_station_stresses under BKT-family damping). Populated only
@@ -708,18 +681,12 @@ struct mysolver_t {
     fvector_t* tm3;           /* Displacements at time-step t - 3      */
     fvector_t* force;         /* Force accumulation at time-step t     */
 
-    solver_float* pressure_tm1;   /* Acoustic scalar at current time */
-    solver_float* pressure_tm2;   /* Acoustic scalar at previous/new time */
-    solver_float* pressure_tm3;   /* Acoustic scalar at t - 2dt */
+    solver_float* pressure_tm1;   /* Acoustic pressure at time-step t - 1 */
+    solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
     solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
-    fvector_t* acoustic_velocity;       /* First-order acoustic velocity */
-    fvector_t* acoustic_velocity_prev;  /* Previous velocity for stations */
-    fvector_t* acoustic_velocity_force; /* First-order velocity RHS */
-    fvector_t* acoustic_displacement;   /* Time-integrated fluid motion */
-    solver_float* acoustic_velocity_mass;
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

@@ -251,23 +251,10 @@ Acoustic-elastic input flags (input file):
 	acoustic-elastic interface fragment. `face_mass` uses a 2x2 face quadrature
 	to weakly project the normal velocity/pressure traction over each fragment
 	before assembling nodal interface forces. This is an experimental diagnostic
-	option intended to reduce grid-scale interface forcing in acoustic
-	interface runs. PML interface fragments
+	option intended to reduce grid-scale interface forcing in
+	`acoustic_formulation=velocity_potential` runs. PML interface fragments
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
-- `acoustic_interface_regularization`
-	Optional. `none` (default) keeps the central interface flux. `impedance`
-	enables a symmetric acoustic-elastic impedance/Riemann flux for
-	`acoustic_formulation=velocity_potential`. The flux samples both
-	conjugate interface quantities on both sides: acoustic pressure and
-	normal velocity, plus elastic normal stress and normal velocity. It then
-	blends the baseline flux with the two-impedance Riemann state using
-	`acoustic_interface_penalty_factor` in `[0, 1]` (`0` = baseline,
-	`1` = full Riemann flux). The same blended pressure is used for the
-	elastic traction and the same blended normal velocity is used for the
-	acoustic velocity-potential source, so the regularization is applied to
-	both sides consistently. `robin` and `upwind` are accepted as aliases for
-	`impedance`.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
@@ -284,48 +271,28 @@ Acoustic-elastic input flags (input file):
 	the mesh etree in phase A; importing an already-generated mesh preserves the
 	existing mesh resolution.
 - `acoustic_formulation`
-	Optional. Single controlling variable for acoustic physics:
-	`velocity_potential` (default), `displacement_potential`,
-	`pressure_velocity`, `pressure`, or `none` (`potential` is accepted as
-	an alias for `velocity_potential`; `pressure-velocity`, `first_order`,
-	and `first-order` are accepted as aliases for `pressure_velocity`).
-	`velocity_potential` enables the current validated potential formulation
-	(`p = -dphi/dt`), which is the recommended acoustic-elastic coupling path.
-	`displacement_potential` is an experimental potential formulation that
-	stores a scalar `chi`, enforces normal-displacement continuity at the
-	interface, reconstructs acoustic displacement directly as `grad(chi)/rho`,
-	and recovers pressure as `p = -d2chi/dt2` using an extra scalar history
-	buffer. `pressure_velocity` enables the experimental first-order acoustic
-	system with nodal pressure and particle velocity:
-	`p_t + K div(v) = 0`, `rho v_t + grad(p) = 0`. At acoustic-elastic
-	interfaces it uses an upwind/Riemann normal flux: the acoustic side is
-	driven by the Riemann normal velocity, and the elastic side receives the
-	matching Riemann pressure traction. When the adjacent elastic state and
-	impedance are local, the flux uses both acoustic and elastic impedances;
-	otherwise it falls back to an acoustic upwind state with the sampled solid
-	normal velocity. This mode also stores time-integrated acoustic particle
-	displacement so water stations and reconstructed plane output can report
-	displacement, velocity, and acceleration directly from the fluid velocity.
-	`pressure` enables the legacy pressure-variable acoustic solver.
-	`none` is an explicit opt-out: it keeps acoustic material handling and
-	interface classification available, but does not allocate scalar acoustic
-	DOFs. `pressure`, `velocity_potential`, `displacement_potential`, and
-	`pressure_velocity` require `include_acoustic=yes`; when
+	Optional. Single controlling variable for scalar acoustic physics:
+	`velocity_potential` (default), `pressure`, or `none` (`potential` is
+	accepted as an alias for `velocity_potential`). `velocity_potential`
+	enables the current validated potential formulation (`p = -dphi/dt`), which
+	is the recommended acoustic-elastic coupling path. `pressure` enables the
+	legacy pressure-variable acoustic solver. `none` is an explicit opt-out:
+	it keeps acoustic material handling and interface classification available,
+	but does not allocate scalar acoustic DOFs. `pressure` and
+	`velocity_potential` require `include_acoustic=yes`; when
 	`include_acoustic=no`, the acoustic module is inactive.
-	For scalar modes, acoustic elements assemble scalar acoustic mass/stiffness
-	instead of displacement mass/stiffness, while elastic elements continue to
-	use displacement DOFs. On a flat model surface, acoustic scalar nodes on the
-	top external domain face are constrained to enforce a pressure-release water
-	surface. For `pressure_velocity`, pressure nodes on the top external
-	domain face are constrained to `p=0`, while particle velocity evolves from
-	the first-order momentum equation. When `acoustic_interface_coupling=yes`,
-	acoustic formulations build an explicit acoustic-solid interface table. In
-	octree meshes, nonconforming interface faces are split into area-weighted fragments
+	Acoustic elements assemble scalar acoustic mass/stiffness instead of
+	displacement mass/stiffness, while elastic elements continue to use
+	displacement DOFs. On a flat model surface, acoustic scalar nodes on the top
+	external domain face are constrained to enforce a pressure-release water
+	surface. When `acoustic_interface_coupling=yes`, scalar acoustic
+	formulations build an explicit acoustic-solid interface table. In octree
+	meshes, nonconforming interface faces are split into area-weighted fragments
 	with fragment centers and normals, and CUDA kernels apply the normal
-	interface coupling only on those fragments. Each fragment interpolates the
-	acoustic field on the acoustic element and the matching normal quantity on
-	the adjacent elastic element, so refined elastic neighbors can couple to
-	coarser acoustic faces. Fragment subdivision follows
+	traction/acceleration coupling only on those fragments. Each fragment
+	interpolates the scalar acoustic field on the acoustic element and
+	displacement acceleration on the adjacent elastic element, so refined elastic
+	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
 	`acoustic_interface_max_level` and finer local neighbors. When the
 	neighboring element is local, the table uses that element's mesh-level
 	acoustic/elastic classification, so mixed elements kept elastic still
@@ -335,20 +302,9 @@ Acoustic-elastic input flags (input file):
 	backward-compatibility alias only when `acoustic_formulation` is absent:
 	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
 	input files should use `acoustic_formulation`.
-	`acoustic_interface_regularization=impedance` is currently available only
-	with `acoustic_formulation=velocity_potential`; the
-	`displacement_potential` mode is intended for direct comparison runs before
-	adding a characteristic/passive flux for that variable set, and
-	`pressure_velocity` has its own built-in Riemann/upwind interface flux.
-	The first-order `pressure_velocity` mode uses a staggered explicit
-	velocity-then-pressure update. With `abc_type=cpml`, acoustic PML elements
-	use first-order ADE derivative corrections on both the pressure-gradient
-	and velocity-divergence sides. This mode is still experimental and should be
-	validated against the scalar potential formulation and CPS benchmarks before
-	production use.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
-	and an acoustic formulation is active, the solver
+	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver
 	writes one row per local acoustic-solid interface fragment after mesh setup.
 	The file records the acoustic element id, face id, fragment area, fragment
 	center in local and model coordinates, outward normal, element level/size,
@@ -356,18 +312,16 @@ Acoustic-elastic input flags (input file):
 	when the adjacent element is local. This file can be very large, so it is
 	disabled when unset.
 - `print_station_pressures`
-	Optional. `yes` writes acoustic pressure station histories when an acoustic
-	formulation is active. Pressure is appended as a
+	Optional. `yes` writes scalar pressure station histories when
+	`acoustic_formulation` is `pressure` or `velocity_potential`. Pressure is
+	appended as a
 	`Pressure(Pa)` column in the normal `station.N` files after any requested
 	displacement, velocity, and acceleration columns. For stations whose
 	containing element is acoustic, the motion columns are reconstructed from
-	the scalar acoustic field (`pressure`/`velocity_potential`: integrate
-	`-grad(p)/rho`; `displacement_potential`: use `grad(chi)/rho` and its time
-	differences directly; `pressure_velocity`: interpolate the nodal fluid
-	particle displacement/velocity directly). For elastic stations they
-	continue to use the elastic displacement field. The pressure column is
-	`nan` for stations whose containing element is elastic, because acoustic
-	pressure is not defined there.
+	the pressure gradient; for elastic stations they continue to use the
+	elastic displacement field. The pressure column is `nan` for stations whose
+	containing element is elastic, because scalar acoustic pressure is not
+	defined there.
 - `print_station_strains` / `print_station_stresses`
 	Optional, independent (`yes`/`no`, default `no` → byte-identical to
 	before). For **linear** analysis, append the 6 strain and/or 6 stress
@@ -421,7 +375,7 @@ Acoustic-elastic input flags (input file):
 	standard `planedisplacements.N` files. Elastic plane points continue to use
 	the elastic displacement field, so mixed water/solid planes remain a single
 	three-component displacement file. This requires `include_acoustic=yes` and
-	a scalar `acoustic_formulation`.
+	`acoustic_formulation=pressure` or `acoustic_formulation=velocity_potential`.
 	Default is `no`, which preserves the legacy plane-output behavior.
 - `basin_material_type`
 	Optional. Controls material assigned inside `basin_velocity_model` geometry.
@@ -445,30 +399,14 @@ Acoustic-elastic input flags (input file):
 	`Q` adds a small, high-frequency-selective damping to acoustic
 	(water) elements that attenuates the synthetic lossless-cavity grid
 	ring while barely touching the physical signal. Applies to interior
-	acoustic elements only (skipped in the CPML zone); works for scalar
-	acoustic formulations. **This is a numerical
+	acoustic elements only (skipped in the CPML zone); works for both
+	`pressure` and `velocity_potential`. **This is a numerical
 	regularizer for a low-order-discretisation artifact, not physical
 	ocean attenuation** (and is non-SPECFEM) — use it only to clean the
 	synthetic no-attenuation benchmark; runs with a realistically
 	attenuating Earth do not need it. Empirical sweet spot
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
-- `acoustic_stabilization`
-	Optional. Default `none`. Set to `spectral_viscosity` to add an
-	acoustic-only, element-local high-wavenumber regularizer. This applies
-	a local `K^2` damping operator to the acoustic scalar increment, so it
-	targets grid-scale pressure ringing more strongly than the
-	`acoustic_quality_factor` `K` damping while perturbing long wavelengths
-	less. It is skipped inside CPML elements. This is a numerical
-	stabilization for validation / lossless-water benchmarks, not physical
-	ocean attenuation.
-- `acoustic_spectral_viscosity_strength`
-	Optional. Default `1.0`. Used only when
-	`acoustic_stabilization = spectral_viscosity`. Suggested first tests:
-	`0.25`, `0.5`, and `1.0`, with `acoustic_quality_factor` unset so the
-	effect is isolated. The strength is normalized so the highest
-	element-local acoustic mode sees roughly this value as an effective
-	stiffness-damping beta; lower element modes are damped less.
 
 Scalar acoustic formulation — correctness fix & known limitation:
 
@@ -480,15 +418,14 @@ Scalar acoustic formulation — correctness fix & known limitation:
 	flat-water CPS analytic improved from ~0.83 to ~0.997). Elastic-only
 	/ non-acoustic runs are unaffected.
 - **Lossless in-water pressure-coda ring (known limitation).** With no
-	attenuation, the in-water *pressure* coda can carry a non-decaying
+	attenuation, the in-water *pressure* coda carries a non-decaying
 	grid-scale ring absent from the exact solution. It is
 	displacement-invisible (the validated 0.997 displacement is
-	unaffected) and is a low-order/lossless scalar acoustic artifact, not
-	a code bug. With any realistic ocean Q it damps
+	unaffected) and is a fundamental property of the lossless pressure
+	formulation, not a code bug. With any realistic ocean Q it damps
 	physically; for a clean lossless-benchmark comparison apply a
 	post-processing low-pass to the output pressure, or opt into the
-	in-model `acoustic_quality_factor` or `acoustic_stabilization`
-	regularizers (see those flags).
+	in-model `acoustic_quality_factor` regularizer (see that flag).
 
 Absorbing boundary input flags (input file):
 

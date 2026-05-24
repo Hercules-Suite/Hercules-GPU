@@ -349,16 +349,6 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define AN_PRESSURE_SURFACE_MSG 127
 #define DN_PRESSURE_DAMP_MSG 128
 #define AN_PRESSURE_DAMP_MSG 129
-#define DN_ACOUSTIC_VELOCITY_FORCE_MSG 130
-#define AN_ACOUSTIC_VELOCITY_FORCE_MSG 131
-#define AN_ACOUSTIC_VELOCITY_MSG 132
-#define DN_ACOUSTIC_VELOCITY_MSG 133
-#define AN_ACOUSTIC_DISPLACEMENT_MSG 134
-#define DN_ACOUSTIC_DISPLACEMENT_MSG 135
-#define DN_ACOUSTIC_VELOCITY_MASS_MSG 136
-#define AN_ACOUSTIC_VELOCITY_MASS_MSG 137
-#define AN_ACOUSTIC_VELOCITY_PREV_MSG 138
-#define DN_ACOUSTIC_VELOCITY_PREV_MSG 139
 #define CVMRECORD_MSG 110
 
 #define BATCH (1 << 20)
@@ -1583,18 +1573,13 @@ static struct Param_t {
    * theCpmlNativeStiffnessAcoustic to preserve C++ designated-init
    * order. */
   noyesflag_t theTopoBktGpuStabilize;
-  /* Acoustic-elastic coupling formulation. DEFAULT is velocity_potential.
-   * pressure is the legacy explicit opt-in; displacement_potential is an
-   * experimental scalar-potential variant; pressure_velocity is a first-order
-   * pressure/particle-velocity formulation. Only affects acoustic /
-   * acoustic-elastic runs; pure-elastic is unaffected. */
-  int theAcousticVelocityPotential;          /* ACOUSTIC_FORMULATION_* */
+  /* Acoustic-elastic coupling formulation. DEFAULT is velocity_potential
+   * (1) — the cross-validated stable coupling; pressure (0) is the legacy
+   * explicit opt-in. Only affects acoustic / acoustic-elastic runs;
+   * pure-elastic is unaffected. */
+  int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
-  int theAcousticInterfaceRegularizationMode;/* none or impedance flux */
-  double theAcousticInterfacePenaltyFactor;  /* passive flux blend in [0,1] */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
-  int theAcousticStabilizationMode;          /* ACOUSTIC_STABILIZATION_* */
-  double theAcousticSpectralViscosityStrength; /* local high-k damping */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1654,16 +1639,10 @@ static struct Param_t {
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,
            .theTopoBktGpuStabilize = UNSET,
-           .theAcousticVelocityPotential =
-               ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL,
+           .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
-           .theAcousticInterfaceRegularizationMode =
-               ACOUSTIC_INTERFACE_REGULARIZATION_NONE,
-           .theAcousticInterfacePenaltyFactor = 1.0,
-           .theAcousticQualityFactor = 0.0,
-           .theAcousticStabilizationMode = ACOUSTIC_STABILIZATION_NONE,
-           .theAcousticSpectralViscosityStrength = 1.0};
+           .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1787,12 +1766,6 @@ static int element_is_acoustic(const edata_t* edata) {
 static int acoustic_pressure_enabled(void) {
   return (Param.includeAcoustic == YES) &&
          (Param.acousticPressureFormulation == YES);
-}
-
-static int acoustic_pressure_velocity_enabled(void) {
-  return acoustic_pressure_enabled() &&
-         (Param.theAcousticVelocityPotential ==
-          ACOUSTIC_FORMULATION_PRESSURE_VELOCITY);
 }
 
 static void acoustic_zero_damping(edata_t* edata) {
@@ -1960,9 +1933,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  40 /* Must adjust this if adding double params */
+  38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  54 /* Must adjust this if adding int params */
+  52 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2017,8 +1990,6 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
-  double_message[38] = Param.theAcousticInterfacePenaltyFactor;
-  double_message[39] = Param.theAcousticSpectralViscosityStrength;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2061,8 +2032,6 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
-  Param.theAcousticInterfacePenaltyFactor = double_message[38];
-  Param.theAcousticSpectralViscosityStrength = double_message[39];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2117,8 +2086,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
-  int_message[52] = Param.theAcousticInterfaceRegularizationMode;
-  int_message[53] = Param.theAcousticStabilizationMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2176,8 +2143,6 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
-  Param.theAcousticInterfaceRegularizationMode = int_message[52];
-  Param.theAcousticStabilizationMode = int_message[53];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2460,8 +2425,6 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_regularization[64] = "none",
-       acoustic_stabilization[64] = "none",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2502,8 +2465,6 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
-  int acousticInterfaceRegularizationMode =
-      ACOUSTIC_INTERFACE_REGULARIZATION_NONE;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -2861,9 +2822,6 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
-  parsetext(fp, "acoustic_interface_regularization", 's',
-            &acoustic_interface_regularization);
-  parsetext(fp, "acoustic_stabilization", 's', &acoustic_stabilization);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -2902,10 +2860,6 @@ static int32_t parse_parameters(const char* numericalin) {
   {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
-    hu_config_get_double_opt(fp, "acoustic_spectral_viscosity_strength",
-                             &Param.theAcousticSpectralViscosityStrength);
-    hu_config_get_double_opt(fp, "acoustic_interface_penalty_factor",
-                             &Param.theAcousticInterfacePenaltyFactor);
   }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
@@ -3248,64 +3202,6 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_projection);
   }
 
-  if ((strcasecmp(acoustic_interface_regularization, "none") == 0) ||
-      (strcasecmp(acoustic_interface_regularization, "off") == 0)) {
-    acousticInterfaceRegularizationMode =
-        ACOUSTIC_INTERFACE_REGULARIZATION_NONE;
-  } else if ((strcasecmp(acoustic_interface_regularization, "impedance") == 0) ||
-             (strcasecmp(acoustic_interface_regularization, "robin") == 0) ||
-             (strcasecmp(acoustic_interface_regularization, "upwind") == 0)) {
-    acousticInterfaceRegularizationMode =
-        ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown response for acoustic_interface_regularization "
-                 "(none or impedance): %s\n",
-                 acoustic_interface_regularization);
-  }
-  if (Param.theAcousticInterfacePenaltyFactor < 0.0) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_interface_penalty_factor=%g must be >= 0.\n",
-                 Param.theAcousticInterfacePenaltyFactor);
-  }
-  if ((acousticInterfaceRegularizationMode ==
-       ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
-      (Param.theAcousticInterfacePenaltyFactor > 1.0)) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_interface_penalty_factor=%g must be <= 1 for "
-                 "the passive impedance flux.\n",
-                 Param.theAcousticInterfacePenaltyFactor);
-  }
-
-  if ((strcasecmp(acoustic_stabilization, "none") == 0) ||
-      (strcasecmp(acoustic_stabilization, "off") == 0) ||
-      (strcasecmp(acoustic_stabilization, "no") == 0)) {
-    Param.theAcousticStabilizationMode = ACOUSTIC_STABILIZATION_NONE;
-  } else if ((strcasecmp(acoustic_stabilization, "spectral_viscosity") == 0) ||
-             (strcasecmp(acoustic_stabilization, "spectral-viscosity") == 0) ||
-             (strcasecmp(acoustic_stabilization, "sv") == 0)) {
-    Param.theAcousticStabilizationMode =
-        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown response for acoustic_stabilization "
-                 "(none or spectral_viscosity): %s\n",
-                 acoustic_stabilization);
-  }
-  if (Param.theAcousticSpectralViscosityStrength < 0.0) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_spectral_viscosity_strength=%g must be >= 0.\n",
-                 Param.theAcousticSpectralViscosityStrength);
-  }
-  if ((Param.theAcousticStabilizationMode ==
-       ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) &&
-      (Param.theAcousticSpectralViscosityStrength <= 0.0)) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_spectral_viscosity_strength=%g must be > 0 "
-                 "when acoustic_stabilization=spectral_viscosity.\n",
-                 Param.theAcousticSpectralViscosityStrength);
-  }
-
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -3325,59 +3221,37 @@ static int32_t parse_parameters(const char* numericalin) {
   if (acoustic_formulation_explicit) {
     if (strcasecmp(acoustic_formulation, "none") == 0) {
       acousticPressureFormulation = NO;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
+      Param.theAcousticVelocityPotential = 1;
     } else if (strcasecmp(acoustic_formulation, "pressure") == 0) {
       acousticPressureFormulation = YES;
-      Param.theAcousticVelocityPotential = ACOUSTIC_FORMULATION_PRESSURE;
+      Param.theAcousticVelocityPotential = 0;
     } else if ((strcasecmp(acoustic_formulation, "velocity_potential") == 0) ||
                (strcasecmp(acoustic_formulation, "potential") == 0)) {
       acousticPressureFormulation = YES;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
-    } else if ((strcasecmp(acoustic_formulation,
-                           "displacement_potential") == 0) ||
-               (strcasecmp(acoustic_formulation,
-                           "displacement-potential") == 0)) {
-      acousticPressureFormulation = YES;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL;
-    } else if ((strcasecmp(acoustic_formulation, "pressure_velocity") == 0) ||
-               (strcasecmp(acoustic_formulation, "pressure-velocity") == 0) ||
-               (strcasecmp(acoustic_formulation, "first_order") == 0) ||
-               (strcasecmp(acoustic_formulation, "first-order") == 0)) {
-      acousticPressureFormulation = YES;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_PRESSURE_VELOCITY;
+      Param.theAcousticVelocityPotential = 1;
     } else {
       solver_abort(__FUNCTION_NAME, NULL,
-                   "acoustic_formulation must be 'none', 'pressure', "
-                   "'velocity_potential', 'displacement_potential', or "
-                   "'pressure_velocity': "
-                   "got '%s'\n",
+                   "acoustic_formulation must be 'none', 'pressure', or "
+                   "'velocity_potential': got '%s'\n",
                    acoustic_formulation);
     }
   } else if (legacy_acoustic_pressure_formulation_explicit) {
     if (legacyAcousticPressureFormulation == YES) {
       acousticPressureFormulation = YES;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
+      Param.theAcousticVelocityPotential = 1;
       strcpy(acoustic_formulation, "velocity_potential");
     } else {
       acousticPressureFormulation = NO;
-      Param.theAcousticVelocityPotential =
-          ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
+      Param.theAcousticVelocityPotential = 1;
       strcpy(acoustic_formulation, "none");
     }
   } else if (includeAcoustic == YES) {
     acousticPressureFormulation = YES;
-    Param.theAcousticVelocityPotential =
-        ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
+    Param.theAcousticVelocityPotential = 1;
     strcpy(acoustic_formulation, "velocity_potential");
   } else {
     acousticPressureFormulation = NO;
-    Param.theAcousticVelocityPotential =
-        ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
+    Param.theAcousticVelocityPotential = 1;
     strcpy(acoustic_formulation, "velocity_potential");
   }
 
@@ -3415,38 +3289,14 @@ static int32_t parse_parameters(const char* numericalin) {
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "print_station_pressures=yes requires include_acoustic=yes "
-                 "and an active acoustic_formulation\n");
+                 "and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
   }
   if ((reconstructAcousticPlaneDisplacements == YES) &&
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
-                 "include_acoustic=yes and an active acoustic_formulation\n");
-  }
-  if ((Param.theAcousticStabilizationMode != ACOUSTIC_STABILIZATION_NONE) &&
-      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_stabilization requires include_acoustic=yes and "
-                 "an active acoustic_formulation\n");
-  }
-  if ((Param.theAcousticVelocityPotential ==
-       ACOUSTIC_FORMULATION_PRESSURE_VELOCITY) &&
-      ((Param.theAcousticQualityFactor > 0.0) ||
-       (Param.theAcousticStabilizationMode != ACOUSTIC_STABILIZATION_NONE))) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_quality_factor and acoustic_stabilization apply "
-                 "only to scalar second-order acoustic formulations. Leave "
-                 "both unset for acoustic_formulation=pressure_velocity.\n");
-  }
-  if ((acousticInterfaceRegularizationMode ==
-       ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
-      (Param.theAcousticInterfacePenaltyFactor > 0.0) &&
-      ((includeAcoustic != YES) || (acousticPressureFormulation != YES) ||
-       (Param.theAcousticVelocityPotential !=
-        ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL))) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_interface_regularization=impedance requires "
-                 "include_acoustic=yes and "
+                 "include_acoustic=yes and acoustic_formulation=pressure or "
                  "acoustic_formulation=velocity_potential\n");
   }
   if ((basinMaterialType == BASIN_MATERIAL_ACOUSTIC_WATER) &&
@@ -3713,8 +3563,6 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
-  Param.theAcousticInterfaceRegularizationMode =
-      acousticInterfaceRegularizationMode;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
@@ -3769,31 +3617,12 @@ static int32_t parse_parameters(const char* numericalin) {
                    ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
                       ? "face_mass"
                       : "point");
-    monitor_print("Acoustic interface regularization:  %s",
-                  (Param.theAcousticInterfaceRegularizationMode ==
-                   ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE)
-                      ? "impedance"
-                      : "none");
-    if (Param.theAcousticInterfaceRegularizationMode ==
-        ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) {
-      monitor_print(" (factor=%.3f)\n",
-                    Param.theAcousticInterfacePenaltyFactor);
-    } else {
-      monitor_print("\n");
-    }
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
-                      : ((Param.theAcousticVelocityPotential ==
-                          ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL)
+                      : ((Param.theAcousticVelocityPotential == 1)
                              ? "velocity_potential (p = -dphi/dt; vel continuity)"
-                             : ((Param.theAcousticVelocityPotential ==
-                                 ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL)
-                                     ? "displacement_potential (p = -d2chi/dt2; disp continuity)"
-                                    : ((Param.theAcousticVelocityPotential ==
-                                        ACOUSTIC_FORMULATION_PRESSURE_VELOCITY)
-                                           ? "pressure_velocity (first-order p/v; Riemann interface)"
-                                           : "pressure (legacy pressure variable)"))),
+                             : "pressure (legacy pressure variable)"),
                   ((!acoustic_formulation_explicit) &&
                    legacy_acoustic_pressure_formulation_explicit &&
                    (legacyAcousticPressureFormulation == YES))
@@ -3810,18 +3639,6 @@ static int32_t parse_parameters(const char* numericalin) {
     } else {
       monitor_print("Acoustic quality factor Q:          %s\n",
                     "lossless (default; bit-identical baseline)");
-    }
-    monitor_print("Acoustic stabilization:             %s",
-                  (Param.theAcousticStabilizationMode ==
-                   ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY)
-                      ? "spectral_viscosity"
-                      : "none");
-    if (Param.theAcousticStabilizationMode ==
-        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) {
-      monitor_print(" (strength=%.3f)\n",
-                    Param.theAcousticSpectralViscosityStrength);
-    } else {
-      monitor_print("\n");
     }
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
@@ -8314,18 +8131,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (Param.theAcousticVelocityPotential ==
-        ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) {
-      if (cudaMallocHost(&(Global.mySolver->pressure_tm3),
-                         Global.myMesh->nharbored * sizeof(solver_float)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic displacement-potential tm3 pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-    }
     if (cudaMallocHost(&(Global.mySolver->pressure_force),
                        Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
@@ -8357,79 +8162,16 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (acoustic_pressure_velocity_enabled()) {
-      if (cudaMallocHost(&(Global.mySolver->acoustic_velocity),
-                         Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic velocity pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMallocHost(&(Global.mySolver->acoustic_velocity_prev),
-                         Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic previous velocity pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMallocHost(&(Global.mySolver->acoustic_velocity_force),
-                         Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic velocity force pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMallocHost(&(Global.mySolver->acoustic_displacement),
-                         Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic displacement pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMallocHost(&(Global.mySolver->acoustic_velocity_mass),
-                         Global.myMesh->nharbored * sizeof(solver_float)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic velocity mass pinned memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-    }
     memset(Global.mySolver->pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_tm2, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
-    if (Global.mySolver->pressure_tm3 != NULL) {
-      memset(Global.mySolver->pressure_tm3, 0,
-             Global.myMesh->nharbored * sizeof(solver_float));
-    }
     memset(Global.mySolver->pressure_force, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_mass, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_damp, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
-    if (acoustic_pressure_velocity_enabled()) {
-      memset(Global.mySolver->acoustic_velocity, 0,
-             Global.myMesh->nharbored * sizeof(fvector_t));
-      memset(Global.mySolver->acoustic_velocity_prev, 0,
-             Global.myMesh->nharbored * sizeof(fvector_t));
-      memset(Global.mySolver->acoustic_velocity_force, 0,
-             Global.myMesh->nharbored * sizeof(fvector_t));
-      memset(Global.mySolver->acoustic_displacement, 0,
-             Global.myMesh->nharbored * sizeof(fvector_t));
-      memset(Global.mySolver->acoustic_velocity_mass, 0,
-             Global.myMesh->nharbored * sizeof(solver_float));
-    }
 
     pressureFreeSurfaceHost =
         (solver_float*)calloc(Global.myMesh->nharbored, sizeof(solver_float));
@@ -8719,7 +8461,6 @@ static void solver_init() {
       const double volume =
           edata->edgesize * edata->edgesize * edata->edgesize;
       const double nodalPressureMass = volume / (8.0 * bulk);
-      const double nodalVelocityMass = edata->rho * volume / 8.0;
 
       ep->c1 = 0.0;
       ep->c2 = 0.0;
@@ -8736,14 +8477,13 @@ static void solver_init() {
       double acoustic_damp = 0.0;
 
 #ifdef BOUNDARY
-      /* Acoustic elements 'continue' below before the elastic-path CPML
-       * block, so this is where acoustic PML is enrolled. The scalar
-       * second-order formulation uses matched mass/damping terms below; the
-       * first-order pressure/velocity formulation uses the same geometric
-       * enrollment and derivative ADE coefficients, but leaves pressure mass
-       * and damping unscaled. Strict no-op for dashpot / non-PML /
-       * non-BOUNDARY -> every previously-validated configuration is
-       * bit-identical. */
+      /* Step A activation + Step B divergence-side coefficient build.
+       * Acoustic elements 'continue' below before the elastic-path CPML
+       * block, so this is where acoustic PML is enrolled (Step A) and
+       * its divergence-side coeffs are built (Step B). Relocated ABOVE
+       * the pressure-mass accumulation so the matched kappa-inertia can
+       * scale it. Strict no-op for dashpot / non-PML / non-BOUNDARY ->
+       * every previously-validated configuration is bit-identical. */
       if (Param.theAbcType == ABC_CPML) {
         lnid0 = elemp->lnid[0];
         ldb[0] = Global.myMesh->nodeTable[lnid0].x;
@@ -8790,48 +8530,37 @@ static void solver_init() {
             g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
                 invKappa_axis[axis];
           }
-          if (acoustic_pressure_velocity_enabled()) {
-            g_cpmlBuild.acoustic_forceCoeff[pml_idx] = 0.0;
-            g_cpmlBuild.acoustic_restoreCoeff[pml_idx] = 0.0;
-            for (int axis = 0; axis < 3; axis++) {
-              g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = 0.0;
-              g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] = 0.0;
-              g_cpmlBuild.acoustic_memForce[axis][pml_idx] = 0.0;
-            }
-          } else {
-            const double rho = (double)edata->rho;
-            /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
-             * interior acoustic stiffness coefficient (commit 20180b6), so
-             * P_raw exactly equals the constant-gradient content of the
-             * interior operator and the native delta vanishes at the PML
-             * inner edge. rho > 0 guaranteed by mesh validation. (Array
-             * name kept; semantics are now the stiffness coeff, not the
-             * old dt^2 h^2/4 forceCoeff.) */
-            g_cpmlBuild.acoustic_forceCoeff[pml_idx] =
-                dt2 * h / (16.0 * rho);
+          const double rho = (double)edata->rho;
+          /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
+           * interior acoustic stiffness coefficient (commit 20180b6), so
+           * P_raw exactly equals the constant-gradient content of the
+           * interior operator and the native delta vanishes at the PML
+           * inner edge. rho > 0 guaranteed by mesh validation. (Array
+           * name kept; semantics are now the stiffness coeff, not the
+           * old dt^2 h^2/4 forceCoeff.) */
+          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
 
-            /* Step B divergence side -- scalar mirror of the validated
-             * elastic two-sided. memForce/restoreCoeff use the acoustic
-             * nodal mass (nodalPressureMass) in place of the elastic
-             * rho*h^3/8. */
-            acoustic_kprod =
-                kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
-            double restore = 0.0;
-            for (int axis = 0; axis < 3; axis++) {
-              const double da = d_axis[axis];
-              const double aa = alpha_axis[axis];
-              const double decay = exp(-aa * dt);
-              g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
-              g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
-                  (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
-              g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
-                  dt2 * nodalPressureMass * da * aa * aa;
-              restore += da * aa;
-            }
-            g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
-                dt2 * nodalPressureMass * restore;
-            acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
+          /* Step B divergence side -- scalar mirror of the validated
+           * elastic two-sided. memForce/restoreCoeff use the acoustic
+           * nodal mass (nodalPressureMass) in place of the elastic
+           * rho*h^3/8. */
+          acoustic_kprod =
+              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
+          double restore = 0.0;
+          for (int axis = 0; axis < 3; axis++) {
+            const double da = d_axis[axis];
+            const double aa = alpha_axis[axis];
+            const double decay = exp(-aa * dt);
+            g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
+            g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
+                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
+            g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
+                dt2 * nodalPressureMass * da * aa * aa;
+            restore += da * aa;
           }
+          g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
+              dt2 * nodalPressureMass * restore;
+          acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
         }
       }
 #endif /* BOUNDARY */
@@ -8846,10 +8575,6 @@ static void solver_init() {
         Global.mySolver->pressure_damp[lnid] +=
             (solver_float)(nodalPressureMass * acoustic_damp *
                            Param.theDeltaT);
-        if (acoustic_pressure_velocity_enabled()) {
-          Global.mySolver->acoustic_velocity_mass[lnid] +=
-              (solver_float)nodalVelocityMass;
-        }
       }
       if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
           Global.myOctree->nearendp[2]) {
@@ -10057,16 +9782,6 @@ static void solver_init() {
     compute_adjust(Global.mySolver->pressure_damp, 1, DISTRIBUTION);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_damp,
                       1, CONTRIBUTION, AN_PRESSURE_DAMP_MSG);
-    if (acoustic_pressure_velocity_enabled()) {
-      schedule_senddata(Global.mySolver->dn_sched,
-                        Global.mySolver->acoustic_velocity_mass, 1,
-                        CONTRIBUTION, DN_ACOUSTIC_VELOCITY_MASS_MSG);
-      compute_adjust(Global.mySolver->acoustic_velocity_mass, 1,
-                     DISTRIBUTION);
-      schedule_senddata(Global.mySolver->an_sched,
-                        Global.mySolver->acoustic_velocity_mass, 1,
-                        CONTRIBUTION, AN_ACOUSTIC_VELOCITY_MASS_MSG);
-    }
     schedule_senddata(Global.mySolver->dn_sched, pressureFreeSurfaceHost, 1,
                       CONTRIBUTION, DN_PRESSURE_SURFACE_MSG);
     compute_adjust(pressureFreeSurfaceHost, 1, DISTRIBUTION);
@@ -10094,19 +9809,10 @@ static void solver_init() {
     g_acousticPressureFreeSurfaceNodeCount = globalPressureFreeSurfaceNodes;
     if (Global.myID == 0) {
       monitor_print(
-          "%s: %.1fM elements, %.1fM nodes, %.1fM free-surface nodes\n",
-          acoustic_pressure_velocity_enabled()
-              ? "Acoustic pressure/velocity formulation"
-              : "Acoustic scalar formulation",
+          "Acoustic scalar formulation: %.1fM elements, %.1fM nodes, %.1fM free-surface nodes\n",
           (double)globalPressureElements / 1.0e6,
           (double)globalPressureNodes / 1.0e6,
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
-      if (acoustic_pressure_velocity_enabled() &&
-          (Param.theAbcType == ABC_CPML)) {
-        monitor_print(
-            "Acoustic pressure/velocity CPML: first-order ADE derivative "
-            "corrections enabled for acoustic PML elements.\n");
-      }
     }
   } else {
     g_acousticPressureElementCount = 0;
@@ -10171,17 +9877,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (Param.theAcousticVelocityPotential ==
-        ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) {
-      if (cudaMalloc((void**)&(Global.gpuData.pressureTm3Device),
-                     Global.myMesh->nharbored * sizeof(solver_float)) !=
-          cudaSuccess) {
-        fprintf(stderr, "Thread %d: Failed to allocate acoustic displacement-potential tm3 memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-    }
     if (cudaMalloc((void**)&(Global.gpuData.pressureForceDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
@@ -10214,52 +9909,6 @@ static void solver_init() {
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
-    }
-    if (acoustic_pressure_velocity_enabled()) {
-      if (cudaMalloc((void**)&Global.gpuData.acousticVelocityDevice,
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr, "Thread %d: Failed to allocate acoustic velocity memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMalloc((void**)&Global.gpuData.acousticVelocityPrevDevice,
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic previous velocity memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMalloc((void**)&Global.gpuData.acousticVelocityForceDevice,
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic velocity force memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMalloc((void**)&Global.gpuData.acousticDisplacementDevice,
-                     Global.myMesh->nharbored * sizeof(fvector_t)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic displacement memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMalloc((void**)&Global.gpuData.acousticVelocityMassDevice,
-                     Global.myMesh->nharbored * sizeof(solver_float)) !=
-          cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to allocate acoustic velocity mass memory\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
     }
   }
   if (cudaMalloc((void**)&(Global.gpuData.conv_shear_1Device),
@@ -10344,19 +9993,11 @@ static void solver_init() {
     exit(1);
   }
   Global.gpuData.acousticInterfaceFaceCount = 0;
-  /* Independent acoustic coupling formulation. */
+  /* Independent velocity-potential coupling. */
   Global.gpuData.acousticVelocityPotential =
       Param.theAcousticVelocityPotential;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
-  Global.gpuData.acousticInterfaceRegularizationMode =
-      Param.theAcousticInterfaceRegularizationMode;
-  Global.gpuData.acousticInterfacePenaltyFactor =
-      Param.theAcousticInterfacePenaltyFactor;
-  Global.gpuData.acousticStabilizationMode =
-      Param.theAcousticStabilizationMode;
-  Global.gpuData.acousticSpectralViscosityStrength =
-      Param.theAcousticSpectralViscosityStrength;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10398,28 +10039,12 @@ static void solver_init() {
       }
     }
   }
-  if (Global.myID == 0) {
-    if (Global.gpuData.acousticStabilizationMode ==
-        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) {
-      monitor_print(
-          "Acoustic spectral viscosity:       strength=%.6e "
-          "(local K^2 high-k regularizer; ACTIVE)\n",
-          Global.gpuData.acousticSpectralViscosityStrength);
-    } else {
-      monitor_print("Acoustic spectral viscosity:       off\n");
-    }
-  }
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceAreasDevice = NULL;
   Global.gpuData.acousticInterfaceFaceCentersDevice = NULL;
   Global.gpuData.acousticInterfaceFaceNormalsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceHalfWidthsDevice = NULL;
-  Global.gpuData.acousticInterfaceImpedanceDevice = NULL;
-  Global.gpuData.acousticInterfaceInvDensityDevice = NULL;
-  Global.gpuData.acousticInterfaceInvEdgeSizeDevice = NULL;
-  Global.gpuData.acousticInterfaceElasticImpedanceDevice = NULL;
-  Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
@@ -10506,80 +10131,6 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
-      }
-      const int need_interface_impedance =
-          acoustic_pressure_velocity_enabled() ||
-          ((Param.theAcousticInterfaceRegularizationMode ==
-            ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
-           (Param.theAcousticInterfacePenaltyFactor > 0.0));
-      if (need_interface_impedance) {
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfaceImpedanceDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface impedance table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(
-                    Global.gpuData.acousticInterfaceInvEdgeSizeDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface inverse edge-size table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(
-                    Global.gpuData.acousticInterfaceInvDensityDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface inverse density table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(
-                    Global.gpuData.acousticInterfaceElasticImpedanceDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface elastic impedance table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(
-                    Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface elastic inverse edge-size table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfaceElasticMuDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface elastic mu table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfaceElasticLambdaDevice),
-                face_count * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface elastic lambda table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
       }
       if (cudaMalloc(
               (void**)&(
@@ -11164,17 +10715,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if ((Global.gpuData.pressureTm3Device != NULL) &&
-        (Global.mySolver->pressure_tm3 != NULL) &&
-        (cudaMemcpy(Global.gpuData.pressureTm3Device,
-                    Global.mySolver->pressure_tm3,
-                    Global.myMesh->nharbored * sizeof(solver_float),
-                    cudaMemcpyHostToDevice) != cudaSuccess)) {
-      fprintf(stderr, "Thread %d: Failed to copy pressure tm3 array\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     if (cudaMemcpy(Global.gpuData.pressureForceDevice,
                    Global.mySolver->pressure_force,
                    Global.myMesh->nharbored * sizeof(solver_float),
@@ -11193,56 +10733,6 @@ static void solver_init() {
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
-    }
-    if (acoustic_pressure_velocity_enabled()) {
-      if (cudaMemcpy(Global.gpuData.acousticVelocityMassDevice,
-                     Global.mySolver->acoustic_velocity_mass,
-                     Global.myMesh->nharbored * sizeof(solver_float),
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr, "Thread %d: Failed to copy acoustic velocity mass array\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMemcpy(Global.gpuData.acousticVelocityDevice,
-                     Global.mySolver->acoustic_velocity,
-                     Global.myMesh->nharbored * sizeof(fvector_t),
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr, "Thread %d: Failed to copy acoustic velocity array\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMemcpy(Global.gpuData.acousticVelocityPrevDevice,
-                     Global.mySolver->acoustic_velocity_prev,
-                     Global.myMesh->nharbored * sizeof(fvector_t),
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to copy acoustic previous velocity array\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMemcpy(Global.gpuData.acousticVelocityForceDevice,
-                     Global.mySolver->acoustic_velocity_force,
-                     Global.myMesh->nharbored * sizeof(fvector_t),
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to copy acoustic velocity force array\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
-      if (cudaMemcpy(Global.gpuData.acousticDisplacementDevice,
-                     Global.mySolver->acoustic_displacement,
-                     Global.myMesh->nharbored * sizeof(fvector_t),
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr,
-                "Thread %d: Failed to copy acoustic displacement array\n",
-                Global.myID);
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-      }
     }
     if (Global.gpuData.acousticInterfaceFaceCount > 0) {
       size_t face_count =
@@ -11307,143 +10797,6 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
-      }
-      if (Global.gpuData.acousticInterfaceImpedanceDevice != NULL) {
-        double* interface_impedance =
-            (double*)calloc(face_count, sizeof(double));
-        double* interface_inv_h = (double*)calloc(face_count, sizeof(double));
-        double* interface_inv_rho =
-            (double*)calloc(face_count, sizeof(double));
-        double* interface_elastic_impedance =
-            (double*)calloc(face_count, sizeof(double));
-        double* interface_elastic_inv_h =
-            (double*)calloc(face_count, sizeof(double));
-        double* interface_elastic_mu =
-            (double*)calloc(face_count, sizeof(double));
-        double* interface_elastic_lambda =
-            (double*)calloc(face_count, sizeof(double));
-        if ((interface_impedance == NULL) || (interface_inv_h == NULL) ||
-            (interface_inv_rho == NULL) ||
-            (interface_elastic_impedance == NULL) ||
-            (interface_elastic_inv_h == NULL) ||
-            (interface_elastic_mu == NULL) ||
-            (interface_elastic_lambda == NULL)) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate acoustic interface impedance host tables\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-
-        for (size_t iface = 0; iface < face_count; iface++) {
-          int32_t eindex = Global.acousticInterfaceElementIds[iface];
-          if ((eindex >= 0) && (eindex < Global.myMesh->lenum)) {
-            edata_t* edata =
-                (edata_t*)Global.myMesh->elemTable[eindex].data;
-            if ((edata->rho > 0.0) && (edata->Vp > 0.0) &&
-                (edata->edgesize > 0.0)) {
-              interface_impedance[iface] = edata->rho * edata->Vp;
-              interface_inv_h[iface] = 1.0 / edata->edgesize;
-              interface_inv_rho[iface] = 1.0 / edata->rho;
-            }
-          }
-
-          int32_t adjacent_eindex =
-              Global.acousticInterfaceAdjacentElementIndexes[iface];
-          if ((adjacent_eindex >= 0) &&
-              (adjacent_eindex < Global.myMesh->lenum)) {
-            edata_t* adjacent_edata =
-                (edata_t*)Global.myMesh->elemTable[adjacent_eindex].data;
-            if ((adjacent_edata->rho > 0.0) &&
-                (adjacent_edata->Vp > 0.0) &&
-                (adjacent_edata->edgesize > 0.0)) {
-              double adjacent_mu = 0.0;
-              double adjacent_lambda = 0.0;
-              interface_elastic_impedance[iface] =
-                  adjacent_edata->rho * adjacent_edata->Vp;
-              interface_elastic_inv_h[iface] =
-                  1.0 / adjacent_edata->edgesize;
-              mu_and_lambda(&adjacent_mu, &adjacent_lambda, adjacent_edata,
-                            adjacent_eindex);
-              interface_elastic_mu[iface] = adjacent_mu;
-              interface_elastic_lambda[iface] = adjacent_lambda;
-            }
-          }
-        }
-
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceImpedanceDevice,
-                       interface_impedance, face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface impedance table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceInvEdgeSizeDevice,
-                       interface_inv_h, face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface inverse edge-size table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceInvDensityDevice,
-                       interface_inv_rho, face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface inverse density table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceElasticImpedanceDevice,
-                       interface_elastic_impedance,
-                       face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface elastic impedance table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(
-                Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice,
-                interface_elastic_inv_h, face_count * sizeof(double),
-                cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface elastic inverse edge-size table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceElasticMuDevice,
-                       interface_elastic_mu, face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface elastic mu table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.acousticInterfaceElasticLambdaDevice,
-                       interface_elastic_lambda, face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy acoustic interface elastic lambda table\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-
-        free(interface_impedance);
-        free(interface_inv_h);
-        free(interface_inv_rho);
-        free(interface_elastic_impedance);
-        free(interface_elastic_inv_h);
-        free(interface_elastic_mu);
-        free(interface_elastic_lambda);
       }
       if (cudaMemcpy(
               Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice,
@@ -11904,16 +11257,9 @@ static void solver_delete() {
   cudaFree(Global.gpuData.forceDevice);
   cudaFree(Global.gpuData.pressureTm1Device);
   cudaFree(Global.gpuData.pressureTm2Device);
-  cudaFree(Global.gpuData.pressureTm3Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
-  cudaFree(Global.gpuData.pressureDampDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
-  cudaFree(Global.gpuData.acousticVelocityDevice);
-  cudaFree(Global.gpuData.acousticVelocityPrevDevice);
-  cudaFree(Global.gpuData.acousticVelocityForceDevice);
-  cudaFree(Global.gpuData.acousticDisplacementDevice);
-  cudaFree(Global.gpuData.acousticVelocityMassDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
   cudaFree(Global.gpuData.conv_shear_3Device);
@@ -11944,13 +11290,6 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceFaceCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceNormalsDevice);
   cudaFree(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice);
-  cudaFree(Global.gpuData.acousticInterfaceImpedanceDevice);
-  cudaFree(Global.gpuData.acousticInterfaceInvDensityDevice);
-  cudaFree(Global.gpuData.acousticInterfaceInvEdgeSizeDevice);
-  cudaFree(Global.gpuData.acousticInterfaceElasticImpedanceDevice);
-  cudaFree(Global.gpuData.acousticInterfaceElasticInvEdgeSizeDevice);
-  cudaFree(Global.gpuData.acousticInterfaceElasticMuDevice);
-  cudaFree(Global.gpuData.acousticInterfaceElasticLambdaDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice);
@@ -12183,9 +11522,6 @@ static void solver_delete() {
   if (Global.mySolver->pressure_tm2 != NULL) {
     cudaFreeHost(Global.mySolver->pressure_tm2);
   }
-  if (Global.mySolver->pressure_tm3 != NULL) {
-    cudaFreeHost(Global.mySolver->pressure_tm3);
-  }
   if (Global.mySolver->pressure_force != NULL) {
     cudaFreeHost(Global.mySolver->pressure_force);
   }
@@ -12194,21 +11530,6 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_damp != NULL) {
     cudaFreeHost(Global.mySolver->pressure_damp);
-  }
-  if (Global.mySolver->acoustic_velocity != NULL) {
-    cudaFreeHost(Global.mySolver->acoustic_velocity);
-  }
-  if (Global.mySolver->acoustic_velocity_prev != NULL) {
-    cudaFreeHost(Global.mySolver->acoustic_velocity_prev);
-  }
-  if (Global.mySolver->acoustic_velocity_force != NULL) {
-    cudaFreeHost(Global.mySolver->acoustic_velocity_force);
-  }
-  if (Global.mySolver->acoustic_displacement != NULL) {
-    cudaFreeHost(Global.mySolver->acoustic_displacement);
-  }
-  if (Global.mySolver->acoustic_velocity_mass != NULL) {
-    cudaFreeHost(Global.mySolver->acoustic_velocity_mass);
   }
 
   if (Param.theTypeOfDamping >= BKT) {
@@ -13948,41 +13269,11 @@ static void solver_load_pressure_gpu(mysolver_t* solver, mesh_t* mesh) {
   cudaMemcpyAsync(solver->gpuData->pressureTm2Device, solver->pressure_tm2,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  if ((solver->gpuData->pressureTm3Device != NULL) &&
-      (solver->pressure_tm3 != NULL)) {
-    cudaMemcpyAsync(solver->gpuData->pressureTm3Device, solver->pressure_tm3,
-                    mesh->nharbored * sizeof(solver_float),
-                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  }
-  if (acoustic_pressure_velocity_enabled()) {
-    cudaMemcpyAsync(solver->gpuData->acousticVelocityDevice,
-                    solver->acoustic_velocity,
-                    mesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-    cudaMemcpyAsync(solver->gpuData->acousticVelocityPrevDevice,
-                    solver->acoustic_velocity_prev,
-                    mesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-    cudaMemcpyAsync(solver->gpuData->acousticDisplacementDevice,
-                    solver->acoustic_displacement,
-                    mesh->nharbored * sizeof(fvector_t),
-                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  }
   cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
                   mesh->nharbored * sizeof(solver_float),
                   solver->streams[CUDA_STREAM_MAIN]);
-  if (acoustic_pressure_velocity_enabled()) {
-    cudaMemsetAsync(solver->gpuData->acousticVelocityForceDevice, 0,
-                    mesh->nharbored * sizeof(fvector_t),
-                    solver->streams[CUDA_STREAM_MAIN]);
-  }
   solver->gpu_spec->numbytespci +=
-      ((solver->pressure_tm3 != NULL) ? 3 : 2) * mesh->nharbored *
-      (int64_t)sizeof(solver_float);
-  if (acoustic_pressure_velocity_enabled()) {
-    solver->gpu_spec->numbytespci +=
-        3 * mesh->nharbored * (int64_t)sizeof(fvector_t);
-  }
+      2 * mesh->nharbored * (int64_t)sizeof(solver_float);
 }
 
 static void solver_swap_pressure_buffers(mysolver_t* solver) {
@@ -13995,279 +13286,6 @@ static void solver_swap_pressure_buffers(mysolver_t* solver) {
   tmp = solver->pressure_tm2;
   solver->pressure_tm2 = solver->pressure_tm1;
   solver->pressure_tm1 = tmp;
-}
-
-static void solver_preserve_displacement_potential_history(mysolver_t* solver,
-                                                           mesh_t* mesh) {
-  if ((!acoustic_pressure_enabled()) ||
-      (Param.theAcousticVelocityPotential !=
-       ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) ||
-      (solver->pressure_tm2 == NULL) || (solver->pressure_tm3 == NULL)) {
-    return;
-  }
-
-  memcpy(solver->pressure_tm3, solver->pressure_tm2,
-         mesh->nharbored * sizeof(solver_float));
-}
-
-static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
-                                                       mesh_t* mesh) {
-  int blocksize;
-  int gridsize;
-  int32_t face_count;
-  cudaError_t cerror;
-
-  Timer_Start("Acoustic Pressure Step");
-
-  /* Staggered first-order acoustic update:
-   *   1. v^{n+1/2} from p^n;
-   *   2. communicate/share v^{n+1/2};
-   *   3. p^{n+1} from v^{n+1/2}.
-   * Updating pressure and velocity together with forward Euler is unstable for
-   * the acoustic wave equation; this split is the explicit symplectic form. */
-  blocksize = 256;
-  gridsize = (mesh->lenum + blocksize - 1) / blocksize;
-  cudaMemsetAsync(solver->gpuData->acousticVelocityForceDevice, 0,
-                  mesh->nharbored * sizeof(fvector_t),
-                  solver->streams[CUDA_STREAM_MAIN]);
-
-  kernelAcousticFirstOrderVelocityVolume<<<gridsize, blocksize, 0,
-                                           solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, solver->gpuDataDevice, Param.theDeltaT);
-  cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order velocity kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  if (Param.theAbcType == ABC_CPML &&
-      solver->gpuData->pmlAcousticElemCount > 0) {
-    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
-    const int pmlBlock = 128;
-    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
-    kernelAcousticFirstOrderPMLVelocityStep<<<
-        pmlGrid, pmlBlock, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->lenum, solver->gpuDataDevice, pmlN, Param.theDeltaT);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: acoustic first-order CPML velocity kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
-  face_count = solver->gpuData->acousticInterfaceFaceCount;
-  if (face_count > 0) {
-    gridsize = (face_count + blocksize - 1) / blocksize;
-    kernelAcousticFirstOrderInterface<<<
-        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        face_count, solver->gpuDataDevice, Param.theDeltaT, 0, 1);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: acoustic first-order velocity interface kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
-  cudaMemcpyAsync(solver->acoustic_velocity_force,
-                  solver->gpuData->acousticVelocityForceDevice,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(fvector_t);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  schedule_senddata(solver->dn_sched, solver->acoustic_velocity_force,
-                    sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_ACOUSTIC_VELOCITY_FORCE_MSG);
-  compute_adjust(solver->acoustic_velocity_force,
-                 sizeof(fvector_t) / sizeof(solver_float), DISTRIBUTION);
-  schedule_senddata(solver->an_sched, solver->acoustic_velocity_force,
-                    sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_ACOUSTIC_VELOCITY_FORCE_MSG);
-
-  cudaMemcpyAsync(solver->gpuData->acousticVelocityForceDevice,
-                  solver->acoustic_velocity_force,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(fvector_t);
-
-  blocksize = 256;
-  gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-  kernelAcousticFirstOrderVelocityUpdate<<<gridsize, blocksize, 0,
-                                           solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice, Param.theDeltaT);
-  cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order velocity update kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  cudaMemcpyAsync(solver->acoustic_velocity,
-                  solver->gpuData->acousticVelocityDevice,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  cudaMemcpyAsync(solver->acoustic_velocity_prev,
-                  solver->gpuData->acousticVelocityPrevDevice,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  cudaMemcpyAsync(solver->acoustic_displacement,
-                  solver->gpuData->acousticDisplacementDevice,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (3 * (int64_t)sizeof(fvector_t));
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  memset(solver->acoustic_velocity_force, 0,
-         mesh->nharbored * sizeof(fvector_t));
-
-  /* Pressure RHS uses the just-updated acoustic velocity, so share it before
-   * launching the pressure substep on partition-boundary elements. */
-  schedule_senddata(solver->an_sched, solver->acoustic_velocity,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_ACOUSTIC_VELOCITY_MSG);
-  compute_adjust(solver->acoustic_velocity,
-                 sizeof(fvector_t) / sizeof(solver_float), ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->acoustic_velocity,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_ACOUSTIC_VELOCITY_MSG);
-
-  cudaMemcpyAsync(solver->gpuData->acousticVelocityDevice,
-                  solver->acoustic_velocity,
-                  mesh->nharbored * sizeof(fvector_t),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(fvector_t);
-
-  cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
-                  mesh->nharbored * sizeof(solver_float),
-                  solver->streams[CUDA_STREAM_MAIN]);
-
-  blocksize = 256;
-  gridsize = (mesh->lenum + blocksize - 1) / blocksize;
-  kernelAcousticFirstOrderPressureVolume<<<gridsize, blocksize, 0,
-                                           solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->lenum, solver->gpuDataDevice, Param.theDeltaT);
-  cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order pressure kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  if (Param.theAbcType == ABC_CPML &&
-      solver->gpuData->pmlAcousticElemCount > 0) {
-    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
-    const int pmlBlock = 128;
-    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
-    kernelAcousticFirstOrderPMLPressureStep<<<
-        pmlGrid, pmlBlock, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        mesh->lenum, solver->gpuDataDevice, pmlN, Param.theDeltaT);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: acoustic first-order CPML pressure kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
-  face_count = solver->gpuData->acousticInterfaceFaceCount;
-  if (face_count > 0) {
-    gridsize = (face_count + blocksize - 1) / blocksize;
-    kernelAcousticFirstOrderInterface<<<
-        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        face_count, solver->gpuDataDevice, Param.theDeltaT, 1, 0);
-    cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: acoustic first-order pressure interface kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
-  cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    DN_PRESSURE_FORCE_MSG);
-  compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
-  schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    AN_PRESSURE_FORCE_MSG);
-
-  cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-
-  blocksize = 256;
-  gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-  kernelAcousticFirstOrderUpdate<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice, Param.theDeltaT);
-  cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order pressure update kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  memset(solver->pressure_force, 0,
-         mesh->nharbored * sizeof(solver_float));
-
-  schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
-                    AN_PRESSURE_MSG);
-  compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
-                    DN_PRESSURE_MSG);
-
-  schedule_senddata(solver->an_sched, solver->acoustic_velocity_prev,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_ACOUSTIC_VELOCITY_PREV_MSG);
-  compute_adjust(solver->acoustic_velocity_prev,
-                 sizeof(fvector_t) / sizeof(solver_float), ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->acoustic_velocity_prev,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_ACOUSTIC_VELOCITY_PREV_MSG);
-
-  schedule_senddata(solver->an_sched, solver->acoustic_displacement,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_ACOUSTIC_DISPLACEMENT_MSG);
-  compute_adjust(solver->acoustic_displacement,
-                 sizeof(fvector_t) / sizeof(solver_float), ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->acoustic_displacement,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_ACOUSTIC_DISPLACEMENT_MSG);
-
-  Timer_Stop("Acoustic Pressure Step");
 }
 
 static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
@@ -14314,11 +13332,6 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   cudaError_t cerror;
 
   if ((!acoustic_pressure_enabled()) || (g_acousticPressureElementCount <= 0)) {
-    return;
-  }
-
-  if (acoustic_pressure_velocity_enabled()) {
-    solver_run_acoustic_pressure_velocity_step(solver, mesh);
     return;
   }
 
@@ -14376,8 +13389,6 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
       exit(1);
     }
   }
-
-  solver_preserve_displacement_potential_history(solver, mesh);
 
   cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
                   mesh->nharbored * sizeof(solver_float),
@@ -21302,82 +20313,6 @@ static void solver_snapshot_station_accel_history(mysolver_t* solver) {
   topography_snapshot_station_history(solver);
 }
 
-static int station_scalar_gradient(int32_t iStation, const solver_float* scalar,
-                                   double grad[3]) {
-  int iPhi;
-  const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-  const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-  const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-  const double h = Param.myStations[iStation].h;
-  const vector3D_t localCoords = Param.myStations[iStation].localcoords;
-  const double xi = localCoords.x[0];
-  const double eta = localCoords.x[1];
-  const double zeta = localCoords.x[2];
-  int32_t nodesToInterpolate[8];
-
-  grad[0] = 0.0;
-  grad[1] = 0.0;
-  grad[2] = 0.0;
-
-  if ((Param.myStations[iStation].pressure_is_defined == 0) ||
-      (scalar == NULL) || (h <= 0.0)) {
-    return 0;
-  }
-
-  for (iPhi = 0; iPhi < 8; iPhi++) {
-    nodesToInterpolate[iPhi] =
-        Param.myStations[iStation].nodestointerpolate[iPhi];
-  }
-
-  for (iPhi = 0; iPhi < 8; iPhi++) {
-    const int nd = nodesToInterpolate[iPhi];
-    const double scalar_value = (double)scalar[nd];
-    const double dphidx =
-        sx[iPhi] * (1.0 + sy[iPhi] * eta) *
-        (1.0 + sz[iPhi] * zeta) / (4.0 * h);
-    const double dphidy =
-        sy[iPhi] * (1.0 + sx[iPhi] * xi) *
-        (1.0 + sz[iPhi] * zeta) / (4.0 * h);
-    const double dphidz =
-        sz[iPhi] * (1.0 + sx[iPhi] * xi) *
-        (1.0 + sy[iPhi] * eta) / (4.0 * h);
-
-    grad[0] += dphidx * scalar_value;
-    grad[1] += dphidy * scalar_value;
-    grad[2] += dphidz * scalar_value;
-  }
-
-  return 1;
-}
-
-static double station_scalar_pressure_node(int32_t node) {
-  if ((Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
-    return 0.0;
-  }
-
-  if ((Param.theAcousticVelocityPotential ==
-       ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL) &&
-      (Param.theDeltaT > 0.0) &&
-      (Global.mySolver->pressure_tm2 != NULL)) {
-    return -((double)Global.mySolver->pressure_tm1[node] -
-             (double)Global.mySolver->pressure_tm2[node]) /
-           Param.theDeltaT;
-  }
-
-  if ((Param.theAcousticVelocityPotential ==
-       ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) &&
-      (Param.theDeltaTSquared > 0.0) &&
-      (Global.mySolver->pressure_tm2 != NULL) &&
-      (Global.mySolver->pressure_tm3 != NULL)) {
-    return -((double)Global.mySolver->pressure_tm1[node] -
-             2.0 * (double)Global.mySolver->pressure_tm2[node] +
-             (double)Global.mySolver->pressure_tm3[node]) /
-           Param.theDeltaTSquared;
-  }
-
-  return (double)Global.mySolver->pressure_tm1[node];
-}
-
 static int station_pressure_gradient(int32_t iStation, double grad[3]) {
   int iPhi;
   const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
@@ -21405,9 +20340,17 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
+  /* velocity_potential: the field is phi; p = -dphi/dt
+   * = -(phi^n - phi^{n-1})/dt. pressure mode: field is p directly. */
+  const int vp_out = (Param.theAcousticVelocityPotential == 1) &&
+                     (Param.theDeltaT > 0.0);
   for (iPhi = 0; iPhi < 8; iPhi++) {
     const int nd = nodesToInterpolate[iPhi];
-    const double pressure = station_scalar_pressure_node(nd);
+    const double pressure =
+        vp_out ? (-(double)(Global.mySolver->pressure_tm1[nd] -
+                            Global.mySolver->pressure_tm2[nd]) /
+                  Param.theDeltaT)
+               : (double)Global.mySolver->pressure_tm1[nd];
     const double dphidx =
         sx[iPhi] * (1.0 + sy[iPhi] * eta) *
         (1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -21446,95 +20389,8 @@ static void solver_update_acoustic_station_kinematics(int32_t step) {
     if (station->pressure_is_defined == 0) {
       continue;
     }
-    if (station->rho <= 0.0) {
-      continue;
-    }
-
-    if (Param.theAcousticVelocityPotential ==
-        ACOUSTIC_FORMULATION_PRESSURE_VELOCITY) {
-      int iPhi;
-      const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-      const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-      const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-      const vector3D_t localCoords = station->localcoords;
-
-      if ((Global.mySolver->acoustic_velocity == NULL) ||
-          (Global.mySolver->acoustic_velocity_prev == NULL) ||
-          (Global.mySolver->acoustic_displacement == NULL)) {
-        continue;
-      }
-
-      for (int axis = 0; axis < 3; axis++) {
-        station->acoustic_disp[axis] = 0.0;
-        station->acoustic_vel[axis] = 0.0;
-        station->acoustic_acc[axis] = 0.0;
-      }
-
-      for (iPhi = 0; iPhi < 8; iPhi++) {
-        const int nd = station->nodestointerpolate[iPhi];
-        const double sh =
-            (1.0 + sx[iPhi] * localCoords.x[0]) *
-            (1.0 + sy[iPhi] * localCoords.x[1]) *
-            (1.0 + sz[iPhi] * localCoords.x[2]) / 8.0;
-        const fvector_t disp = Global.mySolver->acoustic_displacement[nd];
-        const fvector_t vel = Global.mySolver->acoustic_velocity[nd];
-        const fvector_t vel_prev =
-            Global.mySolver->acoustic_velocity_prev[nd];
-
-        station->acoustic_disp[0] += sh * (double)disp.f[0];
-        station->acoustic_disp[1] += sh * (double)disp.f[1];
-        station->acoustic_disp[2] += sh * (double)disp.f[2];
-        station->acoustic_vel[0] += sh * (double)vel.f[0];
-        station->acoustic_vel[1] += sh * (double)vel.f[1];
-        station->acoustic_vel[2] += sh * (double)vel.f[2];
-        if (Param.theDeltaT > 0.0) {
-          station->acoustic_acc[0] +=
-              sh * ((double)vel.f[0] - (double)vel_prev.f[0]) /
-              Param.theDeltaT;
-          station->acoustic_acc[1] +=
-              sh * ((double)vel.f[1] - (double)vel_prev.f[1]) /
-              Param.theDeltaT;
-          station->acoustic_acc[2] +=
-              sh * ((double)vel.f[2] - (double)vel_prev.f[2]) /
-              Param.theDeltaT;
-        }
-      }
-      station->acoustic_kinematics_ready = 1;
-      continue;
-    }
-
-    if (Param.theAcousticVelocityPotential ==
-        ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) {
-      double grad_prev[3], grad_prev2[3];
-
-      if ((station_scalar_gradient(iStation, Global.mySolver->pressure_tm1,
-                                   grad) == 0) ||
-          (station_scalar_gradient(iStation, Global.mySolver->pressure_tm2,
-                                   grad_prev) == 0) ||
-          (station_scalar_gradient(iStation, Global.mySolver->pressure_tm3,
-                                   grad_prev2) == 0)) {
-        continue;
-      }
-
-      for (int axis = 0; axis < 3; axis++) {
-        station->acoustic_disp[axis] = grad[axis] / station->rho;
-        station->acoustic_vel[axis] =
-            (Param.theDeltaT > 0.0)
-                ? ((grad[axis] - grad_prev[axis]) /
-                   (station->rho * Param.theDeltaT))
-                : 0.0;
-        station->acoustic_acc[axis] =
-            (Param.theDeltaTSquared > 0.0)
-                ? ((grad[axis] - 2.0 * grad_prev[axis] + grad_prev2[axis]) /
-                   (station->rho * Param.theDeltaTSquared))
-                : 0.0;
-        station->acoustic_prev_acc[axis] = station->acoustic_acc[axis];
-      }
-      station->acoustic_kinematics_ready = 1;
-      continue;
-    }
-
-    if (station_pressure_gradient(iStation, grad) == 0) {
+    if ((station->rho <= 0.0) ||
+        (station_pressure_gradient(iStation, grad) == 0)) {
       continue;
     }
 
@@ -21898,7 +20754,14 @@ static double interpolate_station_pressure_value(int32_t iStation) {
                       (1 + xi[1][iPhi] * localCoords.x[1]) *
                       (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
     const int nd = nodesToInterpolate[iPhi];
-    pressure += sh * station_scalar_pressure_node(nd);
+    /* velocity_potential: p = -dphi/dt = -(phi^n - phi^{n-1})/dt. */
+    const double val =
+        ((Param.theAcousticVelocityPotential == 1) && (Param.theDeltaT > 0.0))
+            ? (-(double)(Global.mySolver->pressure_tm1[nd] -
+                         Global.mySolver->pressure_tm2[nd]) /
+               Param.theDeltaT)
+            : (double)Global.mySolver->pressure_tm1[nd];
+    pressure += sh * val;
   }
 
   return pressure;
@@ -23464,8 +22327,7 @@ int main(int argc, char** argv) {
                  Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
                  Param.theDomainX, Param.theDomainY, Param.theDomainZ,
                  Param.planes_input_file, &Param.utmZone,
-                 Param.reconstructAcousticPlaneDisplacements,
-                 Param.theAcousticVelocityPotential);
+                 Param.reconstructAcousticPlaneDisplacements);
     Timer_Stop("Pre Setup Planes Init");
 
     planesSetupElapsed = MPI_Wtime() - planesSetupStart;

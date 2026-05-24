@@ -134,8 +134,6 @@ static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
 static int32_t g_planePrintSequence = 0;
 static int32_t g_reconstructAcousticPlaneDisplacements = 0;
-static int32_t g_acousticFormulation =
-	ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL;
 
 static void plane_unpack_message(const double* messageBuffer, int recvCount) {
 	int offset = 0;
@@ -210,80 +208,8 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	element->rho = material.rho;
 }
 
-static int plane_scalar_gradient(const mysolver_t* mySolver,
-		const plane_strip_element_t* element,
-		const solver_float* scalar,
-		double grad[3]) {
-	int iPhi;
-	const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-	const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-	const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-	const double h = element->h;
-	const vector3D_t localCoords = element->localcoords;
-	const double xi = localCoords.x[0];
-	const double eta = localCoords.x[1];
-	const double zeta = localCoords.x[2];
-	(void)mySolver;
-
-	grad[0] = 0.0;
-	grad[1] = 0.0;
-	grad[2] = 0.0;
-
-	if ((element->pressure_is_defined == 0) || (scalar == NULL) ||
-	    (h <= 0.0)) {
-		return 0;
-	}
-
-	for (iPhi = 0; iPhi < 8; iPhi++) {
-		const int32_t node = element->nodestointerpolate[iPhi];
-		const double value = scalar[node];
-		const double dphidx =
-			sx[iPhi] * (1.0 + sy[iPhi] * eta) *
-			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
-		const double dphidy =
-			sy[iPhi] * (1.0 + sx[iPhi] * xi) *
-			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
-		const double dphidz =
-			sz[iPhi] * (1.0 + sx[iPhi] * xi) *
-			(1.0 + sy[iPhi] * eta) / (4.0 * h);
-
-		grad[0] += dphidx * value;
-		grad[1] += dphidy * value;
-		grad[2] += dphidz * value;
-	}
-
-	return 1;
-}
-
-static double plane_scalar_pressure_node(const mysolver_t* mySolver,
-		int32_t node, double deltaT, double deltaTSquared) {
-	if ((mySolver == NULL) || (mySolver->pressure_tm1 == NULL)) {
-		return 0.0;
-	}
-
-	if ((g_acousticFormulation ==
-	     ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL) &&
-	    (deltaT > 0.0) && (mySolver->pressure_tm2 != NULL)) {
-		return -((double)mySolver->pressure_tm1[node] -
-		         (double)mySolver->pressure_tm2[node]) / deltaT;
-	}
-
-	if ((g_acousticFormulation ==
-	     ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) &&
-	    (deltaTSquared > 0.0) && (mySolver->pressure_tm2 != NULL) &&
-	    (mySolver->pressure_tm3 != NULL)) {
-		return -((double)mySolver->pressure_tm1[node] -
-		         2.0 * (double)mySolver->pressure_tm2[node] +
-		         (double)mySolver->pressure_tm3[node]) / deltaTSquared;
-	}
-
-	return (double)mySolver->pressure_tm1[node];
-}
-
 static int plane_pressure_gradient(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
-		double deltaT,
-		double deltaTSquared,
 		double grad[3]) {
 	int iPhi;
 	const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
@@ -306,8 +232,7 @@ static int plane_pressure_gradient(const mysolver_t* mySolver,
 
 	for (iPhi = 0; iPhi < 8; iPhi++) {
 		const int32_t node = element->nodestointerpolate[iPhi];
-		const double pressure =
-			plane_scalar_pressure_node(mySolver, node, deltaT, deltaTSquared);
+		const double pressure = mySolver->pressure_tm1[node];
 		const double dphidx =
 			sx[iPhi] * (1.0 + sy[iPhi] * eta) *
 			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -334,98 +259,9 @@ static void plane_update_acoustic_point(const mysolver_t* mySolver,
 	double grad[3];
 	double accel[3];
 
-	if ((element == NULL) || (mySolver == NULL) ||
-	    (element->pressure_is_defined == 0) ||
-	    (element->rho <= 0.0)) {
-		return;
-	}
-
-	if (g_acousticFormulation ==
-	    ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL) {
-		double grad_prev[3], grad_prev2[3];
-
-		if ((plane_scalar_gradient(mySolver, element, mySolver->pressure_tm1,
-		                           grad) == 0) ||
-		    (plane_scalar_gradient(mySolver, element, mySolver->pressure_tm2,
-		                           grad_prev) == 0) ||
-		    (plane_scalar_gradient(mySolver, element, mySolver->pressure_tm3,
-		                           grad_prev2) == 0)) {
-			return;
-		}
-
-		for (int axis = 0; axis < 3; axis++) {
-			element->acoustic_disp[axis] = grad[axis] / element->rho;
-			element->acoustic_vel[axis] =
-				(deltaT > 0.0)
-					? ((grad[axis] - grad_prev[axis]) /
-					   (element->rho * deltaT))
-					: 0.0;
-			element->acoustic_acc[axis] =
-				(deltaTSquared > 0.0)
-					? ((grad[axis] - 2.0 * grad_prev[axis] +
-					    grad_prev2[axis]) /
-					   (element->rho * deltaTSquared))
-					: 0.0;
-			element->acoustic_prev_acc[axis] = element->acoustic_acc[axis];
-		}
-		element->acoustic_kinematics_ready = 1;
-		return;
-	}
-
-	if (g_acousticFormulation ==
-	    ACOUSTIC_FORMULATION_PRESSURE_VELOCITY) {
-		const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-		const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-		const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-		const vector3D_t localCoords = element->localcoords;
-
-		if ((mySolver->acoustic_velocity == NULL) ||
-		    (mySolver->acoustic_velocity_prev == NULL) ||
-		    (mySolver->acoustic_displacement == NULL)) {
-			return;
-		}
-
-		for (int axis = 0; axis < 3; axis++) {
-			element->acoustic_disp[axis] = 0.0;
-			element->acoustic_vel[axis] = 0.0;
-			element->acoustic_acc[axis] = 0.0;
-		}
-
-		for (int iPhi = 0; iPhi < 8; iPhi++) {
-			const int32_t node = element->nodestointerpolate[iPhi];
-			const double sh =
-				(1.0 + sx[iPhi] * localCoords.x[0]) *
-				(1.0 + sy[iPhi] * localCoords.x[1]) *
-				(1.0 + sz[iPhi] * localCoords.x[2]) / 8.0;
-			const fvector_t disp = mySolver->acoustic_displacement[node];
-			const fvector_t vel = mySolver->acoustic_velocity[node];
-			const fvector_t vel_prev =
-				mySolver->acoustic_velocity_prev[node];
-
-			element->acoustic_disp[0] += sh * (double)disp.f[0];
-			element->acoustic_disp[1] += sh * (double)disp.f[1];
-			element->acoustic_disp[2] += sh * (double)disp.f[2];
-			element->acoustic_vel[0] += sh * (double)vel.f[0];
-			element->acoustic_vel[1] += sh * (double)vel.f[1];
-			element->acoustic_vel[2] += sh * (double)vel.f[2];
-			if (deltaT > 0.0) {
-				element->acoustic_acc[0] +=
-					sh * ((double)vel.f[0] -
-					      (double)vel_prev.f[0]) / deltaT;
-				element->acoustic_acc[1] +=
-					sh * ((double)vel.f[1] -
-					      (double)vel_prev.f[1]) / deltaT;
-				element->acoustic_acc[2] +=
-					sh * ((double)vel.f[2] -
-					      (double)vel_prev.f[2]) / deltaT;
-			}
-		}
-		element->acoustic_kinematics_ready = 1;
-		return;
-	}
-
-	if (plane_pressure_gradient(mySolver, element, deltaT, deltaTSquared,
-	                            grad) == 0) {
+	if ((element == NULL) || (element->pressure_is_defined == 0) ||
+	    (element->rho <= 0.0) ||
+	    (plane_pressure_gradient(mySolver, element, grad) == 0)) {
 		return;
 	}
 
@@ -610,13 +446,11 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
     double theDomainX, double theDomainY, double theDomainZ, char* planes_input_file,
-	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements,
-	int acousticFormulation){
+	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements){
 
 //	IO_pool_pe_count = 1;
 	g_reconstructAcousticPlaneDisplacements =
 		reconstructAcousticPlaneDisplacements ? 1 : 0;
-	g_acousticFormulation = acousticFormulation;
     if (IO_pool_pe_count)
 	New_planes_setup(myID, thePlanePrintRate, thePlaneDirOut,
 		IO_pool_pe_count,
