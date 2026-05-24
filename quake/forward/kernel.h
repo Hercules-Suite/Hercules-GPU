@@ -137,12 +137,6 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 					     gpu_data_t* gpuData);
 
-__global__ void kernelAcousticRk4AdvanceStage(int32_t nharbored,
-					      gpu_data_t* gpuData,
-					      int stage,
-					      double deltaT,
-					      double deltaT2);
-
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);

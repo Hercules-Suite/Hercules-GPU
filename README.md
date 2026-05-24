@@ -302,16 +302,6 @@ Acoustic-elastic input flags (input file):
 	backward-compatibility alias only when `acoustic_formulation` is absent:
 	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
 	input files should use `acoustic_formulation`.
-- `acoustic_time_integrator`
-	Optional scalar-acoustic time integrator. Default is `leapfrog`, the
-	validated central-difference update used by existing `pressure` and
-	`velocity_potential` runs. `rk4` enables an experimental explicit
-	fourth-order Runge-Kutta update for the acoustic scalar and an explicit
-	scalar-rate state; in `velocity_potential` mode, station pressure and
-	acoustic traction use `p = -phi_t` from that RK rate instead of the
-	one-step finite difference. The RK4 path is intended for acoustic-interface
-	stability experiments, keeps the elastic solver explicit/unchanged, and
-	should be validated against CPS before production use.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver
