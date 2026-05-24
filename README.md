@@ -431,6 +431,22 @@ Acoustic-elastic input flags (input file):
 	attenuating Earth do not need it. Empirical sweet spot
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
+- `acoustic_stabilization`
+	Optional. Default `none`. Set to `spectral_viscosity` to add an
+	acoustic-only, element-local high-wavenumber regularizer. This applies
+	a local `K^2` damping operator to the acoustic scalar increment, so it
+	targets grid-scale pressure ringing more strongly than the
+	`acoustic_quality_factor` `K` damping while perturbing long wavelengths
+	less. It is skipped inside CPML elements. This is a numerical
+	stabilization for validation / lossless-water benchmarks, not physical
+	ocean attenuation.
+- `acoustic_spectral_viscosity_strength`
+	Optional. Default `1.0`. Used only when
+	`acoustic_stabilization = spectral_viscosity`. Suggested first tests:
+	`0.25`, `0.5`, and `1.0`, with `acoustic_quality_factor` unset so the
+	effect is isolated. The strength is normalized so the highest
+	element-local acoustic mode sees roughly this value as an effective
+	stiffness-damping beta; lower element modes are damped less.
 
 Scalar acoustic formulation — correctness fix & known limitation:
 
@@ -449,7 +465,8 @@ Scalar acoustic formulation — correctness fix & known limitation:
 	a code bug. With any realistic ocean Q it damps
 	physically; for a clean lossless-benchmark comparison apply a
 	post-processing low-pass to the output pressure, or opt into the
-	in-model `acoustic_quality_factor` regularizer (see that flag).
+	in-model `acoustic_quality_factor` or `acoustic_stabilization`
+	regularizers (see those flags).
 
 Absorbing boundary input flags (input file):
 

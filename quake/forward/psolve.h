@@ -153,6 +153,8 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS 1
 #define ACOUSTIC_INTERFACE_REGULARIZATION_NONE      0
 #define ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE 1
+#define ACOUSTIC_STABILIZATION_NONE                 0
+#define ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY   1
 #define ACOUSTIC_FORMULATION_PRESSURE               0
 #define ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL     1
 #define ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL 2
@@ -642,6 +644,8 @@ typedef struct gpu_data_t {
     int           acousticInterfaceRegularizationMode;
     double        acousticInterfacePenaltyFactor;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
+    int           acousticStabilizationMode;
+    double        acousticSpectralViscosityStrength;
 
     /* v3 station viscoelastic stress gather (print_station_strains /
      * print_station_stresses under BKT-family damping). Populated only

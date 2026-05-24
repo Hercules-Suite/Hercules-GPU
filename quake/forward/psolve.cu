@@ -1582,6 +1582,8 @@ static struct Param_t {
   int theAcousticInterfaceRegularizationMode;/* none or impedance flux */
   double theAcousticInterfacePenaltyFactor;  /* passive flux blend in [0,1] */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
+  int theAcousticStabilizationMode;          /* ACOUSTIC_STABILIZATION_* */
+  double theAcousticSpectralViscosityStrength; /* local high-k damping */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1648,7 +1650,9 @@ static struct Param_t {
            .theAcousticInterfaceRegularizationMode =
                ACOUSTIC_INTERFACE_REGULARIZATION_NONE,
            .theAcousticInterfacePenaltyFactor = 1.0,
-           .theAcousticQualityFactor = 0.0};
+           .theAcousticQualityFactor = 0.0,
+           .theAcousticStabilizationMode = ACOUSTIC_STABILIZATION_NONE,
+           .theAcousticSpectralViscosityStrength = 1.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1939,9 +1943,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  39 /* Must adjust this if adding double params */
+  40 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  53 /* Must adjust this if adding int params */
+  54 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1997,6 +2001,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
   double_message[38] = Param.theAcousticInterfacePenaltyFactor;
+  double_message[39] = Param.theAcousticSpectralViscosityStrength;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2040,6 +2045,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
   Param.theAcousticInterfacePenaltyFactor = double_message[38];
+  Param.theAcousticSpectralViscosityStrength = double_message[39];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2095,6 +2101,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
   int_message[52] = Param.theAcousticInterfaceRegularizationMode;
+  int_message[53] = Param.theAcousticStabilizationMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2153,6 +2160,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
   Param.theAcousticInterfaceRegularizationMode = int_message[52];
+  Param.theAcousticStabilizationMode = int_message[53];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2436,6 +2444,7 @@ static int32_t parse_parameters(const char* numericalin) {
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
        acoustic_interface_regularization[64] = "none",
+       acoustic_stabilization[64] = "none",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2837,6 +2846,7 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_projection);
   parsetext(fp, "acoustic_interface_regularization", 's',
             &acoustic_interface_regularization);
+  parsetext(fp, "acoustic_stabilization", 's', &acoustic_stabilization);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -2875,6 +2885,8 @@ static int32_t parse_parameters(const char* numericalin) {
   {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
+    hu_config_get_double_opt(fp, "acoustic_spectral_viscosity_strength",
+                             &Param.theAcousticSpectralViscosityStrength);
     hu_config_get_double_opt(fp, "acoustic_interface_penalty_factor",
                              &Param.theAcousticInterfacePenaltyFactor);
   }
@@ -3248,6 +3260,35 @@ static int32_t parse_parameters(const char* numericalin) {
                  Param.theAcousticInterfacePenaltyFactor);
   }
 
+  if ((strcasecmp(acoustic_stabilization, "none") == 0) ||
+      (strcasecmp(acoustic_stabilization, "off") == 0) ||
+      (strcasecmp(acoustic_stabilization, "no") == 0)) {
+    Param.theAcousticStabilizationMode = ACOUSTIC_STABILIZATION_NONE;
+  } else if ((strcasecmp(acoustic_stabilization, "spectral_viscosity") == 0) ||
+             (strcasecmp(acoustic_stabilization, "spectral-viscosity") == 0) ||
+             (strcasecmp(acoustic_stabilization, "sv") == 0)) {
+    Param.theAcousticStabilizationMode =
+        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_stabilization "
+                 "(none or spectral_viscosity): %s\n",
+                 acoustic_stabilization);
+  }
+  if (Param.theAcousticSpectralViscosityStrength < 0.0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_spectral_viscosity_strength=%g must be >= 0.\n",
+                 Param.theAcousticSpectralViscosityStrength);
+  }
+  if ((Param.theAcousticStabilizationMode ==
+       ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) &&
+      (Param.theAcousticSpectralViscosityStrength <= 0.0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_spectral_viscosity_strength=%g must be > 0 "
+                 "when acoustic_stabilization=spectral_viscosity.\n",
+                 Param.theAcousticSpectralViscosityStrength);
+  }
+
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -3356,6 +3397,12 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
                  "include_acoustic=yes and a scalar acoustic_formulation\n");
+  }
+  if ((Param.theAcousticStabilizationMode != ACOUSTIC_STABILIZATION_NONE) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_stabilization requires include_acoustic=yes and "
+                 "a scalar acoustic_formulation\n");
   }
   if ((acousticInterfaceRegularizationMode ==
        ACOUSTIC_INTERFACE_REGULARIZATION_IMPEDANCE) &&
@@ -3726,6 +3773,18 @@ static int32_t parse_parameters(const char* numericalin) {
     } else {
       monitor_print("Acoustic quality factor Q:          %s\n",
                     "lossless (default; bit-identical baseline)");
+    }
+    monitor_print("Acoustic stabilization:             %s",
+                  (Param.theAcousticStabilizationMode ==
+                   ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY)
+                      ? "spectral_viscosity"
+                      : "none");
+    if (Param.theAcousticStabilizationMode ==
+        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) {
+      monitor_print(" (strength=%.3f)\n",
+                    Param.theAcousticSpectralViscosityStrength);
+    } else {
+      monitor_print("\n");
     }
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
@@ -10116,6 +10175,10 @@ static void solver_init() {
       Param.theAcousticInterfaceRegularizationMode;
   Global.gpuData.acousticInterfacePenaltyFactor =
       Param.theAcousticInterfacePenaltyFactor;
+  Global.gpuData.acousticStabilizationMode =
+      Param.theAcousticStabilizationMode;
+  Global.gpuData.acousticSpectralViscosityStrength =
+      Param.theAcousticSpectralViscosityStrength;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10155,6 +10218,17 @@ static void solver_init() {
         monitor_print("Acoustic stiffness damping:         beta=0 "
                       "(lossless; baseline bit-identical)\n");
       }
+    }
+  }
+  if (Global.myID == 0) {
+    if (Global.gpuData.acousticStabilizationMode ==
+        ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) {
+      monitor_print(
+          "Acoustic spectral viscosity:       strength=%.6e "
+          "(local K^2 high-k regularizer; ACTIVE)\n",
+          Global.gpuData.acousticSpectralViscosityStrength);
+    } else {
+      monitor_print("Acoustic spectral viscosity:       off\n");
     }
   }
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;

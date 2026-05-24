@@ -936,38 +936,69 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
    * with the material-damping skip in commit 5d91b09). Non-SPECFEM
    * numerical regularizer; see README. */
   const double damp_beta = gpuData->acousticStiffnessDampingBeta;
-  const int damp_on =
-      (damp_beta != 0.0) &&
-      !(gpuData->pmlFlagArrayDevice != NULL &&
-        gpuData->pmlFlagArrayDevice[eindex] != 0);
+  const int pml_element =
+      (gpuData->pmlFlagArrayDevice != NULL &&
+       gpuData->pmlFlagArrayDevice[eindex] != 0);
+  const int damp_on = (damp_beta != 0.0) && !pml_element;
+  const double sv_strength = gpuData->acousticSpectralViscosityStrength;
+  const int sv_on =
+      (gpuData->acousticStabilizationMode ==
+       ACOUSTIC_STABILIZATION_SPECTRAL_VISCOSITY) &&
+      (sv_strength > 0.0) && !pml_element;
   solver_float pressure_prev[8];
-  if (damp_on) {
+  double k_delta[8];
+  if (damp_on || sv_on) {
     for (int i = 0; i < 8; i++) {
       const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
       pressure_prev[i] = gpuData->pressureTm2Device[lnid];
     }
   }
+  if (sv_on) {
+    for (int i = 0; i < 8; i++) {
+      double dlocal = 0.0;
+      for (int j = 0; j < 8; j++) {
+        dlocal += acoustic_scalar_stiffness_shape(i, j) *
+                  ((double)pressure[j] - (double)pressure_prev[j]);
+      }
+      k_delta[i] = dlocal;
+    }
+  }
 
   for (int i = 0; i < 8; i++) {
     double local = 0.0;
+    double damping_local = 0.0;
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
 
     for (int j = 0; j < 8; j++) {
       local += acoustic_scalar_stiffness_shape(i, j) * pressure[j];
     }
 
-    if (!damp_on) {
+    if (!damp_on && !sv_on) {
       atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
                 (solver_float)(-stiffness_coeff * local));
     } else {
-      double dlocal = 0.0;
-      for (int j = 0; j < 8; j++) {
-        dlocal += acoustic_scalar_stiffness_shape(i, j) *
-                  ((double)pressure[j] - (double)pressure_prev[j]);
+      if (damp_on) {
+        double dlocal = 0.0;
+        for (int j = 0; j < 8; j++) {
+          dlocal += acoustic_scalar_stiffness_shape(i, j) *
+                    ((double)pressure[j] - (double)pressure_prev[j]);
+        }
+        damping_local += damp_beta * dlocal;
+      }
+      if (sv_on) {
+        double sv_local = 0.0;
+        for (int j = 0; j < 8; j++) {
+          sv_local += acoustic_scalar_stiffness_shape(i, j) * k_delta[j];
+        }
+        /* Element-local spectral viscosity: K^2 applied to the scalar
+         * increment. Normalizing by max(lambda(K_shape)) = 8 makes the
+         * user strength comparable to the existing beta at the element
+         * Nyquist mode while reducing damping on longer element modes. */
+        damping_local += 0.125 * sv_strength * sv_local;
       }
       atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
                 (solver_float)(-stiffness_coeff * local -
-                               stiffness_coeff * damp_beta * dlocal));
+                               stiffness_coeff * damping_local));
     }
   }
 }
