@@ -995,14 +995,12 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
   }
 }
 
-__global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
-                                               gpu_data_t* gpuData,
-                                               double deltaT)
+__global__ void kernelAcousticFirstOrderVelocityVolume(int32_t lenum,
+                                                       gpu_data_t* gpuData,
+                                                       double deltaT)
 {
   int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
   solver_float pressure[8];
-  fvector_t velocity[8];
-  double pressure_rhs[8];
   fvector_t velocity_rhs[8];
 
   if (eindex >= lenum) {
@@ -1033,8 +1031,6 @@ __global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
   for (int i = 0; i < 8; i++) {
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
     pressure[i] = gpuData->pressureTm1Device[lnid];
-    velocity[i] = gpuData->acousticVelocityDevice[lnid];
-    pressure_rhs[i] = 0.0;
     velocity_rhs[i].f[0] = 0.0;
     velocity_rhs[i].f[1] = 0.0;
     velocity_rhs[i].f[2] = 0.0;
@@ -1046,7 +1042,6 @@ __global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
         const double csi = gp[gx];
         const double eta = gp[gy];
         const double dzeta = gp[gz];
-        double div_v = 0.0;
         double grad_p[3] = {0.0, 0.0, 0.0};
 
         for (int j = 0; j < 8; j++) {
@@ -1055,13 +1050,11 @@ __global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
                 acoustic_shape_derivative_at(j, axis, csi, eta, dzeta) *
                 inv_h;
             grad_p[axis] += (double)pressure[j] * dN;
-            div_v += (double)velocity[j].f[axis] * dN;
           }
         }
 
         for (int i = 0; i < 8; i++) {
           const double w = jac * acoustic_shape_value_at(i, csi, eta, dzeta);
-          pressure_rhs[i] += -deltaT * w * div_v;
           velocity_rhs[i].f[0] += (solver_float)(-deltaT * w * grad_p[0]);
           velocity_rhs[i].f[1] += (solver_float)(-deltaT * w * grad_p[1]);
           velocity_rhs[i].f[2] += (solver_float)(-deltaT * w * grad_p[2]);
@@ -1072,8 +1065,6 @@ __global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
 
   for (int i = 0; i < 8; i++) {
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)pressure_rhs[i]);
     atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
               velocity_rhs[i].f[0]);
     atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
@@ -1083,17 +1074,95 @@ __global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
   }
 }
 
+__global__ void kernelAcousticFirstOrderPressureVolume(int32_t lenum,
+                                                       gpu_data_t* gpuData,
+                                                       double deltaT)
+{
+  int32_t eindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  fvector_t velocity[8];
+  double pressure_rhs[8];
+
+  if (eindex >= lenum) {
+    return;
+  }
+  if (gpuData->acousticElementFlagsArrayDevice[eindex] == 0) {
+    return;
+  }
+  if ((gpuData->acousticVelocityDevice == NULL) ||
+      (gpuData->pressureForceDevice == NULL)) {
+    return;
+  }
+
+  const double boundary_coeff =
+      gpuData->acousticPressureBoundaryCoeffArrayDevice[eindex];
+  if (boundary_coeff <= 0.0) {
+    return;
+  }
+  const double h = 2.0 * sqrt(boundary_coeff);
+  if (h <= 0.0) {
+    return;
+  }
+  const double inv_h = 2.0 / h;
+  const double jac = h * h * h / 8.0;
+  const double gp[2] = {-0.57735026918962576451,
+                         0.57735026918962576451};
+
+  for (int i = 0; i < 8; i++) {
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    velocity[i] = gpuData->acousticVelocityDevice[lnid];
+    pressure_rhs[i] = 0.0;
+  }
+
+  for (int gx = 0; gx < 2; gx++) {
+    for (int gy = 0; gy < 2; gy++) {
+      for (int gz = 0; gz < 2; gz++) {
+        const double csi = gp[gx];
+        const double eta = gp[gy];
+        const double dzeta = gp[gz];
+        double div_v = 0.0;
+
+        for (int j = 0; j < 8; j++) {
+          for (int axis = 0; axis < 3; axis++) {
+            const double dN =
+                acoustic_shape_derivative_at(j, axis, csi, eta, dzeta) *
+                inv_h;
+            div_v += (double)velocity[j].f[axis] * dN;
+          }
+        }
+
+        for (int i = 0; i < 8; i++) {
+          const double w = jac * acoustic_shape_value_at(i, csi, eta, dzeta);
+          pressure_rhs[i] += -deltaT * w * div_v;
+        }
+      }
+    }
+  }
+
+  for (int i = 0; i < 8; i++) {
+    const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)pressure_rhs[i]);
+  }
+}
+
 __global__ void kernelAcousticFirstOrderInterface(int32_t faceCount,
                                                  gpu_data_t* gpuData,
-                                                 double deltaT)
+                                                 double deltaT,
+                                                 int updatePressure,
+                                                 int updateVelocity)
 {
   int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
   const double invDt = (deltaT > 0.0) ? (1.0 / deltaT) : 0.0;
 
+  if ((!updatePressure) && (!updateVelocity)) {
+    return;
+  }
   if ((faceIndex >= faceCount) || (gpuData->tm2Device == NULL) ||
       (gpuData->tm1Device == NULL) ||
       (gpuData->acousticVelocityDevice == NULL) ||
-      (gpuData->acousticVelocityForceDevice == NULL)) {
+      (updatePressure && (gpuData->pressureForceDevice == NULL)) ||
+      (updateVelocity &&
+       (gpuData->acousticVelocityForceDevice == NULL))) {
     return;
   }
 
@@ -1194,17 +1263,21 @@ __global__ void kernelAcousticFirstOrderInterface(int32_t faceCount,
 
           const int32_t lnid =
               gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
-          atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                    (solver_float)(-q_coeff * weight * v_correction));
-          atomicAdd(
-              (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
-              (solver_float)(-q_coeff * weight * p_correction * normal[0]));
-          atomicAdd(
-              (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
-              (solver_float)(-q_coeff * weight * p_correction * normal[1]));
-          atomicAdd(
-              (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[2],
-              (solver_float)(-q_coeff * weight * p_correction * normal[2]));
+          if (updatePressure) {
+            atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                      (solver_float)(-q_coeff * weight * v_correction));
+          }
+          if (updateVelocity) {
+            atomicAdd(
+                (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
+                (solver_float)(-q_coeff * weight * p_correction * normal[0]));
+            atomicAdd(
+                (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
+                (solver_float)(-q_coeff * weight * p_correction * normal[1]));
+            atomicAdd(
+                (solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[2],
+                (solver_float)(-q_coeff * weight * p_correction * normal[2]));
+          }
         }
       }
     }
@@ -1243,14 +1316,18 @@ __global__ void kernelAcousticFirstOrderInterface(int32_t faceCount,
 
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
-    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-              (solver_float)(-coeff * weight * v_correction));
-    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
-              (solver_float)(-coeff * weight * p_correction * normal[0]));
-    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
-              (solver_float)(-coeff * weight * p_correction * normal[1]));
-    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[2],
-              (solver_float)(-coeff * weight * p_correction * normal[2]));
+    if (updatePressure) {
+      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                (solver_float)(-coeff * weight * v_correction));
+    }
+    if (updateVelocity) {
+      atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
+                (solver_float)(-coeff * weight * p_correction * normal[0]));
+      atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
+                (solver_float)(-coeff * weight * p_correction * normal[1]));
+      atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[2],
+                (solver_float)(-coeff * weight * p_correction * normal[2]));
+    }
   }
 }
 
@@ -1721,9 +1798,157 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   gpuData->pressureForceDevice[nindex] = 0.0;
 }
 
-__global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
-                                               gpu_data_t* gpuData,
-                                               double deltaT)
+__global__ void kernelAcousticFirstOrderPMLVelocityStep(
+    int32_t lenum, gpu_data_t* gpuData, int32_t pmlAcousticCount,
+    double deltaT)
+{
+  int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (pml_idx >= pmlAcousticCount) {
+    return;
+  }
+  if ((gpuData->pmlAcousticElemMapperDevice == NULL) ||
+      (gpuData->pressureTm1Device == NULL) ||
+      (gpuData->acousticVelocityForceDevice == NULL)) {
+    return;
+  }
+
+  const int32_t eindex = gpuData->pmlAcousticElemMapperDevice[pml_idx];
+  const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
+  const double boundary_coeff =
+      gpuData->acousticPressureBoundaryCoeffArrayDevice[eindex];
+  if (boundary_coeff <= 0.0) {
+    return;
+  }
+  const double h = 2.0 * sqrt(boundary_coeff);
+  if (h <= 0.0) {
+    return;
+  }
+
+  double p[8];
+  for (int n = 0; n < 8; n++) {
+    const int32_t lnid = lnid_base[n * lenum];
+    p[n] = (double)gpuData->pressureTm1Device[lnid];
+  }
+
+  double S[3];
+  for (int axis = 0; axis < 3; axis++) {
+    double s = 0.0;
+    for (int n = 0; n < 8; n++) {
+      const double sign = ((n >> axis) & 1) ? 1.0 : -1.0;
+      s += sign * p[n];
+    }
+    S[axis] = s;
+  }
+
+  const double aJ[3] = {gpuData->pml_acoustic_a_xArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_a_yArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_a_zArrayDevice[pml_idx]};
+  const double bJ[3] = {gpuData->pml_acoustic_b_xArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_b_yArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_b_zArrayDevice[pml_idx]};
+  const double invKJ[3] = {
+      gpuData->pml_acoustic_invKappa_xArrayDevice[pml_idx],
+      gpuData->pml_acoustic_invKappa_yArrayDevice[pml_idx],
+      gpuData->pml_acoustic_invKappa_zArrayDevice[pml_idx]};
+
+  double delta_partial[3];
+  for (int axis = 0; axis < 3; axis++) {
+    const double psi_old =
+        (double)gpuData->pml_acoustic_psiArrayDevice[axis][pml_idx];
+    const double psi_new = bJ[axis] * psi_old + aJ[axis] * S[axis];
+    gpuData->pml_acoustic_psiArrayDevice[axis][pml_idx] =
+        (solver_float)psi_new;
+    delta_partial[axis] = invKJ[axis] * S[axis] + psi_new - S[axis];
+  }
+
+  /* One-point CPML correction to the velocity equation. The native
+   * first-order volume kernel has already assembled the unstretched gradient;
+   * here we add only -(stretched-gradient - raw-gradient). */
+  const double coeff = deltaT * h * h / 32.0;
+  const double corr[3] = {-coeff * delta_partial[0],
+                          -coeff * delta_partial[1],
+                          -coeff * delta_partial[2]};
+  for (int n = 0; n < 8; n++) {
+    const int32_t lnid = lnid_base[n * lenum];
+    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[0],
+              (solver_float)corr[0]);
+    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[1],
+              (solver_float)corr[1]);
+    atomicAdd((solver_float*)&gpuData->acousticVelocityForceDevice[lnid].f[2],
+              (solver_float)corr[2]);
+  }
+}
+
+__global__ void kernelAcousticFirstOrderPMLPressureStep(
+    int32_t lenum, gpu_data_t* gpuData, int32_t pmlAcousticCount,
+    double deltaT)
+{
+  int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (pml_idx >= pmlAcousticCount) {
+    return;
+  }
+  if ((gpuData->pmlAcousticElemMapperDevice == NULL) ||
+      (gpuData->acousticVelocityDevice == NULL) ||
+      (gpuData->pressureForceDevice == NULL)) {
+    return;
+  }
+
+  const int32_t eindex = gpuData->pmlAcousticElemMapperDevice[pml_idx];
+  const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
+  const double boundary_coeff =
+      gpuData->acousticPressureBoundaryCoeffArrayDevice[eindex];
+  if (boundary_coeff <= 0.0) {
+    return;
+  }
+  const double h = 2.0 * sqrt(boundary_coeff);
+  if (h <= 0.0) {
+    return;
+  }
+
+  double V[3] = {0.0, 0.0, 0.0};
+  for (int n = 0; n < 8; n++) {
+    const int32_t lnid = lnid_base[n * lenum];
+    const fvector_t v = gpuData->acousticVelocityDevice[lnid];
+    for (int axis = 0; axis < 3; axis++) {
+      const double sign = ((n >> axis) & 1) ? 1.0 : -1.0;
+      V[axis] += sign * (double)v.f[axis];
+    }
+  }
+
+  const double aJ[3] = {gpuData->pml_acoustic_a_xArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_a_yArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_a_zArrayDevice[pml_idx]};
+  const double bJ[3] = {gpuData->pml_acoustic_b_xArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_b_yArrayDevice[pml_idx],
+                        gpuData->pml_acoustic_b_zArrayDevice[pml_idx]};
+  const double invKJ[3] = {
+      gpuData->pml_acoustic_invKappa_xArrayDevice[pml_idx],
+      gpuData->pml_acoustic_invKappa_yArrayDevice[pml_idx],
+      gpuData->pml_acoustic_invKappa_zArrayDevice[pml_idx]};
+
+  double div_delta = 0.0;
+  for (int axis = 0; axis < 3; axis++) {
+    const double psi_old =
+        (double)gpuData->pml_acoustic_zetaPArrayDevice[axis][pml_idx];
+    const double psi_new = bJ[axis] * psi_old + aJ[axis] * V[axis];
+    gpuData->pml_acoustic_zetaPArrayDevice[axis][pml_idx] =
+        (solver_float)psi_new;
+    div_delta += invKJ[axis] * V[axis] + psi_new - V[axis];
+  }
+
+  /* One-point CPML correction to p_t = -K div(v). The pressure mass already
+   * contains 1/K, so this force is the unscaled weak RHS contribution. */
+  const double corr = -deltaT * h * h * div_delta / 32.0;
+  for (int n = 0; n < 8; n++) {
+    const int32_t lnid = lnid_base[n * lenum];
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)corr);
+  }
+}
+
+__global__ void kernelAcousticFirstOrderVelocityUpdate(int32_t nharbored,
+                                                       gpu_data_t* gpuData,
+                                                       double deltaT)
 {
   lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -1731,12 +1956,10 @@ __global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
     return;
   }
 
-  const solver_float pressure_mass = gpuData->pressureMassDevice[nindex];
   const solver_float velocity_mass =
       (gpuData->acousticVelocityMassDevice != NULL)
           ? gpuData->acousticVelocityMassDevice[nindex]
           : (solver_float)0.0;
-  solver_float p_new = gpuData->pressureTm1Device[nindex];
   fvector_t v_old;
   fvector_t v_new;
   fvector_t disp;
@@ -1752,13 +1975,6 @@ __global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
     v_new = v_old;
   }
 
-  if (pressure_mass > 0.0) {
-    p_new += gpuData->pressureForceDevice[nindex] / pressure_mass;
-  }
-  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
-      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
-    p_new = (solver_float)0.0;
-  }
   if (velocity_mass > 0.0 && gpuData->acousticVelocityForceDevice != NULL) {
     v_new.f[0] +=
         gpuData->acousticVelocityForceDevice[nindex].f[0] / velocity_mass;
@@ -1769,7 +1985,6 @@ __global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
   }
   if (gpuData->pmlClampNodeMaskDevice != NULL &&
       gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
-    p_new = (solver_float)0.0;
     v_new.f[0] = 0.0;
     v_new.f[1] = 0.0;
     v_new.f[2] = 0.0;
@@ -1785,16 +2000,44 @@ __global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
     disp.f[2] += (solver_float)(deltaT * (double)v_new.f[2]);
     gpuData->acousticDisplacementDevice[nindex] = disp;
   }
-  gpuData->pressureTm2Device[nindex] = p_new;
   if (gpuData->acousticVelocityDevice != NULL) {
     gpuData->acousticVelocityDevice[nindex] = v_new;
   }
-  gpuData->pressureForceDevice[nindex] = 0.0;
   if (gpuData->acousticVelocityForceDevice != NULL) {
     gpuData->acousticVelocityForceDevice[nindex].f[0] = 0.0;
     gpuData->acousticVelocityForceDevice[nindex].f[1] = 0.0;
     gpuData->acousticVelocityForceDevice[nindex].f[2] = 0.0;
   }
+}
+
+__global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
+                                               gpu_data_t* gpuData,
+                                               double deltaT)
+{
+  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  (void)deltaT;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  const solver_float pressure_mass = gpuData->pressureMassDevice[nindex];
+  solver_float p_new = gpuData->pressureTm1Device[nindex];
+
+  if (pressure_mass > 0.0) {
+    p_new += gpuData->pressureForceDevice[nindex] / pressure_mass;
+  }
+  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
+      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
+    p_new = (solver_float)0.0;
+  }
+  if (gpuData->pmlClampNodeMaskDevice != NULL &&
+      gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
+    p_new = (solver_float)0.0;
+  }
+
+  gpuData->pressureTm2Device[nindex] = p_new;
+  gpuData->pressureForceDevice[nindex] = 0.0;
 }
 
 

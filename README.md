@@ -340,10 +340,12 @@ Acoustic-elastic input flags (input file):
 	`displacement_potential` mode is intended for direct comparison runs before
 	adding a characteristic/passive flux for that variable set, and
 	`pressure_velocity` has its own built-in Riemann/upwind interface flux.
-	The first-order `pressure_velocity` mode does not yet have a dedicated
-	first-order acoustic CPML ADE update. For validation of this mode, prefer
-	`abc_type=dashpot` or a larger acoustic domain until that CPML extension is
-	added.
+	The first-order `pressure_velocity` mode uses a staggered explicit
+	velocity-then-pressure update. With `abc_type=cpml`, acoustic PML elements
+	use first-order ADE derivative corrections on both the pressure-gradient
+	and velocity-divergence sides. This mode is still experimental and should be
+	validated against the scalar potential formulation and CPS benchmarks before
+	production use.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and an acoustic formulation is active, the solver

@@ -8736,13 +8736,14 @@ static void solver_init() {
       double acoustic_damp = 0.0;
 
 #ifdef BOUNDARY
-      /* Step A activation + Step B divergence-side coefficient build.
-       * Acoustic elements 'continue' below before the elastic-path CPML
-       * block, so this is where acoustic PML is enrolled (Step A) and
-       * its divergence-side coeffs are built (Step B). Relocated ABOVE
-       * the pressure-mass accumulation so the matched kappa-inertia can
-       * scale it. Strict no-op for dashpot / non-PML / non-BOUNDARY ->
-       * every previously-validated configuration is bit-identical. */
+      /* Acoustic elements 'continue' below before the elastic-path CPML
+       * block, so this is where acoustic PML is enrolled. The scalar
+       * second-order formulation uses matched mass/damping terms below; the
+       * first-order pressure/velocity formulation uses the same geometric
+       * enrollment and derivative ADE coefficients, but leaves pressure mass
+       * and damping unscaled. Strict no-op for dashpot / non-PML /
+       * non-BOUNDARY -> every previously-validated configuration is
+       * bit-identical. */
       if (Param.theAbcType == ABC_CPML) {
         lnid0 = elemp->lnid[0];
         ldb[0] = Global.myMesh->nodeTable[lnid0].x;
@@ -8756,7 +8757,7 @@ static void solver_init() {
             ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
             Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
         g_cpmlBuild.face_mask[eindex] = pml_face_mask;
-        if ((pml_face_mask != 0) && (!acoustic_pressure_velocity_enabled())) {
+        if (pml_face_mask != 0) {
           g_cpmlBuild.active_axis_count +=
               cpml_active_axis_count(pml_face_mask);
           double a_axis[3], b_axis[3], invKappa_axis[3], d_axis[3];
@@ -8789,37 +8790,48 @@ static void solver_init() {
             g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
                 invKappa_axis[axis];
           }
-          const double rho = (double)edata->rho;
-          /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
-           * interior acoustic stiffness coefficient (commit 20180b6), so
-           * P_raw exactly equals the constant-gradient content of the
-           * interior operator and the native delta vanishes at the PML
-           * inner edge. rho > 0 guaranteed by mesh validation. (Array
-           * name kept; semantics are now the stiffness coeff, not the
-           * old dt^2 h^2/4 forceCoeff.) */
-          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
+          if (acoustic_pressure_velocity_enabled()) {
+            g_cpmlBuild.acoustic_forceCoeff[pml_idx] = 0.0;
+            g_cpmlBuild.acoustic_restoreCoeff[pml_idx] = 0.0;
+            for (int axis = 0; axis < 3; axis++) {
+              g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = 0.0;
+              g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] = 0.0;
+              g_cpmlBuild.acoustic_memForce[axis][pml_idx] = 0.0;
+            }
+          } else {
+            const double rho = (double)edata->rho;
+            /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
+             * interior acoustic stiffness coefficient (commit 20180b6), so
+             * P_raw exactly equals the constant-gradient content of the
+             * interior operator and the native delta vanishes at the PML
+             * inner edge. rho > 0 guaranteed by mesh validation. (Array
+             * name kept; semantics are now the stiffness coeff, not the
+             * old dt^2 h^2/4 forceCoeff.) */
+            g_cpmlBuild.acoustic_forceCoeff[pml_idx] =
+                dt2 * h / (16.0 * rho);
 
-          /* Step B divergence side -- scalar mirror of the validated
-           * elastic two-sided. memForce/restoreCoeff use the acoustic
-           * nodal mass (nodalPressureMass) in place of the elastic
-           * rho*h^3/8. */
-          acoustic_kprod =
-              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
-          double restore = 0.0;
-          for (int axis = 0; axis < 3; axis++) {
-            const double da = d_axis[axis];
-            const double aa = alpha_axis[axis];
-            const double decay = exp(-aa * dt);
-            g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
-            g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
-                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
-            g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
-                dt2 * nodalPressureMass * da * aa * aa;
-            restore += da * aa;
+            /* Step B divergence side -- scalar mirror of the validated
+             * elastic two-sided. memForce/restoreCoeff use the acoustic
+             * nodal mass (nodalPressureMass) in place of the elastic
+             * rho*h^3/8. */
+            acoustic_kprod =
+                kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
+            double restore = 0.0;
+            for (int axis = 0; axis < 3; axis++) {
+              const double da = d_axis[axis];
+              const double aa = alpha_axis[axis];
+              const double decay = exp(-aa * dt);
+              g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
+              g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
+                  (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
+              g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
+                  dt2 * nodalPressureMass * da * aa * aa;
+              restore += da * aa;
+            }
+            g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
+                dt2 * nodalPressureMass * restore;
+            acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
           }
-          g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
-              dt2 * nodalPressureMass * restore;
-          acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
         }
       }
 #endif /* BOUNDARY */
@@ -10092,10 +10104,8 @@ static void solver_init() {
       if (acoustic_pressure_velocity_enabled() &&
           (Param.theAbcType == ABC_CPML)) {
         monitor_print(
-            "WARNING: acoustic_formulation=pressure_velocity currently "
-            "uses the first-order acoustic volume/interface update without "
-            "a dedicated first-order acoustic CPML ADE update; prefer "
-            "abc_type=dashpot or a larger acoustic domain for validation.\n");
+            "Acoustic pressure/velocity CPML: first-order ADE derivative "
+            "corrections enabled for acoustic PML elements.\n");
       }
     }
   } else {
@@ -13957,24 +13967,45 @@ static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
 
   Timer_Start("Acoustic Pressure Step");
 
+  /* Staggered first-order acoustic update:
+   *   1. v^{n+1/2} from p^n;
+   *   2. communicate/share v^{n+1/2};
+   *   3. p^{n+1} from v^{n+1/2}.
+   * Updating pressure and velocity together with forward Euler is unstable for
+   * the acoustic wave equation; this split is the explicit symplectic form. */
   blocksize = 256;
   gridsize = (mesh->lenum + blocksize - 1) / blocksize;
-  cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
-                  mesh->nharbored * sizeof(solver_float),
-                  solver->streams[CUDA_STREAM_MAIN]);
   cudaMemsetAsync(solver->gpuData->acousticVelocityForceDevice, 0,
                   mesh->nharbored * sizeof(fvector_t),
                   solver->streams[CUDA_STREAM_MAIN]);
 
-  kernelAcousticFirstOrderVolume<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+  kernelAcousticFirstOrderVelocityVolume<<<gridsize, blocksize, 0,
+                                           solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->lenum, solver->gpuDataDevice, Param.theDeltaT);
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order volume kernel - %s\n",
+    fprintf(stderr, "Thread %d: acoustic first-order velocity kernel - %s\n",
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
+  }
+
+  if (Param.theAbcType == ABC_CPML &&
+      solver->gpuData->pmlAcousticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
+    const int pmlBlock = 128;
+    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
+    kernelAcousticFirstOrderPMLVelocityStep<<<
+        pmlGrid, pmlBlock, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN, Param.theDeltaT);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: acoustic first-order CPML velocity kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   face_count = solver->gpuData->acousticInterfaceFaceCount;
@@ -13982,33 +14013,24 @@ static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
     gridsize = (face_count + blocksize - 1) / blocksize;
     kernelAcousticFirstOrderInterface<<<
         gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-        face_count, solver->gpuDataDevice, Param.theDeltaT);
+        face_count, solver->gpuDataDevice, Param.theDeltaT, 0, 1);
     cerror = cudaGetLastError();
     if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: acoustic first-order interface kernel - %s\n",
+      fprintf(stderr,
+              "Thread %d: acoustic first-order velocity interface kernel - %s\n",
               Global.myID, cudaGetErrorString(cerror));
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
   }
 
-  cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   cudaMemcpyAsync(solver->acoustic_velocity_force,
                   solver->gpuData->acousticVelocityForceDevice,
                   mesh->nharbored * sizeof(fvector_t),
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
-      mesh->nharbored * ((int64_t)sizeof(solver_float) +
-                         (int64_t)sizeof(fvector_t));
+      mesh->nharbored * (int64_t)sizeof(fvector_t);
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
-
-  schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    DN_PRESSURE_FORCE_MSG);
-  compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
-  schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    AN_PRESSURE_FORCE_MSG);
 
   schedule_senddata(solver->dn_sched, solver->acoustic_velocity_force,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
@@ -14019,33 +14041,26 @@ static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
                     sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
                     AN_ACOUSTIC_VELOCITY_FORCE_MSG);
 
-  cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   cudaMemcpyAsync(solver->gpuData->acousticVelocityForceDevice,
                   solver->acoustic_velocity_force,
                   mesh->nharbored * sizeof(fvector_t),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
-      mesh->nharbored * ((int64_t)sizeof(solver_float) +
-                         (int64_t)sizeof(fvector_t));
+      mesh->nharbored * (int64_t)sizeof(fvector_t);
 
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-  kernelAcousticFirstOrderUpdate<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+  kernelAcousticFirstOrderVelocityUpdate<<<gridsize, blocksize, 0,
+                                           solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->nharbored, solver->gpuDataDevice, Param.theDeltaT);
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic first-order update kernel - %s\n",
+    fprintf(stderr, "Thread %d: acoustic first-order velocity update kernel - %s\n",
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
 
-  cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   cudaMemcpyAsync(solver->acoustic_velocity,
                   solver->gpuData->acousticVelocityDevice,
                   mesh->nharbored * sizeof(fvector_t),
@@ -14059,21 +14074,14 @@ static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
                   mesh->nharbored * sizeof(fvector_t),
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
-      mesh->nharbored * ((int64_t)sizeof(solver_float) +
-                         3 * (int64_t)sizeof(fvector_t));
+      mesh->nharbored * (3 * (int64_t)sizeof(fvector_t));
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
 
-  memset(solver->pressure_force, 0,
-         mesh->nharbored * sizeof(solver_float));
   memset(solver->acoustic_velocity_force, 0,
          mesh->nharbored * sizeof(fvector_t));
 
-  schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
-                    AN_PRESSURE_MSG);
-  compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
-                    DN_PRESSURE_MSG);
-
+  /* Pressure RHS uses the just-updated acoustic velocity, so share it before
+   * launching the pressure substep on partition-boundary elements. */
   schedule_senddata(solver->an_sched, solver->acoustic_velocity,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
                     AN_ACOUSTIC_VELOCITY_MSG);
@@ -14082,6 +14090,112 @@ static void solver_run_acoustic_pressure_velocity_step(mysolver_t* solver,
   schedule_senddata(solver->dn_sched, solver->acoustic_velocity,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,
                     DN_ACOUSTIC_VELOCITY_MSG);
+
+  cudaMemcpyAsync(solver->gpuData->acousticVelocityDevice,
+                  solver->acoustic_velocity,
+                  mesh->nharbored * sizeof(fvector_t),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(fvector_t);
+
+  cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
+                  mesh->nharbored * sizeof(solver_float),
+                  solver->streams[CUDA_STREAM_MAIN]);
+
+  blocksize = 256;
+  gridsize = (mesh->lenum + blocksize - 1) / blocksize;
+  kernelAcousticFirstOrderPressureVolume<<<gridsize, blocksize, 0,
+                                           solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->lenum, solver->gpuDataDevice, Param.theDeltaT);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: acoustic first-order pressure kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Param.theAbcType == ABC_CPML &&
+      solver->gpuData->pmlAcousticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
+    const int pmlBlock = 128;
+    const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
+    kernelAcousticFirstOrderPMLPressureStep<<<
+        pmlGrid, pmlBlock, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN, Param.theDeltaT);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: acoustic first-order CPML pressure kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  face_count = solver->gpuData->acousticInterfaceFaceCount;
+  if (face_count > 0) {
+    gridsize = (face_count + blocksize - 1) / blocksize;
+    kernelAcousticFirstOrderInterface<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        face_count, solver->gpuDataDevice, Param.theDeltaT, 1, 0);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: acoustic first-order pressure interface kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+  schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
+                    DN_PRESSURE_FORCE_MSG);
+  compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
+  schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
+                    AN_PRESSURE_FORCE_MSG);
+
+  cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
+  kernelAcousticFirstOrderUpdate<<<gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->nharbored, solver->gpuDataDevice, Param.theDeltaT);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: acoustic first-order pressure update kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+  memset(solver->pressure_force, 0,
+         mesh->nharbored * sizeof(solver_float));
+
+  schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
+                    AN_PRESSURE_MSG);
+  compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
+  schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
+                    DN_PRESSURE_MSG);
 
   schedule_senddata(solver->an_sched, solver->acoustic_velocity_prev,
                     sizeof(fvector_t) / sizeof(solver_float), SHARING,

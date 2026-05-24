@@ -137,17 +137,37 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 					     gpu_data_t* gpuData);
 
-__global__ void kernelAcousticFirstOrderVolume(int32_t lenum,
-					       gpu_data_t* gpuData,
-					       double deltaT);
+__global__ void kernelAcousticFirstOrderVelocityVolume(int32_t lenum,
+						       gpu_data_t* gpuData,
+						       double deltaT);
+
+__global__ void kernelAcousticFirstOrderPressureVolume(int32_t lenum,
+						       gpu_data_t* gpuData,
+						       double deltaT);
 
 __global__ void kernelAcousticFirstOrderInterface(int32_t faceCount,
-						  gpu_data_t* gpuData,
-						  double deltaT);
+							  gpu_data_t* gpuData,
+							  double deltaT,
+							  int updatePressure,
+							  int updateVelocity);
+
+__global__ void kernelAcousticFirstOrderPMLVelocityStep(int32_t lenum,
+						       gpu_data_t* gpuData,
+						       int32_t pmlAcousticCount,
+						       double deltaT);
+
+__global__ void kernelAcousticFirstOrderPMLPressureStep(int32_t lenum,
+						       gpu_data_t* gpuData,
+						       int32_t pmlAcousticCount,
+						       double deltaT);
+
+__global__ void kernelAcousticFirstOrderVelocityUpdate(int32_t nharbored,
+						       gpu_data_t* gpuData,
+						       double deltaT);
 
 __global__ void kernelAcousticFirstOrderUpdate(int32_t nharbored,
-					       gpu_data_t* gpuData,
-					       double deltaT);
+						       gpu_data_t* gpuData,
+						       double deltaT);
 
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
