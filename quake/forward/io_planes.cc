@@ -372,6 +372,58 @@ static void plane_update_acoustic_point(const mysolver_t* mySolver,
 		return;
 	}
 
+	if (g_acousticFormulation ==
+	    ACOUSTIC_FORMULATION_PRESSURE_VELOCITY) {
+		const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+		const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+		const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+		const vector3D_t localCoords = element->localcoords;
+
+		if ((mySolver->acoustic_velocity == NULL) ||
+		    (mySolver->acoustic_velocity_prev == NULL) ||
+		    (mySolver->acoustic_displacement == NULL)) {
+			return;
+		}
+
+		for (int axis = 0; axis < 3; axis++) {
+			element->acoustic_disp[axis] = 0.0;
+			element->acoustic_vel[axis] = 0.0;
+			element->acoustic_acc[axis] = 0.0;
+		}
+
+		for (int iPhi = 0; iPhi < 8; iPhi++) {
+			const int32_t node = element->nodestointerpolate[iPhi];
+			const double sh =
+				(1.0 + sx[iPhi] * localCoords.x[0]) *
+				(1.0 + sy[iPhi] * localCoords.x[1]) *
+				(1.0 + sz[iPhi] * localCoords.x[2]) / 8.0;
+			const fvector_t disp = mySolver->acoustic_displacement[node];
+			const fvector_t vel = mySolver->acoustic_velocity[node];
+			const fvector_t vel_prev =
+				mySolver->acoustic_velocity_prev[node];
+
+			element->acoustic_disp[0] += sh * (double)disp.f[0];
+			element->acoustic_disp[1] += sh * (double)disp.f[1];
+			element->acoustic_disp[2] += sh * (double)disp.f[2];
+			element->acoustic_vel[0] += sh * (double)vel.f[0];
+			element->acoustic_vel[1] += sh * (double)vel.f[1];
+			element->acoustic_vel[2] += sh * (double)vel.f[2];
+			if (deltaT > 0.0) {
+				element->acoustic_acc[0] +=
+					sh * ((double)vel.f[0] -
+					      (double)vel_prev.f[0]) / deltaT;
+				element->acoustic_acc[1] +=
+					sh * ((double)vel.f[1] -
+					      (double)vel_prev.f[1]) / deltaT;
+				element->acoustic_acc[2] +=
+					sh * ((double)vel.f[2] -
+					      (double)vel_prev.f[2]) / deltaT;
+			}
+		}
+		element->acoustic_kinematics_ready = 1;
+		return;
+	}
+
 	if (plane_pressure_gradient(mySolver, element, deltaT, deltaTSquared,
 	                            grad) == 0) {
 		return;

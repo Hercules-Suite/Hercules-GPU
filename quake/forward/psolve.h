@@ -158,6 +158,7 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_FORMULATION_PRESSURE               0
 #define ACOUSTIC_FORMULATION_VELOCITY_POTENTIAL     1
 #define ACOUSTIC_FORMULATION_DISPLACEMENT_POTENTIAL 2
+#define ACOUSTIC_FORMULATION_PRESSURE_VELOCITY      3
 #define ACOUSTIC_VS_EPS 1.0e-6
 
 /**
@@ -413,6 +414,11 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
+    fvector_t*   acousticVelocityDevice;
+    fvector_t*   acousticVelocityPrevDevice;
+    fvector_t*   acousticVelocityForceDevice;
+    fvector_t*   acousticDisplacementDevice;
+    solver_float* acousticVelocityMassDevice;
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -707,6 +713,11 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    fvector_t* acoustic_velocity;       /* First-order acoustic velocity */
+    fvector_t* acoustic_velocity_prev;  /* Previous velocity for stations */
+    fvector_t* acoustic_velocity_force; /* First-order velocity RHS */
+    fvector_t* acoustic_displacement;   /* Time-integrated fluid motion */
+    solver_float* acoustic_velocity_mass;
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
