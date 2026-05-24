@@ -153,30 +153,6 @@ __host__ __device__ static inline double acoustic_shape_value_at(int node,
          (1.0 + sz[node] * dzeta);
 }
 
-static __device__ inline solver_float acoustic_scalar_field_at(
-    const gpu_data_t* gpuData, int32_t lnid)
-{
-  if ((gpuData->acousticRkReadStage != 0) &&
-      (gpuData->pressureStageDevice != NULL)) {
-    return gpuData->pressureStageDevice[lnid];
-  }
-  return gpuData->pressureTm1Device[lnid];
-}
-
-static __device__ inline double acoustic_physical_pressure_at(
-    const gpu_data_t* gpuData, int32_t lnid, double invDt)
-{
-  if (gpuData->acousticVelocityPotential == 1) {
-    if ((gpuData->acousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK2) &&
-        (gpuData->pressureRateDevice != NULL)) {
-      return -(double)gpuData->pressureRateDevice[lnid];
-    }
-    return -((double)gpuData->pressureTm1Device[lnid] -
-             (double)gpuData->pressureTm2Device[lnid]) * invDt;
-  }
-  return (double)gpuData->pressureTm1Device[lnid];
-}
-
 __host__ __device__ static inline int acoustic_interface_face_axes(
     const double normal[3], int tangent_axes[2])
 {
@@ -492,6 +468,7 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                                                            double deltaT2,
                                                            double deltaT)
 {
+  const int vp = (gpuData->acousticVelocityPotential == 1);
   const double invDt = (deltaT > 0.0) ? (1.0 / deltaT) : 0.0;
   int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -568,8 +545,15 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
               acoustic_shape_value_at(i, q_center[0], q_center[1],
                                       q_center[2]);
 
-          q_pressure +=
-              weight * acoustic_physical_pressure_at(gpuData, lnid, invDt);
+          if (vp) {
+            q_pressure +=
+                weight *
+                (-((double)gpuData->pressureTm1Device[lnid] -
+                   (double)gpuData->pressureTm2Device[lnid]) * invDt);
+          } else {
+            q_pressure +=
+                weight * (double)gpuData->pressureTm1Device[lnid];
+          }
         }
 
         for (int i = 0; i < 8; i++) {
@@ -606,10 +590,15 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     const double weight =
         acoustic_shape_value_at(i, center[0], center[1], center[2]);
 
-    /* velocity_potential: the solid feels p = -dphi/dt. In RK2 mode the
-     * time derivative is stored explicitly; otherwise use the legacy
-     * one-step finite difference. pressure mode: field IS p. */
-    pressure += weight * acoustic_physical_pressure_at(gpuData, lnid, invDt);
+    /* velocity_potential: the solid feels p = -dphi/dt
+     * = -(phi^n - phi^{n-1})/dt. pressure mode: field IS p. */
+    if (vp) {
+      pressure += weight *
+                  (-((double)gpuData->pressureTm1Device[lnid] -
+                     (double)gpuData->pressureTm2Device[lnid]) * invDt);
+    } else {
+      pressure += weight * (double)gpuData->pressureTm1Device[lnid];
+    }
   }
 
   /* CPML-aware interface correction for the pressure traction in the
@@ -690,7 +679,7 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
 
   for (int i = 0; i < 8; i++) {
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
-    pressure[i] = acoustic_scalar_field_at(gpuData, lnid);
+    pressure[i] = gpuData->pressureTm1Device[lnid];
   }
 
   const double stiffness_coeff =
@@ -713,7 +702,6 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
   const double damp_beta = gpuData->acousticStiffnessDampingBeta;
   const int damp_on =
       (damp_beta != 0.0) &&
-      (gpuData->acousticTimeIntegrator != ACOUSTIC_TIME_INTEGRATOR_RK2) &&
       !(gpuData->pmlFlagArrayDevice != NULL &&
         gpuData->pmlFlagArrayDevice[eindex] != 0);
   solver_float pressure_prev[8];
@@ -929,11 +917,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
    * the acoustic equation. Use the acoustic-side stretch only; the acoustic
    * RHS is the one being modified. Identity on non-acoustic-PML faces / at
    * the PML inner edge. */
-  const int apply_interface_cpml =
-      !((gpuData->acousticTimeIntegrator == ACOUSTIC_TIME_INTEGRATOR_RK2) &&
-        (gpuData->acousticRkReadStage == 0));
-  if (apply_interface_cpml &&
-      gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
+  if (gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
       (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] &
        ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE) != 0) {
     const double a =
@@ -1025,118 +1009,6 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   }
 
   gpuData->pressureTm2Device[nindex] = p_new;
-  gpuData->pressureForceDevice[nindex] = 0.0;
-}
-
-__global__ void kernelAcousticRk2Midpoint(int32_t nharbored,
-                                          gpu_data_t* gpuData,
-                                          double deltaT,
-                                          double deltaT2)
-{
-  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-  if (nindex >= nharbored) {
-    return;
-  }
-  if ((gpuData->pressureRateDevice == NULL) ||
-      (gpuData->pressureStageDevice == NULL) ||
-      (gpuData->pressureRateStageDevice == NULL)) {
-    return;
-  }
-
-  const solver_float mass = gpuData->pressureMassDevice[nindex];
-  const double q0 = (double)gpuData->pressureTm1Device[nindex];
-  double r0 = (double)gpuData->pressureRateDevice[nindex];
-  double q_mid = q0;
-  double r_mid = r0;
-
-  if ((mass > 0.0) && (deltaT2 > 0.0)) {
-    double accel =
-        (double)gpuData->pressureForceDevice[nindex] / ((double)mass * deltaT2);
-    const solver_float cd = (gpuData->pressureDampDevice != NULL)
-                                ? gpuData->pressureDampDevice[nindex]
-                                : (solver_float)0.0;
-    if ((cd != (solver_float)0.0) && (deltaT > 0.0)) {
-      accel -= ((double)cd / deltaT) * r0 / (double)mass;
-    }
-    q_mid = q0 + 0.5 * deltaT * r0;
-    r_mid = r0 + 0.5 * deltaT * accel;
-  }
-
-  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
-      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
-    if (gpuData->acousticVelocityPotential == 1) {
-      q_mid = q0;
-      r_mid = 0.0;
-    } else {
-      q_mid = 0.0;
-      r_mid = 0.0;
-    }
-  }
-  if (gpuData->pmlClampNodeMaskDevice != NULL &&
-      gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
-    q_mid = 0.0;
-    r_mid = 0.0;
-  }
-
-  gpuData->pressureStageDevice[nindex] = (solver_float)q_mid;
-  gpuData->pressureRateStageDevice[nindex] = (solver_float)r_mid;
-  gpuData->pressureForceDevice[nindex] = 0.0;
-}
-
-__global__ void kernelAcousticRk2Finalize(int32_t nharbored,
-                                          gpu_data_t* gpuData,
-                                          double deltaT,
-                                          double deltaT2)
-{
-  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-  if (nindex >= nharbored) {
-    return;
-  }
-  if ((gpuData->pressureRateDevice == NULL) ||
-      (gpuData->pressureRateStageDevice == NULL)) {
-    return;
-  }
-
-  const solver_float mass = gpuData->pressureMassDevice[nindex];
-  const double q0 = (double)gpuData->pressureTm1Device[nindex];
-  const double r0 = (double)gpuData->pressureRateDevice[nindex];
-  const double r_mid = (double)gpuData->pressureRateStageDevice[nindex];
-  double q_new = q0;
-  double r_new = r0;
-
-  if ((mass > 0.0) && (deltaT2 > 0.0)) {
-    double accel =
-        (double)gpuData->pressureForceDevice[nindex] / ((double)mass * deltaT2);
-    const solver_float cd = (gpuData->pressureDampDevice != NULL)
-                                ? gpuData->pressureDampDevice[nindex]
-                                : (solver_float)0.0;
-    if ((cd != (solver_float)0.0) && (deltaT > 0.0)) {
-      accel -= ((double)cd / deltaT) * r_mid / (double)mass;
-    }
-    q_new = q0 + deltaT * r_mid;
-    r_new = r0 + deltaT * accel;
-  }
-
-  if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
-      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
-    if (gpuData->acousticVelocityPotential == 1) {
-      q_new = q0;
-      r_new = 0.0;
-    } else {
-      q_new = 0.0;
-      r_new = 0.0;
-    }
-  }
-  if (gpuData->pmlClampNodeMaskDevice != NULL &&
-      gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
-    q_new = 0.0;
-    r_new = 0.0;
-  }
-
-  gpuData->pressureTm2Device[nindex] = (solver_float)q_new;
-  gpuData->pressureRateDevice[nindex] = (solver_float)r_new;
   gpuData->pressureForceDevice[nindex] = 0.0;
 }
 
@@ -2811,7 +2683,7 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
     double p[8];
     for (int n = 0; n < 8; n++) {
         const int32_t lnid = lnid_base[n * lenum];
-        p[n] = (double)acoustic_scalar_field_at(gpuData, lnid);
+        p[n] = (double)gpuData->pressureTm1Device[lnid];
     }
 
     /* Signed sums S[j] = sum_n s_j(n) * p^(n).
