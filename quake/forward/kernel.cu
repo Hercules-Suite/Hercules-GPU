@@ -123,6 +123,71 @@ __host__ __device__ static inline int acoustic_face_has_node(uint8_t face,
   }
 }
 
+__host__ __device__ static inline double acoustic_node_sign(int node, int axis)
+{
+  return (node & (1 << axis)) ? 1.0 : -1.0;
+}
+
+__device__ static inline void acoustic_scalar_stiffness_sums(
+    const solver_float p[8], double sums[7])
+{
+  for (int k = 0; k < 7; k++) {
+    sums[k] = 0.0;
+  }
+
+  for (int node = 0; node < 8; node++) {
+    const double sx = acoustic_node_sign(node, 0);
+    const double sy = acoustic_node_sign(node, 1);
+    const double sz = acoustic_node_sign(node, 2);
+    const double pv = (double)p[node];
+
+    sums[0] += sx * pv;
+    sums[1] += sy * pv;
+    sums[2] += sz * pv;
+    sums[3] += sx * sy * pv;
+    sums[4] += sx * sz * pv;
+    sums[5] += sy * sz * pv;
+    sums[6] += sx * sy * sz * pv;
+  }
+}
+
+__device__ static inline void acoustic_scalar_stiffness_delta_sums(
+    const solver_float p[8], const solver_float p_prev[8], double sums[7])
+{
+  for (int k = 0; k < 7; k++) {
+    sums[k] = 0.0;
+  }
+
+  for (int node = 0; node < 8; node++) {
+    const double sx = acoustic_node_sign(node, 0);
+    const double sy = acoustic_node_sign(node, 1);
+    const double sz = acoustic_node_sign(node, 2);
+    const double pv = (double)p[node] - (double)p_prev[node];
+
+    sums[0] += sx * pv;
+    sums[1] += sy * pv;
+    sums[2] += sz * pv;
+    sums[3] += sx * sy * pv;
+    sums[4] += sx * sz * pv;
+    sums[5] += sy * sz * pv;
+    sums[6] += sx * sy * sz * pv;
+  }
+}
+
+__device__ static inline double acoustic_scalar_stiffness_from_sums(
+    int node, const double sums[7])
+{
+  const double sx = acoustic_node_sign(node, 0);
+  const double sy = acoustic_node_sign(node, 1);
+  const double sz = acoustic_node_sign(node, 2);
+
+  return sx * sums[0] + sy * sums[1] + sz * sums[2] +
+         (2.0 / 3.0) * sx * sy * sums[3] +
+         (2.0 / 3.0) * sx * sz * sums[4] +
+         (2.0 / 3.0) * sy * sz * sums[5] +
+         (1.0 / 3.0) * sx * sy * sz * sums[6];
+}
+
 __host__ __device__ static inline double acoustic_scalar_stiffness_shape(int i,
                                                                          int j)
 {
@@ -710,6 +775,29 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
       const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
       pressure_prev[i] = gpuData->pressureTm2Device[lnid];
     }
+
+    /* Fast algebraically equivalent application of the same consistent
+     * acoustic stiffness matrix.  The shape matrix is diagonal in the
+     * seven non-constant trilinear sign modes (x, y, z, xy, xz, yz,
+     * xyz), so Q-active damping can evaluate K*p and K*(p-p_prev)
+     * without two dense 8x8 loops.  Keep the Q-off branch below in its
+     * original form so the validated lossless path stays bit-identical. */
+    double pressure_sums[7];
+    double delta_sums[7];
+    acoustic_scalar_stiffness_sums(pressure, pressure_sums);
+    acoustic_scalar_stiffness_delta_sums(pressure, pressure_prev, delta_sums);
+
+    for (int i = 0; i < 8; i++) {
+      const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
+      const double local =
+          acoustic_scalar_stiffness_from_sums(i, pressure_sums);
+      const double dlocal =
+          acoustic_scalar_stiffness_from_sums(i, delta_sums);
+      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                (solver_float)(-stiffness_coeff * local -
+                               stiffness_coeff * damp_beta * dlocal));
+    }
+    return;
   }
 
   for (int i = 0; i < 8; i++) {
@@ -720,19 +808,8 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
       local += acoustic_scalar_stiffness_shape(i, j) * pressure[j];
     }
 
-    if (!damp_on) {
-      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                (solver_float)(-stiffness_coeff * local));
-    } else {
-      double dlocal = 0.0;
-      for (int j = 0; j < 8; j++) {
-        dlocal += acoustic_scalar_stiffness_shape(i, j) *
-                  ((double)pressure[j] - (double)pressure_prev[j]);
-      }
-      atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                (solver_float)(-stiffness_coeff * local -
-                               stiffness_coeff * damp_beta * dlocal));
-    }
+    atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+              (solver_float)(-stiffness_coeff * local));
   }
 }
 
