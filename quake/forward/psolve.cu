@@ -242,6 +242,17 @@ static int32_t* g_dispBoundaryNodesDevice = NULL;
 static fvector_t* g_dispBoundaryBufferHost = NULL;
 static fvector_t* g_dispBoundaryBufferDevice = NULL;
 static int32_t g_dispBoundaryNodeCount = 0;
+static int32_t g_pressureForceSyncMode = -1;
+static int32_t g_pressureForceSyncReported = 0;
+static int32_t g_pressureFieldSyncMode = -1;
+static int32_t g_pressureFieldSyncReported = 0;
+static int32_t g_pressureSparseReady = 0;
+static int32_t* g_pressureSparseNodesHost = NULL;
+static int32_t* g_pressureSparseNodesDevice = NULL;
+static solver_float* g_pressureSparseBufferHost = NULL;
+static solver_float* g_pressureSparseBufferDevice = NULL;
+static int32_t g_pressureSparseNodeCount = 0;
+static int32_t g_pressureSparseHostPinned = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -623,7 +634,13 @@ static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
 static int32_t hercules_repro_strict(void);
 static int32_t displacement_sync_mode(void);
+static int32_t pressure_force_sync_mode(void);
+static int32_t pressure_field_sync_mode(void);
 static void solver_init_disp_boundary_sync(mysolver_t* solver);
+static void solver_init_pressure_sparse_sync(mysolver_t* solver);
+static void solver_download_pressure_force_sparse(mysolver_t* solver);
+static void solver_upload_pressure_force_sparse(mysolver_t* solver);
+static void solver_upload_pressure_field_sparse(mysolver_t* solver);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
@@ -698,6 +715,30 @@ __global__ static void kernelDispBoundaryScatter(int32_t count,
   }
 
   dispDevice[lnidList[idx]] = bufferDevice[idx];
+}
+
+__global__ static void kernelScalarBoundaryGather(int32_t count,
+                                                  const int32_t* lnidList,
+                                                  const solver_float* srcDevice,
+                                                  solver_float* bufferDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bufferDevice[idx] = srcDevice[lnidList[idx]];
+}
+
+__global__ static void kernelScalarBoundaryScatter(int32_t count,
+                                                   const int32_t* lnidList,
+                                                   const solver_float* bufferDevice,
+                                                   solver_float* dstDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  dstDevice[lnidList[idx]] = bufferDevice[idx];
 }
 
 __device__ __constant__ int kTopoTetNodes[2][5][4] = {
@@ -11495,6 +11536,32 @@ static void solver_delete() {
   g_rangeUploadSourceCountCached = -1;
   g_rangeUploadTopoCountCached = -1;
 
+  if (g_pressureSparseNodesDevice != NULL) {
+    cudaFree(g_pressureSparseNodesDevice);
+    g_pressureSparseNodesDevice = NULL;
+  }
+  if (g_pressureSparseBufferDevice != NULL) {
+    cudaFree(g_pressureSparseBufferDevice);
+    g_pressureSparseBufferDevice = NULL;
+  }
+  free(g_pressureSparseNodesHost);
+  g_pressureSparseNodesHost = NULL;
+  if (g_pressureSparseBufferHost != NULL) {
+    if (g_pressureSparseHostPinned) {
+      cudaFreeHost(g_pressureSparseBufferHost);
+    } else {
+      free(g_pressureSparseBufferHost);
+    }
+    g_pressureSparseBufferHost = NULL;
+  }
+  g_pressureSparseHostPinned = 0;
+  g_pressureSparseNodeCount = 0;
+  g_pressureSparseReady = 0;
+  g_pressureForceSyncMode = -1;
+  g_pressureForceSyncReported = 0;
+  g_pressureFieldSyncMode = -1;
+  g_pressureFieldSyncReported = 0;
+
   compute_adjust_cache_free();
 
   /* Destroy streams */
@@ -11828,6 +11895,12 @@ static void solver_reset_gpu(mysolver_t* solver, mesh_t* mesh) {
   tmp = solver->gpuData->tm2Device;
   solver->gpuData->tm2Device = solver->gpuData->tm1Device;
   solver->gpuData->tm1Device = tmp;
+
+  if (acoustic_pressure_enabled() && pressure_field_sync_mode() != 0) {
+    solver_float* ptmp = solver->gpuData->pressureTm2Device;
+    solver->gpuData->pressureTm2Device = solver->gpuData->pressureTm1Device;
+    solver->gpuData->pressureTm1Device = ptmp;
+  }
 
   /* Update data structure on device */
   cudaMemcpyAsync(solver->gpuDataDevice, solver->gpuData, sizeof(gpu_data_t),
@@ -13263,6 +13336,11 @@ static void solver_load_pressure_gpu(mysolver_t* solver, mesh_t* mesh) {
     return;
   }
 
+  if (pressure_field_sync_mode() != 0) {
+    solver_init_pressure_sparse_sync(solver);
+    return;
+  }
+
   cudaMemcpyAsync(solver->gpuData->pressureTm1Device, solver->pressure_tm1,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
@@ -13400,12 +13478,16 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   }
 
   Timer_Start("Acoustic pressure force D2H");
-  cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  if (pressure_force_sync_mode() != 0) {
+    solver_download_pressure_force_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
   Timer_Stop("Acoustic pressure force D2H");
 
   Timer_Start("Acoustic pressure force exchange");
@@ -13417,11 +13499,15 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   Timer_Stop("Acoustic pressure force exchange");
 
   Timer_Start("Acoustic pressure force H2D");
-  cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
+  if (pressure_force_sync_mode() != 0) {
+    solver_upload_pressure_force_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
   Timer_Stop("Acoustic pressure force H2D");
 
   blocksize = 256;
@@ -13456,6 +13542,12 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
                     DN_PRESSURE_MSG);
   Timer_Stop("Acoustic pressure field exchange");
+
+  if (pressure_field_sync_mode() != 0) {
+    Timer_Start("Acoustic pressure field H2D");
+    solver_upload_pressure_field_sparse(solver);
+    Timer_Stop("Acoustic pressure field H2D");
+  }
 
   Timer_Stop("Acoustic Pressure Step");
 }
@@ -13563,6 +13655,76 @@ static int32_t displacement_sync_mode(void) {
   }
 
   return g_dispSyncMode;
+}
+
+static int32_t pressure_force_sync_mode(void) {
+  if (g_pressureForceSyncMode < 0) {
+    const char* env = getenv("HERCULES_PRESSURE_FORCE_SYNC_MODE");
+    int32_t useSparse = 1;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "full") == 0 || strcasecmp(env, "cpu") == 0 ||
+          strcasecmp(env, "dense") == 0 || strcasecmp(env, "off") == 0 ||
+          strcasecmp(env, "no") == 0 || strcasecmp(env, "false") == 0 ||
+          strcmp(env, "0") == 0) {
+        useSparse = 0;
+      } else if (strcasecmp(env, "sparse") == 0 ||
+                 strcasecmp(env, "boundary") == 0 ||
+                 strcasecmp(env, "auto") == 0 || strcasecmp(env, "yes") == 0 ||
+                 strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        useSparse = 1;
+      }
+    }
+
+    g_pressureForceSyncMode = useSparse;
+    if ((Global.myID == 0) && (g_pressureForceSyncReported == 0)) {
+      monitor_print("Acoustic pressure force sync path: %s\n",
+                    g_pressureForceSyncMode ? "sparse" : "full");
+      g_pressureForceSyncReported = 1;
+    }
+  }
+
+  return g_pressureForceSyncMode;
+}
+
+static int32_t pressure_field_sync_mode(void) {
+  if (g_pressureFieldSyncMode < 0) {
+    const char* env = getenv("HERCULES_PRESSURE_FIELD_SYNC_MODE");
+    int32_t useSparse = 1;
+
+    if (Param.theUseCheckPoint == 1) {
+      useSparse = 0;
+    }
+
+    if (env != NULL) {
+      if (strcasecmp(env, "full") == 0 || strcasecmp(env, "cpu") == 0 ||
+          strcasecmp(env, "dense") == 0 || strcasecmp(env, "off") == 0 ||
+          strcasecmp(env, "no") == 0 || strcasecmp(env, "false") == 0 ||
+          strcmp(env, "0") == 0) {
+        useSparse = 0;
+      } else if (strcasecmp(env, "sparse") == 0 ||
+                 strcasecmp(env, "boundary") == 0 ||
+                 strcasecmp(env, "resident") == 0 ||
+                 strcasecmp(env, "auto") == 0 || strcasecmp(env, "yes") == 0 ||
+                 strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        useSparse = (Param.theUseCheckPoint == 1) ? 0 : 1;
+      }
+    }
+
+    g_pressureFieldSyncMode = useSparse;
+    if ((Global.myID == 0) && (g_pressureFieldSyncReported == 0)) {
+      monitor_print(
+          "Acoustic pressure field sync path: %s%s\n",
+          g_pressureFieldSyncMode ? "resident+sparse-boundary" : "full",
+          (env != NULL && g_pressureFieldSyncMode == 0 &&
+           Param.theUseCheckPoint == 1)
+              ? " (sparse requested but checkpoint restart needs full upload)"
+              : "");
+      g_pressureFieldSyncReported = 1;
+    }
+  }
+
+  return g_pressureFieldSyncMode;
 }
 
 static void disp_boundary_append_messenger_nodes(int32_t* nodes,
@@ -13697,6 +13859,252 @@ static void solver_init_disp_boundary_sync(mysolver_t* solver) {
   }
 
   g_dispBoundaryReady = 1;
+}
+
+static void solver_init_pressure_sparse_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes = NULL;
+  cudaError_t cerror;
+
+  if (g_pressureSparseReady != 0 ||
+      (pressure_force_sync_mode() == 0 && pressure_field_sync_mode() == 0)) {
+    return;
+  }
+
+  compute_adjust_cache_build();
+
+  capacity =
+      messenger_countnodes(solver->an_sched->first_s) +
+      messenger_countnodes(solver->an_sched->first_c) +
+      messenger_countnodes(solver->dn_sched->first_s) +
+      messenger_countnodes(solver->dn_sched->first_c) + g_adjustDnCount +
+      g_adjustParentCount;
+
+  if (capacity <= 0) {
+    g_pressureSparseReady = 1;
+    g_pressureSparseNodeCount = 0;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * capacity);
+  if (nodes == NULL) {
+    fprintf(stderr, "Thread %d: pressure sparse node list alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_c);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_c);
+
+  for (int32_t i = 0; i < g_adjustDnCount; i++) {
+    nodes[count++] = g_adjustDanglingLnid[i];
+  }
+  for (int32_t i = 0; i < g_adjustParentCount; i++) {
+    nodes[count++] = g_adjustParentIds[i];
+  }
+
+  qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+  for (int32_t i = 0; i < count; i++) {
+    if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+      nodes[uniqueCount++] = nodes[i];
+    }
+  }
+
+  g_pressureSparseNodeCount = uniqueCount;
+  if (g_pressureSparseNodeCount <= 0) {
+    free(nodes);
+    g_pressureSparseReady = 1;
+    return;
+  }
+
+  g_pressureSparseNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * g_pressureSparseNodeCount);
+  if (g_pressureSparseNodesHost == NULL) {
+    free(nodes);
+    fprintf(stderr, "Thread %d: pressure sparse unique alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  memcpy(g_pressureSparseNodesHost, nodes,
+         sizeof(int32_t) * g_pressureSparseNodeCount);
+  free(nodes);
+
+  cerror = cudaMalloc((void**)&g_pressureSparseNodesDevice,
+                      sizeof(int32_t) * g_pressureSparseNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure sparse node device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaMalloc((void**)&g_pressureSparseBufferDevice,
+                      sizeof(solver_float) * g_pressureSparseNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure sparse buffer device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaHostAlloc((void**)&g_pressureSparseBufferHost,
+                         sizeof(solver_float) * g_pressureSparseNodeCount,
+                         cudaHostAllocDefault);
+  if (cerror == cudaSuccess) {
+    g_pressureSparseHostPinned = 1;
+  } else {
+    g_pressureSparseBufferHost =
+        (solver_float*)malloc(sizeof(solver_float) * g_pressureSparseNodeCount);
+    g_pressureSparseHostPinned = 0;
+    if (g_pressureSparseBufferHost == NULL) {
+      fprintf(stderr, "Thread %d: pressure sparse buffer host alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  cerror = cudaMemcpy(g_pressureSparseNodesDevice, g_pressureSparseNodesHost,
+                      sizeof(int32_t) * g_pressureSparseNodeCount,
+                      cudaMemcpyHostToDevice);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure sparse node copy - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Global.myID == 0) {
+    monitor_print("Acoustic pressure sparse sync nodes: %d of %d harbored\n",
+                  g_pressureSparseNodeCount, Global.myMesh->nharbored);
+  }
+
+  g_pressureSparseReady = 1;
+}
+
+static void solver_download_pressure_force_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pressure_sparse_sync(solver);
+  if (g_pressureSparseNodeCount <= 0) {
+    return;
+  }
+
+  blocksize = 256;
+  gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
+      solver->gpuData->pressureForceDevice, g_pressureSparseBufferDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure force sparse gather - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  cudaMemcpyAsync(g_pressureSparseBufferHost, g_pressureSparseBufferDevice,
+                  sizeof(solver_float) * g_pressureSparseNodeCount,
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_pressureSparseNodeCount * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_pressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_pressureSparseNodeCount; i++) {
+    solver->pressure_force[g_pressureSparseNodesHost[i]] =
+        g_pressureSparseBufferHost[i];
+  }
+}
+
+static void solver_upload_pressure_force_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pressure_sparse_sync(solver);
+  if (g_pressureSparseNodeCount <= 0) {
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_pressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_pressureSparseNodeCount; i++) {
+    g_pressureSparseBufferHost[i] =
+        solver->pressure_force[g_pressureSparseNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_pressureSparseBufferDevice, g_pressureSparseBufferHost,
+                  sizeof(solver_float) * g_pressureSparseNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_pressureSparseNodeCount * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
+      g_pressureSparseBufferDevice, solver->gpuData->pressureForceDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure force sparse scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
+static void solver_upload_pressure_field_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pressure_sparse_sync(solver);
+  if (g_pressureSparseNodeCount <= 0) {
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_pressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_pressureSparseNodeCount; i++) {
+    g_pressureSparseBufferHost[i] =
+        solver->pressure_tm2[g_pressureSparseNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_pressureSparseBufferDevice, g_pressureSparseBufferHost,
+                  sizeof(solver_float) * g_pressureSparseNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_pressureSparseNodeCount * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
+      g_pressureSparseBufferDevice, solver->gpuData->pressureTm2Device);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pressure field sparse scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 }
 
 static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -15060,7 +15468,8 @@ static void solver_run_collect_timers(void) {
         "Acoustic pressure force H2D",
         "Acoustic pressure update kernel",
         "Acoustic pressure field D2H",
-        "Acoustic pressure field exchange"};
+        "Acoustic pressure field exchange",
+        "Acoustic pressure field H2D"};
     const int acousticPressureTimerCount =
         (int)(sizeof(acousticPressureTimers) /
               sizeof(acousticPressureTimers[0]));
@@ -19147,6 +19556,7 @@ static void print_timing_stat() {
     solver_print_timer_line("Pressure D2H sync", "Acoustic pressure field D2H");
     solver_print_timer_line("Pressure exchange/adjust",
                             "Acoustic pressure field exchange");
+    solver_print_timer_line("Pressure H2D patch", "Acoustic pressure field H2D");
   }
   printf(
       "    1st schedule send data          : %.2f (Average)   %.2f (Max) %.2f "

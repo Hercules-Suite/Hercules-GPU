@@ -59,6 +59,10 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	`full`/`0` keeps the legacy full-array copy each step.
 	`boundary`/`1` keeps displacement history resident on the GPU and copies only the boundary/adjustment nodes needed by MPI displacement exchange, then patches those host-updated nodes back to the GPU for the next step.
 	For correctness, `boundary` currently falls back to `full` when station/plane/checkpoint/DRM/nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host displacement arrays. The run log prints `Displacement sync path:` and, when active, the boundary node count.
+- `HERCULES_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
+	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
+- `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
+	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Full pressure D2H is still performed so station/plane/checkpoint output remains host-visible. `full` restores the legacy full pressure-field H2D load each step; checkpoint restart also forces `full`.
 
 Advanced/diagnostic toggles:
 
@@ -187,6 +191,8 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
 # export HERCULES_TOPO_FORCE_MODE=cpu
+# export HERCULES_PRESSURE_FORCE_SYNC_MODE=full
+# export HERCULES_PRESSURE_FIELD_SYNC_MODE=full
 # Advanced/debug overrides:
 # export HERCULES_CONTRIB_PACK_OMP=0
 # export HERCULES_CONTRIB_UNPACK_OMP=0
