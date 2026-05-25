@@ -13339,14 +13339,19 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
 
   blocksize = 256;
   gridsize = (mesh->lenum + blocksize - 1) / blocksize;
+  Timer_Start("Acoustic pressure force reset");
   cudaMemsetAsync(solver->gpuData->pressureForceDevice, 0,
                   mesh->nharbored * sizeof(solver_float),
                   solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Acoustic pressure force reset");
+
+  Timer_Start("Acoustic pressure force kernel");
   kernelAcousticPressureForce<<<gridsize, blocksize, 0,
                                 solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->lenum, solver->gpuDataDevice, Param.theDeltaTSquared);
 
   cerror = cudaGetLastError();
+  Timer_Stop("Acoustic pressure force kernel");
   if (cerror != cudaSuccess) {
     fprintf(stderr, "Thread %d: acoustic pressure force kernel - %s\n",
             Global.myID, cudaGetErrorString(cerror));
@@ -13360,10 +13365,12 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
     const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
     const int pmlBlock = 128;
     const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
+    Timer_Start("Acoustic pressure PML kernel");
     kernelPMLAcousticStep<<<pmlGrid, pmlBlock, 0,
                             solver->streams[CUDA_STREAM_MAIN]>>>(
         mesh->lenum, solver->gpuDataDevice, pmlN);
     cerror = cudaGetLastError();
+    Timer_Stop("Acoustic pressure PML kernel");
     if (cerror != cudaSuccess) {
       fprintf(stderr, "Thread %d: PML acoustic step kernel - %s\n",
               Global.myID, cudaGetErrorString(cerror));
@@ -13375,12 +13382,14 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   face_count = solver->gpuData->acousticInterfaceFaceCount;
   if (face_count > 0) {
     gridsize = (face_count + blocksize - 1) / blocksize;
+    Timer_Start("Acoustic pressure interface");
     kernelAcousticPressureInterfaceForce<<<
         gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
         face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
         Param.theDeltaT);
 
     cerror = cudaGetLastError();
+    Timer_Stop("Acoustic pressure interface");
     if (cerror != cudaSuccess) {
       fprintf(stderr,
               "Thread %d: acoustic pressure interface force kernel - %s\n",
@@ -13390,32 +13399,40 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
     }
   }
 
+  Timer_Start("Acoustic pressure force D2H");
   cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Acoustic pressure force D2H");
 
+  Timer_Start("Acoustic pressure force exchange");
   schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
                     DN_PRESSURE_FORCE_MSG);
   compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
   schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
                     AN_PRESSURE_FORCE_MSG);
+  Timer_Stop("Acoustic pressure force exchange");
 
+  Timer_Start("Acoustic pressure force H2D");
   cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
+  Timer_Stop("Acoustic pressure force H2D");
 
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
+  Timer_Start("Acoustic pressure update kernel");
   kernelAcousticPressureUpdate<<<gridsize, blocksize, 0,
                                  solver->streams[CUDA_STREAM_MAIN]>>>(
       mesh->nharbored, solver->gpuDataDevice);
 
   cerror = cudaGetLastError();
+  Timer_Stop("Acoustic pressure update kernel");
   if (cerror != cudaSuccess) {
     fprintf(stderr, "Thread %d: acoustic pressure update kernel - %s\n",
             Global.myID, cudaGetErrorString(cerror));
@@ -13423,20 +13440,27 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
     exit(1);
   }
 
+  Timer_Start("Acoustic pressure field D2H");
   cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
                   mesh->nharbored * sizeof(solver_float),
                   cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
   solver->gpu_spec->numbytespci +=
       mesh->nharbored * (int64_t)sizeof(solver_float);
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Acoustic pressure field D2H");
 
+  Timer_Start("Acoustic pressure host clear");
   memset(solver->pressure_force, 0,
          mesh->nharbored * sizeof(solver_float));
+  Timer_Stop("Acoustic pressure host clear");
+
+  Timer_Start("Acoustic pressure field exchange");
   schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
                     AN_PRESSURE_MSG);
   compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
   schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
                     DN_PRESSURE_MSG);
+  Timer_Stop("Acoustic pressure field exchange");
 
   Timer_Stop("Acoustic Pressure Step");
 }
@@ -14642,6 +14666,17 @@ static double solver_local_timer_elapsed_or_zero(const char* timerName) {
   return Timer_Exists(timerName) ? Timer_Value(timerName, (TimerKind)0) : 0.0;
 }
 
+static void solver_print_timer_line(const char* label, const char* timerName) {
+  if (!Timer_Exists(timerName)) {
+    return;
+  }
+
+  printf(
+      "      %-31s : %.2f (Average)   %.2f (Max) %.2f (Min) seconds\n",
+      label, Timer_Value(timerName, AVERAGE), Timer_Value(timerName, MAX),
+      Timer_Value(timerName, MIN));
+}
+
 static void solver_cpml_rank_diag_collect(void) {
 #ifdef BOUNDARY
   if (Param.theAbcType != ABC_CPML) {
@@ -15018,9 +15053,27 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Acoustic pressure traction",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
-  if (Timer_Exists("Acoustic Pressure Step")) {
-    Timer_Reduce("Acoustic Pressure Step",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  {
+    static const char* acousticPressureTimers[] = {
+        "Acoustic Pressure Step",
+        "Acoustic pressure force reset",
+        "Acoustic pressure force kernel",
+        "Acoustic pressure PML kernel",
+        "Acoustic pressure interface",
+        "Acoustic pressure force D2H",
+        "Acoustic pressure force exchange",
+        "Acoustic pressure force H2D",
+        "Acoustic pressure update kernel",
+        "Acoustic pressure field D2H",
+        "Acoustic pressure host clear",
+        "Acoustic pressure field exchange"};
+    const int acousticPressureTimerCount =
+        (int)(sizeof(acousticPressureTimers) /
+              sizeof(acousticPressureTimers[0]));
+    for (int i = 0; i < acousticPressureTimerCount; i++) {
+      solver_reduce_timer_if_any(acousticPressureTimers[i],
+                                 (TimerKind)(MAX | MIN | AVERAGE));
+    }
   }
   if (Timer_Exists("Force postcopy sync wait")) {
     Timer_Reduce("Force postcopy sync wait",
@@ -19079,6 +19132,29 @@ static void print_timing_stat() {
           Timer_Value("Physics Displacement Wait/Post", MAX),
           Timer_Value("Physics Displacement Wait/Post", MIN));
     }
+  }
+  if (Timer_Exists("Acoustic Pressure Step")) {
+    printf("    Acoustic pressure internals\n");
+    solver_print_timer_line("Total step", "Acoustic Pressure Step");
+    solver_print_timer_line("Force reset enqueue",
+                            "Acoustic pressure force reset");
+    solver_print_timer_line("Force kernel enqueue",
+                            "Acoustic pressure force kernel");
+    solver_print_timer_line("CPML force kernel enqueue",
+                            "Acoustic pressure PML kernel");
+    solver_print_timer_line("Interface force enqueue",
+                            "Acoustic pressure interface");
+    solver_print_timer_line("Force D2H sync", "Acoustic pressure force D2H");
+    solver_print_timer_line("Force exchange/adjust",
+                            "Acoustic pressure force exchange");
+    solver_print_timer_line("Force H2D enqueue", "Acoustic pressure force H2D");
+    solver_print_timer_line("Update kernel enqueue",
+                            "Acoustic pressure update kernel");
+    solver_print_timer_line("Pressure D2H sync", "Acoustic pressure field D2H");
+    solver_print_timer_line("Pressure host clear",
+                            "Acoustic pressure host clear");
+    solver_print_timer_line("Pressure exchange/adjust",
+                            "Acoustic pressure field exchange");
   }
   printf(
       "    1st schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
