@@ -13449,11 +13449,6 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Acoustic pressure field D2H");
 
-  Timer_Start("Acoustic pressure host clear");
-  memset(solver->pressure_force, 0,
-         mesh->nharbored * sizeof(solver_float));
-  Timer_Stop("Acoustic pressure host clear");
-
   Timer_Start("Acoustic pressure field exchange");
   schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
                     AN_PRESSURE_MSG);
@@ -15065,7 +15060,6 @@ static void solver_run_collect_timers(void) {
         "Acoustic pressure force H2D",
         "Acoustic pressure update kernel",
         "Acoustic pressure field D2H",
-        "Acoustic pressure host clear",
         "Acoustic pressure field exchange"};
     const int acousticPressureTimerCount =
         (int)(sizeof(acousticPressureTimers) /
@@ -19151,8 +19145,6 @@ static void print_timing_stat() {
     solver_print_timer_line("Update kernel enqueue",
                             "Acoustic pressure update kernel");
     solver_print_timer_line("Pressure D2H sync", "Acoustic pressure field D2H");
-    solver_print_timer_line("Pressure host clear",
-                            "Acoustic pressure host clear");
     solver_print_timer_line("Pressure exchange/adjust",
                             "Acoustic pressure field exchange");
   }
