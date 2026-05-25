@@ -349,8 +349,6 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define AN_PRESSURE_SURFACE_MSG 127
 #define DN_PRESSURE_DAMP_MSG 128
 #define AN_PRESSURE_DAMP_MSG 129
-#define DN_PRESSURE_STIFF_MSG 130
-#define AN_PRESSURE_STIFF_MSG 131
 #define CVMRECORD_MSG 110
 
 #define BATCH (1 << 20)
@@ -1582,8 +1580,6 @@ static struct Param_t {
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
-  int theAcousticTimeIntegrator;             /* leapfrog or semi-implicit */
-  double theAcousticSemiImplicitTheta;        /* stiffness-diagonal theta */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1646,9 +1642,7 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
-           .theAcousticQualityFactor = 0.0,
-           .theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG,
-           .theAcousticSemiImplicitTheta = 0.5};
+           .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1939,9 +1933,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  39 /* Must adjust this if adding double params */
+  38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  53 /* Must adjust this if adding int params */
+  52 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -1996,7 +1990,6 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
-  double_message[38] = Param.theAcousticSemiImplicitTheta;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2039,7 +2032,6 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
-  Param.theAcousticSemiImplicitTheta = double_message[38];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2094,7 +2086,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
-  int_message[52] = Param.theAcousticTimeIntegrator;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2152,7 +2143,6 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
-  Param.theAcousticTimeIntegrator = int_message[52];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2437,7 +2427,6 @@ static int32_t parse_parameters(const char* numericalin) {
        acoustic_interface_projection[64] = "point",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
-       acoustic_time_integrator[64] = "leapfrog",
        reconstruct_acoustic_plane_displacements[64] = "no",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
@@ -2841,8 +2830,6 @@ static int32_t parse_parameters(const char* numericalin) {
                  &acoustic_formulation) == 0);
   parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
             &reconstruct_acoustic_plane_displacements);
-  parsetext(fp, "acoustic_time_integrator", 's',
-            &acoustic_time_integrator);
   parsetext(fp, "acoustic_interface_diagnostics_file", 's',
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
@@ -2873,8 +2860,6 @@ static int32_t parse_parameters(const char* numericalin) {
   {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
-    hu_config_get_double_opt(fp, "acoustic_semi_implicit_theta",
-                             &Param.theAcousticSemiImplicitTheta);
   }
   hu_config_get_int_opt(fp, "maximum_octant_level",
                         &acoustic_interface_max_level);
@@ -3215,30 +3200,6 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_projection "
                  "(point or face_mass): %s\n",
                  acoustic_interface_projection);
-  }
-
-  if ((strcasecmp(acoustic_time_integrator, "leapfrog") == 0) ||
-      (strcasecmp(acoustic_time_integrator, "central_difference") == 0) ||
-      (strcasecmp(acoustic_time_integrator, "central-difference") == 0)) {
-    Param.theAcousticTimeIntegrator = ACOUSTIC_TIME_INTEGRATOR_LEAPFROG;
-  } else if ((strcasecmp(acoustic_time_integrator, "semi_implicit") == 0) ||
-             (strcasecmp(acoustic_time_integrator, "semi-implicit") == 0) ||
-             (strcasecmp(acoustic_time_integrator, "theta") == 0) ||
-             (strcasecmp(acoustic_time_integrator, "newmark") == 0)) {
-    Param.theAcousticTimeIntegrator =
-        ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown response for acoustic_time_integrator "
-                 "(leapfrog or semi_implicit): %s\n",
-                 acoustic_time_integrator);
-  }
-
-  if ((Param.theAcousticSemiImplicitTheta < 0.0) ||
-      (Param.theAcousticSemiImplicitTheta > 1.0)) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "acoustic_semi_implicit_theta must be in [0, 1]: %f\n",
-                 Param.theAcousticSemiImplicitTheta);
   }
 
   noyesflag_t legacyAcousticPressureFormulation = NO;
@@ -3667,20 +3628,6 @@ static int32_t parse_parameters(const char* numericalin) {
                    (legacyAcousticPressureFormulation == YES))
                       ? " [from legacy acoustic_pressure_formulation=yes]"
                       : "");
-    monitor_print("Acoustic time integrator:           %s%s\n",
-                  (Param.theAcousticTimeIntegrator ==
-                   ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT)
-                      ? "semi_implicit"
-                      : "leapfrog",
-                  (Param.theAcousticTimeIntegrator ==
-                   ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT)
-                      ? ""
-                      : " (baseline)");
-    if (Param.theAcousticTimeIntegrator ==
-        ACOUSTIC_TIME_INTEGRATOR_SEMI_IMPLICIT) {
-      monitor_print("Acoustic semi-implicit theta:       %.6f\n",
-                    Param.theAcousticSemiImplicitTheta);
-    }
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
@@ -8202,15 +8149,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMallocHost(&(Global.mySolver->pressure_stiff_diag),
-                       Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate acoustic pressure stiffness diagonal pinned memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     /* Step B: acoustic CPML nodal damping C. Allocated unconditionally
      * (acoustic path exists regardless of BOUNDARY/CPML); stays 0
      * everywhere unless an acoustic PML element contributes, so the
@@ -8231,8 +8169,6 @@ static void solver_init() {
     memset(Global.mySolver->pressure_force, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_mass, 0,
-           Global.myMesh->nharbored * sizeof(solver_float));
-    memset(Global.mySolver->pressure_stiff_diag, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pressure_damp, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
@@ -8525,8 +8461,6 @@ static void solver_init() {
       const double volume =
           edata->edgesize * edata->edgesize * edata->edgesize;
       const double nodalPressureMass = volume / (8.0 * bulk);
-      const double nodalPressureStiffDiag =
-          Param.theDeltaTSquared * edata->edgesize / (3.0 * edata->rho);
 
       ep->c1 = 0.0;
       ep->c2 = 0.0;
@@ -8635,13 +8569,6 @@ static void solver_init() {
         const int32_t lnid = elemp->lnid[j];
         Global.mySolver->pressure_mass[lnid] +=
             (solver_float)(nodalPressureMass * acoustic_kprod);
-        /* Diagonal of the consistent acoustic scalar stiffness, already
-         * multiplied by dt^2. Used only by the opt-in semi-implicit
-         * acoustic theta update. For trilinear hexes, the dimensionless
-         * reference diagonal is 16/3; combined with the corrected
-         * h/(16*rho) prefactor this is dt^2*h/(3*rho). */
-        Global.mySolver->pressure_stiff_diag[lnid] +=
-            (solver_float)nodalPressureStiffDiag;
         /* Bake dt into pressure_damp so kernelAcousticPressureUpdate
          * needs no dt: stored value is the assembled dt*C term, exactly
          * as the elastic path bakes dt*C into mass_minusaM/mass2. */
@@ -9843,13 +9770,6 @@ static void solver_init() {
     compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, AN_PRESSURE_MASS_MSG);
-    schedule_senddata(Global.mySolver->dn_sched,
-                      Global.mySolver->pressure_stiff_diag, 1, CONTRIBUTION,
-                      DN_PRESSURE_STIFF_MSG);
-    compute_adjust(Global.mySolver->pressure_stiff_diag, 1, DISTRIBUTION);
-    schedule_senddata(Global.mySolver->an_sched,
-                      Global.mySolver->pressure_stiff_diag, 1, CONTRIBUTION,
-                      AN_PRESSURE_STIFF_MSG);
     /* Step B: assemble the acoustic CPML nodal damping across ranks
      * exactly like pressure_mass -- it is a node-accumulated quantity,
      * so partition-boundary nodes must get the full cross-rank sum,
@@ -9981,15 +9901,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureStiffDiagDevice),
-                   Global.myMesh->nharbored * sizeof(solver_float)) !=
-        cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to allocate pressure stiffness diagonal memory\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     if (cudaMalloc(
             (void**)&Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
             Global.myMesh->nharbored * sizeof(uint8_t)) != cudaSuccess) {
@@ -10087,9 +9998,6 @@ static void solver_init() {
       Param.theAcousticVelocityPotential;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
-  Global.gpuData.acousticTimeIntegrator = Param.theAcousticTimeIntegrator;
-  Global.gpuData.acousticSemiImplicitTheta =
-      Param.theAcousticSemiImplicitTheta;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
@@ -10789,16 +10697,6 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMemcpy(Global.gpuData.pressureStiffDiagDevice,
-                   Global.mySolver->pressure_stiff_diag,
-                   Global.myMesh->nharbored * sizeof(solver_float),
-                   cudaMemcpyHostToDevice) != cudaSuccess) {
-      fprintf(stderr,
-              "Thread %d: Failed to copy pressure stiffness diagonal array\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
     if (cudaMemcpy(Global.gpuData.pressureTm1Device,
                    Global.mySolver->pressure_tm1,
                    Global.myMesh->nharbored * sizeof(solver_float),
@@ -11361,8 +11259,6 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
-  cudaFree(Global.gpuData.pressureDampDevice);
-  cudaFree(Global.gpuData.pressureStiffDiagDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -11631,9 +11527,6 @@ static void solver_delete() {
   }
   if (Global.mySolver->pressure_mass != NULL) {
     cudaFreeHost(Global.mySolver->pressure_mass);
-  }
-  if (Global.mySolver->pressure_stiff_diag != NULL) {
-    cudaFreeHost(Global.mySolver->pressure_stiff_diag);
   }
   if (Global.mySolver->pressure_damp != NULL) {
     cudaFreeHost(Global.mySolver->pressure_damp);
