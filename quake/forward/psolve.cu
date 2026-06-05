@@ -12700,9 +12700,9 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
       Param.theCpmlNativeStiffness != NO &&
       solver->gpuData->pmlElasticElemCount > 0) {
     const int32_t pmlN = solver->gpuData->pmlElasticElemCount;
-    int blocksize = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS].blocksize;
+    int blocksize = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE].blocksize;
     int gridsize = (pmlN + blocksize - 1) / blocksize;
-    int sharedmem = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS].sharedmem;
+    int sharedmem = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE].sharedmem;
     cudaGetLastError();
     kernelStiffnessCalcLocal<<<gridsize, blocksize, sharedmem,
                                solver->streams[CUDA_STREAM_MAIN]>>>(
