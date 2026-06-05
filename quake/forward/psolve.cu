@@ -649,6 +649,10 @@ static void solver_record_gpu_event(mysolver_t* solver, int eventID,
                                     const char* eventLabel);
 static int compare_adjust_dn_order(const void* a, const void* b);
 static int compare_adjust_dist_edge(const void* a, const void* b);
+static int solver_debug_diag_step(int step);
+static void solver_report_source_force_diag(int step);
+static void solver_report_displacement_diag(mysolver_t* solver, mesh_t* mesh,
+                                            int step);
 static void solver_snapshot_station_accel_history(mysolver_t* solver);
 static void solver_update_acoustic_station_kinematics(int32_t step);
 static int station_pressure_gradient(int32_t iStation, double grad[3]);
@@ -11962,7 +11966,46 @@ static void solver_read_source_forces(int step, double dt) {
   if (Global.theNodesLoaded > 0) {
     read_myForces(step, dt);
   }
+  solver_report_source_force_diag(step);
   Timer_Stop("Read My Forces");
+}
+
+static int solver_debug_diag_step(int step) {
+  return (step < 5) || (step == 10) || (step == 20) || (step == 50) ||
+         (step == 100) || (step == 200) || (step == 500) ||
+         (step == 1000) || (step == 2000) || (step == 5000) ||
+         ((step > 0) && ((step % 10000) == 0));
+}
+
+static void solver_report_source_force_diag(int step) {
+  if (!solver_debug_diag_step(step)) {
+    return;
+  }
+
+  double local_max = 0.0;
+  int64_t local_nonzero = 0;
+  for (int32_t i = 0; i < Global.theNodesLoaded; i++) {
+    double ax = fabs(Global.myForces[i].x[0]);
+    double ay = fabs(Global.myForces[i].x[1]);
+    double az = fabs(Global.myForces[i].x[2]);
+    double amax = ax;
+    if (ay > amax) amax = ay;
+    if (az > amax) amax = az;
+    if (amax > local_max) local_max = amax;
+    if (amax != 0.0) local_nonzero++;
+  }
+
+  double global_max = 0.0;
+  int64_t global_nonzero = 0;
+  MPI_Reduce(&local_max, &global_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&local_nonzero, &global_nonzero, 1, MPI_INT64_T, MPI_SUM, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print(
+        "Source force diagnostic: step=%d max_abs=%.6e nonzero_loaded_nodes=%lld\n",
+        step, global_max, (long long)global_nonzero);
+  }
 }
 
 /**
@@ -15037,11 +15080,44 @@ static void solver_send_displacement_dangling(mysolver_t* solver) {
   Timer_Stop("4th schedule send data (sharing)");
 }
 
+static void solver_report_displacement_diag(mysolver_t* solver, mesh_t* mesh,
+                                            int step) {
+  if (!solver_debug_diag_step(step)) {
+    return;
+  }
+
+  double local_max = 0.0;
+  int64_t local_nonzero = 0;
+  for (int32_t i = 0; i < mesh->nharbored; i++) {
+    double ax = fabs(solver->tm2[i].f[0]);
+    double ay = fabs(solver->tm2[i].f[1]);
+    double az = fabs(solver->tm2[i].f[2]);
+    double amax = ax;
+    if (ay > amax) amax = ay;
+    if (az > amax) amax = az;
+    if (amax > local_max) local_max = amax;
+    if (amax != 0.0) local_nonzero++;
+  }
+
+  double global_max = 0.0;
+  int64_t global_nonzero = 0;
+  MPI_Reduce(&local_max, &global_max, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+  MPI_Reduce(&local_nonzero, &global_nonzero, 1, MPI_INT64_T, MPI_SUM, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print(
+        "Displacement diagnostic: step=%d max_abs=%.6e nonzero_nodes=%lld\n",
+        step, global_max, (long long)global_nonzero);
+  }
+}
+
 /**
  * Hook for instrumentation or other functionality in the solver_run loop.
  */
 static void solver_loop_hook_bottom(mysolver_t* solver, mesh_t* mesh,
                                     int step) {
+  solver_report_displacement_diag(solver, mesh, step);
   if (0) {
     solver_debug_overflow(solver, mesh, step);
   }
