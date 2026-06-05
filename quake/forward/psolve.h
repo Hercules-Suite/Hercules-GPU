@@ -478,8 +478,8 @@ typedef struct gpu_data_t {
      * memory-variable arrays are sized by the corresponding per-type count.
      *
      * Profile coefficients (a_j, b_j, 1/kappa_j) are precomputed per element
-     * from the local edata (Vp, edgesize) and the per-face damping profile
-     * (d, kappa, alpha):
+     * from the element geometry plus a CPML-wide reference Vp and the
+     * per-face damping profile (d, kappa, alpha):
      *   pml_b_j      = exp(-(d_j/kappa_j + alpha_j) * dt);
      *   pml_a_j      = (d_j / (kappa_j * (d_j + kappa_j * alpha_j)))*(pml_b_j-1);
      *   pml_invKappa = 1 / kappa_j.

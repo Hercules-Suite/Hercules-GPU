@@ -547,6 +547,7 @@ typedef struct cpml_build_s {
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
+  double   reference_vp;          /* global max Vp over CPML elements */
   int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
@@ -4658,7 +4659,7 @@ static int mesh_compute_elastic_side_pml_profile_at_domain_point(
   compute_pml_profile_coeffs(
       face_mask, ldb, ruf, Global.myOctree->nearendp,
       Global.myOctree->farendp, Global.myOctree->ticksize,
-      g_cpmlBuild.thickness_m, (double)g_props.Vp, Param.theDeltaT,
+      g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp, Param.theDeltaT,
       Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
       Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
       Param.theCpmlMpmlCrossFraction, Param.theCpmlAlphaFloorFraction,
@@ -8381,6 +8382,46 @@ static void solver_init() {
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
                                 : (M_PI * Param.theFreq);
+    {
+      double local_vp_max = 0.0;
+      double global_vp_max = 0.0;
+      long long local_pml_count = 0;
+      long long global_pml_count = 0;
+      for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
+        elem_t* ep = &Global.myMesh->elemTable[ei];
+        edata_t* ed = (edata_t*)ep->data;
+        int32_t lnid0 = ep->lnid[0];
+        tick_t ldb_ref[3] = {Global.myMesh->nodeTable[lnid0].x,
+                             Global.myMesh->nodeTable[lnid0].y,
+                             Global.myMesh->nodeTable[lnid0].z};
+        tick_t edgeticks_ref = (tick_t)1 << (PIXELLEVEL - ep->level);
+        tick_t ruf_ref[3] = {ldb_ref[0] + edgeticks_ref,
+                             ldb_ref[1] + edgeticks_ref,
+                             ldb_ref[2] + edgeticks_ref};
+        uint8_t mask_ref = compute_pml_face_mask(
+            ldb_ref, ruf_ref, Global.myOctree->nearendp,
+            Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.thickness_m);
+        if (mask_ref == 0) continue;
+        local_pml_count++;
+        if ((ed != NULL) && (ed->Vp > local_vp_max)) {
+          local_vp_max = (double)ed->Vp;
+        }
+      }
+      MPI_Allreduce(&local_vp_max, &global_vp_max, 1, MPI_DOUBLE,
+                    MPI_MAX, comm_solver);
+      MPI_Allreduce(&local_pml_count, &global_pml_count, 1, MPI_LONG_LONG,
+                    MPI_SUM, comm_solver);
+      if ((global_pml_count > 0) && (global_vp_max <= 0.0)) {
+        fprintf(stderr,
+                "Thread %d: CPML found %lld PML elements but no positive "
+                "Vp for the reference damping profile\n",
+                Global.myID, global_pml_count);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      g_cpmlBuild.reference_vp = global_vp_max;
+    }
     g_cpmlBuild.face_mask =
         (uint8_t*)calloc(Global.myMesh->lenum, sizeof(uint8_t));
     g_cpmlBuild.elastic_elem_list =
@@ -8550,9 +8591,10 @@ static void solver_init() {
           compute_pml_profile_coeffs(
               pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
               Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, (double)edata->Vp, Param.theDeltaT,
-              Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
-              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+              Param.theDeltaT, Param.theCpmlPolyOrder,
+              Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+              g_cpmlBuild.alpha_max,
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction,
               a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
@@ -8707,9 +8749,10 @@ static void solver_init() {
         compute_pml_profile_coeffs(
             pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
-            g_cpmlBuild.thickness_m, (double)edata->Vp, Param.theDeltaT,
-            Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
-            Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
+            g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+            Param.theDeltaT, Param.theCpmlPolyOrder,
+            Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+            g_cpmlBuild.alpha_max,
             Param.theCpmlMpmlCrossFraction,
             Param.theCpmlAlphaFloorFraction,
             a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
@@ -8992,15 +9035,19 @@ static void solver_init() {
     if (Global.myID == 0) {
       fprintf(stdout,
               "CPML: %lld elastic + %lld acoustic PML elements globally "
-              "(thickness %.3f m, alpha_max = %.3g rad/s)\n",
+              "(thickness %.3f m, alpha_max = %.3g rad/s, "
+              "reference Vp = %.3f m/s)\n",
               (long long)global_counts[0], (long long)global_counts[1],
-              g_cpmlBuild.thickness_m, g_cpmlBuild.alpha_max);
+              g_cpmlBuild.thickness_m, g_cpmlBuild.alpha_max,
+              g_cpmlBuild.reference_vp);
       if (Param.theMonitorFileFp != NULL) {
         fprintf(Param.theMonitorFileFp,
                 "CPML: %lld elastic + %lld acoustic PML elements globally, "
-                "thickness %.3f m, alpha_max %.3g rad/s\n",
+                "thickness %.3f m, alpha_max %.3g rad/s, "
+                "reference Vp %.3f m/s\n",
                 (long long)global_counts[0], (long long)global_counts[1],
-                g_cpmlBuild.thickness_m, g_cpmlBuild.alpha_max);
+                g_cpmlBuild.thickness_m, g_cpmlBuild.alpha_max,
+                g_cpmlBuild.reference_vp);
       }
     }
 
@@ -9491,8 +9538,9 @@ static void solver_init() {
      * coefficients for the acoustic side and the elastic side. The
      * elastic-to-acoustic source term uses the acoustic-side profile; the
      * pressure traction on the solid uses the elastic-side profile. Keeping
-     * the two sides separate matters because water and rock generally have
-     * different Vp and therefore different CPML sigma profiles. */
+     * the two sides separate matters because the side geometry/mask can
+     * differ; the damping amplitude itself uses the global CPML reference
+     * Vp, matching the main PML element profiles. */
     Global.acousticInterfacePmlFaceCount = 0;
     int64_t pml_face_count = 0;
     int64_t pml_acoustic_side_count = 0;
@@ -9572,7 +9620,6 @@ static void solver_init() {
 
         if (ma != 0) {
           elem_t* pe = &Global.myMesh->elemTable[ea];
-          edata_t* ped = (edata_t*)pe->data;
           int32_t pln0 = pe->lnid[0];
           tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
                            Global.myMesh->nodeTable[pln0].y,
@@ -9586,8 +9633,9 @@ static void solver_init() {
           compute_pml_profile_coeffs(
               ma, ldb, ruf, Global.myOctree->nearendp,
               Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, (double)ped->Vp, Param.theDeltaT,
-              Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+              Param.theDeltaT, Param.theCpmlPolyOrder,
+              Param.theCpmlReflectionTarget,
               Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
@@ -9600,7 +9648,6 @@ static void solver_init() {
 
         if (me != 0) {
           elem_t* pe = &Global.myMesh->elemTable[ee];
-          edata_t* ped = (edata_t*)pe->data;
           int32_t pln0 = pe->lnid[0];
           tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
                            Global.myMesh->nodeTable[pln0].y,
@@ -9614,8 +9661,9 @@ static void solver_init() {
           compute_pml_profile_coeffs(
               me, ldb, ruf, Global.myOctree->nearendp,
               Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, (double)ped->Vp, Param.theDeltaT,
-              Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
+              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+              Param.theDeltaT, Param.theCpmlPolyOrder,
+              Param.theCpmlReflectionTarget,
               Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
@@ -17872,13 +17920,14 @@ static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
  * For axes outside the mask, returns the no-PML identity:
  *   b_j = 1, a_j = 0, invKappa_j = 1  (memory variable stays at 0).
  *
- * The damping profile uses the local element Vp, so material heterogeneity
- * is handled per-element automatically.
+ * The damping profile uses a single reference Vp for the whole CPML region.
+ * This follows the SPECFEM-style assumption that the damping profile should
+ * not introduce extra heterogeneity along the PML normal direction.
  */
 static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        tick_t ruf[3], tick_t nearendp[3],
                                        tick_t farendp[3], double ticksize,
-                                       double L, double Vp, double dt,
+                                       double L, double reference_vp, double dt,
                                        int poly_order, double R,
                                        double kappa_max, double alpha_max,
                                        double mpml_cross_fraction,
@@ -17902,7 +17951,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
   const uint8_t hi_bits[3] = {PML_FACE_X_MAX, PML_FACE_Y_MAX, PML_FACE_Z_MAX};
   const int p = poly_order;
   const double d_max_pre = (L > 0.0)
-                               ? (-(p + 1.0) * Vp * log(R) / (2.0 * L))
+                               ? (-(p + 1.0) * reference_vp * log(R) /
+                                  (2.0 * L))
                                : 0.0;
 
   /* First pass: compute the *standard* per-axis CPML profile values
