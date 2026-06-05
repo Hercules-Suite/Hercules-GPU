@@ -509,7 +509,8 @@ every offset/component (see the summary below).
 	`0` to disable (only safe with M-PML cross-coupling on). Valid
 	`[0, 1]`.
 - `cpml_pml_material_damping`
-	Optional. `none` (default) | `bkt` | `rayleigh`. Whether the elastic
+	Optional. `none` (default) | `bkt` | `bkt2` | `bkt3` | `bkt3f` |
+	`rayleigh`. Whether the elastic
 	PML zone is physically attenuating or lossless-elastic. `none` skips
 	all material damping on PML elements — correct **only** for a
 	non-attenuating interior (`type_of_damping=none`); it is the
@@ -527,7 +528,10 @@ every offset/component (see the summary below).
 	run. The viscoelastic `bkt` path applies to **every BKT-family
 	`type_of_damping`** (`bkt`, `bkt2`, `bkt3`, `bkt3f`): all four
 	advance their SLS memory on PML elements and feed the Stage-2
-	viscoelastic CFS-CPML. (Previously only `bkt2`'s GPU conv kernel
+	viscoelastic CFS-CPML. The `bkt2`, `bkt3`, and `bkt3f` input values
+	for `cpml_pml_material_damping` are accepted as aliases for `bkt`;
+	the exact BKT mechanism count is still controlled by `type_of_damping`.
+	(Previously only `bkt2`'s GPU conv kernel
 	carried the SLS memory into the PML, so `bkt`/`bkt3`/`bkt3f` +
 	`cpml` silently fed stale/zero anelastic vectors to the PML and
 	could diverge — fixed; `kernelPMLElasticStep` itself is

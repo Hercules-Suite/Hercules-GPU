@@ -2767,14 +2767,18 @@ static int32_t parse_parameters(const char* numericalin) {
                        &cpml_pml_mat) == 0);
         if (strcasecmp(cpml_pml_mat, "none") == 0) {
           Param.theCpmlPmlMaterialDamping = 0;
-        } else if (strcasecmp(cpml_pml_mat, "bkt") == 0) {
+        } else if (strcasecmp(cpml_pml_mat, "bkt") == 0 ||
+                   strcasecmp(cpml_pml_mat, "bkt2") == 0 ||
+                   strcasecmp(cpml_pml_mat, "bkt3") == 0 ||
+                   strcasecmp(cpml_pml_mat, "bkt3f") == 0) {
           Param.theCpmlPmlMaterialDamping = 1;
         } else if (strcasecmp(cpml_pml_mat, "rayleigh") == 0) {
           Param.theCpmlPmlMaterialDamping = 2;
         } else {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_pml_material_damping must be none|bkt|"
-                       "rayleigh: got '%s'\n", cpml_pml_mat);
+                       "bkt2|bkt3|bkt3f|rayleigh: got '%s'\n",
+                       cpml_pml_mat);
         }
       }
 
@@ -12494,7 +12498,7 @@ static int use_gpu_source_fastpath(void) {
   if (topography_has_host_force_path()) {
     return 0;
   }
-  if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
+  if ((Param.theTypeOfDamping < BKT) && (Param.theStiffness != EFFECTIVE)) {
     return 0;
   }
   return 1;
@@ -12507,7 +12511,7 @@ static int use_sparse_force_upload_topo(void) {
   if (Param.drmImplement == YES) {
     return 0;
   }
-  if ((Param.theTypeOfDamping != BKT) && (Param.theStiffness != EFFECTIVE)) {
+  if ((Param.theTypeOfDamping < BKT) && (Param.theStiffness != EFFECTIVE)) {
     return 0;
   }
   return 1;
@@ -14730,9 +14734,9 @@ static int32_t solver_sparse_clear_mode(void) {
 }
 
 static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
-  /* Only copy forces back if Stiffness-Effective or BKT damping */
-  if (((Param.theTypeOfDamping != BKT) && (Param.theStiffness == EFFECTIVE)) ||
-      (Param.theTypeOfDamping == BKT) || acoustic_pressure_enabled()) {
+  /* Only copy forces back if Stiffness-Effective or BKT-family damping. */
+  if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
+      (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled()) {
     /* Copy forces back to host */
     cudaMemcpyAsync(solver->force, solver->gpuData->forceDevice,
                     mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
@@ -14884,8 +14888,8 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
   }
 
   /* Wait for the appropriate physics calculation to complete */
-  if (((Param.theTypeOfDamping != BKT) && (Param.theStiffness == EFFECTIVE)) ||
-      (Param.theTypeOfDamping == BKT) || acoustic_pressure_enabled()) {
+  if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
+      (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled()) {
     Timer_Start("Force Stream Sync");
 
     Timer_Start("Force kernel wait only");
@@ -20066,6 +20070,25 @@ static void source_init(const char* physicsin) {
     }
 
     Global.theNodesLoaded = source_get_local_loaded_nodes_count();
+    {
+      int local_loaded = Global.theNodesLoaded;
+      int min_loaded = 0;
+      int max_loaded = 0;
+      int64_t local_loaded64 = (int64_t)local_loaded;
+      int64_t total_loaded = 0;
+
+      MPI_Reduce(&local_loaded, &min_loaded, 1, MPI_INT, MPI_MIN, 0,
+                 comm_solver);
+      MPI_Reduce(&local_loaded, &max_loaded, 1, MPI_INT, MPI_MAX, 0,
+                 comm_solver);
+      MPI_Reduce(&local_loaded64, &total_loaded, 1, MPI_INT64_T, MPI_SUM, 0,
+                 comm_solver);
+      if (Global.myID == 0) {
+        monitor_print(
+            "Source loaded nodes:               total=%lld max/rank=%d min/rank=%d\n",
+            (long long)total_loaded, max_loaded, min_loaded);
+      }
+    }
 
     if (Global.theNodesLoaded != 0) {
       size_t ret;
