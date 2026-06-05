@@ -1269,7 +1269,7 @@ __device__ static void topoTetraForcesBKT(const fvector_t* un,
  * Force sign mirrors the CPU: nodalForce -= localForce * dt^2.
  * CPML: defensive PML skip mirrors kernelDampingCalcConvBkt2/Local -- a
  * PML-flagged cell had its shear/kappa vectors skipped by the conv kernel,
- * so it must not get a force here (its attenuation is the CPML viscoelastic
+ * so it must not get a force here (its attenuation is the elastic CPML
  * path's job). No-op under dashpot (pmlFlagArrayDevice == NULL). The builder
  * additionally excludes cpml_pml_flattened_element cells, so this is
  * belt-and-suspenders. */
@@ -2481,10 +2481,8 @@ static int32_t parse_parameters(const char* numericalin) {
   damping_type_t typeOfDamping = UNSET_DAMP;
   stiffness_type_t stiffness_method = UNSET_STIFF;
   /* Whether cpml_pml_material_damping was EXPLICITLY present in the
-   * input (vs defaulted). Lets the auto-enable distinguish "unset"
-   * (-> auto-promote to the validated viscoelastic PML) from an
-   * explicit "none" (-> honored as a deliberate escape hatch for the
-   * known-unstable raw baseline, with a loud warning). */
+   * input (vs defaulted). Lets the Rayleigh auto-enable distinguish
+   * "unset" from explicit "none". */
   int cpml_pml_damp_explicit = 0;
   int acoustic_formulation_explicit = 0;
   int legacy_acoustic_pressure_formulation_explicit = 0;
@@ -2754,13 +2752,10 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
       Param.theCpmlPartitionWeight = cpml_partition_weight;
 
-      /* Opt-in material damping inside the elastic PML zone (viscoelastic
-       * CFS-CPML). Default "none" => all material damping skipped on PML
-       * elements (the 5d91b09 baseline, byte-identical). "bkt"/"rayleigh"
-       * feed the BKT / Rayleigh anelastic-displacement vectors through
-       * the unsplit-displacement CPML stretch (stretch-consistent,
-       * centroid-projected). Staged: parsed/plumbed here; only "none" is
-       * wired in this commit (kernels added in later stages). */
+      /* Optional material damping inside the elastic PML zone. Rayleigh uses
+       * a stretch-consistent CPML cross-pair; BKT-family values are accepted
+       * for input compatibility but are downgraded below to the conservative
+       * elastic-CPML PML policy. */
       {
         char cpml_pml_mat[32] = "none";
         cpml_pml_damp_explicit =
@@ -3495,68 +3490,54 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.theTypeOfDamping = typeOfDamping;
   Param.useInfQk = useInfQk;
 
-  /* Auto-enable viscoelastic PML for the {BKT*, Rayleigh} + CPML combos
-   * -- but ONLY when cpml_pml_material_damping was left UNSET. Material
-   * damping skipped on PML over an ATTENUATING interior is
-   * catastrophically unstable: bkt(2/3)+cpml diverges to NaN by t~40s
-   * (confirmed v5 @23f58bf == v3, byte-identical blow-up). rayleigh+cpml
-   * has the IDENTICAL mechanism now that b*K is on the GPU stiffness
-   * path, so it is expected to fail the same way. The viscoelastic
-   * CFS-CPML is the fix: bkt(1) fully validated (Stage 2: stable 240s,
-   * corr 0.994 vs matching-attenuation CPS); rayleigh(2) implemented the
-   * same native+delta way (Stage 3, pending validation).
-   *
-   * unset             -> auto-promote (BKT-family -> bkt, RAYLEIGH ->
-   *                      rayleigh), log loudly. Safe by default.
-   * explicit "none"   -> HONORED as a deliberate escape hatch (run the
-   *                      known-unstable raw baseline for attribution /
-   *                      regression, mirroring how v3/v5 proved the bkt
-   *                      case) -- not overridden, but a LOUD warning.
-   * explicit bkt/rayl -> as set; a mismatched explicit value still hits
-   *                      the cross-validation abort below.
-   * type_of_damping neither BKT-family nor RAYLEIGH (incl. all prior
-   * =none CPML validation) and all non-CPML runs are untouched. */
+  /* Auto-enable viscoelastic PML only for Rayleigh + CPML. BKT-family
+   * damping is handled conservatively: BKT memory/force is skipped in the
+   * PML zone, native elastic stiffness is added there, and the elastic CPML
+   * correction is applied. The earlier stretched-BKT-memory CPML path was
+   * observed to damp large heterogeneous runs to numerical zero. */
   if (Param.theAbcType == ABC_CPML &&
       Param.theCpmlPmlMaterialDamping == 0) {
-    int wouldPromote = (Param.theTypeOfDamping >= BKT)            ? 1
-                       : (Param.theTypeOfDamping == RAYLEIGH)     ? 2
-                                                                  : 0;
+    int wouldPromote = (Param.theTypeOfDamping == RAYLEIGH) ? 2 : 0;
     if (wouldPromote != 0 && !cpml_pml_damp_explicit) {
       Param.theCpmlPmlMaterialDamping = wouldPromote;
       if (Global.myID == 0) {
         monitor_print(
             "CPML: auto-enabled viscoelastic PML "
-            "(cpml_pml_material_damping=%s) -- type_of_damping is %s "
+            "(cpml_pml_material_damping=%s) -- type_of_damping is Rayleigh "
             "with abc_type=cpml, which is numerically unstable "
             "(material damping skipped on PML over an attenuating "
             "interior, field -> NaN) without it; using the "
             "viscoelastic CFS-CPML.\n",
-            (wouldPromote == 1) ? damping_type_name(Param.theTypeOfDamping)
-                                : "rayleigh",
-            (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
+            "rayleigh");
       }
     } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
                Global.myID == 0) {
       monitor_print(
           "CPML WARNING: cpml_pml_material_damping=none was set "
-          "EXPLICITLY with type_of_damping=%s + abc_type=cpml. This "
+          "EXPLICITLY with type_of_damping=Rayleigh + abc_type=cpml. This "
           "configuration is KNOWN NUMERICALLY UNSTABLE -- material "
           "damping is skipped on PML over an attenuating interior and "
-          "the field diverges to NaN (confirmed for bkt: v5==v3, "
-          "blow-up by t~40s). Honoring the explicit request as a "
+          "the field may diverge to NaN. Honoring the explicit request as a "
           "deliberate escape hatch (attribution / regression only). "
           "OMIT the parameter to auto-use the validated viscoelastic "
-          "CFS-CPML.\n",
-          (wouldPromote == 1) ? "BKT-family" : "Rayleigh");
+          "CFS-CPML.\n");
     }
   }
 
-  /* Stage-2 viscoelastic CPML cross-validation: cpml_pml_material_damping
-   * only does something if the interior actually carries the matching
-   * material damping (so the PML elements have nonzero anelastic vectors
-   * to stretch). Fail fast on a misconfiguration rather than waste a run
-   * (the kernel NULL-guard would otherwise silently no-op it). Both
-   * params are set by here (CPML parse ~line 2140; typeOfDamping above). */
+  if (Param.theAbcType == ABC_CPML &&
+      Param.theCpmlPmlMaterialDamping == 1) {
+    if (Global.myID == 0) {
+      monitor_print(
+          "CPML WARNING: BKT-family material damping inside PML is disabled "
+          "for now because the stretched-BKT-memory CPML path overdamped "
+          "large heterogeneous runs to numerical zero. Using native elastic "
+          "stiffness plus elastic CPML correction in PML elements instead.\n");
+    }
+    Param.theCpmlPmlMaterialDamping = 0;
+  }
+
+  /* Material-PML cross-validation. BKT-family PML material damping has been
+   * downgraded to none above; only Rayleigh remains an active opt-in mode. */
   if (Param.theCpmlPmlMaterialDamping == 1 && Param.theTypeOfDamping < BKT) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "cpml_pml_material_damping=bkt requires a BKT "
@@ -8301,8 +8282,9 @@ static void solver_init() {
         (Param.theCpmlNativeStiffness == YES) ? 1 : 0;
     Global.gpuData.pmlNativeStiffnessAcoustic =
         (Param.theCpmlNativeStiffnessAcoustic == YES) ? 1 : 0;
-    /* Stage-1 plumbing: 0 none (default; PML material-damping skip
-     * unchanged, byte-identical baseline). Consumed from Stage 2 on. */
+    /* PML material-damping mode: 0 none/conservative elastic CPML,
+     * 2 Rayleigh viscoelastic CPML. BKT-family requests are downgraded to 0
+     * during input validation. */
     Global.gpuData.cpmlPmlMaterialDamping = Param.theCpmlPmlMaterialDamping;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
@@ -9124,10 +9106,9 @@ static void solver_init() {
                        (size_t)pmlN * sizeof(solver_float));
           }
         }
-        /* Stage-2 viscoelastic CPML: relaxed-strain psi memory for the
-         * BKT shear/kappa anelastic vectors. Allocated unconditionally
-         * (so cudaFree stays symmetric); zeroed; used by
-         * kernelPMLElasticStep only when cpmlPmlMaterialDamping==1. */
+        /* Extra CPML psi memory. psiShear is used by the Rayleigh b*K
+         * CPML branch; psiKappa is kept allocated so cudaFree and older
+         * checkpoints remain structurally symmetric. */
         for (int i = 0; i < 3; i++) {
           for (int jx = 0; jx < 3; jx++) {
             if (cudaMalloc(
@@ -12709,10 +12690,35 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
     }
   }
 
+  /* BKT-family damping uses kernelDampingCalcLocal as the complete native
+   * viscoelastic force, so the regular stiffness launch above is skipped.
+   * BKT material damping is intentionally excluded from CPML PML elements;
+   * give those elements their native elastic stiffness here, then let
+   * kernelPMLElasticStep add only the CPML correction. */
+  if (Param.theTypeOfDamping >= BKT &&
+      Param.theAbcType == ABC_CPML &&
+      Param.theCpmlNativeStiffness != NO &&
+      solver->gpuData->pmlElasticElemCount > 0) {
+    const int32_t pmlN = solver->gpuData->pmlElasticElemCount;
+    int blocksize = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS].blocksize;
+    int gridsize = (pmlN + blocksize - 1) / blocksize;
+    int sharedmem = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS].sharedmem;
+    cudaGetLastError();
+    kernelStiffnessCalcLocal<<<gridsize, blocksize, sharedmem,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+        mesh->lenum, solver->gpuDataDevice, pmlN,
+        solver->gpuData->pmlElasticElemMapperDevice);
+    cudaError_t cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: PML native stiffness kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
   /* CPML elastic-side force (ADE memory-variable update fused with the
-   * modified-strain Galerkin assembly). Operates on its own mapper, so
-   * the non-PML kernels above have already early-exited on these
-   * elements via the pmlFlagArrayDevice check. */
+   * modified-strain Galerkin assembly). */
   if (Param.theAbcType == ABC_CPML &&
       solver->gpuData->pmlElasticElemCount > 0) {
     const int32_t pmlN = solver->gpuData->pmlElasticElemCount;

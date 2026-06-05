@@ -516,10 +516,8 @@ typedef struct gpu_data_t {
     double*       pml_elastic_muCoeffArrayDevice;    /* unused (cleanup) */
     double*       pml_elastic_lambdaCoeffArrayDevice;/* unused (cleanup) */
     solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
-    /* Stage-2 viscoelastic CPML: separate gradient-side psi memory for the
-     * BKT anelastic-displacement vectors (shear=deviatoric, kappa=bulk),
-     * carried through the SAME stretch (a/b/invKappa) as the elastic psi.
-     * Allocated/used only when cpmlPmlMaterialDamping==1. */
+    /* Extra gradient-side psi memory. psiShear is used by the Rayleigh b*K
+     * CPML branch; psiKappa is kept for symmetric allocation/free layout. */
     solver_float* pml_elastic_psiShearArrayDevice[3][3];
     solver_float* pml_elastic_psiKappaArrayDevice[3][3];
     /* Divergence-side CPML, correct 2nd-order displacement form
@@ -613,9 +611,8 @@ typedef struct gpu_data_t {
      * kernelPMLAcousticStep adds full -P_pml+cfs). Irrelevant without
      * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
-    /* Opt-in material damping inside the elastic PML zone (viscoelastic
-     * CFS-CPML). 0 none (default; 5d91b09 skip, bit-identical), 1 bkt,
-     * 2 rayleigh. Consumed by the CPML kernels from Stage 2 on. */
+    /* Material damping inside the elastic PML zone. 0 none/conservative
+     * elastic CPML, 2 rayleigh. BKT-family requests are downgraded to 0. */
     int           cpmlPmlMaterialDamping;
 
     /* Velocity-potential acoustic-elastic coupling. 0 = pressure;
