@@ -509,37 +509,24 @@ every offset/component (see the summary below).
 	`0` to disable (only safe with M-PML cross-coupling on). Valid
 	`[0, 1]`.
 - `cpml_pml_material_damping`
-	Optional. `none` (default) | `bkt` | `bkt2` | `bkt3` | `bkt3f` |
-	`rayleigh`. Whether the elastic
-	PML zone is physically attenuating or lossless-elastic. `none` skips
-	all material damping on PML elements — correct **only** for a
-	non-attenuating interior (`type_of_damping=none`); it is the
-	bit-identical historical baseline there. **Important:**
-	`type_of_damping=bkt*` with `abc_type=cpml` under `none` is
-	catastrophically unstable (diverges to NaN by t≈40 s). Resolution
-	policy with an attenuating interior (BKT-family or Rayleigh):
-	(1) **unset** → auto-promoted to the matching viscoelastic PML
-	(`bkt`/`rayleigh`), safe by default; (2) **explicit `none`** →
-	honored, with a loud KNOWN-UNSTABLE warning (a deliberate escape
-	hatch for attribution/regression); (3) **explicit `bkt`/`rayleigh`**
-	→ used as set (a mismatched value is a hard error). `bkt` is fully
-	validated (stable, correct, corr ~0.99 vs the matching-attenuation
-	CPS analytic); `rayleigh` is implemented and pending a validation
-	run. The viscoelastic `bkt` path applies to **every BKT-family
-	`type_of_damping`** (`bkt`, `bkt2`, `bkt3`, `bkt3f`): all four
-	advance their SLS memory on PML elements and feed the Stage-2
-	viscoelastic CFS-CPML. The `bkt2`, `bkt3`, and `bkt3f` input values
-	for `cpml_pml_material_damping` are accepted as aliases for `bkt`;
-	the exact BKT mechanism count is still controlled by `type_of_damping`.
-	(Previously only `bkt2`'s GPU conv kernel
-	carried the SLS memory into the PML, so `bkt`/`bkt3`/`bkt3f` +
-	`cpml` silently fed stale/zero anelastic vectors to the PML and
-	could diverge — fixed; `kernelPMLElasticStep` itself is
-	mechanism-count-agnostic.) Note: a related correctness fix ported
-	stiffness-proportional
-	Rayleigh damping to the GPU, so **existing `type_of_damping=rayleigh`
-	GPU results change** (they now match the CPU path); every
-	non-Rayleigh run stays byte-identical.
+	Optional. `none` (default) | `rayleigh`. Whether material damping is
+	applied inside elastic PML elements. `none` means material damping is
+	skipped in the PML zone; non-PML elements still use the requested
+	`type_of_damping`. For BKT-family runs (`bkt`, `bkt2`, `bkt3`,
+	`bkt3f`), this is the supported policy: the interior uses BKT damping,
+	while PML elements use native elastic stiffness plus the elastic CPML
+	correction. The previous experimental BKT-in-PML path was removed
+	because stretching the BKT memory variables inside CPML overdamped
+	large heterogeneous runs to numerical zero. Therefore `bkt`, `bkt2`,
+	`bkt3`, and `bkt3f` are not valid values for
+	`cpml_pml_material_damping`; use `none` with BKT-family
+	`type_of_damping`.
+
+	`rayleigh` enables the Rayleigh material-damping CPML path and is valid
+	only with `type_of_damping=rayleigh`. If `type_of_damping=rayleigh`,
+	`abc_type=cpml`, and `cpml_pml_material_damping` is omitted, the solver
+	auto-promotes it to `rayleigh`; explicit `none` is honored for
+	debugging/regression with a warning.
 - `cpml_clamp_outer`
 	Optional. `yes` or `no` (default `no`). `yes` pins displacement to
 	zero on the outer PML faces (never `z_min`, the free surface),
@@ -586,11 +573,12 @@ Notes on C-PML behavior:
 	(the same test the acoustic-pressure path uses), so heterogeneous
 	models and acoustic/elastic coupling need no extra configuration.
 - Material damping on PML elements follows `cpml_pml_material_damping`
-	(see that flag). With the default `none` all material damping is
-	skipped on PML elements — correct only for a non-attenuating
-	interior; `bkt`/`rayleigh` carry the attenuation into the PML
-	consistently. Non-PML elements always use material damping as usual;
-	dashpot mode and no-attenuation runs are bit-identical.
+	(see that flag). With the default `none`, material damping is skipped
+	on PML elements, but non-PML elements always use material damping as
+	usual. This is the supported policy for BKT-family damping: the
+	interior is viscoelastic, while the PML zone is elastic CPML.
+	`rayleigh` is the only supported material-damping mode inside PML
+	elements.
 - **Viscoelastic damping runs on the GPU for all BKT-family models**
 	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). When the relaxation spectrum is
 	spatially uniform — the usual case: fixed relaxation frequencies,
@@ -603,7 +591,8 @@ Notes on C-PML behavior:
 	the solver auto-detects this at setup (it scans every damping
 	element) and falls back to a generic per-element kernel that is
 	numerically identical (bit-for-bit for the uniform case). Both
-	paths feed the viscoelastic CFS-CPML correctly. **Behavior change:**
+	paths feed the interior BKT force correctly; BKT material damping is
+	not applied inside PML elements. **Behavior change:**
 	a heterogeneous-spectrum `bkt2` model now uses the generic kernel —
 	previously it silently applied the first element's coefficients to
 	all elements (a latent bug). Spatially-uniform `bkt2` (every

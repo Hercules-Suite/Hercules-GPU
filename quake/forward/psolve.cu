@@ -1596,7 +1596,7 @@ static struct Param_t {
   double theCpmlCflSafety;
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
-  int theCpmlPmlMaterialDamping;        /* 0 none(default) 1 bkt 2 rayleigh */
+  int theCpmlPmlMaterialDamping;        /* 0 none(default) 2 rayleigh */
   noyesflag_t theCpmlClampOuter;
   /* YES = native effective stiffness + CPML correction (default);
    * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
@@ -2753,9 +2753,8 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlPartitionWeight = cpml_partition_weight;
 
       /* Optional material damping inside the elastic PML zone. Rayleigh uses
-       * a stretch-consistent CPML cross-pair; BKT-family values are accepted
-       * for input compatibility but are downgraded below to the conservative
-       * elastic-CPML PML policy. */
+       * a stretch-consistent CPML cross-pair. BKT-family material damping is
+       * intentionally not supported inside PML elements. */
       {
         char cpml_pml_mat[32] = "none";
         cpml_pml_damp_explicit =
@@ -2763,17 +2762,13 @@ static int32_t parse_parameters(const char* numericalin) {
                        &cpml_pml_mat) == 0);
         if (strcasecmp(cpml_pml_mat, "none") == 0) {
           Param.theCpmlPmlMaterialDamping = 0;
-        } else if (strcasecmp(cpml_pml_mat, "bkt") == 0 ||
-                   strcasecmp(cpml_pml_mat, "bkt2") == 0 ||
-                   strcasecmp(cpml_pml_mat, "bkt3") == 0 ||
-                   strcasecmp(cpml_pml_mat, "bkt3f") == 0) {
-          Param.theCpmlPmlMaterialDamping = 1;
         } else if (strcasecmp(cpml_pml_mat, "rayleigh") == 0) {
           Param.theCpmlPmlMaterialDamping = 2;
         } else {
           solver_abort(__FUNCTION_NAME, NULL,
-                       "cpml_pml_material_damping must be none|bkt|"
-                       "bkt2|bkt3|bkt3f|rayleigh: got '%s'\n",
+                       "cpml_pml_material_damping must be none|rayleigh: "
+                       "got '%s' (BKT-family damping is not supported inside "
+                       "PML; use none with type_of_damping=bkt*)\n",
                        cpml_pml_mat);
         }
       }
@@ -3524,26 +3519,8 @@ static int32_t parse_parameters(const char* numericalin) {
     }
   }
 
-  if (Param.theAbcType == ABC_CPML &&
-      Param.theCpmlPmlMaterialDamping == 1) {
-    if (Global.myID == 0) {
-      monitor_print(
-          "CPML WARNING: BKT-family material damping inside PML is disabled "
-          "for now because the stretched-BKT-memory CPML path overdamped "
-          "large heterogeneous runs to numerical zero. Using native elastic "
-          "stiffness plus elastic CPML correction in PML elements instead.\n");
-    }
-    Param.theCpmlPmlMaterialDamping = 0;
-  }
-
-  /* Material-PML cross-validation. BKT-family PML material damping has been
-   * downgraded to none above; only Rayleigh remains an active opt-in mode. */
-  if (Param.theCpmlPmlMaterialDamping == 1 && Param.theTypeOfDamping < BKT) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "cpml_pml_material_damping=bkt requires a BKT "
-                 "type_of_damping (bkt/bkt2/bkt3); got type_of_damping "
-                 "enum %d\n", (int)Param.theTypeOfDamping);
-  }
+  /* Material-PML cross-validation. Only Rayleigh remains an active opt-in
+   * mode; BKT-family material damping is not supported inside PML elements. */
   if (Param.theCpmlPmlMaterialDamping == 2 &&
       Param.theTypeOfDamping != RAYLEIGH) {
     solver_abort(__FUNCTION_NAME, NULL,
@@ -3684,10 +3661,8 @@ static int32_t parse_parameters(const char* numericalin) {
     monitor_print("PML layers:                         %d\n",
                   Param.theCpmlLayers);
     monitor_print("PML material damping:               %s\n",
-                  (Param.theCpmlPmlMaterialDamping == 1)
-                      ? damping_type_name(Param.theTypeOfDamping)
-                  : (Param.theCpmlPmlMaterialDamping == 2) ? "rayleigh"
-                  : "none (skipped; baseline)");
+                  (Param.theCpmlPmlMaterialDamping == 2) ? "rayleigh"
+                  : "none (BKT-family skipped in PML)");
     monitor_print("PML thickness override (m):         %f\n",
                   Param.theCpmlThicknessM);
     monitor_print("PML reflection coefficient:         %e\n",
@@ -8283,8 +8258,7 @@ static void solver_init() {
     Global.gpuData.pmlNativeStiffnessAcoustic =
         (Param.theCpmlNativeStiffnessAcoustic == YES) ? 1 : 0;
     /* PML material-damping mode: 0 none/conservative elastic CPML,
-     * 2 Rayleigh viscoelastic CPML. BKT-family requests are downgraded to 0
-     * during input validation. */
+     * 2 Rayleigh viscoelastic CPML. */
     Global.gpuData.cpmlPmlMaterialDamping = Param.theCpmlPmlMaterialDamping;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else

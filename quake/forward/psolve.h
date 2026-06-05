@@ -612,7 +612,8 @@ typedef struct gpu_data_t {
      * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
     /* Material damping inside the elastic PML zone. 0 none/conservative
-     * elastic CPML, 2 rayleigh. BKT-family requests are downgraded to 0. */
+     * elastic CPML, 2 rayleigh. BKT-family damping is not supported inside
+     * PML elements. */
     int           cpmlPmlMaterialDamping;
 
     /* Velocity-potential acoustic-elastic coupling. 0 = pressure;
