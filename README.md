@@ -261,6 +261,13 @@ Acoustic-elastic input flags (input file):
 	`acoustic_formulation=velocity_potential` runs. PML interface fragments
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
+- `acoustic_interface_face_filter`
+	Optional. `all` (default) couples every acoustic-elastic interface face.
+	`bottom_only` couples only acoustic `Z+` faces, which correspond to the
+	water-bottom interface in the depth-positive mesh. This is a diagnostic
+	option for bathymetry/shoreline cases: if `bottom_only` is stable while
+	`all` is not, the instability is likely coming from lateral wet/dry
+	stair-step shoreline coupling rather than from the water-bottom coupling.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which

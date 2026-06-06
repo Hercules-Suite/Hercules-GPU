@@ -1621,6 +1621,7 @@ static struct Param_t {
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
+  int theAcousticInterfaceFaceFilter;        /* all or bottom-only diagnostic */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
@@ -1684,6 +1685,8 @@ static struct Param_t {
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
+           .theAcousticInterfaceFaceFilter =
+               ACOUSTIC_INTERFACE_FACE_FILTER_ALL,
            .theAcousticQualityFactor = 0.0};
 
 /* These are all of the remaining global variables - this list should not grow
@@ -1977,7 +1980,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  52 /* Must adjust this if adding int params */
+  53 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2128,6 +2131,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[49] = (int)Param.printStationStrains;
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
+  int_message[52] = Param.theAcousticInterfaceFaceFilter;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2185,6 +2189,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStrains = (noyesflag_t)int_message[49];
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
+  Param.theAcousticInterfaceFaceFilter = int_message[52];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2467,6 +2472,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
+       acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
@@ -2505,6 +2511,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
+  int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
   noyesflag_t includePlaneWaves = UNSET;
   noyesflag_t includeHmgHalfSpace = UNSET;
   noyesflag_t includeIstanbulVelModel = UNSET;
@@ -2858,6 +2865,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
+  parsetext(fp, "acoustic_interface_face_filter", 's',
+            &acoustic_interface_face_filter);
   legacy_acoustic_pressure_formulation_explicit =
       (parsetext(fp, "acoustic_pressure_formulation", 's',
                  &acoustic_pressure_formulation) == 0);
@@ -3238,6 +3247,22 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_projection);
   }
 
+  if ((strcasecmp(acoustic_interface_face_filter, "all") == 0) ||
+      (strcasecmp(acoustic_interface_face_filter, "none") == 0) ||
+      (strcasecmp(acoustic_interface_face_filter, "default") == 0)) {
+    acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
+  } else if ((strcasecmp(acoustic_interface_face_filter, "bottom_only") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter, "bottom") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter, "z_plus") == 0)) {
+    acousticInterfaceFaceFilter =
+        ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_interface_face_filter "
+                 "(all or bottom_only): %s\n",
+                 acoustic_interface_face_filter);
+  }
+
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -3567,6 +3592,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticInterfaceCoupling = acousticInterfaceCoupling;
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
+  Param.theAcousticInterfaceFaceFilter = acousticInterfaceFaceFilter;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includeIncidentPlaneWaves = includePlaneWaves;
@@ -3621,6 +3647,11 @@ static int32_t parse_parameters(const char* numericalin) {
                    ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
                       ? "face_mass"
                       : "point");
+    monitor_print("Acoustic interface face filter:     %s\n",
+                  (Param.theAcousticInterfaceFaceFilter ==
+                   ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY)
+                      ? "bottom_only"
+                      : "all");
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
@@ -5106,6 +5137,11 @@ static void mesh_build_acoustic_interface_flags(
 
     for (int iface = 0; iface < 6; iface++) {
       uint8_t face = face_bits[iface];
+      if ((Param.theAcousticInterfaceFaceFilter ==
+           ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) &&
+          (face != ACOUSTIC_FACE_Z_PLUS)) {
+        continue;
+      }
       int64_t fragments = mesh_build_acoustic_interface_face_fragments(
           eindex, face, acoustic_pressure_enabled(), &table_count,
           &table_capacity, IstVelModel_origin, basinVelModel_origin,
