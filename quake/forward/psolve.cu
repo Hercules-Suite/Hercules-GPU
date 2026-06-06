@@ -5107,6 +5107,14 @@ static void mesh_build_acoustic_interface_flags(
       ACOUSTIC_FACE_Y_PLUS,  ACOUSTIC_FACE_Z_MINUS, ACOUSTIC_FACE_Z_PLUS};
   int64_t local_counts[3] = {0, 0, 0};
   int64_t global_counts[3] = {0, 0, 0};
+  int64_t local_candidate_faces[6] = {0, 0, 0, 0, 0, 0};
+  int64_t local_candidate_fragments[6] = {0, 0, 0, 0, 0, 0};
+  int64_t local_coupled_faces[6] = {0, 0, 0, 0, 0, 0};
+  int64_t local_coupled_fragments[6] = {0, 0, 0, 0, 0, 0};
+  int64_t global_candidate_faces[6] = {0, 0, 0, 0, 0, 0};
+  int64_t global_candidate_fragments[6] = {0, 0, 0, 0, 0, 0};
+  int64_t global_coupled_faces[6] = {0, 0, 0, 0, 0, 0};
+  int64_t global_coupled_fragments[6] = {0, 0, 0, 0, 0, 0};
   int64_t table_count = 0;
   int64_t table_capacity = 0;
 
@@ -5137,13 +5145,11 @@ static void mesh_build_acoustic_interface_flags(
 
     for (int iface = 0; iface < 6; iface++) {
       uint8_t face = face_bits[iface];
-      if ((Param.theAcousticInterfaceFaceFilter ==
-           ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) &&
-          (face != ACOUSTIC_FACE_Z_PLUS)) {
-        continue;
-      }
+      int keep_face = !((Param.theAcousticInterfaceFaceFilter ==
+                         ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) &&
+                        (face != ACOUSTIC_FACE_Z_PLUS));
       int64_t fragments = mesh_build_acoustic_interface_face_fragments(
-          eindex, face, acoustic_pressure_enabled(), &table_count,
+          eindex, face, keep_face && acoustic_pressure_enabled(), &table_count,
           &table_capacity, IstVelModel_origin, basinVelModel_origin,
           threeDVelModel_origin);
 
@@ -5151,9 +5157,17 @@ static void mesh_build_acoustic_interface_flags(
         continue;
       }
 
+      local_candidate_faces[iface]++;
+      local_candidate_fragments[iface] += fragments;
+      if (!keep_face) {
+        continue;
+      }
+
       flags |= face;
       local_counts[1]++;
       local_counts[2] += fragments;
+      local_coupled_faces[iface]++;
+      local_coupled_fragments[iface] += fragments;
     }
 
     Global.acousticFaceFlags[eindex] = flags;
@@ -5180,6 +5194,14 @@ static void mesh_build_acoustic_interface_flags(
 
   MPI_Reduce(local_counts, global_counts, 3, MPI_INT64_T, MPI_SUM, 0,
              comm_solver);
+  MPI_Reduce(local_candidate_faces, global_candidate_faces, 6, MPI_INT64_T,
+             MPI_SUM, 0, comm_solver);
+  MPI_Reduce(local_candidate_fragments, global_candidate_fragments, 6,
+             MPI_INT64_T, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(local_coupled_faces, global_coupled_faces, 6, MPI_INT64_T,
+             MPI_SUM, 0, comm_solver);
+  MPI_Reduce(local_coupled_fragments, global_coupled_fragments, 6,
+             MPI_INT64_T, MPI_SUM, 0, comm_solver);
   if (Global.myID == 0) {
     if (acoustic_pressure_enabled()) {
       monitor_print(
@@ -5194,6 +5216,17 @@ static void mesh_build_acoustic_interface_flags(
           "acoustic interface elements %.1fM\n",
           (double)global_counts[1] / 1.0e6,
           (double)global_counts[0] / 1.0e6);
+    }
+    monitor_print(
+        "Acoustic interface face breakdown (candidate -> coupled):\n");
+    for (int iface = 0; iface < 6; iface++) {
+      monitor_print(
+          "  %s faces %.3fM -> %.3fM, fragments %.3fM -> %.3fM\n",
+          mesh_acoustic_face_name(face_bits[iface]),
+          (double)global_candidate_faces[iface] / 1.0e6,
+          (double)global_coupled_faces[iface] / 1.0e6,
+          (double)global_candidate_fragments[iface] / 1.0e6,
+          (double)global_coupled_fragments[iface] / 1.0e6);
     }
     fflush(stdout);
   }

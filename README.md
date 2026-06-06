@@ -268,6 +268,9 @@ Acoustic-elastic input flags (input file):
 	option for bathymetry/shoreline cases: if `bottom_only` is stable while
 	`all` is not, the instability is likely coming from lateral wet/dry
 	stair-step shoreline coupling rather than from the water-bottom coupling.
+	The monitor reports candidate and actually coupled face/fragment counts by
+	face direction, so this option also shows how much lateral interface area
+	was filtered.
 - `acoustic_interface_max_level`
 	Optional. When set to a nonnegative octree level, mixed acoustic/elastic
 	octants are refined up to that level during meshing. Default is `-1`, which
