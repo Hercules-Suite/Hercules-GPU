@@ -361,6 +361,10 @@ int32_t gpu_get_blocksize(gpu_spec_t *gpuSpecs,
       max_threads = imin(computed, max_threads);
     }
 
+    if (attributes.maxThreadsPerBlock > 0) {
+      max_threads = imin(max_threads, attributes.maxThreadsPerBlock);
+    }
+
     return(max_threads);
 }
 

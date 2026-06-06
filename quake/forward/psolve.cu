@@ -11120,6 +11120,7 @@ static void solver_init() {
     k->handle = (char*)kernelDampingCalcConvBkt2;
     k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                      (char*)kernelDampingCalcConvBkt2, 0);
+    k->blocksize = imin(k->blocksize, 512);
   } else if (!damping_force_generic() &&
              ((Param.theTypeOfDamping == BKT3) ||
               (Param.theTypeOfDamping == BKT3F))) {
@@ -11127,6 +11128,7 @@ static void solver_init() {
     k->handle = (char*)kernelDampingCalcConvBkt3;
     k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
                                      (char*)kernelDampingCalcConvBkt3, 0);
+    k->blocksize = imin(k->blocksize, 512);
   } else {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV);
     k->handle = (char*)kernelDampingCalcConv;
