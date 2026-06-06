@@ -2897,7 +2897,7 @@ static int32_t parse_parameters(const char* numericalin) {
     hu_config_get_double_opt(fp, "acoustic_quality_factor",
                              &Param.theAcousticQualityFactor);
   }
-  hu_config_get_int_opt(fp, "maximum_octant_level",
+  hu_config_get_int_opt(fp, "acoustic_interface_max_level",
                         &acoustic_interface_max_level);
   hu_config_get_int_opt(fp, "enable_timing_barriers",
                         &Param.theTimingBarriersFlag);
