@@ -268,6 +268,11 @@ Acoustic-elastic input flags (input file):
 	option for bathymetry/shoreline cases: if `bottom_only` is stable while
 	`all` is not, the instability is likely coming from lateral wet/dry
 	stair-step shoreline coupling rather than from the water-bottom coupling.
+	`bathymetry` also couples only acoustic `Z+` faces, but reconstructs a
+	local bathymetry normal from nearby acoustic-to-elastic transition depths
+	and scales each projected bottom patch by the reconstructed surface area.
+	This restores inclined-bottom normal coupling without reintroducing raw
+	stair-step side-wall faces.
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered.

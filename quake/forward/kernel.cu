@@ -218,15 +218,19 @@ __host__ __device__ static inline double acoustic_shape_value_at(int node,
          (1.0 + sz[node] * dzeta);
 }
 
-__host__ __device__ static inline int acoustic_interface_face_axes(
-    const double normal[3], int tangent_axes[2])
+__host__ __device__ static inline int acoustic_interface_face_axes_from_face(
+    uint8_t face, int tangent_axes[2])
 {
-  const double ax = fabs(normal[0]);
-  const double ay = fabs(normal[1]);
-  const double az = fabs(normal[2]);
-  int normal_axis = (ax >= ay && ax >= az) ? 0 : ((ay >= az) ? 1 : 2);
-  int cursor = 0;
+  int normal_axis = 2;
 
+  if ((face == ACOUSTIC_FACE_X_MINUS) || (face == ACOUSTIC_FACE_X_PLUS)) {
+    normal_axis = 0;
+  } else if ((face == ACOUSTIC_FACE_Y_MINUS) ||
+             (face == ACOUSTIC_FACE_Y_PLUS)) {
+    normal_axis = 1;
+  }
+
+  int cursor = 0;
   for (int dim = 0; dim < 3; dim++) {
     if (dim != normal_axis) {
       tangent_axes[cursor++] = dim;
@@ -557,6 +561,10 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
+  const uint8_t face =
+      (gpuData->acousticInterfaceFaceIdsDevice != NULL)
+          ? gpuData->acousticInterfaceFaceIdsDevice[faceIndex]
+          : ACOUSTIC_FACE_Z_PLUS;
   const int32_t adjacent_eindex =
       (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
           ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
@@ -591,7 +599,7 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     const double q_coeff = face_coeff * 0.25;
     int tangent_axes[2];
 
-    (void)acoustic_interface_face_axes(normal, tangent_axes);
+    (void)acoustic_interface_face_axes_from_face(face, tangent_axes);
 
     for (int g0 = 0; g0 < 2; g0++) {
       for (int g1 = 0; g1 < 2; g1++) {
@@ -840,6 +848,10 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 1],
       gpuData->acousticInterfaceFaceNormalsDevice[3 * faceIndex + 2]};
+  const uint8_t face =
+      (gpuData->acousticInterfaceFaceIdsDevice != NULL)
+          ? gpuData->acousticInterfaceFaceIdsDevice[faceIndex]
+          : ACOUSTIC_FACE_Z_PLUS;
   const int32_t adjacent_eindex =
       (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
           ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
@@ -877,7 +889,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const double q_coeff = face_coeff * deltaT2 * 0.25;
     int tangent_axes[2];
 
-    (void)acoustic_interface_face_axes(normal, tangent_axes);
+    (void)acoustic_interface_face_axes_from_face(face, tangent_axes);
 
     for (int g0 = 0; g0 < 2; g0++) {
       for (int g1 = 0; g1 < 2; g1++) {

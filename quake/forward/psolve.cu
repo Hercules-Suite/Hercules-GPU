@@ -3256,10 +3256,17 @@ static int32_t parse_parameters(const char* numericalin) {
              (strcasecmp(acoustic_interface_face_filter, "z_plus") == 0)) {
     acousticInterfaceFaceFilter =
         ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY;
+  } else if ((strcasecmp(acoustic_interface_face_filter, "bathymetry") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter,
+                         "reconstructed_bathymetry") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter,
+                         "bathymetry_normal") == 0)) {
+    acousticInterfaceFaceFilter =
+        ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY;
   } else {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Unknown response for acoustic_interface_face_filter "
-                 "(all or bottom_only): %s\n",
+                 "(all, bottom_only, or bathymetry): %s\n",
                  acoustic_interface_face_filter);
   }
 
@@ -3649,9 +3656,12 @@ static int32_t parse_parameters(const char* numericalin) {
                       : "point");
     monitor_print("Acoustic interface face filter:     %s\n",
                   (Param.theAcousticInterfaceFaceFilter ==
-                   ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY)
-                      ? "bottom_only"
-                      : "all");
+                   ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY)
+                      ? "bathymetry"
+                      : ((Param.theAcousticInterfaceFaceFilter ==
+                          ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY)
+                             ? "bottom_only"
+                             : "all"));
     monitor_print("Acoustic formulation:               %s%s\n",
                   (Param.acousticPressureFormulation != YES)
                       ? "none"
@@ -4596,6 +4606,164 @@ static int mesh_query_material_at_model_point(
   return 1;
 }
 
+static int mesh_material_phase_at_model_point(
+    double north_m, double east_m, double depth_m,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin) {
+  cvmpayload_t g_props;
+
+  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
+                                         IstVelModel_origin,
+                                         basinVelModel_origin,
+                                         threeDVelModel_origin,
+                                         &g_props) != 0) {
+    return 0;
+  }
+
+  if (material_values_are_acoustic(g_props.Vp, g_props.Vs, g_props.rho)) {
+    return 1;
+  }
+  if (material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho)) {
+    return 2;
+  }
+  return 0;
+}
+
+static int mesh_find_acoustic_elastic_transition_depth(
+    double north_m, double east_m, double depth_hint_m, double search_half_m,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, double* depth_out) {
+  const int sample_count = 16;
+  const int bisection_count = 16;
+  const double z_domain_min = Global.theZForMeshOrigin;
+  const double z_domain_max = Global.theZForMeshOrigin + Param.theDomainZ;
+
+  if ((depth_out == NULL) || (search_half_m <= 0.0) ||
+      (north_m < Global.theXForMeshOrigin) ||
+      (north_m > Global.theXForMeshOrigin + Param.theDomainX) ||
+      (east_m < Global.theYForMeshOrigin) ||
+      (east_m > Global.theYForMeshOrigin + Param.theDomainY)) {
+    return 0;
+  }
+
+  for (int expand = 0; expand < 4; expand++) {
+    double half = search_half_m * (double)(1 << expand);
+    double z_min = fmax(z_domain_min, depth_hint_m - half);
+    double z_max = fmin(z_domain_max, depth_hint_m + half);
+    double prev_z = z_min;
+    int prev_phase = mesh_material_phase_at_model_point(
+        north_m, east_m, prev_z, IstVelModel_origin, basinVelModel_origin,
+        threeDVelModel_origin);
+
+    for (int is = 1; is <= sample_count; is++) {
+      double z = z_min + (z_max - z_min) * (double)is / (double)sample_count;
+      int phase = mesh_material_phase_at_model_point(
+          north_m, east_m, z, IstVelModel_origin, basinVelModel_origin,
+          threeDVelModel_origin);
+
+      if ((prev_phase == 1) && (phase == 2)) {
+        double lo = prev_z;
+        double hi = z;
+
+        for (int iter = 0; iter < bisection_count; iter++) {
+          double mid = 0.5 * (lo + hi);
+          int mid_phase = mesh_material_phase_at_model_point(
+              north_m, east_m, mid, IstVelModel_origin, basinVelModel_origin,
+              threeDVelModel_origin);
+
+          if (mid_phase == 1) {
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+
+        *depth_out = 0.5 * (lo + hi);
+        return 1;
+      }
+
+      prev_z = z;
+      prev_phase = phase;
+    }
+  }
+
+  return 0;
+}
+
+static int mesh_reconstruct_bathymetry_normal_at_domain_point(
+    const vector3D_t* domain_point, double h,
+    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
+    const vector3D_t* threeDVelModel_origin, double normal[3],
+    double* area_scale_out) {
+  double north, east, depth_hint;
+  double center_depth;
+  double x_minus_depth, x_plus_depth;
+  double y_minus_depth, y_plus_depth;
+  double offset, search_half;
+  double slope_x = 0.0;
+  double slope_y = 0.0;
+  int has_center, has_x_minus, has_x_plus, has_y_minus, has_y_plus;
+  double norm;
+
+  if ((domain_point == NULL) || (normal == NULL) || (area_scale_out == NULL) ||
+      (h <= 0.0)) {
+    return 0;
+  }
+
+  north = Global.theXForMeshOrigin + domain_point->x[0];
+  east = Global.theYForMeshOrigin + domain_point->x[1];
+  depth_hint = Global.theZForMeshOrigin + domain_point->x[2];
+  offset = h;
+  search_half = 4.0 * h;
+
+  has_center = mesh_find_acoustic_elastic_transition_depth(
+      north, east, depth_hint, search_half, IstVelModel_origin,
+      basinVelModel_origin, threeDVelModel_origin, &center_depth);
+  if (!has_center) {
+    center_depth = depth_hint;
+  }
+
+  has_x_minus = mesh_find_acoustic_elastic_transition_depth(
+      north - offset, east, center_depth, search_half, IstVelModel_origin,
+      basinVelModel_origin, threeDVelModel_origin, &x_minus_depth);
+  has_x_plus = mesh_find_acoustic_elastic_transition_depth(
+      north + offset, east, center_depth, search_half, IstVelModel_origin,
+      basinVelModel_origin, threeDVelModel_origin, &x_plus_depth);
+  has_y_minus = mesh_find_acoustic_elastic_transition_depth(
+      north, east - offset, center_depth, search_half, IstVelModel_origin,
+      basinVelModel_origin, threeDVelModel_origin, &y_minus_depth);
+  has_y_plus = mesh_find_acoustic_elastic_transition_depth(
+      north, east + offset, center_depth, search_half, IstVelModel_origin,
+      basinVelModel_origin, threeDVelModel_origin, &y_plus_depth);
+
+  if (has_x_minus && has_x_plus) {
+    slope_x = (x_plus_depth - x_minus_depth) / (2.0 * offset);
+  } else if (has_x_plus) {
+    slope_x = (x_plus_depth - center_depth) / offset;
+  } else if (has_x_minus) {
+    slope_x = (center_depth - x_minus_depth) / offset;
+  }
+
+  if (has_y_minus && has_y_plus) {
+    slope_y = (y_plus_depth - y_minus_depth) / (2.0 * offset);
+  } else if (has_y_plus) {
+    slope_y = (y_plus_depth - center_depth) / offset;
+  } else if (has_y_minus) {
+    slope_y = (center_depth - y_minus_depth) / offset;
+  }
+
+  norm = sqrt(slope_x * slope_x + slope_y * slope_y + 1.0);
+  if (norm <= 0.0) {
+    return 0;
+  }
+
+  normal[0] = -slope_x / norm;
+  normal[1] = -slope_y / norm;
+  normal[2] = 1.0 / norm;
+  *area_scale_out = norm;
+  return has_center || has_x_minus || has_x_plus || has_y_minus || has_y_plus;
+}
+
 #ifdef BOUNDARY
 static int mesh_compute_elastic_side_pml_profile_at_domain_point(
     const vector3D_t* domain_point, int axis,
@@ -4975,11 +5143,24 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
                    Global.myMesh->ticksize * Global.myMesh->nodeTable[lnid0].z};
   double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
   double normal[3];
+  double area_scale = 1.0;
 
   if (!mesh_acoustic_face_axis(face, &axis, &sign, tangent_axes)) {
     return 0;
   }
   mesh_acoustic_face_normal(face, normal);
+
+  if ((Param.theAcousticInterfaceFaceFilter ==
+       ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY) &&
+      (face == ACOUSTIC_FACE_Z_PLUS)) {
+    vector3D_t face_center;
+    face_center.x[0] = ldb[0] + 0.5 * h;
+    face_center.x[1] = ldb[1] + 0.5 * h;
+    face_center.x[2] = ldb[2] + h;
+    (void)mesh_reconstruct_bathymetry_normal_at_domain_point(
+        &face_center, h, IstVelModel_origin, basinVelModel_origin,
+        threeDVelModel_origin, normal, &area_scale);
+  }
 
   if ((Param.theAcousticInterfaceMaxLevel >= elemp->level) &&
       (Param.theAcousticInterfaceMaxLevel > target_level)) {
@@ -5089,9 +5270,9 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
         }
 
         mesh_append_acoustic_interface_fragment(
-            table_count, table_capacity, eindex, face, fragment_h * fragment_h,
-            center, normal, halfwidth, adjacent_eindex, adjacent_geid,
-            adjacent_center, adjacent_halfwidth);
+            table_count, table_capacity, eindex, face,
+            fragment_h * fragment_h * area_scale, center, normal, halfwidth,
+            adjacent_eindex, adjacent_geid, adjacent_center, adjacent_halfwidth);
       }
     }
   }
@@ -5145,9 +5326,12 @@ static void mesh_build_acoustic_interface_flags(
 
     for (int iface = 0; iface < 6; iface++) {
       uint8_t face = face_bits[iface];
-      int keep_face = !((Param.theAcousticInterfaceFaceFilter ==
-                         ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) &&
-                        (face != ACOUSTIC_FACE_Z_PLUS));
+      int bottom_projected_filter =
+          (Param.theAcousticInterfaceFaceFilter ==
+           ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) ||
+          (Param.theAcousticInterfaceFaceFilter ==
+           ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY);
+      int keep_face = !bottom_projected_filter || (face == ACOUSTIC_FACE_Z_PLUS);
       int64_t fragments = mesh_build_acoustic_interface_face_fragments(
           eindex, face, keep_face && acoustic_pressure_enabled(), &table_count,
           &table_capacity, IstVelModel_origin, basinVelModel_origin,
