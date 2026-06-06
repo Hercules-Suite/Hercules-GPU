@@ -1798,6 +1798,17 @@ struct station_medium_record_t {
 
 #define ACOUSTIC_INTERFACE_FRAGMENT_MAX_LEVEL_DELTA 5
 
+typedef struct acoustic_bathymetry_diag_t {
+  int64_t faces;
+  int64_t reconstructed_faces;
+  int64_t fallback_faces;
+  int64_t fragments;
+  double sum_area_scale;
+  double max_area_scale;
+  double sum_slope;
+  double max_slope;
+} acoustic_bathymetry_diag_t;
+
 static int material_values_are_acoustic(double Vp, double Vs, double rho) {
   return (Param.includeAcoustic == YES) && (Vp > 0.0) && (rho > 0.0) &&
          (Vs <= ACOUSTIC_VS_EPS);
@@ -5128,7 +5139,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
     int64_t* table_count, int64_t* table_capacity,
     const vector3D_t* IstVelModel_origin,
     const vector3D_t* basinVelModel_origin,
-    const vector3D_t* threeDVelModel_origin) {
+    const vector3D_t* threeDVelModel_origin,
+    acoustic_bathymetry_diag_t* bathy_diag) {
   elem_t* elemp = &Global.myMesh->elemTable[eindex];
   edata_t* edata = (edata_t*)elemp->data;
   int32_t lnid0 = elemp->lnid[0];
@@ -5144,6 +5156,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
   double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
   double normal[3];
   double area_scale = 1.0;
+  int bathymetry_attempted = 0;
+  int bathymetry_reconstructed = 0;
 
   if (!mesh_acoustic_face_axis(face, &axis, &sign, tangent_axes)) {
     return 0;
@@ -5154,10 +5168,11 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
        ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY) &&
       (face == ACOUSTIC_FACE_Z_PLUS)) {
     vector3D_t face_center;
+    bathymetry_attempted = 1;
     face_center.x[0] = ldb[0] + 0.5 * h;
     face_center.x[1] = ldb[1] + 0.5 * h;
     face_center.x[2] = ldb[2] + h;
-    (void)mesh_reconstruct_bathymetry_normal_at_domain_point(
+    bathymetry_reconstructed = mesh_reconstruct_bathymetry_normal_at_domain_point(
         &face_center, h, IstVelModel_origin, basinVelModel_origin,
         threeDVelModel_origin, normal, &area_scale);
   }
@@ -5277,6 +5292,26 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
     }
   }
 
+  if (bathymetry_attempted && (fragment_count > 0) && (bathy_diag != NULL)) {
+    double slope = sqrt(fmax(area_scale * area_scale - 1.0, 0.0));
+
+    bathy_diag->faces++;
+    bathy_diag->fragments += fragment_count;
+    if (bathymetry_reconstructed) {
+      bathy_diag->reconstructed_faces++;
+    } else {
+      bathy_diag->fallback_faces++;
+    }
+    bathy_diag->sum_area_scale += area_scale * (double)fragment_count;
+    bathy_diag->sum_slope += slope * (double)fragment_count;
+    if (area_scale > bathy_diag->max_area_scale) {
+      bathy_diag->max_area_scale = area_scale;
+    }
+    if (slope > bathy_diag->max_slope) {
+      bathy_diag->max_slope = slope;
+    }
+  }
+
   return fragment_count;
 }
 
@@ -5296,6 +5331,14 @@ static void mesh_build_acoustic_interface_flags(
   int64_t global_candidate_fragments[6] = {0, 0, 0, 0, 0, 0};
   int64_t global_coupled_faces[6] = {0, 0, 0, 0, 0, 0};
   int64_t global_coupled_fragments[6] = {0, 0, 0, 0, 0, 0};
+  acoustic_bathymetry_diag_t local_bathy_diag = {0, 0, 0, 0, 0.0, 0.0, 0.0,
+                                                 0.0};
+  int64_t local_bathy_counts[4] = {0, 0, 0, 0};
+  int64_t global_bathy_counts[4] = {0, 0, 0, 0};
+  double local_bathy_sums[2] = {0.0, 0.0};
+  double global_bathy_sums[2] = {0.0, 0.0};
+  double local_bathy_max[2] = {0.0, 0.0};
+  double global_bathy_max[2] = {0.0, 0.0};
   int64_t table_count = 0;
   int64_t table_capacity = 0;
 
@@ -5335,7 +5378,7 @@ static void mesh_build_acoustic_interface_flags(
       int64_t fragments = mesh_build_acoustic_interface_face_fragments(
           eindex, face, keep_face && acoustic_pressure_enabled(), &table_count,
           &table_capacity, IstVelModel_origin, basinVelModel_origin,
-          threeDVelModel_origin);
+          threeDVelModel_origin, keep_face ? &local_bathy_diag : NULL);
 
       if (fragments == 0) {
         continue;
@@ -5386,6 +5429,20 @@ static void mesh_build_acoustic_interface_flags(
              MPI_SUM, 0, comm_solver);
   MPI_Reduce(local_coupled_fragments, global_coupled_fragments, 6,
              MPI_INT64_T, MPI_SUM, 0, comm_solver);
+  local_bathy_counts[0] = local_bathy_diag.faces;
+  local_bathy_counts[1] = local_bathy_diag.reconstructed_faces;
+  local_bathy_counts[2] = local_bathy_diag.fallback_faces;
+  local_bathy_counts[3] = local_bathy_diag.fragments;
+  local_bathy_sums[0] = local_bathy_diag.sum_area_scale;
+  local_bathy_sums[1] = local_bathy_diag.sum_slope;
+  local_bathy_max[0] = local_bathy_diag.max_area_scale;
+  local_bathy_max[1] = local_bathy_diag.max_slope;
+  MPI_Reduce(local_bathy_counts, global_bathy_counts, 4, MPI_INT64_T,
+             MPI_SUM, 0, comm_solver);
+  MPI_Reduce(local_bathy_sums, global_bathy_sums, 2, MPI_DOUBLE, MPI_SUM, 0,
+             comm_solver);
+  MPI_Reduce(local_bathy_max, global_bathy_max, 2, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
   if (Global.myID == 0) {
     if (acoustic_pressure_enabled()) {
       monitor_print(
@@ -5411,6 +5468,28 @@ static void mesh_build_acoustic_interface_flags(
           (double)global_coupled_faces[iface] / 1.0e6,
           (double)global_candidate_fragments[iface] / 1.0e6,
           (double)global_coupled_fragments[iface] / 1.0e6);
+    }
+    if (Param.theAcousticInterfaceFaceFilter ==
+        ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY) {
+      double avg_area_scale = 1.0;
+      double avg_slope = 0.0;
+      if (global_bathy_counts[3] > 0) {
+        avg_area_scale =
+            global_bathy_sums[0] / (double)global_bathy_counts[3];
+        avg_slope = global_bathy_sums[1] / (double)global_bathy_counts[3];
+      }
+      monitor_print(
+          "Acoustic bathymetry normal reconstruction: z+ faces %.3fM "
+          "(reconstructed %.3fM, flat fallback %.3fM), fragments %.3fM\n",
+          (double)global_bathy_counts[0] / 1.0e6,
+          (double)global_bathy_counts[1] / 1.0e6,
+          (double)global_bathy_counts[2] / 1.0e6,
+          (double)global_bathy_counts[3] / 1.0e6);
+      monitor_print(
+          "  projected area scale avg %.6f max %.6f; |grad depth| avg %.6f "
+          "max %.6f\n",
+          avg_area_scale, global_bathy_max[0], avg_slope,
+          global_bathy_max[1]);
     }
     fflush(stdout);
   }
