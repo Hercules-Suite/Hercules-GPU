@@ -487,6 +487,18 @@ every offset/component (see the summary below).
 	Larger values can reduce CPML compute skew but also increase MPI /
 	patch imbalance, so they may slow the full run even when the PML
 	kernel load looks better.
+- `cpml_3d_material_extension`
+	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
+	and `3D_velocity_model=yes`. When enabled, material queries made
+	from inside the CPML are clamped to the inner PML box before reading
+	the 3D velocity model, so Vs/Vp/rho and the acoustic/elastic water
+	classification are extended normally into the absorber instead of
+	letting a coarse `materialfiles` grid create a new coastline or
+	bathymetry inside the PML. Corners clamp along every active PML
+	normal. This changes sampled element material properties, so rebuild
+	or re-correct an imported etree for the PML element values to change;
+	Phase B imports that reuse baked properties keep those existing
+	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`
 	Optional. Target theoretical reflection coefficient. Default `1.0e-3`.
 	Smaller = stronger absorption but tighter stability margins.
@@ -589,6 +601,10 @@ Notes on C-PML behavior:
 - Each PML element is automatically classified as elastic or acoustic
 	(the same test the acoustic-pressure path uses), so heterogeneous
 	models and acoustic/elastic coupling need no extra configuration.
+	For `3D_velocity_model=yes`, `cpml_3d_material_extension=yes`
+	(default) makes that classification come from the corresponding
+	inner-PML material column/row, matching the usual flat-PML material
+	extension used by spectral-element PML setups.
 - Material damping on PML elements follows `cpml_pml_material_damping`
 	(see that flag). With the default `none`, material damping is skipped
 	on PML elements, but non-PML elements always use material damping as
@@ -636,6 +652,10 @@ Notes on C-PML behavior:
 	non-VT / flat runs are byte-identical. The
 	`benchmark_inputs/topography_tilt_boundary` example is a deliberate
 	worst-case test, not a model-setup template.)
+	This surface taper is independent of `cpml_3d_material_extension`:
+	tapering makes the PML top surface flat, while
+	`cpml_3d_material_extension` extends the 3D material/water mask
+	through the PML volume.
 
 Using `benchmark_inputs/taper_topography.py` (the recommended
 preprocessing step for any real topography + C-PML run):

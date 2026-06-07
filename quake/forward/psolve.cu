@@ -494,6 +494,9 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double alpha_out[3],
                                        double kappa_out[3]);
 #endif /* BOUNDARY */
+static double cpml_material_extension_thickness(void);
+static void cpml_extend_3d_material_query(double* north_m, double* east_m,
+                                          double* depth_m);
 
 /* CPML build-time context. Populated by solver_init() while iterating
  * elements; the contents are uploaded into Global.gpuData and then freed
@@ -551,6 +554,7 @@ typedef struct cpml_build_s {
   int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
+static double g_cpmlMaterialExtensionThicknessM = -1.0;
 
 static int cpml_active_axis_count(uint8_t face_mask) {
   int count = 0;
@@ -1608,12 +1612,15 @@ static struct Param_t {
    * to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffnessAcoustic;
   double theCpmlPartitionWeight;            /* 1.0 disables CPML load bias */
+  /* SPECFEM-style extension of the 3D material model inside CPML. When YES,
+   * 3D material queries made from PML coordinates are clamped to the inner PML
+   * box, so the PML is constant along each active PML-normal direction. */
+  noyesflag_t theCpml3DMaterialExtension;
   /* VT + BKT GPU stabilization (default NO -> strict no-op, bit-identical
    * to the validated v2/CPML baseline). YES enables the faithful CUDA
    * port of the CPU cut-cell visco-elastic operator TetraForcesBKT for
    * VT topography under bkt* damping. Declared AFTER
-   * theCpmlNativeStiffnessAcoustic to preserve C++ designated-init
-   * order. */
+   * theCpml3DMaterialExtension to preserve C++ designated-init order. */
   noyesflag_t theTopoBktGpuStabilize;
   /* Acoustic-elastic coupling formulation. DEFAULT is velocity_potential
    * (1) — the cross-validated stable coupling; pressure (0) is the legacy
@@ -1681,6 +1688,7 @@ static struct Param_t {
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,
+           .theCpml3DMaterialExtension = YES,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
@@ -1991,7 +1999,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   38 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  53 /* Must adjust this if adding int params */
+  54 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2143,6 +2151,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[50] = (int)Param.printStationStresses;
   int_message[51] = Param.theAcousticInterfaceProjectionMode;
   int_message[52] = Param.theAcousticInterfaceFaceFilter;
+  int_message[53] = (int)Param.theCpml3DMaterialExtension;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2201,6 +2210,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationStresses = (noyesflag_t)int_message[50];
   Param.theAcousticInterfaceProjectionMode = int_message[51];
   Param.theAcousticInterfaceFaceFilter = int_message[52];
+  Param.theCpml3DMaterialExtension = (noyesflag_t)int_message[53];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2674,6 +2684,20 @@ static int32_t parse_parameters(const char* numericalin) {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_clamp_outer must be 'yes' or 'no': got '%s'\n",
                        cpml_clamp_outer);
+        }
+      }
+
+      char cpml_3d_material_extension[64] = "";
+      if (parsetext(fp, "cpml_3d_material_extension", 's',
+                    &cpml_3d_material_extension) == 0) {
+        if (strcasecmp(cpml_3d_material_extension, "yes") == 0) {
+          Param.theCpml3DMaterialExtension = YES;
+        } else if (strcasecmp(cpml_3d_material_extension, "no") == 0) {
+          Param.theCpml3DMaterialExtension = NO;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_3d_material_extension must be 'yes' or "
+                       "'no': got '%s'\n", cpml_3d_material_extension);
         }
       }
 
@@ -3738,6 +3762,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlCflSafety);
     monitor_print("PML partition weight:               %f\n",
                   Param.theCpmlPartitionWeight);
+    monitor_print("PML 3D material extension:          %s\n",
+                  (Param.theCpml3DMaterialExtension == YES)
+                      ? "yes (clamp to inner PML)"
+                      : "no");
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
     monitor_print("PML stiffness mode (elastic):       %s\n",
@@ -4226,12 +4254,168 @@ int getBasinMaterial(cvmpayload_t* g_props, vector3D_t basinVelModel_origin,
   return res;
 }
 
+static double cpml_material_extension_thickness(void) {
+#ifdef BOUNDARY
+  if ((Param.theAbcType != ABC_CPML) ||
+      (Param.theCpml3DMaterialExtension != YES)) {
+    return 0.0;
+  }
+
+  if (Param.theCpmlThicknessM > 0.0) {
+    return Param.theCpmlThicknessM;
+  }
+
+  if (g_cpmlBuild.thickness_m > 0.0) {
+    return g_cpmlBuild.thickness_m;
+  }
+
+  if (g_cpmlMaterialExtensionThicknessM >= 0.0) {
+    return g_cpmlMaterialExtensionThicknessM;
+  }
+
+  if ((Global.myMesh == NULL) || (Global.myOctree == NULL) ||
+      (Param.theCpmlLayers <= 0)) {
+    return 0.0;
+  }
+
+  const double ticksize = Global.myOctree->ticksize;
+  const double eps = ticksize * 0.25;
+  const double lo[3] = {
+      (double)Global.myOctree->nearendp[0] * ticksize,
+      (double)Global.myOctree->nearendp[1] * ticksize,
+      (double)Global.myOctree->nearendp[2] * ticksize};
+  const double hi[3] = {
+      (double)Global.myOctree->farendp[0] * ticksize,
+      (double)Global.myOctree->farendp[1] * ticksize,
+      (double)Global.myOctree->farendp[2] * ticksize};
+  double local_bnd_h = 0.0;
+  double local_any_h = 0.0;
+
+  for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
+    elem_t* elemp = &Global.myMesh->elemTable[eindex];
+    edata_t* edata = (edata_t*)elemp->data;
+    node_t* node0 = &Global.myMesh->nodeTable[elemp->lnid[0]];
+    const double h = edata->edgesize;
+    const double c0[3] = {(double)node0->x * ticksize,
+                          (double)node0->y * ticksize,
+                          (double)node0->z * ticksize};
+    int on_face = 0;
+
+    if (h <= 0.0) {
+      continue;
+    }
+    if (h > local_any_h) {
+      local_any_h = h;
+    }
+    for (int ax = 0; ax < 2; ax++) {
+      if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
+      if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
+    }
+    if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
+    if (on_face && (h > local_bnd_h)) {
+      local_bnd_h = h;
+    }
+  }
+
+  double global_bnd_h = 0.0;
+  double global_any_h = 0.0;
+  MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
+                comm_solver);
+  MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
+                comm_solver);
+
+  const double basis_h = (global_bnd_h > 0.0) ? global_bnd_h : global_any_h;
+  g_cpmlMaterialExtensionThicknessM =
+      (basis_h > 0.0) ? (double)Param.theCpmlLayers * basis_h : 0.0;
+  return g_cpmlMaterialExtensionThicknessM;
+#else
+  return 0.0;
+#endif
+}
+
+static void cpml_extend_3d_material_query(double* north_m, double* east_m,
+                                          double* depth_m) {
+#ifdef BOUNDARY
+  if ((north_m == NULL) || (east_m == NULL) || (depth_m == NULL)) {
+    return;
+  }
+
+  const double L = cpml_material_extension_thickness();
+  if (L <= 0.0) {
+    return;
+  }
+
+  const double ticksize =
+      (Global.myOctree != NULL) ? Global.myOctree->ticksize : 0.0;
+  const double domain_lo[3] = {
+      Global.theXForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->nearendp[0] * ticksize
+               : 0.0),
+      Global.theYForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->nearendp[1] * ticksize
+               : 0.0),
+      Global.theZForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->nearendp[2] * ticksize
+               : 0.0)};
+  const double domain_hi[3] = {
+      Global.theXForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->farendp[0] * ticksize
+               : Param.theDomainX),
+      Global.theYForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->farendp[1] * ticksize
+               : Param.theDomainY),
+      Global.theZForMeshOrigin +
+          ((Global.myOctree != NULL)
+               ? (double)Global.myOctree->farendp[2] * ticksize
+               : Param.theDomainZ)};
+
+  const double old_north = *north_m;
+  const double old_east = *east_m;
+
+  if ((domain_lo[0] + L) < (domain_hi[0] - L)) {
+    if (*north_m < domain_lo[0] + L) {
+      *north_m = domain_lo[0] + L;
+    } else if (*north_m > domain_hi[0] - L) {
+      *north_m = domain_hi[0] - L;
+    }
+  }
+  if ((domain_lo[1] + L) < (domain_hi[1] - L)) {
+    if (*east_m < domain_lo[1] + L) {
+      *east_m = domain_lo[1] + L;
+    } else if (*east_m > domain_hi[1] - L) {
+      *east_m = domain_hi[1] - L;
+    }
+  }
+  if (domain_lo[2] < (domain_hi[2] - L)) {
+    if (*depth_m > domain_hi[2] - L) {
+      *depth_m = domain_hi[2] - L;
+    }
+  }
+
+  if (((*north_m != old_north) || (*east_m != old_east)) &&
+      (Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
+    *depth_m += point_elevation(old_north, old_east) -
+                point_elevation(*north_m, *east_m);
+  }
+#else
+  (void)north_m;
+  (void)east_m;
+  (void)depth_m;
+#endif
+}
+
 /*
  * Implemented by Clifford
  */
 int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
                   double x_m, double y_m, double z_m) {
   double output[3] = {0.0};
+  cpml_extend_3d_material_query(&x_m, &y_m, &z_m);
   double x_rel = x_m - threeDVelModel_origin.x[0];
   double y_rel = y_m - threeDVelModel_origin.x[1];
   int res = getMaterialFrom3DVelocityModel(x_rel, y_rel, z_m, output,
@@ -5341,6 +5525,10 @@ static void mesh_build_acoustic_interface_flags(
   double global_bathy_max[2] = {0.0, 0.0};
   int64_t table_count = 0;
   int64_t table_capacity = 0;
+
+  if (threeDVelModel_origin != NULL) {
+    (void)cpml_material_extension_thickness();
+  }
 
   mesh_release_acoustic_interface_data();
 
@@ -22219,6 +22407,7 @@ static void mesh_correct_properties(etree_t* cvm) {
         Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
         Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
         Param.theDomainY, Param.theDomainX, &Param.utmZone);
+    (void)cpml_material_extension_thickness();
   }
 
   if (Global.myID == 0) {
