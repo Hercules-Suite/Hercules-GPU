@@ -4408,6 +4408,9 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
       (Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
     *depth_m += point_elevation(old_north, old_east) -
                 point_elevation(*north_m, *east_m);
+    if (*depth_m < 0.0) {
+      *depth_m = 0.0;
+    }
   }
 #else
   (void)north_m;
