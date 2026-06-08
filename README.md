@@ -345,53 +345,6 @@ Acoustic-elastic input flags (input file):
 	elastic displacement field. The pressure column is `nan` for stations whose
 	containing element is elastic, because scalar acoustic pressure is not
 	defined there.
-- `print_station_strains` / `print_station_stresses`
-	Optional, independent (`yes`/`no`, default `no` → byte-identical to
-	before). For **linear** analysis, append the 6 strain and/or 6 stress
-	tensor components per station per output step — the linear-analysis
-	counterpart of the strain/stress columns that `include_nonlinear_
-	analysis=yes` already produces. Intended for reciprocity-based fault
-	inversion (strain Green's tensors). Each is a **contiguous 6-column
-	block** in the order `XX, YY, ZZ, XY, YZ, XZ`, appended to the normal
-	`station.N` files after any displacement/velocity/acceleration/
-	pressure columns (header labels `Eps_*` / `Sig_*`); if both flags are
-	set, the strain block precedes the stress block. **Tensor strain
-	convention:** `eps_ij = ½(∂u_i/∂x_j + ∂u_j/∂x_i)` for the
-	off-diagonals (the true strain tensor, matching Hercules' existing
-	nonlinear output — *not* engineering shear). **Strain (`Eps_*`)** is
-	always the kinematic `ε = ½(∇u + ∇uᵀ)` of the current displacement
-	`u(t)` — correct for both elastic and viscoelastic runs, recovered
-	from the owning element's 8 nodal displacements at the station's
-	local coordinates via the shared `point_strain` helper (regular
-	cubes) or `point_strain_tetrah` via `compute_tetra_strain` (VT
-	cut-cell topography stations, consistent with how
-	`compute_tetra_displ` interpolates the displacement column there).
-	No extra GPU transfer on the host path; no kernel changes.
-	**Stress (`Sig_*`) is *physically correct* under viscoelastic
-	damping (BKT-family).** When `type_of_damping` is BKT/BKT2/BKT3/
-	BKT3F, a small GPU gather kernel (`kernelStationVEStressGather`)
-	computes the viscoelastic stress from Hercules' internal
-	modified-displacement vectors using the same deviatoric/volumetric
-	split the damping force operator uses internally:
-	`σ_visco = 2μ·dev(ε_shearVector) + K·tr(ε_kappaVector)·I` with
-	`K = λ + 2μ/3` (so off-diagonals are pure deviatoric `2μ·ε^s_ij`
-	from `shearVector`, and the diagonal carries both the shear-channel
-	and the bulk-channel SLS memory). One small `cudaMemcpyAsync` per
-	station-output step ships the per-station tensors to host; no bulk
-	transfer of the full per-node arrays. Under non-BKT damping
-	(`none`/`rayleigh`/`mass`) the GPU gather is skipped and `Sig_*`
-	falls back to the elastic constitutive `σ = 2μ ε + λ tr(ε) I` on
-	the kinematic strain (which IS the physical stress in that regime).
-	**Caveat — one-step phase lag in `Sig_*`:** the per-step kick reads
-	the previous step's `shearVector`/`kappaVector` (station output runs
-	at the top of each timestep, before that step's damping conv
-	kernel), so `Sig_*` is offset by one simulation `Δt` relative to
-	`Eps_*`. Negligible for the typical reciprocity / kinematic-
-	inversion sample rate and easily corrected post-hoc if needed.
-	Acoustic/fluid stations (which have `print_station_pressures`
-	instead) get no strain/stress columns. v3 plumbing is fully
-	gated: with both flags off and/or non-BKT damping, no extra device
-	allocation, no kernel launch, no memcpy — byte-identical to before.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
@@ -790,6 +743,54 @@ analogous to SPECFEM3D's `FORCESOLUTION`. It applies a Cartesian force
 distributed to the 8 nodes via the trilinear hex8 shape functions
 `f_a^i = F_i * N_a(x,y,z)`. No moment tensor, strike, dip, or rake is
 needed.
+
+- `print_station_strains` / `print_station_stresses`
+	Optional, independent (`yes`/`no`, default `no` → byte-identical to
+	before). For **linear** analysis, append the 6 strain and/or 6 stress
+	tensor components per station per output step — the linear-analysis
+	counterpart of the strain/stress columns that `include_nonlinear_
+	analysis=yes` already produces. Intended for reciprocity-based fault
+	inversion (strain Green's tensors). Each is a **contiguous 6-column
+	block** in the order `XX, YY, ZZ, XY, YZ, XZ`, appended to the normal
+	`station.N` files after any displacement/velocity/acceleration/
+	pressure columns (header labels `Eps_*` / `Sig_*`); if both flags are
+	set, the strain block precedes the stress block. **Tensor strain
+	convention:** `eps_ij = ½(∂u_i/∂x_j + ∂u_j/∂x_i)` for the
+	off-diagonals (the true strain tensor, matching Hercules' existing
+	nonlinear output — *not* engineering shear). **Strain (`Eps_*`)** is
+	always the kinematic `ε = ½(∇u + ∇uᵀ)` of the current displacement
+	`u(t)` — correct for both elastic and viscoelastic runs, recovered
+	from the owning element's 8 nodal displacements at the station's
+	local coordinates via the shared `point_strain` helper (regular
+	cubes) or `point_strain_tetrah` via `compute_tetra_strain` (VT
+	cut-cell topography stations, consistent with how
+	`compute_tetra_displ` interpolates the displacement column there).
+	No extra GPU transfer on the host path; no kernel changes.
+	**Stress (`Sig_*`) is *physically correct* under viscoelastic
+	damping (BKT-family).** When `type_of_damping` is BKT/BKT2/BKT3/
+	BKT3F, a small GPU gather kernel (`kernelStationVEStressGather`)
+	computes the viscoelastic stress from Hercules' internal
+	modified-displacement vectors using the same deviatoric/volumetric
+	split the damping force operator uses internally:
+	`σ_visco = 2μ·dev(ε_shearVector) + K·tr(ε_kappaVector)·I` with
+	`K = λ + 2μ/3` (so off-diagonals are pure deviatoric `2μ·ε^s_ij`
+	from `shearVector`, and the diagonal carries both the shear-channel
+	and the bulk-channel SLS memory). One small `cudaMemcpyAsync` per
+	station-output step ships the per-station tensors to host; no bulk
+	transfer of the full per-node arrays. Under non-BKT damping
+	(`none`/`rayleigh`/`mass`) the GPU gather is skipped and `Sig_*`
+	falls back to the elastic constitutive `σ = 2μ ε + λ tr(ε) I` on
+	the kinematic strain (which IS the physical stress in that regime).
+	**Caveat — one-step phase lag in `Sig_*`:** the per-step kick reads
+	the previous step's `shearVector`/`kappaVector` (station output runs
+	at the top of each timestep, before that step's damping conv
+	kernel), so `Sig_*` is offset by one simulation `Δt` relative to
+	`Eps_*`. Negligible for the typical reciprocity / kinematic-
+	inversion sample rate and easily corrected post-hoc if needed.
+	Acoustic/fluid stations (which have `print_station_pressures`
+	instead) get no strain/stress columns. v3 plumbing is fully
+	gated: with both flags off and/or non-BKT damping, no extra device
+	allocation, no kernel launch, no memcpy — byte-identical to before.
 
 Use cases:
 
