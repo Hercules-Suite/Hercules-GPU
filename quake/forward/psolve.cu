@@ -4261,6 +4261,14 @@ static double cpml_material_extension_thickness(void) {
     return 0.0;
   }
 
+  /* The octree refinement pass calls get3DMaterial() before Global.myMesh is
+   * extracted. Do not extend those provisional refinement queries: the final
+   * element properties are re-sampled by mesh_correct_properties(), where the
+   * mesh and realized CPML geometry are available. */
+  if ((Global.myMesh == NULL) || (Global.myOctree == NULL)) {
+    return 0.0;
+  }
+
   if (Param.theCpmlThicknessM > 0.0) {
     return Param.theCpmlThicknessM;
   }
@@ -4273,8 +4281,7 @@ static double cpml_material_extension_thickness(void) {
     return g_cpmlMaterialExtensionThicknessM;
   }
 
-  if ((Global.myMesh == NULL) || (Global.myOctree == NULL) ||
-      (Param.theCpmlLayers <= 0)) {
+  if (Param.theCpmlLayers <= 0) {
     return 0.0;
   }
 
