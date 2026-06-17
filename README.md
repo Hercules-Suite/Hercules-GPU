@@ -384,6 +384,68 @@ Acoustic-elastic input flags (input file):
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
 
+Poroelastic U-P input flags (experimental V1):
+
+- `include_poroelastic`
+	Optional. `no` (default) keeps the existing elastic/acoustic solver
+	behavior. `yes` enables an experimental linear BrickUP-style U-P
+	poroelastic path for saturated shallow solid soil.
+- `poroelastic_formulation`
+	Optional. Currently only `brick_up` is supported. The implementation
+	keeps the existing elastic skeleton displacement path, adds the
+	`-alpha p I` pore-pressure coupling force, and evolves a scalar pore
+	pressure from volumetric strain increment plus optional Darcy
+	diffusion.
+- `poroelastic_depth_max_m`
+	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
+	within this depth below the local ground surface are eligible for
+	poroelastic classification.
+- `surface_groundwatertable`
+	Optional. `no` (default) means the groundwater level is the local
+	ground surface, so eligible shallow soil is saturated from the
+	surface down. `yes` reads a groundwater-level grid and only classifies
+	elements whose centroids are below that level.
+- `groundwaterlevel_file`
+	Optional. Used only when `surface_groundwatertable=yes`. If unset,
+	the solver reads `groundwaterlevel.in` from the 3D material model
+	directory (`3D_velocity_model_directory`, normally
+	`inputfiles/materialfiles`). If set to a bare filename, it is resolved
+	relative to that materialfiles directory; if it contains `/`, it is
+	treated as an explicit path. The file format mirrors `topography.in`:
+	first value is grid spacing, followed by regular-grid values over the
+	full model footprint, with the same datum/sign convention and ordering
+	as `topography.in`.
+- `topographybase_zcoord`
+	Required for `surface_groundwatertable=yes` when the topography datum
+	cannot be inferred from the loaded topography module. The groundwater
+	grid uses the same vertical datum as `topography.in`.
+- `poroelastic_surface_pressure_bc`
+	Optional. `undrained` (default) leaves pore pressure unconstrained at
+	the saturated surface. `drained` sets pore pressure to zero on nodes
+	near the groundwater/free-drainage surface.
+- `poroelastic_elastic_interface`
+	Optional. Currently only `no_flow` is supported. Poroelastic and
+	elastic regions share displacement nodes mechanically, while pore
+	pressure exists only on poroelastic elements/nodes; Darcy diffusion is
+	assembled only through poroelastic elements, giving a no-flow
+	poroelastic-elastic boundary in V1.
+- Poroelastic material constants:
+	`poroelastic_porosity` (default `0.4`),
+	`poroelastic_biot_alpha` (default `1.0`),
+	`poroelastic_fluid_bulk_modulus_pa` (default `2.2e9`),
+	`poroelastic_fluid_density_kgm3` (default `1000.0`),
+	`poroelastic_fluid_viscosity_pa_s` (default `1.0e-3`), and
+	`poroelastic_permeability_x_m2`,
+	`poroelastic_permeability_y_m2`,
+	`poroelastic_permeability_z_m2` (all default `0.0`, i.e. undrained
+	no-diffusion response).
+
+CPML policy for poroelasticity: PML elements are kept acoustic or
+elastic only. Any poroelastic candidate inside the CPML zone is converted
+to elastic and reported in the startup line
+`Poroelastic BrickUP: ... CPML candidates converted to elastic`, matching
+the practical SPECFEM-style policy that avoids poroelastic PML in V1.
+
 Scalar acoustic formulation — correctness fix & known limitation:
 
 - **Interior stiffness factor-of-2 correction.** An earlier acoustic

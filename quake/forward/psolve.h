@@ -688,6 +688,11 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    solver_float* pore_pressure_tm1;   /* Poroelastic pore pressure at t - 1 */
+    solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
+    solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
+    solver_float* pore_pressure_mass;  /* Poroelastic lumped storage/mass */
+    solver_float* pore_pressure_surface; /* Drained pressure flags; host only */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
