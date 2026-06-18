@@ -392,10 +392,15 @@ Poroelastic U-P input flags (experimental V1):
 	poroelastic path for saturated shallow solid soil.
 - `poroelastic_formulation`
 	Optional. Currently only `brick_up` is supported. The implementation
-	keeps the existing elastic skeleton displacement path, adds the
-	`-alpha p I` pore-pressure coupling force, and evolves a scalar pore
-	pressure from volumetric strain increment plus optional Darcy
-	diffusion. The displacement-pressure coupling uses one shared
+	rebuilds the solid skeleton stiffness on the **drained** modulus for
+	poroelastic elements (it subtracts the Biot fluid stiffening
+	`alpha^2 * M`, `M = K_f/porosity`, from `lambda`; shear is unchanged),
+	adds the `-alpha p I` pore-pressure coupling force, and evolves a scalar
+	pore pressure from volumetric strain increment plus optional Darcy
+	diffusion. The drained skeleton plus the `Q S^-1 Q^T` coupling reproduces
+	the input (undrained/saturated) `Vp`, so the fluid stiffness is counted
+	once — not twice — and the CFL/dt chosen from the mesh `Vp` stays valid.
+	The displacement-pressure coupling uses one shared
 	2x2x2-Gauss BrickUP coupling operator, applied as `Q p` in the
 	skeleton force path and as `Q^T du` in the pore-pressure source path.
 	The hot path is matrix-free on the GPU: setup precomputes the

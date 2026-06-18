@@ -9188,6 +9188,7 @@ static void solver_init() {
   int64_t globalPressureElements = 0;
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
+  int64_t localPoroelasticDrainedClamped = 0;
   solver_float* pressureFreeSurfaceHost = NULL;
 
   /* Initialize the GPU */
@@ -10103,6 +10104,33 @@ static void solver_init() {
           }
         }
       }
+    }
+
+    /* Poroelastic u-p: the solid skeleton stiffness must use the DRAINED
+     * modulus. The mesh Vp for saturated soil is the UNDRAINED P-velocity,
+     * so the constrained modulus baked into c2 (lambda + 2*mu = rho*Vp^2)
+     * already embeds the Biot fluid stiffening alpha^2 * M, where M is the
+     * Biot modulus (= K_f/porosity here). The Q / Q^T pore-pressure coupling
+     * re-supplies that same alpha^2 * M, so without this correction the
+     * fluid stiffness is counted twice and the effective P-wave speed is
+     * inflated to sqrt(Vp^2 + alpha^2*M/rho). Subtract alpha^2*M from lambda
+     * (shear mu is unaffected by the fluid: drained mu == undrained mu) so
+     * that K_drained + Q S^-1 Q^T reproduces the input (undrained) Vp and
+     * the existing CFL/dt picked from that Vp stays valid. This mirrors
+     * OpenSees BrickUP, whose getStiff() uses the drained material tangent. */
+    if (poro_element_active) {
+      const double biotAlpha = Param.thePoroelasticBiotAlpha;
+      const double biotModulus = poroelastic_biot_storage_modulus();
+      double lambdaDrained = lambda - biotAlpha * biotAlpha * biotModulus;
+      if (lambdaDrained < 0.0) {
+        /* Inputs inconsistent: the saturated Vp is too low to contain the
+         * requested fluid stiffening alpha^2*M (drained Poisson ratio would
+         * be negative). Clamp to the lambda=0 floor and warn so results are
+         * still bounded; the user should supply a drained Vp or smaller M. */
+        lambdaDrained = 0.0;
+        localPoroelasticDrainedClamped++;
+      }
+      ep->c2 = Param.theDeltaTSquared * edata->edgesize * lambdaDrained / 9;
     }
 
     /* Assign the element mass to its vertices */
@@ -11180,6 +11208,10 @@ static void solver_init() {
     MPI_Allreduce(&localPoroelasticPmlCandidates,
                   &globalPoroelasticPmlCandidates, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
+    int64_t globalPoroelasticDrainedClamped = 0;
+    MPI_Allreduce(&localPoroelasticDrainedClamped,
+                  &globalPoroelasticDrainedClamped, 1, MPI_INT64_T, MPI_SUM,
+                  comm_solver);
     g_poroelasticElementCount = globalPoroelasticElements;
     g_poroelasticNodeCount = globalPoroelasticNodes;
     g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
@@ -11200,6 +11232,19 @@ static void solver_init() {
           (double)globalPoroelasticNodes / 1.0e6,
           (double)globalPoroelasticPmlCandidates / 1.0e6,
           (long long)globalPoroelasticPmlCandidates);
+      monitor_print(
+          "Poroelastic drained skeleton: subtracted alpha^2*M = %.3g Pa "
+          "(alpha=%.3f, M=K_f/n=%.3g Pa) from lambda for the solid stiffness\n",
+          Param.thePoroelasticBiotAlpha * Param.thePoroelasticBiotAlpha *
+              poroelastic_biot_storage_modulus(),
+          Param.thePoroelasticBiotAlpha, poroelastic_biot_storage_modulus());
+      if (globalPoroelasticDrainedClamped > 0) {
+        monitor_print(
+            "WARNING: %lld poroelastic elements had drained lambda < 0 and "
+            "were clamped to 0 (saturated Vp too low for alpha^2*M; supply a "
+            "drained Vp or reduce K_f/alpha for consistent inputs)\n",
+            (long long)globalPoroelasticDrainedClamped);
+      }
     }
   } else {
     g_poroelasticElementCount = 0;
