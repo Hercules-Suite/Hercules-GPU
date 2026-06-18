@@ -1102,6 +1102,222 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   gpuData->pressureForceDevice[nindex] = 0.0;
 }
 
+__device__ static double poro_node_sign_device(int node, int axis)
+{
+  return (node & (1 << axis)) ? 1.0 : -1.0;
+}
+
+__global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
+                                                  gpu_data_t* gpuData,
+                                                  double deltaT2,
+                                                  double biotAlpha)
+{
+  const int32_t pindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const double gp = 0.57735026918962576451;
+  const double gcoord[2] = {-gp, gp};
+
+  if (pindex >= elemCount) {
+    return;
+  }
+
+  const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
+  const double h = gpuData->poroelasticElemHDevice[pindex];
+  const double detJ = gpuData->poroelasticElemDetJDevice[pindex];
+  if ((h <= 0.0) || (detJ <= 0.0)) {
+    return;
+  }
+
+  double qForce[8][3];
+  for (int j = 0; j < 8; j++) {
+    qForce[j][0] = 0.0;
+    qForce[j][1] = 0.0;
+    qForce[j][2] = 0.0;
+  }
+
+  for (int gx = 0; gx < 2; gx++) {
+    const double xi = gcoord[gx];
+    for (int gy = 0; gy < 2; gy++) {
+      const double eta = gcoord[gy];
+      for (int gz = 0; gz < 2; gz++) {
+        const double zeta = gcoord[gz];
+        double dNdx[8][3];
+        double pressureAtGp = 0.0;
+
+        for (int j = 0; j < 8; j++) {
+          const double sx = poro_node_sign_device(j, 0);
+          const double sy = poro_node_sign_device(j, 1);
+          const double sz = poro_node_sign_device(j, 2);
+          const double ax = 1.0 + sx * xi;
+          const double ay = 1.0 + sy * eta;
+          const double az = 1.0 + sz * zeta;
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+          const double N = 0.125 * ax * ay * az;
+          const double shapeScale =
+              gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
+                                                           pindex];
+          const double Np = N * shapeScale;
+
+          dNdx[j][0] = sx * ay * az / (4.0 * h);
+          dNdx[j][1] = sy * ax * az / (4.0 * h);
+          dNdx[j][2] = sz * ax * ay / (4.0 * h);
+          pressureAtGp +=
+              Np * (double)gpuData->porePressureTm1Device[lnid];
+        }
+
+        const double scale = biotAlpha * pressureAtGp * detJ;
+        for (int j = 0; j < 8; j++) {
+          qForce[j][0] += scale * dNdx[j][0];
+          qForce[j][1] += scale * dNdx[j][1];
+          qForce[j][2] += scale * dNdx[j][2];
+        }
+      }
+    }
+  }
+
+  for (int j = 0; j < 8; j++) {
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+    fvector_t* nodalForce = gpuData->forceDevice + lnid;
+    atomicAdd((solver_float*)&nodalForce->f[0],
+              (solver_float)(deltaT2 * qForce[j][0]));
+    atomicAdd((solver_float*)&nodalForce->f[1],
+              (solver_float)(deltaT2 * qForce[j][1]));
+    atomicAdd((solver_float*)&nodalForce->f[2],
+              (solver_float)(deltaT2 * qForce[j][2]));
+  }
+}
+
+__global__ void kernelPoroelasticPressureForce(int32_t elemCount,
+                                               gpu_data_t* gpuData,
+                                               double storageM,
+                                               double deltaT,
+                                               double diffusivityX,
+                                               double diffusivityY,
+                                               double diffusivityZ,
+                                               int haveDiffusion,
+                                               double biotAlpha)
+{
+  const int32_t pindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const double gp = 0.57735026918962576451;
+  const double gcoord[2] = {-gp, gp};
+
+  if ((pindex >= elemCount) || ((biotAlpha == 0.0) && !haveDiffusion)) {
+    return;
+  }
+
+  const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
+  const double h = gpuData->poroelasticElemHDevice[pindex];
+  const double detJ = gpuData->poroelasticElemDetJDevice[pindex];
+  if ((h <= 0.0) || (detJ <= 0.0)) {
+    return;
+  }
+
+  double qtDeltaU[8];
+  for (int j = 0; j < 8; j++) {
+    qtDeltaU[j] = 0.0;
+  }
+
+  for (int gx = 0; gx < 2; gx++) {
+    const double xi = gcoord[gx];
+    for (int gy = 0; gy < 2; gy++) {
+      const double eta = gcoord[gy];
+      for (int gz = 0; gz < 2; gz++) {
+        const double zeta = gcoord[gz];
+        double Np[8];
+        double divDeltaU = 0.0;
+
+        for (int j = 0; j < 8; j++) {
+          const double sx = poro_node_sign_device(j, 0);
+          const double sy = poro_node_sign_device(j, 1);
+          const double sz = poro_node_sign_device(j, 2);
+          const double ax = 1.0 + sx * xi;
+          const double ay = 1.0 + sy * eta;
+          const double az = 1.0 + sz * zeta;
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+          const fvector_t unew = gpuData->tm2Device[lnid];
+          const fvector_t uold = gpuData->tm1Device[lnid];
+          const double N = 0.125 * ax * ay * az;
+          const double shapeScale =
+              gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
+                                                           pindex];
+          const double dNdx0 = sx * ay * az / (4.0 * h);
+          const double dNdx1 = sy * ax * az / (4.0 * h);
+          const double dNdx2 = sz * ax * ay / (4.0 * h);
+
+          Np[j] = N * shapeScale;
+          divDeltaU += dNdx0 * ((double)unew.f[0] - (double)uold.f[0]);
+          divDeltaU += dNdx1 * ((double)unew.f[1] - (double)uold.f[1]);
+          divDeltaU += dNdx2 * ((double)unew.f[2] - (double)uold.f[2]);
+        }
+
+        const double scale = biotAlpha * divDeltaU * detJ;
+        for (int j = 0; j < 8; j++) {
+          qtDeltaU[j] += scale * Np[j];
+        }
+      }
+    }
+  }
+
+  double gradp[3] = {0.0, 0.0, 0.0};
+  const double gradCoeff = 0.25 / h;
+  if (haveDiffusion) {
+    for (int j = 0; j < 8; j++) {
+      const int32_t lnid =
+          gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+      const double pold = (double)gpuData->porePressureTm1Device[lnid];
+      gradp[0] += poro_node_sign_device(j, 0) * gradCoeff * pold;
+      gradp[1] += poro_node_sign_device(j, 1) * gradCoeff * pold;
+      gradp[2] += poro_node_sign_device(j, 2) * gradCoeff * pold;
+    }
+  }
+
+  const double diffusivity[3] = {diffusivityX, diffusivityY, diffusivityZ};
+  const double elementVolume = 8.0 * detJ;
+  for (int j = 0; j < 8; j++) {
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+    double rhs = -storageM * qtDeltaU[j];
+
+    if (haveDiffusion) {
+      double weakDiffusion = 0.0;
+      for (int axis = 0; axis < 3; axis++) {
+        const double gradN =
+            poro_node_sign_device(j, axis) * gradCoeff;
+        weakDiffusion += diffusivity[axis] * gradp[axis] * gradN;
+      }
+      rhs -= deltaT * elementVolume * weakDiffusion;
+    }
+
+    atomicAdd((solver_float*)(gpuData->porePressureForceDevice + lnid),
+              (solver_float)rhs);
+  }
+}
+
+__global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
+                                                gpu_data_t* gpuData)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  const solver_float mass = gpuData->porePressureMassDevice[nindex];
+  solver_float pnew = 0.0;
+  if (mass > 0.0) {
+    pnew = gpuData->porePressureTm1Device[nindex] +
+           gpuData->porePressureForceDevice[nindex] / mass;
+    if (gpuData->porePressureSurfaceDevice[nindex] > (solver_float)0.5) {
+      pnew = (solver_float)0.0;
+    }
+  }
+
+  gpuData->porePressureTm2Device[nindex] = pnew;
+  gpuData->porePressureForceDevice[nindex] = (solver_float)0.0;
+}
+
 
 /* Damping Calc-Conv Kernel
    FLOPs: 63M + 54A + 4T

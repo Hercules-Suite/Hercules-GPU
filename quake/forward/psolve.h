@@ -409,6 +409,17 @@ typedef struct gpu_data_t {
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
 
+    solver_float* porePressureTm1Device;     /* GPU pore pressure at t */
+    solver_float* porePressureTm2Device;     /* GPU pore pressure at t-dt/new */
+    solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
+    solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
+    solver_float* porePressureSurfaceDevice; /* GPU drained pressure flags */
+    int32_t       poroelasticElemCount;      /* local BrickUP elements */
+    int32_t*      poroelasticElemMapperDevice;
+    double*       poroelasticElemHDevice;
+    double*       poroelasticElemDetJDevice;
+    double*       poroelasticPressureShapeScaleDevice; /* [8][poroelasticElemCount] */
+
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
     fvector_t*   conv_shear_3Device;

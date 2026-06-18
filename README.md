@@ -398,6 +398,11 @@ Poroelastic U-P input flags (experimental V1):
 	diffusion. The displacement-pressure coupling uses one shared
 	2x2x2-Gauss BrickUP coupling operator, applied as `Q p` in the
 	skeleton force path and as `Q^T du` in the pore-pressure source path.
+	The hot path is matrix-free on the GPU: setup precomputes the
+	poroelastic element mapper and topography-aware pressure-test weights,
+	then CUDA kernels apply both conjugate operators and the pressure
+	update. MPI pressure exchange still uses the existing host schedules in
+	V1, so future optimization should target sparse pore-pressure transfer.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for

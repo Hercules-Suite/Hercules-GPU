@@ -137,6 +137,24 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
 					     gpu_data_t* gpuData);
 
+__global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
+                                                  gpu_data_t* gpuData,
+                                                  double deltaT2,
+                                                  double biotAlpha);
+
+__global__ void kernelPoroelasticPressureForce(int32_t elemCount,
+                                               gpu_data_t* gpuData,
+                                               double storageM,
+                                               double deltaT,
+                                               double diffusivityX,
+                                               double diffusivityY,
+                                               double diffusivityZ,
+                                               int haveDiffusion,
+                                               double biotAlpha);
+
+__global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
+                                                gpu_data_t* gpuData);
+
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);

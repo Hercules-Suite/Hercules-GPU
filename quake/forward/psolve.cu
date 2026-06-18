@@ -1906,6 +1906,10 @@ static int poroelastic_enabled(void) {
          (Param.thePoroelasticFormulation == POROELASTIC_FORMULATION_BRICK_UP);
 }
 
+static int poroelastic_gpu_active(void) {
+  return poroelastic_enabled() && (g_poroelasticElementCount > 0);
+}
+
 static double poroelastic_biot_storage_modulus(void) {
   /* V1 assumes incompressible grains, so 1/M ~= porosity/Kf. */
   return Param.thePoroelasticFluidBulkModulus / Param.thePoroelasticPorosity;
@@ -2243,6 +2247,32 @@ static void poroelastic_element_coupling_apply(
           }
         }
       }
+    }
+  }
+}
+
+static void poroelastic_build_gpu_geometry(mesh_t* mesh, int32_t elemCount,
+                                           const int32_t* mapper,
+                                           double* hArray, double* detJArray,
+                                           double* pressureShapeScaleArray) {
+  for (int32_t m = 0; m < elemCount; m++) {
+    const int32_t eindex = mapper[m];
+    edata_t* edata = (edata_t*)mesh->elemTable[eindex].data;
+    const double h = (double)edata->edgesize;
+    double nodalVolumes[8];
+    double elementVolume = 0.0;
+    double referenceNodalVolume;
+
+    poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
+                                      &elementVolume);
+    hArray[m] = h;
+    detJArray[m] = 0.125 * elementVolume;
+    referenceNodalVolume = elementVolume / 8.0;
+    for (int j = 0; j < 8; j++) {
+      pressureShapeScaleArray[j * elemCount + m] =
+          (referenceNodalVolume > 0.0)
+              ? (nodalVolumes[j] / referenceNodalVolume)
+              : 1.0;
     }
   }
 }
@@ -11271,6 +11301,73 @@ static void solver_init() {
       exit(1);
     }
   }
+  if (poroelastic_gpu_active()) {
+    Global.gpuData.poroelasticElemCount = g_poroelasticLocalElementCount;
+    if (cudaMalloc((void**)&(Global.gpuData.porePressureTm1Device),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to allocate pore pressure tm1 memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.porePressureTm2Device),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to allocate pore pressure tm2 memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.porePressureForceDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate pore pressure force memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.porePressureMassDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate pore pressure mass memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMalloc((void**)&(Global.gpuData.porePressureSurfaceDevice),
+                   Global.myMesh->nharbored * sizeof(solver_float)) !=
+        cudaSuccess) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate pore pressure surface memory\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (g_poroelasticLocalElementCount > 0) {
+      const size_t poroN = (size_t)g_poroelasticLocalElementCount;
+      if ((cudaMalloc(
+               (void**)&(Global.gpuData.poroelasticElemMapperDevice),
+               poroN * sizeof(int32_t)) != cudaSuccess) ||
+          (cudaMalloc((void**)&(Global.gpuData.poroelasticElemHDevice),
+                      poroN * sizeof(double)) != cudaSuccess) ||
+          (cudaMalloc((void**)&(Global.gpuData.poroelasticElemDetJDevice),
+                      poroN * sizeof(double)) != cudaSuccess) ||
+          (cudaMalloc(
+               (void**)&(Global.gpuData.poroelasticPressureShapeScaleDevice),
+               8 * poroN * sizeof(double)) != cudaSuccess)) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate poroelastic element GPU geometry\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
+  } else {
+    Global.gpuData.poroelasticElemCount = 0;
+  }
   if (cudaMalloc((void**)&(Global.gpuData.conv_shear_1Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate conv_shear_1 memory\n",
@@ -11712,6 +11809,29 @@ static void solver_init() {
       exit(1);
     }
   }
+  int32_t* poroelasticElemMapperArray = NULL;
+  double* poroelasticElemHArray = NULL;
+  double* poroelasticElemDetJArray = NULL;
+  double* poroelasticPressureShapeScaleArray = NULL;
+  if (poroelastic_gpu_active() && (g_poroelasticLocalElementCount > 0)) {
+    const size_t poroN = (size_t)g_poroelasticLocalElementCount;
+    poroelasticElemMapperArray =
+        (int32_t*)malloc(poroN * sizeof(int32_t));
+    poroelasticElemHArray = (double*)malloc(poroN * sizeof(double));
+    poroelasticElemDetJArray = (double*)malloc(poroN * sizeof(double));
+    poroelasticPressureShapeScaleArray =
+        (double*)malloc(8 * poroN * sizeof(double));
+    if ((poroelasticElemMapperArray == NULL) ||
+        (poroelasticElemHArray == NULL) ||
+        (poroelasticElemDetJArray == NULL) ||
+        (poroelasticPressureShapeScaleArray == NULL)) {
+      fprintf(stderr,
+              "Thread %d: Failed to allocate poroelastic GPU geometry host arrays\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
 
   double* g0_shearArray =
       (double*)malloc(Global.myMesh->lenum * sizeof(double));
@@ -11828,6 +11948,15 @@ static void solver_init() {
     a0_kappaArray[i] = edata->a0_kappa;
     a1_kappaArray[i] = edata->a1_kappa;
     a2_kappaArray[i] = edata->a2_kappa;
+  }
+
+  if (poroelasticElemMapperArray != NULL) {
+    memcpy(poroelasticElemMapperArray, g_poroelasticElemMapper,
+           (size_t)g_poroelasticLocalElementCount * sizeof(int32_t));
+    poroelastic_build_gpu_geometry(
+        Global.myMesh, g_poroelasticLocalElementCount,
+        poroelasticElemMapperArray, poroelasticElemHArray,
+        poroelasticElemDetJArray, poroelasticPressureShapeScaleArray);
   }
 
   for (int i = 0; i < Global.myMesh->nharbored; i++) {
@@ -12275,6 +12404,79 @@ static void solver_init() {
     }
   }
 
+  if (poroelastic_gpu_active()) {
+    if (cudaMemcpy(Global.gpuData.porePressureMassDevice,
+                   Global.mySolver->pore_pressure_mass,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure mass array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMemcpy(Global.gpuData.porePressureSurfaceDevice,
+                   Global.mySolver->pore_pressure_surface,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure surface array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMemcpy(Global.gpuData.porePressureTm1Device,
+                   Global.mySolver->pore_pressure_tm1,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure tm1 array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMemcpy(Global.gpuData.porePressureTm2Device,
+                   Global.mySolver->pore_pressure_tm2,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure tm2 array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (cudaMemcpy(Global.gpuData.porePressureForceDevice,
+                   Global.mySolver->pore_pressure_force,
+                   Global.myMesh->nharbored * sizeof(solver_float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure force array\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (g_poroelasticLocalElementCount > 0) {
+      const size_t poroN = (size_t)g_poroelasticLocalElementCount;
+      if ((cudaMemcpy(Global.gpuData.poroelasticElemMapperDevice,
+                      poroelasticElemMapperArray,
+                      poroN * sizeof(int32_t), cudaMemcpyHostToDevice) !=
+           cudaSuccess) ||
+          (cudaMemcpy(Global.gpuData.poroelasticElemHDevice,
+                      poroelasticElemHArray,
+                      poroN * sizeof(double), cudaMemcpyHostToDevice) !=
+           cudaSuccess) ||
+          (cudaMemcpy(Global.gpuData.poroelasticElemDetJDevice,
+                      poroelasticElemDetJArray,
+                      poroN * sizeof(double), cudaMemcpyHostToDevice) !=
+           cudaSuccess) ||
+          (cudaMemcpy(Global.gpuData.poroelasticPressureShapeScaleDevice,
+                      poroelasticPressureShapeScaleArray,
+                      8 * poroN * sizeof(double),
+                      cudaMemcpyHostToDevice) != cudaSuccess)) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy poroelastic GPU geometry arrays\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
+  }
+
   free(c1Array);
   free(c2Array);
   free(c3Array);
@@ -12284,6 +12486,10 @@ static void solver_init() {
   free(pressureFreeSurfaceNodeFlagsArray);
   free(acousticPressureCoeffArray);
   free(acousticPressureBoundaryCoeffArray);
+  free(poroelasticElemMapperArray);
+  free(poroelasticElemHArray);
+  free(poroelasticElemDetJArray);
+  free(poroelasticPressureShapeScaleArray);
   free(pressureFreeSurfaceHost);
   free(g0_shearArray);
   free(g1_shearArray);
@@ -12327,6 +12533,10 @@ static void solver_init() {
              Global.myMesh->nharbored * sizeof(fvector_t));
   if (acoustic_pressure_enabled()) {
     cudaMemset(Global.gpuData.pressureForceDevice, 0,
+               Global.myMesh->nharbored * sizeof(solver_float));
+  }
+  if (poroelastic_gpu_active()) {
+    cudaMemset(Global.gpuData.porePressureForceDevice, 0,
                Global.myMesh->nharbored * sizeof(solver_float));
   }
 
@@ -12621,7 +12831,17 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pressureTm2Device);
   cudaFree(Global.gpuData.pressureForceDevice);
   cudaFree(Global.gpuData.pressureMassDevice);
+  cudaFree(Global.gpuData.pressureDampDevice);
   cudaFree(Global.gpuData.pressureFreeSurfaceNodeFlagsDevice);
+  cudaFree(Global.gpuData.porePressureTm1Device);
+  cudaFree(Global.gpuData.porePressureTm2Device);
+  cudaFree(Global.gpuData.porePressureForceDevice);
+  cudaFree(Global.gpuData.porePressureMassDevice);
+  cudaFree(Global.gpuData.porePressureSurfaceDevice);
+  cudaFree(Global.gpuData.poroelasticElemMapperDevice);
+  cudaFree(Global.gpuData.poroelasticElemHDevice);
+  cudaFree(Global.gpuData.poroelasticElemDetJDevice);
+  cudaFree(Global.gpuData.poroelasticPressureShapeScaleDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
   cudaFree(Global.gpuData.conv_shear_3Device);
@@ -13247,6 +13467,13 @@ static void solver_reset_gpu(mysolver_t* solver, mesh_t* mesh) {
     solver->gpuData->pressureTm1Device = ptmp;
   }
 
+  if (poroelastic_gpu_active()) {
+    solver_float* ptmp = solver->gpuData->porePressureTm2Device;
+    solver->gpuData->porePressureTm2Device =
+        solver->gpuData->porePressureTm1Device;
+    solver->gpuData->porePressureTm1Device = ptmp;
+  }
+
   /* Update data structure on device */
   cudaMemcpyAsync(solver->gpuDataDevice, solver->gpuData, sizeof(gpu_data_t),
                   cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
@@ -13836,9 +14063,6 @@ static int use_gpu_source_fastpath(void) {
   if (Param.drmImplement == YES) {
     return 0;
   }
-  if (poroelastic_enabled() && (g_poroelasticElementCount > 0)) {
-    return 0;
-  }
   if (topography_has_host_force_path()) {
     return 0;
   }
@@ -13863,9 +14087,6 @@ static int use_sparse_force_upload_topo(void) {
 
 static int32_t need_host_force_upload(void) {
   if (Param.drmImplement == YES) {
-    return 1;
-  }
-  if (poroelastic_enabled() && (g_poroelasticElementCount > 0)) {
     return 1;
   }
   if (!use_gpu_source_fastpath()) {
@@ -14931,7 +15152,7 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
 static void solver_swap_pore_pressure_buffers(mysolver_t* solver) {
   solver_float* tmp;
 
-  if ((!poroelastic_enabled()) || (g_poroelasticElementCount <= 0)) {
+  if (!poroelastic_gpu_active()) {
     return;
   }
 
@@ -14942,28 +15163,29 @@ static void solver_swap_pore_pressure_buffers(mysolver_t* solver) {
 
 static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
                                                       mesh_t* mesh) {
-  const double dt2 = Param.theDeltaTSquared;
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+  (void)mesh;
 
-  if ((!poroelastic_enabled()) || (g_poroelasticLocalElementCount <= 0) ||
+  if ((!poroelastic_gpu_active()) || (g_poroelasticLocalElementCount <= 0) ||
       (Param.thePoroelasticBiotAlpha == 0.0)) {
     return;
   }
 
   Timer_Start("Poroelastic pressure traction");
-  for (int32_t m = 0; m < g_poroelasticLocalElementCount; m++) {
-    const int32_t eindex = g_poroelasticElemMapper[m];
-    elem_t* elemp = &mesh->elemTable[eindex];
-    double qPressureForce[8][3] = {{0.0}};
-
-    poroelastic_element_coupling_apply(mesh, eindex,
-                                       solver->pore_pressure_tm1, NULL, NULL,
-                                       qPressureForce, NULL);
-    for (int j = 0; j < 8; j++) {
-      fvector_t* force = &solver->force[elemp->lnid[j]];
-      force->f[0] += (solver_float)(dt2 * qPressureForce[j][0]);
-      force->f[1] += (solver_float)(dt2 * qPressureForce[j][1]);
-      force->f[2] += (solver_float)(dt2 * qPressureForce[j][2]);
-    }
+  blocksize = 128;
+  gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
+  kernelPoroelasticPressureTraction<<<gridsize, blocksize, 0,
+                                      solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_poroelasticLocalElementCount, solver->gpuDataDevice,
+      Param.theDeltaTSquared, Param.thePoroelasticBiotAlpha);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: poroelastic pressure traction kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
   Timer_Stop("Poroelastic pressure traction");
 }
@@ -14982,66 +15204,50 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   const int haveDiffusion =
       (permeability[0] > 0.0) || (permeability[1] > 0.0) ||
       (permeability[2] > 0.0);
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
 
-  if ((!poroelastic_enabled()) || (g_poroelasticElementCount <= 0)) {
+  if (!poroelastic_gpu_active()) {
     return;
   }
 
   Timer_Start("Poroelastic Pressure Step");
 
   Timer_Start("Poroelastic pressure force reset");
-  memset(solver->pore_pressure_force, 0,
-         (size_t)mesh->nharbored * sizeof(solver_float));
+  cudaMemsetAsync(solver->gpuData->porePressureForceDevice, 0,
+                  mesh->nharbored * sizeof(solver_float),
+                  solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Poroelastic pressure force reset");
 
   Timer_Start("Poroelastic pressure force kernel");
-  for (int32_t m = 0; m < g_poroelasticLocalElementCount; m++) {
-    const int32_t eindex = g_poroelasticElemMapper[m];
-    elem_t* elemp = &mesh->elemTable[eindex];
-    double elementVolume = 0.0;
-    double gradCoeff = 0.0;
-    double gradp[3] = {0.0, 0.0, 0.0};
-    double qtDeltaU[8] = {0.0};
-
-    poroelastic_element_coupling_apply(mesh, eindex, NULL, solver->tm2,
-                                       solver->tm1, NULL, qtDeltaU);
-
-    if (haveDiffusion) {
-      edata_t* edata = (edata_t*)elemp->data;
-      const double h = (double)edata->edgesize;
-      double nodalVolumes[8];
-
-      gradCoeff = 0.25 / h;
-      poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
-                                        &elementVolume);
-      for (int j = 0; j < 8; j++) {
-        const int32_t lnid = elemp->lnid[j];
-        const double pold = (double)solver->pore_pressure_tm1[lnid];
-
-        for (int axis = 0; axis < 3; axis++) {
-          const double gradN = poro_node_sign(j, axis) * gradCoeff;
-          gradp[axis] += gradN * pold;
-        }
-      }
-    }
-
-    for (int j = 0; j < 8; j++) {
-      const int32_t lnid = elemp->lnid[j];
-      double rhs = -storageM * qtDeltaU[j];
-
-      if (haveDiffusion) {
-        double weakDiffusion = 0.0;
-        for (int axis = 0; axis < 3; axis++) {
-          const double gradN = poro_node_sign(j, axis) * gradCoeff;
-          weakDiffusion += diffusivity[axis] * gradp[axis] * gradN;
-        }
-        rhs -= dt * elementVolume * weakDiffusion;
-      }
-
-      solver->pore_pressure_force[lnid] += (solver_float)rhs;
+  if (g_poroelasticLocalElementCount > 0) {
+    blocksize = 128;
+    gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
+    kernelPoroelasticPressureForce<<<gridsize, blocksize, 0,
+                                     solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_poroelasticLocalElementCount, solver->gpuDataDevice, storageM, dt,
+        diffusivity[0], diffusivity[1], diffusivity[2], haveDiffusion,
+        Param.thePoroelasticBiotAlpha);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: poroelastic pressure force kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
     }
   }
   Timer_Stop("Poroelastic pressure force kernel");
+
+  Timer_Start("Poroelastic pressure force D2H");
+  cudaMemcpyAsync(solver->pore_pressure_force,
+                  solver->gpuData->porePressureForceDevice,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Poroelastic pressure force D2H");
 
   Timer_Start("Poroelastic pressure force exchange");
   schedule_senddata(solver->dn_sched, solver->pore_pressure_force, 1,
@@ -15051,24 +15257,39 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
                     CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
   Timer_Stop("Poroelastic pressure force exchange");
 
+  Timer_Start("Poroelastic pressure force H2D");
+  cudaMemcpyAsync(solver->gpuData->porePressureForceDevice,
+                  solver->pore_pressure_force,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  Timer_Stop("Poroelastic pressure force H2D");
+
   Timer_Start("Poroelastic pressure update");
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(mesh->nharbored > 100000)
-#endif
-  for (int32_t nindex = 0; nindex < mesh->nharbored; nindex++) {
-    const double mass = (double)solver->pore_pressure_mass[nindex];
-    if (mass > 0.0) {
-      double pnew = (double)solver->pore_pressure_tm1[nindex] +
-                    (double)solver->pore_pressure_force[nindex] / mass;
-      if (solver->pore_pressure_surface[nindex] > 0.5) {
-        pnew = 0.0;
-      }
-      solver->pore_pressure_tm2[nindex] = (solver_float)pnew;
-    } else {
-      solver->pore_pressure_tm2[nindex] = 0.0;
-    }
+  blocksize = 256;
+  gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
+  kernelPoroelasticPressureUpdate<<<gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+      mesh->nharbored, solver->gpuDataDevice);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: poroelastic pressure update kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
   }
   Timer_Stop("Poroelastic pressure update");
+
+  Timer_Start("Poroelastic pressure field D2H");
+  cudaMemcpyAsync(solver->pore_pressure_tm2,
+                  solver->gpuData->porePressureTm2Device,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Poroelastic pressure field D2H");
 
   Timer_Start("Poroelastic pressure field exchange");
   schedule_senddata(solver->an_sched, solver->pore_pressure_tm2, 1, SHARING,
@@ -15077,6 +15298,15 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   schedule_senddata(solver->dn_sched, solver->pore_pressure_tm2, 1, SHARING,
                     DN_PORE_PRESSURE_MSG);
   Timer_Stop("Poroelastic pressure field exchange");
+
+  Timer_Start("Poroelastic pressure field H2D");
+  cudaMemcpyAsync(solver->gpuData->porePressureTm2Device,
+                  solver->pore_pressure_tm2,
+                  mesh->nharbored * sizeof(solver_float),
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      mesh->nharbored * (int64_t)sizeof(solver_float);
+  Timer_Stop("Poroelastic pressure field H2D");
 
   Timer_Stop("Poroelastic Pressure Step");
 }
@@ -16262,7 +16492,7 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Only copy forces back if Stiffness-Effective or BKT-family damping. */
   if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
       (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled() ||
-      (poroelastic_enabled() && (g_poroelasticElementCount > 0))) {
+      poroelastic_gpu_active()) {
     /* Copy forces back to host */
     cudaMemcpyAsync(solver->force, solver->gpuData->forceDevice,
                     mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
@@ -16416,7 +16646,7 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Wait for the appropriate physics calculation to complete */
   if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
       (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled() ||
-      (poroelastic_enabled() && (g_poroelasticElementCount > 0))) {
+      poroelastic_gpu_active()) {
     Timer_Start("Force Stream Sync");
 
     Timer_Start("Force kernel wait only");
@@ -17016,9 +17246,13 @@ static void solver_run_collect_timers(void) {
         "Poroelastic Pressure Step",
         "Poroelastic pressure force reset",
         "Poroelastic pressure force kernel",
+        "Poroelastic pressure force D2H",
         "Poroelastic pressure force exchange",
+        "Poroelastic pressure force H2D",
         "Poroelastic pressure update",
-        "Poroelastic pressure field exchange"};
+        "Poroelastic pressure field D2H",
+        "Poroelastic pressure field exchange",
+        "Poroelastic pressure field H2D"};
     const int poroelasticPressureTimerCount =
         (int)(sizeof(poroelasticPressureTimers) /
               sizeof(poroelasticPressureTimers[0]));
@@ -17244,7 +17478,6 @@ static void solver_run() {
       solver_compute_force_topography(Global.mySolver, Global.myMesh,
                                       Param.theDeltaTSquared);
     }
-    solver_compute_force_poroelastic_pressure(Global.mySolver, Global.myMesh);
 
     /* Push host-side source/DRM/topography force terms to device before
      * GPU stiffness/damping accumulation. */
@@ -17260,6 +17493,7 @@ static void solver_run() {
       solver_compute_force_topography(Global.mySolver, Global.myMesh,
                                       Param.theDeltaTSquared);
     }
+    solver_compute_force_poroelastic_pressure(Global.mySolver, Global.myMesh);
     Timer_Stop("Physics Force Prep");
 
     Timer_Start("Physics Force Kernels Enqueue");
@@ -21164,12 +21398,20 @@ static void print_timing_stat() {
                             "Poroelastic pressure force reset");
     solver_print_timer_line("Force kernel",
                             "Poroelastic pressure force kernel");
+    solver_print_timer_line("Force D2H sync",
+                            "Poroelastic pressure force D2H");
     solver_print_timer_line("Force exchange/adjust",
                             "Poroelastic pressure force exchange");
+    solver_print_timer_line("Force H2D enqueue",
+                            "Poroelastic pressure force H2D");
     solver_print_timer_line("Pressure update",
                             "Poroelastic pressure update");
+    solver_print_timer_line("Pressure D2H sync",
+                            "Poroelastic pressure field D2H");
     solver_print_timer_line("Pressure exchange/adjust",
                             "Poroelastic pressure field exchange");
+    solver_print_timer_line("Pressure H2D patch",
+                            "Poroelastic pressure field H2D");
   }
   printf(
       "    1st schedule send data          : %.2f (Average)   %.2f (Max) %.2f "
