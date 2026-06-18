@@ -64,4 +64,9 @@ Suggested first checks on Vista:
    vertical compression check; compression should produce positive excess pore
    pressure under the current sign convention.
 
+An OpenSees companion model is provided in `opensees/model.tcl`. It reads the
+same `sourcefiles/baseforcefunction.in`, keeps the 3D block geometry rather
+than imposing `equalDOF` constraints, and approximates the Hercules dashpot
+boundaries with OpenSees zeroLength viscous dashpots.
+
 No local build is expected from this workspace; compile and run on Vista.
