@@ -16903,10 +16903,8 @@ static void solver_run_collect_timers(void) {
     Timer_Reduce("Acoustic pressure traction",
                  (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
   }
-  if (Timer_Exists("Poroelastic pressure traction")) {
-    Timer_Reduce("Poroelastic pressure traction",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
+  solver_reduce_timer_if_any("Poroelastic pressure traction",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   {
     static const char* acousticPressureTimers[] = {
         "Acoustic Pressure Step",
