@@ -336,15 +336,15 @@ Acoustic-elastic input flags (input file):
 	disabled when unset.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
-	`acoustic_formulation` is `pressure` or `velocity_potential`. Pressure is
-	appended as a
+	`acoustic_formulation` is `pressure` or `velocity_potential`, and writes
+	BrickUP pore pressure when `include_poroelastic=yes`. Pressure is appended as a
 	`Pressure(Pa)` column in the normal `station.N` files after any requested
 	displacement, velocity, and acceleration columns. For stations whose
 	containing element is acoustic, the motion columns are reconstructed from
 	the pressure gradient; for elastic stations they continue to use the
 	elastic displacement field. The pressure column is `nan` for stations whose
-	containing element is elastic, because scalar acoustic pressure is not
-	defined there.
+	containing element has neither acoustic pressure nor poroelastic pore
+	pressure.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
@@ -438,10 +438,10 @@ Poroelastic U-P input flags (experimental V1):
 	no-diffusion response).
 
 CPML policy for poroelasticity: PML elements are kept acoustic or
-elastic only. Any poroelastic candidate inside the CPML zone is converted
-to elastic and reported in the startup line
-`Poroelastic BrickUP: ... CPML candidates converted to elastic`, matching
-the practical SPECFEM-style policy that avoids poroelastic PML in V1.
+elastic only. Any saturated poroelastic candidate inside the CPML zone is
+left as elastic CPML and reported in the startup line
+`Poroelastic BrickUP: ... saturated CPML candidates left as elastic CPML`,
+matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 Scalar acoustic formulation — correctness fix & known limitation:
 

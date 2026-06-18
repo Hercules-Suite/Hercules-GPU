@@ -750,6 +750,7 @@ typedef struct vector3D_t vector3D_t;
 struct station_t {
     int32_t    id, nodestointerpolate[8];
     int32_t    pressure_is_defined;
+    int32_t    pore_pressure_is_defined;
     int32_t    acoustic_kinematics_ready;
     double*    displacementsX;
     double*    displacementsY;

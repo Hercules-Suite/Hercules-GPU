@@ -1837,9 +1837,9 @@ struct station_medium_record_t {
   int32_t stationId;
   int32_t ownerRank;
   int32_t ownerIsAcoustic;
+  int32_t ownerIsPoroelastic;
   int32_t pressureDefined;
   int32_t elementLevel;
-  int32_t reserved;
   int64_t elementId;
   double x;
   double y;
@@ -3845,11 +3845,12 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_formulation);
   }
   if ((printStationPressures == YES) &&
-      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+      (((includeAcoustic != YES) || (acousticPressureFormulation != YES)) &&
+       (includePoroelastic != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "print_station_pressures=yes requires include_acoustic=yes "
-                 "and acoustic_formulation=pressure or "
-                 "acoustic_formulation=velocity_potential\n");
+                 "print_station_pressures=yes requires either "
+                 "include_acoustic=yes with acoustic_formulation=pressure or "
+                 "velocity_potential, or include_poroelastic=yes\n");
   }
   if ((reconstructAcousticPlaneDisplacements == YES) &&
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
@@ -11060,10 +11061,11 @@ static void solver_init() {
       }
       monitor_print(
           "Poroelastic BrickUP: %.1fM elements, %.1fM pressure nodes; "
-          "%.1fM CPML candidates converted to elastic\n",
+          "%.1fM (%lld) saturated CPML candidates left as elastic CPML\n",
           (double)globalPoroelasticElements / 1.0e6,
           (double)globalPoroelasticNodes / 1.0e6,
-          (double)globalPoroelasticPmlCandidates / 1.0e6);
+          (double)globalPoroelasticPmlCandidates / 1.0e6,
+          (long long)globalPoroelasticPmlCandidates);
     }
   } else {
     g_poroelasticElementCount = 0;
@@ -21977,7 +21979,10 @@ static void station_write_mediums_file(
       fprintf(fp,
               "%d %s %s %d %" PRId64 " %d %.9e %.9e %.9e %.9e %.9e %.9e "
               "%.9e %.9e %.9e %.9e\n",
-              rec->stationId, rec->ownerIsAcoustic ? "acoustic" : "elastic",
+              rec->stationId,
+              rec->ownerIsAcoustic
+                  ? "acoustic"
+                  : (rec->ownerIsPoroelastic ? "poroelastic" : "elastic"),
               rec->pressureDefined ? "yes" : "no", rec->ownerRank,
               rec->elementId, rec->elementLevel, rec->x, rec->y, rec->z,
               rec->csi, rec->eta, rec->dzeta, rec->h, rec->Vp, rec->Vs,
@@ -22068,6 +22073,10 @@ void setup_stations_data() {
     }
   }
 
+  if (poroelastic_enabled() && (Param.surfaceGroundwaterTable == YES)) {
+    poro_groundwater_grid_load();
+  }
+
   Timer_Start("Stations Local Init");
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
@@ -22093,6 +22102,11 @@ void setup_stations_data() {
         (edata_t*)Global.myMesh->elemTable[stationElementIndex].data;
     Param.myStations[iLCStation].pressure_is_defined =
         (acoustic_pressure_enabled() && element_is_acoustic(stationMaterial))
+            ? 1
+            : 0;
+    Param.myStations[iLCStation].pore_pressure_is_defined =
+        (poroelastic_element_candidate(Global.myMesh, stationElementIndex, 0,
+                                       NULL, NULL))
             ? 1
             : 0;
     Param.myStations[iLCStation].acoustic_kinematics_ready = 0;
@@ -22133,8 +22147,11 @@ void setup_stations_data() {
     stationMediumRecords[iLCStation].ownerRank = Global.myID;
     stationMediumRecords[iLCStation].ownerIsAcoustic =
         element_is_acoustic(stationMaterial) ? 1 : 0;
+    stationMediumRecords[iLCStation].ownerIsPoroelastic =
+        Param.myStations[iLCStation].pore_pressure_is_defined;
     stationMediumRecords[iLCStation].pressureDefined =
-        Param.myStations[iLCStation].pressure_is_defined;
+        (Param.myStations[iLCStation].pressure_is_defined ||
+         Param.myStations[iLCStation].pore_pressure_is_defined);
     stationMediumRecords[iLCStation].elementLevel =
         Global.myMesh->elemTable[stationElementIndex].level;
     stationMediumRecords[iLCStation].elementId =
@@ -22731,12 +22748,8 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   vector3D_t localCoords;
   double pressure = 0.0;
 
-  if ((Param.printStationPressures != YES) || !acoustic_pressure_enabled() ||
-      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
+  if ((Param.printStationPressures != YES) || (Global.mySolver == NULL)) {
     return 0.0;
-  }
-  if (Param.myStations[iStation].pressure_is_defined == 0) {
-    return NAN;
   }
 
   localCoords = Param.myStations[iStation].localcoords;
@@ -22745,22 +22758,49 @@ static double interpolate_station_pressure_value(int32_t iStation) {
         Param.myStations[iStation].nodestointerpolate[iPhi];
   }
 
-  for (iPhi = 0; iPhi < 8; iPhi++) {
-    const double sh = (1 + xi[0][iPhi] * localCoords.x[0]) *
-                      (1 + xi[1][iPhi] * localCoords.x[1]) *
-                      (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
-    const int nd = nodesToInterpolate[iPhi];
-    /* velocity_potential: p = -dphi/dt = -(phi^n - phi^{n-1})/dt. */
-    const double val =
-        ((Param.theAcousticVelocityPotential == 1) && (Param.theDeltaT > 0.0))
-            ? (-(double)(Global.mySolver->pressure_tm1[nd] -
-                         Global.mySolver->pressure_tm2[nd]) /
-               Param.theDeltaT)
-            : (double)Global.mySolver->pressure_tm1[nd];
-    pressure += sh * val;
+  if (Param.myStations[iStation].pressure_is_defined != 0) {
+    if ((!acoustic_pressure_enabled()) ||
+        (Global.mySolver->pressure_tm1 == NULL)) {
+      return NAN;
+    }
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      const double sh = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                        (1 + xi[1][iPhi] * localCoords.x[1]) *
+                        (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+      const int nd = nodesToInterpolate[iPhi];
+      /* velocity_potential: p = -dphi/dt = -(phi^n - phi^{n-1})/dt. */
+      const double val =
+          ((Param.theAcousticVelocityPotential == 1) &&
+           (Param.theDeltaT > 0.0))
+              ? (-(double)(Global.mySolver->pressure_tm1[nd] -
+                           Global.mySolver->pressure_tm2[nd]) /
+                 Param.theDeltaT)
+              : (double)Global.mySolver->pressure_tm1[nd];
+      pressure += sh * val;
+    }
+    return pressure;
   }
 
-  return pressure;
+  if ((Param.myStations[iStation].pore_pressure_is_defined != 0) &&
+      poroelastic_enabled() && (Global.mySolver->pore_pressure_tm1 != NULL) &&
+      (Global.mySolver->pore_pressure_mass != NULL)) {
+    double massWeight = 0.0;
+
+    for (iPhi = 0; iPhi < 8; iPhi++) {
+      const double sh = (1 + xi[0][iPhi] * localCoords.x[0]) *
+                        (1 + xi[1][iPhi] * localCoords.x[1]) *
+                        (1 + xi[2][iPhi] * localCoords.x[2]) / 8;
+      const int nd = nodesToInterpolate[iPhi];
+      const double mass = (double)Global.mySolver->pore_pressure_mass[nd];
+      if (mass > 0.0) {
+        pressure += sh * (double)Global.mySolver->pore_pressure_tm1[nd];
+        massWeight += sh;
+      }
+    }
+    return (massWeight > 0.0) ? pressure : NAN;
+  }
+
+  return NAN;
 }
 
 static int32_t station_output_use_omp(void) {
