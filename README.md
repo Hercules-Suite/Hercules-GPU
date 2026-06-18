@@ -941,3 +941,54 @@ the samples to peak 1 and carry the physical amplitude in
 `force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
+
+Distributed compliant-base force source (`type_of_source = base_force`):
+
+For OpenSees-style 1D site-response validation, Hercules also supports a
+distributed base force source. It reads a base velocity history and applies
+nodal forces on the deepest horizontal mesh-node plane:
+
+```
+F_i(t) = scale * rho_base * Vs_base * A_i * v(t) * direction_i
+```
+
+where `A_i` is the bottom-face tributary area assembled from local hex
+faces. This is the force-source analogue of the Lysmer-Kuhlemeyer
+compliant-base input often used in OpenSees. It precomputes the standard
+`force_process.*` files during source initialization, so the solver hot path
+is unchanged.
+
+`source.in` keys:
+
+```
+type_of_source       = base_force
+source_function_type = discrete
+
+base_force_rho_kgm3      = 2500.0   # base/rock density
+base_force_vs_mps        = 700.0    # base/rock shear velocity
+base_force_direction_x   = 1.0      # x = north
+base_force_direction_y   = 0.0      # y = east
+base_force_direction_z   = 0.0      # z = down
+base_force_scale         = 2.0      # use 2.0 for outcrop velocity input
+
+# Optional. Omit to use the deepest mesh-node plane.
+# base_force_depth_m     = 30000.0
+# base_force_tolerance_m = 0.01
+```
+
+Place `baseforcefunction.in` beside `source.in`:
+
+```
+<nt1>             # number of velocity samples
+<tinit>           # initial delay (s)
+<dt>              # sampling interval (s)
+<v[0]>            # base velocity sample in m/s
+...
+<v[nt1-1]>
+```
+
+Use `base_force_scale = 1.0` for an incident/within velocity history and
+`2.0` for an outcrop velocity history, matching the usual compliant-base
+conversion convention. The first implementation is intended for flat-bottom
+validation columns; if `base_force_depth_m` is provided and no bottom faces
+are found within `base_force_tolerance_m`, source generation aborts clearly.
