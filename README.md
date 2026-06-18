@@ -63,6 +63,19 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
 - `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
 	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Full pressure D2H is still performed so station/plane/checkpoint output remains host-visible. `full` restores the legacy full pressure-field H2D load each step; checkpoint restart also forces `full`.
+- `HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
+	Selects poroelastic pore-pressure force synchronization before the scalar
+	MPI/adjust phase. Default is `sparse`, which gathers only nodes touched by
+	communication schedules and hanging-node adjustment, exchanges through the
+	existing host schedules, and scatters only those force entries back to the
+	GPU. `full` restores the full `nharbored` D2H/H2D copies.
+- `HERCULES_PORE_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
+	Selects poroelastic pore-pressure field synchronization. Default is
+	`resident`, which keeps pore-pressure histories resident on the GPU and
+	patches only MPI/adjust nodes plus local pore-pressure station interpolation
+	nodes, when station pressure output is enabled, back to the current device
+	field after host-side pressure sharing.
+	`full` restores full `nharbored` field D2H/H2D copies.
 
 Advanced/diagnostic toggles:
 
@@ -405,8 +418,9 @@ Poroelastic U-P input flags (experimental V1):
 	The hot path is matrix-free on the GPU: setup precomputes the
 	poroelastic element mapper and topography-aware pressure-test weights,
 	then CUDA kernels apply both conjugate operators and the pressure
-	update. MPI pressure exchange still uses the existing host schedules in
-	V1, so future optimization should target sparse pore-pressure transfer.
+	update. MPI pressure exchange still uses the existing host schedules, but
+	the pore-pressure transfer path is sparse by default: only schedule,
+	adjustment, and pressure-output station nodes are staged between host and GPU.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for

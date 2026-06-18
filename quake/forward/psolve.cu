@@ -260,6 +260,17 @@ static solver_float* g_pressureSparseBufferHost = NULL;
 static solver_float* g_pressureSparseBufferDevice = NULL;
 static int32_t g_pressureSparseNodeCount = 0;
 static int32_t g_pressureSparseHostPinned = 0;
+static int32_t g_porePressureForceSyncMode = -1;
+static int32_t g_porePressureForceSyncReported = 0;
+static int32_t g_porePressureFieldSyncMode = -1;
+static int32_t g_porePressureFieldSyncReported = 0;
+static int32_t g_porePressureSparseReady = 0;
+static int32_t* g_porePressureSparseNodesHost = NULL;
+static int32_t* g_porePressureSparseNodesDevice = NULL;
+static solver_float* g_porePressureSparseBufferHost = NULL;
+static solver_float* g_porePressureSparseBufferDevice = NULL;
+static int32_t g_porePressureSparseNodeCount = 0;
+static int32_t g_porePressureSparseHostPinned = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -663,11 +674,18 @@ static int32_t hercules_repro_strict(void);
 static int32_t displacement_sync_mode(void);
 static int32_t pressure_force_sync_mode(void);
 static int32_t pressure_field_sync_mode(void);
+static int32_t pore_pressure_force_sync_mode(void);
+static int32_t pore_pressure_field_sync_mode(void);
 static void solver_init_disp_boundary_sync(mysolver_t* solver);
 static void solver_init_pressure_sparse_sync(mysolver_t* solver);
 static void solver_download_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pressure_field_sparse(mysolver_t* solver);
+static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver);
+static void solver_download_pore_pressure_force_sparse(mysolver_t* solver);
+static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver);
+static void solver_download_pore_pressure_field_sparse(mysolver_t* solver);
+static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
@@ -13180,6 +13198,32 @@ static void solver_delete() {
   g_pressureFieldSyncMode = -1;
   g_pressureFieldSyncReported = 0;
 
+  if (g_porePressureSparseNodesDevice != NULL) {
+    cudaFree(g_porePressureSparseNodesDevice);
+    g_porePressureSparseNodesDevice = NULL;
+  }
+  if (g_porePressureSparseBufferDevice != NULL) {
+    cudaFree(g_porePressureSparseBufferDevice);
+    g_porePressureSparseBufferDevice = NULL;
+  }
+  free(g_porePressureSparseNodesHost);
+  g_porePressureSparseNodesHost = NULL;
+  if (g_porePressureSparseBufferHost != NULL) {
+    if (g_porePressureSparseHostPinned) {
+      cudaFreeHost(g_porePressureSparseBufferHost);
+    } else {
+      free(g_porePressureSparseBufferHost);
+    }
+    g_porePressureSparseBufferHost = NULL;
+  }
+  g_porePressureSparseHostPinned = 0;
+  g_porePressureSparseNodeCount = 0;
+  g_porePressureSparseReady = 0;
+  g_porePressureForceSyncMode = -1;
+  g_porePressureForceSyncReported = 0;
+  g_porePressureFieldSyncMode = -1;
+  g_porePressureFieldSyncReported = 0;
+
   compute_adjust_cache_free();
 
   /* Destroy streams */
@@ -15316,13 +15360,18 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure force kernel");
 
   Timer_Start("Poroelastic pressure force D2H");
-  cudaMemcpyAsync(solver->pore_pressure_force,
-                  solver->gpuData->porePressureForceDevice,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  if (pore_pressure_force_sync_mode() != 0) {
+    solver_download_pore_pressure_force_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->pore_pressure_force,
+                    solver->gpuData->porePressureForceDevice,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
   Timer_Stop("Poroelastic pressure force D2H");
 
   Timer_Start("Poroelastic pressure force exchange");
@@ -15334,12 +15383,17 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure force exchange");
 
   Timer_Start("Poroelastic pressure force H2D");
-  cudaMemcpyAsync(solver->gpuData->porePressureForceDevice,
-                  solver->pore_pressure_force,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
+  if (pore_pressure_force_sync_mode() != 0) {
+    solver_upload_pore_pressure_force_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->gpuData->porePressureForceDevice,
+                    solver->pore_pressure_force,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
   Timer_Stop("Poroelastic pressure force H2D");
 
   Timer_Start("Poroelastic pressure update");
@@ -15358,13 +15412,18 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure update");
 
   Timer_Start("Poroelastic pressure field D2H");
-  cudaMemcpyAsync(solver->pore_pressure_tm2,
-                  solver->gpuData->porePressureTm2Device,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  if (pore_pressure_field_sync_mode() != 0) {
+    solver_download_pore_pressure_field_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->pore_pressure_tm2,
+                    solver->gpuData->porePressureTm2Device,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
   Timer_Stop("Poroelastic pressure field D2H");
 
   Timer_Start("Poroelastic pressure field exchange");
@@ -15376,12 +15435,17 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure field exchange");
 
   Timer_Start("Poroelastic pressure field H2D");
-  cudaMemcpyAsync(solver->gpuData->porePressureTm2Device,
-                  solver->pore_pressure_tm2,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
+  if (pore_pressure_field_sync_mode() != 0) {
+    solver_upload_pore_pressure_field_sparse(solver);
+  } else {
+    cudaMemcpyAsync(solver->gpuData->porePressureTm2Device,
+                    solver->pore_pressure_tm2,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
   Timer_Stop("Poroelastic pressure field H2D");
 
   Timer_Stop("Poroelastic Pressure Step");
@@ -15560,6 +15624,69 @@ static int32_t pressure_field_sync_mode(void) {
   }
 
   return g_pressureFieldSyncMode;
+}
+
+static int32_t pore_pressure_force_sync_mode(void) {
+  if (g_porePressureForceSyncMode < 0) {
+    const char* env = getenv("HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE");
+    int32_t useSparse = 1;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "full") == 0 || strcasecmp(env, "cpu") == 0 ||
+          strcasecmp(env, "dense") == 0 || strcasecmp(env, "off") == 0 ||
+          strcasecmp(env, "no") == 0 || strcasecmp(env, "false") == 0 ||
+          strcmp(env, "0") == 0) {
+        useSparse = 0;
+      } else if (strcasecmp(env, "sparse") == 0 ||
+                 strcasecmp(env, "boundary") == 0 ||
+                 strcasecmp(env, "auto") == 0 || strcasecmp(env, "yes") == 0 ||
+                 strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        useSparse = 1;
+      }
+    }
+
+    g_porePressureForceSyncMode = useSparse;
+    if ((Global.myID == 0) && (g_porePressureForceSyncReported == 0)) {
+      monitor_print("Poroelastic pressure force sync path: %s\n",
+                    g_porePressureForceSyncMode ? "sparse" : "full");
+      g_porePressureForceSyncReported = 1;
+    }
+  }
+
+  return g_porePressureForceSyncMode;
+}
+
+static int32_t pore_pressure_field_sync_mode(void) {
+  if (g_porePressureFieldSyncMode < 0) {
+    const char* env = getenv("HERCULES_PORE_PRESSURE_FIELD_SYNC_MODE");
+    int32_t useSparse = 1;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "full") == 0 || strcasecmp(env, "cpu") == 0 ||
+          strcasecmp(env, "dense") == 0 || strcasecmp(env, "off") == 0 ||
+          strcasecmp(env, "no") == 0 || strcasecmp(env, "false") == 0 ||
+          strcmp(env, "0") == 0) {
+        useSparse = 0;
+      } else if (strcasecmp(env, "sparse") == 0 ||
+                 strcasecmp(env, "boundary") == 0 ||
+                 strcasecmp(env, "resident") == 0 ||
+                 strcasecmp(env, "auto") == 0 || strcasecmp(env, "yes") == 0 ||
+                 strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        useSparse = 1;
+      }
+    }
+
+    g_porePressureFieldSyncMode = useSparse;
+    if ((Global.myID == 0) && (g_porePressureFieldSyncReported == 0)) {
+      monitor_print("Poroelastic pressure field sync path: %s\n",
+                    g_porePressureFieldSyncMode
+                        ? "resident+sparse-boundary+stations"
+                        : "full");
+      g_porePressureFieldSyncReported = 1;
+    }
+  }
+
+  return g_porePressureFieldSyncMode;
 }
 
 static void disp_boundary_append_messenger_nodes(int32_t* nodes,
@@ -15936,6 +16063,328 @@ static void solver_upload_pressure_field_sparse(mysolver_t* solver) {
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
     fprintf(stderr, "Thread %d: pressure field sparse scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
+static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes = NULL;
+  cudaError_t cerror;
+
+  if (g_porePressureSparseReady != 0 ||
+      !poroelastic_gpu_active() ||
+      (pore_pressure_force_sync_mode() == 0 &&
+       pore_pressure_field_sync_mode() == 0)) {
+    return;
+  }
+
+  compute_adjust_cache_build();
+
+  capacity =
+      messenger_countnodes(solver->an_sched->first_s) +
+      messenger_countnodes(solver->an_sched->first_c) +
+      messenger_countnodes(solver->dn_sched->first_s) +
+      messenger_countnodes(solver->dn_sched->first_c) + g_adjustDnCount +
+      g_adjustParentCount;
+  if ((pore_pressure_field_sync_mode() != 0) &&
+      (Param.printStationPressures == YES)) {
+    capacity += 8 * Param.myNumberOfStations;
+  }
+
+  if (capacity <= 0) {
+    g_porePressureSparseReady = 1;
+    g_porePressureSparseNodeCount = 0;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * capacity);
+  if (nodes == NULL) {
+    fprintf(stderr, "Thread %d: pore pressure sparse node list alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->an_sched->first_c);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_s);
+  disp_boundary_append_messenger_nodes(nodes, &count, solver->dn_sched->first_c);
+
+  for (int32_t i = 0; i < g_adjustDnCount; i++) {
+    nodes[count++] = g_adjustDanglingLnid[i];
+  }
+  for (int32_t i = 0; i < g_adjustParentCount; i++) {
+    nodes[count++] = g_adjustParentIds[i];
+  }
+
+  if ((pore_pressure_field_sync_mode() != 0) &&
+      (Param.printStationPressures == YES) && (Param.myStations != NULL)) {
+    for (int32_t i = 0; i < Param.myNumberOfStations; i++) {
+      if (Param.myStations[i].pore_pressure_is_defined == 0) {
+        continue;
+      }
+      for (int32_t j = 0; j < 8; j++) {
+        const int32_t node = Param.myStations[i].nodestointerpolate[j];
+        if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+          nodes[count++] = node;
+        }
+      }
+    }
+  }
+
+  qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+  for (int32_t i = 0; i < count; i++) {
+    if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+      nodes[uniqueCount++] = nodes[i];
+    }
+  }
+
+  g_porePressureSparseNodeCount = uniqueCount;
+  if (g_porePressureSparseNodeCount <= 0) {
+    free(nodes);
+    g_porePressureSparseReady = 1;
+    return;
+  }
+
+  g_porePressureSparseNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * g_porePressureSparseNodeCount);
+  if (g_porePressureSparseNodesHost == NULL) {
+    free(nodes);
+    fprintf(stderr, "Thread %d: pore pressure sparse unique alloc failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  memcpy(g_porePressureSparseNodesHost, nodes,
+         sizeof(int32_t) * g_porePressureSparseNodeCount);
+  free(nodes);
+
+  cerror = cudaMalloc((void**)&g_porePressureSparseNodesDevice,
+                      sizeof(int32_t) * g_porePressureSparseNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr,
+            "Thread %d: pore pressure sparse node device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaMalloc((void**)&g_porePressureSparseBufferDevice,
+                      sizeof(solver_float) * g_porePressureSparseNodeCount);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr,
+            "Thread %d: pore pressure sparse buffer device alloc - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  cerror = cudaHostAlloc((void**)&g_porePressureSparseBufferHost,
+                         sizeof(solver_float) * g_porePressureSparseNodeCount,
+                         cudaHostAllocDefault);
+  if (cerror == cudaSuccess) {
+    g_porePressureSparseHostPinned = 1;
+  } else {
+    g_porePressureSparseBufferHost =
+        (solver_float*)malloc(sizeof(solver_float) *
+                              g_porePressureSparseNodeCount);
+    g_porePressureSparseHostPinned = 0;
+    if (g_porePressureSparseBufferHost == NULL) {
+      fprintf(stderr,
+              "Thread %d: pore pressure sparse buffer host alloc failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  cerror =
+      cudaMemcpy(g_porePressureSparseNodesDevice,
+                 g_porePressureSparseNodesHost,
+                 sizeof(int32_t) * g_porePressureSparseNodeCount,
+                 cudaMemcpyHostToDevice);
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure sparse node copy - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  if (Global.myID == 0) {
+    monitor_print("Poroelastic pressure sparse sync nodes: %d of %d harbored\n",
+                  g_porePressureSparseNodeCount, Global.myMesh->nharbored);
+  }
+
+  g_porePressureSparseReady = 1;
+}
+
+static void solver_download_pore_pressure_force_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
+      solver->gpuData->porePressureForceDevice,
+      g_porePressureSparseBufferDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure force sparse gather - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferHost,
+                  g_porePressureSparseBufferDevice,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    solver->pore_pressure_force[g_porePressureSparseNodesHost[i]] =
+        g_porePressureSparseBufferHost[i];
+  }
+}
+
+static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    g_porePressureSparseBufferHost[i] =
+        solver->pore_pressure_force[g_porePressureSparseNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferDevice,
+                  g_porePressureSparseBufferHost,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
+      g_porePressureSparseBufferDevice,
+      solver->gpuData->porePressureForceDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure force sparse scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
+static void solver_download_pore_pressure_field_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
+      solver->gpuData->porePressureTm2Device,
+      g_porePressureSparseBufferDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure field sparse gather - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferHost,
+                  g_porePressureSparseBufferDevice,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    solver->pore_pressure_tm2[g_porePressureSparseNodesHost[i]] =
+        g_porePressureSparseBufferHost[i];
+  }
+}
+
+static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    g_porePressureSparseBufferHost[i] =
+        solver->pore_pressure_tm2[g_porePressureSparseNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferDevice,
+                  g_porePressureSparseBufferHost,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
+      g_porePressureSparseBufferDevice,
+      solver->gpuData->porePressureTm2Device);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure field sparse scatter - %s\n",
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
