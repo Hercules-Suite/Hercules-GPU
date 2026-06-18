@@ -670,6 +670,7 @@ static void solver_upload_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pressure_field_sparse(mysolver_t* solver);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
+static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
 static void solver_wait_force_upload_source_event(void);
 static void solver_record_gpu_event(mysolver_t* solver, int eventID,
@@ -1911,7 +1912,7 @@ static int poroelastic_gpu_active(void) {
 }
 
 static double poroelastic_biot_storage_modulus(void) {
-  /* V1 assumes incompressible grains, so 1/M ~= porosity/Kf. */
+  /* V1 assumes incompressible grains and alpha=1, so 1/M ~= porosity/Kf. */
   return Param.thePoroelasticFluidBulkModulus / Param.thePoroelasticPorosity;
 }
 
@@ -3943,6 +3944,15 @@ static int32_t parse_parameters(const char* numericalin) {
       (Param.thePoroelasticBiotAlpha > 1.0)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "poroelastic_biot_alpha=%g must be in [0,1]\n",
+                 Param.thePoroelasticBiotAlpha);
+  }
+  if ((includePoroelastic == YES) &&
+      (fabs(Param.thePoroelasticBiotAlpha - 1.0) > 1.0e-12)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "poroelastic_biot_alpha=%g is not supported in BrickUP V1. "
+                 "The current storage modulus assumes incompressible grains "
+                 "(alpha=1, M=K_f/porosity); add a grain bulk modulus before "
+                 "using alpha<1.\n",
                  Param.thePoroelasticBiotAlpha);
   }
   if (Param.thePoroelasticFluidBulkModulus <= 0.0 ||
@@ -9188,7 +9198,6 @@ static void solver_init() {
   int64_t globalPressureElements = 0;
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
-  int64_t localPoroelasticDrainedClamped = 0;
   solver_float* pressureFreeSurfaceHost = NULL;
 
   /* Initialize the GPU */
@@ -10106,32 +10115,10 @@ static void solver_init() {
       }
     }
 
-    /* Poroelastic u-p: the solid skeleton stiffness must use the DRAINED
-     * modulus. The mesh Vp for saturated soil is the UNDRAINED P-velocity,
-     * so the constrained modulus baked into c2 (lambda + 2*mu = rho*Vp^2)
-     * already embeds the Biot fluid stiffening alpha^2 * M, where M is the
-     * Biot modulus (= K_f/porosity here). The Q / Q^T pore-pressure coupling
-     * re-supplies that same alpha^2 * M, so without this correction the
-     * fluid stiffness is counted twice and the effective P-wave speed is
-     * inflated to sqrt(Vp^2 + alpha^2*M/rho). Subtract alpha^2*M from lambda
-     * (shear mu is unaffected by the fluid: drained mu == undrained mu) so
-     * that K_drained + Q S^-1 Q^T reproduces the input (undrained) Vp and
-     * the existing CFL/dt picked from that Vp stays valid. This mirrors
-     * OpenSees BrickUP, whose getStiff() uses the drained material tangent. */
-    if (poro_element_active) {
-      const double biotAlpha = Param.thePoroelasticBiotAlpha;
-      const double biotModulus = poroelastic_biot_storage_modulus();
-      double lambdaDrained = lambda - biotAlpha * biotAlpha * biotModulus;
-      if (lambdaDrained < 0.0) {
-        /* Inputs inconsistent: the saturated Vp is too low to contain the
-         * requested fluid stiffening alpha^2*M (drained Poisson ratio would
-         * be negative). Clamp to the lambda=0 floor and warn so results are
-         * still bounded; the user should supply a drained Vp or smaller M. */
-        lambdaDrained = 0.0;
-        localPoroelasticDrainedClamped++;
-      }
-      ep->c2 = Param.theDeltaTSquared * edata->edgesize * lambdaDrained / 9;
-    }
+    /* Poroelastic u-p V1 treats the input Vp as the dry/drained skeleton Vp.
+     * The existing elastic c1/c2 coefficients therefore remain the skeleton
+     * operator, and the Q/Q^T pore-pressure coupling supplies the fluid
+     * stiffness dynamically. Do not subtract alpha^2*M here. */
 
     /* Assign the element mass to its vertices */
     /* mass is the total mass of the element   */
@@ -11208,10 +11195,6 @@ static void solver_init() {
     MPI_Allreduce(&localPoroelasticPmlCandidates,
                   &globalPoroelasticPmlCandidates, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
-    int64_t globalPoroelasticDrainedClamped = 0;
-    MPI_Allreduce(&localPoroelasticDrainedClamped,
-                  &globalPoroelasticDrainedClamped, 1, MPI_INT64_T, MPI_SUM,
-                  comm_solver);
     g_poroelasticElementCount = globalPoroelasticElements;
     g_poroelasticNodeCount = globalPoroelasticNodes;
     g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
@@ -11233,18 +11216,10 @@ static void solver_init() {
           (double)globalPoroelasticPmlCandidates / 1.0e6,
           (long long)globalPoroelasticPmlCandidates);
       monitor_print(
-          "Poroelastic drained skeleton: subtracted alpha^2*M = %.3g Pa "
-          "(alpha=%.3f, M=K_f/n=%.3g Pa) from lambda for the solid stiffness\n",
-          Param.thePoroelasticBiotAlpha * Param.thePoroelasticBiotAlpha *
-              poroelastic_biot_storage_modulus(),
-          Param.thePoroelasticBiotAlpha, poroelastic_biot_storage_modulus());
-      if (globalPoroelasticDrainedClamped > 0) {
-        monitor_print(
-            "WARNING: %lld poroelastic elements had drained lambda < 0 and "
-            "were clamped to 0 (saturated Vp too low for alpha^2*M; supply a "
-            "drained Vp or reduce K_f/alpha for consistent inputs)\n",
-            (long long)globalPoroelasticDrainedClamped);
-      }
+          "Poroelastic skeleton stiffness:  input Vp is dry/drained; "
+          "fluid storage M=K_f/n=%.3g Pa, alpha=%.3f\n",
+          poroelastic_biot_storage_modulus(),
+          Param.thePoroelasticBiotAlpha);
     }
   } else {
     g_poroelasticElementCount = 0;
@@ -16678,6 +16653,58 @@ static void solver_upload_disp_boundary_gpu(mysolver_t* solver) {
   Timer_Stop("GPU Patch Disp");
 }
 
+static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  if (displacement_sync_mode() == 0) {
+    Timer_Start("GPU Patch Disp");
+    cudaMemcpyAsync(solver->gpuData->tm2Device, solver->tm2,
+                    mesh->nharbored * sizeof(fvector_t),
+                    cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(fvector_t);
+    Timer_Stop("GPU Patch Disp");
+    return;
+  }
+
+  solver_init_disp_boundary_sync(solver);
+  if (g_dispBoundaryNodeCount <= 0) {
+    return;
+  }
+
+  Timer_Start("GPU Patch Disp");
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_dispBoundaryNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_dispBoundaryNodeCount; i++) {
+    g_dispBoundaryBufferHost[i] = solver->tm2[g_dispBoundaryNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_dispBoundaryBufferDevice, g_dispBoundaryBufferHost,
+                  sizeof(fvector_t) * g_dispBoundaryNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_dispBoundaryNodeCount * (int64_t)sizeof(fvector_t);
+
+  blocksize = 256;
+  gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
+  kernelDispBoundaryScatter<<<gridsize, blocksize, 0,
+                              solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
+      g_dispBoundaryBufferDevice, solver->gpuData->tm2Device);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: current displacement boundary scatter - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  Timer_Stop("GPU Patch Disp");
+}
+
 static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
   (void)mesh;
 
@@ -17466,6 +17493,7 @@ static void solver_run() {
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
     fvector_t* tmpvector;
+    int pressure_step_needs_synced_disp = poroelastic_gpu_active();
 
     /* prepare for a new iteration
      * swap displacement vectors for t(n) and t(n-1) */
@@ -17607,12 +17635,34 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Wait/Post");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
-    solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
-    solver_run_poroelastic_pressure_step(Global.mySolver, Global.myMesh);
+    if (!pressure_step_needs_synced_disp) {
+      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+    }
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Physics Displacement Wait/Post");
     Timer_Stop("Compute Physics");
+
+    if (pressure_step_needs_synced_disp) {
+      Timer_Start("Communication");
+      Timer_Start("Comm Displacement Exchange");
+      HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
+      solver_send_displacement_anchored(Global.mySolver);
+      solver_adjust_displacement(Global.mySolver);
+      HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
+      solver_send_displacement_dangling(Global.mySolver);
+      Timer_Stop("Comm Displacement Exchange");
+      Timer_Stop("Communication");
+
+      solver_upload_current_disp_gpu(Global.mySolver, Global.myMesh);
+
+      Timer_Start("Compute Physics");
+      Timer_Start("Physics Displacement Wait/Post");
+      solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+      solver_run_poroelastic_pressure_step(Global.mySolver, Global.myMesh);
+      Timer_Stop("Physics Displacement Wait/Post");
+      Timer_Stop("Compute Physics");
+    }
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Reset");
@@ -17620,17 +17670,19 @@ static void solver_run() {
     Timer_Stop("GPU Reset");
     Timer_Stop("GPU Memory Copy");
 
-    Timer_Start("Communication");
-    Timer_Start("Comm Displacement Exchange");
-    HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-    solver_send_displacement_anchored(Global.mySolver);
-    solver_adjust_displacement(Global.mySolver);
-    HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-    solver_send_displacement_dangling(Global.mySolver);
-    Timer_Stop("Comm Displacement Exchange");
-    Timer_Stop("Communication");
+    if (!pressure_step_needs_synced_disp) {
+      Timer_Start("Communication");
+      Timer_Start("Comm Displacement Exchange");
+      HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
+      solver_send_displacement_anchored(Global.mySolver);
+      solver_adjust_displacement(Global.mySolver);
+      HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
+      solver_send_displacement_dangling(Global.mySolver);
+      Timer_Stop("Comm Displacement Exchange");
+      Timer_Stop("Communication");
 
-    solver_upload_disp_boundary_gpu(Global.mySolver);
+      solver_upload_disp_boundary_gpu(Global.mySolver);
+    }
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
@@ -23177,7 +23229,7 @@ static double interpolate_station_pressure_value(int32_t iStation) {
         massWeight += sh;
       }
     }
-    return (massWeight > 0.0) ? pressure : NAN;
+    return (massWeight > 0.0) ? (pressure / massWeight) : NAN;
   }
 
   return NAN;

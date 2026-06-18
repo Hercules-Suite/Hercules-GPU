@@ -392,14 +392,13 @@ Poroelastic U-P input flags (experimental V1):
 	poroelastic path for saturated shallow solid soil.
 - `poroelastic_formulation`
 	Optional. Currently only `brick_up` is supported. The implementation
-	rebuilds the solid skeleton stiffness on the **drained** modulus for
-	poroelastic elements (it subtracts the Biot fluid stiffening
-	`alpha^2 * M`, `M = K_f/porosity`, from `lambda`; shear is unchanged),
-	adds the `-alpha p I` pore-pressure coupling force, and evolves a scalar
-	pore pressure from volumetric strain increment plus optional Darcy
-	diffusion. The drained skeleton plus the `Q S^-1 Q^T` coupling reproduces
-	the input (undrained/saturated) `Vp`, so the fluid stiffness is counted
-	once — not twice — and the CFL/dt chosen from the mesh `Vp` stays valid.
+	uses the input `Vp`, `Vs`, and density as the **dry/drained skeleton**
+	elastic stiffness, adds the `-alpha p I` pore-pressure coupling force,
+	and evolves a scalar pore pressure from volumetric strain increment plus
+	optional Darcy diffusion. Do not provide saturated/undrained `Vp` to this
+	V1 path unless a future velocity-convention conversion is added; otherwise
+	the fluid stiffness would be counted in both the skeleton and the
+	pressure coupling.
 	The displacement-pressure coupling uses one shared
 	2x2x2-Gauss BrickUP coupling operator, applied as `Q p` in the
 	skeleton force path and as `Q^T du` in the pore-pressure source path.
@@ -440,7 +439,9 @@ Poroelastic U-P input flags (experimental V1):
 	poroelastic-elastic boundary in V1.
 - Poroelastic material constants:
 	`poroelastic_porosity` (default `0.4`),
-	`poroelastic_biot_alpha` (default `1.0`),
+	`poroelastic_biot_alpha` (default `1.0`; V1 currently supports only
+	`1.0`, because storage uses the incompressible-grain
+	`M = K_f / porosity` form),
 	`poroelastic_fluid_bulk_modulus_pa` (default `2.2e9`),
 	`poroelastic_fluid_density_kgm3` (default `1000.0`),
 	`poroelastic_fluid_viscosity_pa_s` (default `1.0e-3`), and

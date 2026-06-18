@@ -1260,36 +1260,83 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
     }
   }
 
-  double gradp[3] = {0.0, 0.0, 0.0};
-  const double gradCoeff = 0.25 / h;
   if (haveDiffusion) {
+    double diffusionWeak[8];
+    const double diffusivity[3] = {diffusivityX, diffusivityY, diffusivityZ};
+
+    for (int j = 0; j < 8; j++) {
+      diffusionWeak[j] = 0.0;
+    }
+
+    for (int gx = 0; gx < 2; gx++) {
+      const double xi = gcoord[gx];
+      for (int gy = 0; gy < 2; gy++) {
+        const double eta = gcoord[gy];
+        for (int gz = 0; gz < 2; gz++) {
+          const double zeta = gcoord[gz];
+          double gradp[3] = {0.0, 0.0, 0.0};
+
+          for (int j = 0; j < 8; j++) {
+            const double sx = poro_node_sign_device(j, 0);
+            const double sy = poro_node_sign_device(j, 1);
+            const double sz = poro_node_sign_device(j, 2);
+            const double ax = 1.0 + sx * xi;
+            const double ay = 1.0 + sy * eta;
+            const double az = 1.0 + sz * zeta;
+            const int32_t lnid =
+                gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+            const double pold = (double)gpuData->porePressureTm1Device[lnid];
+            const double shapeScale =
+                gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
+                                                             pindex];
+            const double dNpdx0 = shapeScale * sx * ay * az / (4.0 * h);
+            const double dNpdx1 = shapeScale * sy * ax * az / (4.0 * h);
+            const double dNpdx2 = shapeScale * sz * ax * ay / (4.0 * h);
+
+            gradp[0] += dNpdx0 * pold;
+            gradp[1] += dNpdx1 * pold;
+            gradp[2] += dNpdx2 * pold;
+          }
+
+          for (int j = 0; j < 8; j++) {
+            const double sx = poro_node_sign_device(j, 0);
+            const double sy = poro_node_sign_device(j, 1);
+            const double sz = poro_node_sign_device(j, 2);
+            const double ax = 1.0 + sx * xi;
+            const double ay = 1.0 + sy * eta;
+            const double az = 1.0 + sz * zeta;
+            const double shapeScale =
+                gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
+                                                             pindex];
+            const double dNpdx0 = shapeScale * sx * ay * az / (4.0 * h);
+            const double dNpdx1 = shapeScale * sy * ax * az / (4.0 * h);
+            const double dNpdx2 = shapeScale * sz * ax * ay / (4.0 * h);
+            double weakDiffusion = 0.0;
+
+            weakDiffusion += diffusivity[0] * gradp[0] * dNpdx0;
+            weakDiffusion += diffusivity[1] * gradp[1] * dNpdx1;
+            weakDiffusion += diffusivity[2] * gradp[2] * dNpdx2;
+            diffusionWeak[j] += detJ * weakDiffusion;
+          }
+        }
+      }
+    }
+
     for (int j = 0; j < 8; j++) {
       const int32_t lnid =
           gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
-      const double pold = (double)gpuData->porePressureTm1Device[lnid];
-      gradp[0] += poro_node_sign_device(j, 0) * gradCoeff * pold;
-      gradp[1] += poro_node_sign_device(j, 1) * gradCoeff * pold;
-      gradp[2] += poro_node_sign_device(j, 2) * gradCoeff * pold;
+      double rhs = -storageM * qtDeltaU[j] - deltaT * diffusionWeak[j];
+
+      atomicAdd((solver_float*)(gpuData->porePressureForceDevice + lnid),
+                (solver_float)rhs);
     }
+    return;
   }
 
-  const double diffusivity[3] = {diffusivityX, diffusivityY, diffusivityZ};
-  const double elementVolume = 8.0 * detJ;
   for (int j = 0; j < 8; j++) {
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
-    double rhs = -storageM * qtDeltaU[j];
-
-    if (haveDiffusion) {
-      double weakDiffusion = 0.0;
-      for (int axis = 0; axis < 3; axis++) {
-        const double gradN =
-            poro_node_sign_device(j, axis) * gradCoeff;
-        weakDiffusion += diffusivity[axis] * gradp[axis] * gradN;
-      }
-      rhs -= deltaT * elementVolume * weakDiffusion;
-    }
-
+    const double rhs = -storageM * qtDeltaU[j];
     atomicAdd((solver_float*)(gpuData->porePressureForceDevice + lnid),
               (solver_float)rhs);
   }
