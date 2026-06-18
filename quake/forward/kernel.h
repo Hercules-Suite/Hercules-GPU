@@ -152,7 +152,8 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
                                                double biotAlpha);
 
 __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
-                                                gpu_data_t* gpuData);
+                                                gpu_data_t* gpuData,
+                                                int useDrainMass);
 
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
