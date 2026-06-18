@@ -418,6 +418,7 @@ typedef struct gpu_data_t {
     int32_t*      poroelasticElemMapperDevice;
     double*       poroelasticElemHDevice;
     double*       poroelasticElemDetJDevice;
+    double*       poroelasticStorageMDevice;
     double*       poroelasticPressureShapeScaleDevice; /* [8][poroelasticElemCount] */
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */

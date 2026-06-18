@@ -1190,11 +1190,10 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
 
 __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
                                                gpu_data_t* gpuData,
-                                               double storageM,
                                                double deltaT,
-                                               double diffusivityX,
-                                               double diffusivityY,
-                                               double diffusivityZ,
+                                               double mobilityX,
+                                               double mobilityY,
+                                               double mobilityZ,
                                                int haveDiffusion,
                                                double biotAlpha)
 {
@@ -1209,7 +1208,8 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
   const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
   const double h = gpuData->poroelasticElemHDevice[pindex];
   const double detJ = gpuData->poroelasticElemDetJDevice[pindex];
-  if ((h <= 0.0) || (detJ <= 0.0)) {
+  const double storageM = gpuData->poroelasticStorageMDevice[pindex];
+  if ((h <= 0.0) || (detJ <= 0.0) || (storageM <= 0.0)) {
     return;
   }
 
@@ -1262,7 +1262,9 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
 
   if (haveDiffusion) {
     double diffusionWeak[8];
-    const double diffusivity[3] = {diffusivityX, diffusivityY, diffusivityZ};
+    const double diffusivity[3] = {storageM * mobilityX,
+                                   storageM * mobilityY,
+                                   storageM * mobilityZ};
 
     for (int j = 0; j < 8; j++) {
       diffusionWeak[j] = 0.0;

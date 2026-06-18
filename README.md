@@ -439,9 +439,11 @@ Poroelastic U-P input flags (experimental V1):
 	poroelastic-elastic boundary in V1.
 - Poroelastic material constants:
 	`poroelastic_porosity` (default `0.4`),
-	`poroelastic_biot_alpha` (default `1.0`; V1 currently supports only
-	`1.0`, because storage uses the incompressible-grain
-	`M = K_f / porosity` form),
+	`poroelastic_biot_alpha` (default `1.0`; values below `1.0` derive
+	a local grain bulk modulus from the dry/drained skeleton relation
+	`K_s = K_d / (1 - alpha)` and use
+	`1/M = (alpha - porosity) / K_s + porosity / K_f`; `alpha = 1.0`
+	uses the incompressible-grain limit `M = K_f / porosity`),
 	`poroelastic_fluid_bulk_modulus_pa` (default `2.2e9`),
 	`poroelastic_fluid_density_kgm3` (default `1000.0`),
 	`poroelastic_fluid_viscosity_pa_s` (default `1.0e-3`), and

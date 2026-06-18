@@ -144,11 +144,10 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
 
 __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
                                                gpu_data_t* gpuData,
-                                               double storageM,
                                                double deltaT,
-                                               double diffusivityX,
-                                               double diffusivityY,
-                                               double diffusivityZ,
+                                               double mobilityX,
+                                               double mobilityY,
+                                               double mobilityZ,
                                                int haveDiffusion,
                                                double biotAlpha);
 

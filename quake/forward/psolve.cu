@@ -1911,9 +1911,52 @@ static int poroelastic_gpu_active(void) {
   return poroelastic_enabled() && (g_poroelasticElementCount > 0);
 }
 
-static double poroelastic_biot_storage_modulus(void) {
-  /* V1 assumes incompressible grains and alpha=1, so 1/M ~= porosity/Kf. */
+static double poroelastic_biot_storage_modulus_incompressible_grains(void) {
   return Param.thePoroelasticFluidBulkModulus / Param.thePoroelasticPorosity;
+}
+
+static double poroelastic_drained_bulk_modulus(const edata_t* edata) {
+  const double vp = (double)edata->Vp;
+  const double vs = (double)edata->Vs;
+  const double rho = (double)edata->rho;
+
+  return rho * (vp * vp - (4.0 / 3.0) * vs * vs);
+}
+
+static double poroelastic_biot_storage_modulus_for_element(const edata_t* edata,
+                                                          int32_t eindex) {
+  const double porosity = Param.thePoroelasticPorosity;
+  const double alpha = Param.thePoroelasticBiotAlpha;
+  const double fluidBulk = Param.thePoroelasticFluidBulkModulus;
+  double drainedBulk;
+  double grainBulk;
+  double invStorage;
+
+  if (fabs(alpha - 1.0) <= 1.0e-12) {
+    return poroelastic_biot_storage_modulus_incompressible_grains();
+  }
+
+  drainedBulk = poroelastic_drained_bulk_modulus(edata);
+  if (!isfinite(drainedBulk) || (drainedBulk <= 0.0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "poroelastic element %d has non-positive dry/drained bulk "
+                 "modulus K_d=%g Pa from Vp=%g Vs=%g rho=%g\n",
+                 eindex, drainedBulk, (double)edata->Vp, (double)edata->Vs,
+                 (double)edata->rho);
+  }
+
+  grainBulk = drainedBulk / (1.0 - alpha);
+  invStorage = (alpha - porosity) / grainBulk + porosity / fluidBulk;
+  if (!isfinite(invStorage) || (invStorage <= 0.0)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "poroelastic element %d has invalid Biot storage: "
+                 "1/M=%g from alpha=%g porosity=%g K_s=%g Pa K_f=%g Pa. "
+                 "Check that alpha is physically compatible with porosity "
+                 "and the dry/drained skeleton bulk modulus.\n",
+                 eindex, invStorage, alpha, porosity, grainBulk, fluidBulk);
+  }
+
+  return 1.0 / invStorage;
 }
 
 static double poro_node_sign(int node, int axis) {
@@ -2255,6 +2298,7 @@ static void poroelastic_element_coupling_apply(
 static void poroelastic_build_gpu_geometry(mesh_t* mesh, int32_t elemCount,
                                            const int32_t* mapper,
                                            double* hArray, double* detJArray,
+                                           double* storageMArray,
                                            double* pressureShapeScaleArray) {
   for (int32_t m = 0; m < elemCount; m++) {
     const int32_t eindex = mapper[m];
@@ -2268,6 +2312,8 @@ static void poroelastic_build_gpu_geometry(mesh_t* mesh, int32_t elemCount,
                                       &elementVolume);
     hArray[m] = h;
     detJArray[m] = 0.125 * elementVolume;
+    storageMArray[m] = poroelastic_biot_storage_modulus_for_element(edata,
+                                                                    eindex);
     referenceNodalVolume = elementVolume / 8.0;
     for (int j = 0; j < 8; j++) {
       pressureShapeScaleArray[j * elemCount + m] =
@@ -3944,15 +3990,6 @@ static int32_t parse_parameters(const char* numericalin) {
       (Param.thePoroelasticBiotAlpha > 1.0)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "poroelastic_biot_alpha=%g must be in [0,1]\n",
-                 Param.thePoroelasticBiotAlpha);
-  }
-  if ((includePoroelastic == YES) &&
-      (fabs(Param.thePoroelasticBiotAlpha - 1.0) > 1.0e-12)) {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "poroelastic_biot_alpha=%g is not supported in BrickUP V1. "
-                 "The current storage modulus assumes incompressible grains "
-                 "(alpha=1, M=K_f/porosity); add a grain bulk modulus before "
-                 "using alpha<1.\n",
                  Param.thePoroelasticBiotAlpha);
   }
   if (Param.thePoroelasticFluidBulkModulus <= 0.0 ||
@@ -11215,11 +11252,19 @@ static void solver_init() {
           (double)globalPoroelasticNodes / 1.0e6,
           (double)globalPoroelasticPmlCandidates / 1.0e6,
           (long long)globalPoroelasticPmlCandidates);
-      monitor_print(
-          "Poroelastic skeleton stiffness:  input Vp is dry/drained; "
-          "fluid storage M=K_f/n=%.3g Pa, alpha=%.3f\n",
-          poroelastic_biot_storage_modulus(),
-          Param.thePoroelasticBiotAlpha);
+      if (fabs(Param.thePoroelasticBiotAlpha - 1.0) <= 1.0e-12) {
+        monitor_print(
+            "Poroelastic skeleton stiffness:  input Vp is dry/drained; "
+            "fluid storage M=K_f/n=%.3g Pa, alpha=%.3f\n",
+            poroelastic_biot_storage_modulus_incompressible_grains(),
+            Param.thePoroelasticBiotAlpha);
+      } else {
+        monitor_print(
+            "Poroelastic skeleton stiffness:  input Vp is dry/drained; "
+            "fluid storage is element-local using "
+            "1/M=(alpha-n)/K_s+n/K_f, K_s=K_d/(1-alpha), alpha=%.3f\n",
+            Param.thePoroelasticBiotAlpha);
+      }
     }
   } else {
     g_poroelasticElementCount = 0;
@@ -11374,6 +11419,8 @@ static void solver_init() {
           (cudaMalloc((void**)&(Global.gpuData.poroelasticElemHDevice),
                       poroN * sizeof(double)) != cudaSuccess) ||
           (cudaMalloc((void**)&(Global.gpuData.poroelasticElemDetJDevice),
+                      poroN * sizeof(double)) != cudaSuccess) ||
+          (cudaMalloc((void**)&(Global.gpuData.poroelasticStorageMDevice),
                       poroN * sizeof(double)) != cudaSuccess) ||
           (cudaMalloc(
                (void**)&(Global.gpuData.poroelasticPressureShapeScaleDevice),
@@ -11832,6 +11879,7 @@ static void solver_init() {
   int32_t* poroelasticElemMapperArray = NULL;
   double* poroelasticElemHArray = NULL;
   double* poroelasticElemDetJArray = NULL;
+  double* poroelasticStorageMArray = NULL;
   double* poroelasticPressureShapeScaleArray = NULL;
   if (poroelastic_gpu_active() && (g_poroelasticLocalElementCount > 0)) {
     const size_t poroN = (size_t)g_poroelasticLocalElementCount;
@@ -11839,11 +11887,13 @@ static void solver_init() {
         (int32_t*)malloc(poroN * sizeof(int32_t));
     poroelasticElemHArray = (double*)malloc(poroN * sizeof(double));
     poroelasticElemDetJArray = (double*)malloc(poroN * sizeof(double));
+    poroelasticStorageMArray = (double*)malloc(poroN * sizeof(double));
     poroelasticPressureShapeScaleArray =
         (double*)malloc(8 * poroN * sizeof(double));
     if ((poroelasticElemMapperArray == NULL) ||
         (poroelasticElemHArray == NULL) ||
         (poroelasticElemDetJArray == NULL) ||
+        (poroelasticStorageMArray == NULL) ||
         (poroelasticPressureShapeScaleArray == NULL)) {
       fprintf(stderr,
               "Thread %d: Failed to allocate poroelastic GPU geometry host arrays\n",
@@ -11976,7 +12026,8 @@ static void solver_init() {
     poroelastic_build_gpu_geometry(
         Global.myMesh, g_poroelasticLocalElementCount,
         poroelasticElemMapperArray, poroelasticElemHArray,
-        poroelasticElemDetJArray, poroelasticPressureShapeScaleArray);
+        poroelasticElemDetJArray, poroelasticStorageMArray,
+        poroelasticPressureShapeScaleArray);
   }
 
   for (int i = 0; i < Global.myMesh->nharbored; i++) {
@@ -12484,6 +12535,10 @@ static void solver_init() {
                       poroelasticElemDetJArray,
                       poroN * sizeof(double), cudaMemcpyHostToDevice) !=
            cudaSuccess) ||
+          (cudaMemcpy(Global.gpuData.poroelasticStorageMDevice,
+                      poroelasticStorageMArray,
+                      poroN * sizeof(double), cudaMemcpyHostToDevice) !=
+           cudaSuccess) ||
           (cudaMemcpy(Global.gpuData.poroelasticPressureShapeScaleDevice,
                       poroelasticPressureShapeScaleArray,
                       8 * poroN * sizeof(double),
@@ -12509,6 +12564,7 @@ static void solver_init() {
   free(poroelasticElemMapperArray);
   free(poroelasticElemHArray);
   free(poroelasticElemDetJArray);
+  free(poroelasticStorageMArray);
   free(poroelasticPressureShapeScaleArray);
   free(pressureFreeSurfaceHost);
   free(g0_shearArray);
@@ -12861,6 +12917,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.poroelasticElemMapperDevice);
   cudaFree(Global.gpuData.poroelasticElemHDevice);
   cudaFree(Global.gpuData.poroelasticElemDetJDevice);
+  cudaFree(Global.gpuData.poroelasticStorageMDevice);
   cudaFree(Global.gpuData.poroelasticPressureShapeScaleDevice);
   cudaFree(Global.gpuData.conv_shear_1Device);
   cudaFree(Global.gpuData.conv_shear_2Device);
@@ -15212,15 +15269,14 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
 
 static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
                                                  mesh_t* mesh) {
-  const double storageM = poroelastic_biot_storage_modulus();
   const double dt = Param.theDeltaT;
   const double permeability[3] = {Param.thePoroelasticPermeabilityX,
                                   Param.thePoroelasticPermeabilityY,
                                   Param.thePoroelasticPermeabilityZ};
-  const double diffusivity[3] = {
-      storageM * permeability[0] / Param.thePoroelasticFluidViscosity,
-      storageM * permeability[1] / Param.thePoroelasticFluidViscosity,
-      storageM * permeability[2] / Param.thePoroelasticFluidViscosity};
+  const double mobility[3] = {
+      permeability[0] / Param.thePoroelasticFluidViscosity,
+      permeability[1] / Param.thePoroelasticFluidViscosity,
+      permeability[2] / Param.thePoroelasticFluidViscosity};
   const int haveDiffusion =
       (permeability[0] > 0.0) || (permeability[1] > 0.0) ||
       (permeability[2] > 0.0);
@@ -15246,8 +15302,8 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
     gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
     kernelPoroelasticPressureForce<<<gridsize, blocksize, 0,
                                      solver->streams[CUDA_STREAM_MAIN]>>>(
-        g_poroelasticLocalElementCount, solver->gpuDataDevice, storageM, dt,
-        diffusivity[0], diffusivity[1], diffusivity[2], haveDiffusion,
+        g_poroelasticLocalElementCount, solver->gpuDataDevice, dt,
+        mobility[0], mobility[1], mobility[2], haveDiffusion,
         Param.thePoroelasticBiotAlpha);
     cerror = cudaGetLastError();
     if (cerror != cudaSuccess) {
