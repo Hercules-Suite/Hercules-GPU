@@ -1,0 +1,91 @@
+# Homogeneous 1 m x 1 m x 32 m validation column.
+
+monitor_file = output/monitor.txt
+
+simulation_wave_max_freq_hz    = 25.0
+simulation_start_time_sec      = 0.0
+simulation_end_time_sec        = 0.20
+simulation_delta_time_sec      = 0.0005
+simulation_node_per_wavelength = 8
+simulation_shear_velocity_min  = 200.0
+simulation_output_rate         = 10000000
+
+the_threshold_damping          = 0.05
+the_threshold_Vp_over_Vs       = 3.0
+do_damping_statistics          = 0
+
+cvmdb_input_file               = profile
+number_profile_layers          = 1
+profile_layers =
+ 0.0 400.0 200.0 2000.0 1000000.0 1000000.0
+
+abc_type                       = dashpot
+stiffness_calculation_method   = effective
+
+output_mesh                    = 1
+mesh_only_mode                 = 0
+mesh_input_mode                = 0
+mesh_etree_output_file         = output/mesh.e
+use_checkpoint                 = 0
+checkpointing_rate             = 0
+checkpoint_path                = output/checkpoints
+
+output_displacement            = 0
+output_displacement_file       = output/wavefield/displacement.h4d
+output_velocity                = 0
+output_velocity_file           = output/wavefield/velocity.h4d
+
+number_output_planes           = 0
+output_planes_print_rate       = 1
+output_planes_directory        = output/planes
+
+domain_surface_corners =
+ 0.0 0.0
+ 0.0 0.000008983153
+ 0.000008983153 0.000008983153
+ 0.000008983153 0.0
+
+output_planes =
+ 0.000004491576 0.000004491576 0.0 1.0 1 1.0 1 0.0 0.0
+
+number_output_stations         = 5
+output_stations_print_rate     = 1
+output_stations_directory      = output/stations
+print_station_velocities       = yes
+print_station_accelerations    = yes
+print_station_pressures        = yes
+
+output_stations =
+ 0.000004491576 0.000004491576  0.0
+ 0.000004491576 0.000004491576  8.0
+ 0.000004491576 0.000004491576 16.0
+ 0.000004491576 0.000004491576 24.0
+ 0.000004491576 0.000004491576 31.5
+
+include_buildings              = no
+implement_drm                  = no
+include_topography             = no
+include_acoustic               = no
+include_nonlinear_analysis     = no
+include_incident_planewaves    = no
+include_hmg_halfspace          = no
+Istanbul_velocity_model        = no
+basin_velocity_model           = no
+3D_velocity_model              = no
+mesh_coordinates_for_matlab    = no
+
+include_poroelastic            = yes
+poroelastic_formulation        = brick_up
+poroelastic_depth_max_m        = 32.0
+surface_groundwatertable       = no
+poroelastic_surface_pressure_bc = drained
+poroelastic_surface_pressure_penalty_factor = 1.0
+poroelastic_elastic_interface  = no_flow
+poroelastic_porosity           = 0.4
+poroelastic_biot_alpha         = 1.0
+poroelastic_fluid_bulk_modulus_pa = 2.2e9
+poroelastic_fluid_density_kgm3 = 1000.0
+poroelastic_fluid_viscosity_pa_s = 1.0e-3
+poroelastic_permeability_x_m2  = 0.0
+poroelastic_permeability_y_m2  = 0.0
+poroelastic_permeability_z_m2  = 0.0
