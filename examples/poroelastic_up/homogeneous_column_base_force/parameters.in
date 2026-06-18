@@ -30,7 +30,7 @@ monitor_file = output/monitor.txt
 
 simulation_wave_max_freq_hz    = 25.0
 simulation_start_time_sec      = 0.0
-simulation_end_time_sec        = 0.20
+simulation_end_time_sec        = 0.40
 simulation_delta_time_sec      = 0.0005
 simulation_node_per_wavelength = 8
 simulation_shear_velocity_min  = 200.0

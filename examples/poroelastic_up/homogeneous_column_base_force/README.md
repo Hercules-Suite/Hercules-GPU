@@ -27,8 +27,8 @@ Geometry and material:
 The source is `type_of_source = base_force`. It reads
 `sourcefiles/baseforcefunction.in` as a base velocity history in m/s and applies
 a nodal force distribution on the deepest mesh-node plane. The included table
-is a sampled Ricker velocity pulse with peak frequency 10 Hz, peak time 0.08 s,
-and peak velocity 0.01 m/s:
+is a sampled Ricker velocity pulse with peak frequency 10 Hz, peak time 0.12 s,
+peak velocity 0.01 m/s, and a 0.30 s table duration so both tails are near zero:
 
 ```text
 sum(F_base) = scale * rho_base * Vs_base * A_base * v(t)
