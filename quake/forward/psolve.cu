@@ -1658,8 +1658,6 @@ static struct Param_t {
   int thePoroelasticSurfacePressureBC;       /* undrained or drained */
   int thePoroelasticElasticInterface;        /* no_flow */
   char theGroundwaterLevelFile[256];
-  int theGroundwaterLevelMode;               /* depth or absolute elevation */
-  double theTopographyBaseZCoord;
   double thePoroelasticDepthMaxM;
   double thePoroelasticPorosity;
   double thePoroelasticBiotAlpha;
@@ -1741,8 +1739,6 @@ static struct Param_t {
            .thePoroelasticSurfacePressureBC = 0,
            .thePoroelasticElasticInterface = 0,
            .theGroundwaterLevelFile = "",
-           .theGroundwaterLevelMode = 0,
-           .theTopographyBaseZCoord = 0.0,
            .thePoroelasticDepthMaxM = 30.0,
            .thePoroelasticPorosity = 0.4,
            .thePoroelasticBiotAlpha = 1.0,
@@ -1866,8 +1862,6 @@ struct station_medium_record_t {
 #define POROELASTIC_SURFACE_PRESSURE_UNDRAINED 0
 #define POROELASTIC_SURFACE_PRESSURE_DRAINED 1
 #define POROELASTIC_INTERFACE_NO_FLOW 0
-#define GROUNDWATER_LEVEL_DEPTH_BELOW_SURFACE 0
-#define GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION 1
 
 typedef struct acoustic_bathymetry_diag_t {
   int64_t faces;
@@ -1899,7 +1893,6 @@ typedef struct groundwater_grid_t {
   int loaded;
   char path[PATH_MAX];
   double spacing;
-  double base_z;
   int np_ew;
   int np_ns;
   int64_t ntp;
@@ -1980,18 +1973,6 @@ static int poro_groundwater_grid_load(void) {
                  Param.theDomainY, Param.theDomainX, spacing);
   }
 
-  double base_z = Param.theTopographyBaseZCoord;
-  if ((Param.includeTopography == YES) && (get_thebase_topo() > 0.0)) {
-    base_z = get_thebase_topo();
-  }
-  if ((Param.theGroundwaterLevelMode == GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION) &&
-      (base_z <= 0.0)) {
-    fclose(fp);
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "surface_groundwatertable=yes requires topographybase_zcoord "
-                 "when groundwaterlevel_mode=absolute_elevation\n");
-  }
-
   const int np_ew = (int)(Param.theDomainY / spacing + 1.0);
   const int np_ns = (int)(Param.theDomainX / spacing + 1.0);
   const int64_t ntp = (int64_t)np_ew * (int64_t)np_ns;
@@ -2016,7 +1997,6 @@ static int poro_groundwater_grid_load(void) {
   g_groundwaterGrid.loaded = 1;
   snprintf(g_groundwaterGrid.path, sizeof(g_groundwaterGrid.path), "%s", path);
   g_groundwaterGrid.spacing = spacing;
-  g_groundwaterGrid.base_z = base_z;
   g_groundwaterGrid.np_ew = np_ew;
   g_groundwaterGrid.np_ns = np_ns;
   g_groundwaterGrid.ntp = ntp;
@@ -2076,10 +2056,6 @@ static double poro_groundwater_shift(double north_m, double east_m,
   }
   const double grid_value =
       poro_grid_interp_value(&g_groundwaterGrid, north_m, east_m);
-  if (Param.theGroundwaterLevelMode ==
-      GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION) {
-    return g_groundwaterGrid.base_z - grid_value;
-  }
   return ground_shift + grid_value;
 }
 
@@ -2332,9 +2308,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  48 /* Must adjust this if adding double params */
+  47 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  60 /* Must adjust this if adding int params */
+  59 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2389,16 +2365,15 @@ static void read_parameters(int argc, char** argv) {
   double_message[35] = Param.theCpmlAlphaFloorFraction;
   double_message[36] = Param.theAcousticQualityFactor;
   double_message[37] = Param.theCpmlPartitionWeight;
-  double_message[38] = Param.theTopographyBaseZCoord;
-  double_message[39] = Param.thePoroelasticDepthMaxM;
-  double_message[40] = Param.thePoroelasticPorosity;
-  double_message[41] = Param.thePoroelasticBiotAlpha;
-  double_message[42] = Param.thePoroelasticFluidBulkModulus;
-  double_message[43] = Param.thePoroelasticFluidDensity;
-  double_message[44] = Param.thePoroelasticFluidViscosity;
-  double_message[45] = Param.thePoroelasticPermeabilityX;
-  double_message[46] = Param.thePoroelasticPermeabilityY;
-  double_message[47] = Param.thePoroelasticPermeabilityZ;
+  double_message[38] = Param.thePoroelasticDepthMaxM;
+  double_message[39] = Param.thePoroelasticPorosity;
+  double_message[40] = Param.thePoroelasticBiotAlpha;
+  double_message[41] = Param.thePoroelasticFluidBulkModulus;
+  double_message[42] = Param.thePoroelasticFluidDensity;
+  double_message[43] = Param.thePoroelasticFluidViscosity;
+  double_message[44] = Param.thePoroelasticPermeabilityX;
+  double_message[45] = Param.thePoroelasticPermeabilityY;
+  double_message[46] = Param.thePoroelasticPermeabilityZ;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2441,16 +2416,15 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
-  Param.theTopographyBaseZCoord = double_message[38];
-  Param.thePoroelasticDepthMaxM = double_message[39];
-  Param.thePoroelasticPorosity = double_message[40];
-  Param.thePoroelasticBiotAlpha = double_message[41];
-  Param.thePoroelasticFluidBulkModulus = double_message[42];
-  Param.thePoroelasticFluidDensity = double_message[43];
-  Param.thePoroelasticFluidViscosity = double_message[44];
-  Param.thePoroelasticPermeabilityX = double_message[45];
-  Param.thePoroelasticPermeabilityY = double_message[46];
-  Param.thePoroelasticPermeabilityZ = double_message[47];
+  Param.thePoroelasticDepthMaxM = double_message[38];
+  Param.thePoroelasticPorosity = double_message[39];
+  Param.thePoroelasticBiotAlpha = double_message[40];
+  Param.thePoroelasticFluidBulkModulus = double_message[41];
+  Param.thePoroelasticFluidDensity = double_message[42];
+  Param.thePoroelasticFluidViscosity = double_message[43];
+  Param.thePoroelasticPermeabilityX = double_message[44];
+  Param.thePoroelasticPermeabilityY = double_message[45];
+  Param.thePoroelasticPermeabilityZ = double_message[46];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2512,7 +2486,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[56] = Param.thePoroelasticFormulation;
   int_message[57] = Param.thePoroelasticSurfacePressureBC;
   int_message[58] = Param.thePoroelasticElasticInterface;
-  int_message[59] = Param.theGroundwaterLevelMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2577,7 +2550,6 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticFormulation = int_message[56];
   Param.thePoroelasticSurfacePressureBC = int_message[57];
   Param.thePoroelasticElasticInterface = int_message[58];
-  Param.theGroundwaterLevelMode = int_message[59];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2867,7 +2839,6 @@ static int32_t parse_parameters(const char* numericalin) {
        reconstruct_acoustic_plane_displacements[64] = "no",
        include_poroelastic[64] = "no",
        surface_groundwatertable[64] = "no",
-       groundwaterlevel_mode[64] = "depth_below_surface",
        poroelastic_formulation[64] = "brick_up",
        poroelastic_surface_pressure_bc[64] = "undrained",
        poroelastic_elastic_interface[64] = "no_flow",
@@ -3290,15 +3261,12 @@ static int32_t parse_parameters(const char* numericalin) {
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "include_poroelastic", 's', &include_poroelastic);
   parsetext(fp, "surface_groundwatertable", 's', &surface_groundwatertable);
-  parsetext(fp, "groundwaterlevel_mode", 's', &groundwaterlevel_mode);
   parsetext(fp, "poroelastic_formulation", 's', &poroelastic_formulation);
   parsetext(fp, "poroelastic_surface_pressure_bc", 's',
             &poroelastic_surface_pressure_bc);
   parsetext(fp, "poroelastic_elastic_interface", 's',
             &poroelastic_elastic_interface);
   parsetext(fp, "groundwaterlevel_file", 's', Param.theGroundwaterLevelFile);
-  parsetext(fp, "topographybase_zcoord", 'd',
-            &Param.theTopographyBaseZCoord);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
   parsetext(fp, "basin_material_type", 's', &basin_material_type);
@@ -3795,21 +3763,6 @@ static int32_t parse_parameters(const char* numericalin) {
                  surface_groundwatertable);
   }
 
-  if ((strcasecmp(groundwaterlevel_mode, "depth_below_surface") == 0) ||
-      (strcasecmp(groundwaterlevel_mode, "below_surface") == 0) ||
-      (strcasecmp(groundwaterlevel_mode, "depth") == 0)) {
-    Param.theGroundwaterLevelMode = GROUNDWATER_LEVEL_DEPTH_BELOW_SURFACE;
-  } else if ((strcasecmp(groundwaterlevel_mode, "absolute_elevation") == 0) ||
-             (strcasecmp(groundwaterlevel_mode, "absolute") == 0) ||
-             (strcasecmp(groundwaterlevel_mode, "elevation") == 0)) {
-    Param.theGroundwaterLevelMode = GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION;
-  } else {
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "groundwaterlevel_mode must be depth_below_surface or "
-                 "absolute_elevation: got '%s'\n",
-                 groundwaterlevel_mode);
-  }
-
   if ((strcasecmp(poroelastic_formulation, "brick_up") == 0) ||
       (strcasecmp(poroelastic_formulation, "brickup") == 0)) {
     Param.thePoroelasticFormulation = POROELASTIC_FORMULATION_BRICK_UP;
@@ -4248,11 +4201,6 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.thePoroelasticDepthMaxM);
     monitor_print("Poroelastic groundwater mode:       %s\n", gw_mode);
     if (Param.surfaceGroundwaterTable == YES) {
-      monitor_print("Groundwater level interpretation:   %s\n",
-                    (Param.theGroundwaterLevelMode ==
-                     GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION)
-                        ? "absolute_elevation"
-                        : "depth_below_surface");
       monitor_print("Groundwater level file:             %s\n",
                     (Param.theGroundwaterLevelFile[0] != '\0')
                         ? Param.theGroundwaterLevelFile
@@ -11105,12 +11053,8 @@ static void solver_init() {
       if (Param.surfaceGroundwaterTable == YES) {
         monitor_print(
             "Poroelastic groundwater grid:       %s "
-            "(mode %s, spacing %.3f m, %d x %d)\n",
+            "(depth below surface, spacing %.3f m, %d x %d)\n",
             g_groundwaterGrid.path,
-            (Param.theGroundwaterLevelMode ==
-             GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION)
-                ? "absolute_elevation"
-                : "depth_below_surface",
             g_groundwaterGrid.spacing, g_groundwaterGrid.np_ew,
             g_groundwaterGrid.np_ns);
       }
