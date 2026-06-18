@@ -443,8 +443,18 @@ Poroelastic U-P input flags (experimental V1):
 	means the water table is 100 m below ground everywhere.
 - `poroelastic_surface_pressure_bc`
 	Optional. `undrained` (default) leaves pore pressure unconstrained at
-	the saturated surface. `drained` sets pore pressure to zero on nodes
-	near the groundwater/free-drainage surface.
+	the saturated surface. `drained` applies a weak, mass-projected
+	Dirichlet condition on the groundwater/free-drainage plane: the solver
+	assembles a nodal drained-plane mass from a 2x2 quadrature rule on the
+	water-table cut plane inside the first saturated element, then blends
+	the free pressure update toward zero using that mass. This avoids the
+	old nearest-node hard clamp when the water table cuts through an
+	element.
+- `poroelastic_surface_pressure_penalty_factor`
+	Optional. Default `1.0`. Scales the weak drained-plane mass used by
+	`poroelastic_surface_pressure_bc = drained`; larger values enforce
+	closer-to-zero pore pressure on the plane, while `0.0` disables the
+	weak projection without changing the classification.
 - `poroelastic_elastic_interface`
 	Optional. Currently only `no_flow` is supported. Poroelastic and
 	elastic regions share displacement nodes mechanically, while pore

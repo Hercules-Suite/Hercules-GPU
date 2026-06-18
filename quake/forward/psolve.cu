@@ -1686,6 +1686,7 @@ static struct Param_t {
   double thePoroelasticPermeabilityX;
   double thePoroelasticPermeabilityY;
   double thePoroelasticPermeabilityZ;
+  double thePoroelasticSurfacePressurePenaltyFactor;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1766,7 +1767,8 @@ static struct Param_t {
            .thePoroelasticFluidViscosity = 1.0e-3,
            .thePoroelasticPermeabilityX = 0.0,
            .thePoroelasticPermeabilityY = 0.0,
-           .thePoroelasticPermeabilityZ = 0.0};
+           .thePoroelasticPermeabilityZ = 0.0,
+           .thePoroelasticSurfacePressurePenaltyFactor = 1.0};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -2125,6 +2127,22 @@ static double poro_groundwater_shift(double north_m, double east_m,
   return ground_shift + grid_value;
 }
 
+static int poroelastic_point_is_saturated(double north_m, double east_m,
+                                          double raw_depth_m,
+                                          double h_for_tol) {
+  const double ground_shift = poro_ground_surface_shift(north_m, east_m);
+  const double groundwater_shift =
+      poro_groundwater_shift(north_m, east_m, ground_shift);
+  const double ground_depth = raw_depth_m - ground_shift;
+  const double groundwater_depth = raw_depth_m - groundwater_shift;
+  const double h = (h_for_tol > 0.0) ? h_for_tol : 1.0;
+  const double eps = fmax(1.0e-6, 0.01 * h);
+
+  return (ground_depth >= -eps) &&
+         (ground_depth <= Param.thePoroelasticDepthMaxM + eps) &&
+         (groundwater_depth >= -eps);
+}
+
 static int poroelastic_element_candidate(mesh_t* mesh, int32_t eindex,
                                          uint8_t pml_face_mask,
                                          double* ground_depth_out,
@@ -2206,6 +2224,67 @@ static void poroelastic_element_nodal_volumes(mesh_t* mesh, int32_t eindex,
   }
   if (totalVolume != NULL) {
     *totalVolume = sumVolume;
+  }
+}
+
+static void poroelastic_add_groundwater_drain_mass(
+    mesh_t* mesh, int32_t eindex, double plane_zeta,
+    const double nodalVolumes[8], double elementVolume,
+    solver_float* drainMass) {
+  elem_t* elemp = &mesh->elemTable[eindex];
+  edata_t* edata = (edata_t*)elemp->data;
+  const double h = (double)edata->edgesize;
+  const double gp = 0.57735026918962576451;
+  const double gcoord[2] = {-gp, gp};
+  const double referenceNodalVolume = elementVolume / 8.0;
+  double pressureShapeScale[8];
+  double zeta = plane_zeta;
+  double planeVolumeJac;
+
+  if ((drainMass == NULL) || (h <= 0.0) || (elementVolume <= 0.0) ||
+      (Param.thePoroelasticSurfacePressurePenaltyFactor <= 0.0)) {
+    return;
+  }
+
+  if (zeta < -1.0) {
+    zeta = -1.0;
+  } else if (zeta > 1.0) {
+    zeta = 1.0;
+  }
+
+  for (int j = 0; j < 8; j++) {
+    pressureShapeScale[j] =
+        (referenceNodalVolume > 0.0)
+            ? (nodalVolumes[j] / referenceNodalVolume)
+            : 1.0;
+  }
+
+  /* The plane integral has area units. Multiplying by h/2 gives it the
+   * same volume units as pore_pressure_mass. For a regular cube and a
+   * plane on the top face, this gives h^3/8 at each top node, matching
+   * the nodal pressure mass contributed by the adjacent saturated element.
+   */
+  planeVolumeJac =
+      Param.thePoroelasticSurfacePressurePenaltyFactor * elementVolume / 8.0;
+
+  for (int gx = 0; gx < 2; gx++) {
+    const double xi = gcoord[gx];
+    for (int gy = 0; gy < 2; gy++) {
+      const double eta = gcoord[gy];
+      for (int j = 0; j < 8; j++) {
+        const double sx = poro_node_sign(j, 0);
+        const double sy = poro_node_sign(j, 1);
+        const double sz = poro_node_sign(j, 2);
+        const double ax = 1.0 + sx * xi;
+        const double ay = 1.0 + sy * eta;
+        const double az = 1.0 + sz * zeta;
+        const double N = 0.125 * ax * ay * az;
+        const double Np = N * pressureShapeScale[j];
+        const int32_t lnid = elemp->lnid[j];
+
+        drainMass[lnid] += (solver_float)(Np * planeVolumeJac);
+      }
+    }
   }
 }
 
@@ -2507,7 +2586,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  47 /* Must adjust this if adding double params */
+  48 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   59 /* Must adjust this if adding int params */
 
@@ -2573,6 +2652,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[44] = Param.thePoroelasticPermeabilityX;
   double_message[45] = Param.thePoroelasticPermeabilityY;
   double_message[46] = Param.thePoroelasticPermeabilityZ;
+  double_message[47] = Param.thePoroelasticSurfacePressurePenaltyFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2624,6 +2704,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticPermeabilityX = double_message[44];
   Param.thePoroelasticPermeabilityY = double_message[45];
   Param.thePoroelasticPermeabilityZ = double_message[46];
+  Param.thePoroelasticSurfacePressurePenaltyFactor = double_message[47];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -3524,6 +3605,8 @@ static int32_t parse_parameters(const char* numericalin) {
                            &Param.thePoroelasticPermeabilityY);
   hu_config_get_double_opt(fp, "poroelastic_permeability_z_m2",
                            &Param.thePoroelasticPermeabilityZ);
+  hu_config_get_double_opt(fp, "poroelastic_surface_pressure_penalty_factor",
+                           &Param.thePoroelasticSurfacePressurePenaltyFactor);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -4023,6 +4106,12 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "poroelastic permeability values must be nonnegative\n");
   }
+  if (Param.thePoroelasticSurfacePressurePenaltyFactor < 0.0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "poroelastic_surface_pressure_penalty_factor=%g must be "
+                 "nonnegative\n",
+                 Param.thePoroelasticSurfacePressurePenaltyFactor);
+  }
 
   if ((strcasecmp(basin_material_type, "elastic") == 0) ||
       (strcasecmp(basin_material_type, "default") == 0)) {
@@ -4411,6 +4500,12 @@ static int32_t parse_parameters(const char* numericalin) {
                    POROELASTIC_SURFACE_PRESSURE_DRAINED)
                       ? "drained"
                       : "undrained");
+    if (Param.thePoroelasticSurfacePressureBC ==
+        POROELASTIC_SURFACE_PRESSURE_DRAINED) {
+      monitor_print("Poroelastic pressure drain factor: %.6g "
+                    "(weak mass-projected plane)\n",
+                    Param.thePoroelasticSurfacePressurePenaltyFactor);
+    }
     monitor_print("Poroelastic-elastic interface:      no_flow\n");
   }
   monitor_print("Include PML:                        %s\n",
@@ -9441,7 +9536,7 @@ static void solver_init() {
                        Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
-              "Thread %d: Failed to allocate pore pressure surface flags\n",
+              "Thread %d: Failed to allocate pore pressure drain mass\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -9775,7 +9870,8 @@ static void solver_init() {
 
     double zeta, a, b;
     int poro_element_active = 0;
-    int poro_drained_surface = 0;
+    int poro_drain_plane = 0;
+    double poro_drain_plane_zeta = -1.0;
 
     /* yigit says -- Buildings assume 5% damping */
 
@@ -10164,7 +10260,10 @@ static void solver_init() {
           if ((Param.thePoroelasticSurfacePressureBC ==
                POROELASTIC_SURFACE_PRESSURE_DRAINED) &&
               (poro_groundwater_depth <= 0.5 * h + eps)) {
-            poro_drained_surface = 1;
+            const double depthInElement =
+                fmin(fmax(poro_groundwater_depth, 0.0), 0.5 * h);
+            poro_drain_plane = 1;
+            poro_drain_plane_zeta = -2.0 * depthInElement / h;
           }
         }
       }
@@ -10204,15 +10303,19 @@ static void solver_init() {
     }
 
     if (poro_element_active) {
+      double nodalPoreVolumes[8];
+      double poroElementVolume = 0.0;
       for (j = 0; j < 8; j++) {
         const double nodalPoreVolume = nodesMass[j] / edata->rho;
+        nodalPoreVolumes[j] = nodalPoreVolume;
+        poroElementVolume += nodalPoreVolume;
         Global.mySolver->pore_pressure_mass[elemp->lnid[j]] +=
             (solver_float)nodalPoreVolume;
       }
-      if (poro_drained_surface) {
-        for (j = 0; j < 4; j++) {
-          Global.mySolver->pore_pressure_surface[elemp->lnid[j]] = 1.0;
-        }
+      if (poro_drain_plane) {
+        poroelastic_add_groundwater_drain_mass(
+            Global.myMesh, eindex, poro_drain_plane_zeta, nodalPoreVolumes,
+            poroElementVolume, Global.mySolver->pore_pressure_surface);
       }
     }
 
@@ -11214,8 +11317,10 @@ static void solver_init() {
 
   if (poroelastic_enabled()) {
     int64_t localPoroelasticNodes = 0;
+    int64_t localPoroelasticDrainNodes = 0;
     int64_t globalPoroelasticElements = 0;
     int64_t globalPoroelasticNodes = 0;
+    int64_t globalPoroelasticDrainNodes = 0;
     int64_t globalPoroelasticPmlCandidates = 0;
 
     schedule_senddata(Global.mySolver->dn_sched,
@@ -11239,7 +11344,7 @@ static void solver_init() {
         localPoroelasticNodes++;
       }
       if (Global.mySolver->pore_pressure_surface[nindex] > 0.0) {
-        Global.mySolver->pore_pressure_surface[nindex] = 1.0;
+        localPoroelasticDrainNodes++;
       }
     }
 
@@ -11247,6 +11352,9 @@ static void solver_init() {
                   MPI_INT64_T, MPI_SUM, comm_solver);
     MPI_Allreduce(&localPoroelasticNodes, &globalPoroelasticNodes, 1,
                   MPI_INT64_T, MPI_SUM, comm_solver);
+    MPI_Allreduce(&localPoroelasticDrainNodes,
+                  &globalPoroelasticDrainNodes, 1, MPI_INT64_T, MPI_SUM,
+                  comm_solver);
     MPI_Allreduce(&localPoroelasticPmlCandidates,
                   &globalPoroelasticPmlCandidates, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
@@ -11270,6 +11378,14 @@ static void solver_init() {
           (double)globalPoroelasticNodes / 1.0e6,
           (double)globalPoroelasticPmlCandidates / 1.0e6,
           (long long)globalPoroelasticPmlCandidates);
+      if (Param.thePoroelasticSurfacePressureBC ==
+          POROELASTIC_SURFACE_PRESSURE_DRAINED) {
+        monitor_print(
+            "Poroelastic drained pressure plane: %.1fM nodes "
+            "(weak mass-projected, factor %.6g)\n",
+            (double)globalPoroelasticDrainNodes / 1.0e6,
+            Param.thePoroelasticSurfacePressurePenaltyFactor);
+      }
       if (fabs(Param.thePoroelasticBiotAlpha - 1.0) <= 1.0e-12) {
         monitor_print(
             "Poroelastic skeleton stiffness:  input Vp is dry/drained; "
@@ -11424,7 +11540,7 @@ static void solver_init() {
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
-              "Thread %d: Failed to allocate pore pressure surface memory\n",
+              "Thread %d: Failed to allocate pore pressure drain mass\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -12507,7 +12623,7 @@ static void solver_init() {
                    Global.mySolver->pore_pressure_surface,
                    Global.myMesh->nharbored * sizeof(solver_float),
                    cudaMemcpyHostToDevice) != cudaSuccess) {
-      fprintf(stderr, "Thread %d: Failed to copy pore pressure surface array\n",
+      fprintf(stderr, "Thread %d: Failed to copy pore pressure drain mass\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
@@ -15401,7 +15517,12 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
   kernelPoroelasticPressureUpdate<<<gridsize, blocksize, 0,
                                     solver->streams[CUDA_STREAM_MAIN]>>>(
-      mesh->nharbored, solver->gpuDataDevice);
+      mesh->nharbored, solver->gpuDataDevice,
+      (Param.thePoroelasticSurfacePressureBC ==
+           POROELASTIC_SURFACE_PRESSURE_DRAINED &&
+       Param.thePoroelasticSurfacePressurePenaltyFactor > 0.0)
+          ? 1
+          : 0);
   cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
     fprintf(stderr, "Thread %d: poroelastic pressure update kernel - %s\n",
@@ -23043,7 +23164,10 @@ void setup_stations_data() {
             : 0;
     Param.myStations[iLCStation].pore_pressure_is_defined =
         (poroelastic_element_candidate(Global.myMesh, stationElementIndex, 0,
-                                       NULL, NULL))
+                                       NULL, NULL) &&
+         poroelastic_point_is_saturated(
+             stationCoords.x[0], stationCoords.x[1], stationCoords.x[2],
+             (stationMaterial != NULL) ? stationMaterial->edgesize : 1.0))
             ? 1
             : 0;
     Param.myStations[iLCStation].acoustic_kinematics_ready = 0;

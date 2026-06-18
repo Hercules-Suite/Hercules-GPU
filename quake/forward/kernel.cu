@@ -1345,7 +1345,8 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
 }
 
 __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
-                                                gpu_data_t* gpuData)
+                                                gpu_data_t* gpuData,
+                                                int useDrainMass)
 {
   const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -1356,10 +1357,16 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
   const solver_float mass = gpuData->porePressureMassDevice[nindex];
   solver_float pnew = 0.0;
   if (mass > 0.0) {
-    pnew = gpuData->porePressureTm1Device[nindex] +
-           gpuData->porePressureForceDevice[nindex] / mass;
-    if (gpuData->porePressureSurfaceDevice[nindex] > (solver_float)0.5) {
-      pnew = (solver_float)0.0;
+    const solver_float pfree =
+        gpuData->porePressureTm1Device[nindex] +
+        gpuData->porePressureForceDevice[nindex] / mass;
+    const solver_float drainMass =
+        useDrainMass ? gpuData->porePressureSurfaceDevice[nindex]
+                     : (solver_float)0.0;
+    if (drainMass > (solver_float)0.0) {
+      pnew = (mass * pfree) / (mass + drainMass);
+    } else {
+      pnew = pfree;
     }
   }
 

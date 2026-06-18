@@ -413,7 +413,7 @@ typedef struct gpu_data_t {
     solver_float* porePressureTm2Device;     /* GPU pore pressure at t-dt/new */
     solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
     solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
-    solver_float* porePressureSurfaceDevice; /* GPU drained pressure flags */
+    solver_float* porePressureSurfaceDevice; /* GPU drained-plane mass */
     int32_t       poroelasticElemCount;      /* local BrickUP elements */
     int32_t*      poroelasticElemMapperDevice;
     double*       poroelasticElemHDevice;
@@ -704,7 +704,7 @@ struct mysolver_t {
     solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
     solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
     solver_float* pore_pressure_mass;  /* Poroelastic lumped storage/mass */
-    solver_float* pore_pressure_surface; /* Drained pressure flags; host only */
+    solver_float* pore_pressure_surface; /* Drained-plane mass; host only */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
