@@ -2143,6 +2143,110 @@ static void poroelastic_element_nodal_volumes(mesh_t* mesh, int32_t eindex,
   }
 }
 
+static void poroelastic_element_coupling_apply(
+    mesh_t* mesh, int32_t eindex, const solver_float* pressure,
+    const fvector_t* unew, const fvector_t* uold, double forceOut[8][3],
+    double qtDeltaUOut[8]) {
+  elem_t* elemp = &mesh->elemTable[eindex];
+  edata_t* edata = (edata_t*)elemp->data;
+  const double alpha = Param.thePoroelasticBiotAlpha;
+  const double h = (double)edata->edgesize;
+  const double gp = 0.57735026918962576451; /* 1 / sqrt(3) */
+  const double gcoord[2] = {-gp, gp};
+  double nodalVolumes[8];
+  double pressureShapeScale[8];
+  double elementVolume = 0.0;
+  double detJ;
+  double volumeScale;
+  double referenceNodalVolume;
+  const int wantForce = (pressure != NULL) && (forceOut != NULL);
+  const int wantTranspose =
+      (unew != NULL) && (uold != NULL) && (qtDeltaUOut != NULL);
+
+  if ((alpha == 0.0) || (h <= 0.0) || (!wantForce && !wantTranspose)) {
+    return;
+  }
+
+  poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
+                                    &elementVolume);
+  if (elementVolume <= 0.0) {
+    return;
+  }
+  volumeScale = elementVolume / (h * h * h);
+  detJ = 0.125 * h * h * h * volumeScale;
+  /* Match the pressure test-function volume to the existing lumped
+   * pore-pressure mass, especially for topographic cut-cell elements. */
+  referenceNodalVolume = elementVolume / 8.0;
+  for (int j = 0; j < 8; j++) {
+    pressureShapeScale[j] =
+        (referenceNodalVolume > 0.0)
+            ? (nodalVolumes[j] / referenceNodalVolume)
+            : 1.0;
+  }
+
+  for (int gx = 0; gx < 2; gx++) {
+    const double xi = gcoord[gx];
+    for (int gy = 0; gy < 2; gy++) {
+      const double eta = gcoord[gy];
+      for (int gz = 0; gz < 2; gz++) {
+        const double zeta = gcoord[gz];
+        double N[8];
+        double Np[8];
+        double dNdx[8][3];
+        double pressureAtGp = 0.0;
+        double divDeltaU = 0.0;
+
+        for (int j = 0; j < 8; j++) {
+          const double sx = poro_node_sign(j, 0);
+          const double sy = poro_node_sign(j, 1);
+          const double sz = poro_node_sign(j, 2);
+          const double ax = 1.0 + sx * xi;
+          const double ay = 1.0 + sy * eta;
+          const double az = 1.0 + sz * zeta;
+          const int32_t lnid = elemp->lnid[j];
+
+          N[j] = 0.125 * ax * ay * az;
+          Np[j] = N[j] * pressureShapeScale[j];
+          dNdx[j][0] = sx * ay * az / (4.0 * h);
+          dNdx[j][1] = sy * ax * az / (4.0 * h);
+          dNdx[j][2] = sz * ax * ay / (4.0 * h);
+
+          if (wantForce) {
+            pressureAtGp += Np[j] * (double)pressure[lnid];
+          }
+          if (wantTranspose) {
+            divDeltaU += dNdx[j][0] *
+                         ((double)unew[lnid].f[0] -
+                          (double)uold[lnid].f[0]);
+            divDeltaU += dNdx[j][1] *
+                         ((double)unew[lnid].f[1] -
+                          (double)uold[lnid].f[1]);
+            divDeltaU += dNdx[j][2] *
+                         ((double)unew[lnid].f[2] -
+                          (double)uold[lnid].f[2]);
+          }
+        }
+
+        if (wantForce) {
+          const double scale = alpha * pressureAtGp * detJ;
+          for (int j = 0; j < 8; j++) {
+            forceOut[j][0] += scale * dNdx[j][0];
+            forceOut[j][1] += scale * dNdx[j][1];
+            forceOut[j][2] += scale * dNdx[j][2];
+          }
+        }
+
+        if (wantTranspose) {
+          const double scale = alpha * divDeltaU * detJ;
+          for (int j = 0; j < 8; j++) {
+            qtDeltaUOut[j] += scale * Np[j];
+          }
+        }
+      }
+    }
+  }
+}
+
 static void acoustic_zero_damping(edata_t* edata) {
   if (edata == NULL) {
     return;
@@ -14838,11 +14942,10 @@ static void solver_swap_pore_pressure_buffers(mysolver_t* solver) {
 
 static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
                                                       mesh_t* mesh) {
-  const double alpha = Param.thePoroelasticBiotAlpha;
   const double dt2 = Param.theDeltaTSquared;
 
   if ((!poroelastic_enabled()) || (g_poroelasticLocalElementCount <= 0) ||
-      (alpha == 0.0)) {
+      (Param.thePoroelasticBiotAlpha == 0.0)) {
     return;
   }
 
@@ -14850,27 +14953,16 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
   for (int32_t m = 0; m < g_poroelasticLocalElementCount; m++) {
     const int32_t eindex = g_poroelasticElemMapper[m];
     elem_t* elemp = &mesh->elemTable[eindex];
-    edata_t* edata = (edata_t*)elemp->data;
-    const double h = (double)edata->edgesize;
-    double nodalVolumes[8];
-    double elementVolume = 0.0;
-    const double gradCoeff = 0.25 / h;
-    double pavg = 0.0;
+    double qPressureForce[8][3] = {{0.0}};
 
-    poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
-                                      &elementVolume);
-
-    for (int j = 0; j < 8; j++) {
-      pavg += (double)solver->pore_pressure_tm1[elemp->lnid[j]];
-    }
-    pavg *= 0.125;
-
-    const double scale = dt2 * alpha * pavg * elementVolume * gradCoeff;
+    poroelastic_element_coupling_apply(mesh, eindex,
+                                       solver->pore_pressure_tm1, NULL, NULL,
+                                       qPressureForce, NULL);
     for (int j = 0; j < 8; j++) {
       fvector_t* force = &solver->force[elemp->lnid[j]];
-      force->f[0] += (solver_float)(scale * poro_node_sign(j, 0));
-      force->f[1] += (solver_float)(scale * poro_node_sign(j, 1));
-      force->f[2] += (solver_float)(scale * poro_node_sign(j, 2));
+      force->f[0] += (solver_float)(dt2 * qPressureForce[j][0]);
+      force->f[1] += (solver_float)(dt2 * qPressureForce[j][1]);
+      force->f[2] += (solver_float)(dt2 * qPressureForce[j][2]);
     }
   }
   Timer_Stop("Poroelastic pressure traction");
@@ -14878,7 +14970,6 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
 
 static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
                                                  mesh_t* mesh) {
-  const double alpha = Param.thePoroelasticBiotAlpha;
   const double storageM = poroelastic_biot_storage_modulus();
   const double dt = Param.theDeltaT;
   const double permeability[3] = {Param.thePoroelasticPermeabilityX,
@@ -14907,34 +14998,36 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   for (int32_t m = 0; m < g_poroelasticLocalElementCount; m++) {
     const int32_t eindex = g_poroelasticElemMapper[m];
     elem_t* elemp = &mesh->elemTable[eindex];
-    edata_t* edata = (edata_t*)elemp->data;
-    const double h = (double)edata->edgesize;
-    double nodalVolumes[8];
     double elementVolume = 0.0;
-    const double gradCoeff = 0.25 / h;
-    double divdu = 0.0;
+    double gradCoeff = 0.0;
     double gradp[3] = {0.0, 0.0, 0.0};
+    double qtDeltaU[8] = {0.0};
 
-    poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
-                                      &elementVolume);
+    poroelastic_element_coupling_apply(mesh, eindex, NULL, solver->tm2,
+                                       solver->tm1, NULL, qtDeltaU);
 
-    for (int j = 0; j < 8; j++) {
-      const int32_t lnid = elemp->lnid[j];
-      const fvector_t* unew = &solver->tm2[lnid];
-      const fvector_t* uold = &solver->tm1[lnid];
-      const double pold = (double)solver->pore_pressure_tm1[lnid];
+    if (haveDiffusion) {
+      edata_t* edata = (edata_t*)elemp->data;
+      const double h = (double)edata->edgesize;
+      double nodalVolumes[8];
 
-      for (int axis = 0; axis < 3; axis++) {
-        const double gradN = poro_node_sign(j, axis) * gradCoeff;
-        divdu += gradN * ((double)unew->f[axis] - (double)uold->f[axis]);
-        gradp[axis] += gradN * pold;
+      gradCoeff = 0.25 / h;
+      poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
+                                        &elementVolume);
+      for (int j = 0; j < 8; j++) {
+        const int32_t lnid = elemp->lnid[j];
+        const double pold = (double)solver->pore_pressure_tm1[lnid];
+
+        for (int axis = 0; axis < 3; axis++) {
+          const double gradN = poro_node_sign(j, axis) * gradCoeff;
+          gradp[axis] += gradN * pold;
+        }
       }
     }
 
-    const double pressureIncrement = -storageM * alpha * divdu;
     for (int j = 0; j < 8; j++) {
       const int32_t lnid = elemp->lnid[j];
-      double rhs = nodalVolumes[j] * pressureIncrement;
+      double rhs = -storageM * qtDeltaU[j];
 
       if (haveDiffusion) {
         double weakDiffusion = 0.0;

@@ -395,7 +395,9 @@ Poroelastic U-P input flags (experimental V1):
 	keeps the existing elastic skeleton displacement path, adds the
 	`-alpha p I` pore-pressure coupling force, and evolves a scalar pore
 	pressure from volumetric strain increment plus optional Darcy
-	diffusion.
+	diffusion. The displacement-pressure coupling uses one shared
+	2x2x2-Gauss BrickUP coupling operator, applied as `Q p` in the
+	skeleton force path and as `Q^T du` in the pore-pressure source path.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for
