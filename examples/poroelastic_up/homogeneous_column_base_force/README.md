@@ -3,6 +3,15 @@
 This is a minimal OpenSees-style validation column for the poroelastic U-P
 implementation and the distributed compliant-base source.
 
+Use `parameters.in` as the single input file for the current solver interface:
+
+```bash
+mpirun -np <N> <path-to-psolve> parameters.in
+```
+
+The split `physics.in` and `numerical.in` files are kept only as reference for
+older scripts.
+
 Geometry and material:
 
 - Domain: 1 m north-south x 1 m east-west x 32 m depth
