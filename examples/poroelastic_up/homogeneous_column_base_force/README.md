@@ -24,6 +24,13 @@ Geometry and material:
 - Groundwater: `surface_groundwatertable = no`, meaning the groundwater level
   is the local ground surface and the full shallow column is saturated
 
+The timestep is intentionally conservative for the U-P case. With
+`poroelastic_fluid_bulk_modulus_pa = 2.2e9` and `poroelastic_porosity = 0.4`,
+the undrained storage stiffness is much larger than the dry skeleton bulk
+modulus, so the fast compressional speed is roughly 1.7 km/s rather than the
+dry `Vp = 400 m/s`. Do not choose `simulation_delta_time_sec` from the dry
+elastic CFL alone.
+
 The source is `type_of_source = base_force`. It reads
 `sourcefiles/baseforcefunction.in` as a base velocity history in m/s and applies
 a nodal force distribution on the deepest mesh-node plane. The included table
