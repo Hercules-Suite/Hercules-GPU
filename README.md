@@ -413,12 +413,17 @@ Poroelastic U-P input flags (experimental V1):
 	relative to that materialfiles directory; if it contains `/`, it is
 	treated as an explicit path. The file format mirrors `topography.in`:
 	first value is grid spacing, followed by regular-grid values over the
-	full model footprint, with the same datum/sign convention and ordering
-	as `topography.in`.
+	full model footprint in the same ordering as `topography.in`.
+- `groundwaterlevel_mode`
+	Optional. `depth_below_surface` (default) interprets values in
+	`groundwaterlevel.in` as positive depth below the local ground surface,
+	so `100.0` means the water table is 100 m below ground everywhere.
+	`absolute_elevation` interprets values using the same vertical datum
+	and sign convention as `topography.in`.
 - `topographybase_zcoord`
-	Required for `surface_groundwatertable=yes` when the topography datum
-	cannot be inferred from the loaded topography module. The groundwater
-	grid uses the same vertical datum as `topography.in`.
+	Required for `surface_groundwatertable=yes` only when
+	`groundwaterlevel_mode=absolute_elevation` and the topography datum
+	cannot be inferred from the loaded topography module.
 - `poroelastic_surface_pressure_bc`
 	Optional. `undrained` (default) leaves pore pressure unconstrained at
 	the saturated surface. `drained` sets pore pressure to zero on nodes

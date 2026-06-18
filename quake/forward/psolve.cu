@@ -234,6 +234,7 @@ static int32_t g_contribUnpackOmpMode = -1;
 static int32_t g_contribUnpackOmpReported = 0;
 static int32_t g_contribRecvMode = -1;
 static int32_t g_contribRecvReported = 0;
+static int32_t g_contribReportDeferred = 1;
 static int32_t g_reproMode = -1;
 static int32_t g_meshImportBootstrapLevel = -1;
 static int32_t g_forcePathReported = 0;
@@ -622,6 +623,7 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
                                                  mesh_t* mesh);
 static void solver_swap_pore_pressure_buffers(mysolver_t* solver);
 static int material_values_are_elastic(double Vp, double Vs, double rho);
+static void contrib_report_runtime_modes(void);
 static void solver_compute_force_topography_gpu(mysolver_t* solver,
                                                 mesh_t* mesh,
                                                 double deltaT2);
@@ -1656,6 +1658,7 @@ static struct Param_t {
   int thePoroelasticSurfacePressureBC;       /* undrained or drained */
   int thePoroelasticElasticInterface;        /* no_flow */
   char theGroundwaterLevelFile[256];
+  int theGroundwaterLevelMode;               /* depth or absolute elevation */
   double theTopographyBaseZCoord;
   double thePoroelasticDepthMaxM;
   double thePoroelasticPorosity;
@@ -1738,6 +1741,7 @@ static struct Param_t {
            .thePoroelasticSurfacePressureBC = 0,
            .thePoroelasticElasticInterface = 0,
            .theGroundwaterLevelFile = "",
+           .theGroundwaterLevelMode = 0,
            .theTopographyBaseZCoord = 0.0,
            .thePoroelasticDepthMaxM = 30.0,
            .thePoroelasticPorosity = 0.4,
@@ -1862,6 +1866,8 @@ struct station_medium_record_t {
 #define POROELASTIC_SURFACE_PRESSURE_UNDRAINED 0
 #define POROELASTIC_SURFACE_PRESSURE_DRAINED 1
 #define POROELASTIC_INTERFACE_NO_FLOW 0
+#define GROUNDWATER_LEVEL_DEPTH_BELOW_SURFACE 0
+#define GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION 1
 
 typedef struct acoustic_bathymetry_diag_t {
   int64_t faces;
@@ -1978,11 +1984,12 @@ static int poro_groundwater_grid_load(void) {
   if ((Param.includeTopography == YES) && (get_thebase_topo() > 0.0)) {
     base_z = get_thebase_topo();
   }
-  if (base_z <= 0.0) {
+  if ((Param.theGroundwaterLevelMode == GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION) &&
+      (base_z <= 0.0)) {
     fclose(fp);
     solver_abort(__FUNCTION_NAME, NULL,
                  "surface_groundwatertable=yes requires topographybase_zcoord "
-                 "because groundwaterlevel.in uses the topography datum\n");
+                 "when groundwaterlevel_mode=absolute_elevation\n");
   }
 
   const int np_ew = (int)(Param.theDomainY / spacing + 1.0);
@@ -2015,16 +2022,11 @@ static int poro_groundwater_grid_load(void) {
   g_groundwaterGrid.ntp = ntp;
   g_groundwaterGrid.values = values;
 
-  if (Global.myID == 0) {
-    monitor_print("Poroelastic groundwater grid:       %s "
-                  "(spacing %.3f m, %d x %d)\n",
-                  g_groundwaterGrid.path, spacing, np_ew, np_ns);
-  }
   return 0;
 }
 
-static double poro_grid_surface_shift(const groundwater_grid_t* grid,
-                                      double north_m, double east_m) {
+static double poro_grid_interp_value(const groundwater_grid_t* grid,
+                                     double north_m, double east_m) {
   const double spacing = grid->spacing;
   double north_cell = 0.0, east_cell = 0.0;
   double rem_n = modf(north_m / spacing, &north_cell);
@@ -2057,8 +2059,7 @@ static double poro_grid_surface_shift(const groundwater_grid_t* grid,
   const double z10 = grid->values[(int64_t)grid->np_ew * (i + 1) + j];
   const double z0 = z00 * (1.0 - rem_e) + z01 * rem_e;
   const double z1 = z10 * (1.0 - rem_e) + z11 * rem_e;
-  const double z = z0 * (1.0 - rem_n) + z1 * rem_n;
-  return grid->base_z - z;
+  return z0 * (1.0 - rem_n) + z1 * rem_n;
 }
 
 static double poro_ground_surface_shift(double north_m, double east_m) {
@@ -2073,7 +2074,13 @@ static double poro_groundwater_shift(double north_m, double east_m,
   if (Param.surfaceGroundwaterTable != YES) {
     return ground_shift;
   }
-  return poro_grid_surface_shift(&g_groundwaterGrid, north_m, east_m);
+  const double grid_value =
+      poro_grid_interp_value(&g_groundwaterGrid, north_m, east_m);
+  if (Param.theGroundwaterLevelMode ==
+      GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION) {
+    return g_groundwaterGrid.base_z - grid_value;
+  }
+  return ground_shift + grid_value;
 }
 
 static int poroelastic_element_candidate(mesh_t* mesh, int32_t eindex,
@@ -2327,7 +2334,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   48 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  59 /* Must adjust this if adding int params */
+  60 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2505,6 +2512,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[56] = Param.thePoroelasticFormulation;
   int_message[57] = Param.thePoroelasticSurfacePressureBC;
   int_message[58] = Param.thePoroelasticElasticInterface;
+  int_message[59] = Param.theGroundwaterLevelMode;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2569,6 +2577,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticFormulation = int_message[56];
   Param.thePoroelasticSurfacePressureBC = int_message[57];
   Param.thePoroelasticElasticInterface = int_message[58];
+  Param.theGroundwaterLevelMode = int_message[59];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2858,6 +2867,7 @@ static int32_t parse_parameters(const char* numericalin) {
        reconstruct_acoustic_plane_displacements[64] = "no",
        include_poroelastic[64] = "no",
        surface_groundwatertable[64] = "no",
+       groundwaterlevel_mode[64] = "depth_below_surface",
        poroelastic_formulation[64] = "brick_up",
        poroelastic_surface_pressure_bc[64] = "undrained",
        poroelastic_elastic_interface[64] = "no_flow",
@@ -3280,6 +3290,7 @@ static int32_t parse_parameters(const char* numericalin) {
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "include_poroelastic", 's', &include_poroelastic);
   parsetext(fp, "surface_groundwatertable", 's', &surface_groundwatertable);
+  parsetext(fp, "groundwaterlevel_mode", 's', &groundwaterlevel_mode);
   parsetext(fp, "poroelastic_formulation", 's', &poroelastic_formulation);
   parsetext(fp, "poroelastic_surface_pressure_bc", 's',
             &poroelastic_surface_pressure_bc);
@@ -3784,6 +3795,21 @@ static int32_t parse_parameters(const char* numericalin) {
                  surface_groundwatertable);
   }
 
+  if ((strcasecmp(groundwaterlevel_mode, "depth_below_surface") == 0) ||
+      (strcasecmp(groundwaterlevel_mode, "below_surface") == 0) ||
+      (strcasecmp(groundwaterlevel_mode, "depth") == 0)) {
+    Param.theGroundwaterLevelMode = GROUNDWATER_LEVEL_DEPTH_BELOW_SURFACE;
+  } else if ((strcasecmp(groundwaterlevel_mode, "absolute_elevation") == 0) ||
+             (strcasecmp(groundwaterlevel_mode, "absolute") == 0) ||
+             (strcasecmp(groundwaterlevel_mode, "elevation") == 0)) {
+    Param.theGroundwaterLevelMode = GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "groundwaterlevel_mode must be depth_below_surface or "
+                 "absolute_elevation: got '%s'\n",
+                 groundwaterlevel_mode);
+  }
+
   if ((strcasecmp(poroelastic_formulation, "brick_up") == 0) ||
       (strcasecmp(poroelastic_formulation, "brickup") == 0)) {
     Param.thePoroelasticFormulation = POROELASTIC_FORMULATION_BRICK_UP;
@@ -4222,6 +4248,11 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.thePoroelasticDepthMaxM);
     monitor_print("Poroelastic groundwater mode:       %s\n", gw_mode);
     if (Param.surfaceGroundwaterTable == YES) {
+      monitor_print("Groundwater level interpretation:   %s\n",
+                    (Param.theGroundwaterLevelMode ==
+                     GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION)
+                        ? "absolute_elevation"
+                        : "depth_below_surface");
       monitor_print("Groundwater level file:             %s\n",
                     (Param.theGroundwaterLevelFile[0] != '\0')
                         ? Param.theGroundwaterLevelFile
@@ -11071,6 +11102,18 @@ static void solver_init() {
     g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
 
     if (Global.myID == 0) {
+      if (Param.surfaceGroundwaterTable == YES) {
+        monitor_print(
+            "Poroelastic groundwater grid:       %s "
+            "(mode %s, spacing %.3f m, %d x %d)\n",
+            g_groundwaterGrid.path,
+            (Param.theGroundwaterLevelMode ==
+             GROUNDWATER_LEVEL_ABSOLUTE_ELEVATION)
+                ? "absolute_elevation"
+                : "depth_below_surface",
+            g_groundwaterGrid.spacing, g_groundwaterGrid.np_ew,
+            g_groundwaterGrid.np_ns);
+      }
       monitor_print(
           "Poroelastic BrickUP: %.1fM elements, %.1fM pressure nodes; "
           "%.1fM CPML candidates converted to elastic\n",
@@ -11084,6 +11127,8 @@ static void solver_init() {
     g_poroelasticPmlCandidateCount = 0;
     g_poroelasticLocalElementCount = 0;
   }
+
+  contrib_report_runtime_modes();
 
   if (Global.myID == 0) {
     fprintf(stdout, "GPU device memory allocation: start\n");
@@ -20249,7 +20294,8 @@ static int32_t contrib_pack_use_omp(void) {
       g_contribPackOmpMode = 1;
     }
 
-    if ((g_contribPackOmpMode == 1) && (Global.myID == 0) &&
+    if ((g_contribReportDeferred == 0) && (g_contribPackOmpMode == 1) &&
+        (Global.myID == 0) &&
         (g_contribPackOmpReported == 0)) {
       monitor_print("contribution pack OpenMP: enabled (threads=%d)\n",
                     omp_get_max_threads());
@@ -20283,7 +20329,8 @@ static int32_t contrib_unpack_use_omp(void) {
       g_contribUnpackOmpMode = 1;
     }
 
-    if ((g_contribUnpackOmpMode == 1) && (Global.myID == 0) &&
+    if ((g_contribReportDeferred == 0) && (g_contribUnpackOmpMode == 1) &&
+        (Global.myID == 0) &&
         (g_contribUnpackOmpReported == 0)) {
       monitor_print("contribution unpack OpenMP: enabled (threads=%d)\n",
                     omp_get_max_threads());
@@ -20317,7 +20364,8 @@ static int32_t contrib_recv_use_waitsome(void) {
       g_contribRecvMode = 1;
     }
 
-    if ((Global.myID == 0) && (g_contribRecvReported == 0)) {
+    if ((g_contribReportDeferred == 0) && (Global.myID == 0) &&
+        (g_contribRecvReported == 0)) {
       monitor_print("contribution receive mode: %s\n",
                     g_contribRecvMode ? "waitsome" : "waitall");
       g_contribRecvReported = 1;
@@ -20325,6 +20373,46 @@ static int32_t contrib_recv_use_waitsome(void) {
   }
 
   return g_contribRecvMode;
+}
+
+static void contrib_report_runtime_modes(void) {
+  if (g_contribReportDeferred == 0) {
+    return;
+  }
+
+  if (g_contribRecvMode < 0) {
+    contrib_recv_use_waitsome();
+  }
+#ifdef _OPENMP
+  if (g_contribPackOmpMode < 0) {
+    contrib_pack_use_omp();
+  }
+  if (g_contribUnpackOmpMode < 0) {
+    contrib_unpack_use_omp();
+  }
+#endif
+
+  g_contribReportDeferred = 0;
+  if ((Global.myID == 0) && (g_contribRecvReported == 0)) {
+    monitor_print("contribution receive mode: %s\n",
+                  g_contribRecvMode ? "waitsome" : "waitall");
+    g_contribRecvReported = 1;
+  }
+
+#ifdef _OPENMP
+  if ((Global.myID == 0) && (g_contribPackOmpReported == 0) &&
+      (g_contribPackOmpMode == 1)) {
+    monitor_print("contribution pack OpenMP: enabled (threads=%d)\n",
+                  omp_get_max_threads());
+    g_contribPackOmpReported = 1;
+  }
+  if ((Global.myID == 0) && (g_contribUnpackOmpReported == 0) &&
+      (g_contribUnpackOmpMode == 1)) {
+    monitor_print("contribution unpack OpenMP: enabled (threads=%d)\n",
+                  omp_get_max_threads());
+    g_contribUnpackOmpReported = 1;
+  }
+#endif
 }
 
 static int32_t sparse_force_upload_mode(void) {
