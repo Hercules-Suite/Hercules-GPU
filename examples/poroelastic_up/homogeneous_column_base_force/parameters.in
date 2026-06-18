@@ -15,12 +15,6 @@ region_length_north_m       = 1.0
 region_depth_deep_m         = 32.0
 region_azimuth_leftface_deg = 0.0
 
-domain_surface_corners =
- 0.0 0.0
- 0.0 0.000008983153
- 0.000008983153 0.000008983153
- 0.000008983153 0.0
-
 type_of_damping             = none
 abc_type                    = dashpot
 stiffness_calculation_method = effective

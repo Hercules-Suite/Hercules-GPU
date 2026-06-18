@@ -12,9 +12,3 @@ type_of_damping             = none
 
 source_directory            = sourcefiles
 source_directory_output     = output/srctmp
-
-domain_surface_corners =
- 0.0 0.0
- 0.0 0.000008983153
- 0.000008983153 0.000008983153
- 0.000008983153 0.0

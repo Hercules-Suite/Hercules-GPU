@@ -11,6 +11,8 @@ mpirun -np <N> <path-to-psolve> parameters.in
 
 The split `physics.in` and `numerical.in` files are kept only as reference for
 older scripts.
+This example assumes a PROJ-enabled build, so it does not include legacy
+`domain_surface_corners` blocks.
 
 Geometry and material:
 
@@ -24,7 +26,9 @@ Geometry and material:
 
 The source is `type_of_source = base_force`. It reads
 `sourcefiles/baseforcefunction.in` as a base velocity history in m/s and applies
-a nodal force distribution on the deepest mesh-node plane:
+a nodal force distribution on the deepest mesh-node plane. The included table
+is a sampled Ricker velocity pulse with peak frequency 10 Hz, peak time 0.08 s,
+and peak velocity 0.01 m/s:
 
 ```text
 sum(F_base) = scale * rho_base * Vs_base * A_base * v(t)
