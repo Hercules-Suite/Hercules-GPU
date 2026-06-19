@@ -3,10 +3,11 @@
 # Run from this directory:
 #   OpenSees model.tcl
 #
-# The model intentionally keeps the same 3D block geometry as the Hercules case
-# instead of imposing equalDOF 1D constraints. Bottom and lateral dashpots are
-# applied as explicit nodal forces, F = -C v, because OpenSees zeroLength
-# elements do not support the 4-DOF U-P nodes used by BrickUP.
+# The model intentionally keeps the same 3D block geometry as the Hercules
+# case instead of imposing equalDOF 1D constraints. Bottom and lateral dashpots
+# are represented with auxiliary displacement-only nodes tied to BrickUP
+# displacement DOFs, following the pattern used by OpenSees site-response
+# examples.
 
 wipe
 model BasicBuilder -ndm 3 -ndf 4
@@ -163,7 +164,49 @@ for {set k 0} {$k < $nz} {incr k} {
         2 [expr {$dx * $dz}] $rho $vp $vs
 }
 
-puts "Accumulated [array size dashC] nodal dashpot coefficients on bottom/lateral boundaries"
+model BasicBuilder -ndm 3 -ndf 3
+
+set nextNodeTag 100000
+set nextMatTag 100000
+set nextEleTag 100000
+
+foreach key [array names dashC] {
+    set c $dashC($key)
+    if {$c <= 0.0} {
+        continue
+    }
+    set parts [split $key ","]
+    set nd [lindex $parts 0]
+    set dof [lindex $parts 1]
+
+    set dashF $nextNodeTag
+    incr nextNodeTag
+    set dashS $nextNodeTag
+    incr nextNodeTag
+
+    node $dashF $nodeX($nd) $nodeY($nd) $nodeZ($nd)
+    node $dashS $nodeX($nd) $nodeY($nd) $nodeZ($nd)
+    fix $dashF 1 1 1
+
+    if {$dof == 1} {
+        fix $dashS 0 1 1
+    } elseif {$dof == 2} {
+        fix $dashS 1 0 1
+    } else {
+        fix $dashS 1 1 0
+    }
+
+    equalDOF $nd $dashS $dof
+
+    set mat $nextMatTag
+    incr nextMatTag
+    uniaxialMaterial Viscous $mat $c 1.0
+
+    element zeroLength $nextEleTag $dashF $dashS -mat $mat -dir $dof
+    incr nextEleTag
+}
+
+puts "Created [array size dashC] auxiliary zeroLength dashpots on bottom/lateral boundaries"
 
 # ----------------------------------------------------------------------
 # Base force. The same velocity history used by Hercules is converted to
@@ -204,91 +247,15 @@ set dirX 1.0
 set dirY 0.0
 set dirZ 0.0
 
-timeSeries Constant 1
+model BasicBuilder -ndm 3 -ndf 4
+timeSeries Path 1 -dt $dtSeries -values $velocitySeries -factor $totalForceFactor
 
 set bottomNodes [list [nodeTag 0 0 $nz] [nodeTag 1 0 $nz] \
                       [nodeTag 1 1 $nz] [nodeTag 0 1 $nz]]
-
-proc addLoadComponent {nd dof value} {
-    upvar nodalLoad nodalLoad
-    set key "$nd,$dof"
-    if {![info exists nodalLoad($key)]} {
-        set nodalLoad($key) 0.0
-    }
-    set nodalLoad($key) [expr {$nodalLoad($key) + $value}]
-}
-
-proc scalarSeriesValue {time} {
-    global nSeries t0Series dtSeries velocitySeries
-
-    set tau [expr {$time - $t0Series}]
-    if {$tau < 0.0} {
-        return 0.0
-    }
-
-    set scaled [expr {$tau / $dtSeries}]
-    set i0 [expr {int(floor($scaled))}]
-    if {$i0 < 0} {
-        return 0.0
-    }
-    if {$i0 >= $nSeries - 1} {
-        if {$i0 == $nSeries - 1} {
-            return [lindex $velocitySeries $i0]
-        }
-        return 0.0
-    }
-
-    set frac [expr {$scaled - $i0}]
-    set v0 [lindex $velocitySeries $i0]
-    set v1 [lindex $velocitySeries [expr {$i0 + 1}]]
-    return [expr {(1.0 - $frac) * $v0 + $frac * $v1}]
-}
-
-proc applyDynamicBoundaryLoads {time patternTag} {
-    global dashC totalForceFactor dirX dirY dirZ bottomNodes
-
-    catch {remove loadPattern $patternTag}
-    array set nodalLoad {}
-
-    foreach key [array names dashC] {
-        set parts [split $key ","]
-        set nd [lindex $parts 0]
-        set dof [lindex $parts 1]
-        set c $dashC($key)
-        set force [expr {-1.0 * $c * [nodeVel $nd $dof]}]
-        addLoadComponent $nd $dof $force
-    }
-
-    set baseForce [expr {$totalForceFactor * [scalarSeriesValue $time]}]
+pattern Plain 1 1 {
     foreach nd $bottomNodes {
-        addLoadComponent $nd 1 [expr {0.25 * $dirX * $baseForce}]
-        addLoadComponent $nd 2 [expr {0.25 * $dirY * $baseForce}]
-        addLoadComponent $nd 3 [expr {0.25 * $dirZ * $baseForce}]
+        load $nd [expr {0.25 * $dirX}] [expr {0.25 * $dirY}] [expr {0.25 * $dirZ}] 0.0
     }
-
-    array set nodeSeen {}
-    array set nodeLoad {}
-    foreach key [array names nodalLoad] {
-        set parts [split $key ","]
-        set nd [lindex $parts 0]
-        set dof [lindex $parts 1]
-        set nodeSeen($nd) 1
-        for {set c 1} {$c <= 3} {incr c} {
-            set compKey "$nd,$c"
-            if {![info exists nodeLoad($compKey)]} {
-                set nodeLoad($compKey) 0.0
-            }
-        }
-        set compKey "$nd,$dof"
-        set nodeLoad($compKey) [expr {$nodeLoad($compKey) + $nodalLoad($key)}]
-    }
-
-    set script ""
-    foreach nd [array names nodeSeen] {
-        append script "load $nd $nodeLoad($nd,1) $nodeLoad($nd,2) $nodeLoad($nd,3) 0.0\n"
-    }
-
-    pattern Plain $patternTag 1 $script
 }
 
 # ----------------------------------------------------------------------
@@ -377,12 +344,10 @@ integrator Newmark 0.5 0.25
 analysis Transient
 
 set nSteps [expr {int(round($tEnd / $dt))}]
-applyDynamicBoundaryLoads 0.0 1
 writeStations 0.0
 
 set ok 0
 for {set step 1} {$step <= $nSteps} {incr step} {
-    applyDynamicBoundaryLoads [expr {[getTime] + $dt}] 1
     set ok [analyze 1 $dt]
     if {$ok != 0} {
         puts "OpenSees analysis failed at step $step time [getTime] with code $ok"
