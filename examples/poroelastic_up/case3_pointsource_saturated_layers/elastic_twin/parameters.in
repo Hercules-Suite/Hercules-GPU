@@ -34,7 +34,12 @@ simulation_shear_velocity_min  = 300.0
 simulation_output_rate         = 10000000
 
 the_threshold_damping          = 0.05
-the_threshold_Vp_over_Vs       = 3.0
+# Must exceed the UNDRAINED Vp/Vs of the saturated layers (1804/300 = 6.0,
+# 1936/500 = 3.9) or mu_and_lambda clamps this twin's Vp down to 3*Vs and it
+# stops being the undrained-equivalent. The poroelastic run does NOT need this
+# (its drained Vp/Vs = 2.0 is under the cap, and the coupling adds alpha^2*M as
+# a force that bypasses the cap), but we set both runs identically.
+the_threshold_Vp_over_Vs       = 8.0
 do_damping_statistics          = 0
 
 output_mesh                    = 1

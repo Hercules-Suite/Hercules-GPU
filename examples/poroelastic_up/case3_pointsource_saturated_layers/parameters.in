@@ -37,7 +37,11 @@ simulation_shear_velocity_min  = 300.0
 simulation_output_rate         = 10000000
 
 the_threshold_damping          = 0.05
-the_threshold_Vp_over_Vs       = 3.0
+# No effect on this poroelastic run (drained Vp/Vs = 2.0 < cap); set to match the
+# elastic twin, which NEEDS it raised so its undrained Vp (Vp/Vs up to 6.0) is not
+# clamped to 3*Vs. The Biot coupling adds alpha^2*M as a force, bypassing this cap,
+# so the poro run reaches undrained Vp/Vs the elastic path cannot represent at cap=3.
+the_threshold_Vp_over_Vs       = 8.0
 do_damping_statistics          = 0
 
 output_mesh                    = 1

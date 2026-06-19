@@ -30,6 +30,14 @@ Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/`
   `region_depth_deep_m`) by their integer GCD; the largest reduced value must be a power
   of 2 (octor.c embeds the domain in a `2^31`-tick cube along that axis). E.g. `1×1×64` ✓
   (`60` ✗ → element sizes don't tile the 1 m lateral); `2000×2000×1500` → `4×4×3` ✓.
+- **Vp/Vs cap & the elastic twin:** `mu_and_lambda` clamps `Vp` to `the_threshold_Vp_over_Vs · Vs`
+  (default 3.0). The undrained-equivalent **elastic twin** uses the *undrained* `Vp` with the
+  *low* skeleton `Vs`, so its `Vp/Vs` is high (e.g. saturated soft soil `1804/300 = 6`) and gets
+  clamped unless you raise `the_threshold_Vp_over_Vs` above it — otherwise the twin silently runs
+  at `3·Vs` and is not the undrained-equivalent. The poroelastic run does **not** need this (its
+  drained `Vp/Vs` is low, and the Biot coupling adds `α²M` as a force that bypasses the cap) — so
+  the coupling can represent an undrained `Vp/Vs` the elastic path cannot. Always set the twin's
+  threshold above the saturated layers' undrained `Vp/Vs`.
 
 ## Run pattern
 ```bash
