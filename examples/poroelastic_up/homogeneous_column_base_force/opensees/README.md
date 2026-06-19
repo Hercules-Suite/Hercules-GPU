@@ -19,8 +19,8 @@ F(t) = rho_base * Vs_base * A_base * v(t)
 and distributes that force over the four bottom nodes. The model keeps the
 same 1 m x 1 m x 32 m 3D block geometry as Hercules. It does not impose
 OpenSees `equalDOF` column constraints; instead it approximates Hercules'
-dashpot boundaries with zeroLength viscous dashpots on the lateral and bottom
-faces.
+dashpot boundaries with nodal dashpot forces on the lateral and bottom faces.
+Those forces are updated once per OpenSees time step as `F = -C v`.
 
 Outputs are written to `output/station.0` through `output/station.4` at the
 same station depths and output interval as the Hercules example.
