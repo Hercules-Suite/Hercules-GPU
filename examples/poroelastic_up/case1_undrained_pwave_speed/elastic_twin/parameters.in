@@ -1,20 +1,14 @@
-# Case 1 - ELASTIC TWIN (undrained-equivalent reference).
-#
-# Identical to ../parameters.in but with poroelasticity OFF and the skeleton Vp
-# replaced by the undrained value Vp_u = 1705.872 m/s. In the undrained limit
-# (perm = 0) the poroelastic column is EXACTLY this elastic medium, so the two
-# runs must produce the same waveforms. Same source file is reused via
-# source_directory = ../sourcefiles.
-#
-# Run from THIS directory:
-#   mpirun -np <N> <path-to-psolve> parameters.in
+# Case 1 - UNDRAINED-equivalent elastic twin (Vp = Vp_u = 1705.872 m/s).
+# In the undrained limit (perm=0) the poroelastic column is exactly this medium,
+# so ../output and this run must match. Same source via ../sourcefiles.
+#   mpirun -np <N> <path-to-psolve> parameters.in   (run from this directory)
 
 region_origin_latitude_deg  = 0.0
 region_origin_longitude_deg = 0.0
 region_depth_shallow_m      = 0.0
 region_length_east_m        = 1.0
 region_length_north_m       = 1.0
-region_depth_deep_m         = 32.0
+region_depth_deep_m         = 1024.0
 region_azimuth_leftface_deg = 0.0
 
 type_of_damping             = none
@@ -28,7 +22,7 @@ monitor_file = output/monitor.txt
 
 simulation_wave_max_freq_hz    = 25.0
 simulation_start_time_sec      = 0.0
-simulation_end_time_sec        = 0.40
+simulation_end_time_sec        = 1.00
 simulation_delta_time_sec      = 0.00005
 simulation_node_per_wavelength = 8
 simulation_shear_velocity_min  = 200.0
@@ -68,15 +62,15 @@ print_station_accelerations    = yes
 print_station_pressures         = no
 
 output_stations =
- 0.000004491576 0.000004491576  0.0
- 0.000004491576 0.000004491576  2.0
- 0.000004491576 0.000004491576  6.0
- 0.000004491576 0.000004491576 10.0
- 0.000004491576 0.000004491576 14.0
- 0.000004491576 0.000004491576 18.0
- 0.000004491576 0.000004491576 22.0
- 0.000004491576 0.000004491576 27.0
- 0.000004491576 0.000004491576 31.5
+ 0.000004491576 0.000004491576    0.0
+ 0.000004491576 0.000004491576  128.0
+ 0.000004491576 0.000004491576  256.0
+ 0.000004491576 0.000004491576  384.0
+ 0.000004491576 0.000004491576  512.0
+ 0.000004491576 0.000004491576  640.0
+ 0.000004491576 0.000004491576  768.0
+ 0.000004491576 0.000004491576  896.0
+ 0.000004491576 0.000004491576 1020.0
 
 include_buildings              = no
 implement_drm                  = no

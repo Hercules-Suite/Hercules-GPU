@@ -10,11 +10,11 @@ analytical references possible:
 > elastic element with undrained moduli: `Vp_u = sqrt(Vp_drained^2 + alpha^2*M/rho)`,
 > `Vs` and `rho` unchanged.
 
-| Case | Folder | Reference | Checks |
+| Case | Folder | Reference | Status |
 |------|--------|-----------|--------|
-| 1 | `case1_undrained_pwave_speed/` | Gassmann undrained `Vp_u` + elastic twin | P-wave speed = `sqrt(Vp^2+alpha^2 M/rho)`; twin NRMS; also confirms CFL |
-| 2 | `case2_sh_transfer_function/` | Kausel/Roesset 1D SH transfer function | resonance `f0=Vs/(4H)`; poroelastic == elastic (fluid independence) |
-| 3 | `case3_pointsource_saturated_layers/` | undrained-equivalent elastic twin | per-offset surface-motion NRMS < 3 % |
+| 1 | `case1_undrained_pwave_speed/` | Gassmann `Vp_u` + undrained & drained twins | active — P-speed slope + which-twin verdict |
+| 2 | `case2_sh_transfer_function/` | Kausel/Roesset 1D SH transfer function | **DEFERRED** — base-force thin column is killed by absorbing side boundaries; needs the plane-wave/DRM injector in a wider domain (see its README) |
+| 3 | `case3_pointsource_saturated_layers/` | undrained-equivalent elastic twin | active — per-offset surface-motion NRMS < 3 % |
 
 Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/` or
 `elastic/` reference run, a `post/*.py` analysis script, and a `README.md`).

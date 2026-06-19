@@ -5,24 +5,24 @@
 # speed must equal the undrained Vp:
 #
 #   Vp_u = sqrt(Vp_drained^2 + alpha^2 * M / rho),   M = K_f / porosity
-#        = sqrt(400^2 + 1.0^2 * (2.2e9/0.4) / 2000)
 #        = sqrt(400^2 + 5.5e9/2000) = 1705.9 m/s
 #
-# The dry skeleton Vp is 400 m/s, so the propagating P-wave is ~4.3x faster;
-# the time step MUST be sized from Vp_u, not the dry Vp.
+# MESH: simulation_wave_max_freq_hz=25 with Vs_min=200 and 8 nodes/wavelength
+# gives 1 m elements (200/(25*8)=1.0). The source is the fc=10 Hz Ricker
+# (energy within the 25 Hz mesh band).
+#
+# REGIME: the column must be several undrained wavelengths long or the wave
+# crosses it quasi-statically and the speed is unmeasurable. lambda_u = Vp_u/fc
+# = 1705.9/10 ~ 171 m, so the 1024 m column = ~6 lambda_u. dt is sized for Vp_u.
 #
 #   mpirun -np <N> <path-to-psolve> parameters.in
-
-# ----------------------------------------------------------------------
-# Domain / physics
-# ----------------------------------------------------------------------
 
 region_origin_latitude_deg  = 0.0
 region_origin_longitude_deg = 0.0
 region_depth_shallow_m      = 0.0
 region_length_east_m        = 1.0
 region_length_north_m       = 1.0
-region_depth_deep_m         = 32.0
+region_depth_deep_m         = 1024.0
 region_azimuth_leftface_deg = 0.0
 
 type_of_damping             = none
@@ -32,15 +32,11 @@ stiffness_calculation_method = effective
 source_directory            = sourcefiles
 source_directory_output     = output/srctmp
 
-# ----------------------------------------------------------------------
-# Time step / mesh controls
-# ----------------------------------------------------------------------
-
 monitor_file = output/monitor.txt
 
 simulation_wave_max_freq_hz    = 25.0
 simulation_start_time_sec      = 0.0
-simulation_end_time_sec        = 0.40
+simulation_end_time_sec        = 1.00
 simulation_delta_time_sec      = 0.00005
 simulation_node_per_wavelength = 8
 simulation_shear_velocity_min  = 200.0
@@ -59,31 +55,20 @@ use_checkpoint                 = 0
 checkpointing_rate             = 0
 checkpoint_path                = output/checkpoints
 
-# ----------------------------------------------------------------------
-# Homogeneous profile material (dry/drained skeleton)
-# profile_layers: z_top, Vp, Vs, rho, Qp, Qs
-# ----------------------------------------------------------------------
-
+# Homogeneous profile material (dry/drained skeleton): z_top Vp Vs rho Qp Qs
 cvmdb_input_file               = profile
 number_profile_layers          = 1
 profile_layers =
  0.0 400.0 200.0 2000.0 1000000.0 1000000.0
 
-# ----------------------------------------------------------------------
-# Output
-# ----------------------------------------------------------------------
-
 output_displacement            = 0
-output_displacement_file       = output/wavefield/displacement.h4d
 output_velocity                = 0
-output_velocity_file           = output/wavefield/velocity.h4d
 
 number_output_planes           = 0
 output_planes_print_rate       = 1
 output_planes_directory        = output/planes
 
-# Dense vertical line of receivers (z = depth, m); fine sampling resolves the
-# high-speed undrained first arrivals. Source plane is at z = 32 m.
+# Vertical receiver line down the 1024 m column (z = depth, m). Source plane z=1024.
 number_output_stations         = 9
 output_stations_print_rate     = 1
 output_stations_directory      = output/stations
@@ -92,19 +77,15 @@ print_station_accelerations    = yes
 print_station_pressures        = yes
 
 output_stations =
- 0.000004491576 0.000004491576  0.0
- 0.000004491576 0.000004491576  2.0
- 0.000004491576 0.000004491576  6.0
- 0.000004491576 0.000004491576 10.0
- 0.000004491576 0.000004491576 14.0
- 0.000004491576 0.000004491576 18.0
- 0.000004491576 0.000004491576 22.0
- 0.000004491576 0.000004491576 27.0
- 0.000004491576 0.000004491576 31.5
-
-# ----------------------------------------------------------------------
-# Disabled optional physics
-# ----------------------------------------------------------------------
+ 0.000004491576 0.000004491576    0.0
+ 0.000004491576 0.000004491576  128.0
+ 0.000004491576 0.000004491576  256.0
+ 0.000004491576 0.000004491576  384.0
+ 0.000004491576 0.000004491576  512.0
+ 0.000004491576 0.000004491576  640.0
+ 0.000004491576 0.000004491576  768.0
+ 0.000004491576 0.000004491576  896.0
+ 0.000004491576 0.000004491576 1020.0
 
 include_buildings              = no
 implement_drm                  = no
@@ -118,13 +99,10 @@ basin_velocity_model           = no
 3D_velocity_model              = no
 mesh_coordinates_for_matlab    = no
 
-# ----------------------------------------------------------------------
 # BrickUP poroelasticity (undrained: permeability = 0)
-# ----------------------------------------------------------------------
-
 include_poroelastic            = yes
 poroelastic_formulation        = brick_up
-poroelastic_depth_max_m        = 32.0
+poroelastic_depth_max_m        = 1024.0
 surface_groundwatertable       = no
 poroelastic_surface_pressure_bc = undrained
 poroelastic_surface_pressure_penalty_factor = 1.0
