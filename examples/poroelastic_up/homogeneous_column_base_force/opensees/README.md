@@ -30,6 +30,9 @@ Important comparison notes:
 - The top pore-pressure DOF is fixed to zero to mimic
   `poroelastic_surface_pressure_bc = drained`.
 - Permeability is zero, matching the current Hercules smoke test.
+- OpenSees `brickUP` takes a single storage/combined bulk modulus, not a
+  separate porosity. For the Hercules settings `K_f = 2.2e9 Pa`,
+  `porosity = 0.4`, and `alpha = 1`, the script passes `K_f / n = 5.5e9 Pa`.
 - This is a waveform and sign/magnitude comparison target, not a bitwise match:
   OpenSees and Hercules use different boundary implementations, element
   assembly paths, and time integrator details.

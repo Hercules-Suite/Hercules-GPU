@@ -42,7 +42,9 @@ set outputEvery 10
 set rho 2000.0
 set vs 200.0
 set vp 400.0
-set fluidBulk 2.2e9
+set porosity 0.4
+set fluidBulkModulus 2.2e9
+set brickUPBulk [expr {$fluidBulkModulus / $porosity}]
 set fluidRho 1000.0
 set permX 0.0
 set permY 0.0
@@ -54,6 +56,7 @@ set young [expr {$shearMod * (3.0 * $lambda + 2.0 * $shearMod) / ($lambda + $she
 set poisson [expr {$lambda / (2.0 * ($lambda + $shearMod))}]
 
 puts "Dry skeleton: E=$young Pa, nu=$poisson, rho=$rho kg/m^3"
+puts "BrickUP storage bulk: $brickUPBulk Pa (Kf=$fluidBulkModulus Pa, porosity=$porosity)"
 
 nDMaterial ElasticIsotropic 1 $young $poisson $rho
 
@@ -97,7 +100,7 @@ for {set k 0} {$k < $nz} {incr k} {
     set n7 [nodeTag 1 1 $k]
     set n8 [nodeTag 0 1 $k]
     element brickUP $eleTag $n1 $n2 $n3 $n4 $n5 $n6 $n7 $n8 1 \
-        $fluidBulk $fluidRho $permX $permY $permZ 0.0 0.0 0.0
+        $brickUPBulk $fluidRho $permX $permY $permZ 0.0 0.0 0.0
     incr eleTag
 }
 
