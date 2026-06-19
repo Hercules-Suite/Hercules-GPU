@@ -1,0 +1,39 @@
+# Poroelastic BrickUP (u-p) validation suite
+
+Validation cases for the reduced-Biot `u-p` (BrickUP-style) poroelastic element,
+against **analytical references** (no second code needed). Hercules' u-p formulation
+neglects fluid inertia / the slow P-wave, treats the input `Vp/Vs` as the **drained
+skeleton**, and uses `M = K_f/porosity`, `alpha=1`. The key fact that makes exact
+analytical references possible:
+
+> In the undrained limit (`permeability = 0`), a poroelastic element is *exactly* an
+> elastic element with undrained moduli: `Vp_u = sqrt(Vp_drained^2 + alpha^2*M/rho)`,
+> `Vs` and `rho` unchanged.
+
+| Case | Folder | Reference | Checks |
+|------|--------|-----------|--------|
+| 1 | `case1_undrained_pwave_speed/` | Gassmann undrained `Vp_u` + elastic twin | P-wave speed = `sqrt(Vp^2+alpha^2 M/rho)`; twin NRMS; also confirms CFL |
+| 2 | `case2_sh_transfer_function/` | Kausel/Roesset 1D SH transfer function | resonance `f0=Vs/(4H)`; poroelastic == elastic (fluid independence) |
+| 3 | `case3_pointsource_saturated_layers/` | undrained-equivalent elastic twin | per-offset surface-motion NRMS < 3 % |
+
+Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/` or
+`elastic/` reference run, a `post/*.py` analysis script, and a `README.md`).
+`homogeneous_column_base_force/` is the original smoke-test column the cases are built from.
+
+## Cross-cutting conventions (every case)
+- `poroelastic_permeability_* = 0`, `poroelastic_biot_alpha = 1`,
+  `poroelastic_surface_pressure_bc = undrained` (so the elastic equivalence is exact).
+- **Size `simulation_delta_time_sec` from the undrained `Vp`**, not the dry `Vp` — the
+  solver's auto-CFL only sees the dry `Vp` and would under-size the step.
+- Analysis scripts require `numpy` (run on the host with the station output).
+- **Octree domain rule:** divide (`region_length_north_m`, `region_length_east_m`,
+  `region_depth_deep_m`) by their integer GCD; the largest reduced value must be a power
+  of 2 (octor.c embeds the domain in a `2^31`-tick cube along that axis). E.g. `1×1×64` ✓
+  (`60` ✗ → element sizes don't tile the 1 m lateral); `2000×2000×1500` → `4×4×3` ✓.
+
+## Run pattern
+```bash
+cd caseN_xxx && mpirun -np <N> <path-to-psolve> parameters.in
+cd elastic_twin && mpirun -np <N> <path-to-psolve> parameters.in && cd ..   # reference
+python3 post/<script>.py
+```

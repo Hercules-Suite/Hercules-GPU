@@ -1,0 +1,21 @@
+# Vertical compliant-base force for the undrained P-wave-speed check.
+# A vertical base force launches a (fast) compressional pulse up the column.
+
+source_is_filtered        = 0
+threshold_frequency       = 25.0
+number_of_poles           = 4
+
+type_of_source            = base_force
+source_function_type      = discrete
+
+# Base impedance for the Lysmer-style velocity->force conversion.
+base_force_rho_kgm3       = 2000.0
+base_force_vs_mps         = 200.0
+
+# x = north, y = east, z = down. Vertical -> P-wave.
+base_force_direction_x    = 0.0
+base_force_direction_y    = 0.0
+base_force_direction_z    = 1.0
+
+# 1.0 = incident/within velocity history.
+base_force_scale          = 1.0

@@ -1,0 +1,110 @@
+# Case 3 - Point source under saturated soil layers (realistic target, POROELASTIC).
+#
+# Layered profile with two SATURATED poroelastic soil layers on top and an
+# elastic bedrock below; a point double-couple in the bedrock radiates upward
+# through the saturated layers to surface receivers. In the undrained limit
+# (perm = 0) the saturated layers are exactly elastic layers with undrained Vp:
+#   layer A: Vp_u = sqrt(600^2  + 5.5e9/1900) = 1804 m/s
+#   layer B: Vp_u = sqrt(1000^2 + 5.5e9/2000) = 1936 m/s
+# so the run is validated against ../elastic_twin (same model, saturated layers
+# replaced by these undrained-Vp elastic layers).
+#
+#   mpirun -np <N> <path-to-psolve> parameters.in
+
+region_origin_latitude_deg  = 0.0
+region_origin_longitude_deg = 0.0
+region_depth_shallow_m      = 0.0
+region_length_east_m        = 2000.0
+region_length_north_m       = 2000.0
+region_depth_deep_m         = 1500.0
+region_azimuth_leftface_deg = 0.0
+
+type_of_damping             = none
+abc_type                    = dashpot
+stiffness_calculation_method = effective
+
+source_directory            = sourcefiles
+source_directory_output     = output/srctmp
+
+monitor_file = output/monitor.txt
+
+simulation_wave_max_freq_hz    = 4.0
+simulation_start_time_sec      = 0.0
+simulation_end_time_sec        = 4.00
+simulation_delta_time_sec      = 0.0005
+simulation_node_per_wavelength = 8
+simulation_shear_velocity_min  = 300.0
+simulation_output_rate         = 10000000
+
+the_threshold_damping          = 0.05
+the_threshold_Vp_over_Vs       = 3.0
+do_damping_statistics          = 0
+
+output_mesh                    = 1
+mesh_only_mode                 = 0
+mesh_input_mode                = 0
+mesh_etree_output_file         = output/mesh.e
+
+use_checkpoint                 = 0
+checkpointing_rate             = 0
+checkpoint_path                = output/checkpoints
+
+# 3-layer profile (dry/drained skeleton): z_top Vp Vs rho Qp Qs
+# Top two layers (0-400 m) are saturated poroelastic; bedrock (>=400 m) elastic.
+cvmdb_input_file               = profile
+number_profile_layers          = 3
+profile_layers =
+ 0.0    600.0  300.0  1900.0 1000000.0 1000000.0
+ 150.0  1000.0 500.0  2000.0 1000000.0 1000000.0
+ 400.0  2500.0 1300.0 2300.0 1000000.0 1000000.0
+
+output_displacement            = 0
+output_velocity                = 0
+
+number_output_planes           = 0
+output_planes_print_rate       = 1
+output_planes_directory        = output/planes
+
+# Surface receivers at increasing east offset from the epicenter (x=1000,y=1000).
+number_output_stations         = 5
+output_stations_print_rate     = 2
+output_stations_directory      = output/stations
+print_station_velocities       = yes
+print_station_accelerations    = no
+print_station_pressures        = yes
+
+output_stations =
+ 1000.0 1000.0 0.0
+ 1000.0 1200.0 0.0
+ 1000.0 1400.0 0.0
+ 1000.0 1600.0 0.0
+ 1000.0 1800.0 0.0
+
+include_buildings              = no
+implement_drm                  = no
+include_topography             = no
+include_acoustic               = no
+include_nonlinear_analysis     = no
+include_incident_planewaves    = no
+include_hmg_halfspace          = no
+Istanbul_velocity_model        = no
+basin_velocity_model           = no
+3D_velocity_model              = no
+mesh_coordinates_for_matlab    = no
+
+# Saturated poroelastic top layers (perm=0, undrained).
+include_poroelastic            = yes
+poroelastic_formulation        = brick_up
+poroelastic_depth_max_m        = 400.0
+surface_groundwatertable       = no
+poroelastic_surface_pressure_bc = undrained
+poroelastic_surface_pressure_penalty_factor = 1.0
+poroelastic_elastic_interface  = no_flow
+poroelastic_porosity           = 0.4
+poroelastic_biot_alpha         = 1.0
+poroelastic_fluid_bulk_modulus_pa = 2.2e9
+poroelastic_fluid_density_kgm3 = 1000.0
+poroelastic_fluid_viscosity_pa_s = 1.0e-3
+poroelastic_permeability_x_m2  = 0.0
+poroelastic_permeability_y_m2  = 0.0
+poroelastic_permeability_z_m2  = 0.0
