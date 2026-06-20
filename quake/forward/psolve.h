@@ -414,12 +414,6 @@ typedef struct gpu_data_t {
     solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
     solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
     solver_float* porePressureSurfaceDevice; /* GPU drained-plane mass */
-    solver_float* porePressurePcgXDevice;    /* Consistent-storage pressure solve */
-    solver_float* porePressurePcgRDevice;
-    solver_float* porePressurePcgZDevice;
-    solver_float* porePressurePcgPDevice;
-    solver_float* porePressurePcgApDevice;
-    uint8_t*      porePressureOwnedDevice;   /* owned-node mask for PCG dots */
     int32_t       poroelasticElemCount;      /* local BrickUP elements */
     int32_t*      poroelasticElemMapperDevice;
     double*       poroelasticElemHDevice;

@@ -421,23 +421,6 @@ Poroelastic U-P input flags (experimental V1):
 	update. MPI pressure exchange still uses the existing host schedules, but
 	the pore-pressure transfer path is sparse by default: only schedule,
 	adjustment, and pressure-output station nodes are staged between host and GPU.
-- `poroelastic_pressure_storage`
-	Optional. `lumped` (default) keeps the current diagonal pressure-storage
-	update and is the fastest path. `consistent` replaces the diagonal
-	storage divide with a matrix-free 2x2x2-Gauss pressure-storage solve,
-	using the same topography-aware pressure-test weights as the BrickUP
-	coupling. This is intended for dispersion studies where short-wavelength
-	pore-pressure/storage error matters more than raw speed. The consistent
-	mode uses GPU PCG with a lumped-storage preconditioner, preserves the
-	current lumped formula in the diagonal limit, and supports the weak
-	drained-plane mass through `(S + D)`. It is more expensive because each
-	PCG matvec performs pressure-vector MPI sharing/contribution exchanges;
-	those exchanges reuse the sparse pore-pressure staging path when available.
-- `poroelastic_pressure_storage_pcg_max_iter` and
-	`poroelastic_pressure_storage_pcg_tolerance`
-	Optional. Used only by `poroelastic_pressure_storage = consistent`.
-	Defaults are `12` iterations and relative preconditioned-residual
-	tolerance `1.0e-6`.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for

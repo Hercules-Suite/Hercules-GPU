@@ -155,34 +155,6 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
                                                 gpu_data_t* gpuData,
                                                 int useDrainMass);
 
-__global__ void kernelPoroelasticPressurePcgPrepare(int32_t nharbored,
-                                                    gpu_data_t* gpuData,
-                                                    int useDrainMass);
-
-__global__ void kernelPoroelasticConsistentStorageMatvec(int32_t elemCount,
-                                                         gpu_data_t* gpuData);
-
-__global__ void kernelPoroelasticConsistentStorageAddDrain(int32_t nharbored,
-                                                          gpu_data_t* gpuData,
-                                                          int useDrainMass);
-
-__global__ void kernelPoroelasticPressurePcgUpdateSolutionResidual(
-    int32_t nharbored, gpu_data_t* gpuData, double alpha);
-
-__global__ void kernelPoroelasticPressurePcgApplyPreconditioner(
-    int32_t nharbored, gpu_data_t* gpuData, int useDrainMass);
-
-__global__ void kernelPoroelasticPressurePcgUpdateDirection(
-    int32_t nharbored, gpu_data_t* gpuData, double beta);
-
-__global__ void kernelPoroelasticPressurePcgFinalize(int32_t nharbored,
-                                                     gpu_data_t* gpuData);
-
-__global__ void kernelPoroelasticVectorDotPartial(
-    int32_t nharbored, const solver_float* a, const solver_float* b,
-    const solver_float* activeMass, const uint8_t* ownedMask,
-    double* partial);
-
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);
