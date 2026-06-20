@@ -12786,6 +12786,23 @@ static void solver_init() {
             Global.myMesh->nodeTable[nindex].ismine ? (uint8_t)1
                                                     : (uint8_t)0;
       }
+      /* Dangling (hanging) octree nodes are slave DOFs: their pressure is
+         constrained to the anchored parents (see compute_adjust ASSIGNMENT /
+         DISTRIBUTION). They are NOT independent unknowns, so they must be
+         excluded from the consistent-storage PCG inner products. The matvec
+         already reduces dangling contributions onto the parents (SHARING/
+         ASSIGNMENT slaves p before, CONTRIBUTION/DISTRIBUTION folds Ap after),
+         but the owner-only dot products would otherwise add spurious slave-DOF
+         terms (dangling nodes keep positive mass and ismine==1) that pollute
+         alpha/beta and bias the solve, injecting energy every time step. The
+         lumped path is immune because it forms no inner products and its
+         dangling pnew is overwritten by the final field ASSIGNMENT. */
+      for (int32_t d = 0; d < Global.myMesh->ldnnum; d++) {
+        const int32_t ldnid = Global.myMesh->dnodeTable[d].ldnid;
+        if ((ldnid >= 0) && (ldnid < Global.myMesh->nharbored)) {
+          ownedMaskHost[ldnid] = (uint8_t)0;
+        }
+      }
       if (cudaMemcpy(Global.gpuData.porePressureOwnedDevice, ownedMaskHost,
                      Global.myMesh->nharbored * sizeof(uint8_t),
                      cudaMemcpyHostToDevice) != cudaSuccess) {
