@@ -87,38 +87,11 @@ extract_config_value() {
   ' "${file}"
 }
 
-is_enabled_value() {
-  case "$(trim_ws "$1")" in
-    1|yes|YES|true|TRUE|on|ON)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 mpi_reports_cuda_support() {
   local ompi_info_bin="${OMPI_INFO:-ompi_info}"
 
   "${ompi_info_bin}" --parsable --all 2>/dev/null |
     grep -F 'mpi_built_with_cuda_support:value:true' >/dev/null
-}
-
-phase_b_uses_cuda_aware_pore_pressure() {
-  local backend="${HERCULES_PORE_PRESSURE_SYNC_BACKEND:-}"
-
-  if ! is_enabled_value "$(extract_config_value "${PHASE_B_IN}" "include_poroelastic")"; then
-    return 1
-  fi
-
-  case "${backend}" in
-    host|HOST|sparse|SPARSE|cpu|CPU|no|NO|false|FALSE|0)
-      return 1
-      ;;
-  esac
-
-  mpi_reports_cuda_support
 }
 
 set_or_add_param() {
@@ -372,13 +345,15 @@ if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   exit 1
 fi
 
-PHASE_B_AUTO_UCX_TLS=""
-PHASE_B_UCX_TLS_SOURCE=""
+AUTO_UCX_TLS=""
+UCX_TLS_SOURCE=""
 if [[ -n "${UCX_TLS+x}" ]]; then
-  PHASE_B_UCX_TLS_SOURCE="user"
-elif phase_b_uses_cuda_aware_pore_pressure; then
-  PHASE_B_AUTO_UCX_TLS="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
-  PHASE_B_UCX_TLS_SOURCE="cuda-aware default"
+  UCX_TLS_SOURCE="user"
+elif mpi_reports_cuda_support; then
+  AUTO_UCX_TLS="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
+  UCX_TLS="${AUTO_UCX_TLS}"
+  export UCX_TLS
+  UCX_TLS_SOURCE="cuda-aware default"
 fi
 
 if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
@@ -426,11 +401,11 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP}"
-if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" ]]; then
-  if [[ "${PHASE_B_UCX_TLS_SOURCE}" == "user" ]]; then
-    echo "Phase B UCX TLS: user (${UCX_TLS})"
+if [[ -n "${UCX_TLS_SOURCE}" ]]; then
+  if [[ "${UCX_TLS_SOURCE}" == "user" ]]; then
+    echo "UCX TLS:        user (${UCX_TLS})"
   else
-    echo "Phase B UCX TLS: ${PHASE_B_UCX_TLS_SOURCE} (${PHASE_B_AUTO_UCX_TLS})"
+    echo "UCX TLS:        ${UCX_TLS_SOURCE} (${AUTO_UCX_TLS})"
   fi
 fi
 if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
@@ -589,9 +564,6 @@ fi
 B_ENV_VARS=()
 if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
   B_ENV_VARS+=("OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
-fi
-if [[ -n "${PHASE_B_AUTO_UCX_TLS}" ]]; then
-  B_ENV_VARS+=("UCX_TLS=${PHASE_B_AUTO_UCX_TLS}")
 fi
 if [[ ${#B_ENV_VARS[@]} -gt 0 ]]; then
   B_ENV=(env "${B_ENV_VARS[@]}")
