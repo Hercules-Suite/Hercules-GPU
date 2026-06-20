@@ -9382,6 +9382,8 @@ static void solver_init() {
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
   int64_t localPoroelasticUndrainedFastPathElements = 0;
+  double localPoroelasticMinHOverVpUndrained = 1.0e32;
+  double localPoroelasticMinDtFactorUndrained = 1.0e32;
   solver_float* pressureFreeSurfaceHost = NULL;
 
   /* Initialize the GPU */
@@ -10319,6 +10321,40 @@ static void solver_init() {
       ep->c4 += b * Param.theDeltaT * edata->edgesize *
                 undrainedLambda / 9.0;
       localPoroelasticUndrainedFastPathElements++;
+    }
+
+    /* Poroelastic elements propagate at the UNDRAINED Vp (the alpha^2*M
+     * stiffening, whether folded into lambda by the fast path or supplied by
+     * the staggered Q p coupling). The generic critical-dt scan in
+     * solver_set_critical_T() uses the dry/drained input Vp and therefore
+     * over-estimates the stable step for these elements. Accumulate the
+     * undrained h/Vp and dt-factor so the reported critical dt and the
+     * stability warning reflect the real fast wave. */
+    if (poro_element_active) {
+      const double rhoCfl = (double)edata->rho;
+      const double vpDrained = (double)edata->Vp;
+      if ((rhoCfl > 0.0) && (vpDrained > 0.0)) {
+        const double storageMcfl =
+            poroelastic_biot_storage_modulus_for_element(edata, eindex);
+        const double alphaCfl = Param.thePoroelasticBiotAlpha;
+        const double vpUndrained =
+            sqrt(vpDrained * vpDrained +
+                 alphaCfl * alphaCfl * storageMcfl / rhoCfl);
+        const double ratioUndrained = (double)edata->edgesize / vpUndrained;
+        double zetaCfl =
+            element_is_acoustic(edata) ? 0.0 : (25.0 / (double)edata->Vs);
+        if (zetaCfl > Param.theThresholdDamping) {
+          zetaCfl = Param.theThresholdDamping;
+        }
+        const double dtFactorUndrained =
+            0.57735026919 * (1.0 - zetaCfl) * ratioUndrained;
+        if (ratioUndrained < localPoroelasticMinHOverVpUndrained) {
+          localPoroelasticMinHOverVpUndrained = ratioUndrained;
+        }
+        if (dtFactorUndrained < localPoroelasticMinDtFactorUndrained) {
+          localPoroelasticMinDtFactorUndrained = dtFactorUndrained;
+        }
+      }
     }
 
     /* Assign the element mass to its vertices */
@@ -11370,6 +11406,8 @@ static void solver_init() {
     int64_t globalPoroelasticDrainNodes = 0;
     int64_t globalPoroelasticPmlCandidates = 0;
     int64_t globalPoroelasticUndrainedFastPathElements = 0;
+    double globalPoroelasticMinHOverVpUndrained = 1.0e32;
+    double globalPoroelasticMinDtFactorUndrained = 1.0e32;
 
     schedule_senddata(Global.mySolver->dn_sched,
                       Global.mySolver->pore_pressure_mass, 1, CONTRIBUTION,
@@ -11409,11 +11447,32 @@ static void solver_init() {
     MPI_Allreduce(&localPoroelasticUndrainedFastPathElements,
                   &globalPoroelasticUndrainedFastPathElements, 1,
                   MPI_INT64_T, MPI_SUM, comm_solver);
+    MPI_Allreduce(&localPoroelasticMinHOverVpUndrained,
+                  &globalPoroelasticMinHOverVpUndrained, 1, MPI_DOUBLE,
+                  MPI_MIN, comm_solver);
+    MPI_Allreduce(&localPoroelasticMinDtFactorUndrained,
+                  &globalPoroelasticMinDtFactorUndrained, 1, MPI_DOUBLE,
+                  MPI_MIN, comm_solver);
     g_poroelasticElementCount = globalPoroelasticElements;
     g_poroelasticNodeCount = globalPoroelasticNodes;
     g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
     g_poroelasticUndrainedFastPathElementCount =
         globalPoroelasticUndrainedFastPathElements;
+
+    /* Tighten the critical dt for the undrained poroelastic wave speed: the
+     * generic scan used the drained input Vp, but these elements actually carry
+     * alpha^2*M and so have a smaller stable step. Done on all ranks so the
+     * summary's "Critical deltaT" is consistent. */
+    if ((globalPoroelasticElements > 0) &&
+        (globalPoroelasticMinHOverVpUndrained < 1.0e31)) {
+      double poroCriticalT = globalPoroelasticMinHOverVpUndrained;
+      if (Param.theAbcType == ABC_CPML) {
+        poroCriticalT *= Param.theCpmlCflSafety;
+      }
+      if (poroCriticalT < Global.theCriticalT) {
+        Global.theCriticalT = poroCriticalT;
+      }
+    }
 
     if (Global.myID == 0) {
       if (Param.surfaceGroundwaterTable == YES) {
@@ -11436,6 +11495,23 @@ static void solver_init() {
             "Poroelastic undrained fast path: %.1fM elements use native "
             "lambda += alpha^2*M; pore pressure is diagnostic only\n",
             (double)globalPoroelasticUndrainedFastPathElements / 1.0e6);
+      }
+      if ((globalPoroelasticElements > 0) &&
+          (globalPoroelasticMinHOverVpUndrained < 1.0e31)) {
+        monitor_print(
+            "Poroelastic undrained CFL: min h/Vp_undrained = %.6f s "
+            "(the critical-dt scan above uses the dry/drained input Vp and "
+            "over-estimates the stable step for these elements). Size "
+            "simulation_delta_time_sec from this undrained value.\n",
+            globalPoroelasticMinHOverVpUndrained);
+        if (Param.theDeltaT > globalPoroelasticMinDtFactorUndrained) {
+          monitor_print(
+              "  *** WARNING: simulation_delta_time_sec = %.6e s exceeds the "
+              "undrained poroelastic stability limit ~%.6e s "
+              "(0.577*(1-zeta)*h/Vp_undrained). The run is likely UNSTABLE; "
+              "reduce dt below this value. ***\n",
+              Param.theDeltaT, globalPoroelasticMinDtFactorUndrained);
+        }
       }
       if (Param.thePoroelasticSurfacePressureBC ==
           POROELASTIC_SURFACE_PRESSURE_DRAINED) {
