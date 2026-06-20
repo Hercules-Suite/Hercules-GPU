@@ -83,8 +83,11 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	on the GPU through schedule packing, MPI messages, and local hanging-node
 	adjustment; it requires a CUDA-aware MPI library. Pore-pressure station
 	values are copied back only at station-output steps. This backend is opt-in
-	because MPI CUDA awareness cannot be safely autodetected; it falls back to
-	`host` when checkpointing is enabled.
+	because MPI CUDA awareness is not universally available. With Open MPI,
+	Hercules checks `MPIX_Query_cuda_support()` and falls back to `host` when
+	CUDA buffers or checkpointing are unavailable. For the UCX PML, configure
+	CUDA transports explicitly, for example
+	`UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc`.
 
 Advanced/diagnostic toggles:
 

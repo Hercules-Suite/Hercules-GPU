@@ -16076,6 +16076,7 @@ static int32_t pore_pressure_field_sync_mode(void) {
 static int32_t pore_pressure_device_sync_enabled(void) {
   if (g_porePressureDeviceSyncMode < 0) {
     const char* env = getenv("HERCULES_PORE_PRESSURE_SYNC_BACKEND");
+    const char* fallbackReason = NULL;
     int32_t useDevice = 0;
 
     if (env != NULL) {
@@ -16101,22 +16102,32 @@ static int32_t pore_pressure_device_sync_enabled(void) {
     if (useDevice &&
         ((Param.theUseCheckPoint == 1) || (Param.theCheckPointingRate != 0))) {
       useDevice = 0;
-      if (Global.myID == 0) {
-        monitor_print(
-            "Poroelastic pressure sync backend: host (CUDA-aware request "
-            "disabled by checkpointing)\n");
+      fallbackReason = "checkpointing needs host pore-pressure state";
+    }
+
+    if (useDevice) {
+#if defined(OMPI_HAVE_MPI_EXT_CUDA) && OMPI_HAVE_MPI_EXT_CUDA
+      if (MPIX_Query_cuda_support() == 0) {
+        useDevice = 0;
+        fallbackReason = "MPIX_Query_cuda_support() returned 0";
       }
+#else
+      useDevice = 0;
+      fallbackReason = "this MPI build has no CUDA-aware MPI extension";
+#endif
     }
 
     g_porePressureDeviceSyncMode = useDevice;
-    if ((Global.myID == 0) && (g_porePressureDeviceSyncReported == 0) &&
-        !(useDevice == 0 &&
-          ((Param.theUseCheckPoint == 1) ||
-           (Param.theCheckPointingRate != 0)) &&
-          env != NULL)) {
-      monitor_print("Poroelastic pressure sync backend: %s\n",
-                    useDevice ? "CUDA-aware MPI/device-resident"
-                              : "host sparse/resident");
+    if ((Global.myID == 0) && (g_porePressureDeviceSyncReported == 0)) {
+      if ((fallbackReason != NULL) && (env != NULL)) {
+        monitor_print(
+            "Poroelastic pressure sync backend: host (CUDA-aware request "
+            "disabled: %s)\n", fallbackReason);
+      } else {
+        monitor_print("Poroelastic pressure sync backend: %s\n",
+                      useDevice ? "CUDA-aware MPI/device-resident"
+                                : "host sparse/resident");
+      }
       g_porePressureDeviceSyncReported = 1;
     }
   }

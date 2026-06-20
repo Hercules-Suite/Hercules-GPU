@@ -41,6 +41,10 @@
 #include <stdio.h>
 #include <mpi.h>
 
+#if defined(OMPI_MAJOR_VERSION)
+#include <mpi-ext.h>
+#endif
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 
