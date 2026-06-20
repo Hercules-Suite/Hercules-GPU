@@ -78,16 +78,16 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	`full` restores full `nharbored` field D2H/H2D copies.
 - `HERCULES_PORE_PRESSURE_SYNC_BACKEND=host|cuda_aware`
 	Selects the communication backend for the U-P pore-pressure RHS and field.
-	`host` (default) uses the sparse/resident paths above: GPU gather/scatter
-	with the existing host MPI schedules. `cuda_aware` keeps both scalar arrays
-	on the GPU through schedule packing, MPI messages, and local hanging-node
-	adjustment; it requires a CUDA-aware MPI library. Pore-pressure station
-	values are copied back only at station-output steps. This backend is opt-in
-	because MPI CUDA awareness is not universally available. With Open MPI,
-	Hercules checks `MPIX_Query_cuda_support()` and falls back to `host` when
-	CUDA buffers or checkpointing are unavailable. For the UCX PML, configure
-	CUDA transports explicitly, for example
-	`UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc`.
+	The default is `cuda_aware` when the linked Open MPI reports CUDA-buffer
+	support through `MPIX_Query_cuda_support()`. It keeps both scalar arrays on
+	the GPU through schedule packing, MPI messages, and local hanging-node
+	adjustment; pore-pressure station values are copied back only at
+	station-output steps. The solver automatically falls back to `host` when
+	CUDA buffers or checkpointing are unavailable. Set `host` explicitly to use
+	the sparse/resident GPU gather-scatter path with the existing host MPI
+	schedules. For the UCX PML, CUDA transports are discovered automatically;
+	set `UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc` only as a tested site-specific
+	override.
 
 Advanced/diagnostic toggles:
 

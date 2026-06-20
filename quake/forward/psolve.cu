@@ -16071,13 +16071,14 @@ static int32_t pore_pressure_field_sync_mode(void) {
   return g_porePressureFieldSyncMode;
 }
 
-/* CUDA-aware MPI cannot be probed safely without issuing an actual device
- * transfer, so keep this backend explicit rather than guessing at runtime. */
+/* Prefer device-resident scalar schedules when Open MPI advertises CUDA
+ * support. The environment remains an explicit opt-out for conservative
+ * deployments or an explicit request for diagnostics. */
 static int32_t pore_pressure_device_sync_enabled(void) {
   if (g_porePressureDeviceSyncMode < 0) {
     const char* env = getenv("HERCULES_PORE_PRESSURE_SYNC_BACKEND");
     const char* fallbackReason = NULL;
-    int32_t useDevice = 0;
+    int32_t useDevice = 1;
 
     if (env != NULL) {
       if (strcasecmp(env, "host") == 0 || strcasecmp(env, "sparse") == 0 ||
@@ -16119,10 +16120,11 @@ static int32_t pore_pressure_device_sync_enabled(void) {
 
     g_porePressureDeviceSyncMode = useDevice;
     if ((Global.myID == 0) && (g_porePressureDeviceSyncReported == 0)) {
-      if ((fallbackReason != NULL) && (env != NULL)) {
+      if (fallbackReason != NULL) {
         monitor_print(
-            "Poroelastic pressure sync backend: host (CUDA-aware request "
-            "disabled: %s)\n", fallbackReason);
+            "Poroelastic pressure sync backend: host (CUDA-aware %s "
+            "disabled: %s)\n", env != NULL ? "request" : "default",
+            fallbackReason);
       } else {
         monitor_print("Poroelastic pressure sync backend: %s\n",
                       useDevice ? "CUDA-aware MPI/device-resident"
