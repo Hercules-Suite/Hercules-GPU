@@ -261,6 +261,13 @@ static solver_float* g_pressureSparseBufferHost = NULL;
 static solver_float* g_pressureSparseBufferDevice = NULL;
 static int32_t g_pressureSparseNodeCount = 0;
 static int32_t g_pressureSparseHostPinned = 0;
+static int32_t g_acousticPressureStationSyncReady = 0;
+static int32_t* g_acousticPressureStationNodesHost = NULL;
+static int32_t* g_acousticPressureStationNodesDevice = NULL;
+static solver_float* g_acousticPressureStationBufferHost = NULL;
+static solver_float* g_acousticPressureStationBufferDevice = NULL;
+static int32_t g_acousticPressureStationNodeCount = 0;
+static int32_t g_acousticPressureStationHostPinned = 0;
 static int32_t g_porePressureForceSyncMode = -1;
 static int32_t g_porePressureForceSyncReported = 0;
 static int32_t g_porePressureFieldSyncMode = -1;
@@ -272,9 +279,11 @@ static solver_float* g_porePressureSparseBufferHost = NULL;
 static solver_float* g_porePressureSparseBufferDevice = NULL;
 static int32_t g_porePressureSparseNodeCount = 0;
 static int32_t g_porePressureSparseHostPinned = 0;
-static int32_t g_porePressureDeviceSyncMode = -1;
-static int32_t g_porePressureDeviceSyncReported = 0;
-static int32_t g_porePressureDeviceScheduleReady = 0;
+static int32_t g_gpuDeviceSyncMode = -1;
+static int32_t g_gpuDeviceSyncReported = 0;
+static int32_t g_deviceAdjustReady = 0;
+static int32_t g_scalarDeviceScheduleReady = 0;
+static int32_t g_vectorDeviceScheduleReady = 0;
 static int32_t* g_porePressureAdjustParentOffsetsDevice = NULL;
 static int32_t* g_porePressureAdjustDanglingBase3Device = NULL;
 static solver_float* g_porePressureAdjustInvDepsDevice = NULL;
@@ -695,7 +704,10 @@ static int32_t pressure_force_sync_mode(void);
 static int32_t pressure_field_sync_mode(void);
 static int32_t pore_pressure_force_sync_mode(void);
 static int32_t pore_pressure_field_sync_mode(void);
-static int32_t pore_pressure_device_sync_enabled(void);
+static int32_t gpu_device_sync_enabled(void);
+static int32_t acoustic_pressure_device_sync_enabled(void);
+static int32_t elastic_force_device_sync_enabled(void);
+static int32_t displacement_device_sync_enabled(void);
 static void solver_init_disp_boundary_sync(mysolver_t* solver);
 static void solver_init_pressure_sparse_sync(mysolver_t* solver);
 static void solver_download_pressure_force_sparse(mysolver_t* solver);
@@ -706,13 +718,20 @@ static void solver_download_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_download_pore_pressure_field_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver);
-static void solver_init_pore_pressure_device_sync(mysolver_t* solver);
-static void solver_pore_pressure_device_schedule_senddata(
+static void solver_init_scalar_device_sync(mysolver_t* solver);
+static void solver_init_vector_device_sync(mysolver_t* solver);
+static void solver_scalar_device_schedule_senddata(
     mysolver_t* solver, schedule_t* sched, solver_float* valueDevice,
     int32_t direction, int32_t msgtag);
-static void solver_pore_pressure_device_adjust(mysolver_t* solver,
-                                                solver_float* valueDevice,
-                                                int32_t how);
+static void solver_scalar_device_adjust(mysolver_t* solver,
+                                        solver_float* valueDevice,
+                                        int32_t how);
+static void solver_vector_device_schedule_senddata(
+    mysolver_t* solver, schedule_t* sched, fvector_t* valueDevice,
+    int32_t direction, int32_t msgtag);
+static void solver_vector_device_adjust(mysolver_t* solver,
+                                        fvector_t* valueDevice, int32_t how);
+static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver);
 static void solver_sync_pore_pressure_station_values(mysolver_t* solver);
 static void solver_free_pore_pressure_device_sync(void);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
@@ -873,6 +892,100 @@ __global__ static void kernelScalarAdjustAssignment(
     sum += values[parentBase3[parent] / 3];
   }
   values[danglingBase3[dnindex] / 3] = sum * invDeps[dnindex];
+}
+
+__global__ static void kernelVectorBoundaryGather(int32_t count,
+                                                  const int32_t* lnidList,
+                                                  const fvector_t* srcDevice,
+                                                  fvector_t* bufferDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx < count) {
+    bufferDevice[idx] = srcDevice[lnidList[idx]];
+  }
+}
+
+__global__ static void kernelVectorBoundaryScatter(int32_t count,
+                                                   const int32_t* lnidList,
+                                                   const fvector_t* bufferDevice,
+                                                   fvector_t* dstDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx < count) {
+    dstDevice[lnidList[idx]] = bufferDevice[idx];
+  }
+}
+
+__global__ static void kernelVectorBoundaryScatterSerial(
+    int32_t count, const int32_t* lnidList, const fvector_t* bufferDevice,
+    fvector_t* dstDevice) {
+  if ((blockIdx.x != 0) || (threadIdx.x != 0)) {
+    return;
+  }
+  for (int32_t idx = 0; idx < count; idx++) {
+    dstDevice[lnidList[idx]] = bufferDevice[idx];
+  }
+}
+
+__global__ static void kernelVectorBoundaryAccumulate(
+    int32_t count, const int32_t* lnidList, const fvector_t* bufferDevice,
+    fvector_t* dstDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  const int32_t node = lnidList[idx];
+  atomicAdd(&dstDevice[node].f[0], bufferDevice[idx].f[0]);
+  atomicAdd(&dstDevice[node].f[1], bufferDevice[idx].f[1]);
+  atomicAdd(&dstDevice[node].f[2], bufferDevice[idx].f[2]);
+}
+
+__global__ static void kernelVectorAdjustDistribution(
+    int32_t runCount, const int32_t* runOffsets, const int32_t* runParentBase3,
+    const int32_t* edgeDn, const int32_t* danglingBase3,
+    const solver_float* invDeps, fvector_t* values) {
+  int32_t run = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (run >= runCount) {
+    return;
+  }
+
+  fvector_t sum = {{0.0, 0.0, 0.0}};
+  for (int32_t edge = runOffsets[run]; edge < runOffsets[run + 1]; edge++) {
+    const int32_t dnindex = edgeDn[edge];
+    const fvector_t value = values[danglingBase3[dnindex] / 3];
+    const solver_float weight = invDeps[dnindex];
+    sum.f[0] += value.f[0] * weight;
+    sum.f[1] += value.f[1] * weight;
+    sum.f[2] += value.f[2] * weight;
+  }
+  const int32_t parent = runParentBase3[run] / 3;
+  values[parent].f[0] += sum.f[0];
+  values[parent].f[1] += sum.f[1];
+  values[parent].f[2] += sum.f[2];
+}
+
+__global__ static void kernelVectorAdjustAssignment(
+    int32_t dnCount, const int32_t* dnOrder, const int32_t* parentOffsets,
+    const int32_t* parentBase3, const int32_t* danglingBase3,
+    const solver_float* invDeps, fvector_t* values) {
+  int32_t orderIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (orderIndex >= dnCount) {
+    return;
+  }
+
+  const int32_t dnindex = dnOrder[orderIndex];
+  fvector_t sum = {{0.0, 0.0, 0.0}};
+  for (int32_t parent = parentOffsets[dnindex];
+       parent < parentOffsets[dnindex + 1]; parent++) {
+    const fvector_t value = values[parentBase3[parent] / 3];
+    sum.f[0] += value.f[0];
+    sum.f[1] += value.f[1];
+    sum.f[2] += value.f[2];
+  }
+  const solver_float weight = invDeps[dnindex];
+  fvector_t* dst = &values[danglingBase3[dnindex] / 3];
+  dst->f[0] = sum.f[0] * weight;
+  dst->f[1] = sum.f[1] * weight;
+  dst->f[2] = sum.f[2] * weight;
 }
 
 __device__ __constant__ int kTopoTetNodes[2][5][4] = {
@@ -15366,17 +15479,28 @@ static void solver_send_force_dangling(mysolver_t* solver) {
   //    HU_COND_GLOBAL_BARRIER( Param.theTimingBarriersFlag );
 
   Timer_Start("1st schedule send data (contribution)");
-  schedule_senddata(solver->dn_sched, solver->force,
-                    sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    DN_FORCE_MSG);
+  if (elastic_force_device_sync_enabled()) {
+    solver_vector_device_schedule_senddata(
+        solver, solver->dn_sched, solver->gpuData->forceDevice, CONTRIBUTION,
+        DN_FORCE_MSG);
+  } else {
+    schedule_senddata(solver->dn_sched, solver->force,
+                      sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
+                      DN_FORCE_MSG);
+  }
   Timer_Stop("1st schedule send data (contribution)");
 }
 
 static void solver_adjust_forces(mysolver_t* solver) {
   Timer_Start("1st compute adjust (distribution)");
   /* Distribute the forces to LOCAL anchored nodes */
-  compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
-                 DISTRIBUTION);
+  if (elastic_force_device_sync_enabled()) {
+    solver_vector_device_adjust(solver, solver->gpuData->forceDevice,
+                                DISTRIBUTION);
+  } else {
+    compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
+                   DISTRIBUTION);
+  }
   Timer_Stop("1st compute adjust (distribution)");
 }
 
@@ -15385,9 +15509,15 @@ static void solver_send_force_anchored(mysolver_t* solver) {
 
   Timer_Start("2nd schedule send data (contribution)");
   /* Send the forces on anchored nodes to their owner processors */
-  schedule_senddata(solver->an_sched, solver->force,
-                    sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
-                    AN_FORCE_MSG);
+  if (elastic_force_device_sync_enabled()) {
+    solver_vector_device_schedule_senddata(
+        solver, solver->an_sched, solver->gpuData->forceDevice, CONTRIBUTION,
+        AN_FORCE_MSG);
+  } else {
+    schedule_senddata(solver->an_sched, solver->force,
+                      sizeof(fvector_t) / sizeof(solver_float), CONTRIBUTION,
+                      AN_FORCE_MSG);
+  }
   Timer_Stop("2nd schedule send data (contribution)");
 }
 
@@ -15467,12 +15597,14 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   int blocksize;
   int32_t face_count;
   int gridsize;
+  int useDeviceSync;
   cudaError_t cerror;
 
   if ((!acoustic_pressure_enabled()) || (g_acousticPressureElementCount <= 0)) {
     return;
   }
 
+  useDeviceSync = acoustic_pressure_device_sync_enabled();
   Timer_Start("Acoustic Pressure Step");
 
   blocksize = 256;
@@ -15538,7 +15670,9 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   }
 
   Timer_Start("Acoustic pressure force D2H");
-  if (pressure_force_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* The CUDA-aware schedule below exchanges pressureForceDevice directly. */
+  } else if (pressure_force_sync_mode() != 0) {
     solver_download_pressure_force_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->pressure_force, solver->gpuData->pressureForceDevice,
@@ -15551,15 +15685,28 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   Timer_Stop("Acoustic pressure force D2H");
 
   Timer_Start("Acoustic pressure force exchange");
-  schedule_senddata(solver->dn_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    DN_PRESSURE_FORCE_MSG);
-  compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
-  schedule_senddata(solver->an_sched, solver->pressure_force, 1, CONTRIBUTION,
-                    AN_PRESSURE_FORCE_MSG);
+  if (useDeviceSync) {
+    solver_scalar_device_schedule_senddata(
+        solver, solver->dn_sched, solver->gpuData->pressureForceDevice,
+        CONTRIBUTION, DN_PRESSURE_FORCE_MSG);
+    solver_scalar_device_adjust(solver, solver->gpuData->pressureForceDevice,
+                                DISTRIBUTION);
+    solver_scalar_device_schedule_senddata(
+        solver, solver->an_sched, solver->gpuData->pressureForceDevice,
+        CONTRIBUTION, AN_PRESSURE_FORCE_MSG);
+  } else {
+    schedule_senddata(solver->dn_sched, solver->pressure_force, 1,
+                      CONTRIBUTION, DN_PRESSURE_FORCE_MSG);
+    compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
+    schedule_senddata(solver->an_sched, solver->pressure_force, 1,
+                      CONTRIBUTION, AN_PRESSURE_FORCE_MSG);
+  }
   Timer_Stop("Acoustic pressure force exchange");
 
   Timer_Start("Acoustic pressure force H2D");
-  if (pressure_force_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* Already resident after CUDA-aware exchange. */
+  } else if (pressure_force_sync_mode() != 0) {
     solver_upload_pressure_force_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->gpuData->pressureForceDevice, solver->pressure_force,
@@ -15587,23 +15734,36 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   }
 
   Timer_Start("Acoustic pressure field D2H");
-  cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
-                  mesh->nharbored * sizeof(solver_float),
-                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
-  solver->gpu_spec->numbytespci +=
-      mesh->nharbored * (int64_t)sizeof(solver_float);
-  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  if (!useDeviceSync) {
+    cudaMemcpyAsync(solver->pressure_tm2, solver->gpuData->pressureTm2Device,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
   Timer_Stop("Acoustic pressure field D2H");
 
   Timer_Start("Acoustic pressure field exchange");
-  schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
-                    AN_PRESSURE_MSG);
-  compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
-                    DN_PRESSURE_MSG);
+  if (useDeviceSync) {
+    solver_scalar_device_schedule_senddata(
+        solver, solver->an_sched, solver->gpuData->pressureTm2Device, SHARING,
+        AN_PRESSURE_MSG);
+    solver_scalar_device_adjust(solver, solver->gpuData->pressureTm2Device,
+                                ASSIGNMENT);
+    solver_scalar_device_schedule_senddata(
+        solver, solver->dn_sched, solver->gpuData->pressureTm2Device, SHARING,
+        DN_PRESSURE_MSG);
+  } else {
+    schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
+                      AN_PRESSURE_MSG);
+    compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
+    schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
+                      DN_PRESSURE_MSG);
+  }
   Timer_Stop("Acoustic pressure field exchange");
 
-  if (pressure_field_sync_mode() != 0) {
+  if (!useDeviceSync && pressure_field_sync_mode() != 0) {
     Timer_Start("Acoustic pressure field H2D");
     solver_upload_pressure_field_sparse(solver);
     Timer_Stop("Acoustic pressure field H2D");
@@ -15676,7 +15836,7 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
     return;
   }
 
-  useDeviceSync = pore_pressure_device_sync_enabled();
+  useDeviceSync = gpu_device_sync_enabled();
 
   Timer_Start("Poroelastic Pressure Step");
 
@@ -15725,12 +15885,12 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
 
   Timer_Start("Poroelastic pressure force exchange");
   if (useDeviceSync) {
-    solver_pore_pressure_device_schedule_senddata(
+    solver_scalar_device_schedule_senddata(
         solver, solver->dn_sched, solver->gpuData->porePressureForceDevice,
         CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
-    solver_pore_pressure_device_adjust(
+    solver_scalar_device_adjust(
         solver, solver->gpuData->porePressureForceDevice, DISTRIBUTION);
-    solver_pore_pressure_device_schedule_senddata(
+    solver_scalar_device_schedule_senddata(
         solver, solver->an_sched, solver->gpuData->porePressureForceDevice,
         CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
   } else {
@@ -15797,12 +15957,12 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
 
   Timer_Start("Poroelastic pressure field exchange");
   if (useDeviceSync) {
-    solver_pore_pressure_device_schedule_senddata(
+    solver_scalar_device_schedule_senddata(
         solver, solver->an_sched, solver->gpuData->porePressureTm2Device,
         SHARING, AN_PORE_PRESSURE_MSG);
-    solver_pore_pressure_device_adjust(
+    solver_scalar_device_adjust(
         solver, solver->gpuData->porePressureTm2Device, ASSIGNMENT);
-    solver_pore_pressure_device_schedule_senddata(
+    solver_scalar_device_schedule_senddata(
         solver, solver->dn_sched, solver->gpuData->porePressureTm2Device,
         SHARING, DN_PORE_PRESSURE_MSG);
   } else {
@@ -16071,14 +16231,20 @@ static int32_t pore_pressure_field_sync_mode(void) {
   return g_porePressureFieldSyncMode;
 }
 
-/* Prefer device-resident scalar schedules when Open MPI advertises CUDA
- * support. The environment remains an explicit opt-out for conservative
- * deployments or an explicit request for diagnostics. */
-static int32_t pore_pressure_device_sync_enabled(void) {
-  if (g_porePressureDeviceSyncMode < 0) {
-    const char* env = getenv("HERCULES_PORE_PRESSURE_SYNC_BACKEND");
+/* Prefer device-resident schedules when Open MPI advertises CUDA support.
+ * The legacy pore-pressure setting remains an alias until users migrate to
+ * the solver-wide backend setting. */
+static int32_t gpu_device_sync_enabled(void) {
+  if (g_gpuDeviceSyncMode < 0) {
+    const char* env = getenv("HERCULES_GPU_MPI_BACKEND");
+    const char* envName = "HERCULES_GPU_MPI_BACKEND";
     const char* fallbackReason = NULL;
     int32_t useDevice = 1;
+
+    if (env == NULL) {
+      env = getenv("HERCULES_PORE_PRESSURE_SYNC_BACKEND");
+      envName = "HERCULES_PORE_PRESSURE_SYNC_BACKEND";
+    }
 
     if (env != NULL) {
       if (strcasecmp(env, "host") == 0 || strcasecmp(env, "sparse") == 0 ||
@@ -16093,17 +16259,17 @@ static int32_t pore_pressure_device_sync_enabled(void) {
         useDevice = 1;
       } else {
         solver_abort(__FUNCTION_NAME, NULL,
-                     "HERCULES_PORE_PRESSURE_SYNC_BACKEND must be "
-                     "host or cuda_aware: got '%s'\n", env);
+                     "%s must be host or cuda_aware: got '%s'\n", envName,
+                     env);
       }
     }
 
-    /* Checkpoints serialize host state. Keep that path conservative until
-     * checkpoint I/O can gather pore pressure directly from the device. */
+    /* Checkpoints serialize host state. Keep the device schedule path
+     * conservative until every field has a direct checkpoint gather. */
     if (useDevice &&
         ((Param.theUseCheckPoint == 1) || (Param.theCheckPointingRate != 0))) {
       useDevice = 0;
-      fallbackReason = "checkpointing needs host pore-pressure state";
+      fallbackReason = "checkpointing needs host field state";
     }
 
     if (useDevice) {
@@ -16118,23 +16284,44 @@ static int32_t pore_pressure_device_sync_enabled(void) {
 #endif
     }
 
-    g_porePressureDeviceSyncMode = useDevice;
-    if ((Global.myID == 0) && (g_porePressureDeviceSyncReported == 0)) {
+    g_gpuDeviceSyncMode = useDevice;
+    if ((Global.myID == 0) && (g_gpuDeviceSyncReported == 0)) {
       if (fallbackReason != NULL) {
         monitor_print(
-            "Poroelastic pressure sync backend: host (CUDA-aware %s "
+            "GPU MPI sync backend: host (CUDA-aware %s "
             "disabled: %s)\n", env != NULL ? "request" : "default",
             fallbackReason);
       } else {
-        monitor_print("Poroelastic pressure sync backend: %s\n",
+        monitor_print("GPU MPI sync backend: %s\n",
                       useDevice ? "CUDA-aware MPI/device-resident"
                                 : "host sparse/resident");
       }
-      g_porePressureDeviceSyncReported = 1;
+      g_gpuDeviceSyncReported = 1;
     }
   }
 
-  return g_porePressureDeviceSyncMode;
+  return g_gpuDeviceSyncMode;
+}
+
+static int32_t acoustic_pressure_device_sync_enabled(void) {
+  if (!acoustic_pressure_enabled() || pressure_force_sync_mode() == 0 ||
+      pressure_field_sync_mode() == 0 || Param.theNumberOfPlanes != 0) {
+    return 0;
+  }
+  return gpu_device_sync_enabled();
+}
+
+static int32_t elastic_force_device_sync_enabled(void) {
+  if (Param.includeNonlinearAnalysis == YES ||
+      Param.includeIncidentPlaneWaves == YES ||
+      get_geostatic_total_time() > 0) {
+    return 0;
+  }
+  return gpu_device_sync_enabled();
+}
+
+static int32_t displacement_device_sync_enabled(void) {
+  return (displacement_sync_mode() != 0) && gpu_device_sync_enabled();
 }
 
 static void disp_boundary_append_messenger_nodes(int32_t* nodes,
@@ -16881,7 +17068,7 @@ static void solver_pore_pressure_device_copy_scalar(
       operation);
 }
 
-static void solver_init_pore_pressure_device_messengers(messenger_t* first) {
+static void solver_init_device_messenger_mapping(messenger_t* first) {
   for (messenger_t* messenger = first; messenger != NULL;
        messenger = messenger->next) {
     const int32_t count = messenger->nodecount;
@@ -16890,38 +17077,61 @@ static void solver_init_pore_pressure_device_messengers(messenger_t* first) {
     }
     if (messenger->nidx != count) {
       solver_abort(__FUNCTION_NAME, NULL,
-                   "CUDA-aware scalar schedule has incomplete mapping: %d of "
+                   "CUDA-aware schedule has incomplete mapping: %d of "
                    "%d entries\n", messenger->nidx, count);
     }
-    if (messenger->scalar_mapping_device != NULL) {
-      continue;
+    if (messenger->scalar_mapping_device == NULL) {
+      solver_pore_pressure_device_copy_int32(
+          &messenger->scalar_mapping_device, messenger->mapping, count,
+          "CUDA-aware schedule mapping");
     }
-
-    solver_pore_pressure_device_copy_int32(
-        &messenger->scalar_mapping_device, messenger->mapping, count,
-        "pore-pressure CUDA-aware schedule mapping");
-    solver_pore_pressure_device_check(
-        cudaMalloc((void**)&messenger->scalar_out_device,
-                   sizeof(solver_float) * (size_t)count),
-        "pore-pressure CUDA-aware send buffer");
-    solver_pore_pressure_device_check(
-        cudaMalloc((void**)&messenger->scalar_in_device,
-                   sizeof(solver_float) * (size_t)count),
-        "pore-pressure CUDA-aware receive buffer");
   }
 }
 
-static void solver_init_pore_pressure_device_sync(mysolver_t* solver) {
-  if (g_porePressureDeviceScheduleReady != 0 ||
-      !pore_pressure_device_sync_enabled()) {
+static void solver_init_scalar_device_messengers(messenger_t* first) {
+  solver_init_device_messenger_mapping(first);
+  for (messenger_t* messenger = first; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if ((count <= 0) || (messenger->scalar_out_device != NULL)) {
+      continue;
+    }
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->scalar_out_device,
+                   sizeof(solver_float) * (size_t)count),
+        "CUDA-aware scalar send buffer");
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->scalar_in_device,
+                   sizeof(solver_float) * (size_t)count),
+        "CUDA-aware scalar receive buffer");
+  }
+}
+
+static void solver_init_vector_device_messengers(messenger_t* first) {
+  solver_init_device_messenger_mapping(first);
+  for (messenger_t* messenger = first; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if ((count <= 0) || (messenger->vector_out_device != NULL)) {
+      continue;
+    }
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->vector_out_device,
+                   sizeof(fvector_t) * (size_t)count),
+        "CUDA-aware vector send buffer");
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->vector_in_device,
+                   sizeof(fvector_t) * (size_t)count),
+        "CUDA-aware vector receive buffer");
+  }
+}
+
+static void solver_init_device_adjust_sync(void) {
+  if (g_deviceAdjustReady != 0) {
     return;
   }
 
   compute_adjust_cache_build();
-  solver_init_pore_pressure_device_messengers(solver->an_sched->first_c);
-  solver_init_pore_pressure_device_messengers(solver->an_sched->first_s);
-  solver_init_pore_pressure_device_messengers(solver->dn_sched->first_c);
-  solver_init_pore_pressure_device_messengers(solver->dn_sched->first_s);
 
   if (g_adjustDnCount > 0) {
     solver_pore_pressure_device_copy_int32(
@@ -16955,10 +17165,34 @@ static void solver_init_pore_pressure_device_sync(mysolver_t* solver) {
         g_adjustDistRunCount + 1, "pore-pressure distribution offsets");
   }
 
-  g_porePressureDeviceScheduleReady = 1;
+  g_deviceAdjustReady = 1;
 }
 
-static void solver_pore_pressure_device_schedule_senddata(
+static void solver_init_scalar_device_sync(mysolver_t* solver) {
+  if (g_scalarDeviceScheduleReady != 0 || !gpu_device_sync_enabled()) {
+    return;
+  }
+  solver_init_scalar_device_messengers(solver->an_sched->first_c);
+  solver_init_scalar_device_messengers(solver->an_sched->first_s);
+  solver_init_scalar_device_messengers(solver->dn_sched->first_c);
+  solver_init_scalar_device_messengers(solver->dn_sched->first_s);
+  solver_init_device_adjust_sync();
+  g_scalarDeviceScheduleReady = 1;
+}
+
+static void solver_init_vector_device_sync(mysolver_t* solver) {
+  if (g_vectorDeviceScheduleReady != 0 || !gpu_device_sync_enabled()) {
+    return;
+  }
+  solver_init_vector_device_messengers(solver->an_sched->first_c);
+  solver_init_vector_device_messengers(solver->an_sched->first_s);
+  solver_init_vector_device_messengers(solver->dn_sched->first_c);
+  solver_init_vector_device_messengers(solver->dn_sched->first_s);
+  solver_init_device_adjust_sync();
+  g_vectorDeviceScheduleReady = 1;
+}
+
+static void solver_scalar_device_schedule_senddata(
     mysolver_t* solver, schedule_t* sched, solver_float* valueDevice,
     int32_t direction, int32_t msgtag) {
   messenger_t *send, *recv;
@@ -16969,7 +17203,7 @@ static void solver_pore_pressure_device_schedule_senddata(
   int32_t sendIndex = 0;
   const int32_t blocksize = 256;
 
-  solver_init_pore_pressure_device_sync(solver);
+  solver_init_scalar_device_sync(solver);
 
   if (direction == CONTRIBUTION) {
     send = sched->first_c;
@@ -17010,10 +17244,10 @@ static void solver_pore_pressure_device_schedule_senddata(
     }
   }
   solver_pore_pressure_device_check(cudaGetLastError(),
-                                    "pore-pressure CUDA-aware schedule pack");
+                                    "CUDA-aware scalar schedule pack");
   solver_pore_pressure_device_check(
       cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
-      "pore-pressure CUDA-aware schedule pack sync");
+      "CUDA-aware scalar schedule pack sync");
 
   for (messenger_t* messenger = send; messenger != NULL;
        messenger = messenger->next) {
@@ -17050,20 +17284,23 @@ static void solver_pore_pressure_device_schedule_senddata(
           valueDevice);
     }
   }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "CUDA-aware scalar schedule unpack");
   solver_pore_pressure_device_check(
-      cudaGetLastError(), "pore-pressure CUDA-aware schedule unpack");
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "CUDA-aware scalar schedule unpack sync");
 
   if (sendCount > 0) {
     MPI_Waitall(sendCount, sendRequests, sendStatuses);
   }
 }
 
-static void solver_pore_pressure_device_adjust(mysolver_t* solver,
-                                                solver_float* valueDevice,
-                                                int32_t how) {
+static void solver_scalar_device_adjust(mysolver_t* solver,
+                                        solver_float* valueDevice,
+                                        int32_t how) {
   const int32_t blocksize = 256;
 
-  solver_init_pore_pressure_device_sync(solver);
+  solver_init_scalar_device_sync(solver);
   if (how == DISTRIBUTION) {
     if (g_adjustDistRunCount > 0) {
       const int32_t gridsize =
@@ -17089,7 +17326,275 @@ static void solver_pore_pressure_device_adjust(mysolver_t* solver,
     }
   }
   solver_pore_pressure_device_check(cudaGetLastError(),
-                                    "pore-pressure CUDA-aware adjustment");
+                                    "CUDA-aware scalar adjustment");
+}
+
+static void solver_vector_device_schedule_senddata(
+    mysolver_t* solver, schedule_t* sched, fvector_t* valueDevice,
+    int32_t direction, int32_t msgtag) {
+  messenger_t *send, *recv;
+  MPI_Request *recvRequests, *sendRequests;
+  MPI_Status *recvStatuses, *sendStatuses;
+  int32_t recvCount, sendCount;
+  int32_t recvIndex = 0;
+  int32_t sendIndex = 0;
+  const int32_t blocksize = 256;
+
+  solver_init_vector_device_sync(solver);
+
+  if (direction == CONTRIBUTION) {
+    send = sched->first_c;
+    recv = sched->first_s;
+    recvCount = sched->s_count;
+    sendCount = sched->c_count;
+    recvRequests = sched->irecvreqs_s;
+    recvStatuses = sched->irecvstats_s;
+    sendRequests = sched->isendreqs_c;
+    sendStatuses = sched->isendstats_c;
+  } else {
+    send = sched->first_s;
+    recv = sched->first_c;
+    recvCount = sched->c_count;
+    sendCount = sched->s_count;
+    recvRequests = sched->irecvreqs_c;
+    recvStatuses = sched->irecvstats_c;
+    sendRequests = sched->isendreqs_s;
+    sendStatuses = sched->isendstats_s;
+  }
+
+  for (messenger_t* messenger = recv; messenger != NULL;
+       messenger = messenger->next) {
+    const int bytes = messenger->nodecount * (int)sizeof(fvector_t);
+    MPI_Irecv(messenger->vector_in_device, bytes, MPI_CHAR, messenger->procid,
+              msgtag, comm_solver, &recvRequests[recvIndex++]);
+  }
+
+  for (messenger_t* messenger = send; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if (count > 0) {
+      const int32_t gridsize = (count + blocksize - 1) / blocksize;
+      kernelVectorBoundaryGather<<<gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, valueDevice,
+          messenger->vector_out_device);
+    }
+  }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "CUDA-aware vector schedule pack");
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "CUDA-aware vector schedule pack sync");
+
+  for (messenger_t* messenger = send; messenger != NULL;
+       messenger = messenger->next) {
+    const int bytes = messenger->nodecount * (int)sizeof(fvector_t);
+    MPI_Isend(messenger->vector_out_device, bytes, MPI_CHAR, messenger->procid,
+              msgtag, comm_solver, &sendRequests[sendIndex++]);
+  }
+
+  if (recvCount > 0) {
+    MPI_Waitall(recvCount, recvRequests, recvStatuses);
+  }
+
+  for (messenger_t* messenger = recv; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if (count <= 0) {
+      continue;
+    }
+    const int32_t gridsize = (count + blocksize - 1) / blocksize;
+    if (direction == CONTRIBUTION) {
+      kernelVectorBoundaryAccumulate<<<gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->vector_in_device,
+          valueDevice);
+    } else if (messenger->mapping_has_duplicates) {
+      kernelVectorBoundaryScatterSerial<<<1, 1, 0,
+                                          solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->vector_in_device,
+          valueDevice);
+    } else {
+      kernelVectorBoundaryScatter<<<gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->vector_in_device,
+          valueDevice);
+    }
+  }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "CUDA-aware vector schedule unpack");
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "CUDA-aware vector schedule unpack sync");
+
+  if (sendCount > 0) {
+    MPI_Waitall(sendCount, sendRequests, sendStatuses);
+  }
+}
+
+static void solver_vector_device_adjust(mysolver_t* solver,
+                                        fvector_t* valueDevice, int32_t how) {
+  const int32_t blocksize = 256;
+
+  solver_init_vector_device_sync(solver);
+  if (how == DISTRIBUTION) {
+    if (g_adjustDistRunCount > 0) {
+      const int32_t gridsize =
+          (g_adjustDistRunCount + blocksize - 1) / blocksize;
+      kernelVectorAdjustDistribution<<<gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+          g_adjustDistRunCount, g_porePressureAdjustDistRunOffsetsDevice,
+          g_porePressureAdjustDistRunParentBase3Device,
+          g_porePressureAdjustDistEdgeDnDevice,
+          g_porePressureAdjustDanglingBase3Device,
+          g_porePressureAdjustInvDepsDevice, valueDevice);
+    }
+  } else if (g_adjustDnCount > 0) {
+    const int32_t gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
+    kernelVectorAdjustAssignment<<<gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_adjustDnCount, g_porePressureAdjustDnOrderDevice,
+        g_porePressureAdjustParentOffsetsDevice,
+        g_porePressureAdjustParentBase3Device,
+        g_porePressureAdjustDanglingBase3Device,
+        g_porePressureAdjustInvDepsDevice, valueDevice);
+  }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "CUDA-aware vector adjustment");
+}
+
+static void solver_init_acoustic_pressure_station_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes;
+
+  if (g_acousticPressureStationSyncReady != 0 ||
+      !acoustic_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  if ((Param.myNumberOfStations <= 0) || (Param.myStations == NULL)) {
+    g_acousticPressureStationSyncReady = 1;
+    return;
+  }
+
+  capacity = 8 * Param.myNumberOfStations;
+  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
+  if (nodes == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating acoustic station-node list\n");
+  }
+
+  for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
+    if (Param.myStations[station].pressure_is_defined == 0) {
+      continue;
+    }
+    for (int32_t corner = 0; corner < 8; corner++) {
+      const int32_t node = Param.myStations[station].nodestointerpolate[corner];
+      if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+        nodes[count++] = node;
+      }
+    }
+  }
+
+  if (count > 0) {
+    qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+    for (int32_t i = 0; i < count; i++) {
+      if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+        nodes[uniqueCount++] = nodes[i];
+      }
+    }
+  }
+
+  g_acousticPressureStationNodeCount = uniqueCount;
+  if (uniqueCount <= 0) {
+    free(nodes);
+    g_acousticPressureStationSyncReady = 1;
+    return;
+  }
+
+  g_acousticPressureStationNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)uniqueCount);
+  if (g_acousticPressureStationNodesHost == NULL) {
+    free(nodes);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating acoustic station-node copy\n");
+  }
+  memcpy(g_acousticPressureStationNodesHost, nodes,
+         sizeof(int32_t) * (size_t)uniqueCount);
+  free(nodes);
+
+  solver_pore_pressure_device_copy_int32(
+      &g_acousticPressureStationNodesDevice, g_acousticPressureStationNodesHost,
+      uniqueCount, "acoustic station-node copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_acousticPressureStationBufferDevice,
+                 sizeof(solver_float) * (size_t)uniqueCount),
+      "acoustic station device buffer");
+  if (cudaHostAlloc((void**)&g_acousticPressureStationBufferHost,
+                    sizeof(solver_float) * (size_t)uniqueCount,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_acousticPressureStationHostPinned = 1;
+  } else {
+    g_acousticPressureStationBufferHost = NULL;
+    g_acousticPressureStationBufferHost =
+        (solver_float*)malloc(sizeof(solver_float) * (size_t)uniqueCount);
+    if (g_acousticPressureStationBufferHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating acoustic station host buffer\n");
+    }
+  }
+
+  g_acousticPressureStationSyncReady = 1;
+}
+
+static void solver_sync_acoustic_pressure_station_field(
+    mysolver_t* solver, const solver_float* sourceDevice,
+    solver_float* destinationHost) {
+  const int32_t blocksize = 256;
+  const int32_t gridsize =
+      (g_acousticPressureStationNodeCount + blocksize - 1) / blocksize;
+
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_acousticPressureStationNodeCount, g_acousticPressureStationNodesDevice,
+      sourceDevice, g_acousticPressureStationBufferDevice);
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "acoustic station gather");
+  solver_pore_pressure_device_check(
+      cudaMemcpyAsync(g_acousticPressureStationBufferHost,
+                      g_acousticPressureStationBufferDevice,
+                      sizeof(solver_float) *
+                          (size_t)g_acousticPressureStationNodeCount,
+                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic station D2H");
+  solver->gpu_spec->numbytespci +=
+      g_acousticPressureStationNodeCount * (int64_t)sizeof(solver_float);
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic station D2H sync");
+
+  for (int32_t i = 0; i < g_acousticPressureStationNodeCount; i++) {
+    destinationHost[g_acousticPressureStationNodesHost[i]] =
+        g_acousticPressureStationBufferHost[i];
+  }
+}
+
+static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
+  if (!acoustic_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  solver_init_acoustic_pressure_station_sync(solver);
+  if (g_acousticPressureStationNodeCount <= 0) {
+    return;
+  }
+
+  solver_sync_acoustic_pressure_station_field(
+      solver, solver->gpuData->pressureTm1Device, solver->pressure_tm1);
+  solver_sync_acoustic_pressure_station_field(
+      solver, solver->gpuData->pressureTm2Device, solver->pressure_tm2);
 }
 
 static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
@@ -17099,7 +17604,7 @@ static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
   int32_t* nodes;
 
   if (g_porePressureStationSyncReady != 0 ||
-      !pore_pressure_device_sync_enabled()) {
+      !gpu_device_sync_enabled()) {
     return;
   }
 
@@ -17182,7 +17687,7 @@ static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
 static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
   const int32_t blocksize = 256;
 
-  if (!poroelastic_gpu_active() || !pore_pressure_device_sync_enabled()) {
+  if (!poroelastic_gpu_active() || !gpu_device_sync_enabled()) {
     return;
   }
 
@@ -17220,6 +17725,16 @@ static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
 }
 
 static void solver_free_pore_pressure_device_sync(void) {
+  cudaFree(g_acousticPressureStationNodesDevice);
+  cudaFree(g_acousticPressureStationBufferDevice);
+  free(g_acousticPressureStationNodesHost);
+  if (g_acousticPressureStationBufferHost != NULL) {
+    if (g_acousticPressureStationHostPinned != 0) {
+      cudaFreeHost(g_acousticPressureStationBufferHost);
+    } else {
+      free(g_acousticPressureStationBufferHost);
+    }
+  }
   cudaFree(g_porePressureAdjustParentOffsetsDevice);
   cudaFree(g_porePressureAdjustDanglingBase3Device);
   cudaFree(g_porePressureAdjustInvDepsDevice);
@@ -17247,6 +17762,13 @@ static void solver_free_pore_pressure_device_sync(void) {
   g_porePressureAdjustDistEdgeDnDevice = NULL;
   g_porePressureAdjustDistRunParentBase3Device = NULL;
   g_porePressureAdjustDistRunOffsetsDevice = NULL;
+  g_acousticPressureStationNodesHost = NULL;
+  g_acousticPressureStationNodesDevice = NULL;
+  g_acousticPressureStationBufferHost = NULL;
+  g_acousticPressureStationBufferDevice = NULL;
+  g_acousticPressureStationNodeCount = 0;
+  g_acousticPressureStationHostPinned = 0;
+  g_acousticPressureStationSyncReady = 0;
   g_porePressureStationNodesHost = NULL;
   g_porePressureStationNodesDevice = NULL;
   g_porePressureStationBufferHost = NULL;
@@ -17254,9 +17776,11 @@ static void solver_free_pore_pressure_device_sync(void) {
   g_porePressureStationNodeCount = 0;
   g_porePressureStationHostPinned = 0;
   g_porePressureStationSyncReady = 0;
-  g_porePressureDeviceScheduleReady = 0;
-  g_porePressureDeviceSyncMode = -1;
-  g_porePressureDeviceSyncReported = 0;
+  g_deviceAdjustReady = 0;
+  g_scalarDeviceScheduleReady = 0;
+  g_vectorDeviceScheduleReady = 0;
+  g_gpuDeviceSyncMode = -1;
+  g_gpuDeviceSyncReported = 0;
 }
 
 static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -17882,6 +18406,10 @@ static int32_t solver_sparse_clear_mode(void) {
 }
 
 static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
+  if (elastic_force_device_sync_enabled()) {
+    return;
+  }
+
   /* Only copy forces back if Stiffness-Effective or BKT-family damping. */
   if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
       (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled() ||
@@ -17917,6 +18445,10 @@ static void solver_record_force_kernel_done_event(mysolver_t* solver) {
 }
 
 static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
+  if (displacement_device_sync_enabled()) {
+    return;
+  }
+
   if (displacement_sync_mode() != 0) {
     int blocksize;
     int gridsize;
@@ -17967,7 +18499,8 @@ static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 static void solver_finalize_disp_boundary_download(mysolver_t* solver) {
   (void)solver;
 
-  if (displacement_sync_mode() == 0 || g_dispBoundaryNodeCount <= 0) {
+  if (displacement_device_sync_enabled() || displacement_sync_mode() == 0 ||
+      g_dispBoundaryNodeCount <= 0) {
     return;
   }
 
@@ -17986,7 +18519,7 @@ static void solver_upload_disp_boundary_gpu(mysolver_t* solver) {
   int gridsize;
   cudaError_t cerror;
 
-  if (displacement_sync_mode() == 0) {
+  if (displacement_device_sync_enabled() || displacement_sync_mode() == 0) {
     return;
   }
 
@@ -18030,6 +18563,10 @@ static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
   int blocksize;
   int gridsize;
   cudaError_t cerror;
+
+  if (displacement_device_sync_enabled()) {
+    return;
+  }
 
   if (displacement_sync_mode() == 0) {
     Timer_Start("GPU Patch Disp");
@@ -18210,32 +18747,49 @@ static void solver_geostatic_fix(int step) {
 }
 
 /** Share the displacement of anchored nodes with other processors. */
-static void solver_send_displacement_anchored(mysolver_t* solver) {
+static void solver_send_displacement_anchored(mysolver_t* solver,
+                                              fvector_t* valueDevice) {
   //    HU_COND_GLOBAL_BARRIER( Param.theTimingBarriersFlag );
 
   Timer_Start("3rd schedule send data (sharing)");
-  schedule_senddata(Global.mySolver->an_sched, Global.mySolver->tm2,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    AN_DISP_MSG);
+  if (valueDevice != NULL) {
+    solver_vector_device_schedule_senddata(solver, solver->an_sched,
+                                            valueDevice, SHARING, AN_DISP_MSG);
+  } else {
+    schedule_senddata(solver->an_sched, solver->tm2,
+                      sizeof(fvector_t) / sizeof(solver_float), SHARING,
+                      AN_DISP_MSG);
+  }
   Timer_Stop("3rd schedule send data (sharing)");
 }
 
 /** Adjust the displacements of my LOCAL dangling nodes. */
-static void solver_adjust_displacement(mysolver_t* solver) {
+static void solver_adjust_displacement(mysolver_t* solver,
+                                       fvector_t* valueDevice) {
   Timer_Start("2nd compute adjust (assignment)");
-  compute_adjust(Global.mySolver->tm2, sizeof(fvector_t) / sizeof(solver_float),
-                 ASSIGNMENT);
+  if (valueDevice != NULL) {
+    solver_vector_device_adjust(solver, valueDevice, ASSIGNMENT);
+  } else {
+    compute_adjust(solver->tm2, sizeof(fvector_t) / sizeof(solver_float),
+                   ASSIGNMENT);
+  }
   Timer_Stop("2nd compute adjust (assignment)");
 }
 
 /** Share the displacement of dangling nodes with other processors. */
-static void solver_send_displacement_dangling(mysolver_t* solver) {
+static void solver_send_displacement_dangling(mysolver_t* solver,
+                                              fvector_t* valueDevice) {
   //    HU_COND_GLOBAL_BARRIER( Param.theTimingBarriersFlag );
 
   Timer_Start("4th schedule send data (sharing)");
-  schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->tm2,
-                    sizeof(fvector_t) / sizeof(solver_float), SHARING,
-                    DN_DISP_MSG);
+  if (valueDevice != NULL) {
+    solver_vector_device_schedule_senddata(solver, solver->dn_sched,
+                                            valueDevice, SHARING, DN_DISP_MSG);
+  } else {
+    schedule_senddata(solver->dn_sched, solver->tm2,
+                      sizeof(fvector_t) / sizeof(solver_float), SHARING,
+                      DN_DISP_MSG);
+  }
   Timer_Stop("4th schedule send data (sharing)");
 }
 
@@ -18882,6 +19436,7 @@ static void solver_run() {
     solver_load_pressure_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Load Disp");
     Timer_Stop("GPU Memory Copy");
+    solver_sync_acoustic_pressure_station_values(Global.mySolver);
     solver_update_acoustic_station_kinematics(step);
     planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
                                       step, Param.theDeltaT,
@@ -18987,7 +19542,9 @@ static void solver_run() {
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Load Forces");
-    solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    if (!elastic_force_device_sync_enabled()) {
+      solver_load_forces_gpu(Global.mySolver, Global.myMesh);
+    }
     Timer_Stop("GPU Load Forces");
     Timer_Stop("GPU Memory Copy");
 
@@ -19017,13 +19574,17 @@ static void solver_run() {
     Timer_Stop("Compute Physics");
 
     if (pressure_step_needs_synced_disp) {
+      fvector_t* displacementDevice =
+          displacement_device_sync_enabled()
+              ? Global.mySolver->gpuData->tm2Device
+              : NULL;
       Timer_Start("Communication");
       Timer_Start("Comm Displacement Exchange");
       HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-      solver_send_displacement_anchored(Global.mySolver);
-      solver_adjust_displacement(Global.mySolver);
+      solver_send_displacement_anchored(Global.mySolver, displacementDevice);
+      solver_adjust_displacement(Global.mySolver, displacementDevice);
       HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-      solver_send_displacement_dangling(Global.mySolver);
+      solver_send_displacement_dangling(Global.mySolver, displacementDevice);
       Timer_Stop("Comm Displacement Exchange");
       Timer_Stop("Communication");
 
@@ -19044,13 +19605,17 @@ static void solver_run() {
     Timer_Stop("GPU Memory Copy");
 
     if (!pressure_step_needs_synced_disp) {
+      fvector_t* displacementDevice =
+          displacement_device_sync_enabled()
+              ? Global.mySolver->gpuData->tm1Device
+              : NULL;
       Timer_Start("Communication");
       Timer_Start("Comm Displacement Exchange");
       HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-      solver_send_displacement_anchored(Global.mySolver);
-      solver_adjust_displacement(Global.mySolver);
+      solver_send_displacement_anchored(Global.mySolver, displacementDevice);
+      solver_adjust_displacement(Global.mySolver, displacementDevice);
       HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
-      solver_send_displacement_dangling(Global.mySolver);
+      solver_send_displacement_dangling(Global.mySolver, displacementDevice);
       Timer_Stop("Comm Displacement Exchange");
       Timer_Stop("Communication");
 
@@ -20526,6 +21091,12 @@ static void messenger_delete(messenger_t* messenger) {
   if (messenger->scalar_in_device != NULL) {
     cudaFree(messenger->scalar_in_device);
   }
+  if (messenger->vector_out_device != NULL) {
+    cudaFree(messenger->vector_out_device);
+  }
+  if (messenger->vector_in_device != NULL) {
+    cudaFree(messenger->vector_in_device);
+  }
 
   if (messenger->outdata != NULL) free(messenger->outdata);
 
@@ -20559,6 +21130,14 @@ static void messenger_set(messenger_t* messenger, int32_t outsize,
   if (messenger->scalar_in_device != NULL) {
     cudaFree(messenger->scalar_in_device);
     messenger->scalar_in_device = NULL;
+  }
+  if (messenger->vector_out_device != NULL) {
+    cudaFree(messenger->vector_out_device);
+    messenger->vector_out_device = NULL;
+  }
+  if (messenger->vector_in_device != NULL) {
+    cudaFree(messenger->vector_in_device);
+    messenger->vector_in_device = NULL;
   }
 
   if (messenger->outdata != NULL) {

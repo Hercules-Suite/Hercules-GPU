@@ -58,11 +58,21 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Selects how updated displacements are synchronized between GPU and host. Default is `auto`.
 	`full`/`0` keeps the legacy full-array copy each step.
 	`boundary`/`1` keeps displacement history resident on the GPU and copies only the boundary/adjustment nodes needed by MPI displacement exchange, then patches those host-updated nodes back to the GPU for the next step.
+	With `HERCULES_GPU_MPI_BACKEND=cuda_aware` and a CUDA-aware MPI build,
+	`boundary` sends those displacement boundary values directly from device
+	memory and performs the hanging-node adjustment on the GPU, eliminating the
+	host staging for that exchange.
 	For correctness, `boundary` currently falls back to `full` when station/plane/checkpoint/DRM/nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host displacement arrays. The run log prints `Displacement sync path:` and, when active, the boundary node count.
 - `HERCULES_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
 - `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
 	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Full pressure D2H is still performed so station/plane/checkpoint output remains host-visible. `full` restores the legacy full pressure-field H2D load each step; checkpoint restart also forces `full`.
+	When both acoustic pressure synchronization modes are sparse/resident,
+	`HERCULES_GPU_MPI_BACKEND=cuda_aware` sends both acoustic pressure arrays
+	directly from GPU memory and applies the scalar hanging-node adjustment on
+	the GPU. Acoustic station output gathers only its local station nodes from
+	the two device histories; reconstructed acoustic plane output still uses the
+	host path.
 - `HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects poroelastic pore-pressure force synchronization before the scalar
 	MPI/adjust phase. Default is `sparse`, which gathers only nodes touched by
@@ -76,16 +86,19 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	nodes, when station pressure output is enabled, back to the current device
 	field after host-side pressure sharing.
 	`full` restores full `nharbored` field D2H/H2D copies.
-- `HERCULES_PORE_PRESSURE_SYNC_BACKEND=host|cuda_aware`
-	Selects the communication backend for the U-P pore-pressure RHS and field.
+
+- `HERCULES_GPU_MPI_BACKEND=host|cuda_aware`
+	Selects the MPI exchange backend for GPU-resident scalar and vector fields.
 	The default is `cuda_aware` when the linked Open MPI reports CUDA-buffer
-	support through `MPIX_Query_cuda_support()`. It keeps both scalar arrays on
-	the GPU through schedule packing, MPI messages, and local hanging-node
-	adjustment; pore-pressure station values are copied back only at
-	station-output steps. The solver automatically falls back to `host` when
-	CUDA buffers or checkpointing are unavailable. Set `host` explicitly to use
-	the sparse/resident GPU gather-scatter path with the existing host MPI
-	schedules. `run_phaseA_phaseB.sh` automatically exports
+	support through `MPIX_Query_cuda_support()`. This enables direct device
+	packing, MPI messages, and GPU hanging-node adjustment for eligible
+	poroelastic pressure, acoustic pressure, elastic displacement-boundary, and
+	elastic force-contribution exchanges. The solver automatically uses the
+	host schedules whenever checkpointing or a host-side correction/output path
+	requires them. Set `host` explicitly to use the sparse/resident GPU
+	gather-scatter path with the existing host MPI schedules.
+	`HERCULES_PORE_PRESSURE_SYNC_BACKEND=host|cuda_aware` remains a legacy alias
+	when `HERCULES_GPU_MPI_BACKEND` is unset. `run_phaseA_phaseB.sh` automatically exports
 	`UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc` for both phases when the active
 	Open MPI reports CUDA support and `UCX_TLS` is not already set. A
 	user-defined `UCX_TLS` takes precedence.
@@ -429,10 +442,11 @@ Poroelastic U-P input flags (experimental V1):
 	`Q^T du` in the pore-pressure source path. The GPU path is matrix-free:
 	setup precomputes the
 	poroelastic element mapper and topography-aware pressure-test weights,
-	then CUDA kernels apply the coupling operators and pressure update. MPI
-	pressure exchange still uses the existing host schedules, but
-	the pore-pressure transfer path is sparse by default: only schedule,
-	adjustment, and pressure-output station nodes are staged between host and GPU.
+	then CUDA kernels apply the coupling operators and pressure update. With a
+	CUDA-aware MPI build, the default `HERCULES_GPU_MPI_BACKEND=cuda_aware`
+	keeps eligible pore-pressure schedule exchange and hanging-node adjustment
+	on the GPU; `host` restores the sparse host staging path. Pore-pressure
+	station values are copied back only at station-output steps.
 - `poroelastic_undrained_fast_path`
 	Optional. `yes` (default) activates only when
 	`poroelastic_surface_pressure_bc = undrained` and all three permeability
