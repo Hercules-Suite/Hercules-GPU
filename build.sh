@@ -1,3 +1,4 @@
-module load nvidia/25.5 cuda/12.9 proj/9.6.0 gsl
+module load nvidia/25.9 cuda/13.0 proj/9.6.0 gsl
 make clean
+make cleanall
 make
