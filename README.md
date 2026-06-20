@@ -87,8 +87,7 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	the sparse/resident GPU gather-scatter path with the existing host MPI
 	schedules. `run_phaseA_phaseB.sh` automatically supplies
 	`UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc` for a CUDA-aware poroelastic
-	Phase B when `UCX_TLS` is not already set. This avoids inconsistent UCX/OB1
-	PML selection on Vista's CUDA-aware Open MPI stack. A user-defined `UCX_TLS`
+	Phase B when `UCX_TLS` is not already set. A user-defined `UCX_TLS`
 	takes precedence; the Phase A CPU meshing launch is left unchanged.
 
 Advanced/diagnostic toggles:
