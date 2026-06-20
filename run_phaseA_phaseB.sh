@@ -374,6 +374,13 @@ fi
 
 echo "=== Two-phase run ==="
 echo "MPI launcher:   ${MPI_RUN}"
+if [[ -n "${UCX_TLS_SOURCE}" ]]; then
+  if [[ "${UCX_TLS_SOURCE}" == "user" ]]; then
+    echo "UCX TLS:        user (${UCX_TLS})"
+  else
+    echo "UCX TLS:        ${UCX_TLS_SOURCE} (${AUTO_UCX_TLS})"
+  fi
+fi
 echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
 if [[ -n "${BASE_IN}" ]]; then
@@ -401,13 +408,6 @@ else
   echo "Phase A ranks:  launcher default"
 fi
 echo "Phase B ranks:  ${PHASE_B_NP}"
-if [[ -n "${UCX_TLS_SOURCE}" ]]; then
-  if [[ "${UCX_TLS_SOURCE}" == "user" ]]; then
-    echo "UCX TLS:        user (${UCX_TLS})"
-  else
-    echo "UCX TLS:        ${UCX_TLS_SOURCE} (${AUTO_UCX_TLS})"
-  fi
-fi
 if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
   echo "Phase A OMP:    ${PHASE_A_OMP_THREADS}"
 fi
