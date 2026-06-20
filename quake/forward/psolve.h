@@ -353,6 +353,12 @@ struct messenger_t {
     int32_t  mapping_has_duplicates;
     int32_t  mapping_dup_reported;
 
+    /* Lazily allocated only by the opt-in CUDA-aware scalar schedule path.
+     * The regular host schedule never touches these buffers. */
+    int32_t* scalar_mapping_device;
+    solver_float* scalar_out_device;
+    solver_float* scalar_in_device;
+
     messenger_t* next;
 };
 

@@ -272,6 +272,24 @@ static solver_float* g_porePressureSparseBufferHost = NULL;
 static solver_float* g_porePressureSparseBufferDevice = NULL;
 static int32_t g_porePressureSparseNodeCount = 0;
 static int32_t g_porePressureSparseHostPinned = 0;
+static int32_t g_porePressureDeviceSyncMode = -1;
+static int32_t g_porePressureDeviceSyncReported = 0;
+static int32_t g_porePressureDeviceScheduleReady = 0;
+static int32_t* g_porePressureAdjustParentOffsetsDevice = NULL;
+static int32_t* g_porePressureAdjustDanglingBase3Device = NULL;
+static solver_float* g_porePressureAdjustInvDepsDevice = NULL;
+static int32_t* g_porePressureAdjustDnOrderDevice = NULL;
+static int32_t* g_porePressureAdjustParentBase3Device = NULL;
+static int32_t* g_porePressureAdjustDistEdgeDnDevice = NULL;
+static int32_t* g_porePressureAdjustDistRunParentBase3Device = NULL;
+static int32_t* g_porePressureAdjustDistRunOffsetsDevice = NULL;
+static int32_t g_porePressureStationSyncReady = 0;
+static int32_t* g_porePressureStationNodesHost = NULL;
+static int32_t* g_porePressureStationNodesDevice = NULL;
+static solver_float* g_porePressureStationBufferHost = NULL;
+static solver_float* g_porePressureStationBufferDevice = NULL;
+static int32_t g_porePressureStationNodeCount = 0;
+static int32_t g_porePressureStationHostPinned = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -677,6 +695,7 @@ static int32_t pressure_force_sync_mode(void);
 static int32_t pressure_field_sync_mode(void);
 static int32_t pore_pressure_force_sync_mode(void);
 static int32_t pore_pressure_field_sync_mode(void);
+static int32_t pore_pressure_device_sync_enabled(void);
 static void solver_init_disp_boundary_sync(mysolver_t* solver);
 static void solver_init_pressure_sparse_sync(mysolver_t* solver);
 static void solver_download_pressure_force_sparse(mysolver_t* solver);
@@ -687,6 +706,15 @@ static void solver_download_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_download_pore_pressure_field_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver);
+static void solver_init_pore_pressure_device_sync(mysolver_t* solver);
+static void solver_pore_pressure_device_schedule_senddata(
+    mysolver_t* solver, schedule_t* sched, solver_float* valueDevice,
+    int32_t direction, int32_t msgtag);
+static void solver_pore_pressure_device_adjust(mysolver_t* solver,
+                                                solver_float* valueDevice,
+                                                int32_t how);
+static void solver_sync_pore_pressure_station_values(mysolver_t* solver);
+static void solver_free_pore_pressure_device_sync(void);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
@@ -786,6 +814,65 @@ __global__ static void kernelScalarBoundaryScatter(int32_t count,
   }
 
   dstDevice[lnidList[idx]] = bufferDevice[idx];
+}
+
+__global__ static void kernelScalarBoundaryScatterSerial(
+    int32_t count, const int32_t* lnidList, const solver_float* bufferDevice,
+    solver_float* dstDevice) {
+  if ((blockIdx.x != 0) || (threadIdx.x != 0)) {
+    return;
+  }
+  for (int32_t idx = 0; idx < count; idx++) {
+    dstDevice[lnidList[idx]] = bufferDevice[idx];
+  }
+}
+
+__global__ static void kernelScalarBoundaryAccumulate(
+    int32_t count, const int32_t* lnidList, const solver_float* bufferDevice,
+    solver_float* dstDevice) {
+  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  atomicAdd(dstDevice + lnidList[idx], bufferDevice[idx]);
+}
+
+/* The host compute_adjust cache is already grouped by parent for the
+ * contribution path. One GPU thread therefore owns each parent update. */
+__global__ static void kernelScalarAdjustDistribution(
+    int32_t runCount, const int32_t* runOffsets, const int32_t* runParentBase3,
+    const int32_t* edgeDn, const int32_t* danglingBase3,
+    const solver_float* invDeps, solver_float* values) {
+  int32_t run = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (run >= runCount) {
+    return;
+  }
+
+  solver_float sum = 0.0;
+  for (int32_t edge = runOffsets[run]; edge < runOffsets[run + 1]; edge++) {
+    const int32_t dnindex = edgeDn[edge];
+    sum += values[danglingBase3[dnindex] / 3] * invDeps[dnindex];
+  }
+  values[runParentBase3[run] / 3] += sum;
+}
+
+__global__ static void kernelScalarAdjustAssignment(
+    int32_t dnCount, const int32_t* dnOrder, const int32_t* parentOffsets,
+    const int32_t* parentBase3, const int32_t* danglingBase3,
+    const solver_float* invDeps, solver_float* values) {
+  int32_t orderIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (orderIndex >= dnCount) {
+    return;
+  }
+
+  const int32_t dnindex = dnOrder[orderIndex];
+  solver_float sum = 0.0;
+  for (int32_t parent = parentOffsets[dnindex];
+       parent < parentOffsets[dnindex + 1]; parent++) {
+    sum += values[parentBase3[parent] / 3];
+  }
+  values[danglingBase3[dnindex] / 3] = sum * invDeps[dnindex];
 }
 
 __device__ __constant__ int kTopoTetNodes[2][5][4] = {
@@ -13184,6 +13271,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.porePressureForceDevice);
   cudaFree(Global.gpuData.porePressureMassDevice);
   cudaFree(Global.gpuData.porePressureSurfaceDevice);
+  solver_free_pore_pressure_device_sync();
   cudaFree(Global.gpuData.poroelasticElemMapperDevice);
   cudaFree(Global.gpuData.poroelasticElemHDevice);
   cudaFree(Global.gpuData.poroelasticElemDetJDevice);
@@ -13821,6 +13909,7 @@ static void solver_output_stations(int step) {
   if (Param.theNumberOfStations != 0) {
     if (step % Param.theStationsPrintRate == 0) {
       Timer_Start("Print Stations");
+      solver_sync_pore_pressure_station_values(Global.mySolver);
       interpolate_station_displacements(step);
       Timer_Stop("Print Stations");
     }
@@ -15581,10 +15670,13 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   int blocksize;
   int gridsize;
   cudaError_t cerror;
+  int useDeviceSync;
 
   if (!poroelastic_gpu_active()) {
     return;
   }
+
+  useDeviceSync = pore_pressure_device_sync_enabled();
 
   Timer_Start("Poroelastic Pressure Step");
 
@@ -15614,7 +15706,10 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure force kernel");
 
   Timer_Start("Poroelastic pressure force D2H");
-  if (pore_pressure_force_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* Device buffers are exchanged directly below. Keep the timing category
+     * present so host and CUDA-aware runs remain easy to compare. */
+  } else if (pore_pressure_force_sync_mode() != 0) {
     solver_download_pore_pressure_force_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->pore_pressure_force,
@@ -15629,15 +15724,28 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure force D2H");
 
   Timer_Start("Poroelastic pressure force exchange");
-  schedule_senddata(solver->dn_sched, solver->pore_pressure_force, 1,
-                    CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
-  compute_adjust(solver->pore_pressure_force, 1, DISTRIBUTION);
-  schedule_senddata(solver->an_sched, solver->pore_pressure_force, 1,
-                    CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
+  if (useDeviceSync) {
+    solver_pore_pressure_device_schedule_senddata(
+        solver, solver->dn_sched, solver->gpuData->porePressureForceDevice,
+        CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
+    solver_pore_pressure_device_adjust(
+        solver, solver->gpuData->porePressureForceDevice, DISTRIBUTION);
+    solver_pore_pressure_device_schedule_senddata(
+        solver, solver->an_sched, solver->gpuData->porePressureForceDevice,
+        CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
+  } else {
+    schedule_senddata(solver->dn_sched, solver->pore_pressure_force, 1,
+                      CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
+    compute_adjust(solver->pore_pressure_force, 1, DISTRIBUTION);
+    schedule_senddata(solver->an_sched, solver->pore_pressure_force, 1,
+                      CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
+  }
   Timer_Stop("Poroelastic pressure force exchange");
 
   Timer_Start("Poroelastic pressure force H2D");
-  if (pore_pressure_force_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* The pressure RHS never left the GPU. */
+  } else if (pore_pressure_force_sync_mode() != 0) {
     solver_upload_pore_pressure_force_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->gpuData->porePressureForceDevice,
@@ -15671,7 +15779,9 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure update");
 
   Timer_Start("Poroelastic pressure field D2H");
-  if (pore_pressure_field_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* Field sharing below operates on device-resident pressure directly. */
+  } else if (pore_pressure_field_sync_mode() != 0) {
     solver_download_pore_pressure_field_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->pore_pressure_tm2,
@@ -15686,15 +15796,28 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure field D2H");
 
   Timer_Start("Poroelastic pressure field exchange");
-  schedule_senddata(solver->an_sched, solver->pore_pressure_tm2, 1, SHARING,
-                    AN_PORE_PRESSURE_MSG);
-  compute_adjust(solver->pore_pressure_tm2, 1, ASSIGNMENT);
-  schedule_senddata(solver->dn_sched, solver->pore_pressure_tm2, 1, SHARING,
-                    DN_PORE_PRESSURE_MSG);
+  if (useDeviceSync) {
+    solver_pore_pressure_device_schedule_senddata(
+        solver, solver->an_sched, solver->gpuData->porePressureTm2Device,
+        SHARING, AN_PORE_PRESSURE_MSG);
+    solver_pore_pressure_device_adjust(
+        solver, solver->gpuData->porePressureTm2Device, ASSIGNMENT);
+    solver_pore_pressure_device_schedule_senddata(
+        solver, solver->dn_sched, solver->gpuData->porePressureTm2Device,
+        SHARING, DN_PORE_PRESSURE_MSG);
+  } else {
+    schedule_senddata(solver->an_sched, solver->pore_pressure_tm2, 1,
+                      SHARING, AN_PORE_PRESSURE_MSG);
+    compute_adjust(solver->pore_pressure_tm2, 1, ASSIGNMENT);
+    schedule_senddata(solver->dn_sched, solver->pore_pressure_tm2, 1,
+                      SHARING, DN_PORE_PRESSURE_MSG);
+  }
   Timer_Stop("Poroelastic pressure field exchange");
 
   Timer_Start("Poroelastic pressure field H2D");
-  if (pore_pressure_field_sync_mode() != 0) {
+  if (useDeviceSync) {
+    /* Station values are gathered on demand at output time. */
+  } else if (pore_pressure_field_sync_mode() != 0) {
     solver_upload_pore_pressure_field_sparse(solver);
   } else {
     cudaMemcpyAsync(solver->gpuData->porePressureTm2Device,
@@ -15946,6 +16069,59 @@ static int32_t pore_pressure_field_sync_mode(void) {
   }
 
   return g_porePressureFieldSyncMode;
+}
+
+/* CUDA-aware MPI cannot be probed safely without issuing an actual device
+ * transfer, so keep this backend explicit rather than guessing at runtime. */
+static int32_t pore_pressure_device_sync_enabled(void) {
+  if (g_porePressureDeviceSyncMode < 0) {
+    const char* env = getenv("HERCULES_PORE_PRESSURE_SYNC_BACKEND");
+    int32_t useDevice = 0;
+
+    if (env != NULL) {
+      if (strcasecmp(env, "host") == 0 || strcasecmp(env, "sparse") == 0 ||
+          strcasecmp(env, "cpu") == 0 || strcasecmp(env, "no") == 0 ||
+          strcasecmp(env, "false") == 0 || strcmp(env, "0") == 0) {
+        useDevice = 0;
+      } else if (strcasecmp(env, "cuda_aware") == 0 ||
+                 strcasecmp(env, "cuda-aware") == 0 ||
+                 strcasecmp(env, "device") == 0 ||
+                 strcasecmp(env, "gpu") == 0 || strcasecmp(env, "yes") == 0 ||
+                 strcasecmp(env, "true") == 0 || strcmp(env, "1") == 0) {
+        useDevice = 1;
+      } else {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "HERCULES_PORE_PRESSURE_SYNC_BACKEND must be "
+                     "host or cuda_aware: got '%s'\n", env);
+      }
+    }
+
+    /* Checkpoints serialize host state. Keep that path conservative until
+     * checkpoint I/O can gather pore pressure directly from the device. */
+    if (useDevice &&
+        ((Param.theUseCheckPoint == 1) || (Param.theCheckPointingRate != 0))) {
+      useDevice = 0;
+      if (Global.myID == 0) {
+        monitor_print(
+            "Poroelastic pressure sync backend: host (CUDA-aware request "
+            "disabled by checkpointing)\n");
+      }
+    }
+
+    g_porePressureDeviceSyncMode = useDevice;
+    if ((Global.myID == 0) && (g_porePressureDeviceSyncReported == 0) &&
+        !(useDevice == 0 &&
+          ((Param.theUseCheckPoint == 1) ||
+           (Param.theCheckPointingRate != 0)) &&
+          env != NULL)) {
+      monitor_print("Poroelastic pressure sync backend: %s\n",
+                    useDevice ? "CUDA-aware MPI/device-resident"
+                              : "host sparse/resident");
+      g_porePressureDeviceSyncReported = 1;
+    }
+  }
+
+  return g_porePressureDeviceSyncMode;
 }
 
 static void disp_boundary_append_messenger_nodes(int32_t* nodes,
@@ -16648,6 +16824,426 @@ static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+}
+
+static void solver_pore_pressure_device_check(cudaError_t cerror,
+                                              const char* operation) {
+  if (cerror == cudaSuccess) {
+    return;
+  }
+
+  fprintf(stderr, "Thread %d: %s - %s\n", Global.myID, operation,
+          cudaGetErrorString(cerror));
+  MPI_Abort(MPI_COMM_WORLD, ERROR);
+  exit(1);
+}
+
+static void solver_pore_pressure_device_copy_int32(int32_t** target,
+                                                    const int32_t* source,
+                                                    int32_t count,
+                                                    const char* operation) {
+  if (count <= 0) {
+    return;
+  }
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)target, sizeof(int32_t) * (size_t)count), operation);
+  solver_pore_pressure_device_check(
+      cudaMemcpy(*target, source, sizeof(int32_t) * (size_t)count,
+                 cudaMemcpyHostToDevice),
+      operation);
+}
+
+static void solver_pore_pressure_device_copy_scalar(
+    solver_float** target, const solver_float* source, int32_t count,
+    const char* operation) {
+  if (count <= 0) {
+    return;
+  }
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)target, sizeof(solver_float) * (size_t)count),
+      operation);
+  solver_pore_pressure_device_check(
+      cudaMemcpy(*target, source, sizeof(solver_float) * (size_t)count,
+                 cudaMemcpyHostToDevice),
+      operation);
+}
+
+static void solver_init_pore_pressure_device_messengers(messenger_t* first) {
+  for (messenger_t* messenger = first; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if (count <= 0) {
+      continue;
+    }
+    if (messenger->nidx != count) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "CUDA-aware scalar schedule has incomplete mapping: %d of "
+                   "%d entries\n", messenger->nidx, count);
+    }
+    if (messenger->scalar_mapping_device != NULL) {
+      continue;
+    }
+
+    solver_pore_pressure_device_copy_int32(
+        &messenger->scalar_mapping_device, messenger->mapping, count,
+        "pore-pressure CUDA-aware schedule mapping");
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->scalar_out_device,
+                   sizeof(solver_float) * (size_t)count),
+        "pore-pressure CUDA-aware send buffer");
+    solver_pore_pressure_device_check(
+        cudaMalloc((void**)&messenger->scalar_in_device,
+                   sizeof(solver_float) * (size_t)count),
+        "pore-pressure CUDA-aware receive buffer");
+  }
+}
+
+static void solver_init_pore_pressure_device_sync(mysolver_t* solver) {
+  if (g_porePressureDeviceScheduleReady != 0 ||
+      !pore_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  compute_adjust_cache_build();
+  solver_init_pore_pressure_device_messengers(solver->an_sched->first_c);
+  solver_init_pore_pressure_device_messengers(solver->an_sched->first_s);
+  solver_init_pore_pressure_device_messengers(solver->dn_sched->first_c);
+  solver_init_pore_pressure_device_messengers(solver->dn_sched->first_s);
+
+  if (g_adjustDnCount > 0) {
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustParentOffsetsDevice, g_adjustParentOffsets,
+        g_adjustDnCount + 1, "pore-pressure adjustment parent offsets");
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustDanglingBase3Device, g_adjustDanglingBase3,
+        g_adjustDnCount, "pore-pressure adjustment dangling nodes");
+    solver_pore_pressure_device_copy_scalar(
+        &g_porePressureAdjustInvDepsDevice, g_adjustInvDeps, g_adjustDnCount,
+        "pore-pressure adjustment weights");
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustDnOrderDevice, g_adjustDnOrder, g_adjustDnCount,
+        "pore-pressure adjustment order");
+  }
+  if (g_adjustParentCount > 0) {
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustParentBase3Device, g_adjustParentBase3,
+        g_adjustParentCount, "pore-pressure adjustment parent nodes");
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustDistEdgeDnDevice, g_adjustDistEdgeDn,
+        g_adjustParentCount, "pore-pressure distribution edges");
+  }
+  if (g_adjustDistRunCount > 0) {
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustDistRunParentBase3Device,
+        g_adjustDistRunParentBase3, g_adjustDistRunCount,
+        "pore-pressure distribution parents");
+    solver_pore_pressure_device_copy_int32(
+        &g_porePressureAdjustDistRunOffsetsDevice, g_adjustDistRunOffsets,
+        g_adjustDistRunCount + 1, "pore-pressure distribution offsets");
+  }
+
+  g_porePressureDeviceScheduleReady = 1;
+}
+
+static void solver_pore_pressure_device_schedule_senddata(
+    mysolver_t* solver, schedule_t* sched, solver_float* valueDevice,
+    int32_t direction, int32_t msgtag) {
+  messenger_t *send, *recv;
+  MPI_Request *recvRequests, *sendRequests;
+  MPI_Status *recvStatuses, *sendStatuses;
+  int32_t recvCount, sendCount;
+  int32_t recvIndex = 0;
+  int32_t sendIndex = 0;
+  const int32_t blocksize = 256;
+
+  solver_init_pore_pressure_device_sync(solver);
+
+  if (direction == CONTRIBUTION) {
+    send = sched->first_c;
+    recv = sched->first_s;
+    recvCount = sched->s_count;
+    sendCount = sched->c_count;
+    recvRequests = sched->irecvreqs_s;
+    recvStatuses = sched->irecvstats_s;
+    sendRequests = sched->isendreqs_c;
+    sendStatuses = sched->isendstats_c;
+  } else {
+    send = sched->first_s;
+    recv = sched->first_c;
+    recvCount = sched->c_count;
+    sendCount = sched->s_count;
+    recvRequests = sched->irecvreqs_c;
+    recvStatuses = sched->irecvstats_c;
+    sendRequests = sched->isendreqs_s;
+    sendStatuses = sched->isendstats_s;
+  }
+
+  for (messenger_t* messenger = recv; messenger != NULL;
+       messenger = messenger->next) {
+    const int bytes = messenger->nodecount * (int)sizeof(solver_float);
+    MPI_Irecv(messenger->scalar_in_device, bytes, MPI_CHAR, messenger->procid,
+              msgtag, comm_solver, &recvRequests[recvIndex++]);
+  }
+
+  for (messenger_t* messenger = send; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if (count > 0) {
+      const int32_t gridsize = (count + blocksize - 1) / blocksize;
+      kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, valueDevice,
+          messenger->scalar_out_device);
+    }
+  }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "pore-pressure CUDA-aware schedule pack");
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "pore-pressure CUDA-aware schedule pack sync");
+
+  for (messenger_t* messenger = send; messenger != NULL;
+       messenger = messenger->next) {
+    const int bytes = messenger->nodecount * (int)sizeof(solver_float);
+    MPI_Isend(messenger->scalar_out_device, bytes, MPI_CHAR, messenger->procid,
+              msgtag, comm_solver, &sendRequests[sendIndex++]);
+  }
+
+  if (recvCount > 0) {
+    MPI_Waitall(recvCount, recvRequests, recvStatuses);
+  }
+
+  for (messenger_t* messenger = recv; messenger != NULL;
+       messenger = messenger->next) {
+    const int32_t count = messenger->nodecount;
+    if (count <= 0) {
+      continue;
+    }
+    const int32_t gridsize = (count + blocksize - 1) / blocksize;
+    if (direction == CONTRIBUTION) {
+      kernelScalarBoundaryAccumulate<<<gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->scalar_in_device,
+          valueDevice);
+    } else if (messenger->mapping_has_duplicates) {
+      kernelScalarBoundaryScatterSerial<<<1, 1, 0,
+                                          solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->scalar_in_device,
+          valueDevice);
+    } else {
+      kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+          count, messenger->scalar_mapping_device, messenger->scalar_in_device,
+          valueDevice);
+    }
+  }
+  solver_pore_pressure_device_check(
+      cudaGetLastError(), "pore-pressure CUDA-aware schedule unpack");
+
+  if (sendCount > 0) {
+    MPI_Waitall(sendCount, sendRequests, sendStatuses);
+  }
+}
+
+static void solver_pore_pressure_device_adjust(mysolver_t* solver,
+                                                solver_float* valueDevice,
+                                                int32_t how) {
+  const int32_t blocksize = 256;
+
+  solver_init_pore_pressure_device_sync(solver);
+  if (how == DISTRIBUTION) {
+    if (g_adjustDistRunCount > 0) {
+      const int32_t gridsize =
+          (g_adjustDistRunCount + blocksize - 1) / blocksize;
+      kernelScalarAdjustDistribution<<<gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+          g_adjustDistRunCount, g_porePressureAdjustDistRunOffsetsDevice,
+          g_porePressureAdjustDistRunParentBase3Device,
+          g_porePressureAdjustDistEdgeDnDevice,
+          g_porePressureAdjustDanglingBase3Device,
+          g_porePressureAdjustInvDepsDevice, valueDevice);
+    }
+  } else {
+    if (g_adjustDnCount > 0) {
+      const int32_t gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
+      kernelScalarAdjustAssignment<<<gridsize, blocksize, 0,
+                                     solver->streams[CUDA_STREAM_MAIN]>>>(
+          g_adjustDnCount, g_porePressureAdjustDnOrderDevice,
+          g_porePressureAdjustParentOffsetsDevice,
+          g_porePressureAdjustParentBase3Device,
+          g_porePressureAdjustDanglingBase3Device,
+          g_porePressureAdjustInvDepsDevice, valueDevice);
+    }
+  }
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "pore-pressure CUDA-aware adjustment");
+}
+
+static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes;
+
+  if (g_porePressureStationSyncReady != 0 ||
+      !pore_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  if ((Param.printStationPressures != YES) ||
+      (Param.myNumberOfStations <= 0) || (Param.myStations == NULL)) {
+    g_porePressureStationSyncReady = 1;
+    return;
+  }
+
+  capacity = 8 * Param.myNumberOfStations;
+  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
+  if (nodes == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating pore-pressure station-node list\n");
+  }
+
+  for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
+    if (Param.myStations[station].pore_pressure_is_defined == 0) {
+      continue;
+    }
+    for (int32_t corner = 0; corner < 8; corner++) {
+      const int32_t node = Param.myStations[station].nodestointerpolate[corner];
+      if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+        nodes[count++] = node;
+      }
+    }
+  }
+
+  if (count > 0) {
+    qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+    for (int32_t i = 0; i < count; i++) {
+      if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+        nodes[uniqueCount++] = nodes[i];
+      }
+    }
+  }
+
+  g_porePressureStationNodeCount = uniqueCount;
+  if (uniqueCount <= 0) {
+    free(nodes);
+    g_porePressureStationSyncReady = 1;
+    return;
+  }
+
+  g_porePressureStationNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)uniqueCount);
+  if (g_porePressureStationNodesHost == NULL) {
+    free(nodes);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating pore-pressure station-node copy\n");
+  }
+  memcpy(g_porePressureStationNodesHost, nodes,
+         sizeof(int32_t) * (size_t)uniqueCount);
+  free(nodes);
+
+  solver_pore_pressure_device_copy_int32(
+      &g_porePressureStationNodesDevice, g_porePressureStationNodesHost,
+      uniqueCount, "pore-pressure station-node copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_porePressureStationBufferDevice,
+                 sizeof(solver_float) * (size_t)uniqueCount),
+      "pore-pressure station device buffer");
+  if (cudaHostAlloc((void**)&g_porePressureStationBufferHost,
+                    sizeof(solver_float) * (size_t)uniqueCount,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_porePressureStationHostPinned = 1;
+  } else {
+    g_porePressureStationBufferHost = NULL;
+    g_porePressureStationBufferHost =
+        (solver_float*)malloc(sizeof(solver_float) * (size_t)uniqueCount);
+    if (g_porePressureStationBufferHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating pore-pressure station host buffer\n");
+    }
+  }
+
+  g_porePressureStationSyncReady = 1;
+}
+
+static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
+  const int32_t blocksize = 256;
+
+  if (!poroelastic_gpu_active() || !pore_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  solver_init_pore_pressure_station_sync(solver);
+  if (g_porePressureStationNodeCount <= 0) {
+    return;
+  }
+
+  const int32_t gridsize =
+      (g_porePressureStationNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureStationNodeCount, g_porePressureStationNodesDevice,
+      solver->gpuData->porePressureTm1Device,
+      g_porePressureStationBufferDevice);
+  solver_pore_pressure_device_check(
+      cudaGetLastError(), "pore-pressure station gather");
+  solver_pore_pressure_device_check(
+      cudaMemcpyAsync(g_porePressureStationBufferHost,
+                      g_porePressureStationBufferDevice,
+                      sizeof(solver_float) *
+                          (size_t)g_porePressureStationNodeCount,
+                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
+      "pore-pressure station D2H");
+  solver->gpu_spec->numbytespci +=
+      g_porePressureStationNodeCount * (int64_t)sizeof(solver_float);
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "pore-pressure station D2H sync");
+
+  for (int32_t i = 0; i < g_porePressureStationNodeCount; i++) {
+    solver->pore_pressure_tm1[g_porePressureStationNodesHost[i]] =
+        g_porePressureStationBufferHost[i];
+  }
+}
+
+static void solver_free_pore_pressure_device_sync(void) {
+  cudaFree(g_porePressureAdjustParentOffsetsDevice);
+  cudaFree(g_porePressureAdjustDanglingBase3Device);
+  cudaFree(g_porePressureAdjustInvDepsDevice);
+  cudaFree(g_porePressureAdjustDnOrderDevice);
+  cudaFree(g_porePressureAdjustParentBase3Device);
+  cudaFree(g_porePressureAdjustDistEdgeDnDevice);
+  cudaFree(g_porePressureAdjustDistRunParentBase3Device);
+  cudaFree(g_porePressureAdjustDistRunOffsetsDevice);
+  cudaFree(g_porePressureStationNodesDevice);
+  cudaFree(g_porePressureStationBufferDevice);
+  free(g_porePressureStationNodesHost);
+  if (g_porePressureStationBufferHost != NULL) {
+    if (g_porePressureStationHostPinned != 0) {
+      cudaFreeHost(g_porePressureStationBufferHost);
+    } else {
+      free(g_porePressureStationBufferHost);
+    }
+  }
+
+  g_porePressureAdjustParentOffsetsDevice = NULL;
+  g_porePressureAdjustDanglingBase3Device = NULL;
+  g_porePressureAdjustInvDepsDevice = NULL;
+  g_porePressureAdjustDnOrderDevice = NULL;
+  g_porePressureAdjustParentBase3Device = NULL;
+  g_porePressureAdjustDistEdgeDnDevice = NULL;
+  g_porePressureAdjustDistRunParentBase3Device = NULL;
+  g_porePressureAdjustDistRunOffsetsDevice = NULL;
+  g_porePressureStationNodesHost = NULL;
+  g_porePressureStationNodesDevice = NULL;
+  g_porePressureStationBufferHost = NULL;
+  g_porePressureStationBufferDevice = NULL;
+  g_porePressureStationNodeCount = 0;
+  g_porePressureStationHostPinned = 0;
+  g_porePressureStationSyncReady = 0;
+  g_porePressureDeviceScheduleReady = 0;
+  g_porePressureDeviceSyncMode = -1;
+  g_porePressureDeviceSyncReported = 0;
 }
 
 static void solver_load_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
@@ -19908,6 +20504,16 @@ static messenger_t* messenger_new(int32_t procid) {
 static void messenger_delete(messenger_t* messenger) {
   if (messenger == NULL) return;
 
+  if (messenger->scalar_mapping_device != NULL) {
+    cudaFree(messenger->scalar_mapping_device);
+  }
+  if (messenger->scalar_out_device != NULL) {
+    cudaFree(messenger->scalar_out_device);
+  }
+  if (messenger->scalar_in_device != NULL) {
+    cudaFree(messenger->scalar_in_device);
+  }
+
   if (messenger->outdata != NULL) free(messenger->outdata);
 
   if (messenger->indata != NULL) free(messenger->indata);
@@ -19929,6 +20535,19 @@ static void messenger_delete(messenger_t* messenger) {
  */
 static void messenger_set(messenger_t* messenger, int32_t outsize,
                           int32_t insize) {
+  if (messenger->scalar_mapping_device != NULL) {
+    cudaFree(messenger->scalar_mapping_device);
+    messenger->scalar_mapping_device = NULL;
+  }
+  if (messenger->scalar_out_device != NULL) {
+    cudaFree(messenger->scalar_out_device);
+    messenger->scalar_out_device = NULL;
+  }
+  if (messenger->scalar_in_device != NULL) {
+    cudaFree(messenger->scalar_in_device);
+    messenger->scalar_in_device = NULL;
+  }
+
   if (messenger->outdata != NULL) {
     free(messenger->outdata);
     messenger->outdata = NULL;
