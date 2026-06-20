@@ -1374,6 +1374,230 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
   gpuData->porePressureForceDevice[nindex] = (solver_float)0.0;
 }
 
+__global__ void kernelPoroelasticPressurePcgPrepare(int32_t nharbored,
+                                                    gpu_data_t* gpuData,
+                                                    int useDrainMass)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  const solver_float mass = gpuData->porePressureMassDevice[nindex];
+  solver_float rhs = (solver_float)0.0;
+  solver_float diag = (solver_float)0.0;
+  if (mass > (solver_float)0.0) {
+    const solver_float drainMass =
+        useDrainMass ? gpuData->porePressureSurfaceDevice[nindex]
+                     : (solver_float)0.0;
+    rhs = gpuData->porePressureForceDevice[nindex] -
+          drainMass * gpuData->porePressureTm1Device[nindex];
+    diag = mass + drainMass;
+  }
+
+  gpuData->porePressurePcgXDevice[nindex] = (solver_float)0.0;
+  gpuData->porePressurePcgRDevice[nindex] = rhs;
+  if (diag > (solver_float)0.0) {
+    gpuData->porePressurePcgZDevice[nindex] = rhs / diag;
+  } else {
+    gpuData->porePressurePcgZDevice[nindex] = (solver_float)0.0;
+  }
+  gpuData->porePressurePcgPDevice[nindex] =
+      gpuData->porePressurePcgZDevice[nindex];
+  gpuData->porePressurePcgApDevice[nindex] = (solver_float)0.0;
+}
+
+__global__ void kernelPoroelasticConsistentStorageMatvec(int32_t elemCount,
+                                                         gpu_data_t* gpuData)
+{
+  const int32_t pindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const double gp = 0.57735026918962576451;
+  const double gcoord[2] = {-gp, gp};
+
+  if (pindex >= elemCount) {
+    return;
+  }
+
+  const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
+  const double detJ = gpuData->poroelasticElemDetJDevice[pindex];
+  if (detJ <= 0.0) {
+    return;
+  }
+
+  double localY[8];
+  for (int j = 0; j < 8; j++) {
+    localY[j] = 0.0;
+  }
+
+  for (int gx = 0; gx < 2; gx++) {
+    const double xi = gcoord[gx];
+    for (int gy = 0; gy < 2; gy++) {
+      const double eta = gcoord[gy];
+      for (int gz = 0; gz < 2; gz++) {
+        const double zeta = gcoord[gz];
+        double Np[8];
+        double pAtGp = 0.0;
+
+        for (int j = 0; j < 8; j++) {
+          const double sx = poro_node_sign_device(j, 0);
+          const double sy = poro_node_sign_device(j, 1);
+          const double sz = poro_node_sign_device(j, 2);
+          const double ax = 1.0 + sx * xi;
+          const double ay = 1.0 + sy * eta;
+          const double az = 1.0 + sz * zeta;
+          const int32_t lnid =
+              gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+          const double shapeScale =
+              gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
+                                                           pindex];
+          Np[j] = 0.125 * ax * ay * az * shapeScale;
+          pAtGp += Np[j] * (double)gpuData->porePressurePcgPDevice[lnid];
+        }
+
+        for (int j = 0; j < 8; j++) {
+          localY[j] += detJ * Np[j] * pAtGp;
+        }
+      }
+    }
+  }
+
+  for (int j = 0; j < 8; j++) {
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
+    atomicAdd((solver_float*)(gpuData->porePressurePcgApDevice + lnid),
+              (solver_float)localY[j]);
+  }
+}
+
+__global__ void kernelPoroelasticConsistentStorageAddDrain(int32_t nharbored,
+                                                          gpu_data_t* gpuData,
+                                                          int useDrainMass)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored || !useDrainMass) {
+    return;
+  }
+
+  const solver_float drainMass = gpuData->porePressureSurfaceDevice[nindex];
+  if (drainMass > (solver_float)0.0) {
+    gpuData->porePressurePcgApDevice[nindex] +=
+        drainMass * gpuData->porePressurePcgPDevice[nindex];
+  }
+}
+
+__global__ void kernelPoroelasticPressurePcgUpdateSolutionResidual(
+    int32_t nharbored, gpu_data_t* gpuData, double alpha)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  if (gpuData->porePressureMassDevice[nindex] > (solver_float)0.0) {
+    gpuData->porePressurePcgXDevice[nindex] +=
+        (solver_float)(alpha * (double)gpuData->porePressurePcgPDevice[nindex]);
+    gpuData->porePressurePcgRDevice[nindex] -=
+        (solver_float)(alpha *
+                       (double)gpuData->porePressurePcgApDevice[nindex]);
+  }
+}
+
+__global__ void kernelPoroelasticPressurePcgApplyPreconditioner(
+    int32_t nharbored, gpu_data_t* gpuData, int useDrainMass)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  const solver_float mass = gpuData->porePressureMassDevice[nindex];
+  solver_float diag = mass;
+  if (useDrainMass) {
+    diag += gpuData->porePressureSurfaceDevice[nindex];
+  }
+
+  if (diag > (solver_float)0.0) {
+    gpuData->porePressurePcgZDevice[nindex] =
+        gpuData->porePressurePcgRDevice[nindex] / diag;
+  } else {
+    gpuData->porePressurePcgZDevice[nindex] = (solver_float)0.0;
+  }
+}
+
+__global__ void kernelPoroelasticPressurePcgUpdateDirection(
+    int32_t nharbored, gpu_data_t* gpuData, double beta)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  if (gpuData->porePressureMassDevice[nindex] > (solver_float)0.0) {
+    gpuData->porePressurePcgPDevice[nindex] =
+        gpuData->porePressurePcgZDevice[nindex] +
+        (solver_float)(beta *
+                       (double)gpuData->porePressurePcgPDevice[nindex]);
+  } else {
+    gpuData->porePressurePcgPDevice[nindex] = (solver_float)0.0;
+  }
+}
+
+__global__ void kernelPoroelasticPressurePcgFinalize(int32_t nharbored,
+                                                     gpu_data_t* gpuData)
+{
+  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+  if (nindex >= nharbored) {
+    return;
+  }
+
+  solver_float pnew = (solver_float)0.0;
+  if (gpuData->porePressureMassDevice[nindex] > (solver_float)0.0) {
+    pnew = gpuData->porePressureTm1Device[nindex] +
+           gpuData->porePressurePcgXDevice[nindex];
+  }
+  gpuData->porePressureTm2Device[nindex] = pnew;
+  gpuData->porePressureForceDevice[nindex] = (solver_float)0.0;
+}
+
+__global__ void kernelPoroelasticVectorDotPartial(
+    int32_t nharbored, const solver_float* a, const solver_float* b,
+    const solver_float* activeMass, const uint8_t* ownedMask,
+    double* partial)
+{
+  extern __shared__ double shmem[];
+  const int32_t tid = threadIdx.x;
+  const int32_t globalTid = blockIdx.x * blockDim.x + tid;
+  const int32_t stride = blockDim.x * gridDim.x;
+  double sum = 0.0;
+
+  for (int32_t nindex = globalTid; nindex < nharbored; nindex += stride) {
+    if ((activeMass[nindex] > (solver_float)0.0) &&
+        (ownedMask[nindex] != (uint8_t)0)) {
+      sum += (double)a[nindex] * (double)b[nindex];
+    }
+  }
+
+  shmem[tid] = sum;
+  __syncthreads();
+
+  for (int32_t offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      shmem[tid] += shmem[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    partial[blockIdx.x] = shmem[0];
+  }
+}
+
 
 /* Damping Calc-Conv Kernel
    FLOPs: 63M + 54A + 4T
