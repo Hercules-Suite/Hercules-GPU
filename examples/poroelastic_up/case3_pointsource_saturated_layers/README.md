@@ -45,6 +45,9 @@ python3 post/case3_compare.py
   diffusion absent from the elastic twin.
 - **`poroelastic_surface_pressure_bc = undrained`** so no spurious `p=0` plane is imposed
   that the elastic twin cannot reproduce.
+- **`poroelastic_undrained_fast_path = yes`** (default) folds `alpha^2 M` into the native
+  elastic volumetric stiffness and leaves pore pressure as a diagnostic; this is the path
+  intended to match the undrained-equivalent elastic twin.
 - The poro-vs-twin check is insensitive to absorbing-boundary reflections (shared by both
   runs). Scale the domain/record up only if you add the **optional** CPS reflectivity
   cross-check (build the equivalent-elastic `.mod` under `benchmark_inputs/`).

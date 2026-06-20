@@ -39,8 +39,8 @@ simulation_output_rate         = 10000000
 the_threshold_damping          = 0.05
 # No effect on this poroelastic run (drained Vp/Vs = 2.0 < cap); set to match the
 # elastic twin, which NEEDS it raised so its undrained Vp (Vp/Vs up to 6.0) is not
-# clamped to 3*Vs. The Biot coupling adds alpha^2*M as a force, bypassing this cap,
-# so the poro run reaches undrained Vp/Vs the elastic path cannot represent at cap=3.
+# clamped to 3*Vs. The poro run starts from the dry Vp, then the undrained fast
+# path adds alpha^2*M directly to native volumetric stiffness.
 the_threshold_Vp_over_Vs       = 8.0
 do_damping_statistics          = 0
 
@@ -108,6 +108,7 @@ poroelastic_formulation        = brick_up
 poroelastic_depth_max_m        = 400.0
 surface_groundwatertable       = no
 poroelastic_surface_pressure_bc = undrained
+poroelastic_undrained_fast_path = yes
 poroelastic_surface_pressure_penalty_factor = 1.0
 poroelastic_elastic_interface  = no_flow
 poroelastic_porosity           = 0.4

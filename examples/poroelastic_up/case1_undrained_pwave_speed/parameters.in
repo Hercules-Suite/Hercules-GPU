@@ -105,6 +105,7 @@ poroelastic_formulation        = brick_up
 poroelastic_depth_max_m        = 1024.0
 surface_groundwatertable       = no
 poroelastic_surface_pressure_bc = undrained
+poroelastic_undrained_fast_path = yes
 poroelastic_surface_pressure_penalty_factor = 1.0
 poroelastic_elastic_interface  = no_flow
 poroelastic_porosity           = 0.4

@@ -22,7 +22,10 @@ Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/`
 
 ## Cross-cutting conventions (every case)
 - `poroelastic_permeability_* = 0`, `poroelastic_biot_alpha = 1`,
-  `poroelastic_surface_pressure_bc = undrained` (so the elastic equivalence is exact).
+  `poroelastic_surface_pressure_bc = undrained`, and
+  `poroelastic_undrained_fast_path = yes` (default), so the displacement
+  operator is the native undrained-equivalent elastic operator and the
+  equivalence is exact up to ordinary elastic discretization.
 - **Size `simulation_delta_time_sec` from the undrained `Vp`**, not the dry `Vp` — the
   solver's auto-CFL only sees the dry `Vp` and would under-size the step.
 - Analysis scripts require `numpy` (run on the host with the station output).
@@ -34,10 +37,10 @@ Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/`
   (default 3.0). The undrained-equivalent **elastic twin** uses the *undrained* `Vp` with the
   *low* skeleton `Vs`, so its `Vp/Vs` is high (e.g. saturated soft soil `1804/300 = 6`) and gets
   clamped unless you raise `the_threshold_Vp_over_Vs` above it — otherwise the twin silently runs
-  at `3·Vs` and is not the undrained-equivalent. The poroelastic run does **not** need this (its
-  drained `Vp/Vs` is low, and the Biot coupling adds `α²M` as a force that bypasses the cap) — so
-  the coupling can represent an undrained `Vp/Vs` the elastic path cannot. Always set the twin's
-  threshold above the saturated layers' undrained `Vp/Vs`.
+  at `3·Vs` and is not the undrained-equivalent. The poroelastic run starts from the dry skeleton
+  `Vp/Vs`, then the undrained fast path adds `alpha^2 M` directly to the native volumetric
+  stiffness, so it is subject to the same intended fast-wave CFL as the twin. Always set the
+  twin's threshold above the saturated layers' undrained `Vp/Vs`.
 
 ## Run pattern
 ```bash

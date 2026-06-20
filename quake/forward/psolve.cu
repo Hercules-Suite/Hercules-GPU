@@ -123,6 +123,7 @@ static int64_t g_acousticPressureFreeSurfaceNodeCount = 0;
 static int64_t g_poroelasticElementCount = 0;
 static int64_t g_poroelasticNodeCount = 0;
 static int64_t g_poroelasticPmlCandidateCount = 0;
+static int64_t g_poroelasticUndrainedFastPathElementCount = 0;
 static int32_t g_poroelasticLocalElementCount = 0;
 static int32_t* g_poroelasticElemMapper = NULL;
 static uint8_t* g_poroelasticElementFlags = NULL;
@@ -1687,6 +1688,7 @@ static struct Param_t {
   double thePoroelasticPermeabilityY;
   double thePoroelasticPermeabilityZ;
   double thePoroelasticSurfacePressurePenaltyFactor;
+  noyesflag_t thePoroelasticUndrainedFastPath;
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -1768,7 +1770,8 @@ static struct Param_t {
            .thePoroelasticPermeabilityX = 0.0,
            .thePoroelasticPermeabilityY = 0.0,
            .thePoroelasticPermeabilityZ = 0.0,
-           .thePoroelasticSurfacePressurePenaltyFactor = 1.0};
+           .thePoroelasticSurfacePressurePenaltyFactor = 1.0,
+           .thePoroelasticUndrainedFastPath = YES};
 
 /* These are all of the remaining global variables - this list should not grow
  */
@@ -1929,6 +1932,20 @@ static int poroelastic_enabled(void) {
 
 static int poroelastic_gpu_active(void) {
   return poroelastic_enabled() && (g_poroelasticElementCount > 0);
+}
+
+static int poroelastic_zero_permeability(void) {
+  return (Param.thePoroelasticPermeabilityX == 0.0) &&
+         (Param.thePoroelasticPermeabilityY == 0.0) &&
+         (Param.thePoroelasticPermeabilityZ == 0.0);
+}
+
+static int poroelastic_undrained_fast_path_active(void) {
+  return poroelastic_enabled() &&
+         (Param.thePoroelasticUndrainedFastPath == YES) &&
+         (Param.thePoroelasticSurfacePressureBC ==
+          POROELASTIC_SURFACE_PRESSURE_UNDRAINED) &&
+         poroelastic_zero_permeability();
 }
 
 static double poroelastic_biot_storage_modulus_incompressible_grains(void) {
@@ -2588,7 +2605,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   48 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  59 /* Must adjust this if adding int params */
+  60 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2766,6 +2783,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[56] = Param.thePoroelasticFormulation;
   int_message[57] = Param.thePoroelasticSurfacePressureBC;
   int_message[58] = Param.thePoroelasticElasticInterface;
+  int_message[59] = (int)Param.thePoroelasticUndrainedFastPath;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2830,6 +2848,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticFormulation = int_message[56];
   Param.thePoroelasticSurfacePressureBC = int_message[57];
   Param.thePoroelasticElasticInterface = int_message[58];
+  Param.thePoroelasticUndrainedFastPath = (noyesflag_t)int_message[59];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3122,6 +3141,7 @@ static int32_t parse_parameters(const char* numericalin) {
        poroelastic_formulation[64] = "brick_up",
        poroelastic_surface_pressure_bc[64] = "undrained",
        poroelastic_elastic_interface[64] = "no_flow",
+       poroelastic_undrained_fast_path[64] = "yes",
        basin_material_type[64] = "elastic",
        IstanbulModel[64] = "no", basinModel[64] = "no", threeDModel[64] = "no",
        include_nonlinear_analysis[64] = "no",
@@ -3546,6 +3566,8 @@ static int32_t parse_parameters(const char* numericalin) {
             &poroelastic_surface_pressure_bc);
   parsetext(fp, "poroelastic_elastic_interface", 's',
             &poroelastic_elastic_interface);
+  parsetext(fp, "poroelastic_undrained_fast_path", 's',
+            &poroelastic_undrained_fast_path);
   parsetext(fp, "groundwaterlevel_file", 's', Param.theGroundwaterLevelFile);
   parsetext(fp, "Istanbul_velocity_model", 's', &IstanbulModel);
   parsetext(fp, "basin_velocity_model", 's', &basinModel);
@@ -4074,6 +4096,17 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "poroelastic_elastic_interface must be no_flow: got '%s'\n",
                  poroelastic_elastic_interface);
+  }
+
+  if (strcasecmp(poroelastic_undrained_fast_path, "yes") == 0) {
+    Param.thePoroelasticUndrainedFastPath = YES;
+  } else if (strcasecmp(poroelastic_undrained_fast_path, "no") == 0) {
+    Param.thePoroelasticUndrainedFastPath = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "poroelastic_undrained_fast_path must be yes or no: got "
+                 "'%s'\n",
+                 poroelastic_undrained_fast_path);
   }
 
   if (Param.thePoroelasticDepthMaxM < 0.0) {
@@ -9348,6 +9381,7 @@ static void solver_init() {
   int64_t globalPressureElements = 0;
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
+  int64_t localPoroelasticUndrainedFastPathElements = 0;
   solver_float* pressureFreeSurfaceHost = NULL;
 
   /* Initialize the GPU */
@@ -10269,10 +10303,23 @@ static void solver_init() {
       }
     }
 
-    /* Poroelastic u-p V1 treats the input Vp as the dry/drained skeleton Vp.
-     * The existing elastic c1/c2 coefficients therefore remain the skeleton
-     * operator, and the Q/Q^T pore-pressure coupling supplies the fluid
-     * stiffness dynamically. Do not subtract alpha^2*M here. */
+    /* Poroelastic u-p treats the input Vp as the dry/drained skeleton Vp.
+     * In the common undrained/no-flow case, fold the fluid bulk alpha^2*M
+     * directly into the native volumetric stiffness. This gives the same
+     * displacement operator as the undrained-equivalent elastic twin and avoids
+     * the split Qp / Q^Tdu dispersion seen in the prototype path. The pressure
+     * update still runs as a diagnostic. */
+    if (poro_element_active && poroelastic_undrained_fast_path_active()) {
+      const double storageM =
+          poroelastic_biot_storage_modulus_for_element(edata, eindex);
+      const double alpha = Param.thePoroelasticBiotAlpha;
+      const double undrainedLambda = alpha * alpha * storageM;
+      ep->c2 += Param.theDeltaTSquared * edata->edgesize *
+                undrainedLambda / 9.0;
+      ep->c4 += b * Param.theDeltaT * edata->edgesize *
+                undrainedLambda / 9.0;
+      localPoroelasticUndrainedFastPathElements++;
+    }
 
     /* Assign the element mass to its vertices */
     /* mass is the total mass of the element   */
@@ -11322,6 +11369,7 @@ static void solver_init() {
     int64_t globalPoroelasticNodes = 0;
     int64_t globalPoroelasticDrainNodes = 0;
     int64_t globalPoroelasticPmlCandidates = 0;
+    int64_t globalPoroelasticUndrainedFastPathElements = 0;
 
     schedule_senddata(Global.mySolver->dn_sched,
                       Global.mySolver->pore_pressure_mass, 1, CONTRIBUTION,
@@ -11358,9 +11406,14 @@ static void solver_init() {
     MPI_Allreduce(&localPoroelasticPmlCandidates,
                   &globalPoroelasticPmlCandidates, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
+    MPI_Allreduce(&localPoroelasticUndrainedFastPathElements,
+                  &globalPoroelasticUndrainedFastPathElements, 1,
+                  MPI_INT64_T, MPI_SUM, comm_solver);
     g_poroelasticElementCount = globalPoroelasticElements;
     g_poroelasticNodeCount = globalPoroelasticNodes;
     g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
+    g_poroelasticUndrainedFastPathElementCount =
+        globalPoroelasticUndrainedFastPathElements;
 
     if (Global.myID == 0) {
       if (Param.surfaceGroundwaterTable == YES) {
@@ -11378,6 +11431,12 @@ static void solver_init() {
           (double)globalPoroelasticNodes / 1.0e6,
           (double)globalPoroelasticPmlCandidates / 1.0e6,
           (long long)globalPoroelasticPmlCandidates);
+      if (globalPoroelasticUndrainedFastPathElements > 0) {
+        monitor_print(
+            "Poroelastic undrained fast path: %.1fM elements use native "
+            "lambda += alpha^2*M; pore pressure is diagnostic only\n",
+            (double)globalPoroelasticUndrainedFastPathElements / 1.0e6);
+      }
       if (Param.thePoroelasticSurfacePressureBC ==
           POROELASTIC_SURFACE_PRESSURE_DRAINED) {
         monitor_print(
@@ -11404,6 +11463,7 @@ static void solver_init() {
     g_poroelasticElementCount = 0;
     g_poroelasticNodeCount = 0;
     g_poroelasticPmlCandidateCount = 0;
+    g_poroelasticUndrainedFastPathElementCount = 0;
     g_poroelasticLocalElementCount = 0;
   }
 
@@ -13398,6 +13458,7 @@ static void solver_delete() {
   g_poroelasticElementCount = 0;
   g_poroelasticNodeCount = 0;
   g_poroelasticPmlCandidateCount = 0;
+  g_poroelasticUndrainedFastPathElementCount = 0;
   g_poroelasticLocalElementCount = 0;
   poro_groundwater_grid_free();
 
@@ -15406,7 +15467,8 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
   (void)mesh;
 
   if ((!poroelastic_gpu_active()) || (g_poroelasticLocalElementCount <= 0) ||
-      (Param.thePoroelasticBiotAlpha == 0.0)) {
+      (Param.thePoroelasticBiotAlpha == 0.0) ||
+      poroelastic_undrained_fast_path_active()) {
     return;
   }
 
