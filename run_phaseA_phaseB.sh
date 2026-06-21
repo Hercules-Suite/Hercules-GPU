@@ -351,9 +351,7 @@ if [[ -n "${UCX_TLS+x}" ]]; then
   UCX_TLS_SOURCE="user"
 elif mpi_reports_cuda_support; then
   AUTO_UCX_TLS="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
-  UCX_TLS="${AUTO_UCX_TLS}"
-  export UCX_TLS
-  UCX_TLS_SOURCE="cuda-aware default"
+  UCX_TLS_SOURCE="phase-b cuda-aware default"
 fi
 
 if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
@@ -564,6 +562,9 @@ fi
 B_ENV_VARS=()
 if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
   B_ENV_VARS+=("OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
+fi
+if [[ "${UCX_TLS_SOURCE}" == "phase-b cuda-aware default" ]]; then
+  B_ENV_VARS+=("UCX_TLS=${AUTO_UCX_TLS}")
 fi
 if [[ ${#B_ENV_VARS[@]} -gt 0 ]]; then
   B_ENV=(env "${B_ENV_VARS[@]}")
