@@ -345,6 +345,16 @@ if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   exit 1
 fi
 
+if [[ "${ALLOC_NODES}" -gt 1 ]] && [[ "${PHASE_B_NP}" -gt "${ALLOC_NODES}" ]] &&
+   (( PHASE_B_NP % ALLOC_NODES != 0 )); then
+  echo "ERROR: Phase B requests ${PHASE_B_NP} MPI ranks on ${ALLOC_NODES} allocated nodes." >&2
+  echo "       The rank count is not divisible by the node count, so the launcher cannot" >&2
+  echo "       assign an even rank-per-node GPU layout." >&2
+  echo "       Use PHASE_B_NP = allocated_nodes x GPUs_per_node, e.g. 40 ranks for" >&2
+  echo "       10 GB200 nodes or 48 ranks for 12 GB200 nodes." >&2
+  exit 1
+fi
+
 MPI_HAS_CUDA_SUPPORT=0
 if mpi_reports_cuda_support; then
   MPI_HAS_CUDA_SUPPORT=1

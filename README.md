@@ -262,6 +262,10 @@ Notes:
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
 	`auto` typically uses a node-level mapping like `ppr:4:node:PE=35`,
 	while `PHASE_B_MAP_MODE=numa` tries `ppr:2:numa:PE=35` when the local node exposes two NUMA domains.
+- For multi-node Phase B runs, `PHASE_B_NP` must divide evenly by the allocated
+	node count. This prevents accidental uneven GPU layouts such as 48 Phase B
+	ranks on 10 four-GPU nodes; use 40 ranks on 10 GB200 nodes or request 12
+	nodes for 48 ranks.
 
 Mesh mode input flags (input file):
 
