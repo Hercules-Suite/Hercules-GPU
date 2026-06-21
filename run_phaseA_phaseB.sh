@@ -345,13 +345,37 @@ if ! [[ "${PHASE_B_NP}" =~ ^[0-9]+$ ]] || [[ "${PHASE_B_NP}" -lt 1 ]]; then
   exit 1
 fi
 
-AUTO_UCX_TLS=""
-UCX_TLS_SOURCE=""
+MPI_HAS_CUDA_SUPPORT=0
+if mpi_reports_cuda_support; then
+  MPI_HAS_CUDA_SUPPORT=1
+fi
+
+PHASE_A_UCX_TLS_VALUE=""
+PHASE_B_UCX_TLS_VALUE=""
+PHASE_A_UCX_TLS_SOURCE=""
+PHASE_B_UCX_TLS_SOURCE=""
+
 if [[ -n "${UCX_TLS+x}" ]]; then
-  UCX_TLS_SOURCE="user"
-elif mpi_reports_cuda_support; then
-  AUTO_UCX_TLS="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
-  UCX_TLS_SOURCE="phase-b cuda-aware default"
+  PHASE_A_UCX_TLS_VALUE="${UCX_TLS}"
+  PHASE_B_UCX_TLS_VALUE="${UCX_TLS}"
+  PHASE_A_UCX_TLS_SOURCE="user"
+  PHASE_B_UCX_TLS_SOURCE="user"
+else
+  if [[ -n "${PHASE_A_UCX_TLS+x}" ]]; then
+    PHASE_A_UCX_TLS_VALUE="${PHASE_A_UCX_TLS}"
+    PHASE_A_UCX_TLS_SOURCE="phase-a user"
+  elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
+    PHASE_A_UCX_TLS_VALUE="sm,self,tcp"
+    PHASE_A_UCX_TLS_SOURCE="phase-a cpu default"
+  fi
+
+  if [[ -n "${PHASE_B_UCX_TLS+x}" ]]; then
+    PHASE_B_UCX_TLS_VALUE="${PHASE_B_UCX_TLS}"
+    PHASE_B_UCX_TLS_SOURCE="phase-b user"
+  elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
+    PHASE_B_UCX_TLS_VALUE="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
+    PHASE_B_UCX_TLS_SOURCE="phase-b cuda-aware default"
+  fi
 fi
 
 if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
@@ -372,11 +396,14 @@ fi
 
 echo "=== Two-phase run ==="
 echo "MPI launcher:   ${MPI_RUN}"
-if [[ -n "${UCX_TLS_SOURCE}" ]]; then
-  if [[ "${UCX_TLS_SOURCE}" == "user" ]]; then
+if [[ -n "${PHASE_A_UCX_TLS_SOURCE}" ]]; then
+  if [[ "${PHASE_A_UCX_TLS_SOURCE}" == "user" ]]; then
     echo "UCX TLS:        user (${UCX_TLS})"
   else
-    echo "UCX TLS:        ${UCX_TLS_SOURCE} (${AUTO_UCX_TLS})"
+    echo "Phase A UCX TLS:${PHASE_A_UCX_TLS_SOURCE} (${PHASE_A_UCX_TLS_VALUE})"
+    if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" ]]; then
+      echo "Phase B UCX TLS:${PHASE_B_UCX_TLS_SOURCE} (${PHASE_B_UCX_TLS_VALUE})"
+    fi
   fi
 fi
 echo "psolve binary:  ${PSOLVE_BIN}"
@@ -428,7 +455,15 @@ if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
 fi
 
 if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
-  A_ENV=(env "OMP_NUM_THREADS=${PHASE_A_OMP_THREADS}")
+  A_ENV_VARS=("OMP_NUM_THREADS=${PHASE_A_OMP_THREADS}")
+else
+  A_ENV_VARS=()
+fi
+if [[ -n "${PHASE_A_UCX_TLS_SOURCE}" && "${PHASE_A_UCX_TLS_SOURCE}" != "user" ]]; then
+  A_ENV_VARS+=("UCX_TLS=${PHASE_A_UCX_TLS_VALUE}")
+fi
+if [[ ${#A_ENV_VARS[@]} -gt 0 ]]; then
+  A_ENV=(env "${A_ENV_VARS[@]}")
 else
   A_ENV=()
 fi
@@ -563,8 +598,8 @@ B_ENV_VARS=()
 if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
   B_ENV_VARS+=("OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
 fi
-if [[ "${UCX_TLS_SOURCE}" == "phase-b cuda-aware default" ]]; then
-  B_ENV_VARS+=("UCX_TLS=${AUTO_UCX_TLS}")
+if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" && "${PHASE_B_UCX_TLS_SOURCE}" != "user" ]]; then
+  B_ENV_VARS+=("UCX_TLS=${PHASE_B_UCX_TLS_VALUE}")
 fi
 if [[ ${#B_ENV_VARS[@]} -gt 0 ]]; then
   B_ENV=(env "${B_ENV_VARS[@]}")
