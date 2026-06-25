@@ -16304,8 +16304,12 @@ static int32_t gpu_device_sync_enabled(void) {
 }
 
 static int32_t acoustic_pressure_device_sync_enabled(void) {
+  const int32_t planesNeedHostPressure =
+      (Param.theNumberOfPlanes != 0) &&
+      (Param.reconstructAcousticPlaneDisplacements == YES);
+
   if (!acoustic_pressure_enabled() || pressure_force_sync_mode() == 0 ||
-      pressure_field_sync_mode() == 0 || Param.theNumberOfPlanes != 0) {
+      pressure_field_sync_mode() == 0 || planesNeedHostPressure) {
     return 0;
   }
   return gpu_device_sync_enabled();
