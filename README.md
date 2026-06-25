@@ -98,14 +98,14 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	requires them. Set `host` explicitly to use the sparse/resident GPU
 	gather-scatter path with the existing host MPI schedules.
 	`HERCULES_PORE_PRESSURE_SYNC_BACKEND=host|cuda_aware` remains a legacy alias
-	when `HERCULES_GPU_MPI_BACKEND` is unset. `run_phaseA_phaseB.sh` uses
-	phase-specific UCX defaults when the active Open MPI reports CUDA support and
-	`UCX_TLS` is not already set: Phase A gets `UCX_TLS=sm,self,tcp` because it is
-	CPU meshing and large rank-count mesh builds should avoid mlx5 reliable-
-	connection endpoint pressure, while Phase B gets
-	`UCX_TLS=rc,sm,cuda_copy,gdr_copy,cuda_ipc` for CUDA-aware GPU messages.
-	`PHASE_A_UCX_TLS` and `PHASE_B_UCX_TLS` override those phase-specific values.
-	A user-defined global `UCX_TLS` still takes precedence for both phases.
+	when `HERCULES_GPU_MPI_BACKEND` is unset. `run_phaseA_phaseB.sh` applies a
+	Phase A-only `UCX_TLS=sm,self,tcp` default when the active Open MPI reports
+	CUDA support and `UCX_TLS` is not already set, because Phase A is CPU meshing
+	and large rank-count mesh builds should avoid mlx5 reliable-connection
+	endpoint pressure. Phase B leaves `UCX_TLS` unset by default so the system
+	Open MPI/UCX configuration can choose the CUDA-aware transports. Set
+	`PHASE_B_UCX_TLS` only when intentionally overriding the site default. A
+	user-defined global `UCX_TLS` still takes precedence for both phases.
 
 Advanced/diagnostic toggles:
 

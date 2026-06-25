@@ -383,8 +383,8 @@ else
     PHASE_B_UCX_TLS_VALUE="${PHASE_B_UCX_TLS}"
     PHASE_B_UCX_TLS_SOURCE="phase-b user"
   elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
-    PHASE_B_UCX_TLS_VALUE="rc,sm,cuda_copy,gdr_copy,cuda_ipc"
-    PHASE_B_UCX_TLS_SOURCE="phase-b cuda-aware default"
+    PHASE_B_UCX_TLS_VALUE="UCX_TLS unset"
+    PHASE_B_UCX_TLS_SOURCE="phase-b system default"
   fi
 fi
 
@@ -608,7 +608,9 @@ B_ENV_VARS=()
 if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
   B_ENV_VARS+=("OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
 fi
-if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" && "${PHASE_B_UCX_TLS_SOURCE}" != "user" ]]; then
+if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" &&
+      "${PHASE_B_UCX_TLS_SOURCE}" != "user" &&
+      "${PHASE_B_UCX_TLS_SOURCE}" != "phase-b system default" ]]; then
   B_ENV_VARS+=("UCX_TLS=${PHASE_B_UCX_TLS_VALUE}")
 fi
 if [[ ${#B_ENV_VARS[@]} -gt 0 ]]; then
