@@ -83,6 +83,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include <float.h>
 #include <mpi.h>
 #include <glob.h>
 #include <unordered_map>
@@ -190,6 +191,17 @@ static int     theForceNt1   = 0;
 static double  theForceTinit = 0.0;
 static double  theForceDt    = 0.0;
 static double *theForceSlipFun = NULL;
+
+/* OpenSees-style compliant-base force source. The tabulated function is a
+ * velocity history in m/s. Nodal force is
+ * scale * rho * Vs * area * velocity(t) * direction.
+ */
+static double theBaseForceRho = 0.0;
+static double theBaseForceVs = 0.0;
+static double theBaseForceDirection[3] = {1.0, 0.0, 0.0};
+static double theBaseForceScale = 1.0;
+static double theBaseForceDepthM = -1.0;
+static double theBaseForceToleranceM = -1.0;
 
 /* Plane variables */
 static double theExtendedCellSizeAlongStrikeM, theExtendedCellSizeDownDipM;
@@ -2391,6 +2403,77 @@ static int read_force_source(FILE *fp){
   return 1;
 }
 
+/*
+ * read_base_force_source: distributed compliant-base force source.
+ *
+ * Required source.in keys:
+ *   base_force_rho_kgm3
+ *   base_force_vs_mps
+ *   base_force_direction_x/y/z
+ *
+ * Optional:
+ *   base_force_scale       default 1.0; use 2.0 for outcrop velocity input.
+ *   base_force_depth_m     default deepest mesh node / domain base.
+ *   base_force_tolerance_m default 1% of minimum mesh edge.
+ */
+static int read_base_force_source(FILE *fp)
+{
+    double rho, vs, dir_x, dir_y, dir_z;
+    double dir_norm;
+
+    if (theSourceFunctionType != DISCRETE) {
+	fprintf(stderr, "Err type_of_source=base_force requires "
+		"source_function_type=discrete\n");
+	return -1;
+    }
+
+    if ((parsetext(fp, "base_force_rho_kgm3", 'd', &rho) != 0) ||
+	(parsetext(fp, "base_force_vs_mps", 'd', &vs) != 0) ||
+	(parsetext(fp, "base_force_direction_x", 'd', &dir_x) != 0) ||
+	(parsetext(fp, "base_force_direction_y", 'd', &dir_y) != 0) ||
+	(parsetext(fp, "base_force_direction_z", 'd', &dir_z) != 0)) {
+	fprintf(stderr, "Err base_force_* parameters:read_base_force_source\n");
+	return -1;
+    }
+
+    if (rho <= 0.0 || vs <= 0.0) {
+	fprintf(stderr, "Err base_force_rho_kgm3 and base_force_vs_mps "
+		"must be positive\n");
+	return -1;
+    }
+
+    dir_norm = sqrt(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z);
+    if (dir_norm <= 0.0) {
+	fprintf(stderr, "Err base_force_direction vector must be nonzero\n");
+	return -1;
+    }
+
+    theBaseForceRho = rho;
+    theBaseForceVs = vs;
+    theBaseForceDirection[0] = dir_x / dir_norm;
+    theBaseForceDirection[1] = dir_y / dir_norm;
+    theBaseForceDirection[2] = dir_z / dir_norm;
+    theBaseForceScale = 1.0;
+    theBaseForceDepthM = -1.0;
+    theBaseForceToleranceM = -1.0;
+
+    hu_config_get_double_opt(fp, "base_force_scale", &theBaseForceScale);
+    hu_config_get_double_opt(fp, "base_force_depth_m", &theBaseForceDepthM);
+    hu_config_get_double_opt(fp, "base_force_tolerance_m",
+			     &theBaseForceToleranceM);
+
+    if (theBaseForceScale < 0.0) {
+	fprintf(stderr, "Err base_force_scale must be nonnegative\n");
+	return -1;
+    }
+    if (theBaseForceToleranceM != -1.0 && theBaseForceToleranceM <= 0.0) {
+	fprintf(stderr, "Err base_force_tolerance_m must be positive or omitted\n");
+	return -1;
+    }
+
+    return 1;
+}
+
 
 /*
  *  read_force_function_file : Read a tabulated unit STF used by
@@ -3682,6 +3765,202 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
     return 1;
 }
 
+static double
+source_node_depth_coord(int32_t lnid)
+{
+    return (double)myMesh->nodeTable[lnid].z * myMesh->ticksize;
+}
+
+static int
+base_force_element_on_plane(int32_t eindex, double target_z, double tol)
+{
+    static const int face_nodes[4] = {4, 5, 6, 7};
+    elem_t* elemp = &myMesh->elemTable[eindex];
+
+    for (int i = 0; i < 4; i++) {
+	int32_t lnid = elemp->lnid[face_nodes[i]];
+	if (fabs(source_node_depth_coord(lnid) - target_z) > tol) {
+	    return 0;
+	}
+    }
+    return 1;
+}
+
+/**
+ * OpenSees-style compliant-base input:
+ *
+ *   F_i(t) = scale * rho * Vs * A_i * v(t) * direction_i
+ *
+ * The source is assembled once into the standard Hercules force_process file.
+ * This keeps the solver hot path unchanged and avoids a per-step base-node
+ * search. The base plane is the deepest mesh-node plane unless
+ * base_force_depth_m is specified.
+ */
+static int
+compute_myForces_base_force(const char* physicsin, UTMZone_t* utmZone)
+{
+    (void)physicsin;
+    (void)utmZone;
+
+    const int32_t face_nodes[4] = {4, 5, 6, 7};
+    double localMaxZ = -DBL_MAX;
+    double globalMaxZ = -DBL_MAX;
+    double targetZ;
+    double tol;
+    double impedance;
+    double* tributaryArea = NULL;
+    int32_t* nodeIds = NULL;
+    double* nodeCoeff = NULL;
+    vector3D_t* writeBuffer = NULL;
+    int32_t localNodeCount = 0;
+    int64_t globalNodeCount = 0;
+
+    if (theForceNt1 <= 1 || theForceDt <= 0.0 || theForceSlipFun == NULL) {
+	fprintf(stderr, "Thread %d: invalid base force velocity history\n", myID);
+	return -1;
+    }
+
+    for (int32_t lnid = 0; lnid < myMesh->nharbored; lnid++) {
+	double z = source_node_depth_coord(lnid);
+	if (z > localMaxZ) {
+	    localMaxZ = z;
+	}
+    }
+    MPI_Allreduce(&localMaxZ, &globalMaxZ, 1, MPI_DOUBLE, MPI_MAX,
+		  comm_solver);
+
+    targetZ = (theBaseForceDepthM >= 0.0)
+                  ? (theBaseForceDepthM - theRegionDepthShallowM)
+                  : globalMaxZ;
+    tol = (theBaseForceToleranceM > 0.0)
+              ? theBaseForceToleranceM
+              : fmax(1.0e-6, 0.01 * theMinimumEdge);
+    impedance = theBaseForceScale * theBaseForceRho * theBaseForceVs;
+
+    tributaryArea = (double*)calloc((size_t)myMesh->nharbored, sizeof(double));
+    if (tributaryArea == NULL) {
+	fprintf(stderr, "Thread %d: out of memory for base force areas\n", myID);
+	return -1;
+    }
+
+    for (int32_t eindex = 0; eindex < myMesh->lenum; eindex++) {
+	if (base_force_element_on_plane(eindex, targetZ, tol)) {
+	    elem_t* elemp = &myMesh->elemTable[eindex];
+	    edata_t* edata = (edata_t*)elemp->data;
+	    double h = (double)edata->edgesize;
+	    double nodeArea = 0.25 * h * h;
+
+	    for (int i = 0; i < 4; i++) {
+		int32_t lnid = elemp->lnid[face_nodes[i]];
+		if (lnid >= 0 && lnid < myMesh->nharbored) {
+		    tributaryArea[lnid] += nodeArea;
+		}
+	    }
+	}
+    }
+
+    for (int32_t lnid = 0; lnid < myMesh->nharbored; lnid++) {
+	if (tributaryArea[lnid] > 0.0) {
+	    localNodeCount++;
+	}
+    }
+
+    {
+	int64_t local64 = localNodeCount;
+	MPI_Allreduce(&local64, &globalNodeCount, 1, MPI_INT64_T, MPI_SUM,
+		      comm_solver);
+    }
+
+    if (globalNodeCount == 0) {
+	if (myID == 0) {
+	    fprintf(stderr,
+		    "Err type_of_source=base_force found no base nodes "
+		    "(target depth %.6f m, domain z %.6f m, tolerance %.6g m)\n",
+		    theBaseForceDepthM, targetZ, tol);
+	}
+	free(tributaryArea);
+	return -1;
+    }
+
+    myNumberOfNodesLoaded = localNodeCount;
+    myNumberOfForces = (localNodeCount > 0) ? 1 : 0;
+    myNumberOfCycles = 1;
+
+    if (localNodeCount == 0) {
+	free(tributaryArea);
+	return 1;
+    }
+
+    nodeIds = (int32_t*)malloc(sizeof(int32_t) * (size_t)localNodeCount);
+    nodeCoeff = (double*)malloc(sizeof(double) * (size_t)localNodeCount);
+    writeBuffer =
+        (vector3D_t*)calloc((size_t)localNodeCount, sizeof(vector3D_t));
+    if (nodeIds == NULL || nodeCoeff == NULL || writeBuffer == NULL) {
+	fprintf(stderr, "Thread %d: out of memory for base force output\n", myID);
+	free(tributaryArea);
+	free(nodeIds);
+	free(nodeCoeff);
+	free(writeBuffer);
+	return -1;
+    }
+
+    {
+	int32_t idx = 0;
+	for (int32_t lnid = 0; lnid < myMesh->nharbored; lnid++) {
+	    if (tributaryArea[lnid] > 0.0) {
+		nodeIds[idx] = lnid;
+		nodeCoeff[idx] = impedance * tributaryArea[lnid];
+		idx++;
+	    }
+	}
+    }
+
+    FILE* fptmpsrc = source_open_forces_file("w");
+    hu_fwrite(&localNodeCount, sizeof(int32_t), 1, fptmpsrc);
+    hu_fwrite(nodeIds, sizeof(int32_t), localNodeCount, fptmpsrc);
+
+    for (int32_t iTime = 0; iTime < theNumberOfTimeSteps; iTime++) {
+	double T = theDeltaT * iTime;
+	double velocity = 0.0;
+
+	if (T >= theForceTinit) {
+	    velocity = interpolate_linear(T - theForceTinit, theForceNt1,
+					  theForceDt, theForceSlipFun);
+	}
+
+	for (int32_t iNode = 0; iNode < localNodeCount; iNode++) {
+	    double amp = nodeCoeff[iNode] * velocity;
+	    writeBuffer[iNode].x[0] = amp * theBaseForceDirection[0];
+	    writeBuffer[iNode].x[1] = amp * theBaseForceDirection[1];
+	    writeBuffer[iNode].x[2] = amp * theBaseForceDirection[2];
+	}
+	hu_fwrite(writeBuffer, sizeof(double), 3 * localNodeCount, fptmpsrc);
+    }
+    close_file(&fptmpsrc);
+
+    myMemoryAllocated =
+        (double)((sizeof(double) + sizeof(int32_t) + sizeof(vector3D_t)) *
+                 (size_t)localNodeCount);
+
+    if (myID == 0) {
+	fprintf(stdout,
+		"\n Base force source: target depth %.6f m, tolerance %.6g m, "
+		"rho %.6g kg/m3, Vs %.6g m/s, scale %.6g, global nodes %lld\n",
+		(theBaseForceDepthM >= 0.0)
+		    ? theBaseForceDepthM
+		    : (globalMaxZ + theRegionDepthShallowM),
+		tol, theBaseForceRho, theBaseForceVs, theBaseForceScale,
+		(long long)globalNodeCount);
+    }
+
+    free(tributaryArea);
+    free(nodeIds);
+    free(nodeCoeff);
+    free(writeBuffer);
+
+    return 1;
+}
+
 
 /*
  * compute_myForces_srfh: compute the force vector for each
@@ -4264,6 +4543,55 @@ broadcast_force_source_parameters( void )
     }
 }
 
+/**
+ * Broadcast parameters for BASE_FORCE. The velocity history reuses the
+ * FORCE discrete-table storage because the file format is identical.
+ */
+static void
+broadcast_base_force_source_parameters( void )
+{
+    double    d_buf[8];
+    const int d_len = DOUBLE_ARRAY_LENGTH( d_buf );
+
+    if (theTypeOfSource != BASE_FORCE) {
+	return;
+    }
+
+    d_buf[0] = theBaseForceRho;
+    d_buf[1] = theBaseForceVs;
+    d_buf[2] = theBaseForceDirection[0];
+    d_buf[3] = theBaseForceDirection[1];
+    d_buf[4] = theBaseForceDirection[2];
+    d_buf[5] = theBaseForceScale;
+    d_buf[6] = theBaseForceDepthM;
+    d_buf[7] = theBaseForceToleranceM;
+
+    MPI_Bcast( d_buf, d_len, MPI_DOUBLE, 0, comm_solver );
+
+    theBaseForceRho = d_buf[0];
+    theBaseForceVs = d_buf[1];
+    theBaseForceDirection[0] = d_buf[2];
+    theBaseForceDirection[1] = d_buf[3];
+    theBaseForceDirection[2] = d_buf[4];
+    theBaseForceScale = d_buf[5];
+    theBaseForceDepthM = d_buf[6];
+    theBaseForceToleranceM = d_buf[7];
+
+    MPI_Bcast( &theForceNt1,   1, MPI_INT,    0, comm_solver );
+    MPI_Bcast( &theForceTinit, 1, MPI_DOUBLE, 0, comm_solver );
+    MPI_Bcast( &theForceDt,    1, MPI_DOUBLE, 0, comm_solver );
+
+    if (myID != 0) {
+	theForceSlipFun = (double *) malloc(sizeof(double) * theForceNt1);
+	if (theForceSlipFun == NULL) {
+	    fprintf(stderr, "Thread %d: out of memory for base force history"
+		    " (nt1=%d)\n", myID, theForceNt1);
+	    MPI_Abort(MPI_COMM_WORLD, ERROR);
+	}
+    }
+    MPI_Bcast( theForceSlipFun, theForceNt1, MPI_DOUBLE, 0, comm_solver );
+}
+
 
 /**
  * broadcast information that only applies to plane (and plane with kinks)
@@ -4387,6 +4715,8 @@ source_broadcast_parameters( void )
 
     broadcast_force_source_parameters();
 
+    broadcast_base_force_source_parameters();
+
     broadcast_plane_source_parameters();
 
     broadcast_srfh_parameters();
@@ -4426,6 +4756,10 @@ source_read_type( FILE* fpsrc )
 
     else if (strcasecmp( type_of_source, "force" ) == 0) {
 	source_type = FORCE;
+    }
+
+    else if (strcasecmp( type_of_source, "base_force" ) == 0) {
+	source_type = BASE_FORCE;
     }
 
     else {
@@ -4525,6 +4859,25 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 	    }
 	    close_file(&fpff);
 	}
+    }
+
+    if ( theTypeOfSource == BASE_FORCE ) {
+	if( read_base_force_source( fpsrc ) == -1 ) {
+	    return -1;
+	}
+
+	FILE *fpbf = open_file_in_dir( source_dir, "baseforcefunction.in", "r" );
+	if (fpbf == NULL) {
+	    fprintf(stderr, "Err: type_of_source=base_force requires "
+		    "%s/baseforcefunction.in\n", source_dir);
+	    return -1;
+	}
+	source_set_file_buffer(fpbf);
+	if (read_force_function_file(fpbf) == -1) {
+	    close_file(&fpbf);
+	    return -1;
+	}
+	close_file(&fpbf);
     }
 
 
@@ -4665,6 +5018,12 @@ int compute_print_source(const char *physicsin, const char *source_directory_out
     if ( theTypeOfSource == FORCE )
 	if ( compute_myForces_point(physicsin, utmZone) == -1 ){
 	    fprintf(stdout,"Err compute_myForces_point (FORCE) failed");
+	    ABORTEXIT;
+	}
+
+    if ( theTypeOfSource == BASE_FORCE )
+	if ( compute_myForces_base_force(physicsin, utmZone) == -1 ){
+	    fprintf(stdout,"Err compute_myForces_base_force failed");
 	    ABORTEXIT;
 	}
 

@@ -1,0 +1,23 @@
+# Horizontal compliant-base force = vertically-incident shear input for the
+# 1D SH site-response transfer-function test. Broadband Ricker velocity history
+# (fc = 4 Hz) in baseforcefunction.in so the spectral ratio is well resolved
+# across the soil-column modes (f0 = Vs_soft/(4H) = 1.875 Hz and overtones).
+
+source_is_filtered        = 0
+threshold_frequency       = 25.0
+number_of_poles           = 4
+
+type_of_source            = base_force
+source_function_type      = discrete
+
+# Bedrock (halfspace) impedance for the within/incident velocity->force conversion.
+base_force_rho_kgm3       = 2200.0
+base_force_vs_mps         = 450.0
+
+# x = north, y = east, z = down. Horizontal -> SH/shear input.
+base_force_direction_x    = 1.0
+base_force_direction_y    = 0.0
+base_force_direction_z    = 0.0
+
+# 1.0 = incident/within velocity history (used as the TF reference).
+base_force_scale          = 1.0

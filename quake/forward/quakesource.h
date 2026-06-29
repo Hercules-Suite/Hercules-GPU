@@ -90,7 +90,7 @@ typedef enum {
 
 typedef enum {
 
-  POINT = 0, PLANE, SRFH, PLANEWITHKINKS, FORCE
+  POINT = 0, PLANE, SRFH, PLANEWITHKINKS, FORCE, BASE_FORCE
 
 } source_type_t;
 

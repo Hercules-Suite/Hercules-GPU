@@ -1,0 +1,88 @@
+# Case 1 - DRAINED elastic twin (Vp = Vp_drained = 400 m/s, poroelasticity off).
+# Disambiguator: if the poroelastic run (../output) matches THIS run instead of
+# the undrained twin (../elastic_twin), the Biot coupling is not delivering the
+# undrained stiffening. Same source via ../sourcefiles.
+#   mpirun -np <N> <path-to-psolve> parameters.in   (run from this directory)
+
+region_origin_latitude_deg  = 0.0
+region_origin_longitude_deg = 0.0
+region_depth_shallow_m      = 0.0
+region_length_east_m        = 1.0
+region_length_north_m       = 1.0
+region_depth_deep_m         = 1024.0
+region_azimuth_leftface_deg = 0.0
+
+type_of_damping             = none
+abc_type                    = dashpot
+stiffness_calculation_method = effective
+
+source_directory            = ../sourcefiles
+source_directory_output     = output/srctmp
+
+monitor_file = output/monitor.txt
+
+simulation_wave_max_freq_hz    = 25.0
+simulation_start_time_sec      = 0.0
+simulation_end_time_sec        = 1.00
+simulation_delta_time_sec      = 0.00005
+simulation_node_per_wavelength = 8
+simulation_shear_velocity_min  = 200.0
+simulation_output_rate         = 10000000
+
+the_threshold_damping          = 0.05
+the_threshold_Vp_over_Vs       = 3.0
+do_damping_statistics          = 0
+
+output_mesh                    = 1
+mesh_only_mode                 = 0
+mesh_input_mode                = 0
+mesh_etree_output_file         = output/mesh.e
+
+use_checkpoint                 = 0
+checkpointing_rate             = 0
+checkpoint_path                = output/checkpoints
+
+# Dry/drained skeleton: Vp = 400 m/s.
+cvmdb_input_file               = profile
+number_profile_layers          = 1
+profile_layers =
+ 0.0 400.0 200.0 2000.0 1000000.0 1000000.0
+
+output_displacement            = 0
+output_velocity                = 0
+
+number_output_planes           = 0
+output_planes_print_rate       = 1
+output_planes_directory        = output/planes
+
+number_output_stations         = 9
+output_stations_print_rate     = 1
+output_stations_directory      = output/stations
+print_station_velocities       = yes
+print_station_accelerations    = yes
+print_station_pressures         = no
+
+output_stations =
+ 0.000004491576 0.000004491576    0.0
+ 0.000004491576 0.000004491576  128.0
+ 0.000004491576 0.000004491576  256.0
+ 0.000004491576 0.000004491576  384.0
+ 0.000004491576 0.000004491576  512.0
+ 0.000004491576 0.000004491576  640.0
+ 0.000004491576 0.000004491576  768.0
+ 0.000004491576 0.000004491576  896.0
+ 0.000004491576 0.000004491576 1020.0
+
+include_buildings              = no
+implement_drm                  = no
+include_topography             = no
+include_acoustic               = no
+include_nonlinear_analysis     = no
+include_incident_planewaves    = no
+include_hmg_halfspace          = no
+Istanbul_velocity_model        = no
+basin_velocity_model           = no
+3D_velocity_model              = no
+mesh_coordinates_for_matlab    = no
+
+include_poroelastic            = no

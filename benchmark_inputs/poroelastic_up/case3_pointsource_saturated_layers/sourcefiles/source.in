@@ -1,0 +1,29 @@
+# Point double-couple in the ELASTIC bedrock, below the saturated poroelastic
+# layers. Cartesian coordinates (meters) in the domain frame; the hypocenter
+# (depth 800 m) sits well below poroelastic_depth_max_m = 400 m so the source is
+# in genuinely elastic material (required for the clean elastic-equivalent ref).
+
+source_is_filtered   = 0
+threshold_frequency  = 8.0
+number_of_poles      = 4
+
+type_of_source       = point
+source_function_type = ricker
+
+# Ricker STF: dominant frequency ~ 1/ricker_Tp = 2.5 Hz; ricker_Ts shifts the
+# wavelet so it is ~zero at t = 0.
+ricker_Tp            = 0.40
+ricker_Ts            = 0.60
+
+moment_amplitude     = 1.0e15
+
+# Cartesian hypocenter (x = north, y = east, meters), depth in meters.
+lonlat_or_cartesian  = 1
+hypocenter_x         = 1000.0
+hypocenter_y         = 1000.0
+hypocenter_depth_m   = 800.0
+
+# Vertical strike-slip double-couple.
+source_strike_deg    = 0.0
+source_dip_deg       = 90.0
+source_rake_deg      = 0.0

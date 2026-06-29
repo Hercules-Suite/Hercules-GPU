@@ -58,11 +58,60 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Selects how updated displacements are synchronized between GPU and host. Default is `auto`.
 	`full`/`0` keeps the legacy full-array copy each step.
 	`boundary`/`1` keeps displacement history resident on the GPU and copies only the boundary/adjustment nodes needed by MPI displacement exchange, then patches those host-updated nodes back to the GPU for the next step.
+	With `HERCULES_GPU_MPI_BACKEND=cuda_aware` and a CUDA-aware MPI build,
+	`boundary` sends those displacement boundary values directly from device
+	memory and performs the hanging-node adjustment on the GPU, eliminating the
+	host staging for that exchange.
 	For correctness, `boundary` currently falls back to `full` when station/plane/checkpoint/DRM/nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host displacement arrays. The run log prints `Displacement sync path:` and, when active, the boundary node count.
 - `HERCULES_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
 - `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
 	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Full pressure D2H is still performed so station/plane/checkpoint output remains host-visible. `full` restores the legacy full pressure-field H2D load each step; checkpoint restart also forces `full`.
+	When both acoustic pressure synchronization modes are sparse/resident,
+	`HERCULES_GPU_MPI_BACKEND=cuda_aware` sends both acoustic pressure arrays
+	directly from GPU memory and applies the scalar hanging-node adjustment on
+	the GPU. Acoustic station output gathers only its local station nodes from
+	the two device histories. Plane output only disables this direct pressure
+	path when `reconstruct_acoustic_plane_displacements=yes`, because that
+	reconstruction reads acoustic pressure gradients on the host.
+- `HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
+	Selects poroelastic pore-pressure force synchronization before the scalar
+	MPI/adjust phase. Default is `sparse`, which gathers only nodes touched by
+	communication schedules and hanging-node adjustment, exchanges through the
+	existing host schedules, and scatters only those force entries back to the
+	GPU. `full` restores the full `nharbored` D2H/H2D copies.
+- `HERCULES_PORE_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
+	Selects poroelastic pore-pressure field synchronization. Default is
+	`resident`, which keeps pore-pressure histories resident on the GPU and
+	patches only MPI/adjust nodes plus local pore-pressure station interpolation
+	nodes, when station pressure output is enabled, back to the current device
+	field after host-side pressure sharing.
+	`full` restores full `nharbored` field D2H/H2D copies.
+
+- `HERCULES_GPU_MPI_BACKEND=host|cuda_aware`
+	Selects the MPI exchange backend for GPU-resident scalar and vector fields.
+	The default is `cuda_aware` when the linked Open MPI reports CUDA-buffer
+	support through `MPIX_Query_cuda_support()`. This enables direct device
+	packing, MPI messages, and GPU hanging-node adjustment for eligible
+	poroelastic pressure, acoustic pressure, elastic displacement-boundary, and
+	elastic force-contribution exchanges. The solver automatically uses the
+	host schedules whenever checkpointing or a host-side correction/output path
+	requires them. Set `host` explicitly to use the sparse/resident GPU
+	gather-scatter path with the existing host MPI schedules.
+	`HERCULES_PORE_PRESSURE_SYNC_BACKEND=host|cuda_aware` remains a legacy alias
+	when `HERCULES_GPU_MPI_BACKEND` is unset. `run_phaseA_phaseB.sh` applies a
+	Phase A-only `UCX_TLS=sm,self,tcp` default when the active Open MPI reports
+	CUDA support and `UCX_TLS` is not already set, because Phase A is CPU meshing
+	and large rank-count mesh builds should avoid mlx5 reliable-connection
+	endpoint pressure. For Phase B, the wrapper defaults CUDA-aware Open MPI runs
+	to `OMPI_MCA_pml=ucx`, unsets `OMPI_MCA_btl`, and sets
+	`UCX_TLS=rc,sm,self,cuda_copy`. This keeps device-buffer MPI on the UCX path
+	while avoiding the `cuda_ipc` transport that has been unstable on Vista
+	GB/NVL72 multi-GPU nodes. Set `PHASE_B_UCX_TLS` or `PHASE_B_OMPI_MCA_PML`
+	only when intentionally overriding the Phase B default. A user-defined
+	global `UCX_TLS` or `OMPI_MCA_pml` still takes precedence for both phases.
+	Set `PHASE_B_KEEP_OMPI_MCA_BTL=1` only if a site MPI stack requires an
+	explicit inherited BTL setting.
 
 Advanced/diagnostic toggles:
 
@@ -219,6 +268,10 @@ Notes:
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
 	`auto` typically uses a node-level mapping like `ppr:4:node:PE=35`,
 	while `PHASE_B_MAP_MODE=numa` tries `ppr:2:numa:PE=35` when the local node exposes two NUMA domains.
+- For multi-node Phase B runs, `PHASE_B_NP` must divide evenly by the allocated
+	node count. This prevents accidental uneven GPU layouts such as 48 Phase B
+	ranks on 10 four-GPU nodes; use 40 ranks on 10 GB200 nodes or request 12
+	nodes for 48 ranks.
 
 Mesh mode input flags (input file):
 
@@ -336,15 +389,15 @@ Acoustic-elastic input flags (input file):
 	disabled when unset.
 - `print_station_pressures`
 	Optional. `yes` writes scalar pressure station histories when
-	`acoustic_formulation` is `pressure` or `velocity_potential`. Pressure is
-	appended as a
+	`acoustic_formulation` is `pressure` or `velocity_potential`, and writes
+	BrickUP pore pressure when `include_poroelastic=yes`. Pressure is appended as a
 	`Pressure(Pa)` column in the normal `station.N` files after any requested
 	displacement, velocity, and acceleration columns. For stations whose
 	containing element is acoustic, the motion columns are reconstructed from
 	the pressure gradient; for elastic stations they continue to use the
 	elastic displacement field. The pressure column is `nan` for stations whose
-	containing element is elastic, because scalar acoustic pressure is not
-	defined there.
+	containing element has neither acoustic pressure nor poroelastic pore
+	pressure.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
@@ -383,6 +436,101 @@ Acoustic-elastic input flags (input file):
 	attenuating Earth do not need it. Empirical sweet spot
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
+
+Poroelastic U-P input flags (experimental V1):
+
+- `include_poroelastic`
+	Optional. `no` (default) keeps the existing elastic/acoustic solver
+	behavior. `yes` enables an experimental linear BrickUP-style U-P
+	poroelastic path for saturated shallow solid soil.
+- `poroelastic_formulation`
+	Optional. Currently only `brick_up` is supported. The implementation
+	uses the input `Vp`, `Vs`, and density as the **dry/drained skeleton**
+	elastic stiffness and evolves a scalar pore pressure from volumetric strain
+	increment plus optional Darcy diffusion. Do not provide saturated/undrained
+	`Vp` unless a future velocity-convention conversion is added; otherwise the
+	fluid stiffness can be counted twice.
+	When the undrained fast path below is inactive, the
+	displacement-pressure coupling uses one shared 2x2x2-Gauss BrickUP
+	coupling operator, applied as `Q p` in the skeleton force path and as
+	`Q^T du` in the pore-pressure source path. The GPU path is matrix-free:
+	setup precomputes the
+	poroelastic element mapper and topography-aware pressure-test weights,
+	then CUDA kernels apply the coupling operators and pressure update. With a
+	CUDA-aware MPI build, the default `HERCULES_GPU_MPI_BACKEND=cuda_aware`
+	keeps eligible pore-pressure schedule exchange and hanging-node adjustment
+	on the GPU; `host` restores the sparse host staging path. Pore-pressure
+	station values are copied back only at station-output steps.
+- `poroelastic_undrained_fast_path`
+	Optional. `yes` (default) activates only when
+	`poroelastic_surface_pressure_bc = undrained` and all three permeability
+	values are exactly `0.0`. In that common validation/undrained limit, the
+	solver folds `alpha^2 M` directly into the native elastic volumetric
+	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
+	pressure-traction feedback. Pore pressure is still updated from `Q^T du`
+	and remains available in station output as a diagnostic. Set this to `no`
+	to use the older split `Q p` / `Q^T du` path for comparisons, or use
+	nonzero permeability / `drained` pressure BC for the full split path.
+- `poroelastic_depth_max_m`
+	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
+	within this depth below the local ground surface are eligible for
+	poroelastic classification.
+- `surface_groundwatertable`
+	Optional. `no` (default) means the groundwater level is the local
+	ground surface, so eligible shallow soil is saturated from the
+	surface down. `yes` reads a groundwater-level grid and only classifies
+	elements whose centroids are below that level.
+- `groundwaterlevel_file`
+	Optional. Used only when `surface_groundwatertable=yes`. If unset,
+	the solver reads `groundwaterlevel.in` from the 3D material model
+	directory (`3D_velocity_model_directory`, normally
+	`inputfiles/materialfiles`). If set to a bare filename, it is resolved
+	relative to that materialfiles directory; if it contains `/`, it is
+	treated as an explicit path. The file format mirrors `topography.in`:
+	first value is grid spacing, followed by regular-grid values over the
+	full model footprint in the same ordering as `topography.in`. Values
+	are always positive depth below the local ground surface, so `100.0`
+	means the water table is 100 m below ground everywhere.
+- `poroelastic_surface_pressure_bc`
+	Optional. `undrained` (default) leaves pore pressure unconstrained at
+	the saturated surface. `drained` applies a weak, mass-projected
+	Dirichlet condition on the groundwater/free-drainage plane: the solver
+	assembles a nodal drained-plane mass from a 2x2 quadrature rule on the
+	water-table cut plane inside the first saturated element, then blends
+	the free pressure update toward zero using that mass. This avoids the
+	old nearest-node hard clamp when the water table cuts through an
+	element.
+- `poroelastic_surface_pressure_penalty_factor`
+	Optional. Default `1.0`. Scales the weak drained-plane mass used by
+	`poroelastic_surface_pressure_bc = drained`; larger values enforce
+	closer-to-zero pore pressure on the plane, while `0.0` disables the
+	weak projection without changing the classification.
+- `poroelastic_elastic_interface`
+	Optional. Currently only `no_flow` is supported. Poroelastic and
+	elastic regions share displacement nodes mechanically, while pore
+	pressure exists only on poroelastic elements/nodes; Darcy diffusion is
+	assembled only through poroelastic elements, giving a no-flow
+	poroelastic-elastic boundary in V1.
+- Poroelastic material constants:
+	`poroelastic_porosity` (default `0.4`),
+	`poroelastic_biot_alpha` (default `1.0`; values below `1.0` derive
+	a local grain bulk modulus from the dry/drained skeleton relation
+	`K_s = K_d / (1 - alpha)` and use
+	`1/M = (alpha - porosity) / K_s + porosity / K_f`; `alpha = 1.0`
+	uses the incompressible-grain limit `M = K_f / porosity`),
+	`poroelastic_fluid_bulk_modulus_pa` (default `2.2e9`),
+	`poroelastic_fluid_density_kgm3` (default `1000.0`),
+	`poroelastic_fluid_viscosity_pa_s` (default `1.0e-3`), and
+	`poroelastic_permeability_x_m2`,
+	`poroelastic_permeability_y_m2`,
+	`poroelastic_permeability_z_m2` (all default `0.0`, i.e. undrained
+	no-diffusion response).
+
+CPML policy for poroelasticity: PML elements are kept acoustic or
+elastic only. Any saturated poroelastic candidate inside the CPML zone is
+left as elastic CPML and reported in the startup line
+`Poroelastic BrickUP: ... saturated CPML candidates left as elastic CPML`,
+matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 Scalar acoustic formulation — correctness fix & known limitation:
 
@@ -843,3 +991,54 @@ the samples to peak 1 and carry the physical amplitude in
 `force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
+
+Distributed compliant-base force source (`type_of_source = base_force`):
+
+For OpenSees-style 1D site-response validation, Hercules also supports a
+distributed base force source. It reads a base velocity history and applies
+nodal forces on the deepest horizontal mesh-node plane:
+
+```
+F_i(t) = scale * rho_base * Vs_base * A_i * v(t) * direction_i
+```
+
+where `A_i` is the bottom-face tributary area assembled from local hex
+faces. This is the force-source analogue of the Lysmer-Kuhlemeyer
+compliant-base input often used in OpenSees. It precomputes the standard
+`force_process.*` files during source initialization, so the solver hot path
+is unchanged.
+
+`source.in` keys:
+
+```
+type_of_source       = base_force
+source_function_type = discrete
+
+base_force_rho_kgm3      = 2500.0   # base/rock density
+base_force_vs_mps        = 700.0    # base/rock shear velocity
+base_force_direction_x   = 1.0      # x = north
+base_force_direction_y   = 0.0      # y = east
+base_force_direction_z   = 0.0      # z = down
+base_force_scale         = 2.0      # use 2.0 for outcrop velocity input
+
+# Optional. Omit to use the deepest mesh-node plane.
+# base_force_depth_m     = 30000.0
+# base_force_tolerance_m = 0.01
+```
+
+Place `baseforcefunction.in` beside `source.in`:
+
+```
+<nt1>             # number of velocity samples
+<tinit>           # initial delay (s)
+<dt>              # sampling interval (s)
+<v[0]>            # base velocity sample in m/s
+...
+<v[nt1-1]>
+```
+
+Use `base_force_scale = 1.0` for an incident/within velocity history and
+`2.0` for an outcrop velocity history, matching the usual compliant-base
+conversion convention. The first implementation is intended for flat-bottom
+validation columns; if `base_force_depth_m` is provided and no bottom faces
+are found within `base_force_tolerance_m`, source generation aborts clearly.

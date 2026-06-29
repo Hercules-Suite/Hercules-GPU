@@ -41,6 +41,10 @@
 #include <stdio.h>
 #include <mpi.h>
 
+#if defined(OMPI_MAJOR_VERSION)
+#include <mpi-ext.h>
+#endif
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -353,6 +357,14 @@ struct messenger_t {
     int32_t  mapping_has_duplicates;
     int32_t  mapping_dup_reported;
 
+    /* Lazily allocated by CUDA-aware device schedules. The regular host
+     * schedule never touches these buffers. */
+    int32_t* scalar_mapping_device;
+    solver_float* scalar_out_device;
+    solver_float* scalar_in_device;
+    fvector_t* vector_out_device;
+    fvector_t* vector_in_device;
+
     messenger_t* next;
 };
 
@@ -408,6 +420,18 @@ typedef struct gpu_data_t {
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
                                        // (Step B; NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
+
+    solver_float* porePressureTm1Device;     /* GPU pore pressure at t */
+    solver_float* porePressureTm2Device;     /* GPU pore pressure at t-dt/new */
+    solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
+    solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
+    solver_float* porePressureSurfaceDevice; /* GPU drained-plane mass */
+    int32_t       poroelasticElemCount;      /* local BrickUP elements */
+    int32_t*      poroelasticElemMapperDevice;
+    double*       poroelasticElemHDevice;
+    double*       poroelasticElemDetJDevice;
+    double*       poroelasticStorageMDevice;
+    double*       poroelasticPressureShapeScaleDevice; /* [8][poroelasticElemCount] */
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
@@ -688,6 +712,11 @@ struct mysolver_t {
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
     solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
                                    * 0 everywhere unless acoustic PML) */
+    solver_float* pore_pressure_tm1;   /* Poroelastic pore pressure at t - 1 */
+    solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
+    solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
+    solver_float* pore_pressure_mass;  /* Poroelastic lumped storage/mass */
+    solver_float* pore_pressure_surface; /* Drained-plane mass; host only */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */
@@ -745,6 +774,7 @@ typedef struct vector3D_t vector3D_t;
 struct station_t {
     int32_t    id, nodestointerpolate[8];
     int32_t    pressure_is_defined;
+    int32_t    pore_pressure_is_defined;
     int32_t    acoustic_kinematics_ready;
     double*    displacementsX;
     double*    displacementsY;
