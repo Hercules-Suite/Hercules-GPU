@@ -268,6 +268,15 @@ static solver_float* g_acousticPressureStationBufferHost = NULL;
 static solver_float* g_acousticPressureStationBufferDevice = NULL;
 static int32_t g_acousticPressureStationNodeCount = 0;
 static int32_t g_acousticPressureStationHostPinned = 0;
+static int32_t g_acousticPressureSyncReported = 0;
+static int32_t g_acousticPlanePressureSyncReady = 0;
+static int32_t* g_acousticPlanePressureNodesHost = NULL;
+static int32_t* g_acousticPlanePressureNodesDevice = NULL;
+static solver_float* g_acousticPlanePressureBufferHost = NULL;
+static solver_float* g_acousticPlanePressureBufferDevice = NULL;
+static int32_t g_acousticPlanePressureNodeCount = 0;
+static int32_t g_acousticPlanePressureHostPinned = 0;
+static int32_t g_acousticPlanePressureReported = 0;
 static int32_t g_porePressureForceSyncMode = -1;
 static int32_t g_porePressureForceSyncReported = 0;
 static int32_t g_porePressureFieldSyncMode = -1;
@@ -723,6 +732,7 @@ static void solver_init_vector_device_sync(mysolver_t* solver);
 static void solver_scalar_device_schedule_senddata(
     mysolver_t* solver, schedule_t* sched, solver_float* valueDevice,
     int32_t direction, int32_t msgtag);
+static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver);
 static void solver_scalar_device_adjust(mysolver_t* solver,
                                         solver_float* valueDevice,
                                         int32_t how);
@@ -16304,15 +16314,34 @@ static int32_t gpu_device_sync_enabled(void) {
 }
 
 static int32_t acoustic_pressure_device_sync_enabled(void) {
-  const int32_t planesNeedHostPressure =
-      (Param.theNumberOfPlanes != 0) &&
-      (Param.reconstructAcousticPlaneDisplacements == YES);
+  const char* blocker = NULL;
+  int32_t enabled = 0;
 
-  if (!acoustic_pressure_enabled() || pressure_force_sync_mode() == 0 ||
-      pressure_field_sync_mode() == 0 || planesNeedHostPressure) {
-    return 0;
+  if (!acoustic_pressure_enabled()) {
+    blocker = "acoustic pressure is inactive";
+  } else if (pressure_force_sync_mode() == 0) {
+    blocker = "HERCULES_PRESSURE_FORCE_SYNC_MODE=full";
+  } else if (pressure_field_sync_mode() == 0) {
+    blocker = "HERCULES_PRESSURE_FIELD_SYNC_MODE=full";
+  } else if (!gpu_device_sync_enabled()) {
+    blocker = "GPU MPI backend is host";
+  } else {
+    enabled = 1;
   }
-  return gpu_device_sync_enabled();
+
+  if ((Global.myID == 0) && (g_acousticPressureSyncReported == 0)) {
+    if (enabled) {
+      monitor_print(
+          "Acoustic pressure CUDA-aware sync: active "
+          "(device-resident force/field exchange)\n");
+    } else {
+      monitor_print("Acoustic pressure CUDA-aware sync: inactive (%s)\n",
+                    blocker != NULL ? blocker : "unknown blocker");
+    }
+    g_acousticPressureSyncReported = 1;
+  }
+
+  return enabled;
 }
 
 static int32_t elastic_force_device_sync_enabled(void) {
@@ -17601,6 +17630,176 @@ static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
       solver, solver->gpuData->pressureTm2Device, solver->pressure_tm2);
 }
 
+static int32_t solver_count_valid_acoustic_plane_pressure_nodes(void) {
+  const int32_t localPlaneNodeCount = planes_acoustic_pressure_node_count();
+  const int32_t* localPlaneNodes = planes_acoustic_pressure_nodes();
+  int32_t count = 0;
+
+  if ((localPlaneNodeCount <= 0) || (localPlaneNodes == NULL)) {
+    return 0;
+  }
+
+  for (int32_t i = 0; i < localPlaneNodeCount; i++) {
+    const int32_t node = localPlaneNodes[i];
+    if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+static void solver_report_acoustic_plane_pressure_patch_count(
+    int32_t localPatchCount) {
+  long long localCount = (long long)localPatchCount;
+  long long globalCount = 0;
+  long long maxCount = 0;
+
+  if (g_acousticPlanePressureReported != 0) {
+    return;
+  }
+
+  MPI_Reduce(&localCount, &globalCount, 1, MPI_LONG_LONG, MPI_SUM, 0,
+             comm_solver);
+  MPI_Reduce(&localCount, &maxCount, 1, MPI_LONG_LONG, MPI_MAX, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print(
+        "Acoustic plane pressure patch: %lld nodes globally "
+        "(max/rank=%lld) for reconstructed plane output\n",
+        globalCount, maxCount);
+  }
+  g_acousticPlanePressureReported = 1;
+}
+
+static void solver_init_acoustic_plane_pressure_sync(mysolver_t* solver) {
+  const int32_t localPlaneNodeCount = planes_acoustic_pressure_node_count();
+  const int32_t* localPlaneNodes = planes_acoustic_pressure_nodes();
+  int32_t* nodes = NULL;
+  int32_t count = 0;
+
+  (void)solver;
+
+  if (g_acousticPlanePressureSyncReady != 0 ||
+      !acoustic_pressure_device_sync_enabled()) {
+    return;
+  }
+
+  if ((Param.theNumberOfPlanes <= 0) ||
+      (Param.reconstructAcousticPlaneDisplacements != YES)) {
+    g_acousticPlanePressureSyncReady = 1;
+    return;
+  }
+
+  if ((localPlaneNodeCount > 0) && (localPlaneNodes != NULL)) {
+    nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)localPlaneNodeCount);
+    if (nodes == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating acoustic plane pressure-node filter\n");
+    }
+
+    for (int32_t i = 0; i < localPlaneNodeCount; i++) {
+      const int32_t node = localPlaneNodes[i];
+      if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+        nodes[count++] = node;
+      }
+    }
+  }
+
+  solver_report_acoustic_plane_pressure_patch_count(count);
+
+  g_acousticPlanePressureNodeCount = count;
+  if (count <= 0) {
+    free(nodes);
+    g_acousticPlanePressureSyncReady = 1;
+    return;
+  }
+
+  g_acousticPlanePressureNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)count);
+  if (g_acousticPlanePressureNodesHost == NULL) {
+    free(nodes);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating acoustic plane pressure-node copy\n");
+  }
+  memcpy(g_acousticPlanePressureNodesHost, nodes,
+         sizeof(int32_t) * (size_t)count);
+  free(nodes);
+
+  solver_pore_pressure_device_copy_int32(
+      &g_acousticPlanePressureNodesDevice, g_acousticPlanePressureNodesHost,
+      count, "acoustic plane pressure-node copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_acousticPlanePressureBufferDevice,
+                 sizeof(solver_float) * (size_t)count),
+      "acoustic plane pressure device buffer");
+  if (cudaHostAlloc((void**)&g_acousticPlanePressureBufferHost,
+                    sizeof(solver_float) * (size_t)count,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_acousticPlanePressureHostPinned = 1;
+  } else {
+    g_acousticPlanePressureBufferHost = NULL;
+    g_acousticPlanePressureBufferHost =
+        (solver_float*)malloc(sizeof(solver_float) * (size_t)count);
+    if (g_acousticPlanePressureBufferHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating acoustic plane pressure host buffer\n");
+    }
+  }
+
+  g_acousticPlanePressureSyncReady = 1;
+}
+
+static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {
+  const int32_t blocksize = 256;
+  int32_t gridsize;
+
+  if (!acoustic_pressure_device_sync_enabled() ||
+      (Param.theNumberOfPlanes <= 0) ||
+      (Param.reconstructAcousticPlaneDisplacements != YES)) {
+    if ((Param.theNumberOfPlanes > 0) &&
+        (Param.reconstructAcousticPlaneDisplacements == YES)) {
+      solver_report_acoustic_plane_pressure_patch_count(
+          solver_count_valid_acoustic_plane_pressure_nodes());
+    }
+    return;
+  }
+
+  solver_init_acoustic_plane_pressure_sync(solver);
+  if ((g_acousticPlanePressureNodeCount <= 0) ||
+      (solver->pressure_tm1 == NULL)) {
+    return;
+  }
+
+  gridsize = (g_acousticPlanePressureNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_acousticPlanePressureNodeCount, g_acousticPlanePressureNodesDevice,
+      solver->gpuData->pressureTm1Device, g_acousticPlanePressureBufferDevice);
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "acoustic plane pressure gather");
+  solver_pore_pressure_device_check(
+      cudaMemcpyAsync(g_acousticPlanePressureBufferHost,
+                      g_acousticPlanePressureBufferDevice,
+                      sizeof(solver_float) *
+                          (size_t)g_acousticPlanePressureNodeCount,
+                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic plane pressure D2H");
+  solver->gpu_spec->numbytespci +=
+      g_acousticPlanePressureNodeCount * (int64_t)sizeof(solver_float);
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic plane pressure D2H sync");
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_acousticPlanePressureNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_acousticPlanePressureNodeCount; i++) {
+    solver->pressure_tm1[g_acousticPlanePressureNodesHost[i]] =
+        g_acousticPlanePressureBufferHost[i];
+  }
+}
+
 static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
   int32_t capacity;
   int32_t count = 0;
@@ -17739,6 +17938,16 @@ static void solver_free_pore_pressure_device_sync(void) {
       free(g_acousticPressureStationBufferHost);
     }
   }
+  cudaFree(g_acousticPlanePressureNodesDevice);
+  cudaFree(g_acousticPlanePressureBufferDevice);
+  free(g_acousticPlanePressureNodesHost);
+  if (g_acousticPlanePressureBufferHost != NULL) {
+    if (g_acousticPlanePressureHostPinned != 0) {
+      cudaFreeHost(g_acousticPlanePressureBufferHost);
+    } else {
+      free(g_acousticPlanePressureBufferHost);
+    }
+  }
   cudaFree(g_porePressureAdjustParentOffsetsDevice);
   cudaFree(g_porePressureAdjustDanglingBase3Device);
   cudaFree(g_porePressureAdjustInvDepsDevice);
@@ -17773,6 +17982,15 @@ static void solver_free_pore_pressure_device_sync(void) {
   g_acousticPressureStationNodeCount = 0;
   g_acousticPressureStationHostPinned = 0;
   g_acousticPressureStationSyncReady = 0;
+  g_acousticPressureSyncReported = 0;
+  g_acousticPlanePressureNodesHost = NULL;
+  g_acousticPlanePressureNodesDevice = NULL;
+  g_acousticPlanePressureBufferHost = NULL;
+  g_acousticPlanePressureBufferDevice = NULL;
+  g_acousticPlanePressureNodeCount = 0;
+  g_acousticPlanePressureHostPinned = 0;
+  g_acousticPlanePressureSyncReady = 0;
+  g_acousticPlanePressureReported = 0;
   g_porePressureStationNodesHost = NULL;
   g_porePressureStationNodesDevice = NULL;
   g_porePressureStationBufferHost = NULL;
@@ -19442,6 +19660,7 @@ static void solver_run() {
     Timer_Stop("GPU Memory Copy");
     solver_sync_acoustic_pressure_station_values(Global.mySolver);
     solver_update_acoustic_station_kinematics(step);
+    solver_sync_acoustic_plane_pressure_values(Global.mySolver);
     planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
                                       step, Param.theDeltaT,
                                       Param.theDeltaTSquared);

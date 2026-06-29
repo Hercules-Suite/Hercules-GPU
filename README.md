@@ -71,9 +71,9 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	`HERCULES_GPU_MPI_BACKEND=cuda_aware` sends both acoustic pressure arrays
 	directly from GPU memory and applies the scalar hanging-node adjustment on
 	the GPU. Acoustic station output gathers only its local station nodes from
-	the two device histories. Plane output only disables this direct pressure
-	path when `reconstruct_acoustic_plane_displacements=yes`, because that
-	reconstruction reads acoustic pressure gradients on the host.
+	the two device histories. Reconstructed acoustic plane output gathers only
+	the local plane pressure nodes needed for host-side pressure gradients, so
+	it no longer forces a full acoustic pressure-field host path.
 - `HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects poroelastic pore-pressure force synchronization before the scalar
 	MPI/adjust phase. Default is `sparse`, which gathers only nodes touched by
