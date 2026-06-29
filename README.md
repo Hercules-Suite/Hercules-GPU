@@ -103,10 +103,15 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Phase A-only `UCX_TLS=sm,self,tcp` default when the active Open MPI reports
 	CUDA support and `UCX_TLS` is not already set, because Phase A is CPU meshing
 	and large rank-count mesh builds should avoid mlx5 reliable-connection
-	endpoint pressure. Phase B leaves `UCX_TLS` unset by default so the system
-	Open MPI/UCX configuration can choose the CUDA-aware transports. Set
-	`PHASE_B_UCX_TLS` only when intentionally overriding the site default. A
-	user-defined global `UCX_TLS` still takes precedence for both phases.
+	endpoint pressure. For Phase B, the wrapper defaults CUDA-aware Open MPI runs
+	to `OMPI_MCA_pml=ucx`, unsets `OMPI_MCA_btl`, and sets
+	`UCX_TLS=rc,sm,self,cuda_copy`. This keeps device-buffer MPI on the UCX path
+	while avoiding the `cuda_ipc` transport that has been unstable on Vista
+	GB/NVL72 multi-GPU nodes. Set `PHASE_B_UCX_TLS` or `PHASE_B_OMPI_MCA_PML`
+	only when intentionally overriding the Phase B default. A user-defined
+	global `UCX_TLS` or `OMPI_MCA_pml` still takes precedence for both phases.
+	Set `PHASE_B_KEEP_OMPI_MCA_BTL=1` only if a site MPI stack requires an
+	explicit inherited BTL setting.
 
 Advanced/diagnostic toggles:
 

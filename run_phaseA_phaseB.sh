@@ -364,6 +364,10 @@ PHASE_A_UCX_TLS_VALUE=""
 PHASE_B_UCX_TLS_VALUE=""
 PHASE_A_UCX_TLS_SOURCE=""
 PHASE_B_UCX_TLS_SOURCE=""
+PHASE_B_OMPI_MCA_PML_VALUE=""
+PHASE_B_OMPI_MCA_PML_SOURCE=""
+PHASE_B_UNSET_OMPI_MCA_BTL=0
+PHASE_B_OMPI_MCA_BTL_SOURCE=""
 
 if [[ -n "${UCX_TLS+x}" ]]; then
   PHASE_A_UCX_TLS_VALUE="${UCX_TLS}"
@@ -383,9 +387,25 @@ else
     PHASE_B_UCX_TLS_VALUE="${PHASE_B_UCX_TLS}"
     PHASE_B_UCX_TLS_SOURCE="phase-b user"
   elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
-    PHASE_B_UCX_TLS_VALUE="UCX_TLS unset"
-    PHASE_B_UCX_TLS_SOURCE="phase-b system default"
+    PHASE_B_UCX_TLS_VALUE="rc,sm,self,cuda_copy"
+    PHASE_B_UCX_TLS_SOURCE="phase-b cuda-aware default"
   fi
+fi
+
+if [[ -n "${OMPI_MCA_pml+x}" ]]; then
+  PHASE_B_OMPI_MCA_PML_VALUE="${OMPI_MCA_pml}"
+  PHASE_B_OMPI_MCA_PML_SOURCE="user"
+elif [[ -n "${PHASE_B_OMPI_MCA_PML+x}" ]]; then
+  PHASE_B_OMPI_MCA_PML_VALUE="${PHASE_B_OMPI_MCA_PML}"
+  PHASE_B_OMPI_MCA_PML_SOURCE="phase-b user"
+elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
+  PHASE_B_OMPI_MCA_PML_VALUE="ucx"
+  PHASE_B_OMPI_MCA_PML_SOURCE="phase-b cuda-aware default"
+fi
+
+if [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 && "${PHASE_B_KEEP_OMPI_MCA_BTL:-0}" != "1" ]]; then
+  PHASE_B_UNSET_OMPI_MCA_BTL=1
+  PHASE_B_OMPI_MCA_BTL_SOURCE="phase-b cuda-aware default"
 fi
 
 if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
@@ -415,6 +435,12 @@ if [[ -n "${PHASE_A_UCX_TLS_SOURCE}" ]]; then
       echo "Phase B UCX TLS:${PHASE_B_UCX_TLS_SOURCE} (${PHASE_B_UCX_TLS_VALUE})"
     fi
   fi
+fi
+if [[ -n "${PHASE_B_OMPI_MCA_PML_SOURCE}" ]]; then
+  echo "Phase B OMPI PML:${PHASE_B_OMPI_MCA_PML_SOURCE} (${PHASE_B_OMPI_MCA_PML_VALUE})"
+fi
+if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
+  echo "Phase B OMPI BTL:${PHASE_B_OMPI_MCA_BTL_SOURCE} (unset)"
 fi
 echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
@@ -605,13 +631,19 @@ else
 fi
 
 B_ENV_VARS=()
+if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
+  B_ENV_VARS+=("-u" "OMPI_MCA_btl")
+fi
 if [[ -n "${PHASE_B_OMP_THREADS}" ]]; then
   B_ENV_VARS+=("OMP_NUM_THREADS=${PHASE_B_OMP_THREADS}")
 fi
 if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" &&
-      "${PHASE_B_UCX_TLS_SOURCE}" != "user" &&
-      "${PHASE_B_UCX_TLS_SOURCE}" != "phase-b system default" ]]; then
+      "${PHASE_B_UCX_TLS_SOURCE}" != "user" ]]; then
   B_ENV_VARS+=("UCX_TLS=${PHASE_B_UCX_TLS_VALUE}")
+fi
+if [[ -n "${PHASE_B_OMPI_MCA_PML_SOURCE}" &&
+      "${PHASE_B_OMPI_MCA_PML_SOURCE}" != "user" ]]; then
+  B_ENV_VARS+=("OMPI_MCA_pml=${PHASE_B_OMPI_MCA_PML_VALUE}")
 fi
 if [[ ${#B_ENV_VARS[@]} -gt 0 ]]; then
   B_ENV=(env "${B_ENV_VARS[@]}")
