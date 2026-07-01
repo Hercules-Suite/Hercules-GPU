@@ -19884,6 +19884,24 @@ static void solver_run_collect_timers(void) {
 /**
  * March forward in time and output the result whenever necessary.
  */
+static int solver_final_step_diag_enabled(void) {
+  static int cached = -1;
+
+  if (cached < 0) {
+    const char* env = getenv("HERCULES_FINAL_STEP_DIAG");
+    cached = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0 &&
+              strcasecmp(env, "false") != 0 && strcasecmp(env, "no") != 0);
+  }
+
+  return cached;
+}
+
+static void solver_final_step_mark(int is_final_step, const char* stage) {
+  if (is_final_step && solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: %s\n", stage);
+  }
+}
+
 static void solver_run() {
   int32_t step, startingStep;
 
@@ -19916,6 +19934,7 @@ static void solver_run() {
     fvector_t* tmpvector;
     int pressure_step_needs_synced_disp = poroelastic_gpu_active();
     int is_final_step = (step == Param.theTotalSteps - 1);
+    solver_final_step_mark(is_final_step, "begin step");
 
     /* prepare for a new iteration
      * swap displacement vectors for t(n) and t(n-1) */
@@ -19938,6 +19957,7 @@ static void solver_run() {
     planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
                                       step, Param.theDeltaT,
                                       Param.theDeltaTSquared);
+    solver_final_step_mark(is_final_step, "output patches complete");
 
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
@@ -19945,19 +19965,25 @@ static void solver_run() {
     // Todo Dorian. Ask Ricardo about this file (disp.out), it gets really big
     // at high frequencies, and it is not clear its purpose.
     // solver_output_wavefield( step );
+    solver_final_step_mark(is_final_step, "planes output begin");
     solver_output_planes(Global.mySolver, Global.myID, step);
+    solver_final_step_mark(is_final_step, "planes output end");
     solver_station_ve_stress_kick(step);
+    solver_final_step_mark(is_final_step, "station output begin");
     solver_output_stations(step);
+    solver_final_step_mark(is_final_step, "station output end");
     solver_output_drm_nodes(Global.mySolver, step, Param.theTotalSteps);
     solver_read_source_forces(step, Param.theDeltaT);
     solver_read_drm_displacements_v2(step, Param.theDeltaT,
                                      Param.theTotalSteps);
     Timer_Stop("Solver I/O");
+    solver_final_step_mark(is_final_step, "solver io end");
 
     solver_report_force_paths_once();
 
     Timer_Start("Compute Physics");
     Timer_Start("Physics Force Prep");
+    solver_final_step_mark(is_final_step, "force prep begin");
     solver_nonlinear_state(Global.mySolver, Global.myMesh, Global.theK1,
                            Global.theK2, step);
     if (use_gpu_source_fastpath()) {
@@ -19993,6 +20019,7 @@ static void solver_run() {
     }
     solver_compute_force_poroelastic_pressure(Global.mySolver, Global.myMesh);
     Timer_Stop("Physics Force Prep");
+    solver_final_step_mark(is_final_step, "force prep end");
 
     Timer_Start("Physics Force Kernels Enqueue");
     solver_compute_force_stiffness(Global.mySolver, Global.myMesh, Global.theK1,
@@ -20002,6 +20029,7 @@ static void solver_run() {
     solver_compute_force_acoustic_pressure(Global.mySolver, Global.myMesh);
     solver_record_force_kernel_done_event(Global.mySolver);
     Timer_Stop("Physics Force Kernels Enqueue");
+    solver_final_step_mark(is_final_step, "force kernels enqueued");
 
     Timer_Stop("Compute Physics");
 
@@ -20013,6 +20041,7 @@ static void solver_run() {
 
     Timer_Start("Compute Physics");
     Timer_Start("Physics Force Wait/Post");
+    solver_final_step_mark(is_final_step, "force wait/post begin");
     solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
 
     Timer_Start("Force Post CPU");
@@ -20024,11 +20053,13 @@ static void solver_run() {
                                     Global.theK2);
     Timer_Stop("Force Post CPU");
     Timer_Stop("Physics Force Wait/Post");
+    solver_final_step_mark(is_final_step, "force wait/post end");
 
     Timer_Stop("Compute Physics");
 
     Timer_Start("Communication");
     Timer_Start("Comm Force Exchange");
+    solver_final_step_mark(is_final_step, "force exchange begin");
     HU_COND_GLOBAL_BARRIER(Param.theTimingBarriersFlag);
     solver_send_force_dangling(Global.mySolver);
     solver_adjust_forces(Global.mySolver);
@@ -20036,6 +20067,7 @@ static void solver_run() {
     solver_send_force_anchored(Global.mySolver);
     Timer_Stop("Comm Force Exchange");
     Timer_Stop("Communication");
+    solver_final_step_mark(is_final_step, "force exchange end");
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Load Forces");
@@ -20047,11 +20079,13 @@ static void solver_run() {
 
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Enqueue");
+    solver_final_step_mark(is_final_step, "displacement enqueue begin");
     /* solver_compute_displacement(Global.mySolver, Global.myMesh); */
     solver_compute_displacement_gpu(Global.myID, Global.mySolver,
                                     Global.myMesh);
     Timer_Stop("Physics Displacement Enqueue");
     Timer_Stop("Compute Physics");
+    solver_final_step_mark(is_final_step, "displacement enqueue end");
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Unload Disp");
@@ -20061,14 +20095,18 @@ static void solver_run() {
 
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Wait/Post");
+    solver_final_step_mark(is_final_step, "displacement wait/post begin");
     solver_wait_disp_gpu(Global.mySolver, Global.myMesh);
     if (!pressure_step_needs_synced_disp) {
+      solver_final_step_mark(is_final_step, "acoustic pressure step begin");
       solver_run_acoustic_pressure_step(Global.mySolver, Global.myMesh);
+      solver_final_step_mark(is_final_step, "acoustic pressure step end");
     }
     solver_geostatic_fix(step);
     solver_load_fixedbase_displacements(Global.mySolver, step);
     Timer_Stop("Physics Displacement Wait/Post");
     Timer_Stop("Compute Physics");
+    solver_final_step_mark(is_final_step, "displacement wait/post end");
 
     if (pressure_step_needs_synced_disp) {
       fvector_t* displacementDevice =
@@ -20097,9 +20135,11 @@ static void solver_run() {
 
     Timer_Start("GPU Memory Copy");
     Timer_Start("GPU Reset");
+    solver_final_step_mark(is_final_step, "gpu reset begin");
     solver_reset_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Reset");
     Timer_Stop("GPU Memory Copy");
+    solver_final_step_mark(is_final_step, "gpu reset end");
 
     /* This exchange only prepares the displacement boundary state consumed by
      * the next iteration. The last iteration has no consumer, and avoiding the
@@ -20120,11 +20160,18 @@ static void solver_run() {
       Timer_Stop("Communication");
 
       solver_upload_disp_boundary_gpu(Global.mySolver);
+    } else if (!pressure_step_needs_synced_disp && is_final_step) {
+      solver_final_step_mark(is_final_step, "skipped final displacement exchange");
     }
 
     solver_loop_hook_bottom(Global.mySolver, Global.myMesh, step);
+    solver_final_step_mark(is_final_step, "loop bottom end");
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
+
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: solver loop complete\n");
+  }
 
   solver_drm_close();
   solver_output_wavefield_close();
@@ -25425,9 +25472,7 @@ static int interpolate_station_displacements(int32_t step) {
                 interpolate_station_pressure_value(iStation));
       }
 
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
+      fflush(Param.myStations[iStation].fpoutputfile);
     } else if ((Param.includeTopography == YES) &&
                (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y,
                                     &vel_z, &acc_x, &acc_y, &acc_z,
@@ -25507,9 +25552,7 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
+      fflush(Param.myStations[iStation].fpoutputfile);
     } else {
       for (iPhi = 0; iPhi < 8; iPhi++) {
         phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0]) *
@@ -25639,10 +25682,7 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      /* TODO: Have this 10 as a parameter with a default value */
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
+      fflush(Param.myStations[iStation].fpoutputfile);
     }
   }
 
