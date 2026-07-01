@@ -19303,12 +19303,20 @@ static void solver_output_wavefield_close(void) {
   }
 }
 
+static int solver_final_step_diag_enabled(void);
+
 static void solver_reduce_timer_if_any(const char* timerName, TimerKind kind) {
   int localExists = Timer_Exists(timerName);
   int anyExists = 0;
 
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: timer any begin %s\n", timerName);
+  }
   MPI_Allreduce(&localExists, &anyExists, 1, MPI_INT, MPI_MAX, comm_solver);
   if (anyExists == 0) {
+    if (solver_final_step_diag_enabled() && Global.myID == 0) {
+      monitor_print("Final-step diag: timer any skip %s\n", timerName);
+    }
     return;
   }
 
@@ -19316,7 +19324,13 @@ static void solver_reduce_timer_if_any(const char* timerName, TimerKind kind) {
     Timer_Start(timerName);
     Timer_Stop(timerName);
   }
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: timer reduce begin %s\n", timerName);
+  }
   Timer_Reduce(timerName, kind, comm_solver);
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: timer reduce end %s\n", timerName);
+  }
 }
 
 static double solver_local_timer_elapsed_or_zero(const char* timerName) {
@@ -19602,85 +19616,46 @@ static void solver_run_collect_timers(void) {
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Sparse force upload scatter",
                              (TimerKind)(MAX | MIN | AVERAGE));
-  if (Timer_Exists("Load Fixedbase Disps")) {
-    Timer_Reduce("Load Fixedbase Disps", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Memory Copy")) {
-    Timer_Reduce("GPU Memory Copy", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Load Disp")) {
-    Timer_Reduce("GPU Load Disp", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Unload Forces")) {
-    Timer_Reduce("GPU Unload Forces", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Load Forces")) {
-    Timer_Reduce("GPU Load Forces", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Unload Disp")) {
-    Timer_Reduce("GPU Unload Disp", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Patch Disp")) {
-    Timer_Reduce("GPU Patch Disp", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("GPU Reset")) {
-    Timer_Reduce("GPU Reset", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Physics Force Prep")) {
-    Timer_Reduce("Physics Force Prep", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Physics Force Kernels Enqueue")) {
-    Timer_Reduce("Physics Force Kernels Enqueue",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Physics Force Wait/Post")) {
-    Timer_Reduce("Physics Force Wait/Post",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Station Accel History Copy")) {
-    Timer_Reduce("Station Accel History Copy",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force Stream Sync")) {
-    Timer_Reduce("Force Stream Sync", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Force stiffness wait only")) {
-    Timer_Reduce("Force stiffness wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force pre-stiffness wait only")) {
-    Timer_Reduce("Force pre-stiffness wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force stiffness core wait only")) {
-    Timer_Reduce("Force stiffness core wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force damping conv wait only")) {
-    Timer_Reduce("Force damping conv wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force damping local wait only")) {
-    Timer_Reduce("Force damping local wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force kernel wait only")) {
-    Timer_Reduce("Force kernel wait only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Acoustic pressure traction")) {
-    Timer_Reduce("Acoustic pressure traction",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
+  solver_reduce_timer_if_any("Load Fixedbase Disps",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Memory Copy",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Load Disp",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Unload Forces",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Load Forces",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Unload Disp",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Patch Disp",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("GPU Reset",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Physics Force Prep",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Physics Force Kernels Enqueue",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Physics Force Wait/Post",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Station Accel History Copy",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force Stream Sync",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force stiffness wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force pre-stiffness wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force stiffness core wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force damping conv wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force damping local wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force kernel wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Acoustic pressure traction",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Poroelastic pressure traction",
                              (TimerKind)(MAX | MIN | AVERAGE));
   {
@@ -19725,128 +19700,83 @@ static void solver_run_collect_timers(void) {
                                  (TimerKind)(MAX | MIN | AVERAGE));
     }
   }
-  if (Timer_Exists("Force postcopy sync wait")) {
-    Timer_Reduce("Force postcopy sync wait",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Force Post CPU")) {
-    Timer_Reduce("Force Post CPU", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Physics Displacement Enqueue")) {
-    Timer_Reduce("Physics Displacement Enqueue",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Physics Displacement Wait/Post")) {
-    Timer_Reduce("Physics Displacement Wait/Post",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Comm Force Exchange")) {
-    Timer_Reduce("Comm Force Exchange", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Comm Displacement Exchange")) {
-    Timer_Reduce("Comm Displacement Exchange",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
+  solver_reduce_timer_if_any("Force postcopy sync wait",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Force Post CPU",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Physics Displacement Enqueue",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Physics Displacement Wait/Post",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Comm Force Exchange",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Comm Displacement Exchange",
+                             (TimerKind)(MAX | MIN | AVERAGE));
 
-  Timer_Reduce("Read My Forces", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("Compute addforces s", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
-  Timer_Reduce("Compute addforces e", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
-  Timer_Reduce("Damping addforce", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
-  Timer_Reduce("1st schedule send data (contribution)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  if (Timer_Exists("1st compute adjust (distribution)")) {
-    Timer_Reduce("1st compute adjust (distribution)",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  Timer_Reduce("2nd schedule send data (contribution)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("Compute new displacement", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
-  if (Timer_Exists("Disp kernel enqueue")) {
-    Timer_Reduce("Disp kernel enqueue", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp host force reset")) {
-    Timer_Reduce("Disp host force reset", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp force upload safe wait")) {
-    Timer_Reduce("Disp force upload safe wait",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Disp host force clear only")) {
-    Timer_Reduce("Disp host force clear only",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  if (Timer_Exists("Disp kernel sync wait")) {
-    Timer_Reduce("Disp kernel sync wait", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp kernel wait only")) {
-    Timer_Reduce("Disp kernel wait only", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp postcopy sync wait")) {
-    Timer_Reduce("Disp postcopy sync wait", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Disp boundary host scatter")) {
-    Timer_Reduce("Disp boundary host scatter",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-  Timer_Reduce("3rd schedule send data (sharing)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("2nd compute adjust (assignment)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("4th schedule send data (sharing)",
-               (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  solver_reduce_timer_if_any("Read My Forces",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces s",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces e",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Damping addforce",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("1st schedule send data (contribution)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("1st compute adjust (distribution)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("2nd schedule send data (contribution)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute new displacement",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp kernel enqueue",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp host force reset",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp force upload safe wait",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp host force clear only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp kernel sync wait",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp kernel wait only",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp postcopy sync wait",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Disp boundary host scatter",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("3rd schedule send data (sharing)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("2nd compute adjust (assignment)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("4th schedule send data (sharing)",
+                             (TimerKind)(MAX | MIN | AVERAGE));
 
-  if (Timer_Exists("Schedule Post Recv")) {
-    Timer_Reduce("Schedule Post Recv", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Schedule Pack Outgoing")) {
-    Timer_Reduce("Schedule Pack Outgoing", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Schedule Post Send")) {
-    Timer_Reduce("Schedule Post Send", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Schedule Wait Recv")) {
-    Timer_Reduce("Schedule Wait Recv", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Schedule Wait Send")) {
-    Timer_Reduce("Schedule Wait Send", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Schedule Unpack Incoming")) {
-    Timer_Reduce("Schedule Unpack Incoming", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Adjust Cache Build")) {
-    Timer_Reduce("Adjust Cache Build", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Adjust Distribution Core")) {
-    Timer_Reduce("Adjust Distribution Core", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-  if (Timer_Exists("Adjust Assignment Core")) {
-    Timer_Reduce("Adjust Assignment Core", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
+  solver_reduce_timer_if_any("Schedule Post Recv",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Schedule Pack Outgoing",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Schedule Post Send",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Schedule Wait Recv",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Schedule Wait Send",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Schedule Unpack Incoming",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Adjust Cache Build",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Adjust Distribution Core",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Adjust Assignment Core",
+                             (TimerKind)(MAX | MIN | AVERAGE));
 
-  Timer_Reduce("Solver I/O", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  Timer_Reduce("Compute Physics", (TimerKind)(MAX | MIN | AVERAGE),
-               comm_solver);
-  Timer_Reduce("Communication", (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
+  solver_reduce_timer_if_any("Solver I/O",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute Physics",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Communication",
+                             (TimerKind)(MAX | MIN | AVERAGE));
 
   solver_diag_reduce();
   solver_cpml_rank_diag_collect();
