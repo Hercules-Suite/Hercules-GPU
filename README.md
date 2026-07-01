@@ -62,7 +62,13 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	`boundary` sends those displacement boundary values directly from device
 	memory and performs the hanging-node adjustment on the GPU, eliminating the
 	host staging for that exchange.
-	For correctness, `boundary` currently falls back to `full` when station/plane/checkpoint/DRM/nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host displacement arrays. The run log prints `Displacement sync path:` and, when active, the boundary node count.
+	Station and plane output no longer force a full displacement host path:
+	when `boundary` is active, the solver patches only the station/plane
+	interpolation nodes needed by host-side output before printing. For
+	correctness, `boundary` still falls back to `full` when checkpoint/DRM/
+	nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host
+	displacement arrays. The run log prints `Displacement sync path:`, the
+	boundary node count, and the sparse output patch node count when relevant.
 - `HERCULES_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
 - `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)

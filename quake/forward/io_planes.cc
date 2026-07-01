@@ -134,6 +134,8 @@ static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
 static int32_t g_planePrintSequence = 0;
 static int32_t g_reconstructAcousticPlaneDisplacements = 0;
+static int32_t* g_planeDisplacementNodes = NULL;
+static int32_t g_planeDisplacementNodeCount = 0;
 static int32_t* g_acousticPlanePressureNodes = NULL;
 static int32_t g_acousticPlanePressureNodeCount = 0;
 
@@ -147,6 +149,97 @@ static void planes_reset_acoustic_pressure_nodes(void) {
 	free(g_acousticPlanePressureNodes);
 	g_acousticPlanePressureNodes = NULL;
 	g_acousticPlanePressureNodeCount = 0;
+}
+
+static void planes_reset_displacement_nodes(void) {
+	free(g_planeDisplacementNodes);
+	g_planeDisplacementNodes = NULL;
+	g_planeDisplacementNodeCount = 0;
+}
+
+static void planes_collect_displacement_nodes(int theNumberOfPlanes) {
+	int capacity = 0;
+	int count = 0;
+	int uniqueCount = 0;
+	int32_t* nodes = NULL;
+
+	planes_reset_displacement_nodes();
+
+	if ((theNumberOfPlanes <= 0) || (thePlanes == NULL)) {
+		return;
+	}
+
+	for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+		for (int iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
+		     iStrip++) {
+			const int elemCount =
+				thePlanes[iPlane].stripend[iStrip] -
+				thePlanes[iPlane].stripstart[iStrip] + 1;
+			for (int elemnum = 0; elemnum < elemCount; elemnum++) {
+				const plane_strip_element_t* element =
+					&(thePlanes[iPlane].strip[iStrip][elemnum]);
+				if (element->point_is_valid != 0) {
+					capacity += 8;
+				}
+			}
+		}
+	}
+
+	if (capacity <= 0) {
+		return;
+	}
+
+	nodes = (int32_t*)malloc((size_t)capacity * sizeof(int32_t));
+	if (nodes == NULL) {
+		solver_abort("planes_collect_displacement_nodes", NULL,
+		             "Failed allocating plane displacement-node list\n");
+	}
+
+	for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+		for (int iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
+		     iStrip++) {
+			const int elemCount =
+				thePlanes[iPlane].stripend[iStrip] -
+				thePlanes[iPlane].stripstart[iStrip] + 1;
+			for (int elemnum = 0; elemnum < elemCount; elemnum++) {
+				const plane_strip_element_t* element =
+					&(thePlanes[iPlane].strip[iStrip][elemnum]);
+				if (element->point_is_valid == 0) {
+					continue;
+				}
+				for (int corner = 0; corner < 8; corner++) {
+					const int32_t node = element->nodestointerpolate[corner];
+					if (node >= 0) {
+						nodes[count++] = node;
+					}
+				}
+			}
+		}
+	}
+
+	if (count <= 0) {
+		free(nodes);
+		return;
+	}
+
+	qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_plane_nodes);
+	for (int i = 0; i < count; i++) {
+		if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+			nodes[uniqueCount++] = nodes[i];
+		}
+	}
+
+	g_planeDisplacementNodes =
+		(int32_t*)malloc((size_t)uniqueCount * sizeof(int32_t));
+	if (g_planeDisplacementNodes == NULL) {
+		free(nodes);
+		solver_abort("planes_collect_displacement_nodes", NULL,
+		             "Failed allocating plane displacement-node copy\n");
+	}
+	memcpy(g_planeDisplacementNodes, nodes,
+	       (size_t)uniqueCount * sizeof(int32_t));
+	g_planeDisplacementNodeCount = uniqueCount;
+	free(nodes);
 }
 
 static void planes_collect_acoustic_pressure_nodes(int theNumberOfPlanes) {
@@ -233,6 +326,14 @@ static void planes_collect_acoustic_pressure_nodes(int theNumberOfPlanes) {
 	       (size_t)uniqueCount * sizeof(int32_t));
 	g_acousticPlanePressureNodeCount = uniqueCount;
 	free(nodes);
+}
+
+int32_t planes_displacement_node_count(void) {
+	return g_planeDisplacementNodeCount;
+}
+
+const int32_t* planes_displacement_nodes(void) {
+	return g_planeDisplacementNodes;
 }
 
 int32_t planes_acoustic_pressure_node_count(void) {
@@ -559,6 +660,7 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
 //	IO_pool_pe_count = 1;
 	g_reconstructAcousticPlaneDisplacements =
 		reconstructAcousticPlaneDisplacements ? 1 : 0;
+	planes_reset_displacement_nodes();
 	planes_reset_acoustic_pressure_nodes();
     if (IO_pool_pe_count)
 	New_planes_setup(myID, thePlanePrintRate, thePlaneDirOut,
@@ -574,14 +676,16 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
         theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
         reconstructAcousticPlaneDisplacements);
 
+	planes_collect_displacement_nodes(theNumberOfPlanes);
 	planes_collect_acoustic_pressure_nodes(theNumberOfPlanes);
 }
 
 void planes_close(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes){
     if (IO_pool_pe_count)
 	New_planes_close(myID, theNumberOfPlanes);
-    else
+	else
 	Old_planes_close(myID, theNumberOfPlanes);
+	planes_reset_displacement_nodes();
 	planes_reset_acoustic_pressure_nodes();
 }
 

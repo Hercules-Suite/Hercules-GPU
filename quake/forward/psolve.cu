@@ -250,6 +250,15 @@ static int32_t* g_dispBoundaryNodesDevice = NULL;
 static fvector_t* g_dispBoundaryBufferHost = NULL;
 static fvector_t* g_dispBoundaryBufferDevice = NULL;
 static int32_t g_dispBoundaryNodeCount = 0;
+static int32_t g_dispBoundaryHostPinned = 0;
+static int32_t g_dispOutputSyncReady = 0;
+static int32_t* g_dispOutputNodesHost = NULL;
+static int32_t* g_dispOutputNodesDevice = NULL;
+static fvector_t* g_dispOutputBufferHost = NULL;
+static fvector_t* g_dispOutputBufferDevice = NULL;
+static int32_t g_dispOutputNodeCount = 0;
+static int32_t g_dispOutputHostPinned = 0;
+static int32_t g_dispOutputReported = 0;
 static int32_t g_pressureForceSyncMode = -1;
 static int32_t g_pressureForceSyncReported = 0;
 static int32_t g_pressureFieldSyncMode = -1;
@@ -718,6 +727,12 @@ static int32_t acoustic_pressure_device_sync_enabled(void);
 static int32_t elastic_force_device_sync_enabled(void);
 static int32_t displacement_device_sync_enabled(void);
 static void solver_init_disp_boundary_sync(mysolver_t* solver);
+static void solver_pore_pressure_device_check(cudaError_t cerror,
+                                              const char* label);
+static void solver_pore_pressure_device_copy_int32(int32_t** target,
+                                                   const int32_t* source,
+                                                   int32_t count,
+                                                   const char* label);
 static void solver_init_pressure_sparse_sync(mysolver_t* solver);
 static void solver_download_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pressure_force_sparse(mysolver_t* solver);
@@ -745,6 +760,7 @@ static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver);
 static void solver_sync_pore_pressure_station_values(mysolver_t* solver);
 static void solver_free_pore_pressure_device_sync(void);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
+static void solver_sync_displacement_output_values(mysolver_t* solver);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
@@ -16056,9 +16072,6 @@ static int32_t displacement_boundary_sync_safe(void) {
   if (Param.theUseCheckPoint == 1 || Param.theCheckPointingRate != 0) {
     return 0;
   }
-  if (Param.theNumberOfStations != 0 || Param.theNumberOfPlanes != 0) {
-    return 0;
-  }
   if (Param.drmImplement == YES || Param.includeNonlinearAnalysis == YES ||
       Param.includeIncidentPlaneWaves == YES) {
     return 0;
@@ -16100,6 +16113,10 @@ static int32_t displacement_sync_mode(void) {
           g_dispSyncMode ? "boundary" : "full",
           (requestedBoundary != 0 && g_dispSyncMode == 0)
               ? " (boundary requested but unsafe for this run)"
+              : (g_dispSyncMode &&
+                 (Param.theNumberOfStations != 0 ||
+                  Param.theNumberOfPlanes != 0))
+                    ? " + sparse output patch"
               : "");
       g_dispSyncReported = 1;
     }
@@ -16464,6 +16481,7 @@ static void solver_init_disp_boundary_sync(mysolver_t* solver) {
   if (cerror != cudaSuccess) {
     g_dispBoundaryBufferHost =
         (fvector_t*)malloc(sizeof(fvector_t) * g_dispBoundaryNodeCount);
+    g_dispBoundaryHostPinned = 0;
     if (g_dispBoundaryBufferHost == NULL) {
       fprintf(stderr,
               "Thread %d: displacement boundary buffer host alloc failed\n",
@@ -16471,6 +16489,8 @@ static void solver_init_disp_boundary_sync(mysolver_t* solver) {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+  } else {
+    g_dispBoundaryHostPinned = 1;
   }
 
   cerror = cudaMemcpy(g_dispBoundaryNodesDevice, g_dispBoundaryNodesHost,
@@ -16489,6 +16509,205 @@ static void solver_init_disp_boundary_sync(mysolver_t* solver) {
   }
 
   g_dispBoundaryReady = 1;
+}
+
+static void solver_append_output_nodes(int32_t* nodes, int32_t* count,
+                                       const int32_t* sourceNodes,
+                                       int32_t sourceCount) {
+  if ((sourceNodes == NULL) || (sourceCount <= 0)) {
+    return;
+  }
+
+  for (int32_t i = 0; i < sourceCount; i++) {
+    const int32_t node = sourceNodes[i];
+    if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+      nodes[(*count)++] = node;
+    }
+  }
+}
+
+static int32_t solver_displacement_output_needs_previous(void) {
+  return (Param.theNumberOfStations != 0) &&
+         ((Param.printStationVelocities == YES) ||
+          (Param.printStationAccelerations == YES));
+}
+
+static void solver_report_displacement_output_patch_count(
+    int32_t localPatchCount) {
+  long long localCount = (long long)localPatchCount;
+  long long globalCount = 0;
+  long long maxCount = 0;
+
+  if (g_dispOutputReported != 0) {
+    return;
+  }
+
+  MPI_Reduce(&localCount, &globalCount, 1, MPI_LONG_LONG, MPI_SUM, 0,
+             comm_solver);
+  MPI_Reduce(&localCount, &maxCount, 1, MPI_LONG_LONG, MPI_MAX, 0,
+             comm_solver);
+  if (Global.myID == 0) {
+    monitor_print(
+        "Displacement output patch nodes: %lld globally "
+        "(max/rank=%lld) for station/plane output%s\n",
+        globalCount, maxCount,
+        solver_displacement_output_needs_previous() ? " (tm1+tm2)" : " (tm1)");
+  }
+  g_dispOutputReported = 1;
+}
+
+static void solver_init_displacement_output_sync(mysolver_t* solver) {
+  int32_t capacity;
+  int32_t count = 0;
+  int32_t uniqueCount = 0;
+  int32_t* nodes = NULL;
+  const int32_t planeNodeCount = planes_displacement_node_count();
+  const int32_t* planeNodes = planes_displacement_nodes();
+
+  (void)solver;
+
+  if (g_dispOutputSyncReady != 0 || displacement_sync_mode() == 0) {
+    return;
+  }
+
+  if ((Param.theNumberOfStations == 0) && (Param.theNumberOfPlanes == 0)) {
+    g_dispOutputSyncReady = 1;
+    return;
+  }
+
+  capacity = (8 * Param.myNumberOfStations) + planeNodeCount;
+  if (capacity <= 0) {
+    solver_report_displacement_output_patch_count(0);
+    g_dispOutputSyncReady = 1;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
+  if (nodes == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating displacement output-node list\n");
+  }
+
+  if ((Param.myNumberOfStations > 0) && (Param.myStations != NULL)) {
+    for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
+      for (int32_t corner = 0; corner < 8; corner++) {
+        const int32_t node =
+            Param.myStations[station].nodestointerpolate[corner];
+        if ((node >= 0) && (node < Global.myMesh->nharbored)) {
+          nodes[count++] = node;
+        }
+      }
+    }
+  }
+  solver_append_output_nodes(nodes, &count, planeNodes, planeNodeCount);
+
+  if (count > 0) {
+    qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
+    for (int32_t i = 0; i < count; i++) {
+      if ((i == 0) || (nodes[i] != nodes[i - 1])) {
+        nodes[uniqueCount++] = nodes[i];
+      }
+    }
+  }
+
+  solver_report_displacement_output_patch_count(uniqueCount);
+  g_dispOutputNodeCount = uniqueCount;
+  if (uniqueCount <= 0) {
+    free(nodes);
+    g_dispOutputSyncReady = 1;
+    return;
+  }
+
+  g_dispOutputNodesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)uniqueCount);
+  if (g_dispOutputNodesHost == NULL) {
+    free(nodes);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating displacement output-node copy\n");
+  }
+  memcpy(g_dispOutputNodesHost, nodes,
+         sizeof(int32_t) * (size_t)uniqueCount);
+  free(nodes);
+
+  solver_pore_pressure_device_copy_int32(
+      &g_dispOutputNodesDevice, g_dispOutputNodesHost, uniqueCount,
+      "displacement output-node copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_dispOutputBufferDevice,
+                 sizeof(fvector_t) * (size_t)uniqueCount),
+      "displacement output device buffer");
+  if (cudaHostAlloc((void**)&g_dispOutputBufferHost,
+                    sizeof(fvector_t) * (size_t)uniqueCount,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_dispOutputHostPinned = 1;
+  } else {
+    g_dispOutputBufferHost =
+        (fvector_t*)malloc(sizeof(fvector_t) * (size_t)uniqueCount);
+    if (g_dispOutputBufferHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Failed allocating displacement output host buffer\n");
+    }
+  }
+
+  g_dispOutputSyncReady = 1;
+}
+
+static void solver_sync_displacement_output_field(
+    mysolver_t* solver, const fvector_t* sourceDevice,
+    fvector_t* destinationHost, const char* label) {
+  const int32_t blocksize = 256;
+  const int32_t gridsize =
+      (g_dispOutputNodeCount + blocksize - 1) / blocksize;
+
+  if ((g_dispOutputNodeCount <= 0) || (sourceDevice == NULL) ||
+      (destinationHost == NULL)) {
+    return;
+  }
+
+  kernelVectorBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_dispOutputNodeCount, g_dispOutputNodesDevice, sourceDevice,
+      g_dispOutputBufferDevice);
+  solver_pore_pressure_device_check(cudaGetLastError(), label);
+  solver_pore_pressure_device_check(
+      cudaMemcpyAsync(g_dispOutputBufferHost, g_dispOutputBufferDevice,
+                      sizeof(fvector_t) * (size_t)g_dispOutputNodeCount,
+                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
+      "displacement output D2H");
+  solver->gpu_spec->numbytespci +=
+      g_dispOutputNodeCount * (int64_t)sizeof(fvector_t);
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "displacement output D2H sync");
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_dispOutputNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_dispOutputNodeCount; i++) {
+    destinationHost[g_dispOutputNodesHost[i]] = g_dispOutputBufferHost[i];
+  }
+}
+
+static void solver_sync_displacement_output_values(mysolver_t* solver) {
+  if (displacement_sync_mode() == 0) {
+    return;
+  }
+
+  solver_init_displacement_output_sync(solver);
+  if (g_dispOutputNodeCount <= 0) {
+    return;
+  }
+
+  Timer_Start("Disp output D2H patch");
+  solver_sync_displacement_output_field(solver, solver->gpuData->tm1Device,
+                                        solver->tm1,
+                                        "displacement output tm1 gather");
+  if (solver_displacement_output_needs_previous()) {
+    solver_sync_displacement_output_field(solver, solver->gpuData->tm2Device,
+                                          solver->tm2,
+                                          "displacement output tm2 gather");
+  }
+  Timer_Stop("Disp output D2H patch");
 }
 
 static void solver_init_pressure_sparse_sync(mysolver_t* solver) {
@@ -17928,6 +18147,26 @@ static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
 }
 
 static void solver_free_pore_pressure_device_sync(void) {
+  cudaFree(g_dispBoundaryNodesDevice);
+  cudaFree(g_dispBoundaryBufferDevice);
+  free(g_dispBoundaryNodesHost);
+  if (g_dispBoundaryBufferHost != NULL) {
+    if (g_dispBoundaryHostPinned != 0) {
+      cudaFreeHost(g_dispBoundaryBufferHost);
+    } else {
+      free(g_dispBoundaryBufferHost);
+    }
+  }
+  cudaFree(g_dispOutputNodesDevice);
+  cudaFree(g_dispOutputBufferDevice);
+  free(g_dispOutputNodesHost);
+  if (g_dispOutputBufferHost != NULL) {
+    if (g_dispOutputHostPinned != 0) {
+      cudaFreeHost(g_dispOutputBufferHost);
+    } else {
+      free(g_dispOutputBufferHost);
+    }
+  }
   cudaFree(g_acousticPressureStationNodesDevice);
   cudaFree(g_acousticPressureStationBufferDevice);
   free(g_acousticPressureStationNodesHost);
@@ -17967,6 +18206,21 @@ static void solver_free_pore_pressure_device_sync(void) {
     }
   }
 
+  g_dispBoundaryNodesHost = NULL;
+  g_dispBoundaryNodesDevice = NULL;
+  g_dispBoundaryBufferHost = NULL;
+  g_dispBoundaryBufferDevice = NULL;
+  g_dispBoundaryNodeCount = 0;
+  g_dispBoundaryHostPinned = 0;
+  g_dispBoundaryReady = 0;
+  g_dispOutputNodesHost = NULL;
+  g_dispOutputNodesDevice = NULL;
+  g_dispOutputBufferHost = NULL;
+  g_dispOutputBufferDevice = NULL;
+  g_dispOutputNodeCount = 0;
+  g_dispOutputHostPinned = 0;
+  g_dispOutputSyncReady = 0;
+  g_dispOutputReported = 0;
   g_porePressureAdjustParentOffsetsDevice = NULL;
   g_porePressureAdjustDanglingBase3Device = NULL;
   g_porePressureAdjustInvDepsDevice = NULL;
@@ -19658,6 +19912,7 @@ static void solver_run() {
     solver_load_pressure_gpu(Global.mySolver, Global.myMesh);
     Timer_Stop("GPU Load Disp");
     Timer_Stop("GPU Memory Copy");
+    solver_sync_displacement_output_values(Global.mySolver);
     solver_sync_acoustic_pressure_station_values(Global.mySolver);
     solver_update_acoustic_station_kinematics(step);
     solver_sync_acoustic_plane_pressure_values(Global.mySolver);
