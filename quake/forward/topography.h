@@ -109,6 +109,9 @@ int    get_topo_station_tet     ( int32_t statID, int *out_teth_i,
 
 void   topography_stations_init ( mesh_t    *myMesh, station_t *myStations, int32_t    myNumberOfStations);
 void   topography_snapshot_station_history(mysolver_t *mySolver);
+int32_t topography_station_node_count(void);
+void   topography_collect_station_nodes(int32_t *nodes, int32_t *count,
+                                        int32_t capacity);
 int    compute_tetra_displ      (double *dis_x, double *dis_y, double *dis_z,
 						 	 	 double *vel_x, double *vel_y, double *vel_z,
 						 	 	 double *accel_x, double *accel_y, double *accel_z,

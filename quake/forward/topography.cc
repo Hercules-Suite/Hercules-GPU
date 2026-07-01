@@ -3092,6 +3092,47 @@ void topography_snapshot_station_history(mysolver_t *mySolver) {
     }
 }
 
+int32_t topography_station_node_count(void) {
+    int32_t count = 0;
+
+    if ((myTopoStations == NULL) || (myTopoStationsCapacity == 0) ||
+        (myNumberOfTopoStations == 0) || (theTopoMethod == FEM)) {
+        return 0;
+    }
+
+    for (int32_t iStation = 0; iStation < myTopoStationsCapacity; iStation++) {
+        if (myTopoStations[iStation].TopoStation != 0) {
+            count += 4;
+        }
+    }
+
+    return count;
+}
+
+void topography_collect_station_nodes(int32_t *nodes, int32_t *count,
+                                      int32_t capacity) {
+    if ((nodes == NULL) || (count == NULL) ||
+        (myTopoStations == NULL) || (myTopoStationsCapacity == 0) ||
+        (myNumberOfTopoStations == 0) || (theTopoMethod == FEM)) {
+        return;
+    }
+
+    for (int32_t iStation = 0; iStation < myTopoStationsCapacity; iStation++) {
+        if (myTopoStations[iStation].TopoStation == 0) {
+            continue;
+        }
+
+        for (int32_t iNode = 0; iNode < 4; iNode++) {
+            if (*count >= capacity) {
+                solver_abort("topography_collect_station_nodes", NULL,
+                             "Topography station node list overflow\n");
+            }
+            nodes[(*count)++] =
+                myTopoStations[iStation].nodes_to_interpolate[iNode];
+        }
+    }
+}
+
 void compute_tetra_localcoord ( vector3D_t point, elem_t *elemp,
                                 int32_t *localNode, double *localCoord,
                                 double xo, double yo, double zo, double h,

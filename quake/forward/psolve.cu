@@ -16563,6 +16563,7 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
   int32_t* nodes = NULL;
   const int32_t planeNodeCount = planes_displacement_node_count();
   const int32_t* planeNodes = planes_displacement_nodes();
+  const int32_t topoStationNodeCount = topography_station_node_count();
 
   (void)solver;
 
@@ -16575,7 +16576,8 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
     return;
   }
 
-  capacity = (8 * Param.myNumberOfStations) + planeNodeCount;
+  capacity = (8 * Param.myNumberOfStations) + topoStationNodeCount +
+             planeNodeCount;
   if (capacity <= 0) {
     solver_report_displacement_output_patch_count(0);
     g_dispOutputSyncReady = 1;
@@ -16599,6 +16601,7 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
       }
     }
   }
+  topography_collect_station_nodes(nodes, &count, capacity);
   solver_append_output_nodes(nodes, &count, planeNodes, planeNodeCount);
 
   if (count > 0) {
