@@ -19915,6 +19915,7 @@ static void solver_run() {
   for (step = startingStep; step < Param.theTotalSteps; step++) {
     fvector_t* tmpvector;
     int pressure_step_needs_synced_disp = poroelastic_gpu_active();
+    int is_final_step = (step == Param.theTotalSteps - 1);
 
     /* prepare for a new iteration
      * swap displacement vectors for t(n) and t(n-1) */
@@ -20100,7 +20101,10 @@ static void solver_run() {
     Timer_Stop("GPU Reset");
     Timer_Stop("GPU Memory Copy");
 
-    if (!pressure_step_needs_synced_disp) {
+    /* This exchange only prepares the displacement boundary state consumed by
+     * the next iteration. The last iteration has no consumer, and avoiding the
+     * extra MPI round prevents end-of-run hangs on device-resident sync paths. */
+    if (!pressure_step_needs_synced_disp && !is_final_step) {
       fvector_t* displacementDevice =
           displacement_device_sync_enabled()
               ? Global.mySolver->gpuData->tm1Device
