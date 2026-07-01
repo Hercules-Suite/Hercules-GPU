@@ -1924,8 +1924,6 @@ void planes_IO_PES_main(int32_t PEnum){
 	ret = fwrite( planes_output_buffer, sizeof(double), items_to_write, thePlanes[iPlane].fpoutputfile );
 	if (ret != items_to_write)
 	    solver_abort( "IO_Server_Main_Loop", NULL, "Error: Unable to output displacement file to disk" );
-	if (fflush(thePlanes[iPlane].fpoutputfile) != 0)
-	    solver_abort( "IO_Server_Main_Loop", NULL, "Error: Unable to flush displacement file to disk" );
 
     }/*while*/
 
