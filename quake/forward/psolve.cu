@@ -16086,6 +16086,9 @@ static int32_t displacement_sync_mode(void) {
   if (g_dispSyncMode < 0) {
     const char* env = getenv("HERCULES_DISP_SYNC_MODE");
     int32_t requestedBoundary = -1;
+    int32_t autoOutputFallback = 0;
+    const int32_t outputPresent =
+        (Param.theNumberOfStations != 0) || (Param.theNumberOfPlanes != 0);
 
     if (env != NULL) {
       if (strcasecmp(env, "boundary") == 0 || strcasecmp(env, "sparse") == 0 ||
@@ -16102,6 +16105,10 @@ static int32_t displacement_sync_mode(void) {
 
     if (requestedBoundary < 0) {
       requestedBoundary = displacement_boundary_sync_safe();
+      if ((requestedBoundary != 0) && outputPresent) {
+        requestedBoundary = 0;
+        autoOutputFallback = 1;
+      }
     }
 
     g_dispSyncMode =
@@ -16111,11 +16118,12 @@ static int32_t displacement_sync_mode(void) {
       monitor_print(
           "Displacement sync path: %s%s\n",
           g_dispSyncMode ? "boundary" : "full",
-          (requestedBoundary != 0 && g_dispSyncMode == 0)
+          autoOutputFallback
+              ? " (station/plane output: set HERCULES_DISP_SYNC_MODE=boundary to test sparse output patch)"
+          : (requestedBoundary != 0 && g_dispSyncMode == 0)
               ? " (boundary requested but unsafe for this run)"
               : (g_dispSyncMode &&
-                 (Param.theNumberOfStations != 0 ||
-                  Param.theNumberOfPlanes != 0))
+                 outputPresent)
                     ? " + sparse output patch"
               : "");
       g_dispSyncReported = 1;
