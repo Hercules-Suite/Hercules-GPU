@@ -129,6 +129,7 @@ static double* planes_stripMPISendBuffer;
 static double* planes_stripMPIRecvBuffer;
 static int32_t g_planeIOServerCount = 1;
 static int32_t g_planeIOServerFirstRank = 0;
+static int32_t g_planeIOSolverRankCount = 0;
 static int32_t g_planeOutputOmpMode = -1;
 static int32_t g_planeOutputOmpReported = 0;
 static int32_t g_planeOutputRankCached = -1;
@@ -1406,6 +1407,10 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
 
 		g_planeIOServerCount = server_count;
 		g_planeIOServerFirstRank = world_size - server_count;
+		g_planeIOSolverRankCount = world_size - io_pool_pe_count;
+		if (g_planeIOSolverRankCount < 1) {
+			g_planeIOSolverRankCount = g_planeIOServerFirstRank;
+		}
 	}
 
 	/* broadcast plane info to whole IO group */
@@ -1415,6 +1420,7 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
     MPI_Bcast( thePlaneDirOut, 256, MPI_CHAR, 0, comm_IO );
 	MPI_Bcast( &g_planeIOServerCount, 1, MPI_INT, 0, comm_IO );
 	MPI_Bcast( &g_planeIOServerFirstRank, 1, MPI_INT, 0, comm_IO );
+	MPI_Bcast( &g_planeIOSolverRankCount, 1, MPI_INT, 0, comm_IO );
 
 
     /* initialize the local structures */
@@ -1754,7 +1760,10 @@ void New_planes_close(int32_t PEnum, int theNumberOfPlanes){
 
     int iServer;
 
-    if (PEnum==0){
+    /* Every solver rank sends STOP after its own plane data. The IO server
+     * waits for all STOPs, which uses MPI's per-source message ordering to
+     * guarantee that all earlier plane messages have been received first. */
+    if (PEnum < g_planeIOSolverRankCount){
 	planes_stripMPISendBuffer[0]= (STOP_SERVER + 0.1);
 	for (iServer = 0; iServer < g_planeIOServerCount; iServer++) {
 	    int serverRank = g_planeIOServerFirstRank + iServer;
@@ -1783,6 +1792,7 @@ void planes_IO_PES_main(int32_t PEnum){
     MPI_Bcast( thePlaneDirOut, 256, MPI_CHAR, 0, comm_IO );
 	MPI_Bcast( &g_planeIOServerCount, 1, MPI_INT, 0, comm_IO );
 	MPI_Bcast( &g_planeIOServerFirstRank, 1, MPI_INT, 0, comm_IO );
+	MPI_Bcast( &g_planeIOSolverRankCount, 1, MPI_INT, 0, comm_IO );
 
     if(theNumberOfPlanes==0) return;
 
@@ -1861,6 +1871,7 @@ void planes_IO_PES_main(int32_t PEnum){
 	   Turn this on when and if it is needed */
     }
 
+    int stopCount = 0;
     while(1){
 
 	int recvStripCount, rStrip;
@@ -1872,8 +1883,14 @@ void planes_IO_PES_main(int32_t PEnum){
 
 	/* Check for a stop message */
 	if( recvStripCount == 1){
-	    if( (int)planes_stripMPIRecvBuffer[0] == STOP_SERVER)
-		break;
+	    if( (int)planes_stripMPIRecvBuffer[0] == STOP_SERVER) {
+		stopCount++;
+		if (stopCount >= g_planeIOSolverRankCount)
+		    break;
+		continue;
+	    }
+	    solver_abort( "IO_Server_Main_Loop", NULL,
+	                  "Error: malformed one-value plane IO message" );
 	}
 	/* else pick this plane and fill in first strip */
 	else{

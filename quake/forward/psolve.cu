@@ -20173,9 +20173,18 @@ static void solver_run() {
     monitor_print("Final-step diag: solver loop complete\n");
   }
 
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: solver local closes begin\n");
+  }
   solver_drm_close();
   solver_output_wavefield_close();
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: solver timer collect begin\n");
+  }
   solver_run_collect_timers();
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: solver timer collect end\n");
+  }
 }
 
 /**
@@ -27459,17 +27468,38 @@ int main(int argc, char** argv) {
   Timer_Stop("Phase Sync/Coordination");
   Timer_Start("Solver");
   solver_run();
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: solver_run returned\n");
+  }
   Timer_Stop("Solver");
 
   if (Param.theNumberOfStations != 0) {
+    if (solver_final_step_diag_enabled() && Global.myID == 0) {
+      monitor_print("Final-step diag: station close begin\n");
+    }
     solver_close_station_outputs();
+    if (solver_final_step_diag_enabled() && Global.myID == 0) {
+      monitor_print("Final-step diag: station close end\n");
+    }
   }
   if (Param.theNumberOfPlanes != 0) {
+    if (solver_final_step_diag_enabled() && Global.myID == 0) {
+      monitor_print("Final-step diag: plane close begin\n");
+    }
     planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
+    if (solver_final_step_diag_enabled() && Global.myID == 0) {
+      monitor_print("Final-step diag: plane close end\n");
+    }
   }
 
   Timer_Start("Phase Sync/Coordination");
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: post-solver barrier begin\n");
+  }
   MPI_Barrier(comm_solver);
+  if (solver_final_step_diag_enabled() && Global.myID == 0) {
+    monitor_print("Final-step diag: post-solver barrier end\n");
+  }
   Timer_Stop("Phase Sync/Coordination");
 
   Timer_Start("Post Solver Finalize");
