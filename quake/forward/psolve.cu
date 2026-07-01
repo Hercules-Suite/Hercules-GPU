@@ -14044,6 +14044,21 @@ static void solver_output_planes(mysolver_t* solver, int my_id, int step) {
   }
 }
 
+static void solver_close_station_outputs(void) {
+  if ((Param.theNumberOfStations == 0) || (Param.myStations == NULL)) {
+    return;
+  }
+
+  for (int32_t iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
+    FILE* fp = Param.myStations[iStation].fpoutputfile;
+    if (fp != NULL) {
+      fflush(fp);
+      hu_fclose(fp);
+      Param.myStations[iStation].fpoutputfile = NULL;
+    }
+  }
+}
+
 static void solver_output_stations(int step) {
   if (Param.theNumberOfStations != 0) {
     if (step % Param.theStationsPrintRate == 0) {
@@ -16086,9 +16101,6 @@ static int32_t displacement_sync_mode(void) {
   if (g_dispSyncMode < 0) {
     const char* env = getenv("HERCULES_DISP_SYNC_MODE");
     int32_t requestedBoundary = -1;
-    int32_t autoOutputFallback = 0;
-    const int32_t outputPresent =
-        (Param.theNumberOfStations != 0) || (Param.theNumberOfPlanes != 0);
 
     if (env != NULL) {
       if (strcasecmp(env, "boundary") == 0 || strcasecmp(env, "sparse") == 0 ||
@@ -16105,10 +16117,6 @@ static int32_t displacement_sync_mode(void) {
 
     if (requestedBoundary < 0) {
       requestedBoundary = displacement_boundary_sync_safe();
-      if ((requestedBoundary != 0) && outputPresent) {
-        requestedBoundary = 0;
-        autoOutputFallback = 1;
-      }
     }
 
     g_dispSyncMode =
@@ -16118,12 +16126,11 @@ static int32_t displacement_sync_mode(void) {
       monitor_print(
           "Displacement sync path: %s%s\n",
           g_dispSyncMode ? "boundary" : "full",
-          autoOutputFallback
-              ? " (station/plane output: set HERCULES_DISP_SYNC_MODE=boundary to test sparse output patch)"
-          : (requestedBoundary != 0 && g_dispSyncMode == 0)
+          (requestedBoundary != 0 && g_dispSyncMode == 0)
               ? " (boundary requested but unsafe for this run)"
               : (g_dispSyncMode &&
-                 outputPresent)
+                 ((Param.theNumberOfStations != 0) ||
+                  (Param.theNumberOfPlanes != 0)))
                     ? " + sparse output patch"
               : "");
       g_dispSyncReported = 1;
@@ -27409,6 +27416,14 @@ int main(int argc, char** argv) {
   Timer_Start("Solver");
   solver_run();
   Timer_Stop("Solver");
+
+  if (Param.theNumberOfStations != 0) {
+    solver_close_station_outputs();
+  }
+  if (Param.theNumberOfPlanes != 0) {
+    planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
+  }
+
   Timer_Start("Phase Sync/Coordination");
   MPI_Barrier(comm_solver);
   Timer_Stop("Phase Sync/Coordination");
@@ -27490,10 +27505,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  /* Send a message to IO pool PEs to close output files and goto here */
-  if (Param.theNumberOfPlanes != 0) {
-    planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
-  }
+  /* IO-pool plane outputs are closed immediately after solver_run(). */
 IO_PES_REJOIN:
 
   MPI_Finalize();
