@@ -19576,55 +19576,26 @@ static void solver_run_collect_timers(void) {
   /* Get min and max of individual cumulative times.
    * this is NOT best and worst single step times
    */
-  if (Timer_Exists("Print Planes")) {
-    Timer_Reduce("Print Planes", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-
-  if (Timer_Exists("Print Stations")) {
-    Timer_Reduce("Print Stations", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-
-  if (Timer_Exists("Compute Non-linear Entities")) {
-    Timer_Reduce("Compute Non-linear Entities",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
-  if (Timer_Exists("Compute addforces Non-linear")) {
-    Timer_Reduce("Compute addforces Non-linear",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
-  if (Timer_Exists("Compute addforces gravity")) {
-    Timer_Reduce("Compute addforces gravity", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-
-  if (Timer_Exists("Compute addforces Topography")) {
-    Timer_Reduce("Compute addforces Topography",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
-  if (Timer_Exists("Compute addforces Incident Plane Waves")) {
-    Timer_Reduce("Compute addforces Incident Plane Waves",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
-  if (Timer_Exists("Solver drm output")) {
-    Timer_Reduce("Solver drm output", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
-
-  if (Timer_Exists("Solver drm read displacements")) {
-    Timer_Reduce("Solver drm read displacements",
-                 (TimerKind)(MAX | MIN | AVERAGE), comm_solver);
-  }
-
-  if (Timer_Exists("Solver drm force compute")) {
-    Timer_Reduce("Solver drm force compute", (TimerKind)(MAX | MIN | AVERAGE),
-                 comm_solver);
-  }
+  solver_reduce_timer_if_any("Print Planes",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Print Stations",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute Non-linear Entities",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces Non-linear",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces gravity",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces Topography",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Compute addforces Incident Plane Waves",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Solver drm output",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Solver drm read displacements",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Solver drm force compute",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Sparse force upload build",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Sparse force upload memcpy",
