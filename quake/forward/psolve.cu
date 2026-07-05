@@ -2139,6 +2139,13 @@ static int acoustic_pressure_enabled(void) {
          (Param.acousticPressureFormulation == YES);
 }
 
+static double acoustic_stiffness_damping_beta(double q_ac, double freq,
+                                              double delta_t) {
+  return (q_ac > 0.0 && freq > 0.0 && delta_t > 0.0)
+             ? (1.0 / (q_ac * 2.0 * PI * freq * delta_t))
+             : 0.0;
+}
+
 typedef struct groundwater_grid_t {
   int loaded;
   char path[PATH_MAX];
@@ -4724,7 +4731,23 @@ static int32_t parse_parameters(const char* numericalin) {
                     Param.theAcousticQualityFactor);
     } else {
       monitor_print("Acoustic quality factor Q:          %s\n",
-                    "lossless (default; bit-identical baseline)");
+                    "lossless (default)");
+    }
+    if (Param.acousticPressureFormulation == YES) {
+      const double q_ac = Param.theAcousticQualityFactor;
+      const double w_ref = 2.0 * PI * Param.theFreq;
+      const double bA = acoustic_stiffness_damping_beta(
+          q_ac, Param.theFreq, Param.theDeltaT);
+      if (bA != 0.0) {
+        monitor_print(
+            "Acoustic stiffness damping:         Q=%.3f -> beta=%.6e "
+            "(zeta@%.3fHz=%.3e; ACTIVE)\n",
+            q_ac, bA, Param.theFreq,
+            0.5 * bA * w_ref * Param.theDeltaT);
+      } else {
+        monitor_print("Acoustic stiffness damping:         beta=0 "
+                      "(lossless)\n");
+      }
     }
     if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
       monitor_print("Acoustic interface diagnostics:     %s\n",
@@ -12039,25 +12062,9 @@ static void solver_init() {
    * / <= 0 (or degenerate freq/dt) => beta = 0 => acoustic stays exactly
    * lossless and bit-identical to the validated baseline. */
   {
-    double q_ac = Param.theAcousticQualityFactor;
-    double w_ref = 2.0 * PI * Param.theFreq;
     Global.gpuData.acousticStiffnessDampingBeta =
-        (q_ac > 0.0 && Param.theFreq > 0.0 && Param.theDeltaT > 0.0)
-            ? (1.0 / (q_ac * w_ref * Param.theDeltaT))
-            : 0.0;
-    if (Global.myID == 0) {
-      double bA = Global.gpuData.acousticStiffnessDampingBeta;
-      if (bA != 0.0) {
-        monitor_print(
-            "Acoustic stiffness damping:         Q=%.3f -> beta=%.6e "
-            "(zeta@%.3fHz=%.3e; ACTIVE)\n",
-            q_ac, bA, Param.theFreq,
-            0.5 * bA * w_ref * Param.theDeltaT);
-      } else {
-        monitor_print("Acoustic stiffness damping:         beta=0 "
-                      "(lossless; baseline bit-identical)\n");
-      }
-    }
+        acoustic_stiffness_damping_beta(Param.theAcousticQualityFactor,
+                                        Param.theFreq, Param.theDeltaT);
   }
   Global.gpuData.acousticInterfaceElementIdsDevice = NULL;
   Global.gpuData.acousticInterfaceFaceIdsDevice = NULL;
