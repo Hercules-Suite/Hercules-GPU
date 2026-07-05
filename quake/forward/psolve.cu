@@ -16305,9 +16305,6 @@ static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
   }
 
   face_count = solver->gpuData->acousticInterfaceFaceCount;
-  if (face_count <= 0) {
-    return;
-  }
 
   Timer_Start("Acoustic open-pore target reset");
   cudaMemsetAsync(solver->gpuData->porePressureOpenPoreTargetDevice, 0,
@@ -16315,21 +16312,26 @@ static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
                   solver->streams[CUDA_STREAM_MAIN]);
   Timer_Stop("Acoustic open-pore target reset");
 
-  Timer_Start("Acoustic open-pore target kernel");
-  blocksize = 256;
-  gridsize = (face_count + blocksize - 1) / blocksize;
-  kernelAcousticPoroelasticOpenPoreTarget<<<
-      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
-      face_count, solver->gpuDataDevice, Param.theDeltaT);
-  cerror = cudaGetLastError();
-  if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: acoustic open-pore target kernel - %s\n",
-            Global.myID, cudaGetErrorString(cerror));
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  if (face_count > 0) {
+    Timer_Start("Acoustic open-pore target kernel");
+    blocksize = 256;
+    gridsize = (face_count + blocksize - 1) / blocksize;
+    kernelAcousticPoroelasticOpenPoreTarget<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        face_count, solver->gpuDataDevice, Param.theDeltaT);
+    cerror = cudaGetLastError();
+    if (cerror != cudaSuccess) {
+      fprintf(stderr, "Thread %d: acoustic open-pore target kernel - %s\n",
+              Global.myID, cudaGetErrorString(cerror));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    Timer_Stop("Acoustic open-pore target kernel");
   }
-  Timer_Stop("Acoustic open-pore target kernel");
 
+  /* Every rank must participate in the target contribution exchange, even if
+   * it has no local acoustic-poroelastic fragments. Otherwise CUDA-aware MPI
+   * ranks with zero fragments skip these schedule calls while neighbors wait. */
   Timer_Start("Acoustic open-pore target D2H");
   if (useDeviceSync) {
     /* CUDA-aware exchange below uses the device-resident target. */
