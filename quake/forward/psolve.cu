@@ -118,12 +118,7 @@ static int32_t g_topoForceMode = -1;
 static int32_t g_topoForceModeReported = 0;
 static int32_t g_topoForcePathReported = 0;
 static int64_t g_acousticPressureElementCount = 0;
-static int64_t g_acousticPressureNodeCount = 0;
-static int64_t g_acousticPressureFreeSurfaceNodeCount = 0;
 static int64_t g_poroelasticElementCount = 0;
-static int64_t g_poroelasticNodeCount = 0;
-static int64_t g_poroelasticPmlCandidateCount = 0;
-static int64_t g_poroelasticUndrainedFastPathElementCount = 0;
 static int32_t g_poroelasticLocalElementCount = 0;
 static int32_t* g_poroelasticElemMapper = NULL;
 static uint8_t* g_poroelasticElementFlags = NULL;
@@ -723,7 +718,6 @@ static int32_t contrib_unpack_use_omp(void);
 static int32_t contrib_recv_use_waitsome(void);
 static int32_t sparse_force_upload_mode(void);
 static int32_t hercules_repro_mode(void);
-static int32_t hercules_repro_strict(void);
 static int32_t displacement_sync_mode(void);
 static int32_t pressure_force_sync_mode(void);
 static int32_t pressure_field_sync_mode(void);
@@ -2623,110 +2617,6 @@ static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
       if ((lnid >= 0) && (lnid < Global.myMesh->nharbored)) {
         solver->pore_pressure_open_pore_mass[lnid] +=
             (solver_float)(scale * weight);
-      }
-    }
-  }
-}
-
-static void poroelastic_element_coupling_apply(
-    mesh_t* mesh, int32_t eindex, const solver_float* pressure,
-    const fvector_t* unew, const fvector_t* uold, double forceOut[8][3],
-    double qtDeltaUOut[8]) {
-  elem_t* elemp = &mesh->elemTable[eindex];
-  edata_t* edata = (edata_t*)elemp->data;
-  const double alpha = Param.thePoroelasticBiotAlpha;
-  const double h = (double)edata->edgesize;
-  const double gp = 0.57735026918962576451; /* 1 / sqrt(3) */
-  const double gcoord[2] = {-gp, gp};
-  double nodalVolumes[8];
-  double pressureShapeScale[8];
-  double elementVolume = 0.0;
-  double detJ;
-  double volumeScale;
-  double referenceNodalVolume;
-  const int wantForce = (pressure != NULL) && (forceOut != NULL);
-  const int wantTranspose =
-      (unew != NULL) && (uold != NULL) && (qtDeltaUOut != NULL);
-
-  if ((alpha == 0.0) || (h <= 0.0) || (!wantForce && !wantTranspose)) {
-    return;
-  }
-
-  poroelastic_element_nodal_volumes(mesh, eindex, nodalVolumes,
-                                    &elementVolume);
-  if (elementVolume <= 0.0) {
-    return;
-  }
-  volumeScale = elementVolume / (h * h * h);
-  detJ = 0.125 * h * h * h * volumeScale;
-  /* Match the pressure test-function volume to the existing lumped
-   * pore-pressure mass, especially for topographic cut-cell elements. */
-  referenceNodalVolume = elementVolume / 8.0;
-  for (int j = 0; j < 8; j++) {
-    pressureShapeScale[j] =
-        (referenceNodalVolume > 0.0)
-            ? (nodalVolumes[j] / referenceNodalVolume)
-            : 1.0;
-  }
-
-  for (int gx = 0; gx < 2; gx++) {
-    const double xi = gcoord[gx];
-    for (int gy = 0; gy < 2; gy++) {
-      const double eta = gcoord[gy];
-      for (int gz = 0; gz < 2; gz++) {
-        const double zeta = gcoord[gz];
-        double N[8];
-        double Np[8];
-        double dNdx[8][3];
-        double pressureAtGp = 0.0;
-        double divDeltaU = 0.0;
-
-        for (int j = 0; j < 8; j++) {
-          const double sx = poro_node_sign(j, 0);
-          const double sy = poro_node_sign(j, 1);
-          const double sz = poro_node_sign(j, 2);
-          const double ax = 1.0 + sx * xi;
-          const double ay = 1.0 + sy * eta;
-          const double az = 1.0 + sz * zeta;
-          const int32_t lnid = elemp->lnid[j];
-
-          N[j] = 0.125 * ax * ay * az;
-          Np[j] = N[j] * pressureShapeScale[j];
-          dNdx[j][0] = sx * ay * az / (4.0 * h);
-          dNdx[j][1] = sy * ax * az / (4.0 * h);
-          dNdx[j][2] = sz * ax * ay / (4.0 * h);
-
-          if (wantForce) {
-            pressureAtGp += Np[j] * (double)pressure[lnid];
-          }
-          if (wantTranspose) {
-            divDeltaU += dNdx[j][0] *
-                         ((double)unew[lnid].f[0] -
-                          (double)uold[lnid].f[0]);
-            divDeltaU += dNdx[j][1] *
-                         ((double)unew[lnid].f[1] -
-                          (double)uold[lnid].f[1]);
-            divDeltaU += dNdx[j][2] *
-                         ((double)unew[lnid].f[2] -
-                          (double)uold[lnid].f[2]);
-          }
-        }
-
-        if (wantForce) {
-          const double scale = alpha * pressureAtGp * detJ;
-          for (int j = 0; j < 8; j++) {
-            forceOut[j][0] += scale * dNdx[j][0];
-            forceOut[j][1] += scale * dNdx[j][1];
-            forceOut[j][2] += scale * dNdx[j][2];
-          }
-        }
-
-        if (wantTranspose) {
-          const double scale = alpha * divDeltaU * detJ;
-          for (int j = 0; j < 8; j++) {
-            qtDeltaUOut[j] += scale * Np[j];
-          }
-        }
       }
     }
   }
@@ -5861,26 +5751,6 @@ static int mesh_find_octant_at_domain_point(const vector3D_t* point,
   if (is_local_out != NULL) {
     *is_local_out = is_local;
   }
-  if (eindex_out != NULL) {
-    *eindex_out = eindex;
-  }
-  return 1;
-}
-
-static int mesh_find_local_element_at_domain_point(const vector3D_t* point,
-                                                   int32_t* eindex_out) {
-  int is_local = 0;
-  int32_t eindex = -1;
-
-  if (!mesh_find_octant_at_domain_point(point, NULL, NULL, NULL, &is_local,
-                                        &eindex) ||
-      !is_local || (eindex < 0)) {
-    if (eindex_out != NULL) {
-      *eindex_out = -1;
-    }
-    return 0;
-  }
-
   if (eindex_out != NULL) {
     *eindex_out = eindex;
   }
@@ -9865,8 +9735,11 @@ static void gpu_init(int32_t myID) {
   //   myID); MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
   // }
 
-  /* Set the shared memory bank size to 8 */
+  /* CUDA 13 deprecates the process-wide shared-memory bank-size preference.
+   * Preserve the old tuning only for older toolkits. */
+#if !defined(CUDA_VERSION) || (CUDA_VERSION < 13000)
   cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
+#endif
 
   /* Retrieve device hardware details */
   getGPUHardware(myID, myDevID, &(Global.gpu_spec));
@@ -11922,8 +11795,6 @@ static void solver_init() {
                   &globalPressureFreeSurfaceNodes, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
     g_acousticPressureElementCount = globalPressureElements;
-    g_acousticPressureNodeCount = globalPressureNodes;
-    g_acousticPressureFreeSurfaceNodeCount = globalPressureFreeSurfaceNodes;
     if (Global.myID == 0) {
       monitor_print(
           "Acoustic scalar formulation: %.1fM elements, %.1fM nodes, %.1fM free-surface nodes\n",
@@ -11933,8 +11804,6 @@ static void solver_init() {
     }
   } else {
     g_acousticPressureElementCount = 0;
-    g_acousticPressureNodeCount = 0;
-    g_acousticPressureFreeSurfaceNodeCount = 0;
   }
 
   if (poroelastic_enabled()) {
@@ -12020,10 +11889,6 @@ static void solver_init() {
                   &globalPoroelasticMinDtFactorUndrained, 1, MPI_DOUBLE,
                   MPI_MIN, comm_solver);
     g_poroelasticElementCount = globalPoroelasticElements;
-    g_poroelasticNodeCount = globalPoroelasticNodes;
-    g_poroelasticPmlCandidateCount = globalPoroelasticPmlCandidates;
-    g_poroelasticUndrainedFastPathElementCount =
-        globalPoroelasticUndrainedFastPathElements;
 
     /* Tighten the critical dt for the undrained poroelastic wave speed: the
      * generic scan used the drained input Vp, but these elements actually carry
@@ -12112,9 +11977,6 @@ static void solver_init() {
     }
   } else {
     g_poroelasticElementCount = 0;
-    g_poroelasticNodeCount = 0;
-    g_poroelasticPmlCandidateCount = 0;
-    g_poroelasticUndrainedFastPathElementCount = 0;
     g_poroelasticLocalElementCount = 0;
   }
 
@@ -12862,7 +12724,7 @@ static void solver_init() {
       /* Interior acoustic stiffness coefficient for the consistent
        * (fully integrated) trilinear-hex Laplacian assembled in
        * kernelAcousticPressureForce as -coeff * sum_j shape(i,j)*p[j],
-       * where acoustic_scalar_stiffness_shape(i,j) = 8 * \int_ref
+       * where shape(i,j) is the sign-mode form of 8 * \int_ref
        * grad(N_i).grad(N_j).  The physical consistent stiffness for a
        * cube of edge h with density rho is
        *   K_ij = (1/rho) \int_phys grad(N_i).grad(N_j) dV
@@ -14195,9 +14057,6 @@ static void solver_delete() {
   free(g_poroelasticElementFlags);
   g_poroelasticElementFlags = NULL;
   g_poroelasticElementCount = 0;
-  g_poroelasticNodeCount = 0;
-  g_poroelasticPmlCandidateCount = 0;
-  g_poroelasticUndrainedFastPathElementCount = 0;
   g_poroelasticLocalElementCount = 0;
   poro_groundwater_grid_free();
 
@@ -16586,55 +16445,6 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure field H2D");
 
   Timer_Stop("Poroelastic Pressure Step");
-}
-
-/** Compute new displacements of my harbored nodes */
-static void solver_compute_displacement(mysolver_t* solver, mesh_t* mesh) {
-  lnid_t nindex;
-
-  Timer_Start("Compute new displacement");
-  solver_snapshot_station_accel_history(solver);
-  for (nindex = 0; nindex < mesh->nharbored; nindex++) {
-    const n_t* np = &solver->nTable[nindex];
-    fvector_t nodalForce = solver->force[nindex];
-    const fvector_t* tm1Disp = solver->tm1 + nindex;
-    fvector_t* tm2Disp = solver->tm2 + nindex;
-
-    /* total nodal forces */
-    nodalForce.f[0] += np->mass2_minusaM[0] * tm1Disp->f[0] -
-                       np->mass_minusaM[0] * tm2Disp->f[0];
-    nodalForce.f[1] += np->mass2_minusaM[1] * tm1Disp->f[1] -
-                       np->mass_minusaM[1] * tm2Disp->f[1];
-    nodalForce.f[2] += np->mass2_minusaM[2] * tm1Disp->f[2] -
-                       np->mass_minusaM[2] * tm2Disp->f[2];
-
-    /* overwrite tm2 */
-    /* mass sanity check */
-    if (np->mass_simple < 0) {
-      fprintf(stderr, "Negative lumped mass m=%f. Node ID=%d \n",
-              np->mass_simple, nindex);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-
-    /* Dorian. correct Displacement */
-    // TODO: Think of a better place for this
-    if (np->mass_simple != 0) {
-      tm2Disp->f[0] = nodalForce.f[0] / np->mass_simple;
-      tm2Disp->f[1] = nodalForce.f[1] / np->mass_simple;
-      tm2Disp->f[2] = nodalForce.f[2] / np->mass_simple;
-    } else {
-      tm2Disp->f[0] = 0.0;
-      tm2Disp->f[1] = 0.0;
-      tm2Disp->f[2] = 0.0;
-    }
-
-  } /* for (nindex ...): all my harbored nodes */
-
-  /* zero out the force vector for all nodes */
-  memset(solver->force, 0, sizeof(fvector_t) * mesh->nharbored);
-
-  Timer_Stop("Compute new displacement");
 }
 
 static int32_t displacement_boundary_sync_safe(void) {
@@ -20603,7 +20413,6 @@ static void solver_run() {
 
     Timer_Start("Compute Physics");
     Timer_Start("Physics Displacement Enqueue");
-    /* solver_compute_displacement(Global.mySolver, Global.myMesh); */
     solver_compute_displacement_gpu(Global.myID, Global.mySolver,
                                     Global.myMesh);
     Timer_Stop("Physics Displacement Enqueue");
@@ -21396,27 +21205,21 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
   isendnum = 0;
   while (send_messenger != NULL) {
     int32_t idx;
-    int32_t useOmp = 0;
-
-    if (direction == SHARING) {
-      useOmp = 1;
-    } else if (direction == CONTRIBUTION) {
-      useOmp = contrib_pack_use_omp();
-    }
 
     if (waitStage >= 0) {
       stageTimerStart = MPI_Wtime();
     }
     Timer_Start("Schedule Pack Outgoing");
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((send_messenger->nidx > 10000) && useOmp)
+#pragma omp parallel for schedule(static)                                      \
+    if((send_messenger->nidx > 10000) &&                                      \
+       ((direction == SHARING) ||                                             \
+        ((direction == CONTRIBUTION) && contrib_pack_use_omp())))
 #endif
     for (idx = 0; idx < send_messenger->nidx; idx++) {
-      int32_t lnid, entry;
+      int32_t entry;
       solver_float* dvalue;
       solver_float* out;
-
-      lnid = send_messenger->mapping[idx];
 
       out = (solver_float*)((char*)send_messenger->outdata +
                             send_messenger->outsize * idx);
@@ -21434,6 +21237,7 @@ static void schedule_senddata(schedule_t* sched, void* valuetable,
 
 #ifdef DEBUG
       /* For debug, carry the global node id */
+      const int32_t lnid = send_messenger->mapping[idx];
       gnidp = (int64_t*)((char*)out + itemsperentry * sizeof(solver_float));
       *gnidp = Global.myMesh->nodeTable[lnid].gnid;
 #endif /* DEBUG */
@@ -21653,16 +21457,16 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
   int32_t idx;
 
   if (direction == SHARING) {
-    const int32_t useOmp = 1;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
+#pragma omp parallel for schedule(static)                                      \
+    if((recv_messenger->nidx > 10000) &&                                      \
+       !recv_messenger->mapping_has_duplicates)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
-      int32_t lnid, entry;
+      int32_t entry;
       solver_float* dvalue;
       solver_float* in;
 
-      lnid = recv_messenger->mapping[idx];
       in = (solver_float*)((char*)recv_messenger->indata +
                            recv_messenger->insize * idx);
 
@@ -21680,6 +21484,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
 #ifdef DEBUG
       {
+        const int32_t lnid = recv_messenger->mapping[idx];
         int64_t* gnidp;
         gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
 
@@ -21698,19 +21503,20 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
   {
 #ifdef _OPENMP
-    const int32_t useOmp = contrib_unpack_use_omp();
-#pragma omp parallel for schedule(static) if((recv_messenger->nidx > 10000) && useOmp && !recv_messenger->mapping_has_duplicates)
+#pragma omp parallel for schedule(static)                                      \
+    if((recv_messenger->nidx > 10000) && contrib_unpack_use_omp() &&          \
+       !recv_messenger->mapping_has_duplicates)
 #endif
     for (idx = 0; idx < recv_messenger->nidx; idx++) {
-      int32_t lnid, entry;
+      int32_t entry;
       solver_float* dvalue;
       solver_float* in;
 
-      lnid = recv_messenger->mapping[idx];
       in = (solver_float*)((char*)recv_messenger->indata +
                            recv_messenger->insize * idx);
 
-      dvalue = (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
+      dvalue =
+          (solver_float*)valuetable + recv_messenger->mapping_itemoffset[idx];
       if (itemsperentry == 3) {
         if (direction == CONTRIBUTION) {
           dvalue[0] += in[0];
@@ -21733,6 +21539,7 @@ static void schedule_unpack_incoming_message(messenger_t* recv_messenger,
 
 #ifdef DEBUG
       {
+        const int32_t lnid = recv_messenger->mapping[idx];
         int64_t* gnidp;
         gnidp = (int64_t*)((char*)in + itemsperentry * sizeof(solver_float));
 
@@ -26387,14 +26194,6 @@ static int32_t hercules_repro_mode(void) {
   }
 
   return (g_reproMode > 0) ? 1 : 0;
-}
-
-static int32_t hercules_repro_strict(void) {
-  if (g_reproMode < 0) {
-    (void)hercules_repro_mode();
-  }
-
-  return (g_reproMode >= 2) ? 1 : 0;
 }
 
 /**

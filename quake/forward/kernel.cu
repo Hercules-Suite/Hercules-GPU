@@ -102,27 +102,6 @@ __host__ __device__ static inline void acoustic_project_interface_nodes(
   }
 }
 
-__host__ __device__ static inline int acoustic_face_has_node(uint8_t face,
-                                                             int node)
-{
-  switch (face) {
-    case ACOUSTIC_FACE_X_MINUS:
-      return (node == 0) || (node == 2) || (node == 4) || (node == 6);
-    case ACOUSTIC_FACE_X_PLUS:
-      return (node == 1) || (node == 3) || (node == 5) || (node == 7);
-    case ACOUSTIC_FACE_Y_MINUS:
-      return (node == 0) || (node == 1) || (node == 4) || (node == 5);
-    case ACOUSTIC_FACE_Y_PLUS:
-      return (node == 2) || (node == 3) || (node == 6) || (node == 7);
-    case ACOUSTIC_FACE_Z_MINUS:
-      return (node == 0) || (node == 1) || (node == 2) || (node == 3);
-    case ACOUSTIC_FACE_Z_PLUS:
-      return (node == 4) || (node == 5) || (node == 6) || (node == 7);
-    default:
-      return 0;
-  }
-}
-
 __host__ __device__ static inline double acoustic_node_sign(int node, int axis)
 {
   return (node & (1 << axis)) ? 1.0 : -1.0;
@@ -186,23 +165,6 @@ __device__ static inline double acoustic_scalar_stiffness_from_sums(
          (2.0 / 3.0) * sx * sz * sums[4] +
          (2.0 / 3.0) * sy * sz * sums[5] +
          (1.0 / 3.0) * sx * sy * sz * sums[6];
-}
-
-__host__ __device__ static inline double acoustic_scalar_stiffness_shape(int i,
-                                                                         int j)
-{
-  const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-  const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-  const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-
-  const double x = sx[i] * sx[j] * (1.0 + sy[i] * sy[j] / 3.0) *
-                   (1.0 + sz[i] * sz[j] / 3.0);
-  const double y = sy[i] * sy[j] * (1.0 + sx[i] * sx[j] / 3.0) *
-                   (1.0 + sz[i] * sz[j] / 3.0);
-  const double z = sz[i] * sz[j] * (1.0 + sx[i] * sx[j] / 3.0) *
-                   (1.0 + sy[i] * sy[j] / 3.0);
-
-  return x + y + z;
 }
 
 __host__ __device__ static inline double acoustic_shape_value_at(int node,
@@ -764,8 +726,8 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
 
   /* Optional stiffness-proportional (Kelvin-Voigt) acoustic damping.
    * Adds -coeff*beta*K*(p^n - p^{n-1}) to the acoustic force: the same
-   * stiffness operator K (acoustic_scalar_stiffness_shape) applied to
-   * the per-step field increment, so the damping rate ~ omega^2
+   * sign-mode stiffness operator K applied to the per-step field increment,
+   * so the damping rate ~ omega^2
    * (Q ~ 1/omega: high-frequency selective -- attenuates the lossless-
    * cavity c/4h grid ring while barely touching the source-band
    * signal). zeta(w) = beta*w*dt/2, so beta = 1/(Q*2*pi*theFreq*dt)
