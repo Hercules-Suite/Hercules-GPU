@@ -5742,7 +5742,8 @@ static int mesh_probe_face_elastic_info(
     const vector3D_t* domain_point, const vector3D_t* IstVelModel_origin,
     const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin, int32_t* neighbor_eindex_out,
-    int32_t* neighbor_level_out, int64_t* neighbor_geid_out) {
+    int32_t* neighbor_level_out, int64_t* neighbor_geid_out,
+    int* neighbor_is_poroelastic_out, double h_for_tol) {
   int32_t neighbor_eindex = -1;
   int found_neighbor_octant = 0;
   int found_local_neighbor = 0;
@@ -5761,6 +5762,9 @@ static int mesh_probe_face_elastic_info(
   }
   if (neighbor_geid_out != NULL) {
     *neighbor_geid_out = -1;
+  }
+  if (neighbor_is_poroelastic_out != NULL) {
+    *neighbor_is_poroelastic_out = 0;
   }
 
   if (domain_point == NULL) {
@@ -5798,6 +5802,11 @@ static int mesh_probe_face_elastic_info(
     if (neighbor_geid_out != NULL) {
       *neighbor_geid_out = neighbor_elemp->geid;
     }
+    if (neighbor_is_poroelastic_out != NULL) {
+      *neighbor_is_poroelastic_out =
+          poroelastic_element_candidate(Global.myMesh, neighbor_eindex, 0,
+                                        NULL, NULL);
+    }
     return 1;
   }
 
@@ -5813,6 +5822,12 @@ static int mesh_probe_face_elastic_info(
     if (remote_neighbor_is_elastic && found_neighbor_octant &&
         (neighbor_level_out != NULL)) {
       *neighbor_level_out = neighbor_level;
+    }
+    if (remote_neighbor_is_elastic &&
+        (neighbor_is_poroelastic_out != NULL)) {
+      *neighbor_is_poroelastic_out =
+          poroelastic_enabled() &&
+          poroelastic_point_is_saturated(north_m, east_m, depth_m, h_for_tol);
     }
     return remote_neighbor_is_elastic;
   }
@@ -6393,7 +6408,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
     const vector3D_t* IstVelModel_origin,
     const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin,
-    acoustic_bathymetry_diag_t* bathy_diag) {
+    acoustic_bathymetry_diag_t* bathy_diag,
+    int64_t* poroelastic_fragment_count) {
   elem_t* elemp = &Global.myMesh->elemTable[eindex];
   edata_t* edata = (edata_t*)elemp->data;
   int32_t lnid0 = elemp->lnid[0];
@@ -6414,6 +6430,9 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
   if (!mesh_acoustic_face_axis(face, &axis, &sign, tangent_axes)) {
     return 0;
+  }
+  if (poroelastic_fragment_count != NULL) {
+    *poroelastic_fragment_count = 0;
   }
   mesh_acoustic_face_normal(face, normal);
 
@@ -6455,7 +6474,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
         if (mesh_probe_face_elastic_info(
                 &probe, IstVelModel_origin, basinVelModel_origin,
-                threeDVelModel_origin, NULL, &neighbor_level, NULL) &&
+                threeDVelModel_origin, NULL, &neighbor_level, NULL, NULL, h) &&
             (neighbor_level > target_level)) {
           target_level = neighbor_level;
           changed = 1;
@@ -6471,6 +6490,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       vector3D_t probe;
       int32_t adjacent_eindex = -1;
       int64_t adjacent_geid = -1;
+      int adjacent_is_poroelastic = 0;
       double center[3] = {0.0, 0.0, 0.0};
       double adjacent_center[3] = {0.0, 0.0, 0.0};
       double halfwidth[3] = {0.0, 0.0, 0.0};
@@ -6490,7 +6510,11 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
       if (!mesh_probe_face_elastic_info(
               &probe, IstVelModel_origin, basinVelModel_origin,
-              threeDVelModel_origin, &adjacent_eindex, NULL, &adjacent_geid)) {
+              threeDVelModel_origin, &adjacent_eindex, NULL, &adjacent_geid,
+              (poroelastic_fragment_count != NULL)
+                  ? &adjacent_is_poroelastic
+                  : NULL,
+              h)) {
         continue;
       }
 
@@ -6498,6 +6522,9 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       center[tangent_axes[0]] = -1.0 + 2.0 * u;
       center[tangent_axes[1]] = -1.0 + 2.0 * v;
       fragment_count++;
+      if (adjacent_is_poroelastic && (poroelastic_fragment_count != NULL)) {
+        (*poroelastic_fragment_count)++;
+      }
 
       if (append_fragments) {
         const double fragment_h = h / (double)split;
@@ -6584,6 +6611,10 @@ static void mesh_build_acoustic_interface_flags(
   int64_t global_candidate_fragments[6] = {0, 0, 0, 0, 0, 0};
   int64_t global_coupled_faces[6] = {0, 0, 0, 0, 0, 0};
   int64_t global_coupled_fragments[6] = {0, 0, 0, 0, 0, 0};
+  int64_t local_medium_faces[2] = {0, 0};
+  int64_t local_medium_fragments[2] = {0, 0};
+  int64_t global_medium_faces[2] = {0, 0};
+  int64_t global_medium_fragments[2] = {0, 0};
   acoustic_bathymetry_diag_t local_bathy_diag = {0, 0, 0, 0, 0.0, 0.0, 0.0,
                                                  0.0};
   int64_t local_bathy_counts[4] = {0, 0, 0, 0};
@@ -6616,6 +6647,10 @@ static void mesh_build_acoustic_interface_flags(
     exit(1);
   }
 
+  if (poroelastic_enabled()) {
+    poro_groundwater_grid_load();
+  }
+
   for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     edata_t* edata = (edata_t*)Global.myMesh->elemTable[eindex].data;
     uint8_t flags = 0;
@@ -6626,6 +6661,7 @@ static void mesh_build_acoustic_interface_flags(
 
     for (int iface = 0; iface < 6; iface++) {
       uint8_t face = face_bits[iface];
+      int64_t poroelastic_fragments = 0;
       int bottom_projected_filter =
           (Param.theAcousticInterfaceFaceFilter ==
            ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY) ||
@@ -6635,7 +6671,9 @@ static void mesh_build_acoustic_interface_flags(
       int64_t fragments = mesh_build_acoustic_interface_face_fragments(
           eindex, face, keep_face && acoustic_pressure_enabled(), &table_count,
           &table_capacity, IstVelModel_origin, basinVelModel_origin,
-          threeDVelModel_origin, keep_face ? &local_bathy_diag : NULL);
+          threeDVelModel_origin, keep_face ? &local_bathy_diag : NULL,
+          (keep_face && poroelastic_enabled()) ? &poroelastic_fragments
+                                               : NULL);
 
       if (fragments == 0) {
         continue;
@@ -6652,6 +6690,14 @@ static void mesh_build_acoustic_interface_flags(
       local_counts[2] += fragments;
       local_coupled_faces[iface]++;
       local_coupled_fragments[iface] += fragments;
+      if (poroelastic_fragments > 0) {
+        local_medium_faces[1]++;
+        local_medium_fragments[1] += poroelastic_fragments;
+      }
+      if (fragments > poroelastic_fragments) {
+        local_medium_faces[0]++;
+        local_medium_fragments[0] += fragments - poroelastic_fragments;
+      }
     }
 
     Global.acousticFaceFlags[eindex] = flags;
@@ -6686,6 +6732,10 @@ static void mesh_build_acoustic_interface_flags(
              MPI_SUM, 0, comm_solver);
   MPI_Reduce(local_coupled_fragments, global_coupled_fragments, 6,
              MPI_INT64_T, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(local_medium_faces, global_medium_faces, 2, MPI_INT64_T, MPI_SUM,
+             0, comm_solver);
+  MPI_Reduce(local_medium_fragments, global_medium_fragments, 2, MPI_INT64_T,
+             MPI_SUM, 0, comm_solver);
   local_bathy_counts[0] = local_bathy_diag.faces;
   local_bathy_counts[1] = local_bathy_diag.reconstructed_faces;
   local_bathy_counts[2] = local_bathy_diag.fallback_faces;
@@ -6714,6 +6764,24 @@ static void mesh_build_acoustic_interface_flags(
           "acoustic interface elements %.1fM\n",
           (double)global_counts[1] / 1.0e6,
           (double)global_counts[0] / 1.0e6);
+    }
+    if (poroelastic_enabled()) {
+      monitor_print(
+          "Acoustic interface medium breakdown: elastic %.3fM face-touches / "
+          "%.3fM fragments, poroelastic %.3fM face-touches / %.3fM fragments\n",
+          (double)global_medium_faces[0] / 1.0e6,
+          (double)global_medium_fragments[0] / 1.0e6,
+          (double)global_medium_faces[1] / 1.0e6,
+          (double)global_medium_fragments[1] / 1.0e6);
+      if (global_medium_fragments[1] > 0) {
+        monitor_print(
+            "Acoustic-poroelastic interface: %.3fM face-touches / %.3fM "
+            "fragments treated as no_flow skeleton coupling\n",
+            (double)global_medium_faces[1] / 1.0e6,
+            (double)global_medium_fragments[1] / 1.0e6);
+      } else {
+        monitor_print("Acoustic-poroelastic interface: none detected\n");
+      }
     }
     monitor_print(
         "Acoustic interface face breakdown (candidate -> coupled):\n");
