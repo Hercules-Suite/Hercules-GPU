@@ -14414,6 +14414,7 @@ static void solver_run_init_comm(mysolver_t* solver) {
 /* show a progress bar to make the process less anxious! */
 static void solver_update_status(int step, const int start_step) {
   static double lastCheckedTime = 0;
+  static int statusHeaderPrinted = 0;
   double interval = 0;
   double CurrTime;
 
@@ -14423,6 +14424,13 @@ static void solver_update_status(int step, const int start_step) {
     if (lastCheckedTime == 0) {
       lastCheckedTime = CurrTime;
       return;
+    }
+
+    if (statusHeaderPrinted == 0) {
+      monitor_print(
+          "Sim = Simulation time (s), Sol = Solver time (s), WC = Wall Clock "
+          "Time (s)\n");
+      statusHeaderPrinted = 1;
     }
 
     monitor_print("*");
@@ -20455,9 +20463,6 @@ static void solver_run() {
     /* print header for monitor file */
     monitor_print("solver_run() start\nStarting time step = %d\n\n",
                   startingStep);
-    monitor_print(
-        "Sim = Simulation time (s), Sol = Solver time (s), WC = Wall Clock "
-        "Time (s)\n");
   }
 
   MPI_Barrier(comm_solver);
