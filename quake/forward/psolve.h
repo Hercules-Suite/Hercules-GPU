@@ -426,6 +426,8 @@ typedef struct gpu_data_t {
     solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
     solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
     solver_float* porePressureSurfaceDevice; /* GPU drained-plane mass */
+    solver_float* porePressureOpenPoreMassDevice;   /* GPU acoustic-open pore weak mass */
+    solver_float* porePressureOpenPoreTargetDevice; /* GPU acoustic pressure target */
     int32_t       poroelasticElemCount;      /* local BrickUP elements */
     int32_t*      poroelasticElemMapperDevice;
     double*       poroelasticElemHDevice;
@@ -456,6 +458,8 @@ typedef struct gpu_data_t {
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
     double*      acousticInterfaceAdjacentHalfWidthsDevice;
+    uint8_t*     acousticInterfaceAdjacentPoroelasticDevice;
+    double*      acousticInterfacePoroelasticBoundaryScalesDevice;
     /* CPML-aware interface coupling correction. All NULL unless
      * abc_type=cpml AND at least one acoustic-elastic interface face has a
      * PML element on either side. Per-face sideMask bit 0 means the
@@ -717,6 +721,8 @@ struct mysolver_t {
     solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
     solver_float* pore_pressure_mass;  /* Poroelastic lumped storage/mass */
     solver_float* pore_pressure_surface; /* Drained-plane mass; host only */
+    solver_float* pore_pressure_open_pore_mass; /* Acoustic-open pore weak mass */
+    solver_float* pore_pressure_open_pore_target; /* Acoustic pressure target */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
     schedule_t* an_sched;     /* Anchored node communication schedule */

@@ -432,7 +432,14 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define AN_PORE_PRESSURE_MASS_MSG 135
 #define DN_PORE_PRESSURE_SURFACE_MSG 136
 #define AN_PORE_PRESSURE_SURFACE_MSG 137
+#define DN_PORE_PRESSURE_OPEN_PORE_MASS_MSG 138
+#define AN_PORE_PRESSURE_OPEN_PORE_MASS_MSG 139
+#define DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG 140
+#define AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG 141
 #define CVMRECORD_MSG 110
+
+#define ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW 0
+#define ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE 1
 
 #define BATCH (1 << 20)
 #define LINESIZE 512
@@ -742,6 +749,12 @@ static void solver_download_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver);
 static void solver_download_pore_pressure_field_sparse(mysolver_t* solver);
 static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver);
+static void solver_download_pore_pressure_sparse_scalar(
+    mysolver_t* solver, solver_float* device, solver_float* host,
+    const char* label);
+static void solver_upload_pore_pressure_sparse_scalar(
+    mysolver_t* solver, solver_float* device, solver_float* host,
+    const char* label);
 static void solver_init_scalar_device_sync(mysolver_t* solver);
 static void solver_init_vector_device_sync(mysolver_t* solver);
 static void solver_scalar_device_schedule_senddata(
@@ -1898,6 +1911,8 @@ static struct Param_t {
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
   int theAcousticInterfaceFaceFilter;        /* all or bottom-only diagnostic */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
+  int theAcousticPoroelasticInterface;        /* no_flow or open_pore */
+  double theAcousticPoroelasticPressurePenaltyFactor;
   noyesflag_t includePoroelastic;
   noyesflag_t surfaceGroundwaterTable;
   int thePoroelasticFormulation;             /* brick_up */
@@ -1981,6 +1996,9 @@ static struct Param_t {
            .theAcousticInterfaceFaceFilter =
                ACOUSTIC_INTERFACE_FACE_FILTER_ALL,
            .theAcousticQualityFactor = 0.0,
+           .theAcousticPoroelasticInterface =
+               ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW,
+           .theAcousticPoroelasticPressurePenaltyFactor = 1.0,
            .includePoroelastic = NO,
            .surfaceGroundwaterTable = NO,
            .thePoroelasticFormulation = 1,
@@ -2048,8 +2066,11 @@ static struct Global_t {
   double* acousticInterfaceAdjacentCenters;
   double* acousticInterfaceAdjacentHalfWidths;
   int64_t* acousticInterfaceAdjacentElementIds;
+  uint8_t* acousticInterfaceAdjacentPoroelastic;
+  double* acousticInterfacePoroelasticBoundaryScales;
   int64_t acousticInterfaceElements;
   int64_t acousticInterfaceFaces;
+  int64_t acousticPoroelasticInterfaceFragments;
 
   /* Host scratch for the CPML-aware interface coupling correction. Filled
    * in solver_init while g_cpmlBuild.face_mask is still alive; uploaded
@@ -2163,6 +2184,12 @@ static int poroelastic_enabled(void) {
          (Param.thePoroelasticFormulation == POROELASTIC_FORMULATION_BRICK_UP);
 }
 
+static int acoustic_poroelastic_open_pore_enabled(void) {
+  return acoustic_pressure_enabled() && poroelastic_enabled() &&
+         (Param.theAcousticPoroelasticInterface ==
+          ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE);
+}
+
 static int poroelastic_gpu_active(void) {
   return poroelastic_enabled() && (g_poroelasticElementCount > 0);
 }
@@ -2176,6 +2203,8 @@ static int poroelastic_zero_permeability(void) {
 static int poroelastic_undrained_fast_path_active(void) {
   return poroelastic_enabled() &&
          (Param.thePoroelasticUndrainedFastPath == YES) &&
+         (Param.theAcousticPoroelasticInterface !=
+          ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE) &&
          (Param.thePoroelasticSurfacePressureBC ==
           POROELASTIC_SURFACE_PRESSURE_UNDRAINED) &&
          poroelastic_zero_permeability();
@@ -2538,6 +2567,67 @@ static void poroelastic_add_groundwater_drain_mass(
   }
 }
 
+static double poro_shape_value_at(int node, double csi, double eta,
+                                  double dzeta) {
+  const double sx = poro_node_sign(node, 0);
+  const double sy = poro_node_sign(node, 1);
+  const double sz = poro_node_sign(node, 2);
+
+  return 0.125 * (1.0 + sx * csi) * (1.0 + sy * eta) *
+         (1.0 + sz * dzeta);
+}
+
+static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
+  if (!acoustic_poroelastic_open_pore_enabled() || (solver == NULL) ||
+      (solver->pore_pressure_open_pore_mass == NULL) ||
+      (Global.myMesh == NULL) || (Global.acousticInterfaceFaces <= 0) ||
+      (Global.acousticInterfaceAdjacentPoroelastic == NULL) ||
+      (Global.acousticInterfacePoroelasticBoundaryScales == NULL)) {
+    return;
+  }
+
+  for (int64_t i = 0; i < Global.acousticInterfaceFaces; i++) {
+    if (Global.acousticInterfaceAdjacentPoroelastic[i] == 0) {
+      continue;
+    }
+
+    const double scale = Global.acousticInterfacePoroelasticBoundaryScales[i];
+    if (scale <= 0.0) {
+      continue;
+    }
+
+    const int32_t adjacent_eindex =
+        Global.acousticInterfaceAdjacentElementIndexes[i];
+    const int32_t target_eindex =
+        (adjacent_eindex >= 0) ? adjacent_eindex
+                               : Global.acousticInterfaceElementIds[i];
+    const double* target_center =
+        (adjacent_eindex >= 0)
+            ? (Global.acousticInterfaceAdjacentCenters + 3 * i)
+            : (Global.acousticInterfaceFaceCenters + 3 * i);
+
+    if ((target_eindex < 0) || (target_eindex >= Global.myMesh->lenum)) {
+      continue;
+    }
+
+    elem_t* elemp = &Global.myMesh->elemTable[target_eindex];
+    for (int j = 0; j < 8; j++) {
+      const double weight =
+          poro_shape_value_at(j, target_center[0], target_center[1],
+                              target_center[2]);
+      if (weight == 0.0) {
+        continue;
+      }
+
+      const int32_t lnid = elemp->lnid[j];
+      if ((lnid >= 0) && (lnid < Global.myMesh->nharbored)) {
+        solver->pore_pressure_open_pore_mass[lnid] +=
+            (solver_float)(scale * weight);
+      }
+    }
+  }
+}
+
 static void poroelastic_element_coupling_apply(
     mesh_t* mesh, int32_t eindex, const solver_float* pressure,
     const fvector_t* unew, const fvector_t* uold, double forceOut[8][3],
@@ -2836,9 +2926,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  48 /* Must adjust this if adding double params */
+  49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  60 /* Must adjust this if adding int params */
+  61 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2903,6 +2993,8 @@ static void read_parameters(int argc, char** argv) {
   double_message[45] = Param.thePoroelasticPermeabilityY;
   double_message[46] = Param.thePoroelasticPermeabilityZ;
   double_message[47] = Param.thePoroelasticSurfacePressurePenaltyFactor;
+  double_message[48] =
+      Param.theAcousticPoroelasticPressurePenaltyFactor;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2955,6 +3047,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticPermeabilityY = double_message[45];
   Param.thePoroelasticPermeabilityZ = double_message[46];
   Param.thePoroelasticSurfacePressurePenaltyFactor = double_message[47];
+  Param.theAcousticPoroelasticPressurePenaltyFactor = double_message[48];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -3017,6 +3110,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[57] = Param.thePoroelasticSurfacePressureBC;
   int_message[58] = Param.thePoroelasticElasticInterface;
   int_message[59] = (int)Param.thePoroelasticUndrainedFastPath;
+  int_message[60] = Param.theAcousticPoroelasticInterface;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -3082,6 +3176,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticSurfacePressureBC = int_message[57];
   Param.thePoroelasticElasticInterface = int_message[58];
   Param.thePoroelasticUndrainedFastPath = (noyesflag_t)int_message[59];
+  Param.theAcousticPoroelasticInterface = int_message[60];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3369,6 +3464,7 @@ static int32_t parse_parameters(const char* numericalin) {
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        reconstruct_acoustic_plane_displacements[64] = "no",
+       acoustic_poroelastic_interface[64] = "no_flow",
        include_poroelastic[64] = "no",
        surface_groundwatertable[64] = "no",
        poroelastic_formulation[64] = "brick_up",
@@ -3790,6 +3886,8 @@ static int32_t parse_parameters(const char* numericalin) {
                  &acoustic_formulation) == 0);
   parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
             &reconstruct_acoustic_plane_displacements);
+  parsetext(fp, "acoustic_poroelastic_interface", 's',
+            &acoustic_poroelastic_interface);
   parsetext(fp, "acoustic_interface_diagnostics_file", 's',
             Param.theAcousticInterfaceDiagnosticsFile);
   parsetext(fp, "include_poroelastic", 's', &include_poroelastic);
@@ -3862,6 +3960,9 @@ static int32_t parse_parameters(const char* numericalin) {
                            &Param.thePoroelasticPermeabilityZ);
   hu_config_get_double_opt(fp, "poroelastic_surface_pressure_penalty_factor",
                            &Param.thePoroelasticSurfacePressurePenaltyFactor);
+  hu_config_get_double_opt(
+      fp, "acoustic_poroelastic_pressure_penalty_factor",
+      &Param.theAcousticPoroelasticPressurePenaltyFactor);
 
   hu_config_get_int_opt(fp, "schedule_print_error_check",
                         &Param.theSchedulePrintErrorCheckFlag);
@@ -4215,6 +4316,25 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_face_filter);
   }
 
+  if ((strcasecmp(acoustic_poroelastic_interface, "no_flow") == 0) ||
+      (strcasecmp(acoustic_poroelastic_interface, "noflow") == 0) ||
+      (strcasecmp(acoustic_poroelastic_interface, "sealed") == 0) ||
+      (strcasecmp(acoustic_poroelastic_interface, "default") == 0)) {
+    Param.theAcousticPoroelasticInterface =
+        ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW;
+  } else if ((strcasecmp(acoustic_poroelastic_interface, "open_pore") == 0) ||
+             (strcasecmp(acoustic_poroelastic_interface, "open") == 0) ||
+             (strcasecmp(acoustic_poroelastic_interface,
+                         "pressure_continuity") == 0)) {
+    Param.theAcousticPoroelasticInterface =
+        ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_poroelastic_interface must be no_flow or "
+                 "open_pore: got '%s'\n",
+                 acoustic_poroelastic_interface);
+  }
+
   noyesflag_t legacyAcousticPressureFormulation = NO;
   if (strcasecmp(acoustic_pressure_formulation, "yes") == 0) {
     legacyAcousticPressureFormulation = YES;
@@ -4424,6 +4544,22 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "basin_water_vp and basin_water_rho must be positive "
                  "for basin_material_type=acoustic_water\n");
+  }
+  if (Param.theAcousticPoroelasticInterface ==
+      ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE) {
+    if ((includeAcoustic != YES) || (acousticPressureFormulation != YES) ||
+        (includePoroelastic != YES)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "acoustic_poroelastic_interface=open_pore requires "
+                   "include_acoustic=yes, acoustic_formulation=pressure or "
+                   "velocity_potential, and include_poroelastic=yes\n");
+    }
+    if (Param.theAcousticPoroelasticPressurePenaltyFactor <= 0.0) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "acoustic_poroelastic_pressure_penalty_factor=%g must be "
+                   "> 0 for acoustic_poroelastic_interface=open_pore\n",
+                   Param.theAcousticPoroelasticPressurePenaltyFactor);
+    }
   }
 
   if (strcasecmp(include_incident_planewaves, "yes") == 0) {
@@ -4758,6 +4894,19 @@ static int32_t parse_parameters(const char* numericalin) {
                     Param.theAcousticInterfaceMaxLevel);
     } else {
       monitor_print("Acoustic interface max level:       disabled\n");
+    }
+    if (Param.includePoroelastic == YES) {
+      monitor_print("Acoustic-poroelastic interface:     %s\n",
+                    (Param.theAcousticPoroelasticInterface ==
+                     ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE)
+                        ? "open_pore (pressure continuity)"
+                        : "no_flow (skeleton coupling)");
+      if (Param.theAcousticPoroelasticInterface ==
+          ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE) {
+        monitor_print("Acoustic-poroelastic pressure factor: %.6g "
+                      "(weak mass-projected)\n",
+                      Param.theAcousticPoroelasticPressurePenaltyFactor);
+      }
     }
   }
   monitor_print("Include Poroelastic:                %s\n",
@@ -5605,6 +5754,8 @@ static void mesh_release_acoustic_interface_data(void) {
   free(Global.acousticInterfaceAdjacentCenters);
   free(Global.acousticInterfaceAdjacentHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIds);
+  free(Global.acousticInterfaceAdjacentPoroelastic);
+  free(Global.acousticInterfacePoroelasticBoundaryScales);
   Global.acousticFaceFlags = NULL;
   Global.acousticInterfaceElementIds = NULL;
   Global.acousticInterfaceFaceIds = NULL;
@@ -5616,8 +5767,11 @@ static void mesh_release_acoustic_interface_data(void) {
   Global.acousticInterfaceAdjacentCenters = NULL;
   Global.acousticInterfaceAdjacentHalfWidths = NULL;
   Global.acousticInterfaceAdjacentElementIds = NULL;
+  Global.acousticInterfaceAdjacentPoroelastic = NULL;
+  Global.acousticInterfacePoroelasticBoundaryScales = NULL;
   Global.acousticInterfaceElements = 0;
   Global.acousticInterfaceFaces = 0;
+  Global.acousticPoroelasticInterfaceFragments = 0;
 }
 
 static int mesh_find_octant_at_domain_point(const vector3D_t* point,
@@ -6120,6 +6274,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   double* new_adjacent_centers;
   double* new_adjacent_halfwidths;
   int64_t* new_adjacent;
+  uint8_t* new_adjacent_poroelastic;
+  double* new_poroelastic_scales;
 
   if ((capacity == NULL) || (needed <= *capacity)) {
     return;
@@ -6151,12 +6307,17 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   new_adjacent_halfwidths =
       (double*)malloc(3 * (size_t)new_capacity * sizeof(double));
   new_adjacent = (int64_t*)malloc((size_t)new_capacity * sizeof(int64_t));
+  new_adjacent_poroelastic =
+      (uint8_t*)malloc((size_t)new_capacity * sizeof(uint8_t));
+  new_poroelastic_scales =
+      (double*)malloc((size_t)new_capacity * sizeof(double));
   if ((new_elements == NULL) || (new_faces == NULL) || (new_areas == NULL) ||
       (new_centers == NULL) || (new_normals == NULL) ||
       (new_halfwidths == NULL) ||
       (new_adjacent_indexes == NULL) || (new_adjacent_centers == NULL) ||
       (new_adjacent_halfwidths == NULL) ||
-      (new_adjacent == NULL)) {
+      (new_adjacent == NULL) || (new_adjacent_poroelastic == NULL) ||
+      (new_poroelastic_scales == NULL)) {
     free(new_elements);
     free(new_faces);
     free(new_areas);
@@ -6167,6 +6328,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
     free(new_adjacent_centers);
     free(new_adjacent_halfwidths);
     free(new_adjacent);
+    free(new_adjacent_poroelastic);
+    free(new_poroelastic_scales);
     fprintf(stderr,
             "Thread %d: failed to allocate acoustic interface fragment table\n",
             Global.myID);
@@ -6195,6 +6358,12 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
            3 * count * sizeof(double));
     memcpy(new_adjacent, Global.acousticInterfaceAdjacentElementIds,
            count * sizeof(int64_t));
+    memcpy(new_adjacent_poroelastic,
+           Global.acousticInterfaceAdjacentPoroelastic,
+           count * sizeof(uint8_t));
+    memcpy(new_poroelastic_scales,
+           Global.acousticInterfacePoroelasticBoundaryScales,
+           count * sizeof(double));
   }
 
   free(Global.acousticInterfaceElementIds);
@@ -6207,6 +6376,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   free(Global.acousticInterfaceAdjacentCenters);
   free(Global.acousticInterfaceAdjacentHalfWidths);
   free(Global.acousticInterfaceAdjacentElementIds);
+  free(Global.acousticInterfaceAdjacentPoroelastic);
+  free(Global.acousticInterfacePoroelasticBoundaryScales);
 
   Global.acousticInterfaceElementIds = new_elements;
   Global.acousticInterfaceFaceIds = new_faces;
@@ -6218,6 +6389,8 @@ static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
   Global.acousticInterfaceAdjacentCenters = new_adjacent_centers;
   Global.acousticInterfaceAdjacentHalfWidths = new_adjacent_halfwidths;
   Global.acousticInterfaceAdjacentElementIds = new_adjacent;
+  Global.acousticInterfaceAdjacentPoroelastic = new_adjacent_poroelastic;
+  Global.acousticInterfacePoroelasticBoundaryScales = new_poroelastic_scales;
   *capacity = new_capacity;
 }
 
@@ -6226,7 +6399,8 @@ static void mesh_append_acoustic_interface_fragment(
     double area, const double center[3], const double normal[3],
     const double halfwidth[3], int32_t adjacent_eindex,
     int64_t adjacent_geid, const double adjacent_center[3],
-    const double adjacent_halfwidth[3]) {
+    const double adjacent_halfwidth[3], uint8_t adjacent_is_poroelastic,
+    double poroelastic_boundary_scale) {
   int64_t index;
 
   mesh_reserve_acoustic_interface_fragments(*count + 1, *count, capacity);
@@ -6255,6 +6429,10 @@ static void mesh_append_acoustic_interface_fragment(
       adjacent_halfwidth[1];
   Global.acousticInterfaceAdjacentHalfWidths[3 * index + 2] =
       adjacent_halfwidth[2];
+  Global.acousticInterfaceAdjacentPoroelastic[index] =
+      adjacent_is_poroelastic;
+  Global.acousticInterfacePoroelasticBoundaryScales[index] =
+      poroelastic_boundary_scale;
   *count = index + 1;
 }
 
@@ -6495,6 +6673,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       double adjacent_center[3] = {0.0, 0.0, 0.0};
       double halfwidth[3] = {0.0, 0.0, 0.0};
       double adjacent_halfwidth[3] = {0.0, 0.0, 0.0};
+      double poroelastic_boundary_scale = 0.0;
       double u = ((double)iu + 0.5) / (double)split;
       double v = ((double)iv + 0.5) / (double)split;
 
@@ -6528,7 +6707,9 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
       if (append_fragments) {
         const double fragment_h = h / (double)split;
+        const double fragment_area = fragment_h * fragment_h * area_scale;
         const double local_halfwidth = 1.0 / (double)split;
+        double adjacent_h_for_scale = h;
 
         halfwidth[tangent_axes[0]] = local_halfwidth;
         halfwidth[tangent_axes[1]] = local_halfwidth;
@@ -6545,6 +6726,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
                   Global.myMesh->nodeTable[adjacent_lnid0].y,
               Global.myMesh->ticksize *
                   Global.myMesh->nodeTable[adjacent_lnid0].z};
+          adjacent_h_for_scale = adjacent_h;
 
           for (int dim = 0; dim < 3; dim++) {
             adjacent_center[dim] =
@@ -6564,10 +6746,17 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
           adjacent_halfwidth[tangent_axes[1]] = fragment_h / adjacent_h;
         }
 
+        if (adjacent_is_poroelastic) {
+          poroelastic_boundary_scale =
+              Param.theAcousticPoroelasticPressurePenaltyFactor *
+              fragment_area * adjacent_h_for_scale * 0.5;
+        }
+
         mesh_append_acoustic_interface_fragment(
-            table_count, table_capacity, eindex, face,
-            fragment_h * fragment_h * area_scale, center, normal, halfwidth,
-            adjacent_eindex, adjacent_geid, adjacent_center, adjacent_halfwidth);
+            table_count, table_capacity, eindex, face, fragment_area, center,
+            normal, halfwidth, adjacent_eindex, adjacent_geid,
+            adjacent_center, adjacent_halfwidth,
+            adjacent_is_poroelastic ? 1u : 0u, poroelastic_boundary_scale);
       }
     }
   }
@@ -6713,6 +6902,7 @@ static void mesh_build_acoustic_interface_flags(
   }
   Global.acousticInterfaceFaces =
       acoustic_pressure_enabled() ? table_count : local_counts[1];
+  Global.acousticPoroelasticInterfaceFragments = local_medium_fragments[1];
 
   if (Global.acousticInterfaceFaces > INT32_MAX) {
     fprintf(stderr,
@@ -6774,11 +6964,15 @@ static void mesh_build_acoustic_interface_flags(
           (double)global_medium_faces[1] / 1.0e6,
           (double)global_medium_fragments[1] / 1.0e6);
       if (global_medium_fragments[1] > 0) {
+        const char* treatment =
+            acoustic_poroelastic_open_pore_enabled()
+                ? "open_pore pressure-continuity coupling"
+                : "no_flow skeleton coupling";
         monitor_print(
             "Acoustic-poroelastic interface: %.3fM face-touches / %.3fM "
-            "fragments treated as no_flow skeleton coupling\n",
+            "fragments treated as %s\n",
             (double)global_medium_faces[1] / 1.0e6,
-            (double)global_medium_fragments[1] / 1.0e6);
+            (double)global_medium_fragments[1] / 1.0e6, treatment);
       } else {
         monitor_print("Acoustic-poroelastic interface: none detected\n");
       }
@@ -9894,6 +10088,26 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (acoustic_poroelastic_open_pore_enabled()) {
+      if (cudaMallocHost(&(Global.mySolver->pore_pressure_open_pore_mass),
+                         Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic open-pore mass\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMallocHost(&(Global.mySolver->pore_pressure_open_pore_target),
+                         Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic open-pore target\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
     memset(Global.mySolver->pore_pressure_tm1, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pore_pressure_tm2, 0,
@@ -9904,6 +10118,14 @@ static void solver_init() {
            Global.myMesh->nharbored * sizeof(solver_float));
     memset(Global.mySolver->pore_pressure_surface, 0,
            Global.myMesh->nharbored * sizeof(solver_float));
+    if (Global.mySolver->pore_pressure_open_pore_mass != NULL) {
+      memset(Global.mySolver->pore_pressure_open_pore_mass, 0,
+             Global.myMesh->nharbored * sizeof(solver_float));
+    }
+    if (Global.mySolver->pore_pressure_open_pore_target != NULL) {
+      memset(Global.mySolver->pore_pressure_open_pore_target, 0,
+             Global.myMesh->nharbored * sizeof(solver_float));
+    }
 
     g_poroelasticElementFlags =
         (uint8_t*)calloc((size_t)Global.myMesh->lenum, sizeof(uint8_t));
@@ -11718,9 +11940,14 @@ static void solver_init() {
   if (poroelastic_enabled()) {
     int64_t localPoroelasticNodes = 0;
     int64_t localPoroelasticDrainNodes = 0;
+    int64_t localPoroelasticOpenPoreNodes = 0;
+    int64_t localAcousticPoroelasticFragments =
+        Global.acousticPoroelasticInterfaceFragments;
     int64_t globalPoroelasticElements = 0;
     int64_t globalPoroelasticNodes = 0;
     int64_t globalPoroelasticDrainNodes = 0;
+    int64_t globalPoroelasticOpenPoreNodes = 0;
+    int64_t globalAcousticPoroelasticFragments = 0;
     int64_t globalPoroelasticPmlCandidates = 0;
     int64_t globalPoroelasticUndrainedFastPathElements = 0;
     double globalPoroelasticMinHOverVpUndrained = 1.0e32;
@@ -11742,12 +11969,28 @@ static void solver_init() {
                       Global.mySolver->pore_pressure_surface, 1, CONTRIBUTION,
                       AN_PORE_PRESSURE_SURFACE_MSG);
 
+    if (acoustic_poroelastic_open_pore_enabled()) {
+      poroelastic_add_open_pore_interface_mass(Global.mySolver);
+      schedule_senddata(Global.mySolver->dn_sched,
+                        Global.mySolver->pore_pressure_open_pore_mass, 1,
+                        CONTRIBUTION, DN_PORE_PRESSURE_OPEN_PORE_MASS_MSG);
+      compute_adjust(Global.mySolver->pore_pressure_open_pore_mass, 1,
+                     DISTRIBUTION);
+      schedule_senddata(Global.mySolver->an_sched,
+                        Global.mySolver->pore_pressure_open_pore_mass, 1,
+                        CONTRIBUTION, AN_PORE_PRESSURE_OPEN_PORE_MASS_MSG);
+    }
+
     for (int32_t nindex = 0; nindex < Global.myMesh->nharbored; nindex++) {
       if (Global.mySolver->pore_pressure_mass[nindex] > 0.0) {
         localPoroelasticNodes++;
       }
       if (Global.mySolver->pore_pressure_surface[nindex] > 0.0) {
         localPoroelasticDrainNodes++;
+      }
+      if ((Global.mySolver->pore_pressure_open_pore_mass != NULL) &&
+          (Global.mySolver->pore_pressure_open_pore_mass[nindex] > 0.0)) {
+        localPoroelasticOpenPoreNodes++;
       }
     }
 
@@ -11758,6 +12001,12 @@ static void solver_init() {
     MPI_Allreduce(&localPoroelasticDrainNodes,
                   &globalPoroelasticDrainNodes, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
+    MPI_Allreduce(&localPoroelasticOpenPoreNodes,
+                  &globalPoroelasticOpenPoreNodes, 1, MPI_INT64_T, MPI_SUM,
+                  comm_solver);
+    MPI_Allreduce(&localAcousticPoroelasticFragments,
+                  &globalAcousticPoroelasticFragments, 1, MPI_INT64_T,
+                  MPI_SUM, comm_solver);
     MPI_Allreduce(&localPoroelasticPmlCandidates,
                   &globalPoroelasticPmlCandidates, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
@@ -11837,6 +12086,15 @@ static void solver_init() {
             "(weak mass-projected, factor %.6g)\n",
             (double)globalPoroelasticDrainNodes / 1.0e6,
             Param.thePoroelasticSurfacePressurePenaltyFactor);
+      }
+      if (acoustic_poroelastic_open_pore_enabled()) {
+        monitor_print(
+            "Acoustic-poroelastic open-pore pressure continuity: %.1fM nodes "
+            "from %.3fM fragments (weak mass-projected, factor %.6g; "
+            "undrained fast path disabled)\n",
+            (double)globalPoroelasticOpenPoreNodes / 1.0e6,
+            (double)globalAcousticPoroelasticFragments / 1.0e6,
+            Param.theAcousticPoroelasticPressurePenaltyFactor);
       }
       if (fabs(Param.thePoroelasticBiotAlpha - 1.0) <= 1.0e-12) {
         monitor_print(
@@ -11955,6 +12213,8 @@ static void solver_init() {
   }
   if (poroelastic_gpu_active()) {
     Global.gpuData.poroelasticElemCount = g_poroelasticLocalElementCount;
+    Global.gpuData.porePressureOpenPoreMassDevice = NULL;
+    Global.gpuData.porePressureOpenPoreTargetDevice = NULL;
     if (cudaMalloc((void**)&(Global.gpuData.porePressureTm1Device),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
@@ -11998,6 +12258,26 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (acoustic_poroelastic_open_pore_enabled()) {
+      if (cudaMalloc((void**)&(Global.gpuData.porePressureOpenPoreMassDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic open-pore mass\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMalloc((void**)&(Global.gpuData.porePressureOpenPoreTargetDevice),
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to allocate acoustic open-pore target\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
     if (g_poroelasticLocalElementCount > 0) {
       const size_t poroN = (size_t)g_poroelasticLocalElementCount;
       if ((cudaMalloc(
@@ -12021,6 +12301,8 @@ static void solver_init() {
     }
   } else {
     Global.gpuData.poroelasticElemCount = 0;
+    Global.gpuData.porePressureOpenPoreMassDevice = NULL;
+    Global.gpuData.porePressureOpenPoreTargetDevice = NULL;
   }
   if (cudaMalloc((void**)&(Global.gpuData.conv_shear_1Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
@@ -12143,6 +12425,8 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentCentersDevice = NULL;
   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice = NULL;
+  Global.gpuData.acousticInterfaceAdjacentPoroelasticDevice = NULL;
+  Global.gpuData.acousticInterfacePoroelasticBoundaryScalesDevice = NULL;
   if (acoustic_pressure_enabled()) {
     if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
@@ -12255,6 +12539,28 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
+      }
+      if (acoustic_poroelastic_open_pore_enabled()) {
+        if (cudaMalloc(
+                (void**)&(Global.gpuData
+                    .acousticInterfaceAdjacentPoroelasticDevice),
+                face_count * sizeof(uint8_t)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic-poroelastic interface flags\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMalloc(
+                (void**)&(Global.gpuData
+                    .acousticInterfacePoroelasticBoundaryScalesDevice),
+                face_count * sizeof(double)) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to allocate acoustic-poroelastic interface scales\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
       }
     }
   }
@@ -12960,6 +13266,30 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
+      if (acoustic_poroelastic_open_pore_enabled()) {
+        if (cudaMemcpy(
+                Global.gpuData.acousticInterfaceAdjacentPoroelasticDevice,
+                Global.acousticInterfaceAdjacentPoroelastic,
+                face_count * sizeof(uint8_t), cudaMemcpyHostToDevice) !=
+            cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic-poroelastic interface flags\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        if (cudaMemcpy(Global.gpuData
+                           .acousticInterfacePoroelasticBoundaryScalesDevice,
+                       Global.acousticInterfacePoroelasticBoundaryScales,
+                       face_count * sizeof(double),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: Failed to copy acoustic-poroelastic interface scales\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
 
       /* CPML-aware interface coupling correction arrays. Only allocated
        * when at least one interface face is inside the PML zone (host
@@ -13064,6 +13394,27 @@ static void solver_init() {
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
+    }
+    if (acoustic_poroelastic_open_pore_enabled()) {
+      if (cudaMemcpy(Global.gpuData.porePressureOpenPoreMassDevice,
+                     Global.mySolver->pore_pressure_open_pore_mass,
+                     Global.myMesh->nharbored * sizeof(solver_float),
+                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to copy acoustic open-pore mass\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      if (cudaMemset(Global.gpuData.porePressureOpenPoreTargetDevice, 0,
+                     Global.myMesh->nharbored * sizeof(solver_float)) !=
+          cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: Failed to initialize acoustic open-pore target\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
     }
     if (cudaMemcpy(Global.gpuData.porePressureTm1Device,
                    Global.mySolver->pore_pressure_tm1,
@@ -13485,6 +13836,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.porePressureForceDevice);
   cudaFree(Global.gpuData.porePressureMassDevice);
   cudaFree(Global.gpuData.porePressureSurfaceDevice);
+  cudaFree(Global.gpuData.porePressureOpenPoreMassDevice);
+  cudaFree(Global.gpuData.porePressureOpenPoreTargetDevice);
   solver_free_pore_pressure_device_sync();
   cudaFree(Global.gpuData.poroelasticElemMapperDevice);
   cudaFree(Global.gpuData.poroelasticElemHDevice);
@@ -13524,6 +13877,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentCentersDevice);
   cudaFree(Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice);
+  cudaFree(Global.gpuData.acousticInterfaceAdjacentPoroelasticDevice);
+  cudaFree(Global.gpuData.acousticInterfacePoroelasticBoundaryScalesDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlSideMaskDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_aDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_bDevice);
@@ -13828,6 +14183,12 @@ static void solver_delete() {
   }
   if (Global.mySolver->pore_pressure_surface != NULL) {
     cudaFreeHost(Global.mySolver->pore_pressure_surface);
+  }
+  if (Global.mySolver->pore_pressure_open_pore_mass != NULL) {
+    cudaFreeHost(Global.mySolver->pore_pressure_open_pore_mass);
+  }
+  if (Global.mySolver->pore_pressure_open_pore_target != NULL) {
+    cudaFreeHost(Global.mySolver->pore_pressure_open_pore_target);
   }
   free(g_poroelasticElemMapper);
   g_poroelasticElemMapper = NULL;
@@ -15930,6 +16291,107 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
   Timer_Stop("Poroelastic pressure traction");
 }
 
+static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
+                                                        mesh_t* mesh,
+                                                        int useDeviceSync) {
+  int blocksize;
+  int gridsize;
+  int32_t face_count;
+  cudaError_t cerror;
+
+  if (!acoustic_poroelastic_open_pore_enabled() ||
+      (solver->gpuData->porePressureOpenPoreTargetDevice == NULL)) {
+    return;
+  }
+
+  face_count = solver->gpuData->acousticInterfaceFaceCount;
+  if (face_count <= 0) {
+    return;
+  }
+
+  Timer_Start("Acoustic open-pore target reset");
+  cudaMemsetAsync(solver->gpuData->porePressureOpenPoreTargetDevice, 0,
+                  mesh->nharbored * sizeof(solver_float),
+                  solver->streams[CUDA_STREAM_MAIN]);
+  Timer_Stop("Acoustic open-pore target reset");
+
+  Timer_Start("Acoustic open-pore target kernel");
+  blocksize = 256;
+  gridsize = (face_count + blocksize - 1) / blocksize;
+  kernelAcousticPoroelasticOpenPoreTarget<<<
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+      face_count, solver->gpuDataDevice, Param.theDeltaT);
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: acoustic open-pore target kernel - %s\n",
+            Global.myID, cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  Timer_Stop("Acoustic open-pore target kernel");
+
+  Timer_Start("Acoustic open-pore target D2H");
+  if (useDeviceSync) {
+    /* CUDA-aware exchange below uses the device-resident target. */
+  } else if (pore_pressure_force_sync_mode() != 0) {
+    solver_download_pore_pressure_sparse_scalar(
+        solver, solver->gpuData->porePressureOpenPoreTargetDevice,
+        solver->pore_pressure_open_pore_target, "open-pore target");
+  } else {
+    cudaMemcpyAsync(solver->pore_pressure_open_pore_target,
+                    solver->gpuData->porePressureOpenPoreTargetDevice,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyDeviceToHost,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+  }
+  Timer_Stop("Acoustic open-pore target D2H");
+
+  Timer_Start("Acoustic open-pore target exchange");
+  if (useDeviceSync) {
+    solver_scalar_device_schedule_senddata(
+        solver, solver->dn_sched,
+        solver->gpuData->porePressureOpenPoreTargetDevice, CONTRIBUTION,
+        DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
+    solver_scalar_device_adjust(
+        solver, solver->gpuData->porePressureOpenPoreTargetDevice,
+        DISTRIBUTION);
+    solver_scalar_device_schedule_senddata(
+        solver, solver->an_sched,
+        solver->gpuData->porePressureOpenPoreTargetDevice, CONTRIBUTION,
+        AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
+  } else {
+    schedule_senddata(solver->dn_sched, solver->pore_pressure_open_pore_target,
+                      1, CONTRIBUTION,
+                      DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
+    compute_adjust(solver->pore_pressure_open_pore_target, 1, DISTRIBUTION);
+    schedule_senddata(solver->an_sched, solver->pore_pressure_open_pore_target,
+                      1, CONTRIBUTION,
+                      AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
+  }
+  Timer_Stop("Acoustic open-pore target exchange");
+
+  Timer_Start("Acoustic open-pore target H2D");
+  if (useDeviceSync) {
+    /* Already resident after CUDA-aware exchange. */
+  } else if (pore_pressure_force_sync_mode() != 0) {
+    solver_upload_pore_pressure_sparse_scalar(
+        solver, solver->gpuData->porePressureOpenPoreTargetDevice,
+        solver->pore_pressure_open_pore_target, "open-pore target");
+  } else {
+    cudaMemcpyAsync(solver->gpuData->porePressureOpenPoreTargetDevice,
+                    solver->pore_pressure_open_pore_target,
+                    mesh->nharbored * sizeof(solver_float),
+                    cudaMemcpyHostToDevice,
+                    solver->streams[CUDA_STREAM_MAIN]);
+    solver->gpu_spec->numbytespci +=
+        mesh->nharbored * (int64_t)sizeof(solver_float);
+  }
+  Timer_Stop("Acoustic open-pore target H2D");
+}
+
 static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
                                                  mesh_t* mesh) {
   const double dt = Param.theDeltaT;
@@ -16034,6 +16496,8 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   }
   Timer_Stop("Poroelastic pressure force H2D");
 
+  solver_accumulate_acoustic_open_pore_target(solver, mesh, useDeviceSync);
+
   Timer_Start("Poroelastic pressure update");
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
@@ -16043,6 +16507,11 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
       (Param.thePoroelasticSurfacePressureBC ==
            POROELASTIC_SURFACE_PRESSURE_DRAINED &&
        Param.thePoroelasticSurfacePressurePenaltyFactor > 0.0)
+          ? 1
+          : 0,
+      (acoustic_poroelastic_open_pore_enabled() &&
+       (solver->gpuData->porePressureOpenPoreMassDevice != NULL) &&
+       (solver->gpuData->porePressureOpenPoreTargetDevice != NULL))
           ? 1
           : 0);
   cerror = cudaGetLastError();
@@ -17053,6 +17522,7 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
   int32_t capacity;
   int32_t count = 0;
   int32_t uniqueCount = 0;
+  int32_t openPoreNodeCount = 0;
   int32_t* nodes = NULL;
   cudaError_t cerror;
 
@@ -17074,6 +17544,15 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
   if ((pore_pressure_field_sync_mode() != 0) &&
       (Param.printStationPressures == YES)) {
     capacity += 8 * Param.myNumberOfStations;
+  }
+  if (acoustic_poroelastic_open_pore_enabled() &&
+      (solver->pore_pressure_open_pore_mass != NULL)) {
+    for (int32_t nindex = 0; nindex < Global.myMesh->nharbored; nindex++) {
+      if (solver->pore_pressure_open_pore_mass[nindex] > 0.0) {
+        openPoreNodeCount++;
+      }
+    }
+    capacity += openPoreNodeCount;
   }
 
   if (capacity <= 0) {
@@ -17100,6 +17579,13 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
   }
   for (int32_t i = 0; i < g_adjustParentCount; i++) {
     nodes[count++] = g_adjustParentIds[i];
+  }
+  if (openPoreNodeCount > 0) {
+    for (int32_t nindex = 0; nindex < Global.myMesh->nharbored; nindex++) {
+      if (solver->pore_pressure_open_pore_mass[nindex] > 0.0) {
+        nodes[count++] = nindex;
+      }
+    }
   }
 
   if ((pore_pressure_field_sync_mode() != 0) &&
@@ -17199,6 +17685,102 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
   }
 
   g_porePressureSparseReady = 1;
+}
+
+static void solver_download_pore_pressure_sparse_scalar(
+    mysolver_t* solver, solver_float* device, solver_float* host,
+    const char* label) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  if ((device == NULL) || (host == NULL)) {
+    return;
+  }
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice, device,
+      g_porePressureSparseBufferDevice);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure %s sparse gather - %s\n",
+            Global.myID, (label != NULL) ? label : "scalar",
+            cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferHost,
+                  g_porePressureSparseBufferDevice,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+  cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    host[g_porePressureSparseNodesHost[i]] = g_porePressureSparseBufferHost[i];
+  }
+}
+
+static void solver_upload_pore_pressure_sparse_scalar(
+    mysolver_t* solver, solver_float* device, solver_float* host,
+    const char* label) {
+  int blocksize;
+  int gridsize;
+  cudaError_t cerror;
+
+  if ((device == NULL) || (host == NULL)) {
+    return;
+  }
+
+  solver_init_pore_pressure_sparse_sync(solver);
+  if (g_porePressureSparseNodeCount <= 0) {
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(g_porePressureSparseNodeCount > 100000)
+#endif
+  for (int32_t i = 0; i < g_porePressureSparseNodeCount; i++) {
+    g_porePressureSparseBufferHost[i] =
+        host[g_porePressureSparseNodesHost[i]];
+  }
+
+  cudaMemcpyAsync(g_porePressureSparseBufferDevice,
+                  g_porePressureSparseBufferHost,
+                  sizeof(solver_float) * g_porePressureSparseNodeCount,
+                  cudaMemcpyHostToDevice, solver->streams[CUDA_STREAM_MAIN]);
+  solver->gpu_spec->numbytespci +=
+      g_porePressureSparseNodeCount * (int64_t)sizeof(solver_float);
+
+  blocksize = 256;
+  gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
+  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
+      g_porePressureSparseBufferDevice, device);
+
+  cerror = cudaGetLastError();
+  if (cerror != cudaSuccess) {
+    fprintf(stderr, "Thread %d: pore pressure %s sparse scatter - %s\n",
+            Global.myID, (label != NULL) ? label : "scalar",
+            cudaGetErrorString(cerror));
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 }
 
 static void solver_download_pore_pressure_force_sparse(mysolver_t* solver) {
@@ -19749,6 +20331,11 @@ static void solver_run_collect_timers(void) {
         "Poroelastic pressure force D2H",
         "Poroelastic pressure force exchange",
         "Poroelastic pressure force H2D",
+        "Acoustic open-pore target reset",
+        "Acoustic open-pore target kernel",
+        "Acoustic open-pore target D2H",
+        "Acoustic open-pore target exchange",
+        "Acoustic open-pore target H2D",
         "Poroelastic pressure update",
         "Poroelastic pressure field D2H",
         "Poroelastic pressure field exchange",

@@ -1344,9 +1344,92 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
   }
 }
 
+__global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
+                                                        gpu_data_t* gpuData,
+                                                        double deltaT)
+{
+  const int32_t faceIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const int vp = (gpuData->acousticVelocityPotential == 1);
+  const double invDt = (deltaT > 0.0) ? (1.0 / deltaT) : 0.0;
+
+  if ((faceIndex >= faceCount) ||
+      (gpuData->acousticInterfaceAdjacentPoroelasticDevice == NULL) ||
+      (gpuData->acousticInterfacePoroelasticBoundaryScalesDevice == NULL) ||
+      (gpuData->porePressureOpenPoreTargetDevice == NULL)) {
+    return;
+  }
+  if (gpuData->acousticInterfaceAdjacentPoroelasticDevice[faceIndex] == 0) {
+    return;
+  }
+
+  const double scale =
+      gpuData->acousticInterfacePoroelasticBoundaryScalesDevice[faceIndex];
+  if (scale <= 0.0) {
+    return;
+  }
+
+  const int32_t eindex =
+      gpuData->acousticInterfaceElementIdsDevice[faceIndex];
+  const int32_t adjacent_eindex =
+      (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
+          : -1;
+  const int32_t target_eindex =
+      (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const double center[3] = {
+      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 0],
+      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 1],
+      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 2]};
+  const double adjacent_center[3] = {
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 0]
+          : center[0],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 1]
+          : center[1],
+      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
+          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
+          : center[2]};
+  const double* target_center =
+      (adjacent_eindex >= 0) ? adjacent_center : center;
+  double pressure = 0.0;
+
+  for (int i = 0; i < 8; i++) {
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
+    const double weight =
+        acoustic_shape_value_at(i, center[0], center[1], center[2]);
+
+    if (vp) {
+      pressure +=
+          weight *
+          (-((double)gpuData->pressureTm2Device[lnid] -
+             (double)gpuData->pressureTm1Device[lnid]) * invDt);
+    } else {
+      pressure += weight * (double)gpuData->pressureTm2Device[lnid];
+    }
+  }
+
+  for (int j = 0; j < 8; j++) {
+    const double weight =
+        acoustic_shape_value_at(j, target_center[0], target_center[1],
+                                target_center[2]);
+    if (weight == 0.0) {
+      continue;
+    }
+
+    const int32_t lnid =
+        gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
+    atomicAdd((solver_float*)(gpuData->porePressureOpenPoreTargetDevice +
+                              lnid),
+              (solver_float)(scale * weight * pressure));
+  }
+}
+
 __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
                                                 gpu_data_t* gpuData,
-                                                int useDrainMass)
+                                                int useDrainMass,
+                                                int useOpenPore)
 {
   const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -1363,8 +1446,16 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
     const solver_float drainMass =
         useDrainMass ? gpuData->porePressureSurfaceDevice[nindex]
                      : (solver_float)0.0;
-    if (drainMass > (solver_float)0.0) {
-      pnew = (mass * pfree) / (mass + drainMass);
+    const solver_float openMass =
+        useOpenPore ? gpuData->porePressureOpenPoreMassDevice[nindex]
+                    : (solver_float)0.0;
+    const solver_float openTarget =
+        useOpenPore ? gpuData->porePressureOpenPoreTargetDevice[nindex]
+                    : (solver_float)0.0;
+    if ((drainMass > (solver_float)0.0) ||
+        (openMass > (solver_float)0.0)) {
+      pnew = (mass * pfree + openTarget) /
+             (mass + drainMass + openMass);
     } else {
       pnew = pfree;
     }

@@ -445,6 +445,19 @@ Acoustic-elastic input flags (input file):
 	attenuating Earth do not need it. Empirical sweet spot
 	`acoustic_quality_factor = 100` (sensible band 100–200): lower
 	over-perturbs, higher under-damps.
+- `acoustic_poroelastic_interface`
+	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
+	sealed for the pore fluid while the existing acoustic pressure traction
+	still acts on the solid skeleton. Set to `open_pore` to add weak
+	mass-projected pressure continuity on detected acoustic-poroelastic
+	interface fragments, driving pore pressure toward the adjacent acoustic
+	pressure. This requires `include_acoustic=yes`, the acoustic scalar
+	formulation, and `include_poroelastic=yes`.
+- `acoustic_poroelastic_pressure_penalty_factor`
+	Optional. Default `1.0`. Multiplies the open-pore weak interface mass
+	used by `acoustic_poroelastic_interface=open_pore`. The target exchange
+	uses the existing device-resident scalar schedule when CUDA-aware MPI is
+	active, with sparse host staging as the fallback.
 
 Poroelastic U-P input flags (experimental V1):
 
@@ -480,6 +493,9 @@ Poroelastic U-P input flags (experimental V1):
 	and remains available in station output as a diagnostic. Set this to `no`
 	to use the older split `Q p` / `Q^T du` path for comparisons, or use
 	nonzero permeability / `drained` pressure BC for the full split path.
+	`acoustic_poroelastic_interface=open_pore` also disables this fast path so
+	the pressure-continuity pore pressure feeds back mechanically through the
+	split `Q p` term.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for
