@@ -483,6 +483,21 @@ typedef struct mrecord_t {
   mdata_t mdata;
 } mrecord_t;
 
+#define MESH_SHARD_MANIFEST_MAGIC "HERCULES_MESH_SHARDS"
+#define MESH_SHARD_MANIFEST_VERSION 1
+#define MESH_SHARD_PATH_SIZE 512
+
+typedef struct mesh_shard_meta_t {
+  int64_t element_count;
+  point_t first;
+  point_t last;
+} mesh_shard_meta_t;
+
+typedef struct mesh_shard_manifest_t {
+  int32_t shard_count;
+  mesh_shard_meta_t* shards;
+} mesh_shard_manifest_t;
+
 /* Mesh generation related routines */
 static inline int monitor_print(const char* format, ...);
 static int32_t toexpand(octant_t* leaf, double ticksize, const void* data);
@@ -8056,6 +8071,135 @@ static void mesh_import_print_stats(void) {
   }
 }
 
+static void mesh_shard_path(const char* manifest_path, int32_t shard_id,
+                            char* path, size_t path_size) {
+  int written = snprintf(path, path_size, "%s.part%06d.etree", manifest_path,
+                         shard_id);
+
+  if ((written < 0) || ((size_t)written >= path_size)) {
+    fprintf(stderr, "Thread %d: mesh shard path is too long: %s\n",
+            Global.myID, manifest_path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
+static void mesh_shard_manifest_free(mesh_shard_manifest_t* manifest) {
+  if (manifest == NULL) {
+    return;
+  }
+  free(manifest->shards);
+  manifest->shards = NULL;
+  manifest->shard_count = 0;
+}
+
+/* Return 1 for a shard manifest, 0 for a legacy etree, and abort if a file
+ * identifies itself as a manifest but is malformed. */
+static int mesh_shard_manifest_load(const char* path,
+                                    mesh_shard_manifest_t* manifest) {
+  FILE* fp;
+  char magic[64];
+  char keyword[64];
+  int version;
+  int header_fields;
+  int32_t shard_count;
+  int32_t i;
+
+  memset(manifest, 0, sizeof(*manifest));
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    return 0;
+  }
+
+  header_fields = fscanf(fp, "%63s %d", magic, &version);
+  if ((header_fields < 1) ||
+      (strcmp(magic, MESH_SHARD_MANIFEST_MAGIC) != 0)) {
+    fclose(fp);
+    return 0;
+  }
+
+  if ((header_fields != 2) ||
+      (version != MESH_SHARD_MANIFEST_VERSION) ||
+      (fscanf(fp, "%63s %d", keyword, &shard_count) != 2) ||
+      (strcmp(keyword, "shards") != 0) || (shard_count < 1)) {
+    fprintf(stderr, "Thread %d: malformed mesh shard manifest %s\n",
+            Global.myID, path);
+    fclose(fp);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  manifest->shards = (mesh_shard_meta_t*)calloc(
+      (size_t)shard_count, sizeof(mesh_shard_meta_t));
+  if (manifest->shards == NULL) {
+    fprintf(stderr,
+            "Thread %d: cannot allocate metadata for %d mesh shards\n",
+            Global.myID, shard_count);
+    fclose(fp);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  manifest->shard_count = shard_count;
+
+  for (i = 0; i < shard_count; i++) {
+    int32_t shard_id;
+    int64_t count;
+    int64_t first_x, first_y, first_z;
+    int64_t last_x, last_y, last_z;
+
+    if ((fscanf(fp,
+                "%63s %d %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64
+                " %" SCNd64 " %" SCNd64 " %" SCNd64,
+                keyword, &shard_id, &count, &first_x, &first_y, &first_z,
+                &last_x, &last_y, &last_z) != 9) ||
+        (strcmp(keyword, "shard") != 0) || (shard_id != i) || (count < 0)) {
+      fprintf(stderr,
+              "Thread %d: malformed entry %d in mesh shard manifest %s\n",
+              Global.myID, i, path);
+      fclose(fp);
+      mesh_shard_manifest_free(manifest);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    manifest->shards[i].element_count = count;
+    manifest->shards[i].first.x = (tick_t)first_x;
+    manifest->shards[i].first.y = (tick_t)first_y;
+    manifest->shards[i].first.z = (tick_t)first_z;
+    manifest->shards[i].last.x = (tick_t)last_x;
+    manifest->shards[i].last.y = (tick_t)last_y;
+    manifest->shards[i].last.z = (tick_t)last_z;
+  }
+
+  {
+    point_t previous_last;
+    int have_previous = 0;
+
+    for (i = 0; i < shard_count; i++) {
+      const mesh_shard_meta_t* shard = &manifest->shards[i];
+      if (shard->element_count == 0) {
+        continue;
+      }
+      if ((octor_zcompare(&shard->first, &shard->last) > 0) ||
+          (have_previous &&
+           (octor_zcompare(&previous_last, &shard->first) >= 0))) {
+        fprintf(stderr,
+                "Thread %d: unordered bounds for shard %d in manifest %s\n",
+                Global.myID, i, path);
+        fclose(fp);
+        mesh_shard_manifest_free(manifest);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      previous_last = shard->last;
+      have_previous = 1;
+    }
+  }
+
+  fclose(fp);
+  return 1;
+}
+
 static void mesh_import_cursor_addr_point(const etree_addr_t* addr,
                                           point_t* point) {
   point->x = (tick_t)addr->x;
@@ -8105,43 +8249,35 @@ static void mesh_import_cursor_start_addr(etree_addr_t* addr,
   *end_point_out = end_point;
 }
 
-static int64_t mesh_import_cursor_load_tree(void) {
-  etree_addr_t start_addr;
+static int64_t mesh_import_cursor_load_etree(etree_t* ep,
+                                             etree_addr_t start_addr,
+                                             const point_t* end_point) {
   etree_addr_t addr;
   mdata_t hit_data;
   edata_t edata;
   point_t start_point;
-  const point_t* end_point = NULL;
   int64_t imported = 0;
   int cursor_active = 0;
 
-  mesh_import_cursor_start_addr(&start_addr, &end_point);
   start_point.x = (tick_t)start_addr.x;
   start_point.y = (tick_t)start_addr.y;
   start_point.z = (tick_t)start_addr.z;
 
-  if (octor_beginleafimport(Global.myOctree) != 0) {
-    fprintf(stderr, "Thread %d: mesh_import_cursor_load_tree: begin failed\n",
-            Global.myID);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  }
-
-  if (etree_initcursor(Global.theMeshInputEp, start_addr) != 0) {
+  if (etree_initcursor(ep, start_addr) != 0) {
     fprintf(stderr,
-            "Thread %d: mesh_import_cursor_load_tree: cannot initialize etree cursor\n",
+            "Thread %d: mesh_import_cursor_load_etree: cannot initialize etree cursor\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
   cursor_active = 1;
 
-  while (etree_getcursor(Global.theMeshInputEp, &addr, NULL, &hit_data) == 0) {
+  while (etree_getcursor(ep, &addr, NULL, &hit_data) == 0) {
     if (mesh_import_cursor_before_start(&addr, &start_point)) {
-      if (etree_advcursor(Global.theMeshInputEp) != 0) {
-        if (etree_errno(Global.theMeshInputEp) != ET_END_OF_TREE) {
+      if (etree_advcursor(ep) != 0) {
+        if (etree_errno(ep) != ET_END_OF_TREE) {
           fprintf(stderr,
-                  "Thread %d: mesh_import_cursor_load_tree: etree cursor advance failed\n",
+                  "Thread %d: mesh_import_cursor_load_etree: etree cursor advance failed\n",
                   Global.myID);
           MPI_Abort(MPI_COMM_WORLD, ERROR);
           exit(1);
@@ -8161,7 +8297,7 @@ static int64_t mesh_import_cursor_load_tree(void) {
       if (octor_importleaf(Global.myOctree, (tick_t)addr.x, (tick_t)addr.y,
                            (tick_t)addr.z, (int8_t)addr.level, &edata) != 0) {
         fprintf(stderr,
-                "Thread %d: mesh_import_cursor_load_tree: cannot import leaf "
+                "Thread %d: mesh_import_cursor_load_etree: cannot import leaf "
                 "(%d,%d,%d,l=%d)\n",
                 Global.myID, (int32_t)addr.x, (int32_t)addr.y,
                 (int32_t)addr.z, (int32_t)addr.level);
@@ -8171,10 +8307,10 @@ static int64_t mesh_import_cursor_load_tree(void) {
       imported++;
     }
 
-    if (etree_advcursor(Global.theMeshInputEp) != 0) {
-      if (etree_errno(Global.theMeshInputEp) != ET_END_OF_TREE) {
+    if (etree_advcursor(ep) != 0) {
+      if (etree_errno(ep) != ET_END_OF_TREE) {
         fprintf(stderr,
-                "Thread %d: mesh_import_cursor_load_tree: etree cursor advance failed\n",
+                "Thread %d: mesh_import_cursor_load_etree: etree cursor advance failed\n",
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -8184,13 +8320,32 @@ static int64_t mesh_import_cursor_load_tree(void) {
     }
   }
 
-  if (cursor_active && (etree_stopcursor(Global.theMeshInputEp) != 0)) {
+  if (cursor_active && (etree_stopcursor(ep) != 0)) {
     fprintf(stderr,
-            "Thread %d: mesh_import_cursor_load_tree: etree cursor stop failed\n",
+            "Thread %d: mesh_import_cursor_load_etree: etree cursor stop failed\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
+
+  return imported;
+}
+
+static int64_t mesh_import_cursor_load_tree(void) {
+  etree_addr_t start_addr;
+  const point_t* end_point = NULL;
+  int64_t imported;
+
+  mesh_import_cursor_start_addr(&start_addr, &end_point);
+  if (octor_beginleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: mesh_import_cursor_load_tree: begin failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  imported =
+      mesh_import_cursor_load_etree(Global.theMeshInputEp, start_addr, end_point);
 
   if (octor_finishleafimport(Global.myOctree) != 0) {
     fprintf(stderr, "Thread %d: mesh_import_cursor_load_tree: finish failed\n",
@@ -8200,6 +8355,96 @@ static int64_t mesh_import_cursor_load_tree(void) {
   }
 
   return imported;
+}
+
+static int64_t mesh_import_cursor_load_shards(
+    const mesh_shard_manifest_t* manifest) {
+  etree_addr_t phase_start;
+  const point_t* phase_end = NULL;
+  point_t phase_start_point;
+  int64_t imported = 0;
+  int32_t i;
+
+  mesh_import_cursor_start_addr(&phase_start, &phase_end);
+  mesh_import_cursor_addr_point(&phase_start, &phase_start_point);
+
+  if (octor_beginleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: mesh shard import begin failed\n", Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (i = 0; i < manifest->shard_count; i++) {
+    const mesh_shard_meta_t* shard = &manifest->shards[i];
+    etree_addr_t shard_start = phase_start;
+    char shard_path[MESH_SHARD_PATH_SIZE];
+    etree_t* ep;
+
+    if (shard->element_count == 0) {
+      continue;
+    }
+    if (octor_zcompare(&shard->last, &phase_start_point) < 0) {
+      continue;
+    }
+    if ((phase_end != NULL) &&
+        (octor_zcompare(&shard->first, phase_end) >= 0)) {
+      continue;
+    }
+
+    if (octor_zcompare(&shard->first, &phase_start_point) > 0) {
+      shard_start.x = (etree_tick_t)shard->first.x;
+      shard_start.y = (etree_tick_t)shard->first.y;
+      shard_start.z = (etree_tick_t)shard->first.z;
+    }
+
+    mesh_shard_path(Param.mesh_etree_output_file, i, shard_path,
+                    sizeof(shard_path));
+    ep = etree_open(shard_path, O_RDONLY, 0, 0, 0);
+    if (ep == NULL) {
+      fprintf(stderr, "Thread %d: cannot open mesh shard %s\n", Global.myID,
+              shard_path);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    imported += mesh_import_cursor_load_etree(ep, shard_start, phase_end);
+    if (etree_close(ep) != 0) {
+      fprintf(stderr, "Thread %d: cannot close mesh shard %s\n", Global.myID,
+              shard_path);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  if (octor_finishleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: mesh shard import finish failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  return imported;
+}
+
+static void mesh_import_validate_shard_count(
+    int64_t local_imported, const mesh_shard_manifest_t* manifest) {
+  int64_t expected = 0;
+  int64_t actual = 0;
+  int32_t i;
+
+  for (i = 0; i < manifest->shard_count; i++) {
+    expected += manifest->shards[i].element_count;
+  }
+  MPI_Allreduce(&local_imported, &actual, 1, MPI_INT64_T, MPI_SUM,
+                comm_solver);
+  if (actual != expected) {
+    fprintf(stderr,
+            "Thread %d: sharded mesh import count mismatch: imported %" PRId64
+            ", manifest %" PRId64 "\n",
+            Global.myID, actual, expected);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
 }
 
 static void mesh_import_print_cursor_stats(int64_t imported) {
@@ -8373,13 +8618,20 @@ static void mesh_generate_from_etree(void) {
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
+  mesh_shard_manifest_t shard_manifest;
   const char* verify_env = getenv("HERCULES_MESH_IMPORT_VERIFY");
   int use_cursor_tree = mesh_import_use_cursor_tree();
+  int use_sharded_mesh = mesh_shard_manifest_load(
+      Param.mesh_etree_output_file, &shard_manifest);
   int verify_import =
       (verify_env != NULL) && (strcmp(verify_env, "0") != 0) &&
       (strcasecmp(verify_env, "no") != 0) &&
       (strcasecmp(verify_env, "false") != 0) &&
       (strcasecmp(verify_env, "off") != 0);
+
+  if (use_sharded_mesh) {
+    use_cursor_tree = 1;
+  }
 
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
   setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
@@ -8406,6 +8658,11 @@ static void mesh_generate_from_etree(void) {
 
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
+    monitor_print("Mesh import storage: %s\n",
+                  use_sharded_mesh ? "rank-local shards" : "single etree");
+    if (use_sharded_mesh) {
+      monitor_print("Mesh import shards: %d\n", shard_manifest.shard_count);
+    }
     monitor_print("Mesh import tree mode: %s\n",
                   use_cursor_tree ? "cursor" : "refine");
     monitor_print("Stage %14s Min %7s Max %5s Total    Time(s)\n\n", "", "",
@@ -8455,19 +8712,27 @@ static void mesh_generate_from_etree(void) {
     g_meshImportBootstrapLevel = -1;
   }
 
-  Global.theMeshInputEp =
-      etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
-  if (Global.theMeshInputEp == NULL) {
-    fprintf(stderr,
-            "Thread %d: mesh_generate_from_etree: cannot open mesh etree %s\n",
-            Global.myID, Param.mesh_etree_output_file);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  Global.theMeshInputEp = NULL;
+  if (!use_sharded_mesh) {
+    Global.theMeshInputEp =
+        etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
+    if (Global.theMeshInputEp == NULL) {
+      fprintf(stderr,
+              "Thread %d: mesh_generate_from_etree: cannot open mesh etree %s\n",
+              Global.myID, Param.mesh_etree_output_file);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
 
   Timer_Start("Octor Refinetree");
   if (use_cursor_tree) {
-    int64_t imported = mesh_import_cursor_load_tree();
+    int64_t imported = use_sharded_mesh
+                           ? mesh_import_cursor_load_shards(&shard_manifest)
+                           : mesh_import_cursor_load_tree();
+    if (use_sharded_mesh) {
+      mesh_import_validate_shard_count(imported, &shard_manifest);
+    }
     mesh_import_print_cursor_stats(imported);
   } else {
     if (octor_refinetree(Global.myOctree, toexpand_mesh_etree,
@@ -8598,6 +8863,14 @@ static void mesh_generate_from_etree(void) {
       fflush(stdout);
     }
   } else {
+    if (use_sharded_mesh) {
+      fprintf(stderr,
+              "Thread %d: sharded cursor import did not populate every "
+              "extracted mesh payload\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     if (Global.myID == 0) {
       monitor_print("Mesh import property backfill %20s", "");
       fflush(stdout);
@@ -8618,8 +8891,11 @@ static void mesh_generate_from_etree(void) {
       (Param.basinVelocityModel == YES) ? &basinVelModel_origin : NULL,
       (Param.threeDVelocityModel == YES) ? &threeDVelModel_origin : NULL);
 
-  etree_close(Global.theMeshInputEp);
-  Global.theMeshInputEp = NULL;
+  if (Global.theMeshInputEp != NULL) {
+    etree_close(Global.theMeshInputEp);
+    Global.theMeshInputEp = NULL;
+  }
+  mesh_shard_manifest_free(&shard_manifest);
 }
 
 /**
@@ -8760,10 +9036,51 @@ static void mesh_print_stat(const octree_t* oct, const mesh_t* mesh, int my_id,
   }
 }
 
-/**
- * Join elements and nodes, and send to Thread 0 for output.
- */
-static void mesh_output() {
+/** Build the etree record for one local mesh element. */
+static void mesh_fill_mrecord(mrecord_t* mrecord, int32_t eindex) {
+  int32_t whichnode;
+  int32_t localnid0 = Global.myMesh->elemTable[eindex].lnid[0];
+
+  mrecord->addr.x = Global.myMesh->nodeTable[localnid0].x;
+  mrecord->addr.y = Global.myMesh->nodeTable[localnid0].y;
+  mrecord->addr.z = Global.myMesh->nodeTable[localnid0].z;
+  mrecord->addr.level = Global.myMesh->elemTable[eindex].level;
+  mrecord->addr.type = ETREE_LEAF;
+
+  for (whichnode = 0; whichnode < 8; whichnode++) {
+    int32_t localnid = Global.myMesh->elemTable[eindex].lnid[whichnode];
+    mrecord->mdata.nid[whichnode] =
+        Global.myMesh->nodeTable[localnid].gnid;
+  }
+
+  memcpy(&mrecord->mdata.edgesize, Global.myMesh->elemTable[eindex].data,
+         sizeof(edata_t));
+}
+
+static int mesh_output_use_shards(void) {
+  const char* mode = getenv("HERCULES_MESH_IO_MODE");
+
+  if ((mode == NULL) || (mode[0] == '\0') ||
+      (strcasecmp(mode, "single") == 0) ||
+      (strcasecmp(mode, "legacy") == 0) ||
+      (strcasecmp(mode, "etree") == 0)) {
+    return 0;
+  }
+  if ((strcasecmp(mode, "sharded") == 0) ||
+      (strcasecmp(mode, "shards") == 0) ||
+      (strcasecmp(mode, "rank-local") == 0)) {
+    return 1;
+  }
+
+  fprintf(stderr,
+          "Thread %d: invalid HERCULES_MESH_IO_MODE='%s' "
+          "(expected single or sharded)\n",
+          Global.myID, mode);
+  MPI_Abort(MPI_COMM_WORLD, ERROR);
+  exit(1);
+}
+
+static void mesh_output_single(void) {
   int32_t eindex;
   int32_t remains, batch, batchlimit, idx;
   mrecord_t* partTable;
@@ -8809,36 +9126,7 @@ static void mesh_output() {
       batch = (remains < batchlimit) ? remains : batchlimit;
 
       for (idx = 0; idx < batch; idx++) {
-        mrecord_t* mrecord;
-        int32_t whichnode;
-        int32_t localnid0;
-
-        mrecord = &partTable[idx];
-
-        /* Fill the address field */
-        localnid0 = Global.myMesh->elemTable[eindex].lnid[0];
-
-        mrecord->addr.x = Global.myMesh->nodeTable[localnid0].x;
-        mrecord->addr.y = Global.myMesh->nodeTable[localnid0].y;
-        mrecord->addr.z = Global.myMesh->nodeTable[localnid0].z;
-        mrecord->addr.level = Global.myMesh->elemTable[eindex].level;
-        mrecord->addr.type = ETREE_LEAF;
-
-        /* Find the global node ids for the vertices */
-        for (whichnode = 0; whichnode < 8; whichnode++) {
-          int32_t localnid;
-          int64_t globalnid;
-
-          localnid = Global.myMesh->elemTable[eindex].lnid[whichnode];
-          globalnid = Global.myMesh->nodeTable[localnid].gnid;
-
-          mrecord->mdata.nid[whichnode] = globalnid;
-        }
-
-        /* data points to mdata_t type */
-        memcpy(&mrecord->mdata.edgesize, Global.myMesh->elemTable[eindex].data,
-               sizeof(edata_t));
-
+        mesh_fill_mrecord(&partTable[idx], eindex);
         eindex++;
       } /* for a batch */
 
@@ -8906,35 +9194,7 @@ static void mesh_output() {
       batch = (remains < batchlimit) ? remains : batchlimit;
 
       for (idx = 0; idx < batch; idx++) {
-        mrecord_t* mrecord;
-        int32_t whichnode;
-        int32_t localnid0;
-
-        mrecord = &partTable[idx];
-
-        /* Fill the address field */
-        localnid0 = Global.myMesh->elemTable[eindex].lnid[0];
-
-        mrecord->addr.x = Global.myMesh->nodeTable[localnid0].x;
-        mrecord->addr.y = Global.myMesh->nodeTable[localnid0].y;
-        mrecord->addr.z = Global.myMesh->nodeTable[localnid0].z;
-        mrecord->addr.level = Global.myMesh->elemTable[eindex].level;
-        mrecord->addr.type = ETREE_LEAF;
-
-        /* Find the global node ids for the vertices */
-        for (whichnode = 0; whichnode < 8; whichnode++) {
-          int32_t localnid;
-          int64_t globalnid;
-
-          localnid = Global.myMesh->elemTable[eindex].lnid[whichnode];
-          globalnid = Global.myMesh->nodeTable[localnid].gnid;
-
-          mrecord->mdata.nid[whichnode] = globalnid;
-        }
-
-        memcpy(&mrecord->mdata.edgesize, Global.myMesh->elemTable[eindex].data,
-               sizeof(edata_t));
-
+        mesh_fill_mrecord(&partTable[idx], eindex);
         eindex++;
       } /* for a batch */
 
@@ -8957,6 +9217,198 @@ static void mesh_output() {
   }
 
   return;
+}
+
+static void mesh_output_sharded(void) {
+  const int32_t batchlimit = BATCH;
+  int32_t eindex = 0;
+  mrecord_t* part_table;
+  etree_t* mep;
+  char shard_path[MESH_SHARD_PATH_SIZE];
+  int64_t local_meta[7] = {0, 0, 0, 0, 0, 0, 0};
+  int64_t* all_meta = NULL;
+
+  Timer_Start("Mesh Out");
+  mesh_shard_path(Param.mesh_etree_output_file, Global.myID, shard_path,
+                  sizeof(shard_path));
+
+  part_table = (mrecord_t*)calloc((size_t)batchlimit, sizeof(mrecord_t));
+  if (part_table == NULL) {
+    fprintf(stderr, "Thread %d: mesh_output_sharded: out of memory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  mep = etree_open(shard_path, O_CREAT | O_RDWR | O_TRUNC, 0,
+                   sizeof(mdata_t), 3);
+  if (mep == NULL) {
+    fprintf(stderr, "Thread %d: cannot create mesh shard %s\n", Global.myID,
+            shard_path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (etree_beginappend(mep, 1) != 0) {
+    fprintf(stderr, "Thread %d: cannot append mesh shard %s\n", Global.myID,
+            shard_path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  while (eindex < Global.myMesh->lenum) {
+    int32_t remains = Global.myMesh->lenum - eindex;
+    int32_t batch = (remains < batchlimit) ? remains : batchlimit;
+    int32_t idx;
+
+    for (idx = 0; idx < batch; idx++) {
+      mesh_fill_mrecord(&part_table[idx], eindex + idx);
+    }
+    if (bulkload(mep, part_table, batch) != 0) {
+      fprintf(stderr, "Thread %d: error writing mesh shard %s\n", Global.myID,
+              shard_path);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    eindex += batch;
+  }
+
+  if (etree_endappend(mep) != 0) {
+    fprintf(stderr, "Thread %d: cannot finish mesh shard %s\n", Global.myID,
+            shard_path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (etree_close(mep) != 0) {
+    fprintf(stderr, "Thread %d: cannot close mesh shard %s\n", Global.myID,
+            shard_path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  free(part_table);
+
+  local_meta[0] = Global.myMesh->lenum;
+  if (Global.myMesh->lenum > 0) {
+    mrecord_t first_record;
+    mrecord_t last_record;
+    point_t first_point;
+    point_t last_point;
+
+    mesh_fill_mrecord(&first_record, 0);
+    mesh_fill_mrecord(&last_record, Global.myMesh->lenum - 1);
+    mesh_import_cursor_addr_point(&first_record.addr, &first_point);
+    mesh_import_cursor_addr_point(&last_record.addr, &last_point);
+    if (octor_zcompare(&first_point, &last_point) > 0) {
+      fprintf(stderr, "Thread %d: local mesh is not SFC ordered\n", Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    local_meta[1] = first_point.x;
+    local_meta[2] = first_point.y;
+    local_meta[3] = first_point.z;
+    local_meta[4] = last_point.x;
+    local_meta[5] = last_point.y;
+    local_meta[6] = last_point.z;
+  }
+
+  if (Global.myID == 0) {
+    all_meta = (int64_t*)calloc((size_t)Global.theGroupSize * 7,
+                                sizeof(int64_t));
+    if (all_meta == NULL) {
+      fprintf(stderr, "Thread 0: cannot allocate mesh shard manifest\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  MPI_Gather(local_meta, 7, MPI_INT64_T, all_meta, 7, MPI_INT64_T, 0,
+             comm_solver);
+
+  if (Global.myID == 0) {
+    char tmp_path[MESH_SHARD_PATH_SIZE];
+    FILE* fp;
+    int32_t i;
+    point_t previous_last;
+    int have_previous = 0;
+    int written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+                           Param.mesh_etree_output_file);
+
+    if ((written < 0) || ((size_t)written >= sizeof(tmp_path))) {
+      fprintf(stderr, "Thread 0: mesh shard manifest path is too long\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    fp = fopen(tmp_path, "w");
+    if (fp == NULL) {
+      fprintf(stderr, "Thread 0: cannot create mesh shard manifest %s: %s\n",
+              tmp_path, strerror(errno));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+
+    fprintf(fp, "%s %d\n", MESH_SHARD_MANIFEST_MAGIC,
+            MESH_SHARD_MANIFEST_VERSION);
+    fprintf(fp, "shards %d\n", Global.theGroupSize);
+    for (i = 0; i < Global.theGroupSize; i++) {
+      const int64_t* meta = &all_meta[(size_t)i * 7];
+      point_t first;
+      point_t last;
+
+      first.x = (tick_t)meta[1];
+      first.y = (tick_t)meta[2];
+      first.z = (tick_t)meta[3];
+      last.x = (tick_t)meta[4];
+      last.y = (tick_t)meta[5];
+      last.z = (tick_t)meta[6];
+      if (meta[0] > 0) {
+        if (have_previous && (octor_zcompare(&previous_last, &first) >= 0)) {
+          fprintf(stderr,
+                  "Thread 0: mesh shard %d is not ordered after shard %d\n",
+                  i, i - 1);
+          fclose(fp);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        previous_last = last;
+        have_previous = 1;
+      }
+
+      fprintf(fp,
+              "shard %d %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64
+              " %" PRId64 " %" PRId64 " %" PRId64 "\n",
+              i, meta[0], meta[1], meta[2], meta[3], meta[4], meta[5],
+              meta[6]);
+    }
+
+    if (fclose(fp) != 0) {
+      fprintf(stderr, "Thread 0: cannot close mesh shard manifest %s\n",
+              tmp_path);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (rename(tmp_path, Param.mesh_etree_output_file) != 0) {
+      fprintf(stderr,
+              "Thread 0: cannot publish mesh shard manifest %s: %s\n",
+              Param.mesh_etree_output_file, strerror(errno));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    free(all_meta);
+  }
+
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Mesh Out");
+  if (Global.myID == 0) {
+    printf("mesh_output (sharded, %d files) ... done : %9.2f seconds\n",
+           Global.theGroupSize, Timer_Value("Mesh Out", (TimerKind)0));
+  }
+}
+
+static void mesh_output(void) {
+  if (mesh_output_use_shards()) {
+    mesh_output_sharded();
+  } else {
+    mesh_output_single();
+  }
 }
 
 /*-----------Computation routines ------------------------------*/

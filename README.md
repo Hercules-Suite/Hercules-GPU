@@ -137,6 +137,12 @@ Advanced/diagnostic toggles:
 	Default is `cursor`, which streams saved mesh leaves from the etree and
 	imports them directly into the local octor tree. Set to `refine` to restore
 	the older recursive `octor_refinetree()` search path.
+- `HERCULES_MESH_IO_MODE=sharded|single`
+	Selects Phase-A mesh storage. `sharded` lets every MPI rank write an etree
+	shard concurrently and publishes a manifest for automatic Phase-B import;
+	`single` retains the serialized rank-0 etree writer. Direct `psolve` runs
+	default to `single` for compatibility, while `run_phaseA_phaseB.sh` defaults
+	to `sharded`.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
 	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
@@ -271,7 +277,15 @@ Notes:
 
 - With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
 - `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
-- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh etree: ...` when it finds and rewrites this setting.
+- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh path: ...` when it finds and rewrites this setting.
+- The two-phase script defaults `HERCULES_MESH_IO_MODE=sharded`. In Phase A,
+	each MPI rank writes `<mesh_etree_output_file>.partNNNNNN.etree` concurrently,
+	then rank 0 publishes a small text manifest at `mesh_etree_output_file`.
+	Phase B detects that manifest automatically and each rank reads only the shards
+	that overlap its space-filling-curve interval. This removes the serialized
+	rank-0 gather/writer from mesh output. Set `HERCULES_MESH_IO_MODE=single` to
+	retain the legacy single-etree writer. Keep the manifest and all `.part*.etree`
+	files together when moving or archiving a generated mesh.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
@@ -285,7 +299,9 @@ Notes:
 Mesh mode input flags (input file):
 
 - `output_mesh`
-	`1` writes the generated mesh etree (`mesh_etree_output_file`) to disk.
+	`1` writes the generated mesh to disk. With
+	`HERCULES_MESH_IO_MODE=sharded`, `mesh_etree_output_file` is the manifest
+	path; with `single`, it is the legacy etree database path.
 	`0` skips mesh etree output.
 - `mesh_only_mode`
 	`1` runs meshing/setup and exits before time-stepping solver iterations.

@@ -19,6 +19,7 @@ RUN_DIR="${PWD}"
 : "${HERCULES_CONTRIB_UNPACK_OMP:=1}"
 : "${HERCULES_CONTRIB_RECV_MODE:=waitsome}"
 : "${HERCULES_SPARSE_UPLOAD_MODE:=dense}"
+: "${HERCULES_MESH_IO_MODE:=sharded}"
 export OMP_PROC_BIND OMP_PLACES
 export HERCULES_ADJUST_ASSIGN_OMP HERCULES_ADJUST_DIST_OMP
 export HERCULES_SPARSE_CLEAR_MODE HERCULES_FULL_CLEAR_OMP
@@ -27,6 +28,7 @@ export HERCULES_PLANE_IO_OMP
 export HERCULES_CONTRIB_PACK_OMP HERCULES_CONTRIB_UNPACK_OMP
 export HERCULES_CONTRIB_RECV_MODE
 export HERCULES_SPARSE_UPLOAD_MODE
+export HERCULES_MESH_IO_MODE
 
 MPI_RUN="${MPI_RUN:-mpirun}"
 BASE_IN="${BASE_IN:-}"
@@ -444,12 +446,13 @@ if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
 fi
 echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
+echo "Mesh I/O mode:  ${HERCULES_MESH_IO_MODE}"
 if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
   echo "Phase B input:  ${PHASE_B_IN} (generated)"
   if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
-    echo "Mesh etree:     ${EFFECTIVE_MESH_ETREE_PATH}"
+    echo "Mesh path:      ${EFFECTIVE_MESH_ETREE_PATH}"
   fi
 else
   echo "Phase A input:  ${PHASE_A_IN}"
@@ -511,7 +514,7 @@ else
 fi
 
 if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] && [[ ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
-  echo "ERROR: Phase A did not produce a readable mesh etree file: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
+  echo "ERROR: Phase A did not produce a readable mesh file or manifest: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
   exit 1
 fi
 
