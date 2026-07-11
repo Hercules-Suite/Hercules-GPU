@@ -16447,8 +16447,20 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Stop("Poroelastic Pressure Step");
 }
 
+/* Return true only when this run can read or write checkpoint state.
+ * A rate at or beyond the total step count cannot trigger
+ * solver_write_checkpoint(), so it must not disable device-resident MPI. */
+static int32_t checkpoint_host_state_required(void) {
+  if (Param.theUseCheckPoint == 1) {
+    return 1;
+  }
+
+  return (Param.theCheckPointingRate > 0) &&
+         (Param.theCheckPointingRate < Param.theTotalSteps);
+}
+
 static int32_t displacement_boundary_sync_safe(void) {
-  if (Param.theUseCheckPoint == 1 || Param.theCheckPointingRate != 0) {
+  if (checkpoint_host_state_required()) {
     return 0;
   }
   if (Param.drmImplement == YES || Param.includeNonlinearAnalysis == YES ||
@@ -16672,10 +16684,11 @@ static int32_t gpu_device_sync_enabled(void) {
 
     /* Checkpoints serialize host state. Keep the device schedule path
      * conservative until every field has a direct checkpoint gather. */
-    if (useDevice &&
-        ((Param.theUseCheckPoint == 1) || (Param.theCheckPointingRate != 0))) {
+    if (useDevice && checkpoint_host_state_required()) {
       useDevice = 0;
-      fallbackReason = "checkpointing needs host field state";
+      fallbackReason = (Param.theUseCheckPoint == 1)
+                           ? "checkpoint restart needs host field state"
+                           : "checkpoint writes need host field state";
     }
 
     if (useDevice) {
