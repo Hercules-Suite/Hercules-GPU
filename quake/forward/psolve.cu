@@ -41,6 +41,9 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -113,6 +116,8 @@ static int32_t*          g_topoBktElemMapperDevice = NULL;
 static topo_bkt_const_t* g_topoBktConstDevice = NULL;
 static int32_t           g_dampingForceCountGPU = -1;
 static int32_t*          g_dampingForceMapperDevice = NULL;
+static int g_unifiedMeshHandoffEnabled = 0;
+static int g_unifiedMeshHandoffActive = 1;
 
 static int32_t g_topoForceMode = -1;
 static int32_t g_topoForceModeReported = 0;
@@ -432,6 +437,7 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG 140
 #define AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG 141
 #define CVMRECORD_MSG 110
+#define MESH_HANDOFF_MSG 142
 
 #define ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW 0
 #define ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE 1
@@ -486,6 +492,9 @@ typedef struct mrecord_t {
 #define MESH_SHARD_MANIFEST_MAGIC "HERCULES_MESH_SHARDS"
 #define MESH_SHARD_MANIFEST_VERSION 1
 #define MESH_SHARD_PATH_SIZE 512
+#define MESH_MPIIO_MAGIC "HERCULES_MPIIO"
+#define MESH_MPIIO_VERSION 1
+#define MESH_MPIIO_BATCH (1 << 16)
 
 typedef struct mesh_shard_meta_t {
   int64_t element_count;
@@ -497,6 +506,31 @@ typedef struct mesh_shard_manifest_t {
   int32_t shard_count;
   mesh_shard_meta_t* shards;
 } mesh_shard_manifest_t;
+
+typedef struct mesh_mpiio_header_t {
+  char magic[16];
+  uint32_t version;
+  uint32_t header_bytes;
+  uint32_t record_bytes;
+  uint32_t directory_entry_bytes;
+  int64_t writer_ranks;
+  int64_t total_elements;
+  int64_t directory_offset;
+  int64_t data_offset;
+} mesh_mpiio_header_t;
+
+typedef struct mesh_mpiio_entry_t {
+  int64_t file_offset;
+  int64_t element_count;
+  int32_t first_x, first_y, first_z;
+  int32_t last_x, last_y, last_z;
+} mesh_mpiio_entry_t;
+
+typedef struct mesh_mpiio_archive_t {
+  MPI_File file;
+  mesh_mpiio_header_t header;
+  mesh_mpiio_entry_t* entries;
+} mesh_mpiio_archive_t;
 
 /* Mesh generation related routines */
 static inline int monitor_print(const char* format, ...);
@@ -510,6 +544,7 @@ static void mesh_import_apply_properties(void);
 static void mesh_generate_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
+static int mesh_unified_memory_handoff(void);
 static void mesh_correct_properties(etree_t* cvm);
 static void mesh_release_acoustic_interface_data(void);
 static void mesh_build_acoustic_interface_flags(
@@ -8093,6 +8128,158 @@ static void mesh_shard_manifest_free(mesh_shard_manifest_t* manifest) {
   manifest->shard_count = 0;
 }
 
+static int mesh_mpiio_archive_detect(const char* path) {
+  FILE* fp;
+  char magic[16] = {0};
+  size_t bytes;
+
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    return 0;
+  }
+  bytes = fread(magic, 1, sizeof(magic), fp);
+  fclose(fp);
+  return (bytes >= strlen(MESH_MPIIO_MAGIC)) &&
+         (memcmp(magic, MESH_MPIIO_MAGIC, strlen(MESH_MPIIO_MAGIC)) == 0);
+}
+
+static void mesh_mpiio_archive_close(mesh_mpiio_archive_t* archive) {
+  if (archive == NULL) {
+    return;
+  }
+  if (archive->file != MPI_FILE_NULL) {
+    MPI_File_close(&archive->file);
+  }
+  free(archive->entries);
+  archive->entries = NULL;
+  archive->file = MPI_FILE_NULL;
+}
+
+static void mesh_mpiio_archive_open(const char* path,
+                                    mesh_mpiio_archive_t* archive) {
+  int32_t i;
+  int64_t counted_elements = 0;
+  int64_t minimum_data_offset;
+  MPI_Offset file_size = 0;
+  point_t previous_last;
+  int have_previous = 0;
+
+  memset(archive, 0, sizeof(*archive));
+  archive->file = MPI_FILE_NULL;
+  if (MPI_File_open(comm_solver, (char*)path, MPI_MODE_RDONLY, MPI_INFO_NULL,
+                    &archive->file) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot open MPI-IO mesh archive %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (MPI_File_read_at_all(archive->file, 0, &archive->header,
+                           (int)sizeof(archive->header), MPI_BYTE,
+                           MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot read MPI-IO mesh header %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if ((memcmp(archive->header.magic, MESH_MPIIO_MAGIC,
+              strlen(MESH_MPIIO_MAGIC)) != 0) ||
+      (archive->header.version != MESH_MPIIO_VERSION) ||
+      (archive->header.header_bytes != sizeof(mesh_mpiio_header_t)) ||
+      (archive->header.record_bytes != sizeof(mrecord_t)) ||
+      (archive->header.directory_entry_bytes != sizeof(mesh_mpiio_entry_t)) ||
+      (archive->header.writer_ranks < 1) ||
+      (archive->header.writer_ranks >
+       INT_MAX / (int64_t)sizeof(mesh_mpiio_entry_t)) ||
+      (archive->header.total_elements < 0) ||
+      (archive->header.directory_offset !=
+       (int64_t)sizeof(mesh_mpiio_header_t))) {
+    fprintf(stderr, "Thread %d: incompatible MPI-IO mesh archive %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  minimum_data_offset =
+      archive->header.directory_offset +
+      archive->header.writer_ranks * (int64_t)sizeof(mesh_mpiio_entry_t);
+  if (archive->header.data_offset < minimum_data_offset) {
+    fprintf(stderr, "Thread %d: invalid MPI-IO mesh data offset in %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (MPI_File_get_size(archive->file, &file_size) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot stat MPI-IO mesh archive %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  archive->entries = (mesh_mpiio_entry_t*)calloc(
+      (size_t)archive->header.writer_ranks, sizeof(mesh_mpiio_entry_t));
+  if (archive->entries == NULL) {
+    fprintf(stderr, "Thread %d: cannot allocate MPI-IO mesh directory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (MPI_File_read_at_all(
+          archive->file, (MPI_Offset)archive->header.directory_offset,
+          archive->entries,
+          (int)(archive->header.writer_ranks *
+                (int64_t)sizeof(mesh_mpiio_entry_t)),
+          MPI_BYTE, MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot read MPI-IO mesh directory\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (i = 0; i < archive->header.writer_ranks; i++) {
+    const mesh_mpiio_entry_t* entry = &archive->entries[i];
+    int64_t expected_offset =
+        archive->header.data_offset +
+        counted_elements * (int64_t)sizeof(mrecord_t);
+    point_t first = {(tick_t)entry->first_x, (tick_t)entry->first_y,
+                     (tick_t)entry->first_z};
+    point_t last = {(tick_t)entry->last_x, (tick_t)entry->last_y,
+                    (tick_t)entry->last_z};
+    if ((entry->element_count < 0) ||
+        (entry->file_offset != expected_offset) ||
+        (entry->element_count >
+         (INT64_MAX - counted_elements))) {
+      fprintf(stderr, "Thread %d: invalid MPI-IO mesh directory entry %d\n",
+              Global.myID, i);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    counted_elements += entry->element_count;
+    if (entry->element_count == 0) {
+      continue;
+    }
+    if ((octor_zcompare(&first, &last) > 0) ||
+        (have_previous && (octor_zcompare(&previous_last, &first) >= 0))) {
+      fprintf(stderr, "Thread %d: unordered MPI-IO mesh directory entry %d\n",
+              Global.myID, i);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    previous_last = last;
+    have_previous = 1;
+  }
+  if ((counted_elements != archive->header.total_elements) ||
+      (archive->header.total_elements >
+       (INT64_MAX - archive->header.data_offset) /
+           (int64_t)sizeof(mrecord_t)) ||
+      ((MPI_Offset)(archive->header.data_offset +
+                    archive->header.total_elements *
+                        (int64_t)sizeof(mrecord_t)) != file_size)) {
+    fprintf(stderr, "Thread %d: inconsistent MPI-IO mesh archive size %s\n",
+            Global.myID, path);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
 /* Return 1 for a shard manifest, 0 for a legacy etree, and abort if a file
  * identifies itself as a manifest but is malformed. */
 static int mesh_shard_manifest_load(const char* path,
@@ -8426,6 +8613,95 @@ static int64_t mesh_import_cursor_load_shards(
   return imported;
 }
 
+static int64_t mesh_import_cursor_load_mpiio(
+    const mesh_mpiio_archive_t* archive) {
+  etree_addr_t phase_start;
+  const point_t* phase_end = NULL;
+  point_t phase_start_point;
+  mrecord_t* records;
+  int64_t imported = 0;
+  int64_t entry_index;
+
+  mesh_import_cursor_start_addr(&phase_start, &phase_end);
+  mesh_import_cursor_addr_point(&phase_start, &phase_start_point);
+  records = (mrecord_t*)calloc(MESH_MPIIO_BATCH, sizeof(mrecord_t));
+  if (records == NULL) {
+    fprintf(stderr, "Thread %d: cannot allocate MPI-IO import buffer\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (octor_beginleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: MPI-IO mesh import begin failed\n", Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  for (entry_index = 0; entry_index < archive->header.writer_ranks;
+       entry_index++) {
+    const mesh_mpiio_entry_t* entry = &archive->entries[entry_index];
+    point_t first = {(tick_t)entry->first_x, (tick_t)entry->first_y,
+                     (tick_t)entry->first_z};
+    point_t last = {(tick_t)entry->last_x, (tick_t)entry->last_y,
+                    (tick_t)entry->last_z};
+    int64_t offset;
+
+    if ((entry->element_count == 0) ||
+        (octor_zcompare(&last, &phase_start_point) < 0) ||
+        ((phase_end != NULL) && (octor_zcompare(&first, phase_end) >= 0))) {
+      continue;
+    }
+
+    for (offset = 0; offset < entry->element_count;
+         offset += MESH_MPIIO_BATCH) {
+      int64_t remains = entry->element_count - offset;
+      int32_t count = (int32_t)((remains < MESH_MPIIO_BATCH)
+                                    ? remains
+                                    : MESH_MPIIO_BATCH);
+      int32_t i;
+      MPI_Offset file_offset =
+          (MPI_Offset)entry->file_offset +
+          (MPI_Offset)offset * (MPI_Offset)sizeof(mrecord_t);
+
+      if (MPI_File_read_at(archive->file, file_offset, records,
+                           count * (int)sizeof(mrecord_t), MPI_BYTE,
+                           MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+        fprintf(stderr, "Thread %d: MPI-IO mesh record read failed\n",
+                Global.myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      for (i = 0; i < count; i++) {
+        point_t point;
+        edata_t edata;
+        mesh_import_cursor_addr_point(&records[i].addr, &point);
+        if ((octor_zcompare(&point, &phase_start_point) < 0) ||
+            ((phase_end != NULL) && (octor_zcompare(&point, phase_end) >= 0))) {
+          continue;
+        }
+        mesh_import_store_payload(&edata, &records[i].mdata);
+        if (octor_importleaf(Global.myOctree, point.x, point.y, point.z,
+                             (int8_t)records[i].addr.level, &edata) != 0) {
+          fprintf(stderr, "Thread %d: cannot import MPI-IO mesh leaf\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        imported++;
+      }
+    }
+  }
+
+  free(records);
+  if (octor_finishleafimport(Global.myOctree) != 0) {
+    fprintf(stderr, "Thread %d: MPI-IO mesh import finish failed\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  return imported;
+}
+
 static void mesh_import_validate_shard_count(
     int64_t local_imported, const mesh_shard_manifest_t* manifest) {
   int64_t expected = 0;
@@ -8442,6 +8718,21 @@ static void mesh_import_validate_shard_count(
             "Thread %d: sharded mesh import count mismatch: imported %" PRId64
             ", manifest %" PRId64 "\n",
             Global.myID, actual, expected);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+}
+
+static void mesh_import_validate_mpiio_count(
+    int64_t local_imported, const mesh_mpiio_archive_t* archive) {
+  int64_t actual = 0;
+  MPI_Allreduce(&local_imported, &actual, 1, MPI_INT64_T, MPI_SUM,
+                comm_solver);
+  if (actual != archive->header.total_elements) {
+    fprintf(stderr,
+            "Thread %d: MPI-IO mesh import count mismatch: imported %" PRId64
+            ", archive %" PRId64 "\n",
+            Global.myID, actual, archive->header.total_elements);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
@@ -8618,18 +8909,26 @@ static void mesh_generate_from_etree(void) {
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
-  mesh_shard_manifest_t shard_manifest;
+  mesh_shard_manifest_t shard_manifest = {0, NULL};
+  mesh_mpiio_archive_t mpiio_archive;
   const char* verify_env = getenv("HERCULES_MESH_IMPORT_VERIFY");
   int use_cursor_tree = mesh_import_use_cursor_tree();
-  int use_sharded_mesh = mesh_shard_manifest_load(
-      Param.mesh_etree_output_file, &shard_manifest);
+  int use_mpiio_mesh = mesh_mpiio_archive_detect(Param.mesh_etree_output_file);
+  int use_sharded_mesh =
+      !use_mpiio_mesh && mesh_shard_manifest_load(
+                              Param.mesh_etree_output_file, &shard_manifest);
   int verify_import =
       (verify_env != NULL) && (strcmp(verify_env, "0") != 0) &&
       (strcasecmp(verify_env, "no") != 0) &&
       (strcasecmp(verify_env, "false") != 0) &&
       (strcasecmp(verify_env, "off") != 0);
 
-  if (use_sharded_mesh) {
+  mpiio_archive.file = MPI_FILE_NULL;
+  mpiio_archive.entries = NULL;
+  if (use_mpiio_mesh) {
+    mesh_mpiio_archive_open(Param.mesh_etree_output_file, &mpiio_archive);
+  }
+  if (use_sharded_mesh || use_mpiio_mesh) {
     use_cursor_tree = 1;
   }
 
@@ -8659,7 +8958,9 @@ static void mesh_generate_from_etree(void) {
   if (Global.myID == 0) {
     monitor_print("Meshing: Import from existing mesh etree\n\n");
     monitor_print("Mesh import storage: %s\n",
-                  use_sharded_mesh ? "rank-local shards" : "single etree");
+                  use_mpiio_mesh ? "single-file MPI-IO archive"
+                  : use_sharded_mesh ? "rank-local shards"
+                                     : "single etree");
     if (use_sharded_mesh) {
       monitor_print("Mesh import shards: %d\n", shard_manifest.shard_count);
     }
@@ -8713,7 +9014,7 @@ static void mesh_generate_from_etree(void) {
   }
 
   Global.theMeshInputEp = NULL;
-  if (!use_sharded_mesh) {
+  if (!use_sharded_mesh && !use_mpiio_mesh) {
     Global.theMeshInputEp =
         etree_open(Param.mesh_etree_output_file, O_RDONLY, 0, 0, 0);
     if (Global.theMeshInputEp == NULL) {
@@ -8727,9 +9028,14 @@ static void mesh_generate_from_etree(void) {
 
   Timer_Start("Octor Refinetree");
   if (use_cursor_tree) {
-    int64_t imported = use_sharded_mesh
+    int64_t imported = use_mpiio_mesh
+                           ? mesh_import_cursor_load_mpiio(&mpiio_archive)
+                       : use_sharded_mesh
                            ? mesh_import_cursor_load_shards(&shard_manifest)
                            : mesh_import_cursor_load_tree();
+    if (use_mpiio_mesh) {
+      mesh_import_validate_mpiio_count(imported, &mpiio_archive);
+    }
     if (use_sharded_mesh) {
       mesh_import_validate_shard_count(imported, &shard_manifest);
     }
@@ -8863,9 +9169,9 @@ static void mesh_generate_from_etree(void) {
       fflush(stdout);
     }
   } else {
-    if (use_sharded_mesh) {
+    if (use_sharded_mesh || use_mpiio_mesh) {
       fprintf(stderr,
-              "Thread %d: sharded cursor import did not populate every "
+              "Thread %d: streamed mesh import did not populate every "
               "extracted mesh payload\n",
               Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -8896,6 +9202,7 @@ static void mesh_generate_from_etree(void) {
     Global.theMeshInputEp = NULL;
   }
   mesh_shard_manifest_free(&shard_manifest);
+  mesh_mpiio_archive_close(&mpiio_archive);
 }
 
 /**
@@ -9071,13 +9378,24 @@ static int mesh_output_use_shards(void) {
       (strcasecmp(mode, "rank-local") == 0)) {
     return 1;
   }
+  if ((strcasecmp(mode, "mpiio") == 0) ||
+      (strcasecmp(mode, "single-mpiio") == 0)) {
+    return 0;
+  }
 
   fprintf(stderr,
           "Thread %d: invalid HERCULES_MESH_IO_MODE='%s' "
-          "(expected single or sharded)\n",
+          "(expected single, sharded, or mpiio)\n",
           Global.myID, mode);
   MPI_Abort(MPI_COMM_WORLD, ERROR);
   exit(1);
+}
+
+static int mesh_output_use_mpiio(void) {
+  const char* mode = getenv("HERCULES_MESH_IO_MODE");
+  return (mode != NULL) &&
+         ((strcasecmp(mode, "mpiio") == 0) ||
+          (strcasecmp(mode, "single-mpiio") == 0));
 }
 
 static void mesh_output_single(void) {
@@ -9403,12 +9721,718 @@ static void mesh_output_sharded(void) {
   }
 }
 
+static void mesh_output_mpiio(void) {
+  mesh_mpiio_header_t header;
+  mesh_mpiio_entry_t local_entry;
+  mesh_mpiio_entry_t* entries = NULL;
+  mrecord_t* records;
+  MPI_File file = MPI_FILE_NULL;
+  int64_t local_count = Global.myMesh->lenum;
+  int64_t local_bytes = local_count * (int64_t)sizeof(mrecord_t);
+  int64_t byte_prefix = 0;
+  int64_t total_bytes = 0;
+  int64_t total_elements = 0;
+  int64_t local_rounds =
+      (local_count + MESH_MPIIO_BATCH - 1) / MESH_MPIIO_BATCH;
+  int64_t max_rounds = 0;
+  int64_t round;
+  char archive_tmp[MESH_SHARD_PATH_SIZE];
+  int path_length;
+
+  if (Param.mesh_etree_output_file[0] == '\0') {
+    fprintf(stderr,
+            "Thread %d: mesh_etree_output_file is required for MPI-IO output\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  Timer_Start("Mesh Out");
+  path_length = snprintf(archive_tmp, sizeof(archive_tmp), "%s.tmp",
+                         Param.mesh_etree_output_file);
+  if ((path_length < 0) || ((size_t)path_length >= sizeof(archive_tmp))) {
+    fprintf(stderr, "Thread %d: MPI-IO mesh archive path is too long\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  memset(&header, 0, sizeof(header));
+  memset(&local_entry, 0, sizeof(local_entry));
+  memcpy(header.magic, MESH_MPIIO_MAGIC, strlen(MESH_MPIIO_MAGIC));
+  header.version = MESH_MPIIO_VERSION;
+  header.header_bytes = sizeof(header);
+  header.record_bytes = sizeof(mrecord_t);
+  header.directory_entry_bytes = sizeof(mesh_mpiio_entry_t);
+  header.writer_ranks = Global.theGroupSize;
+  header.directory_offset = sizeof(header);
+  header.data_offset =
+      (header.directory_offset +
+       (int64_t)Global.theGroupSize * (int64_t)sizeof(mesh_mpiio_entry_t) +
+       4095) &
+      ~((int64_t)4095);
+
+  MPI_Exscan(&local_bytes, &byte_prefix, 1, MPI_INT64_T, MPI_SUM, comm_solver);
+  if (Global.myID == 0) {
+    byte_prefix = 0;
+  }
+  MPI_Allreduce(&local_bytes, &total_bytes, 1, MPI_INT64_T, MPI_SUM,
+                comm_solver);
+  MPI_Allreduce(&local_count, &total_elements, 1, MPI_INT64_T, MPI_SUM,
+                comm_solver);
+  MPI_Allreduce(&local_rounds, &max_rounds, 1, MPI_INT64_T, MPI_MAX,
+                comm_solver);
+  header.total_elements = total_elements;
+  local_entry.file_offset = header.data_offset + byte_prefix;
+  local_entry.element_count = local_count;
+  if (local_count > 0) {
+    mrecord_t first_record;
+    mrecord_t last_record;
+    mesh_fill_mrecord(&first_record, 0);
+    mesh_fill_mrecord(&last_record, (int32_t)local_count - 1);
+    local_entry.first_x = (int32_t)first_record.addr.x;
+    local_entry.first_y = (int32_t)first_record.addr.y;
+    local_entry.first_z = (int32_t)first_record.addr.z;
+    local_entry.last_x = (int32_t)last_record.addr.x;
+    local_entry.last_y = (int32_t)last_record.addr.y;
+    local_entry.last_z = (int32_t)last_record.addr.z;
+  }
+
+  if (Global.myID == 0) {
+    entries = (mesh_mpiio_entry_t*)calloc(
+        (size_t)Global.theGroupSize, sizeof(mesh_mpiio_entry_t));
+    if (entries == NULL) {
+      fprintf(stderr, "Thread 0: cannot allocate MPI-IO mesh directory\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  MPI_Gather(&local_entry, (int)sizeof(local_entry), MPI_BYTE, entries,
+             (int)sizeof(local_entry), MPI_BYTE, 0, comm_solver);
+
+  if (Global.myID == 0) {
+    point_t previous_last;
+    int have_previous = 0;
+    int32_t rank;
+    for (rank = 0; rank < Global.theGroupSize; rank++) {
+      point_t first = {(tick_t)entries[rank].first_x,
+                       (tick_t)entries[rank].first_y,
+                       (tick_t)entries[rank].first_z};
+      point_t last = {(tick_t)entries[rank].last_x,
+                      (tick_t)entries[rank].last_y,
+                      (tick_t)entries[rank].last_z};
+      if (entries[rank].element_count == 0) {
+        continue;
+      }
+      if ((octor_zcompare(&first, &last) > 0) ||
+          (have_previous && (octor_zcompare(&previous_last, &first) >= 0))) {
+        fprintf(stderr, "Thread 0: MPI-IO mesh rank %d is not SFC ordered\n",
+                rank);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      previous_last = last;
+      have_previous = 1;
+    }
+  }
+
+  if (MPI_File_open(comm_solver, archive_tmp,
+                    MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL,
+                    &file) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot create MPI-IO mesh archive %s\n",
+            Global.myID, Param.mesh_etree_output_file);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (MPI_File_set_size(file,
+                        (MPI_Offset)(header.data_offset + total_bytes)) !=
+      MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot size MPI-IO mesh archive\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (Global.myID == 0) {
+    if ((MPI_File_write_at(file, 0, &header, (int)sizeof(header), MPI_BYTE,
+                           MPI_STATUS_IGNORE) != MPI_SUCCESS) ||
+        (MPI_File_write_at(
+             file, (MPI_Offset)header.directory_offset, entries,
+             Global.theGroupSize * (int)sizeof(mesh_mpiio_entry_t), MPI_BYTE,
+             MPI_STATUS_IGNORE) != MPI_SUCCESS)) {
+      fprintf(stderr, "Thread 0: cannot write MPI-IO mesh index\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  MPI_Barrier(comm_solver);
+
+  records = (mrecord_t*)calloc(MESH_MPIIO_BATCH, sizeof(mrecord_t));
+  if (records == NULL) {
+    fprintf(stderr, "Thread %d: cannot allocate MPI-IO mesh output buffer\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  for (round = 0; round < max_rounds; round++) {
+    int64_t first = round * MESH_MPIIO_BATCH;
+    int32_t count = 0;
+    int32_t i;
+    if (first < local_count) {
+      int64_t remains = local_count - first;
+      count = (int32_t)((remains < MESH_MPIIO_BATCH)
+                            ? remains
+                            : MESH_MPIIO_BATCH);
+      for (i = 0; i < count; i++) {
+        mesh_fill_mrecord(&records[i], (int32_t)(first + i));
+      }
+    }
+    if (MPI_File_write_at_all(
+            file,
+            (MPI_Offset)local_entry.file_offset +
+                (MPI_Offset)first * (MPI_Offset)sizeof(mrecord_t),
+            records, count * (int)sizeof(mrecord_t), MPI_BYTE,
+            MPI_STATUS_IGNORE) != MPI_SUCCESS) {
+      fprintf(stderr, "Thread %d: MPI-IO mesh record write failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  free(records);
+  free(entries);
+  if (MPI_File_sync(file) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot sync MPI-IO mesh archive\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (MPI_File_close(&file) != MPI_SUCCESS) {
+    fprintf(stderr, "Thread %d: cannot close MPI-IO mesh archive\n",
+            Global.myID);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  MPI_Barrier(comm_solver);
+  if (Global.myID == 0) {
+    if (rename(archive_tmp, Param.mesh_etree_output_file) != 0) {
+      fprintf(stderr, "Thread 0: cannot publish MPI-IO mesh archive %s: %s\n",
+              Param.mesh_etree_output_file, strerror(errno));
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  MPI_Barrier(comm_solver);
+  Timer_Stop("Mesh Out");
+  if (Global.myID == 0) {
+    printf("mesh_output (single MPI-IO archive) ... done : %9.2f seconds\n",
+           Timer_Value("Mesh Out", (TimerKind)0));
+  }
+}
+
 static void mesh_output(void) {
-  if (mesh_output_use_shards()) {
+  if (mesh_output_use_mpiio()) {
+    mesh_output_mpiio();
+  } else if (mesh_output_use_shards()) {
     mesh_output_sharded();
   } else {
     mesh_output_single();
   }
+}
+
+static int32_t mesh_handoff_owner(const point_t* intervals, int32_t count,
+                                  const point_t* point) {
+  int32_t low = 0;
+  int32_t high = count - 1;
+  int32_t owner = 0;
+  while (low <= high) {
+    int32_t mid = low + (high - low) / 2;
+    if (octor_zcompare(&intervals[mid], point) <= 0) {
+      owner = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return owner;
+}
+
+static void mesh_handoff_import_records(const mrecord_t* records,
+                                        int32_t count) {
+  int32_t i;
+  for (i = 0; i < count; i++) {
+    edata_t edata;
+    mesh_import_store_payload(&edata, &records[i].mdata);
+    if (octor_importleaf(Global.myOctree, (tick_t)records[i].addr.x,
+                         (tick_t)records[i].addr.y,
+                         (tick_t)records[i].addr.z,
+                         (int8_t)records[i].addr.level, &edata) != 0) {
+      fprintf(stderr, "Thread %d: in-memory mesh leaf import failed\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+}
+
+#ifdef __linux__
+static void mesh_unified_bind_phase_b_cpus(const cpu_set_t* node_cpu_mask,
+                                           int local_rank,
+                                           int ranks_per_node,
+                                           int world_rank) {
+  int allowed_count = CPU_COUNT(node_cpu_mask);
+  int first_cpu_index = (local_rank * allowed_count) / ranks_per_node;
+  int last_cpu_index = ((local_rank + 1) * allowed_count) / ranks_per_node;
+  int allowed_index = 0;
+  int cpu;
+  cpu_set_t phase_b_mask;
+
+  CPU_ZERO(&phase_b_mask);
+  for (cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+    if (CPU_ISSET(cpu, node_cpu_mask)) {
+      if ((allowed_index >= first_cpu_index) &&
+          (allowed_index < last_cpu_index)) {
+        CPU_SET(cpu, &phase_b_mask);
+      }
+      allowed_index++;
+    }
+  }
+  if (CPU_COUNT(&phase_b_mask) == 0) {
+    fprintf(stderr,
+            "Thread %d: warning: unified Phase-B CPU affinity is empty\n",
+            world_rank);
+  } else if (sched_setaffinity(0, sizeof(phase_b_mask), &phase_b_mask) != 0) {
+    fprintf(stderr,
+            "Thread %d: warning: cannot set unified Phase-B CPU affinity: %s\n",
+            world_rank, strerror(errno));
+  }
+}
+#endif
+
+/* Redistribute a CPU-rank mesh to a smaller architecture-neutral set of GPU
+ * ranks without terminating the MPI job.  The selected ranks are the first
+ * HERCULES_UNIFIED_PHASE_B_RANKS / node local ranks on each node, so the
+ * existing local-rank CUDA device mapping remains valid on systems with any
+ * number of GPUs per node. */
+static int mesh_unified_memory_handoff(void) {
+  const char* target_env = getenv("HERCULES_UNIFIED_PHASE_B_RANKS");
+  const char* omp_env = getenv("HERCULES_UNIFIED_PHASE_B_OMP_THREADS");
+  MPI_Comm local_comm = MPI_COMM_NULL;
+  MPI_Comm target_comm = MPI_COMM_NULL;
+  int world_rank, world_size, local_rank, local_size;
+  int node_leader, node_count, target_total, target_per_node;
+  int active, target_rank = -1, target_size = 0;
+  int local_gpu_count = 0;
+  int target_root_world = INT_MAX;
+  int* target_world = NULL;
+  point_t* intervals = NULL;
+  mrecord_t* local_records = NULL;
+  mrecord_t* recv_records = NULL;
+  int64_t local_count;
+  int64_t global_count = 0;
+  int64_t* counts = NULL;
+  int64_t* displs = NULL;
+  int64_t* all_counts = NULL;
+  MPI_Request* requests = NULL;
+  int64_t request_count = 0;
+  int64_t request_index = 0;
+  int32_t i;
+  double handoff_start;
+  char* target_end = NULL;
+  long target_requested;
+#ifdef __linux__
+  cpu_set_t node_cpu_mask;
+  int have_node_cpu_mask = 0;
+#endif
+
+  if ((target_env == NULL) || (target_env[0] == '\0')) {
+    return 1;
+  }
+  g_unifiedMeshHandoffEnabled = 1;
+  handoff_start = MPI_Wtime();
+  if ((Param.theMeshInputMode != 0) || (Param.IO_pool_pe_count != 0)) {
+    fprintf(stderr,
+            "Unified mesh handoff requires mesh_input_mode=0 and IO_PES=0\n");
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  errno = 0;
+  target_requested = strtol(target_env, &target_end, 10);
+  if ((errno != 0) || (target_end == target_env) || (*target_end != '\0') ||
+      (target_requested < 1) || (target_requested > INT_MAX)) {
+    fprintf(stderr,
+            "Thread %d: invalid HERCULES_UNIFIED_PHASE_B_RANKS='%s'\n",
+            world_rank, target_env);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  target_total = (int)target_requested;
+  MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, world_rank,
+                      MPI_INFO_NULL, &local_comm);
+  MPI_Comm_rank(local_comm, &local_rank);
+  MPI_Comm_size(local_comm, &local_size);
+#ifdef __linux__
+  CPU_ZERO(&node_cpu_mask);
+  have_node_cpu_mask = (sched_getaffinity(0, sizeof(node_cpu_mask),
+                                          &node_cpu_mask) == 0);
+#endif
+  node_leader = (local_rank == 0) ? 1 : 0;
+  MPI_Allreduce(&node_leader, &node_count, 1, MPI_INT, MPI_SUM,
+                MPI_COMM_WORLD);
+  if ((target_total < 1) || (target_total > world_size) ||
+      (target_total % node_count != 0)) {
+    fprintf(stderr,
+            "Thread %d: unified Phase-B ranks (%d) must be positive, no "
+            "larger than Phase A (%d), and divisible by node count (%d)\n",
+            world_rank, target_total, world_size, node_count);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  target_per_node = target_total / node_count;
+  if (local_rank == 0) {
+    if (cudaGetDeviceCount(&local_gpu_count) != cudaSuccess) {
+      local_gpu_count = 0;
+    }
+  }
+  MPI_Bcast(&local_gpu_count, 1, MPI_INT, 0, local_comm);
+  if ((target_per_node > local_size) ||
+      (target_per_node > local_gpu_count)) {
+    fprintf(stderr,
+            "Thread %d: requested %d Phase-B ranks/node, but node exposes "
+            "%d local ranks and %d GPU(s)\n",
+            world_rank, target_per_node, local_size, local_gpu_count);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  active = (local_rank < target_per_node);
+  MPI_Comm_split(MPI_COMM_WORLD, active ? 0 : MPI_UNDEFINED, world_rank,
+                 &target_comm);
+  if (active) {
+    MPI_Comm_rank(target_comm, &target_rank);
+    MPI_Comm_size(target_comm, &target_size);
+  }
+  if (target_size != 0 && target_size != target_total) {
+    fprintf(stderr, "Thread %d: unified target communicator size mismatch\n",
+            world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  if (target_total == world_size) {
+#ifdef __linux__
+    if (have_node_cpu_mask) {
+      mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
+                                     target_per_node, world_rank);
+    }
+#endif
+    MPI_Comm_free(&target_comm);
+    MPI_Comm_free(&local_comm);
+#ifdef _OPENMP
+    if ((omp_env != NULL) && (atoi(omp_env) > 0)) {
+      omp_set_num_threads(atoi(omp_env));
+    }
+#endif
+    if (world_rank == 0) {
+      monitor_print(
+          "Unified mesh handoff: Phase A and Phase B both use %d ranks; "
+          "redistribution skipped (%d ranks/node across %d nodes)\n",
+          target_total, target_per_node, node_count);
+    }
+    return 1;
+  }
+
+  local_count = Global.myMesh->lenum;
+  MPI_Allreduce(&local_count, &global_count, 1, MPI_INT64_T, MPI_SUM,
+                MPI_COMM_WORLD);
+  local_records = (mrecord_t*)calloc((size_t)local_count, sizeof(mrecord_t));
+  if ((local_count > 0) && (local_records == NULL)) {
+    fprintf(stderr, "Thread %d: cannot pack in-memory mesh handoff\n",
+            world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  for (i = 0; i < local_count; i++) {
+    mesh_fill_mrecord(&local_records[i], i);
+  }
+
+  octor_deletetree(Global.myOctree);
+  octor_deletemesh(Global.myMesh);
+  Global.myOctree = NULL;
+  Global.myMesh = NULL;
+  mesh_release_acoustic_interface_data();
+  MPI_Comm_free(&comm_solver);
+  MPI_Comm_free(&comm_IO);
+
+  if (active) {
+    comm_solver = target_comm;
+    MPI_Comm_dup(target_comm, &comm_IO);
+    Global.myID = target_rank;
+    Global.theGroupSize = target_size;
+    Global.myOctree = octor_newtree(
+        Param.theDomainX, Param.theDomainY, Param.theDomainZ, sizeof(edata_t),
+        Global.myID, Global.theGroupSize, comm_solver, get_surface_shift());
+    if (Global.myOctree == NULL) {
+      fprintf(stderr, "Thread %d: cannot create Phase-B handoff octree\n",
+              world_rank);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (Param.drmImplement == YES) {
+      drm_fix_coordinates(Global.myOctree->ticksize);
+    }
+    if (target_rank == 0) {
+      target_root_world = world_rank;
+    }
+  } else {
+    comm_solver = MPI_COMM_NULL;
+    comm_IO = MPI_COMM_NULL;
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &target_root_world, 1, MPI_INT, MPI_MIN,
+                MPI_COMM_WORLD);
+
+  intervals = (point_t*)calloc((size_t)target_total, sizeof(point_t));
+  target_world = (int*)malloc((size_t)target_total * sizeof(int));
+  counts = (int64_t*)calloc((size_t)target_total, sizeof(int64_t));
+  displs = (int64_t*)calloc((size_t)target_total, sizeof(int64_t));
+  all_counts = (int64_t*)calloc((size_t)world_size * (size_t)target_total,
+                                sizeof(int64_t));
+  if ((intervals == NULL) || (target_world == NULL) || (counts == NULL) ||
+      (displs == NULL) || (all_counts == NULL)) {
+    fprintf(stderr, "Thread %d: cannot allocate mesh handoff metadata\n",
+            world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  for (i = 0; i < target_total; i++) {
+    target_world[i] = -1;
+  }
+  if (active) {
+    target_world[target_rank] = world_rank;
+    if (target_rank == 0) {
+      const point_t* target_intervals =
+          octor_getintervaltable(Global.myOctree);
+      if (target_intervals != NULL) {
+        memcpy(intervals, target_intervals,
+               (size_t)target_total * sizeof(point_t));
+      } else {
+        memset(intervals, 0, (size_t)target_total * sizeof(point_t));
+      }
+    }
+  }
+  MPI_Allreduce(MPI_IN_PLACE, target_world, target_total, MPI_INT, MPI_MAX,
+                MPI_COMM_WORLD);
+  MPI_Bcast(intervals, target_total * (int)sizeof(point_t), MPI_BYTE,
+            target_root_world, MPI_COMM_WORLD);
+
+  {
+    int32_t previous_owner = 0;
+    for (i = 0; i < local_count; i++) {
+      point_t point;
+      int32_t owner;
+      mesh_import_cursor_addr_point(&local_records[i].addr, &point);
+      owner = mesh_handoff_owner(intervals, target_total, &point);
+      if ((i > 0) && (owner < previous_owner)) {
+        fprintf(stderr,
+                "Thread %d: Phase-A mesh records are not in SFC owner order\n",
+                world_rank);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      counts[owner]++;
+      previous_owner = owner;
+    }
+  }
+  for (i = 1; i < target_total; i++) {
+    displs[i] = displs[i - 1] + counts[i - 1];
+  }
+  MPI_Allgather(counts, target_total, MPI_INT64_T, all_counts, target_total,
+                MPI_INT64_T, MPI_COMM_WORLD);
+
+  for (i = 0; i < target_total; i++) {
+    if (target_world[i] != world_rank) {
+      request_count +=
+          (counts[i] + MESH_MPIIO_BATCH - 1) / MESH_MPIIO_BATCH;
+    }
+  }
+  if (request_count > 0) {
+    requests = (MPI_Request*)calloc((size_t)request_count, sizeof(MPI_Request));
+    if (requests == NULL) {
+      fprintf(stderr, "Thread %d: cannot allocate mesh handoff requests\n",
+              world_rank);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  for (i = 0; i < target_total; i++) {
+    int64_t sent;
+    if (target_world[i] == world_rank) {
+      continue;
+    }
+    for (sent = 0; sent < counts[i]; sent += MESH_MPIIO_BATCH) {
+      int64_t remains = counts[i] - sent;
+      int32_t chunk = (int32_t)((remains < MESH_MPIIO_BATCH)
+                                    ? remains
+                                    : MESH_MPIIO_BATCH);
+      MPI_Isend(&local_records[displs[i] + sent],
+                chunk * (int)sizeof(mrecord_t), MPI_BYTE, target_world[i],
+                MESH_HANDOFF_MSG, MPI_COMM_WORLD, &requests[request_index++]);
+    }
+  }
+
+  if (active) {
+    int source;
+    recv_records =
+        (mrecord_t*)calloc(MESH_MPIIO_BATCH, sizeof(mrecord_t));
+    if (recv_records == NULL) {
+      fprintf(stderr, "Thread %d: cannot allocate mesh handoff receive buffer\n",
+              world_rank);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    if (octor_beginleafimport(Global.myOctree) != 0) {
+      fprintf(stderr, "Thread %d: cannot begin in-memory mesh import\n",
+              world_rank);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    for (source = 0; source < world_size; source++) {
+      int64_t receive_count =
+          all_counts[(size_t)source * target_total + target_rank];
+      int64_t received;
+      if (source == world_rank) {
+        int64_t local_offset = displs[target_rank];
+        for (received = 0; received < receive_count;
+             received += MESH_MPIIO_BATCH) {
+          int64_t remains = receive_count - received;
+          int32_t chunk = (int32_t)((remains < MESH_MPIIO_BATCH)
+                                        ? remains
+                                        : MESH_MPIIO_BATCH);
+          mesh_handoff_import_records(&local_records[local_offset + received],
+                                      chunk);
+        }
+      } else {
+        for (received = 0; received < receive_count;
+             received += MESH_MPIIO_BATCH) {
+          int64_t remains = receive_count - received;
+          int32_t chunk = (int32_t)((remains < MESH_MPIIO_BATCH)
+                                        ? remains
+                                        : MESH_MPIIO_BATCH);
+          MPI_Recv(recv_records, chunk * (int)sizeof(mrecord_t), MPI_BYTE,
+                   source, MESH_HANDOFF_MSG, MPI_COMM_WORLD,
+                   MPI_STATUS_IGNORE);
+          mesh_handoff_import_records(recv_records, chunk);
+        }
+      }
+    }
+  }
+  if (request_count > 0) {
+    MPI_Waitall((int)request_count, requests, MPI_STATUSES_IGNORE);
+  }
+  if (active && (octor_finishleafimport(Global.myOctree) != 0)) {
+    fprintf(stderr, "Thread %d: cannot finish in-memory mesh import\n",
+            world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  {
+    double local_elapsed = MPI_Wtime() - handoff_start;
+    double max_elapsed = 0.0;
+    MPI_Reduce(&local_elapsed, &max_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0,
+               MPI_COMM_WORLD);
+    if (world_rank == 0) {
+      monitor_print("In-memory mesh transfer: %.2f seconds\n", max_elapsed);
+    }
+  }
+
+  free(recv_records);
+  free(requests);
+  free(all_counts);
+  free(displs);
+  free(counts);
+  free(target_world);
+  free(intervals);
+  free(local_records);
+  MPI_Comm_free(&local_comm);
+
+  if (!active) {
+    g_unifiedMeshHandoffActive = 0;
+    return 0;
+  }
+
+  {
+    int64_t imported_global = octor_getleavescount(Global.myOctree, GLOBAL);
+    if (imported_global != global_count) {
+      fprintf(stderr,
+              "Thread %d: in-memory mesh count mismatch: imported %" PRId64
+              ", generated %" PRId64 "\n",
+              world_rank, imported_global, global_count);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+
+  if (mesh_partitiontree("mesh_unified_memory_handoff") != 0) {
+    fprintf(stderr, "Thread %d: cannot partition handed-off mesh\n", world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  Global.myMesh =
+      octor_extractmesh(Global.myOctree, bldgs_nodesearch, pushdowns_nodesearch,
+                        bldgs_nodesearch_com, find_topoAirOct, topo_nodesearch);
+  if (Global.myMesh == NULL) {
+    fprintf(stderr, "Thread %d: cannot extract handed-off mesh\n", world_rank);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  mesh_sanitize_and_report_acoustic("In-memory handed-off mesh");
+  {
+    vector3D_t istanbul_origin;
+    vector3D_t basin_origin;
+    vector3D_t three_d_origin;
+    vector3D_t* istanbul_ptr = NULL;
+    vector3D_t* basin_ptr = NULL;
+    vector3D_t* three_d_ptr = NULL;
+    if (Param.IstanbulVelocityModel == YES) {
+      istanbul_origin = compute_domain_coords_linearinterp(
+          28.675, 40.9565, Param.theSurfaceCornersLong,
+          Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+          &Param.utmZone);
+      istanbul_ptr = &istanbul_origin;
+    }
+    if (Param.basinVelocityModel == YES) {
+      basin_origin = compute_domain_coords_linearinterp(
+          Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+          Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+          &Param.utmZone);
+      basin_ptr = &basin_origin;
+    }
+    if (Param.threeDVelocityModel == YES) {
+      three_d_origin = compute_domain_coords_linearinterp(
+          Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+          Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+          Param.theDomainY, Param.theDomainX, &Param.utmZone);
+      three_d_ptr = &three_d_origin;
+    }
+    mesh_build_acoustic_interface_flags(istanbul_ptr, basin_ptr, three_d_ptr);
+  }
+#ifdef __linux__
+  if (have_node_cpu_mask) {
+    mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
+                                   target_per_node, world_rank);
+  }
+#endif
+#ifdef _OPENMP
+  if ((omp_env != NULL) && (atoi(omp_env) > 0)) {
+    omp_set_num_threads(atoi(omp_env));
+  }
+#endif
+  if (Global.myID == 0) {
+    monitor_print(
+        "Unified mesh handoff: %d Phase-A ranks -> %d Phase-B ranks "
+        "(%d ranks/node across %d nodes)\n",
+        world_size, target_total, target_per_node, node_count);
+  }
+  return 1;
 }
 
 /*-----------Computation routines ------------------------------*/
@@ -27849,6 +28873,26 @@ int main(int argc, char** argv) {
   /* Read input parameters from file */
   Timer_Start("Global Init");
   read_parameters(argc, argv);
+  if (((Param.theMeshOutFlag != 0) || (Param.theMeshInputMode != 0)) &&
+      (Param.mesh_etree_output_file[0] == '\0')) {
+    if (Global.myID == 0) {
+      fprintf(stderr,
+              "mesh_etree_output_file is required when output_mesh=1 or "
+              "mesh_input_mode=1\n");
+    }
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+#ifdef _OPENMP
+  {
+    const char* unified_phase_a_threads =
+        getenv("HERCULES_UNIFIED_PHASE_A_OMP_THREADS");
+    if ((unified_phase_a_threads != NULL) &&
+        (atoi(unified_phase_a_threads) > 0)) {
+      omp_set_num_threads(atoi(unified_phase_a_threads));
+    }
+  }
+#endif
 
   if (Param.IstanbulVelocityModel == YES) {
     g_istanbulVelModelOrigin = compute_domain_coords_linearinterp(
@@ -27934,6 +28978,18 @@ int main(int argc, char** argv) {
     mesh_generate_from_etree();
   } else {
     mesh_generate();
+  }
+
+  if (getenv("HERCULES_UNIFIED_PHASE_B_RANKS") != NULL) {
+    if (Param.theMeshOutFlag && DO_OUTPUT) {
+      mesh_output();
+      Param.theMeshOutFlag = 0;
+    }
+    if (!mesh_unified_memory_handoff()) {
+      MPI_Barrier(MPI_COMM_WORLD);
+      MPI_Finalize();
+      return 0;
+    }
   }
 
   if (Param.includeBuildings == YES) {
@@ -28331,6 +29387,10 @@ int main(int argc, char** argv) {
 
   /* IO-pool plane outputs are closed immediately after solver_run(). */
 IO_PES_REJOIN:
+
+  if (g_unifiedMeshHandoffEnabled && g_unifiedMeshHandoffActive) {
+    MPI_Barrier(MPI_COMM_WORLD);
+  }
 
   MPI_Finalize();
 

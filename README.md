@@ -137,12 +137,27 @@ Advanced/diagnostic toggles:
 	Default is `cursor`, which streams saved mesh leaves from the etree and
 	imports them directly into the local octor tree. Set to `refine` to restore
 	the older recursive `octor_refinetree()` search path.
-- `HERCULES_MESH_IO_MODE=sharded|single`
+- `HERCULES_MESH_IO_MODE=mpiio|sharded|single`
 	Selects Phase-A mesh storage. `sharded` lets every MPI rank write an etree
 	shard concurrently and publishes a manifest for automatic Phase-B import;
-	`single` retains the serialized rank-0 etree writer. Direct `psolve` runs
-	default to `single` for compatibility, while `run_phaseA_phaseB.sh` defaults
-	to `sharded`.
+	`mpiio` writes one flat, indexed archive collectively and Phase B reads its
+	overlapping record ranges through MPI-IO; `single` retains the serialized
+	rank-0 etree writer. Direct `psolve` runs default to `single` for
+	compatibility. `run_phaseA_phaseB.sh` defaults to `sharded` in two-phase mode
+	and `mpiio` in unified mode. The MPI-IO archive records the native Hercules
+	mesh-record ABI and is therefore intended for compatible builds on the same
+	platform family; its header rejects incompatible record sizes.
+- `HERCULES_PHASE_MODE=two-phase|unified`
+	Controls `run_phaseA_phaseB.sh`. `two-phase` launches separate Phase-A and
+	Phase-B MPI jobs. `unified` keeps the Phase-A MPI world alive, writes the
+	optional MPI-IO archive, and redistributes mesh leaves directly from the CPU
+	ranks to the requested Phase-B rank count in memory. The Phase-B ranks per
+	node are derived from `PHASE_B_NP / allocated_nodes`; no GPU count is
+	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
+	and `PHASE_B_OMP_NUM_THREADS` when it cannot be inferred from the allocation.
+	On Linux, the selected ranks divide the node's allowed CPU affinity mask into
+	disjoint blocks before enabling their Phase-B OpenMP threads. Set
+	`HERCULES_UNIFIED_WRITE_ARCHIVE=0` to skip persistent mesh output.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
 	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
@@ -275,7 +290,9 @@ inputfiles/parameter.in
 
 Notes:
 
-- With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
+- With `BASE_IN`, the script auto-generates temporary Phase A, Phase B, and
+	unified inputs by overriding `output_mesh`, `mesh_only_mode`, and
+	`mesh_input_mode`.
 - `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
 - Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh path: ...` when it finds and rewrites this setting.
 - The two-phase script defaults `HERCULES_MESH_IO_MODE=sharded`. In Phase A,
@@ -286,6 +303,17 @@ Notes:
 	rank-0 gather/writer from mesh output. Set `HERCULES_MESH_IO_MODE=single` to
 	retain the legacy single-etree writer. Keep the manifest and all `.part*.etree`
 	files together when moving or archiving a generated mesh.
+- Set `HERCULES_PHASE_MODE=unified` to avoid the Phase-A-to-Phase-B filesystem
+	round trip. The script launches `PHASE_A_NP` ranks once, then the solver
+	selects `PHASE_B_NP / allocated_nodes` local ranks per node, redistributes the
+	mesh by SFC ownership, and runs the GPU phase on the resulting communicator.
+	For example:
+
+	`HERCULES_PHASE_MODE=unified PHASE_B_OMP_NUM_THREADS=35 PSOLVE_BIN=/path/to/psolve ./run_phaseA_phaseB.sh 576 16 inputfiles/parameter.in`
+
+	The default unified archive is one MPI-IO file at
+	`mesh_etree_output_file`; its directory/index is embedded in the header, so
+	there are no `.part*.etree` files or external manifest.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
@@ -301,7 +329,8 @@ Mesh mode input flags (input file):
 - `output_mesh`
 	`1` writes the generated mesh to disk. With
 	`HERCULES_MESH_IO_MODE=sharded`, `mesh_etree_output_file` is the manifest
-	path; with `single`, it is the legacy etree database path.
+	path; with `mpiio`, it is the single archive path; with `single`, it is the
+	legacy etree database path.
 	`0` skips mesh etree output.
 - `mesh_only_mode`
 	`1` runs meshing/setup and exits before time-stepping solver iterations.

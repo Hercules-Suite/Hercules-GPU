@@ -19,7 +19,15 @@ RUN_DIR="${PWD}"
 : "${HERCULES_CONTRIB_UNPACK_OMP:=1}"
 : "${HERCULES_CONTRIB_RECV_MODE:=waitsome}"
 : "${HERCULES_SPARSE_UPLOAD_MODE:=dense}"
-: "${HERCULES_MESH_IO_MODE:=sharded}"
+: "${HERCULES_PHASE_MODE:=two-phase}"
+: "${HERCULES_UNIFIED_WRITE_ARCHIVE:=1}"
+if [[ -z "${HERCULES_MESH_IO_MODE+x}" ]]; then
+  if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+    HERCULES_MESH_IO_MODE=mpiio
+  else
+    HERCULES_MESH_IO_MODE=sharded
+  fi
+fi
 export OMP_PROC_BIND OMP_PLACES
 export HERCULES_ADJUST_ASSIGN_OMP HERCULES_ADJUST_DIST_OMP
 export HERCULES_SPARSE_CLEAR_MODE HERCULES_FULL_CLEAR_OMP
@@ -29,6 +37,7 @@ export HERCULES_CONTRIB_PACK_OMP HERCULES_CONTRIB_UNPACK_OMP
 export HERCULES_CONTRIB_RECV_MODE
 export HERCULES_SPARSE_UPLOAD_MODE
 export HERCULES_MESH_IO_MODE
+export HERCULES_PHASE_MODE HERCULES_UNIFIED_WRITE_ARCHIVE
 
 MPI_RUN="${MPI_RUN:-mpirun}"
 BASE_IN="${BASE_IN:-}"
@@ -44,11 +53,31 @@ else
 fi
 PHASE_A_IN="${PHASE_A_IN:-${PHASE_A_DEFAULT_IN}}"
 PHASE_B_IN="${PHASE_B_IN:-${PHASE_B_DEFAULT_IN}}"
+UNIFIED_IN=""
 PHASE_A_MPI_ARGS="${PHASE_A_MPI_ARGS:-}"
 PHASE_B_MPI_ARGS="${PHASE_B_MPI_ARGS:-}"
 
 if [[ $# -ge 3 ]]; then
   BASE_IN="$3"
+fi
+
+case "${HERCULES_PHASE_MODE}" in
+  two-phase|unified) ;;
+  *)
+    echo "ERROR: HERCULES_PHASE_MODE must be two-phase or unified" >&2
+    exit 1
+    ;;
+esac
+case "${HERCULES_UNIFIED_WRITE_ARCHIVE}" in
+  0|1) ;;
+  *)
+    echo "ERROR: HERCULES_UNIFIED_WRITE_ARCHIVE must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+if [[ "${HERCULES_PHASE_MODE}" == "unified" && -z "${BASE_IN}" ]]; then
+  echo "ERROR: unified mode requires BASE_IN (the third argument or BASE_IN env)" >&2
+  exit 1
 fi
 
 if [[ -n "${PSOLVE_BIN:-}" ]]; then
@@ -64,6 +93,7 @@ fi
 
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
+TMP_UNIFIED_IN=""
 
 trim_ws() {
   local s="$1"
@@ -198,35 +228,48 @@ if [[ -n "${BASE_IN}" ]]; then
   fi
 
   TMPDIR_ROOT="${TMPDIR:-/tmp}"
-  TMP_PHASE_A_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseA.XXXXXX.in")"
-  TMP_PHASE_B_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB.XXXXXX.in")"
+  TMP_PHASE_A_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseA.XXXXXX")"
+  TMP_PHASE_B_IN="$(mktemp "${TMPDIR_ROOT}/hercules_phaseB.XXXXXX")"
+  TMP_UNIFIED_IN="$(mktemp "${TMPDIR_ROOT}/hercules_unified.XXXXXX")"
 
   cleanup_tmp_inputs() {
     [[ -n "${TMP_PHASE_A_IN}" ]] && rm -f "${TMP_PHASE_A_IN}"
     [[ -n "${TMP_PHASE_B_IN}" ]] && rm -f "${TMP_PHASE_B_IN}"
+    [[ -n "${TMP_UNIFIED_IN}" ]] && rm -f "${TMP_UNIFIED_IN}"
   }
   trap cleanup_tmp_inputs EXIT
 
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
+  make_phase_input "${BASE_IN}" "${TMP_UNIFIED_IN}" "${HERCULES_UNIFIED_WRITE_ARCHIVE}" 0 0
 
   # Normalize mesh etree path so both phases use the same absolute location.
   BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
   RUN_DIR_ABS="$(cd -- "${RUN_DIR}" && pwd)"
   MESH_ETREE_RAW="$(extract_config_value "${BASE_IN}" "mesh_etree_output_file")"
   MESH_ETREE_RAW="$(trim_ws "${MESH_ETREE_RAW}")"
+  if [[ -z "${MESH_ETREE_RAW}" ]] &&
+     { [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]] ||
+       [[ "${HERCULES_UNIFIED_WRITE_ARCHIVE}" == "1" ]]; }; then
+    echo "ERROR: mesh_etree_output_file is required for persistent mesh output" >&2
+    exit 1
+  fi
   if [[ -n "${MESH_ETREE_RAW}" ]]; then
     EFFECTIVE_MESH_ETREE_PATH="$(resolve_mesh_path "${MESH_ETREE_RAW}" "${RUN_DIR_ABS}" "${BASE_IN_DIR}")"
     TMP_FIX_A="${TMP_PHASE_A_IN}.fix"
     TMP_FIX_B="${TMP_PHASE_B_IN}.fix"
+    TMP_FIX_U="${TMP_UNIFIED_IN}.fix"
     set_or_add_param "${TMP_PHASE_A_IN}" "${TMP_FIX_A}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
     set_or_add_param "${TMP_PHASE_B_IN}" "${TMP_FIX_B}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
+    set_or_add_param "${TMP_UNIFIED_IN}" "${TMP_FIX_U}" "mesh_etree_output_file" "${EFFECTIVE_MESH_ETREE_PATH}"
     mv -f "${TMP_FIX_A}" "${TMP_PHASE_A_IN}"
     mv -f "${TMP_FIX_B}" "${TMP_PHASE_B_IN}"
+    mv -f "${TMP_FIX_U}" "${TMP_UNIFIED_IN}"
   fi
 
   PHASE_A_IN="${TMP_PHASE_A_IN}"
   PHASE_B_IN="${TMP_PHASE_B_IN}"
+  UNIFIED_IN="${TMP_UNIFIED_IN}"
 fi
 
 detect_alloc_nodes() {
@@ -311,6 +354,12 @@ fi
 
 PHASE_A_OMP_THREADS="${PHASE_A_OMP_NUM_THREADS:-1}"
 PHASE_B_OMP_THREADS="${PHASE_B_OMP_NUM_THREADS:-${OMP_NUM_THREADS:-}}"
+
+if ! [[ "${PHASE_A_OMP_THREADS}" =~ ^[0-9]+$ ]] ||
+   [[ "${PHASE_A_OMP_THREADS}" -lt 1 ]]; then
+  echo "ERROR: PHASE_A_OMP_NUM_THREADS must be a positive integer" >&2
+  exit 1
+fi
 
 if [[ $# -ge 1 ]]; then
   PHASE_A_NP="$1"
@@ -426,7 +475,7 @@ if [[ "${ALLOC_TOTAL_CPUS}" -gt 0 ]] && [[ -n "${PHASE_A_NP}" ]] &&
   esac
 fi
 
-echo "=== Two-phase run ==="
+echo "=== Hercules phase launcher ==="
 echo "MPI launcher:   ${MPI_RUN}"
 if [[ -n "${PHASE_A_UCX_TLS_SOURCE}" ]]; then
   if [[ "${PHASE_A_UCX_TLS_SOURCE}" == "user" ]]; then
@@ -446,11 +495,15 @@ if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
 fi
 echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
+echo "Phase mode:     ${HERCULES_PHASE_MODE}"
 echo "Mesh I/O mode:  ${HERCULES_MESH_IO_MODE}"
 if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
   echo "Phase B input:  ${PHASE_B_IN} (generated)"
+  if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+    echo "Unified input:  ${UNIFIED_IN} (generated)"
+  fi
   if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
     echo "Mesh path:      ${EFFECTIVE_MESH_ETREE_PATH}"
   fi
@@ -477,9 +530,9 @@ if [[ -n "${PHASE_A_OMP_THREADS}" ]]; then
 fi
 echo
 
-if [[ -n "${PHASE_A_NP}" ]]; then
+if [[ "${HERCULES_PHASE_MODE}" == "two-phase" && -n "${PHASE_A_NP}" ]]; then
   echo "[Phase A] ${MPI_RUN} -np ${PHASE_A_NP} ${PSOLVE_BIN} ${PHASE_A_IN}"
-else
+elif [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
   echo "[Phase A] ${MPI_RUN} ${PSOLVE_BIN} ${PHASE_A_IN}"
 fi
 if [[ -n "${PHASE_A_MPI_ARGS}" ]]; then
@@ -505,6 +558,59 @@ if [[ ${#A_ENV_VARS[@]} -gt 0 ]]; then
   A_ENV=(env "${A_ENV_VARS[@]}")
 else
   A_ENV=()
+fi
+
+if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+  if [[ -z "${PHASE_A_NP}" ]]; then
+    echo "ERROR: unified mode requires an explicit Phase A rank count" >&2
+    exit 1
+  fi
+  if [[ -z "${PHASE_B_OMP_THREADS}" && "${ALLOC_NODES}" -gt 0 &&
+        "${ALLOC_CPUS_PER_NODE}" -gt 0 ]] &&
+     (( PHASE_B_NP % ALLOC_NODES == 0 )); then
+    UNIFIED_RANKS_PER_NODE="$((PHASE_B_NP / ALLOC_NODES))"
+    PHASE_B_OMP_THREADS="$((ALLOC_CPUS_PER_NODE / UNIFIED_RANKS_PER_NODE))"
+  fi
+  if [[ -z "${PHASE_B_OMP_THREADS}" ]] ||
+     ! [[ "${PHASE_B_OMP_THREADS}" =~ ^[0-9]+$ ]] ||
+     [[ "${PHASE_B_OMP_THREADS}" -lt 1 ]]; then
+    echo "ERROR: set PHASE_B_OMP_NUM_THREADS to a positive integer for unified mode" >&2
+    exit 1
+  fi
+  UNIFIED_MPI_ARGS_VALUE="${UNIFIED_MPI_ARGS:---bind-to none}"
+  # shellcheck disable=SC2206
+  U_ARGS=(${UNIFIED_MPI_ARGS_VALUE})
+  U_ENV_VARS=(
+    "OMP_NUM_THREADS=${PHASE_A_OMP_THREADS}"
+    "OMP_PROC_BIND=false"
+    "HERCULES_UNIFIED_PHASE_A_OMP_THREADS=${PHASE_A_OMP_THREADS}"
+    "HERCULES_UNIFIED_PHASE_B_OMP_THREADS=${PHASE_B_OMP_THREADS}"
+    "HERCULES_UNIFIED_PHASE_B_RANKS=${PHASE_B_NP}"
+    "HERCULES_MESH_IO_MODE=${HERCULES_MESH_IO_MODE}"
+  )
+  if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
+    U_ENV_VARS=("-u" "OMPI_MCA_btl" "${U_ENV_VARS[@]}")
+  fi
+  if [[ -n "${PHASE_B_UCX_TLS_SOURCE}" &&
+        "${PHASE_B_UCX_TLS_SOURCE}" != "user" ]]; then
+    U_ENV_VARS+=("UCX_TLS=${PHASE_B_UCX_TLS_VALUE}")
+  fi
+  if [[ -n "${PHASE_B_OMPI_MCA_PML_SOURCE}" &&
+        "${PHASE_B_OMPI_MCA_PML_SOURCE}" != "user" ]]; then
+    U_ENV_VARS+=("OMPI_MCA_pml=${PHASE_B_OMPI_MCA_PML_VALUE}")
+  fi
+  echo "[Unified] ${MPI_RUN} -np ${PHASE_A_NP} ${U_ARGS[*]} ${PSOLVE_BIN} ${UNIFIED_IN}"
+  env "${U_ENV_VARS[@]}" "${MPI_RUN}" -np "${PHASE_A_NP}" "${U_ARGS[@]}" \
+    "${PSOLVE_BIN}" "${UNIFIED_IN}"
+  if [[ "${HERCULES_UNIFIED_WRITE_ARCHIVE}" == "1" &&
+        -n "${EFFECTIVE_MESH_ETREE_PATH:-}" &&
+        ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
+    echo "ERROR: unified run did not produce the MPI-IO mesh archive: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
+    exit 1
+  fi
+  echo
+  echo "Unified mesh-and-solver run completed."
+  exit 0
 fi
 
 if [[ -n "${PHASE_A_NP}" ]]; then
