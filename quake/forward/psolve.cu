@@ -8939,7 +8939,7 @@ static void mesh_generate_from_etree(void) {
     use_cursor_tree = 1;
   }
 
-  setenv("OCTOR_SETCOM_ALL2ALL", "1", 1);
+  setenv("OCTOR_SETCOM_ALL2ALL", "1", 0);
   setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
   mesh_import_reset_stats();
 
@@ -10525,6 +10525,13 @@ static int mesh_unified_memory_handoff(void) {
       exit(1);
     }
   }
+
+  /* The target tree already has a known distributed SFC ownership.  Avoid
+   * rediscovering its peer communication graph by scanning tens of millions
+   * of local leaves; this is also the default used by file-based mesh import.
+   * Preserve an explicit zero value for diagnostic comparisons. */
+  setenv("OCTOR_SETCOM_ALL2ALL", "1", 0);
+  setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
 
   if (mesh_partitiontree("mesh_unified_memory_handoff") != 0) {
     fprintf(stderr, "Thread %d: cannot partition handed-off mesh\n", world_rank);
