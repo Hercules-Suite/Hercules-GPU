@@ -148,9 +148,11 @@ Advanced/diagnostic toggles:
 	mesh-record ABI and is therefore intended for compatible builds on the same
 	platform family; its header rejects incompatible record sizes.
 - `HERCULES_PHASE_MODE=two-phase|unified`
-	Controls `run_phaseA_phaseB.sh`. `two-phase` launches separate Phase-A and
-	Phase-B MPI jobs. `unified` keeps the Phase-A MPI world alive, writes the
-	optional MPI-IO archive, and redistributes mesh leaves directly from the CPU
+	Controls `run_phaseA_phaseB.sh` and defaults to `two-phase`, preserving the
+	existing separate-launch workflow when the variable is unset. `two-phase`
+	launches separate Phase-A and Phase-B MPI jobs. `unified` keeps the Phase-A
+	MPI world alive, writes the optional MPI-IO archive, and redistributes mesh
+	leaves directly from the CPU
 	ranks to the requested Phase-B rank count in memory. The Phase-B ranks per
 	node are derived from `PHASE_B_NP / allocated_nodes`; no GPU count is
 	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
