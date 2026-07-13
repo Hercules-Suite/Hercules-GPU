@@ -438,7 +438,7 @@ else
     PHASE_B_UCX_TLS_VALUE="${PHASE_B_UCX_TLS}"
     PHASE_B_UCX_TLS_SOURCE="phase-b user"
   elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
-    PHASE_B_UCX_TLS_VALUE="dc,sm,self,cuda"
+    PHASE_B_UCX_TLS_VALUE="dc,sm,self,cuda_copy"
     PHASE_B_UCX_TLS_SOURCE="phase-b cuda-aware default"
   fi
 fi
