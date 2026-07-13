@@ -114,11 +114,14 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	and large rank-count mesh builds should avoid mlx5 reliable-connection
 	endpoint pressure. For Phase B, the wrapper defaults CUDA-aware Open MPI runs
 	to `OMPI_MCA_pml=ucx`, unsets `OMPI_MCA_btl`, and sets
-	`UCX_TLS=rc,sm,self,cuda_copy`. This keeps device-buffer MPI on the UCX path
-	while avoiding the `cuda_ipc` transport that has been unstable on Vista
-	GB/NVL72 multi-GPU nodes. Set `PHASE_B_UCX_TLS` or `PHASE_B_OMPI_MCA_PML`
-	only when intentionally overriding the Phase B default. A user-defined
-	global `UCX_TLS` or `OMPI_MCA_pml` still takes precedence for both phases.
+	`UCX_TLS=dc,sm,self,cuda`. The scalable DC transport avoids the per-peer
+	reliable-connection queue-pair pressure observed in large jobs, while the
+	`cuda` alias enables the CUDA transports available in the active UCX build.
+	Unified mode applies this setting to its single MPI job from startup, so it
+	also covers the larger Phase-A rank set. Set `PHASE_B_UCX_TLS` or
+	`PHASE_B_OMPI_MCA_PML` only when intentionally overriding the Phase B
+	default. A user-defined global `UCX_TLS` or `OMPI_MCA_pml` still takes
+	precedence for both phases.
 	Set `PHASE_B_KEEP_OMPI_MCA_BTL=1` only if a site MPI stack requires an
 	explicit inherited BTL setting.
 
