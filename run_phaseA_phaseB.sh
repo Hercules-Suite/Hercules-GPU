@@ -21,6 +21,8 @@ RUN_DIR="${PWD}"
 : "${HERCULES_SPARSE_UPLOAD_MODE:=dense}"
 : "${HERCULES_PHASE_MODE:=two-phase}"
 : "${HERCULES_UNIFIED_WRITE_ARCHIVE:=1}"
+: "${HERCULES_UNIFIED_IDLE_POLL_USEC:=10000}"
+: "${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE:=0}"
 if [[ -z "${HERCULES_MESH_IO_MODE+x}" ]]; then
   if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
     HERCULES_MESH_IO_MODE=mpiio
@@ -38,6 +40,8 @@ export HERCULES_CONTRIB_RECV_MODE
 export HERCULES_SPARSE_UPLOAD_MODE
 export HERCULES_MESH_IO_MODE
 export HERCULES_PHASE_MODE HERCULES_UNIFIED_WRITE_ARCHIVE
+export HERCULES_UNIFIED_IDLE_POLL_USEC
+export HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE
 
 MPI_RUN="${MPI_RUN:-mpirun}"
 BASE_IN="${BASE_IN:-}"
@@ -72,6 +76,19 @@ case "${HERCULES_UNIFIED_WRITE_ARCHIVE}" in
   0|1) ;;
   *)
     echo "ERROR: HERCULES_UNIFIED_WRITE_ARCHIVE must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+if ! [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" =~ ^[0-9]+$ ]] ||
+   [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" -lt 100 ]] ||
+   [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" -gt 1000000 ]]; then
+  echo "ERROR: HERCULES_UNIFIED_IDLE_POLL_USEC must be 100..1000000" >&2
+  exit 1
+fi
+case "${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE}" in
+  0|1) ;;
+  *)
+    echo "ERROR: HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE must be 0 or 1" >&2
     exit 1
     ;;
 esac
@@ -497,6 +514,10 @@ echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
 echo "Phase mode:     ${HERCULES_PHASE_MODE}"
 echo "Mesh I/O mode:  ${HERCULES_MESH_IO_MODE}"
+if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+  echo "Inactive poll:  ${HERCULES_UNIFIED_IDLE_POLL_USEC} usec"
+  echo "Active MPI idle: ${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE} (0=aggressive)"
+fi
 if [[ -n "${BASE_IN}" ]]; then
   echo "Base input:     ${BASE_IN}"
   echo "Phase A input:  ${PHASE_A_IN} (generated)"
@@ -587,6 +608,7 @@ if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
     "HERCULES_UNIFIED_PHASE_B_OMP_THREADS=${PHASE_B_OMP_THREADS}"
     "HERCULES_UNIFIED_PHASE_B_RANKS=${PHASE_B_NP}"
     "HERCULES_MESH_IO_MODE=${HERCULES_MESH_IO_MODE}"
+    "OMPI_MCA_mpi_yield_when_idle=${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE}"
   )
   if [[ "${PHASE_B_UNSET_OMPI_MCA_BTL}" -eq 1 ]]; then
     U_ENV_VARS=("-u" "OMPI_MCA_btl" "${U_ENV_VARS[@]}")

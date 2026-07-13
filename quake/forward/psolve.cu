@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <sched.h>
@@ -118,6 +119,9 @@ static int32_t           g_dampingForceCountGPU = -1;
 static int32_t*          g_dampingForceMapperDevice = NULL;
 static int g_unifiedMeshHandoffEnabled = 0;
 static int g_unifiedMeshHandoffActive = 1;
+static int g_unifiedReleaseRootWorld = -1;
+static int g_unifiedInactiveCount = 0;
+static int* g_unifiedInactiveWorldRanks = NULL;
 
 static int32_t g_topoForceMode = -1;
 static int32_t g_topoForceModeReported = 0;
@@ -438,6 +442,7 @@ static double g_stageTimeAvg[STAGE_TIME_METRIC_COUNT] = {0.0};
 #define AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG 141
 #define CVMRECORD_MSG 110
 #define MESH_HANDOFF_MSG 142
+#define MESH_HANDOFF_RELEASE_MSG 143
 
 #define ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW 0
 #define ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE 1
@@ -545,6 +550,8 @@ static void mesh_generate_from_etree(void);
 static int32_t bulkload(etree_t* mep, mrecord_t* partTable, int32_t count);
 static void mesh_output(void);
 static int mesh_unified_memory_handoff(void);
+static void mesh_unified_inactive_wait(void);
+static void mesh_unified_release_inactive(void);
 static void mesh_correct_properties(etree_t* cvm);
 static void mesh_release_acoustic_interface_data(void);
 static void mesh_build_acoustic_interface_flags(
@@ -9957,6 +9964,7 @@ static int32_t mesh_handoff_owner(const point_t* intervals, int32_t count,
 static void mesh_handoff_import_records(const mrecord_t* records,
                                         int32_t count) {
   int32_t i;
+  Timer_Start("Unified Handoff Tree Import");
   for (i = 0; i < count; i++) {
     edata_t edata;
     mesh_import_store_payload(&edata, &records[i].mdata);
@@ -9970,6 +9978,7 @@ static void mesh_handoff_import_records(const mrecord_t* records,
       exit(1);
     }
   }
+  Timer_Stop("Unified Handoff Tree Import");
 }
 
 #ifdef __linux__
@@ -10006,6 +10015,90 @@ static void mesh_unified_bind_phase_b_cpus(const cpu_set_t* node_cpu_mask,
 }
 #endif
 
+/* Inactive Phase-A ranks must remain in MPI until the Phase-B ranks finish,
+ * but a blocking world barrier can make Open MPI poll aggressively and steal
+ * CPU time from the GPU ranks.  Keep one small receive outstanding and enter
+ * MPI only periodically, sleeping between progress checks. */
+static void mesh_unified_inactive_wait(void) {
+  const char* poll_env = getenv("HERCULES_UNIFIED_IDLE_POLL_USEC");
+  long poll_usec = 10000;
+  int release_token = 0;
+  int complete = 0;
+  MPI_Request request = MPI_REQUEST_NULL;
+  struct timespec sleep_time;
+
+  if (poll_env != NULL && poll_env[0] != '\0') {
+    char* end = NULL;
+    long requested;
+    errno = 0;
+    requested = strtol(poll_env, &end, 10);
+    if ((errno == 0) && (end != poll_env) && (*end == '\0') &&
+        (requested >= 100) && (requested <= 1000000)) {
+      poll_usec = requested;
+    } else {
+      fprintf(stderr,
+              "Invalid HERCULES_UNIFIED_IDLE_POLL_USEC='%s'; expected "
+              "100..1000000\n",
+              poll_env);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+  }
+  if (g_unifiedReleaseRootWorld < 0) {
+    fprintf(stderr, "Unified inactive rank has no release root\n");
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+
+  sleep_time.tv_sec = poll_usec / 1000000;
+  sleep_time.tv_nsec = (poll_usec % 1000000) * 1000;
+  MPI_Irecv(&release_token, 1, MPI_INT, g_unifiedReleaseRootWorld,
+            MESH_HANDOFF_RELEASE_MSG, MPI_COMM_WORLD, &request);
+  while (!complete) {
+    struct timespec remaining = sleep_time;
+    MPI_Test(&request, &complete, MPI_STATUS_IGNORE);
+    if (complete) {
+      break;
+    }
+    while ((nanosleep(&remaining, &remaining) != 0) && (errno == EINTR)) {
+    }
+  }
+}
+
+/* Wake the inactive world ranks after all active Phase-B work is complete.
+ * Only the Phase-B root stores the inactive-rank list and sends releases. */
+static void mesh_unified_release_inactive(void) {
+  int world_rank;
+  MPI_Request* requests;
+  int release_token = 1;
+  int32_t i;
+
+  if (!g_unifiedMeshHandoffEnabled || !g_unifiedMeshHandoffActive ||
+      (g_unifiedInactiveCount == 0)) {
+    return;
+  }
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  if (world_rank != g_unifiedReleaseRootWorld) {
+    return;
+  }
+  requests = (MPI_Request*)calloc((size_t)g_unifiedInactiveCount,
+                                  sizeof(MPI_Request));
+  if (requests == NULL) {
+    fprintf(stderr, "Cannot allocate unified inactive-release requests\n");
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+  }
+  for (i = 0; i < g_unifiedInactiveCount; i++) {
+    MPI_Isend(&release_token, 1, MPI_INT, g_unifiedInactiveWorldRanks[i],
+              MESH_HANDOFF_RELEASE_MSG, MPI_COMM_WORLD, &requests[i]);
+  }
+  MPI_Waitall(g_unifiedInactiveCount, requests, MPI_STATUSES_IGNORE);
+  free(requests);
+  free(g_unifiedInactiveWorldRanks);
+  g_unifiedInactiveWorldRanks = NULL;
+  g_unifiedInactiveCount = 0;
+}
+
 /* Redistribute a CPU-rank mesh to a smaller architecture-neutral set of GPU
  * ranks without terminating the MPI job.  The selected ranks are the first
  * HERCULES_UNIFIED_PHASE_B_RANKS / node local ranks on each node, so the
@@ -10034,7 +10127,6 @@ static int mesh_unified_memory_handoff(void) {
   int64_t request_count = 0;
   int64_t request_index = 0;
   int32_t i;
-  double handoff_start;
   char* target_end = NULL;
   long target_requested;
 #ifdef __linux__
@@ -10046,7 +10138,7 @@ static int mesh_unified_memory_handoff(void) {
     return 1;
   }
   g_unifiedMeshHandoffEnabled = 1;
-  handoff_start = MPI_Wtime();
+  Timer_Start("Unified Handoff Setup");
   if ((Param.theMeshInputMode != 0) || (Param.IO_pool_pe_count != 0)) {
     fprintf(stderr,
             "Unified mesh handoff requires mesh_input_mode=0 and IO_PES=0\n");
@@ -10118,6 +10210,9 @@ static int mesh_unified_memory_handoff(void) {
     exit(1);
   }
   if (target_total == world_size) {
+    Timer_Stop("Unified Handoff Setup");
+    Timer_Reduce("Unified Handoff Setup",
+                 (TimerKind)(MAX | MIN | AVERAGE), MPI_COMM_WORLD);
 #ifdef __linux__
     if (have_node_cpu_mask) {
       mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
@@ -10140,6 +10235,8 @@ static int mesh_unified_memory_handoff(void) {
     return 1;
   }
 
+  Timer_Stop("Unified Handoff Setup");
+  Timer_Start("Unified Handoff Pack");
   local_count = Global.myMesh->lenum;
   MPI_Allreduce(&local_count, &global_count, 1, MPI_INT64_T, MPI_SUM,
                 MPI_COMM_WORLD);
@@ -10153,6 +10250,8 @@ static int mesh_unified_memory_handoff(void) {
   for (i = 0; i < local_count; i++) {
     mesh_fill_mrecord(&local_records[i], i);
   }
+  Timer_Stop("Unified Handoff Pack");
+  Timer_Start("Unified Handoff Transfer");
 
   octor_deletetree(Global.myOctree);
   octor_deletemesh(Global.myMesh);
@@ -10220,6 +10319,49 @@ static int mesh_unified_memory_handoff(void) {
   }
   MPI_Allreduce(MPI_IN_PLACE, target_world, target_total, MPI_INT, MPI_MAX,
                 MPI_COMM_WORLD);
+  g_unifiedReleaseRootWorld = target_root_world;
+  if (world_rank == target_root_world) {
+    unsigned char* active_world =
+        (unsigned char*)calloc((size_t)world_size, sizeof(unsigned char));
+    if (active_world == NULL) {
+      fprintf(stderr, "Cannot allocate unified inactive-rank map\n");
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
+    for (i = 0; i < target_total; i++) {
+      if ((target_world[i] < 0) || (target_world[i] >= world_size)) {
+        fprintf(stderr, "Invalid unified active world rank %d\n",
+                target_world[i]);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      active_world[target_world[i]] = 1;
+    }
+    g_unifiedInactiveCount = world_size - target_total;
+    if (g_unifiedInactiveCount > 0) {
+      int32_t inactive_index = 0;
+      g_unifiedInactiveWorldRanks = (int*)malloc(
+          (size_t)g_unifiedInactiveCount * sizeof(int));
+      if (g_unifiedInactiveWorldRanks == NULL) {
+        fprintf(stderr, "Cannot allocate unified inactive-rank list\n");
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+      for (i = 0; i < world_size; i++) {
+        if (!active_world[i]) {
+          g_unifiedInactiveWorldRanks[inactive_index++] = i;
+        }
+      }
+      if (inactive_index != g_unifiedInactiveCount) {
+        fprintf(stderr,
+                "Unified inactive-rank count mismatch: found %d, expected %d\n",
+                inactive_index, g_unifiedInactiveCount);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+      }
+    }
+    free(active_world);
+  }
   MPI_Bcast(intervals, target_total * (int)sizeof(point_t), MPI_BYTE,
             target_root_world, MPI_COMM_WORLD);
 
@@ -10280,6 +10422,7 @@ static int mesh_unified_memory_handoff(void) {
 
   if (active) {
     int source;
+    int import_status;
     recv_records =
         (mrecord_t*)calloc(MESH_MPIIO_BATCH, sizeof(mrecord_t));
     if (recv_records == NULL) {
@@ -10288,7 +10431,10 @@ static int mesh_unified_memory_handoff(void) {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (octor_beginleafimport(Global.myOctree) != 0) {
+    Timer_Start("Unified Handoff Tree Import");
+    import_status = octor_beginleafimport(Global.myOctree);
+    Timer_Stop("Unified Handoff Tree Import");
+    if (import_status != 0) {
       fprintf(stderr, "Thread %d: cannot begin in-memory mesh import\n",
               world_rank);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -10327,21 +10473,30 @@ static int mesh_unified_memory_handoff(void) {
   if (request_count > 0) {
     MPI_Waitall((int)request_count, requests, MPI_STATUSES_IGNORE);
   }
-  if (active && (octor_finishleafimport(Global.myOctree) != 0)) {
-    fprintf(stderr, "Thread %d: cannot finish in-memory mesh import\n",
-            world_rank);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
+  if (active) {
+    int import_status;
+    Timer_Start("Unified Handoff Tree Import");
+    import_status = octor_finishleafimport(Global.myOctree);
+    Timer_Stop("Unified Handoff Tree Import");
+    if (import_status != 0) {
+      fprintf(stderr, "Thread %d: cannot finish in-memory mesh import\n",
+              world_rank);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
   }
   MPI_Barrier(MPI_COMM_WORLD);
-  {
-    double local_elapsed = MPI_Wtime() - handoff_start;
-    double max_elapsed = 0.0;
-    MPI_Reduce(&local_elapsed, &max_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0,
+  Timer_Stop("Unified Handoff Transfer");
+  Timer_Reduce("Unified Handoff Setup",
+               (TimerKind)(MAX | MIN | AVERAGE), MPI_COMM_WORLD);
+  Timer_Reduce("Unified Handoff Pack", (TimerKind)(MAX | MIN | AVERAGE),
                MPI_COMM_WORLD);
-    if (world_rank == 0) {
-      monitor_print("In-memory mesh transfer: %.2f seconds\n", max_elapsed);
-    }
+  Timer_Reduce("Unified Handoff Transfer",
+               (TimerKind)(MAX | MIN | AVERAGE), MPI_COMM_WORLD);
+  if (active) {
+    Timer_Reduce("Unified Handoff Tree Import",
+                 (TimerKind)(MAX | MIN | AVERAGE), target_comm);
+    Timer_Start("Unified Handoff Reconstruction");
   }
 
   free(recv_records);
@@ -10426,11 +10581,23 @@ static int mesh_unified_memory_handoff(void) {
     omp_set_num_threads(atoi(omp_env));
   }
 #endif
+  Timer_Stop("Unified Handoff Reconstruction");
+  Timer_Reduce("Unified Handoff Reconstruction",
+               (TimerKind)(MAX | MIN | AVERAGE), target_comm);
   if (Global.myID == 0) {
     monitor_print(
         "Unified mesh handoff: %d Phase-A ranks -> %d Phase-B ranks "
         "(%d ranks/node across %d nodes)\n",
         world_size, target_total, target_per_node, node_count);
+    monitor_print(
+        "Unified handoff timers (MAX): setup %.2fs, pack %.2fs, "
+        "transfer %.2fs, tree import %.2fs (inside transfer), "
+        "reconstruction %.2fs\n",
+        Timer_Value("Unified Handoff Setup", MAX),
+        Timer_Value("Unified Handoff Pack", MAX),
+        Timer_Value("Unified Handoff Transfer", MAX),
+        Timer_Value("Unified Handoff Tree Import", MAX),
+        Timer_Value("Unified Handoff Reconstruction", MAX));
   }
   return 1;
 }
@@ -25152,8 +25319,10 @@ static int32_t sparse_force_upload_mode(void) {
 
 static void print_timing_stat() {
   double TotalMeshingTime;
+  double UnifiedHandoffTime = 0.0;
   double OtherPhasesTime = 0.0;
   double TotalMeshingTimeMax;
+  double UnifiedHandoffTimeMax = 0.0;
   double OtherPhasesTimeMax = 0.0;
   double BalanceTime = 0.0;
   double BalanceTimeMax = 0.0;
@@ -25214,6 +25383,30 @@ static void print_timing_stat() {
     TotalMeshingTimeMax += Timer_Value("Carve Buildings", MAX);
   }
 
+  /* Tree import is nested inside transfer. Setup, packing, transfer, and the
+   * post-transfer reconstruction are otherwise nonoverlapping. */
+  if (Timer_Exists("Unified Handoff Setup")) {
+    UnifiedHandoffTime +=
+        Timer_Value("Unified Handoff Setup", (TimerKind)0);
+    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Setup", MAX);
+  }
+  if (Timer_Exists("Unified Handoff Pack")) {
+    UnifiedHandoffTime +=
+        Timer_Value("Unified Handoff Pack", (TimerKind)0);
+    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Pack", MAX);
+  }
+  if (Timer_Exists("Unified Handoff Transfer")) {
+    UnifiedHandoffTime +=
+        Timer_Value("Unified Handoff Transfer", (TimerKind)0);
+    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Transfer", MAX);
+  }
+  if (Timer_Exists("Unified Handoff Reconstruction")) {
+    UnifiedHandoffTime +=
+        Timer_Value("Unified Handoff Reconstruction", (TimerKind)0);
+    UnifiedHandoffTimeMax +=
+        Timer_Value("Unified Handoff Reconstruction", MAX);
+  }
+
   if (Timer_Exists("Global Init")) {
     OtherPhasesTime += Timer_Value("Global Init", (TimerKind)0);
     OtherPhasesTimeMax += Timer_Value("Global Init", MAX);
@@ -25255,8 +25448,8 @@ static void print_timing_stat() {
   SolverMax = Timer_Value("Solver", MAX);
   TotalWallClockMax = Timer_Value("Total Wall Clock", MAX);
   AccountedMax =
-      TotalMeshingTimeMax + SourceInitForAccounting + SolverMax +
-      OtherPhasesTimeMax;
+      TotalMeshingTimeMax + UnifiedHandoffTimeMax + SourceInitForAccounting +
+      SolverMax + OtherPhasesTimeMax;
   UnaccountedMax = TotalWallClockMax - AccountedMax;
 
   printf(
@@ -25332,6 +25525,30 @@ static void print_timing_stat() {
   printf("    Mesh Stats Print                : %.2f seconds\n",
          Timer_Value("Mesh Stats Print", (TimerKind)0));
   printf("\n");
+
+  if (Timer_Exists("Unified Handoff Setup")) {
+    printf("UNIFIED HANDOFF (nonoverlapping)    : %.2f seconds\n",
+           UnifiedHandoffTime);
+    printf("    Setup                            : %.2f seconds\n",
+           Timer_Value("Unified Handoff Setup", (TimerKind)0));
+    if (Timer_Exists("Unified Handoff Pack")) {
+      printf("    Pack                             : %.2f seconds\n",
+             Timer_Value("Unified Handoff Pack", (TimerKind)0));
+    }
+    if (Timer_Exists("Unified Handoff Transfer")) {
+      printf("    Transfer                         : %.2f seconds\n",
+             Timer_Value("Unified Handoff Transfer", (TimerKind)0));
+    }
+    if (Timer_Exists("Unified Handoff Tree Import")) {
+      printf("    Tree import (inside transfer)    : %.2f seconds\n",
+             Timer_Value("Unified Handoff Tree Import", (TimerKind)0));
+    }
+    if (Timer_Exists("Unified Handoff Reconstruction")) {
+      printf("    Reconstruction                   : %.2f seconds\n",
+             Timer_Value("Unified Handoff Reconstruction", (TimerKind)0));
+    }
+    printf("\n");
+  }
 
   if (Param.drmImplement == YES) {
     printf(
@@ -28986,7 +29203,7 @@ int main(int argc, char** argv) {
       Param.theMeshOutFlag = 0;
     }
     if (!mesh_unified_memory_handoff()) {
-      MPI_Barrier(MPI_COMM_WORLD);
+      mesh_unified_inactive_wait();
       MPI_Finalize();
       return 0;
     }
@@ -29388,9 +29605,7 @@ int main(int argc, char** argv) {
   /* IO-pool plane outputs are closed immediately after solver_run(). */
 IO_PES_REJOIN:
 
-  if (g_unifiedMeshHandoffEnabled && g_unifiedMeshHandoffActive) {
-    MPI_Barrier(MPI_COMM_WORLD);
-  }
+  mesh_unified_release_inactive();
 
   MPI_Finalize();
 

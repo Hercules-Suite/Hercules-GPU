@@ -176,6 +176,16 @@ Advanced/diagnostic toggles:
 	mesh file. The original input is never modified; only its generated temporary
 	copy is overridden. This variable belongs to the launcher and has no effect
 	when `psolve` is invoked directly.
+- `HERCULES_UNIFIED_IDLE_POLL_USEC=100..1000000`
+	Sets how often inactive Phase-A ranks enter MPI to test for their Phase-B
+	completion message. The default is `10000` microseconds. Between tests they
+	sleep instead of blocking in a world barrier, preventing inactive MPI ranks
+	from aggressively polling on CPUs assigned to the active GPU ranks.
+- `HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE=0|1`
+	Controls the unified launch value of Open MPI's `mpi_yield_when_idle` and
+	defaults to `0`. The active Phase-B ranks therefore retain aggressive MPI
+	progress; low CPU use applies only to the inactive ranks through Hercules'
+	targeted sleep/poll loop. Set `1` only for an intentional diagnostic run.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
 	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
@@ -334,6 +344,10 @@ Notes:
 	in the header, so there are no `.part*.etree` files or external manifest. Set
 	`HERCULES_UNIFIED_WRITE_ARCHIVE=0` when only the immediate in-memory handoff
 	is needed and no reusable archive should be written.
+	The timing report separates unified handoff setup, record packing, transfer,
+	tree import, and reconstruction. Tree import is a subset of transfer and is
+	displayed diagnostically without being double-counted in the accounted
+	wall-clock total.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
