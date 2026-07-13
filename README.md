@@ -156,8 +156,20 @@ Advanced/diagnostic toggles:
 	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
 	and `PHASE_B_OMP_NUM_THREADS` when it cannot be inferred from the allocation.
 	On Linux, the selected ranks divide the node's allowed CPU affinity mask into
-	disjoint blocks before enabling their Phase-B OpenMP threads. Set
-	`HERCULES_UNIFIED_WRITE_ARCHIVE=0` to skip persistent mesh output.
+	disjoint blocks before enabling their Phase-B OpenMP threads.
+- `HERCULES_UNIFIED_WRITE_ARCHIVE=0|1`
+	Controls persistent mesh output in `run_phaseA_phaseB.sh` unified mode and
+	defaults to `1`. With `1`, the launcher overrides the generated temporary
+	unified input to use `output_mesh=1`; `mesh_etree_output_file` is required,
+	and the output format is selected by `HERCULES_MESH_IO_MODE` (`mpiio` by
+	default in unified mode). The archive write is currently synchronous: all
+	Phase-A ranks finish, sync, close, and publish the archive before the
+	in-memory rank-changing handoff starts Phase B. With `0`, the launcher sets
+	`output_mesh=0`, even when the original input file says `output_mesh=1`, and
+	Phase B receives the mesh only through memory without creating a persistent
+	mesh file. The original input is never modified; only its generated temporary
+	copy is overridden. This variable belongs to the launcher and has no effect
+	when `psolve` is invoked directly.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
 	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
@@ -311,9 +323,11 @@ Notes:
 
 	`HERCULES_PHASE_MODE=unified PHASE_B_OMP_NUM_THREADS=35 PSOLVE_BIN=/path/to/psolve ./run_phaseA_phaseB.sh 576 16 inputfiles/parameter.in`
 
-	The default unified archive is one MPI-IO file at
-	`mesh_etree_output_file`; its directory/index is embedded in the header, so
-	there are no `.part*.etree` files or external manifest.
+	With the default `HERCULES_UNIFIED_WRITE_ARCHIVE=1`, the unified archive is
+	one MPI-IO file at `mesh_etree_output_file`; its directory/index is embedded
+	in the header, so there are no `.part*.etree` files or external manifest. Set
+	`HERCULES_UNIFIED_WRITE_ARCHIVE=0` when only the immediate in-memory handoff
+	is needed and no reusable archive should be written.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
