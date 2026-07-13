@@ -19,8 +19,7 @@ RUN_DIR="${PWD}"
 : "${HERCULES_CONTRIB_UNPACK_OMP:=1}"
 : "${HERCULES_CONTRIB_RECV_MODE:=waitsome}"
 : "${HERCULES_SPARSE_UPLOAD_MODE:=dense}"
-: "${HERCULES_PHASE_MODE:=two-phase}"
-: "${HERCULES_UNIFIED_WRITE_ARCHIVE:=1}"
+: "${HERCULES_PHASE_MODE:=unified}"
 : "${HERCULES_UNIFIED_IDLE_POLL_USEC:=10000}"
 : "${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE:=0}"
 if [[ -z "${HERCULES_MESH_IO_MODE+x}" ]]; then
@@ -39,7 +38,7 @@ export HERCULES_CONTRIB_PACK_OMP HERCULES_CONTRIB_UNPACK_OMP
 export HERCULES_CONTRIB_RECV_MODE
 export HERCULES_SPARSE_UPLOAD_MODE
 export HERCULES_MESH_IO_MODE
-export HERCULES_PHASE_MODE HERCULES_UNIFIED_WRITE_ARCHIVE
+export HERCULES_PHASE_MODE
 export HERCULES_UNIFIED_IDLE_POLL_USEC
 export HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE
 
@@ -92,13 +91,6 @@ if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
     PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE="two-phase default"
   fi
 fi
-case "${HERCULES_UNIFIED_WRITE_ARCHIVE}" in
-  0|1) ;;
-  *)
-    echo "ERROR: HERCULES_UNIFIED_WRITE_ARCHIVE must be 0 or 1" >&2
-    exit 1
-    ;;
-esac
 if ! [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" =~ ^[0-9]+$ ]] ||
    [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" -lt 100 ]] ||
    [[ "${HERCULES_UNIFIED_IDLE_POLL_USEC}" -gt 1000000 ]]; then
@@ -131,6 +123,8 @@ fi
 TMP_PHASE_A_IN=""
 TMP_PHASE_B_IN=""
 TMP_UNIFIED_IN=""
+UNIFIED_OUTPUT_MESH=""
+UNIFIED_OUTPUT_MESH_SOURCE=""
 
 trim_ws() {
   local s="$1"
@@ -276,9 +270,29 @@ if [[ -n "${BASE_IN}" ]]; then
   }
   trap cleanup_tmp_inputs EXIT
 
+  BASE_OUTPUT_MESH_RAW="$(extract_config_value "${BASE_IN}" "output_mesh")"
+  BASE_OUTPUT_MESH_RAW="$(trim_ws "${BASE_OUTPUT_MESH_RAW}")"
+  if [[ -n "${BASE_OUTPUT_MESH_RAW}" ]]; then
+    UNIFIED_OUTPUT_MESH="${BASE_OUTPUT_MESH_RAW}"
+    UNIFIED_OUTPUT_MESH_SOURCE="base input"
+  else
+    # Match psolve's compiled default when output_mesh is omitted.
+    UNIFIED_OUTPUT_MESH="1"
+    UNIFIED_OUTPUT_MESH_SOURCE="psolve default"
+  fi
+  if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+    case "${UNIFIED_OUTPUT_MESH}" in
+      0|1) ;;
+      *)
+        echo "ERROR: output_mesh must be 0 or 1 for unified mode" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
   make_phase_input "${BASE_IN}" "${TMP_PHASE_A_IN}" 1 1 0
   make_phase_input "${BASE_IN}" "${TMP_PHASE_B_IN}" 0 0 1
-  make_phase_input "${BASE_IN}" "${TMP_UNIFIED_IN}" "${HERCULES_UNIFIED_WRITE_ARCHIVE}" 0 0
+  make_phase_input "${BASE_IN}" "${TMP_UNIFIED_IN}" "${UNIFIED_OUTPUT_MESH}" 0 0
 
   # Normalize mesh etree path so both phases use the same absolute location.
   BASE_IN_DIR="$(cd -- "$(dirname -- "${BASE_IN}")" && pwd)"
@@ -287,7 +301,7 @@ if [[ -n "${BASE_IN}" ]]; then
   MESH_ETREE_RAW="$(trim_ws "${MESH_ETREE_RAW}")"
   if [[ -z "${MESH_ETREE_RAW}" ]] &&
      { [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]] ||
-       [[ "${HERCULES_UNIFIED_WRITE_ARCHIVE}" == "1" ]]; }; then
+       [[ "${UNIFIED_OUTPUT_MESH}" == "1" ]]; }; then
     echo "ERROR: mesh_etree_output_file is required for persistent mesh output" >&2
     exit 1
   fi
@@ -538,6 +552,7 @@ if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
   echo "Phase A Octor:  ${PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE} (all2all=${PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE})"
 fi
 if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
+  echo "Mesh output:    output_mesh=${UNIFIED_OUTPUT_MESH} (${UNIFIED_OUTPUT_MESH_SOURCE})"
   echo "Inactive poll:  ${HERCULES_UNIFIED_IDLE_POLL_USEC} usec"
   echo "Active MPI idle: ${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE} (0=aggressive)"
 fi
@@ -586,7 +601,9 @@ else
   A_ARGS=()
 fi
 
-if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]]; then
+if [[ -n "${EFFECTIVE_MESH_ETREE_PATH:-}" ]] &&
+   { [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]] ||
+     [[ "${UNIFIED_OUTPUT_MESH}" == "1" ]]; }; then
   mkdir -p -- "$(dirname -- "${EFFECTIVE_MESH_ETREE_PATH}")"
 fi
 
@@ -650,10 +667,10 @@ if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
   echo "[Unified] ${MPI_RUN} -np ${PHASE_A_NP} ${U_ARGS[*]} ${PSOLVE_BIN} ${UNIFIED_IN}"
   env "${U_ENV_VARS[@]}" "${MPI_RUN}" -np "${PHASE_A_NP}" "${U_ARGS[@]}" \
     "${PSOLVE_BIN}" "${UNIFIED_IN}"
-  if [[ "${HERCULES_UNIFIED_WRITE_ARCHIVE}" == "1" &&
+  if [[ "${UNIFIED_OUTPUT_MESH}" == "1" &&
         -n "${EFFECTIVE_MESH_ETREE_PATH:-}" &&
         ! -s "${EFFECTIVE_MESH_ETREE_PATH}" ]]; then
-    echo "ERROR: unified run did not produce the MPI-IO mesh archive: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
+    echo "ERROR: output_mesh=1 but unified run did not produce the MPI-IO mesh archive: ${EFFECTIVE_MESH_ETREE_PATH}" >&2
     exit 1
   fi
   echo

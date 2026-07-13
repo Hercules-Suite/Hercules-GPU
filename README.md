@@ -152,30 +152,16 @@ Advanced/diagnostic toggles:
 	mesh-record ABI and is therefore intended for compatible builds on the same
 	platform family; its header rejects incompatible record sizes.
 - `HERCULES_PHASE_MODE=two-phase|unified`
-	Controls `run_phaseA_phaseB.sh` and defaults to `two-phase`, preserving the
-	existing separate-launch workflow when the variable is unset. `two-phase`
+	Controls `run_phaseA_phaseB.sh` and defaults to `unified`. `two-phase`
 	launches separate Phase-A and Phase-B MPI jobs. `unified` keeps the Phase-A
-	MPI world alive, writes the optional MPI-IO archive, and redistributes mesh
-	leaves directly from the CPU
-	ranks to the requested Phase-B rank count in memory. The Phase-B ranks per
+	MPI world alive, optionally writes the MPI-IO archive according to the input
+	file's `output_mesh` value, and redistributes mesh leaves directly from the
+	CPU ranks to the requested Phase-B rank count in memory. The Phase-B ranks per
 	node are derived from `PHASE_B_NP / allocated_nodes`; no GPU count is
 	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
 	and `PHASE_B_OMP_NUM_THREADS` when it cannot be inferred from the allocation.
 	On Linux, the selected ranks divide the node's allowed CPU affinity mask into
 	disjoint blocks before enabling their Phase-B OpenMP threads.
-- `HERCULES_UNIFIED_WRITE_ARCHIVE=0|1`
-	Controls persistent mesh output in `run_phaseA_phaseB.sh` unified mode and
-	defaults to `1`. With `1`, the launcher overrides the generated temporary
-	unified input to use `output_mesh=1`; `mesh_etree_output_file` is required,
-	and the output format is selected by `HERCULES_MESH_IO_MODE` (`mpiio` by
-	default in unified mode). The archive write is currently synchronous: all
-	Phase-A ranks finish, sync, close, and publish the archive before the
-	in-memory rank-changing handoff starts Phase B. With `0`, the launcher sets
-	`output_mesh=0`, even when the original input file says `output_mesh=1`, and
-	Phase B receives the mesh only through memory without creating a persistent
-	mesh file. The original input is never modified; only its generated temporary
-	copy is overridden. This variable belongs to the launcher and has no effect
-	when `psolve` is invoked directly.
 - `HERCULES_UNIFIED_IDLE_POLL_USEC=100..1000000`
 	Sets how often inactive Phase-A ranks enter MPI to test for their Phase-B
 	completion message. The default is `10000` microseconds. Between tests they
@@ -253,7 +239,7 @@ Build note:
 	Use `USE_OPENMP=0` only if you want to disable OpenMP explicitly.
 	Examples: `make` (OpenMP on by default) or `make USE_OPENMP=0`.
 
-Two-phase script defaults:
+Phase launcher defaults:
 
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
@@ -263,7 +249,8 @@ Two-phase script defaults:
 	`HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_CONTRIB_UNPACK_OMP=1`,
 	`HERCULES_CONTRIB_RECV_MODE=waitsome`,
-	`HERCULES_SPARSE_UPLOAD_MODE=dense`.
+	`HERCULES_SPARSE_UPLOAD_MODE=dense`,
+	`HERCULES_PHASE_MODE=unified`.
 	These are the current recommended runtime defaults.
 - OpenMP thread defaults:
 	Phase A defaults to `PHASE_A_OMP_NUM_THREADS=1` when unset.
@@ -282,7 +269,7 @@ Two-phase script defaults:
 	The `numa` mode is experimental and should be used only when you want to test locality-sensitive placement explicitly.
 - You can still override any of these by exporting your own value before running the script.
 
-Two-phase job run (Phase A then Phase B):
+Phase launcher (unified by default):
 
 - Script: `run_phaseA_phaseB.sh`
 - Positional arguments: `PHASE_A_NP PHASE_B_NP [BASE_IN]`
@@ -294,6 +281,8 @@ cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
 
 export PHASE_A_OMP_NUM_THREADS=1
 export PHASE_B_OMP_NUM_THREADS=64
+# To request separate Phase-A and Phase-B launches instead:
+# export HERCULES_PHASE_MODE=two-phase
 # Optional: override script defaults when needed
 # export OMP_PROC_BIND=spread
 # export OMP_PLACES=threads
@@ -328,10 +317,16 @@ inputfiles/parameter.in
 Notes:
 
 - With `BASE_IN`, the script auto-generates temporary Phase A, Phase B, and
-	unified inputs by overriding `output_mesh`, `mesh_only_mode`, and
-	`mesh_input_mode`.
-- `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
-- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh path: ...` when it finds and rewrites this setting.
+	unified inputs. The two-phase inputs override `output_mesh`, `mesh_only_mode`,
+	and `mesh_input_mode`; the unified input preserves the base input's
+	`output_mesh` behavior and sets `mesh_only_mode=0` and `mesh_input_mode=0`.
+- `BASE_IN` must define `mesh_etree_output_file` for two-phase runs and for
+	unified runs with `output_mesh=1`; it is optional for unified
+	`output_mesh=0`. Generated inputs use the same resolved mesh path. Relative
+	paths are resolved from the run directory, except when only the
+	input-file-relative path already exists.
+- When mesh output is enabled, the launcher creates the archive/manifest parent
+	directory and prints the resolved `Mesh path`.
 - The two-phase script defaults `HERCULES_MESH_IO_MODE=sharded`. In Phase A,
 	each MPI rank writes `<mesh_etree_output_file>.partNNNNNN.etree` concurrently,
 	then rank 0 publishes a small text manifest at `mesh_etree_output_file`.
@@ -340,19 +335,21 @@ Notes:
 	rank-0 gather/writer from mesh output. Set `HERCULES_MESH_IO_MODE=single` to
 	retain the legacy single-etree writer. Keep the manifest and all `.part*.etree`
 	files together when moving or archiving a generated mesh.
-- Set `HERCULES_PHASE_MODE=unified` to avoid the Phase-A-to-Phase-B filesystem
+- Unified mode is the default and avoids the Phase-A-to-Phase-B filesystem
 	round trip. The script launches `PHASE_A_NP` ranks once, then the solver
 	selects `PHASE_B_NP / allocated_nodes` local ranks per node, redistributes the
 	mesh by SFC ownership, and runs the GPU phase on the resulting communicator.
 	For example:
 
-	`HERCULES_PHASE_MODE=unified PHASE_B_OMP_NUM_THREADS=35 PSOLVE_BIN=/path/to/psolve ./run_phaseA_phaseB.sh 576 16 inputfiles/parameter.in`
+	`PHASE_B_OMP_NUM_THREADS=35 PSOLVE_BIN=/path/to/psolve ./run_phaseA_phaseB.sh 576 16 inputfiles/parameter.in`
 
-	With the default `HERCULES_UNIFIED_WRITE_ARCHIVE=1`, the unified archive is
-	one MPI-IO file at `mesh_etree_output_file`; its directory/index is embedded
-	in the header, so there are no `.part*.etree` files or external manifest. Set
-	`HERCULES_UNIFIED_WRITE_ARCHIVE=0` when only the immediate in-memory handoff
-	is needed and no reusable archive should be written.
+	In unified mode, `output_mesh=1` writes one MPI-IO archive at
+	`mesh_etree_output_file`; its directory/index is embedded in the header, so
+	there are no `.part*.etree` files or external manifest. The archive write is
+	synchronous and completes before the handoff. Set `output_mesh=0` in the input
+	when only the immediate in-memory handoff is needed and no reusable archive
+	should be written. Set `HERCULES_PHASE_MODE=two-phase` explicitly to use the
+	separate-launch workflow.
 	The timing report separates unified handoff setup, record packing, transfer,
 	tree import, and reconstruction. Tree import is a subset of transfer and is
 	displayed diagnostically without being double-counted in the accounted
@@ -370,7 +367,8 @@ Notes:
 Mesh mode input flags (input file):
 
 - `output_mesh`
-	`1` writes the generated mesh to disk. With
+	`1` writes the generated mesh to disk and is the default when the setting is
+	omitted. In unified mode this write completes before the in-memory handoff. With
 	`HERCULES_MESH_IO_MODE=sharded`, `mesh_etree_output_file` is the manifest
 	path; with `mpiio`, it is the single archive path; with `single`, it is the
 	legacy etree database path.

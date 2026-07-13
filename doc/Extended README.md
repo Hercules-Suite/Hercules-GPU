@@ -106,7 +106,7 @@ Build note:
 	Use `USE_OPENMP=0` only if you want to disable OpenMP explicitly.
 	Examples: `make` (OpenMP on by default) or `make USE_OPENMP=0`.
 
-Two-phase script defaults:
+Phase launcher defaults:
 
 - `run_phaseA_phaseB.sh` now auto-sets the following when they are unset:
 	`OMP_PROC_BIND=close`, `OMP_PLACES=cores`,
@@ -116,7 +116,8 @@ Two-phase script defaults:
 	`HERCULES_PLANE_IO_OMP=1`,
 	`HERCULES_CONTRIB_PACK_OMP=1`, `HERCULES_CONTRIB_UNPACK_OMP=1`,
 	`HERCULES_CONTRIB_RECV_MODE=waitsome`,
-	`HERCULES_SPARSE_UPLOAD_MODE=dense`.
+	`HERCULES_SPARSE_UPLOAD_MODE=dense`,
+	`HERCULES_PHASE_MODE=unified`.
 	These are the current recommended runtime defaults.
 - OpenMP thread defaults:
 	Phase A defaults to `PHASE_A_OMP_NUM_THREADS=1` when unset.
@@ -135,7 +136,7 @@ Two-phase script defaults:
 	The `numa` mode is experimental and should be used only when you want to test locality-sensitive placement explicitly.
 - You can still override any of these by exporting your own value before running the script.
 
-Two-phase job run (Phase A then Phase B):
+Phase launcher (unified by default):
 
 - Script: `run_phaseA_phaseB.sh`
 - Positional arguments: `PHASE_A_NP PHASE_B_NP [BASE_IN]`
@@ -147,6 +148,8 @@ cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
 
 export PHASE_A_OMP_NUM_THREADS=1
 export PHASE_B_OMP_NUM_THREADS=64
+# To request separate Phase-A and Phase-B launches instead:
+# export HERCULES_PHASE_MODE=two-phase
 # Optional: override script defaults when needed
 # export OMP_PROC_BIND=spread
 # export OMP_PLACES=threads
@@ -176,9 +179,14 @@ inputfiles/parameter.in
 
 Notes:
 
-- With `BASE_IN`, the script auto-generates temporary Phase A/Phase B inputs by overriding `output_mesh`, `mesh_only_mode`, and `mesh_input_mode`.
-- `BASE_IN` should define `mesh_etree_output_file`; both generated phase inputs are rewritten to use the same resolved mesh path. Relative mesh paths are resolved from the run directory, except when only the input-file-relative path already exists.
-- Create the mesh output directory before running Phase A. For example, if the input uses `mesh_etree_output_file = outputfiles/mesh.e`, run `mkdir -p outputfiles` from the case directory first. The two-phase script prints `Mesh etree: ...` when it finds and rewrites this setting.
+- With `BASE_IN`, the script auto-generates temporary Phase A, Phase B, and
+	unified inputs. Two-phase inputs override all mesh-mode flags; unified mode
+	preserves the base input's `output_mesh` behavior while setting
+	`mesh_only_mode=0` and `mesh_input_mode=0`.
+- `BASE_IN` must define `mesh_etree_output_file` for two-phase runs and unified
+	runs with `output_mesh=1`; it is optional for unified `output_mesh=0`.
+	Relative paths are resolved from the run directory, except when only the
+	input-file-relative path already exists.
 - Phase B mapping is controlled by `PHASE_B_MAP_MODE`.
 	`auto` is the default and is recommended unless you are intentionally testing an alternative placement.
 	For example, on NVL72 with `4` GPU ranks per node and `PHASE_B_OMP_NUM_THREADS=35`,
