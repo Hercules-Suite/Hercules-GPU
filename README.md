@@ -229,11 +229,13 @@ Advanced/diagnostic toggles:
 	adds extra timing/reduction work.
 - `OCTOR_SETCOM_ALL2ALL=0|1`
 	Controls construction of Octor's communication manager during mesh
-	extraction. Mesh-input and unified in-memory reconstruction default to `1`,
-	which constructs the peer table directly instead of scanning every local
-	leaf to rediscover neighboring ranks. This is important when each Phase-B
-	rank owns tens of millions of elements. Set it explicitly to `0` only for
-	diagnostic comparison with the legacy neighbor-discovery path.
+	extraction. The two-phase launcher defaults Phase A to `1`; mesh-input
+	Phase B and unified in-memory reconstruction also default to `1`. This
+	constructs the peer table directly instead of scanning every local leaf to
+	rediscover neighboring ranks. It is important when a rank owns millions of
+	elements. Set it explicitly to `0` only for diagnostic comparison with the
+	legacy neighbor-discovery path. Unified Phase-A generation is unchanged
+	unless this variable is explicitly exported for the whole unified launch.
 - `OCTOR_NODE_SORT_MODE=radix|qsort`
 	Controls the node-table Morton/Z-order sort inside `octor_extractmesh()`.
 	Default is `radix`, a linear-time 8-bucket radix sort over the 30 Morton

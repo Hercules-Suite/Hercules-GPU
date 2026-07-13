@@ -72,6 +72,26 @@ case "${HERCULES_PHASE_MODE}" in
     exit 1
     ;;
 esac
+if [[ -n "${OCTOR_SETCOM_ALL2ALL+x}" ]]; then
+  case "${OCTOR_SETCOM_ALL2ALL}" in
+    0|1) ;;
+    *)
+      echo "ERROR: OCTOR_SETCOM_ALL2ALL must be 0 or 1" >&2
+      exit 1
+      ;;
+  esac
+fi
+PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE=""
+PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE=""
+if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
+  if [[ -n "${OCTOR_SETCOM_ALL2ALL+x}" ]]; then
+    PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE="${OCTOR_SETCOM_ALL2ALL}"
+    PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE="user"
+  else
+    PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE="1"
+    PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE="two-phase default"
+  fi
+fi
 case "${HERCULES_UNIFIED_WRITE_ARCHIVE}" in
   0|1) ;;
   *)
@@ -514,6 +534,9 @@ echo "psolve binary:  ${PSOLVE_BIN}"
 echo "Run dir:        ${RUN_DIR}"
 echo "Phase mode:     ${HERCULES_PHASE_MODE}"
 echo "Mesh I/O mode:  ${HERCULES_MESH_IO_MODE}"
+if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
+  echo "Phase A Octor:  ${PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE} (all2all=${PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE})"
+fi
 if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
   echo "Inactive poll:  ${HERCULES_UNIFIED_IDLE_POLL_USEC} usec"
   echo "Active MPI idle: ${HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE} (0=aggressive)"
@@ -574,6 +597,9 @@ else
 fi
 if [[ -n "${PHASE_A_UCX_TLS_SOURCE}" && "${PHASE_A_UCX_TLS_SOURCE}" != "user" ]]; then
   A_ENV_VARS+=("UCX_TLS=${PHASE_A_UCX_TLS_VALUE}")
+fi
+if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
+  A_ENV_VARS+=("OCTOR_SETCOM_ALL2ALL=${PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE}")
 fi
 if [[ ${#A_ENV_VARS[@]} -gt 0 ]]; then
   A_ENV=(env "${A_ENV_VARS[@]}")
