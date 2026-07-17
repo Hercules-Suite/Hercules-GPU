@@ -82,6 +82,15 @@
 #define CUDA_KERNEL_NAME_DISPLACEMENT          "kernelDispCalc"
 #define CUDA_KERNEL_NAME_STATION_VE_STRESS     "kernelStationVEStressGather"
 
+/* Packed GPU plane-interpolation point modes shared by io_planes.cc and the
+ * CUDA interpolation kernel. */
+enum {
+    PLANE_GPU_POINT_INVALID = 0,
+    PLANE_GPU_POINT_TRILINEAR = 1,
+    PLANE_GPU_POINT_TOPO = 2,
+    PLANE_GPU_POINT_HOST_ACOUSTIC = 3
+};
+
 /* Maximum simultaneous CUDA events */
 #define MAX_CUDA_EVENT                   6
 #define CUDA_EVENT_FORCE_UPLOAD_DONE     0

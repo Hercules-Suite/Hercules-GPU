@@ -269,6 +269,14 @@ static fvector_t* g_dispOutputBufferDevice = NULL;
 static int32_t g_dispOutputNodeCount = 0;
 static int32_t g_dispOutputHostPinned = 0;
 static int32_t g_dispOutputReported = 0;
+static int32_t g_planeGpuOutputReady = 0;
+static int32_t g_planeGpuPointCount = 0;
+static int32_t* g_planeGpuNodesDevice = NULL;
+static double* g_planeGpuCoordsDevice = NULL;
+static int32_t* g_planeGpuModesDevice = NULL;
+static double* g_planeGpuValuesDevice = NULL;
+static double* g_planeGpuValuesHost = NULL;
+static int32_t g_planeGpuValuesHostPinned = 0;
 static int32_t g_pressureForceSyncMode = -1;
 static int32_t g_pressureForceSyncReported = 0;
 static int32_t g_pressureFieldSyncMode = -1;
@@ -836,6 +844,9 @@ static void solver_sync_pore_pressure_station_values(mysolver_t* solver);
 static void solver_free_pore_pressure_device_sync(void);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_sync_displacement_output_values(mysolver_t* solver);
+static void solver_init_plane_gpu_output(mysolver_t* solver);
+static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID);
+static void solver_free_plane_gpu_output(void);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
@@ -15339,6 +15350,7 @@ static void solver_delete() {
   }
 
   /* Free device memory */
+  solver_free_plane_gpu_output();
   // cudaFree(Global.gpuData.elemTableDevice);
   // cudaFree(Global.gpuData.eTableDevice);
   // cudaFree(Global.gpuData.nTableDevice);
@@ -16004,8 +16016,15 @@ static void solver_output_planes(mysolver_t* solver, int my_id, int step) {
   if (Param.theNumberOfPlanes != 0) {
     if (step % Param.thePlanePrintRate == 0) {
       Timer_Start("Print Planes");
-      planes_print(my_id, Param.IO_pool_pe_count, Param.theNumberOfPlanes,
-                   solver);
+      if (planes_gpu_mpiio_enabled()) {
+        if (!solver_output_planes_gpu(solver, my_id)) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "GPU/MPI-IO plane output failed at step %d", step);
+        }
+      } else {
+        planes_print(my_id, Param.IO_pool_pe_count, Param.theNumberOfPlanes,
+                     solver);
+      }
       Timer_Stop("Print Planes");
     }
   }
@@ -18657,8 +18676,9 @@ static void solver_report_displacement_output_patch_count(
   if (Global.myID == 0) {
     monitor_print(
         "Displacement output patch nodes: %lld globally "
-        "(max/rank=%lld) for station/plane output%s\n",
+        "(max/rank=%lld) for station%s output%s\n",
         globalCount, maxCount,
+        planes_gpu_mpiio_enabled() ? "" : "/plane",
         solver_displacement_output_needs_previous() ? " (tm1+tm2)" : " (tm1)");
   }
   g_dispOutputReported = 1;
@@ -18669,8 +18689,10 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
   int32_t count = 0;
   int32_t uniqueCount = 0;
   int32_t* nodes = NULL;
-  const int32_t planeNodeCount = planes_displacement_node_count();
-  const int32_t* planeNodes = planes_displacement_nodes();
+  const int32_t planeNodeCount =
+      planes_gpu_mpiio_enabled() ? 0 : planes_displacement_node_count();
+  const int32_t* planeNodes =
+      planes_gpu_mpiio_enabled() ? NULL : planes_displacement_nodes();
   const int32_t topoStationNodeCount = topography_station_node_count();
 
   (void)solver;
@@ -18819,6 +18841,180 @@ static void solver_sync_displacement_output_values(mysolver_t* solver) {
                                           "displacement output tm2 gather");
   }
   Timer_Stop("Disp output D2H patch");
+}
+
+static void solver_init_plane_gpu_output(mysolver_t* solver) {
+  int32_t* nodesHost = NULL;
+  double* coordsHost = NULL;
+  int32_t* modesHost = NULL;
+
+  if (g_planeGpuOutputReady != 0 || !planes_gpu_mpiio_enabled()) {
+    return;
+  }
+
+  g_planeGpuPointCount = planes_local_interpolation_point_count();
+  if (g_planeGpuPointCount <= 0) {
+    g_planeGpuOutputReady = 1;
+    return;
+  }
+  if ((solver == NULL) || (solver->gpuData == NULL) ||
+      (solver->gpuData->tm1Device == NULL)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "GPU plane output requested without device displacement "
+                 "state");
+  }
+
+  nodesHost = (int32_t*)malloc(sizeof(int32_t) *
+                              (size_t)g_planeGpuPointCount * 8);
+  coordsHost =
+      (double*)malloc(sizeof(double) * (size_t)g_planeGpuPointCount * 3);
+  modesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)g_planeGpuPointCount);
+  if ((nodesHost == NULL) || (coordsHost == NULL) || (modesHost == NULL)) {
+    free(nodesHost);
+    free(coordsHost);
+    free(modesHost);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to allocate GPU plane interpolation metadata");
+  }
+  if (!planes_export_gpu_interpolation_metadata(
+          g_planeGpuPointCount, nodesHost, coordsHost, modesHost)) {
+    free(nodesHost);
+    free(coordsHost);
+    free(modesHost);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to export GPU plane interpolation metadata");
+  }
+
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuNodesDevice,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount * 8),
+      "plane interpolation-node allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuCoordsDevice,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3),
+      "plane interpolation-coordinate allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuModesDevice,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount),
+      "plane interpolation-mode allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuValuesDevice,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3),
+      "plane result allocation");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuNodesDevice, nodesHost,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount * 8,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-node copy");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuCoordsDevice, coordsHost,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-coordinate copy");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuModesDevice, modesHost,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-mode copy");
+
+  free(nodesHost);
+  free(coordsHost);
+  free(modesHost);
+
+  if (cudaHostAlloc((void**)&g_planeGpuValuesHost,
+                    sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_planeGpuValuesHostPinned = 1;
+  } else {
+    g_planeGpuValuesHost = (double*)malloc(
+        sizeof(double) * (size_t)g_planeGpuPointCount * 3);
+    if (g_planeGpuValuesHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to allocate host plane-result buffer");
+    }
+  }
+
+  g_planeGpuOutputReady = 1;
+  if (Global.myID == 0) {
+    monitor_print(
+        "GPU plane interpolation enabled (packed local results, MPI-IO "
+        "output; one shared file per configured plane).\n");
+  }
+}
+
+static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID) {
+  const int32_t blocksize = 256;
+
+  solver_init_plane_gpu_output(solver);
+  if (g_planeGpuPointCount > 0) {
+    const int32_t gridsize =
+        (g_planeGpuPointCount + blocksize - 1) / blocksize;
+
+    Timer_Start("Plane GPU Interpolation");
+    kernelPlaneDisplacementInterpolate<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_planeGpuPointCount, g_planeGpuNodesDevice, g_planeGpuCoordsDevice,
+        g_planeGpuModesDevice, solver->gpuData->tm1Device,
+        g_planeGpuValuesDevice);
+    solver_pore_pressure_device_check(cudaGetLastError(),
+                                      "plane interpolation kernel");
+    solver_pore_pressure_device_check(
+        cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+        "plane interpolation sync");
+    Timer_Stop("Plane GPU Interpolation");
+
+    Timer_Start("Plane Result D2H");
+    solver_pore_pressure_device_check(
+        cudaMemcpyAsync(g_planeGpuValuesHost, g_planeGpuValuesDevice,
+                        sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                        cudaMemcpyDeviceToHost,
+                        solver->streams[CUDA_STREAM_MAIN]),
+        "plane result D2H");
+    solver->gpu_spec->numbytespci +=
+        (int64_t)g_planeGpuPointCount * 3 * (int64_t)sizeof(double);
+    solver_pore_pressure_device_check(
+        cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+        "plane result D2H sync");
+    Timer_Stop("Plane Result D2H");
+
+    if (planes_host_only_point_count() > 0) {
+      Timer_Start("Plane Host Patch");
+      if (!planes_patch_host_only_values(g_planeGpuValuesHost,
+                                         g_planeGpuPointCount)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to patch host-only acoustic plane values");
+      }
+      Timer_Stop("Plane Host Patch");
+    }
+  }
+
+  return planes_print_gpu_mpiio(myID, Param.theNumberOfPlanes,
+                                g_planeGpuValuesHost,
+                                g_planeGpuPointCount);
+}
+
+static void solver_free_plane_gpu_output(void) {
+  cudaFree(g_planeGpuNodesDevice);
+  cudaFree(g_planeGpuCoordsDevice);
+  cudaFree(g_planeGpuModesDevice);
+  cudaFree(g_planeGpuValuesDevice);
+  if (g_planeGpuValuesHost != NULL) {
+    if (g_planeGpuValuesHostPinned != 0) {
+      cudaFreeHost(g_planeGpuValuesHost);
+    } else {
+      free(g_planeGpuValuesHost);
+    }
+  }
+
+  g_planeGpuNodesDevice = NULL;
+  g_planeGpuCoordsDevice = NULL;
+  g_planeGpuModesDevice = NULL;
+  g_planeGpuValuesDevice = NULL;
+  g_planeGpuValuesHost = NULL;
+  g_planeGpuValuesHostPinned = 0;
+  g_planeGpuPointCount = 0;
+  g_planeGpuOutputReady = 0;
 }
 
 static void solver_init_pressure_sparse_sync(mysolver_t* solver) {
@@ -21870,6 +22066,14 @@ static void solver_run_collect_timers(void) {
    * this is NOT best and worst single step times
    */
   solver_reduce_timer_if_any("Print Planes",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane GPU Interpolation",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Result D2H",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Host Patch",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane MPI-IO Write",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Print Stations",
                              (TimerKind)(MAX | MIN | AVERAGE));
@@ -26639,6 +26843,34 @@ static void print_timing_stat() {
         "%.2f (Min) seconds\n",
         Timer_Value("Print Planes", AVERAGE), Timer_Value("Print Planes", MAX),
         Timer_Value("Print Planes", MIN));
+  if (Timer_Exists("Plane GPU Interpolation"))
+    printf(
+        "          Plane GPU interpolation  : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane GPU Interpolation", AVERAGE),
+        Timer_Value("Plane GPU Interpolation", MAX),
+        Timer_Value("Plane GPU Interpolation", MIN));
+  if (Timer_Exists("Plane Result D2H"))
+    printf(
+        "          Plane packed-result D2H  : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Result D2H", AVERAGE),
+        Timer_Value("Plane Result D2H", MAX),
+        Timer_Value("Plane Result D2H", MIN));
+  if (Timer_Exists("Plane Host Patch"))
+    printf(
+        "          Plane acoustic host patch: %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Host Patch", AVERAGE),
+        Timer_Value("Plane Host Patch", MAX),
+        Timer_Value("Plane Host Patch", MIN));
+  if (Timer_Exists("Plane MPI-IO Write"))
+    printf(
+        "          Plane MPI-IO write       : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane MPI-IO Write", AVERAGE),
+        Timer_Value("Plane MPI-IO Write", MAX),
+        Timer_Value("Plane MPI-IO Write", MIN));
   if (Timer_Exists("Print Stations"))
     printf(
         "        Stations                    : %.2f (Average)   %.2f (Max) "

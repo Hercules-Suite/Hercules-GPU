@@ -3501,3 +3501,66 @@ __global__ void kernelPorePressureStationInterpolate(
     stationOutput[station] =
         (weight > 0.0) ? (pressure / weight) : nan("");
 }
+
+/* Interpolate one XYZ displacement per locally owned plane point. The output
+ * order exactly matches io_planes.cc's plane/strip/point traversal, allowing
+ * it to be copied once and written through precomputed MPI file views. */
+__global__ void kernelPlaneDisplacementInterpolate(
+    int32_t pointCount, const int32_t* pointNodes,
+    const double* pointCoords, const int32_t* pointModes,
+    const fvector_t* tm1, double* pointOutput)
+{
+    const int32_t point = blockIdx.x * blockDim.x + threadIdx.x;
+    if (point >= pointCount) return;
+
+    const int32_t mode = pointModes[point];
+    double* const out = pointOutput + (size_t)point * 3;
+    if ((mode == PLANE_GPU_POINT_INVALID) ||
+        (mode == PLANE_GPU_POINT_HOST_ACOUSTIC)) {
+        out[0] = 0.0;
+        out[1] = 0.0;
+        out[2] = 0.0;
+        return;
+    }
+
+    const int32_t* const nodes = pointNodes + (size_t)point * 8;
+    const double xi = pointCoords[(size_t)point * 3];
+    const double eta = pointCoords[(size_t)point * 3 + 1];
+    const double zeta = pointCoords[(size_t)point * 3 + 2];
+
+    if (mode == PLANE_GPU_POINT_TOPO) {
+        const fvector_t u0 = tm1[nodes[0]];
+        const fvector_t u1 = tm1[nodes[1]];
+        const fvector_t u2 = tm1[nodes[2]];
+        const fvector_t u3 = tm1[nodes[3]];
+        #pragma unroll
+        for (int axis = 0; axis < 3; axis++) {
+            const double base = (double)u0.f[axis];
+            out[axis] = base + xi * ((double)u2.f[axis] - base) +
+                        eta * ((double)u1.f[axis] - base) +
+                        zeta * ((double)u3.f[axis] - base);
+        }
+        return;
+    }
+
+    const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+    const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+    const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+    double ux = 0.0;
+    double uy = 0.0;
+    double uz = 0.0;
+    #pragma unroll
+    for (int corner = 0; corner < 8; corner++) {
+        const double shape =
+            0.125 * (1.0 + sx[corner] * xi) *
+            (1.0 + sy[corner] * eta) *
+            (1.0 + sz[corner] * zeta);
+        const fvector_t value = tm1[nodes[corner]];
+        ux += shape * (double)value.f[0];
+        uy += shape * (double)value.f[1];
+        uz += shape * (double)value.f[2];
+    }
+    out[0] = ux;
+    out[1] = uy;
+    out[2] = uz;
+}

@@ -133,6 +133,13 @@ __global__ void kernelPorePressureStationInterpolate(
     const double* stationCoords, const solver_float* porePressureTm1,
     const solver_float* porePressureMass, double* stationOutput);
 
+/* Plane interpolation is evaluated directly from device-resident tm1 and
+ * packed as XYZ doubles in local strip order for distributed MPI-IO. */
+__global__ void kernelPlaneDisplacementInterpolate(
+    int32_t pointCount, const int32_t* pointNodes,
+    const double* pointCoords, const int32_t* pointModes,
+    const fvector_t* tm1, double* pointOutput);
+
 __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
 							   gpu_data_t* gpuData,
 							   double deltaT2,

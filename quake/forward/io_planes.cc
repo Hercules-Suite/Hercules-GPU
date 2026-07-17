@@ -22,7 +22,9 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <float.h>
+#include <limits.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -44,6 +46,7 @@
 #include "util.h"
 #include "cvm.h"
 #include "topography.h"
+#include "timers.h"
 
 
 extern int compute_csi_eta_dzeta( octant_t *octant, vector3D_t pointcoords,
@@ -69,6 +72,10 @@ void planes_IO_PES_main(int32_t myID);
 static void New_output_planes_construct_strips(int32_t myID, int theNumberOfPlanes);
 
 static void print_planeinfo(int32_t myID, int theNumberOfPlanes);
+static void planes_select_output_mode(int32_t myID, int io_pool_pe_count);
+static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
+                               const char* planeDirOut);
+static void planes_mpiio_close(int theNumberOfPlanes);
 
 int  Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes);
 void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char* thePlaneDirOut, 
@@ -139,6 +146,264 @@ static int32_t* g_planeDisplacementNodes = NULL;
 static int32_t g_planeDisplacementNodeCount = 0;
 static int32_t* g_acousticPlanePressureNodes = NULL;
 static int32_t g_acousticPlanePressureNodeCount = 0;
+static int32_t g_planeGpuMpiioEnabled = 0;
+static MPI_File* g_planeMpiFiles = NULL;
+static MPI_Datatype* g_planeMpiFileTypes = NULL;
+static int32_t* g_planeLocalPointOffsets = NULL;
+static int32_t* g_planeLocalValueCounts = NULL;
+static MPI_Offset* g_planeSnapshotBytes = NULL;
+static int32_t g_planeLocalPointCount = 0;
+static int32_t g_planeMpiPlaneCount = 0;
+static int32_t g_planeHostOnlyPointCount = 0;
+
+static void planes_mpi_check(int errorCode, const char* operation) {
+    if (errorCode == MPI_SUCCESS) {
+        return;
+    }
+
+    char errorText[MPI_MAX_ERROR_STRING];
+    int errorLength = 0;
+    MPI_Error_string(errorCode, errorText, &errorLength);
+    fprintf(stderr, "Plane MPI-IO %s failed: %.*s\n", operation,
+            errorLength, errorText);
+    MPI_Abort(comm_solver, errorCode);
+    exit(1);
+}
+
+static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
+    const char* env = getenv("HERCULES_PLANE_IO_MODE");
+    int requestedMpiio = -1;
+
+    if ((env == NULL) || (env[0] == '\0') ||
+        (strcasecmp(env, "auto") == 0)) {
+        requestedMpiio = (io_pool_pe_count == 0) ? 1 : 0;
+    } else if ((strcasecmp(env, "mpiio") == 0) ||
+               (strcasecmp(env, "gpu") == 0) ||
+               (strcasecmp(env, "on") == 0) ||
+               (strcasecmp(env, "yes") == 0) ||
+               (strcmp(env, "1") == 0)) {
+        requestedMpiio = 1;
+    } else if ((strcasecmp(env, "legacy") == 0) ||
+               (strcasecmp(env, "root") == 0) ||
+               (strcasecmp(env, "off") == 0) ||
+               (strcasecmp(env, "no") == 0) ||
+               (strcmp(env, "0") == 0)) {
+        requestedMpiio = 0;
+    } else {
+        if (myID == 0) {
+            fprintf(stderr,
+                    "Invalid HERCULES_PLANE_IO_MODE=%s; expected auto, "
+                    "mpiio, or legacy\n",
+                    env);
+        }
+        MPI_Abort(comm_solver, ERROR);
+        exit(1);
+    }
+
+    if ((requestedMpiio != 0) && (io_pool_pe_count != 0)) {
+        if (myID == 0) {
+            fprintf(stderr,
+                    "HERCULES_PLANE_IO_MODE=mpiio is incompatible with "
+                    "dedicated plane I/O ranks; using the existing I/O-pool "
+                    "backend\n");
+        }
+        requestedMpiio = 0;
+    }
+
+    g_planeGpuMpiioEnabled = requestedMpiio;
+    g_planePrintSequence = 0;
+    g_planeHostOnlyPointCount = 0;
+    if (myID == 0) {
+        printf("Plane output backend: %s\n",
+               g_planeGpuMpiioEnabled ? "GPU interpolation + MPI-IO"
+                                      : "legacy rank-0/I/O-pool");
+    }
+}
+
+static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
+                               const char* planeDirOut) {
+    int64_t localPointCount = 0;
+    long long globalPointCount = 0;
+    long long maxRankPointCount = 0;
+
+    if (!g_planeGpuMpiioEnabled || (theNumberOfPlanes <= 0)) {
+        return;
+    }
+
+    g_planeMpiFiles = (MPI_File*)calloc((size_t)theNumberOfPlanes,
+                                        sizeof(MPI_File));
+    g_planeMpiFileTypes = (MPI_Datatype*)calloc((size_t)theNumberOfPlanes,
+                                                sizeof(MPI_Datatype));
+    g_planeLocalPointOffsets = (int32_t*)calloc(
+        (size_t)theNumberOfPlanes + 1, sizeof(int32_t));
+    g_planeLocalValueCounts = (int32_t*)calloc(
+        (size_t)theNumberOfPlanes, sizeof(int32_t));
+    g_planeSnapshotBytes = (MPI_Offset*)calloc(
+        (size_t)theNumberOfPlanes, sizeof(MPI_Offset));
+    if ((g_planeMpiFiles == NULL) || (g_planeMpiFileTypes == NULL) ||
+        (g_planeLocalPointOffsets == NULL) ||
+        (g_planeLocalValueCounts == NULL) ||
+        (g_planeSnapshotBytes == NULL)) {
+        solver_abort("planes_mpiio_setup", NULL,
+                     "Unable to allocate plane MPI-IO state");
+    }
+
+    for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+        char path[1024];
+        const int stripCount = thePlanes[iPlane].numberofstripsthisplane;
+        int* blockLengths = NULL;
+        MPI_Aint* displacements = NULL;
+        MPI_Datatype rawType = MPI_DATATYPE_NULL;
+        MPI_Datatype fileType = MPI_DATATYPE_NULL;
+        int64_t localValues64 = 0;
+        const int64_t planePoints =
+            (int64_t)thePlanes[iPlane].numberofstepsalongstrike *
+            (int64_t)thePlanes[iPlane].numberofstepsdowndip;
+        int64_t snapshotBytes64;
+
+        if ((planePoints <= 0) ||
+            (planePoints > INT64_MAX / (3 * (int64_t)sizeof(double))) ||
+            (planePoints > INTPTR_MAX / (3 * (int64_t)sizeof(double)))) {
+            solver_abort("planes_mpiio_setup", NULL,
+                         "Plane %d dimensions exceed MPI-IO offset limits",
+                         iPlane);
+        }
+        snapshotBytes64 = planePoints * 3 * (int64_t)sizeof(double);
+
+        if (stripCount > 0) {
+            blockLengths = (int*)malloc((size_t)stripCount * sizeof(int));
+            displacements =
+                (MPI_Aint*)malloc((size_t)stripCount * sizeof(MPI_Aint));
+            if ((blockLengths == NULL) || (displacements == NULL)) {
+                free(blockLengths);
+                free(displacements);
+                solver_abort("planes_mpiio_setup", NULL,
+                             "Unable to allocate plane MPI file view");
+            }
+
+            for (int iStrip = 0; iStrip < stripCount; iStrip++) {
+                const int stripPoints = thePlanes[iPlane].stripend[iStrip] -
+                                        thePlanes[iPlane].stripstart[iStrip] +
+                                        1;
+                if ((stripPoints <= 0) || (stripPoints > (INT_MAX / 3)) ||
+                    (localValues64 > (int64_t)INT_MAX -
+                                         (int64_t)stripPoints * 3)) {
+                    free(blockLengths);
+                    free(displacements);
+                    solver_abort("planes_mpiio_setup", NULL,
+                                 "Plane %d local MPI-IO value count exceeds "
+                                 "the MPI int-count limit",
+                                 iPlane);
+                }
+                blockLengths[iStrip] = stripPoints * 3;
+                displacements[iStrip] =
+                    (MPI_Aint)thePlanes[iPlane].stripstart[iStrip] * 3 *
+                    (MPI_Aint)sizeof(double);
+                localValues64 += blockLengths[iStrip];
+            }
+
+            planes_mpi_check(
+                MPI_Type_create_hindexed(stripCount, blockLengths,
+                                         displacements, MPI_DOUBLE, &rawType),
+                "filetype creation");
+            planes_mpi_check(
+                MPI_Type_create_resized(rawType, 0,
+                                        (MPI_Aint)snapshotBytes64, &fileType),
+                "filetype resize");
+            planes_mpi_check(MPI_Type_commit(&fileType), "filetype commit");
+            MPI_Type_free(&rawType);
+            free(blockLengths);
+            free(displacements);
+        } else {
+            /* This rank has no plane points. It still participates in every
+             * collective write with count zero, using a harmless full view. */
+            planes_mpi_check(MPI_Type_contiguous(1, MPI_DOUBLE, &fileType),
+                             "empty filetype creation");
+            planes_mpi_check(MPI_Type_commit(&fileType),
+                             "empty filetype commit");
+        }
+
+        g_planeMpiFileTypes[iPlane] = fileType;
+        g_planeLocalPointOffsets[iPlane] = (int32_t)localPointCount;
+        g_planeLocalValueCounts[iPlane] = (int32_t)localValues64;
+        g_planeSnapshotBytes[iPlane] = (MPI_Offset)snapshotBytes64;
+        localPointCount += localValues64 / 3;
+        if (localPointCount > INT32_MAX) {
+            solver_abort("planes_mpiio_setup", NULL,
+                         "Local plane interpolation point count exceeds "
+                         "INT32_MAX");
+        }
+
+        const int pathLength =
+            snprintf(path, sizeof(path), "%s/planedisplacements.%d",
+                     planeDirOut, iPlane);
+        if ((pathLength < 0) || (pathLength >= (int)sizeof(path))) {
+            solver_abort("planes_mpiio_setup", NULL,
+                         "Plane output path is too long for plane %d", iPlane);
+        }
+        planes_mpi_check(
+            MPI_File_open(comm_solver, path, MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                          MPI_INFO_NULL, &g_planeMpiFiles[iPlane]),
+            "file open");
+        planes_mpi_check(
+            MPI_File_set_errhandler(g_planeMpiFiles[iPlane], MPI_ERRORS_RETURN),
+            "error-handler setup");
+        planes_mpi_check(MPI_File_set_size(g_planeMpiFiles[iPlane], 0),
+                         "file truncation");
+        planes_mpi_check(
+            MPI_File_set_view(g_planeMpiFiles[iPlane], 0, MPI_DOUBLE, fileType,
+                              "native", MPI_INFO_NULL),
+            "file-view setup");
+    }
+    g_planeLocalPointOffsets[theNumberOfPlanes] = (int32_t)localPointCount;
+    g_planeLocalPointCount = (int32_t)localPointCount;
+    g_planeMpiPlaneCount = theNumberOfPlanes;
+
+    {
+        const long long local = (long long)localPointCount;
+        MPI_Reduce(&local, &globalPointCount, 1, MPI_LONG_LONG, MPI_SUM, 0,
+                   comm_solver);
+        MPI_Reduce(&local, &maxRankPointCount, 1, MPI_LONG_LONG, MPI_MAX, 0,
+                   comm_solver);
+    }
+    if (myID == 0) {
+        printf("Plane GPU/MPI-IO layout: %lld interpolation points globally "
+               "(max/rank=%lld)\n",
+               globalPointCount, maxRankPointCount);
+    }
+}
+
+static void planes_mpiio_close(int theNumberOfPlanes) {
+    if (!g_planeGpuMpiioEnabled || (g_planeMpiFiles == NULL)) {
+        return;
+    }
+
+    for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+        const MPI_Offset finalSize =
+            (MPI_Offset)g_planePrintSequence * g_planeSnapshotBytes[iPlane];
+        planes_mpi_check(MPI_File_set_size(g_planeMpiFiles[iPlane], finalSize),
+                         "final file sizing");
+        planes_mpi_check(MPI_File_close(&g_planeMpiFiles[iPlane]),
+                         "file close");
+        if (g_planeMpiFileTypes[iPlane] != MPI_DATATYPE_NULL) {
+            MPI_Type_free(&g_planeMpiFileTypes[iPlane]);
+        }
+    }
+
+    free(g_planeMpiFiles);
+    free(g_planeMpiFileTypes);
+    free(g_planeLocalPointOffsets);
+    free(g_planeLocalValueCounts);
+    free(g_planeSnapshotBytes);
+    g_planeMpiFiles = NULL;
+    g_planeMpiFileTypes = NULL;
+    g_planeLocalPointOffsets = NULL;
+    g_planeLocalValueCounts = NULL;
+    g_planeSnapshotBytes = NULL;
+    g_planeLocalPointCount = 0;
+    g_planeMpiPlaneCount = 0;
+    g_planeHostOnlyPointCount = 0;
+}
 
 static int compare_int32_plane_nodes(const void* lhs, const void* rhs) {
 	const int32_t a = *(const int32_t*)lhs;
@@ -343,6 +608,156 @@ int32_t planes_acoustic_pressure_node_count(void) {
 
 const int32_t* planes_acoustic_pressure_nodes(void) {
 	return g_acousticPlanePressureNodes;
+}
+
+int32_t planes_gpu_mpiio_enabled(void) {
+	return g_planeGpuMpiioEnabled;
+}
+
+int32_t planes_local_interpolation_point_count(void) {
+	return g_planeGpuMpiioEnabled ? g_planeLocalPointCount : 0;
+}
+
+int32_t planes_host_only_point_count(void) {
+	return g_planeGpuMpiioEnabled ? g_planeHostOnlyPointCount : 0;
+}
+
+int planes_export_gpu_interpolation_metadata(
+    int32_t pointCount, int32_t* nodes, double* coords, int32_t* modes) {
+	int32_t packed = 0;
+	g_planeHostOnlyPointCount = 0;
+
+	if (!g_planeGpuMpiioEnabled || (pointCount != g_planeLocalPointCount) ||
+	    ((pointCount > 0) &&
+	     ((nodes == NULL) || (coords == NULL) || (modes == NULL)))) {
+		return 0;
+	}
+
+	for (int iPlane = 0; iPlane < g_planeMpiPlaneCount; iPlane++) {
+		const int32_t planeEnd = g_planeLocalPointOffsets[iPlane + 1];
+		for (int iStrip = 0;
+		     iStrip < thePlanes[iPlane].numberofstripsthisplane;
+		     iStrip++) {
+			const int stripLength = thePlanes[iPlane].stripend[iStrip] -
+			                        thePlanes[iPlane].stripstart[iStrip] + 1;
+			for (int elemnum = 0; elemnum < stripLength; elemnum++) {
+				const plane_strip_element_t* element =
+					&(thePlanes[iPlane].strip[iStrip][elemnum]);
+				int32_t mode = PLANE_GPU_POINT_INVALID;
+
+				for (int corner = 0; corner < 8; corner++) {
+					nodes[(size_t)packed * 8 + corner] =
+						element->nodestointerpolate[corner];
+				}
+				coords[(size_t)packed * 3] = element->localcoords.x[0];
+				coords[(size_t)packed * 3 + 1] = element->localcoords.x[1];
+				coords[(size_t)packed * 3 + 2] = element->localcoords.x[2];
+
+				if (element->point_is_valid != 0) {
+					if ((g_reconstructAcousticPlaneDisplacements != 0) &&
+					    (element->owner_is_acoustic != 0)) {
+						mode = PLANE_GPU_POINT_HOST_ACOUSTIC;
+						g_planeHostOnlyPointCount++;
+					} else if (element->topostrip != 0) {
+						mode = PLANE_GPU_POINT_TOPO;
+					} else {
+						mode = PLANE_GPU_POINT_TRILINEAR;
+					}
+				}
+				modes[packed++] = mode;
+			}
+		}
+		if (packed != planeEnd) {
+			return 0;
+		}
+	}
+
+	return packed == pointCount;
+}
+
+int planes_patch_host_only_values(double* packedValues,
+                                  int32_t pointCount) {
+	int32_t packed = 0;
+
+	if (!g_planeGpuMpiioEnabled || (pointCount != g_planeLocalPointCount) ||
+	    ((pointCount > 0) && (packedValues == NULL))) {
+		return 0;
+	}
+
+	for (int iPlane = 0; iPlane < g_planeMpiPlaneCount; iPlane++) {
+		const int32_t planeEnd = g_planeLocalPointOffsets[iPlane + 1];
+		for (int iStrip = 0;
+		     iStrip < thePlanes[iPlane].numberofstripsthisplane;
+		     iStrip++) {
+			const int stripLength = thePlanes[iPlane].stripend[iStrip] -
+			                        thePlanes[iPlane].stripstart[iStrip] + 1;
+			for (int elemnum = 0; elemnum < stripLength; elemnum++) {
+				const plane_strip_element_t* element =
+					&(thePlanes[iPlane].strip[iStrip][elemnum]);
+				double* const result = packedValues + (size_t)packed * 3;
+				if (element->point_is_valid == 0) {
+					result[0] = result[1] = result[2] = 0.0;
+				} else if ((g_reconstructAcousticPlaneDisplacements != 0) &&
+				           (element->owner_is_acoustic != 0)) {
+					result[0] = element->acoustic_disp[0];
+					result[1] = element->acoustic_disp[1];
+					result[2] = element->acoustic_disp[2];
+				}
+				packed++;
+			}
+		}
+		if (packed != planeEnd) {
+			return 0;
+		}
+	}
+
+	return packed == pointCount;
+}
+
+int planes_print_gpu_mpiio(int32_t myID, int theNumberOfPlanes,
+                           const double* packedValues,
+                           int32_t pointCount) {
+	static double emptyBuffer = 0.0;
+	(void)myID;
+
+	if (!g_planeGpuMpiioEnabled || (g_planeMpiFiles == NULL) ||
+	    (theNumberOfPlanes != g_planeMpiPlaneCount) ||
+	    (pointCount != g_planeLocalPointCount) ||
+	    ((pointCount > 0) && (packedValues == NULL))) {
+		return 0;
+	}
+
+	Timer_Start("Plane MPI-IO Write");
+	for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+		MPI_Status status;
+		const int32_t localValues = g_planeLocalValueCounts[iPlane];
+		const int32_t pointOffset = g_planeLocalPointOffsets[iPlane];
+		const MPI_Offset fileOffset =
+			(MPI_Offset)g_planePrintSequence * (MPI_Offset)localValues;
+		const double* buffer =
+			(localValues > 0) ? packedValues + (size_t)pointOffset * 3
+			                  : &emptyBuffer;
+
+		planes_mpi_check(
+			MPI_File_write_at_all(g_planeMpiFiles[iPlane], fileOffset,
+			                      (void*)buffer, localValues, MPI_DOUBLE,
+			                      &status),
+			"collective write");
+		if (localValues > 0) {
+			int written = 0;
+			planes_mpi_check(MPI_Get_count(&status, MPI_DOUBLE, &written),
+			                 "write count");
+			if (written != localValues) {
+				solver_abort("planes_print_gpu_mpiio", NULL,
+				             "Short plane MPI-IO write: expected %d doubles, "
+				             "wrote %d",
+				             localValues, written);
+			}
+		}
+	}
+	Timer_Stop("Plane MPI-IO Write");
+	g_planePrintSequence++;
+	return 1;
 }
 
 static void plane_unpack_message(const double* messageBuffer, int recvCount) {
@@ -659,6 +1074,7 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
 	UTMZone_t* utmZone, int reconstructAcousticPlaneDisplacements){
 
 //	IO_pool_pe_count = 1;
+	planes_select_output_mode(myID, IO_pool_pe_count);
 	g_reconstructAcousticPlaneDisplacements =
 		reconstructAcousticPlaneDisplacements ? 1 : 0;
 	planes_reset_displacement_nodes();
@@ -677,7 +1093,9 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
         theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
         reconstructAcousticPlaneDisplacements);
 
-	planes_collect_displacement_nodes(theNumberOfPlanes);
+	if (!g_planeGpuMpiioEnabled) {
+		planes_collect_displacement_nodes(theNumberOfPlanes);
+	}
 	planes_collect_acoustic_pressure_nodes(theNumberOfPlanes);
 }
 
@@ -932,11 +1350,18 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 				     planes_input_file);
                     }
 
-                    /* open displacement output files */
-                    sprintf( planedisplacementsout, "%s/planedisplacements.%d",
-                             thePlaneDirOut, iPlane );
-                    fp0 = hu_fopen( planedisplacementsout, "w" );
-                    thePlanes[iPlane].fpoutputfile = fp0;
+                    /* The scalable path opens these files collectively after
+                     * strip ownership is known. The legacy path retains the
+                     * rank-0 stdio writer and its byte-for-byte file layout. */
+                    if (!g_planeGpuMpiioEnabled) {
+                        sprintf(planedisplacementsout,
+                                "%s/planedisplacements.%d", thePlaneDirOut,
+                                iPlane);
+                        fp0 = hu_fopen(planedisplacementsout, "w");
+                        thePlanes[iPlane].fpoutputfile = fp0;
+                    } else {
+                        thePlanes[iPlane].fpoutputfile = NULL;
+                    }
 
                     // NOTE: Commented out by Clifford: Since planecoords files are not implemented, the files should not be created in the first place
 					// sprintf (planecoordsfile, "%s/planecoords.%d",
@@ -980,8 +1405,12 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 
     Old_output_planes_construct_strips(myID, theNumberOfPlanes);
 
+    if (g_planeGpuMpiioEnabled) {
+        planes_mpiio_setup(myID, theNumberOfPlanes, thePlaneDirOut);
+    }
+
     /* master allocates largest plane */
-    if (myID == 0) {
+    if ((myID == 0) && !g_planeGpuMpiioEnabled) {
 	planes_output_buffer = (double*)malloc( 3 * sizeof(double)
 						* largestplanesize );
 	if (planes_output_buffer == NULL) {
@@ -1194,6 +1623,12 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 		&planes_GlobalLargestStripCount,
 		1, MPI_INT, MPI_MAX, 0, comm_solver );
 
+    /* Legacy gather buffers are unnecessary when every rank writes its
+     * owned strips directly through MPI-IO. */
+    if (g_planeGpuMpiioEnabled) {
+        return;
+    }
+
     /* allocate MPI recv buffers for IO PE */
     if (myID == 0) {
     	int buf_len0 = (3 * planes_GlobalLargestStripCount) + 1;
@@ -1224,6 +1659,11 @@ static void Old_output_planes_construct_strips(int32_t myID, int theNumberOfPlan
 void Old_planes_close(int32_t myID, int theNumberOfPlanes)
 {
     int iPlane;
+
+    if (g_planeGpuMpiioEnabled) {
+        planes_mpiio_close(theNumberOfPlanes);
+        return;
+    }
 
     if (myID==0){
 	for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
