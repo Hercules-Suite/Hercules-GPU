@@ -3125,14 +3125,14 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
 
 
 /* ---------------------------------------------------------------------
- * v3 station viscoelastic stress gather.
+ * GPU station strain / viscoelastic-stress gather.
  *
- * One thread per station. Reads the 8 cube nodes x 3 components of the
- * modified-displacement vectors shearVectorDevice (deviatoric channel)
- * and kappaVectorDevice (volumetric channel) -- written by the damping
- * conv kernel each timestep for BKT-family runs -- and forms the
- * viscoelastic stress tensor at the station, using the same dev/vol
- * split that the damping force kernel uses internally:
+ * One thread per station. For kinematic strain it reads the current
+ * displacement at the owning element's eight nodes. For viscoelastic
+ * stress it reads the matching slots of shearVectorDevice (deviatoric
+ * channel) and kappaVectorDevice (volumetric channel), written by the
+ * damping conv kernel each timestep for BKT-family runs, and uses the
+ * same dev/vol split as the damping force kernel:
  *
  *   sigma_visco_ij = 2*mu * (eps^s_ij - 1/3 tr(eps^s) delta_ij)
  *                  + K   * tr(eps^k) delta_ij     (K = lambda + 2*mu/3)
@@ -3151,16 +3151,15 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
  * point_strain_tetrah (nonlinear.cc), ported here inline so the kernel
  * needs no host call.
  *
- * Output array: gpuData->stationVEStressArrayDevice[6 * stationCount]
- * -- 6 sigma components per station in XX,YY,ZZ,XY,YZ,XZ order. The
- * Eps_* columns are still computed host-side from tm1 (the kinematic
- * strain), so the kernel only needs to produce sigma.
+ * Requested tensors are packed in gpuData->stationTensorArrayDevice.
+ * outputStride is 6 for a single tensor or 12 for both; a negative
+ * strainOffset/stressOffset disables that path. Every tensor uses the
+ * XX,YY,ZZ,XY,YZ,XZ component order.
  *
- * Acoustic stations are processed too but their shearVector/kappaVector
- * slots were never written by the BKT conv kernel (acoustic elements
- * are excluded from the damping mapper) -- they are cudaMemset-zeroed
- * at allocation, so the kernel writes zeros, which the host row writer
- * ignores (the acoustic branch returns before the stress columns).
+ * Acoustic stations may be processed too, but the host row writer ignores
+ * gathered tensors for them (the acoustic branch returns before the tensor
+ * columns). Their shearVector/kappaVector slots remain zero because acoustic
+ * elements are excluded from the BKT damping mapper.
  * --------------------------------------------------------------------- */
 
 __device__ static inline void v3_cube_strain(
@@ -3308,6 +3307,9 @@ __device__ static inline void v3_tet_strain(
 }
 
 __global__ void kernelStationVEStressGather(int32_t stationCount,
+                                            int32_t outputStride,
+                                            int32_t strainOffset,
+                                            int32_t stressOffset,
                                             gpu_data_t* gpuData)
 {
     int32_t lin = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3318,67 +3320,97 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
     const double  eta    = gpuData->stationGatherEtaDevice[lin];
     const double  dze    = gpuData->stationGatherDzetaDevice[lin];
     const double  h      = gpuData->stationGatherHDevice[lin];
-    const double  mu     = gpuData->stationGatherMuDevice[lin];
-    const double  lambda = gpuData->stationGatherLambdaDevice[lin];
     const int     teth_i = gpuData->stationGatherTethIDevice[lin];
     const int     cp     = gpuData->stationGatherCubePartDevice[lin];
 
     const int32_t lenum   = gpuData->lenum;
-    const int32_t numcomp = lenum * 8;
+    double* const stationOut =
+        gpuData->stationTensorArrayDevice + (size_t)lin * outputStride;
 
-    /* Gather 8 cube nodes x 3 components of shearVector and
-     * kappaVector at the station's owning element. */
-    double sx[8], sy[8], sz[8], kx[8], ky[8], kz[8];
-    const solver_float* sh = (const solver_float*)gpuData->shearVectorDevice;
-    const solver_float* ka = (const solver_float*)gpuData->kappaVectorDevice;
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        const int32_t o0 = eindex + i * lenum;
-        const int32_t o1 = o0 + numcomp;
-        const int32_t o2 = o1 + numcomp;
-        sx[i] = (double)sh[o0]; sy[i] = (double)sh[o1]; sz[i] = (double)sh[o2];
-        kx[i] = (double)ka[o0]; ky[i] = (double)ka[o1]; kz[i] = (double)ka[o2];
+    if (strainOffset >= 0) {
+        double ux[8], uy[8], uz[8];
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            const int32_t lnid =
+                gpuData->lnidArrayDevice[eindex + i * lenum];
+            const fvector_t u = gpuData->tm1Device[lnid];
+            ux[i] = (double)u.f[0];
+            uy[i] = (double)u.f[1];
+            uz[i] = (double)u.f[2];
+        }
+
+        double exx, eyy, ezz, exy, eyz, exz;
+        if (teth_i < 0) {
+            v3_cube_strain(ux, uy, uz, csi, eta, dze, h,
+                           &exx, &eyy, &ezz, &exy, &eyz, &exz);
+        } else {
+            v3_tet_strain(ux, uy, uz, h, teth_i, cp,
+                          &exx, &eyy, &ezz, &exy, &eyz, &exz);
+        }
+
+        double* const out = stationOut + strainOffset;
+        out[0] = exx;
+        out[1] = eyy;
+        out[2] = ezz;
+        out[3] = exy;
+        out[4] = eyz;
+        out[5] = exz;
     }
 
-    double esxx, esyy, eszz, esxy, esyz, esxz;
-    double ekxx, ekyy, ekzz, ekxy, ekyz, ekxz;
+    if (stressOffset >= 0) {
+        const int32_t numcomp = lenum * 8;
+        const double  mu = gpuData->stationGatherMuDevice[lin];
+        const double  lambda = gpuData->stationGatherLambdaDevice[lin];
 
-    if (teth_i < 0) {
-        /* regular cube station */
-        v3_cube_strain(sx, sy, sz, csi, eta, dze, h,
-                       &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
-        v3_cube_strain(kx, ky, kz, csi, eta, dze, h,
-                       &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
-    } else {
-        /* VT cut-cell station */
-        v3_tet_strain(sx, sy, sz, h, teth_i, cp,
-                      &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
-        v3_tet_strain(kx, ky, kz, h, teth_i, cp,
-                      &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
+        /* Gather 8 cube nodes x 3 components of shearVector and
+         * kappaVector at the station's owning element. */
+        double sx[8], sy[8], sz[8], kx[8], ky[8], kz[8];
+        const solver_float* sh =
+            (const solver_float*)gpuData->shearVectorDevice;
+        const solver_float* ka =
+            (const solver_float*)gpuData->kappaVectorDevice;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            const int32_t o0 = eindex + i * lenum;
+            const int32_t o1 = o0 + numcomp;
+            const int32_t o2 = o1 + numcomp;
+            sx[i] = (double)sh[o0];
+            sy[i] = (double)sh[o1];
+            sz[i] = (double)sh[o2];
+            kx[i] = (double)ka[o0];
+            ky[i] = (double)ka[o1];
+            kz[i] = (double)ka[o2];
+        }
+
+        double esxx, esyy, eszz, esxy, esyz, esxz;
+        double ekxx, ekyy, ekzz, ekxy, ekyz, ekxz;
+        if (teth_i < 0) {
+            v3_cube_strain(sx, sy, sz, csi, eta, dze, h,
+                           &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
+            v3_cube_strain(kx, ky, kz, csi, eta, dze, h,
+                           &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
+        } else {
+            v3_tet_strain(sx, sy, sz, h, teth_i, cp,
+                          &esxx, &esyy, &eszz, &esxy, &esyz, &esxz);
+            v3_tet_strain(kx, ky, kz, h, teth_i, cp,
+                          &ekxx, &ekyy, &ekzz, &ekxy, &ekyz, &ekxz);
+        }
+
+        /* Viscoelastic stress (deviatoric/volumetric split, consistent
+         * with Hercules' damping force operator). */
+        const double tr_s = esxx + esyy + eszz;
+        const double tr_k = ekxx + ekyy + ekzz;
+        const double K_bulk = lambda + (2.0/3.0) * mu;
+        const double Ktr_k = K_bulk * tr_k;
+        const double dev_off = (1.0/3.0) * tr_s;
+        const double two_mu = 2.0 * mu;
+
+        double* const out = stationOut + stressOffset;
+        out[0] = two_mu * (esxx - dev_off) + Ktr_k;
+        out[1] = two_mu * (esyy - dev_off) + Ktr_k;
+        out[2] = two_mu * (eszz - dev_off) + Ktr_k;
+        out[3] = two_mu * esxy;
+        out[4] = two_mu * esyz;
+        out[5] = two_mu * esxz;
     }
-
-    /* Viscoelastic stress (deviatoric/volumetric split, consistent
-     * with Hercules' damping force operator): */
-    const double tr_s     = esxx + esyy + eszz;
-    const double tr_k     = ekxx + ekyy + ekzz;
-    const double K_bulk   = lambda + (2.0/3.0) * mu;
-    const double Ktr_k    = K_bulk * tr_k;
-    const double dev_off  = (1.0/3.0) * tr_s;
-    const double two_mu   = 2.0 * mu;
-
-    const double sig_xx = two_mu * (esxx - dev_off) + Ktr_k;
-    const double sig_yy = two_mu * (esyy - dev_off) + Ktr_k;
-    const double sig_zz = two_mu * (eszz - dev_off) + Ktr_k;
-    const double sig_xy = two_mu * esxy;
-    const double sig_yz = two_mu * esyz;
-    const double sig_xz = two_mu * esxz;
-
-    /* Write 6 sigma components per station, XX,YY,ZZ,XY,YZ,XZ. */
-    double* out = gpuData->stationVEStressArrayDevice + (size_t)lin * 6;
-    out[0] = sig_xx;
-    out[1] = sig_yy;
-    out[2] = sig_zz;
-    out[3] = sig_xy;
-    out[4] = sig_yz;
-    out[5] = sig_xz;
 }

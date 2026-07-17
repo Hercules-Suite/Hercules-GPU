@@ -174,10 +174,16 @@ static double g_dampingBkt2KappaExpCoef0 = 0.0;
 static double g_dampingBkt2KappaCoef3 = 0.0;
 static double g_dampingBkt2KappaCoef4 = 0.0;
 static double g_dampingBkt2KappaExpCoef1 = 0.0;
-/* v3 station VE-stress gather state (set by solver_init_station_ve_stress_gpu,
- * read by solver_station_ve_stress_kick and interpolate_station_displacements). */
+/* GPU station tensor gather state (set by solver_init_station_ve_stress_gpu,
+ * read by solver_station_tensor_kick and station row output). Requested
+ * tensors are packed so strain-only and stress-only output use 6 values per
+ * station while combined output uses 12. */
 static int32_t g_v3StationGatherInit = 0;
-static double* g_stationVEStressHost = NULL;
+static double* g_stationTensorHost = NULL;
+static int32_t g_stationTensorStride = 0;
+static int32_t g_stationStrainOffset = -1;
+static int32_t g_stationStressOffset = -1;
+static void solver_station_tensor_kick(int step);
 static int32_t* g_sourceNodeListDevice = NULL;
 static vector3D_t* g_sourceForcesDevice = NULL;
 static int32_t g_sourceNodeCapacity = 0;
@@ -15362,7 +15368,7 @@ static void solver_delete() {
   cudaFree(Global.gpuData.conv_kappa_1Device);
   cudaFree(Global.gpuData.conv_kappa_2Device);
   cudaFree(Global.gpuData.conv_kappa_3Device);
-  /* v3 station VE-stress gather (all NULL when v3 inactive). */
+  /* GPU station tensor gather (all NULL when inactive). */
   cudaFree(Global.gpuData.stationGatherEindexDevice);
   cudaFree(Global.gpuData.stationGatherCsiDevice);
   cudaFree(Global.gpuData.stationGatherEtaDevice);
@@ -15372,8 +15378,11 @@ static void solver_delete() {
   cudaFree(Global.gpuData.stationGatherLambdaDevice);
   cudaFree(Global.gpuData.stationGatherTethIDevice);
   cudaFree(Global.gpuData.stationGatherCubePartDevice);
-  cudaFree(Global.gpuData.stationVEStressArrayDevice);
-  if (g_stationVEStressHost) { free(g_stationVEStressHost); g_stationVEStressHost = NULL; }
+  cudaFree(Global.gpuData.stationTensorArrayDevice);
+  if (g_stationTensorHost) {
+    free(g_stationTensorHost);
+    g_stationTensorHost = NULL;
+  }
   cudaFree(Global.gpuData.c1ArrayDevice);
   cudaFree(Global.gpuData.c2ArrayDevice);
   cudaFree(Global.gpuData.c3ArrayDevice);
@@ -16016,6 +16025,7 @@ static void solver_output_stations(int step) {
   if (Param.theNumberOfStations != 0) {
     if (step % Param.theStationsPrintRate == 0) {
       Timer_Start("Print Stations");
+      solver_station_tensor_kick(step);
       solver_sync_pore_pressure_station_values(Global.mySolver);
       interpolate_station_displacements(step);
       Timer_Stop("Print Stations");
@@ -16318,11 +16328,11 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 }
 
 
-/* v3 station viscoelastic-stress gather setup. Idempotent. Active
+/* GPU station strain / viscoelastic-stress gather setup. Idempotent. Active
  * iff (print_station_strains||print_station_stresses)=yes AND
  * type_of_damping >= BKT (BKT-family); otherwise sets stationGatherCount=0
  * and leaves all device pointers NULL -- the kick / row writer then no-op
- * and the row writer falls back to v2 elastic-on-strain. Populates the
+ * and the row writer falls back to elastic-on-strain. Populates the
  * per-station gather arrays from Param.myStations and (under topography)
  * topography.cc's get_topo_station_tet. Called from main() right after
  * setup_stations_data; the per-step solver_reset_gpu cudaMemcpyAsync
@@ -16343,7 +16353,10 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
     Global.gpuData.stationGatherLambdaDevice    = NULL;
     Global.gpuData.stationGatherTethIDevice     = NULL;
     Global.gpuData.stationGatherCubePartDevice  = NULL;
-    Global.gpuData.stationVEStressArrayDevice   = NULL;
+    Global.gpuData.stationTensorArrayDevice     = NULL;
+    g_stationTensorStride = 0;
+    g_stationStrainOffset = -1;
+    g_stationStressOffset = -1;
 
     const int active =
         ((Param.printStationStrains == YES) || (Param.printStationStresses == YES))
@@ -16352,6 +16365,16 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
     if (!active) return;
 
     const int32_t N = Param.myNumberOfStations;
+    if (Param.printStationStrains == YES) {
+        g_stationStrainOffset = g_stationTensorStride;
+        g_stationTensorStride += 6;
+    }
+    if (Param.printStationStresses == YES) {
+        g_stationStressOffset = g_stationTensorStride;
+        g_stationTensorStride += 6;
+    }
+    const size_t tensorValueCount =
+        (size_t)g_stationTensorStride * (size_t)N;
     Global.gpuData.stationGatherCount = N;
 
     int32_t* h_eidx = (int32_t*)malloc(N * sizeof(int32_t));
@@ -16366,7 +16389,7 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
     if (!h_eidx || !h_csi || !h_eta || !h_dze || !h_h || !h_mu || !h_lam ||
         !h_teth || !h_cp) {
         fprintf(stderr,
-                "Thread %d: v3 station VE-stress host allocation failed\n",
+                "Thread %d: station tensor gather host allocation failed\n",
                 myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -16409,10 +16432,10 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
                    N * sizeof(int)) != cudaSuccess ||
         cudaMalloc((void**)&Global.gpuData.stationGatherCubePartDevice,
                    N * sizeof(int)) != cudaSuccess ||
-        cudaMalloc((void**)&Global.gpuData.stationVEStressArrayDevice,
-                   6 * N * sizeof(double)) != cudaSuccess) {
+        cudaMalloc((void**)&Global.gpuData.stationTensorArrayDevice,
+                   tensorValueCount * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
-                "Thread %d: v3 station VE-stress device allocation failed\n",
+                "Thread %d: station tensor gather device allocation failed\n",
                 myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -16436,26 +16459,26 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
                N * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(Global.gpuData.stationGatherCubePartDevice, h_cp,
                N * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemset(Global.gpuData.stationVEStressArrayDevice, 0,
-               6 * N * sizeof(double));
+    cudaMemset(Global.gpuData.stationTensorArrayDevice, 0,
+               tensorValueCount * sizeof(double));
 
     free(h_eidx); free(h_csi); free(h_eta); free(h_dze);
     free(h_h);    free(h_mu);  free(h_lam); free(h_teth); free(h_cp);
 
-    g_stationVEStressHost = (double*)malloc(6 * N * sizeof(double));
-    if (g_stationVEStressHost == NULL) {
-        fprintf(stderr, "Thread %d: v3 VE-stress host buffer alloc failed\n",
+    g_stationTensorHost = (double*)malloc(tensorValueCount * sizeof(double));
+    if (g_stationTensorHost == NULL) {
+        fprintf(stderr, "Thread %d: station tensor host buffer alloc failed\n",
                 myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
-    memset(g_stationVEStressHost, 0, 6 * N * sizeof(double));
+    memset(g_stationTensorHost, 0, tensorValueCount * sizeof(double));
 
-    /* Push the freshly-populated v3 pointers (which are zero-initialized
+    /* Push the freshly-populated gather pointers (zero-initialized
      * in Global.gpuData on program start) into the device-side
      * gpu_data_t. The initial alloc-time cudaMemcpy of Global.gpuData ->
      * gpuDataDevice runs BEFORE this setup function, so without this
-     * one-shot sync the very first kick would dereference NULL v3
+     * one-shot sync the very first kick would dereference NULL gather
      * pointers on the GPU and crash. solver_reset_gpu's per-step async
      * sync will keep them current after this. */
     if (Global.mySolver != NULL && Global.mySolver->gpuDataDevice != NULL) {
@@ -16464,14 +16487,17 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
     }
 
     if (myID == 0) {
-        monitor_print("V3 station viscoelastic-stress gather enabled "
-                      "(%d stations).\n", (int)N);
+        monitor_print("GPU station tensor gather enabled "
+                      "(strain=%s, stress=%s, %d stations, %d values/station).\n",
+                      (g_stationStrainOffset >= 0) ? "yes" : "no",
+                      (g_stationStressOffset >= 0) ? "yes" : "no",
+                      (int)N, (int)g_stationTensorStride);
     }
 }
 
 
-/* Per-step kick. Launches the gather kernel and blocks the host on the
- * tiny memcpy-back so the host buffer is ready when
+/* Per-step kick. Launches the requested tensor gather and blocks the host on
+ * the small packed copy so the host buffer is ready when
  * interpolate_station_displacements reads it. NOTE: the shearVector/
  * kappaVector on the GPU at this point reflect the PREVIOUS step's
  * damping conv (step N's solver_output_stations runs before step N's
@@ -16479,7 +16505,7 @@ static void solver_init_station_ve_stress_gpu(int32_t myID)
  * relative to Eps_*. Negligible for the typical inversion use case
  * (one sample of phase lag at the simulation dt); documented in the
  * README. */
-static void solver_station_ve_stress_kick(int step)
+static void solver_station_tensor_kick(int step)
 {
     if (Global.gpuData.stationGatherCount <= 0) return;
     if (Param.theNumberOfStations == 0) return;
@@ -16490,17 +16516,25 @@ static void solver_station_ve_stress_kick(int step)
      * surface later as unrelated "device alloc failed" / "illegal
      * memory access" reports from the next CUDA call. Bail cleanly
      * here instead. */
-    if (Global.gpuData.shearVectorDevice == NULL ||
-        Global.gpuData.kappaVectorDevice == NULL ||
+    const int strainPointersMissing =
+        (g_stationStrainOffset >= 0) &&
+        ((Global.gpuData.tm1Device == NULL) ||
+         (Global.gpuData.lnidArrayDevice == NULL));
+    const int stressPointersMissing =
+        (g_stationStressOffset >= 0) &&
+        ((Global.gpuData.shearVectorDevice == NULL) ||
+         (Global.gpuData.kappaVectorDevice == NULL));
+    if (strainPointersMissing || stressPointersMissing ||
         Global.gpuData.stationGatherEindexDevice == NULL ||
-        Global.gpuData.stationVEStressArrayDevice == NULL) {
+        Global.gpuData.stationTensorArrayDevice == NULL ||
+        g_stationTensorHost == NULL || g_stationTensorStride <= 0) {
         if (Global.myID == 0) {
             static int warned = 0;
             if (!warned) {
                 fprintf(stderr,
-                        "v3 station VE-stress kick: skipped step %d "
-                        "(shearVector/kappaVector/gatherEindex/VEStress "
-                        "device array is NULL).\n", step);
+                        "station tensor gather: skipped step %d because a "
+                        "required displacement, damping, metadata, or output "
+                        "buffer is NULL.\n", step);
                 warned = 1;
             }
         }
@@ -16514,19 +16548,22 @@ static void solver_station_ve_stress_kick(int step)
     int gridsize = (N + blocksize - 1) / blocksize;
     if (gridsize < 1) gridsize = 1;
 
+    Timer_Start("Station Tensor Gather");
+
     /* Clear any previously-pending CUDA error so we can detect a fault
      * specifically from our launch path. */
     (void)cudaGetLastError();
 
     kernelStationVEStressGather<<<gridsize, blocksize, 0,
                                   Global.mySolver->streams[CUDA_STREAM_MAIN]>>>(
-        N, Global.mySolver->gpuDataDevice);
+        N, g_stationTensorStride, g_stationStrainOffset,
+        g_stationStressOffset, Global.mySolver->gpuDataDevice);
 
     /* Launch-time error (e.g., invalid configuration). */
     cudaError_t launchErr = cudaGetLastError();
     if (launchErr != cudaSuccess) {
         fprintf(stderr,
-                "Thread %d: v3 station VE-stress kernel LAUNCH error at "
+                "Thread %d: station tensor kernel LAUNCH error at "
                 "step %d (grid=%d block=%d N=%d): %s\n",
                 Global.myID, step, gridsize, blocksize, (int)N,
                 cudaGetErrorString(launchErr));
@@ -16534,35 +16571,59 @@ static void solver_station_ve_stress_kick(int step)
         exit(1);
     }
 
-    cudaMemcpyAsync(g_stationVEStressHost,
-                    Global.gpuData.stationVEStressArrayDevice,
-                    6 * N * sizeof(double),
-                    cudaMemcpyDeviceToHost,
-                    Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    cudaError_t copyErr =
+        cudaMemcpyAsync(g_stationTensorHost,
+                        Global.gpuData.stationTensorArrayDevice,
+                        (size_t)g_stationTensorStride * (size_t)N *
+                            sizeof(double),
+                        cudaMemcpyDeviceToHost,
+                        Global.mySolver->streams[CUDA_STREAM_MAIN]);
+    if (copyErr != cudaSuccess) {
+        fprintf(stderr,
+                "Thread %d: station tensor copy error at step %d "
+                "(N=%d): %s\n",
+                Global.myID, step, (int)N, cudaGetErrorString(copyErr));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
     cudaError_t syncErr =
         cudaStreamSynchronize(Global.mySolver->streams[CUDA_STREAM_MAIN]);
     if (syncErr != cudaSuccess) {
         /* This surfaces any in-kernel fault (illegal address, out-of-bounds
          * read, etc.) that the asynchronous launch hid -- catching it here
-         * pins the blame on the v3 path instead of letting it cascade
+         * pins the blame on the gather path instead of letting it cascade
          * into a misleading "source node list device alloc failed" later. */
         fprintf(stderr,
-                "Thread %d: v3 station VE-stress sync error at step %d "
+                "Thread %d: station tensor sync error at step %d "
                 "(N=%d): %s\n",
                 Global.myID, step, (int)N, cudaGetErrorString(syncErr));
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
+
+    Timer_Stop("Station Tensor Gather");
 }
 
 
-/* Returns NULL when v3 is inactive; otherwise the 6 sigma components
- * (XX,YY,ZZ,XY,YZ,XZ) for station iStation, from the most recent kick. */
+/* Return the requested 6-component tensor from the most recent gather. */
+static inline const double* solver_station_strain_get(int iStation)
+{
+    if (g_stationTensorHost == NULL || g_stationStrainOffset < 0) return NULL;
+    if (iStation < 0 || iStation >= Global.gpuData.stationGatherCount) {
+        return NULL;
+    }
+    return g_stationTensorHost + (size_t)iStation * g_stationTensorStride +
+           g_stationStrainOffset;
+}
+
 static inline const double* solver_station_ve_stress_get(int iStation)
 {
-    if (g_stationVEStressHost == NULL) return NULL;
-    if (Global.gpuData.stationGatherCount <= 0) return NULL;
-    return g_stationVEStressHost + (size_t)iStation * 6;
+    if (g_stationTensorHost == NULL || g_stationStressOffset < 0) return NULL;
+    if (iStation < 0 || iStation >= Global.gpuData.stationGatherCount) {
+        return NULL;
+    }
+    return g_stationTensorHost + (size_t)iStation * g_stationTensorStride +
+           g_stationStressOffset;
 }
 
 
@@ -21720,6 +21781,8 @@ static void solver_run_collect_timers(void) {
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Print Stations",
                              (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Station Tensor Gather",
+                             (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Compute Non-linear Entities",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Compute addforces Non-linear",
@@ -21975,7 +22038,6 @@ static void solver_run() {
     // at high frequencies, and it is not clear its purpose.
     // solver_output_wavefield( step );
     solver_output_planes(Global.mySolver, Global.myID, step);
-    solver_station_ve_stress_kick(step);
     solver_output_stations(step);
     solver_output_drm_nodes(Global.mySolver, step, Param.theTotalSteps);
     solver_read_source_forces(step, Param.theDeltaT);
@@ -26487,6 +26549,13 @@ static void print_timing_stat() {
         "%.2f (Min) seconds\n",
         Timer_Value("Print Stations", AVERAGE),
         Timer_Value("Print Stations", MAX), Timer_Value("Print Stations", MIN));
+  if (Timer_Exists("Station Tensor Gather"))
+    printf(
+        "          Station tensor gather     : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Station Tensor Gather", AVERAGE),
+        Timer_Value("Station Tensor Gather", MAX),
+        Timer_Value("Station Tensor Gather", MIN));
   if (Timer_Exists("Checkpoint"))
     printf("        Checkpoint                  : %.2f\n",
            Timer_Value("Checkpoint", (TimerKind)0));
@@ -27531,7 +27600,9 @@ static int interpolate_station_displacements(int32_t step) {
        * Topography (VT cut-cell) strain/stress -- constant per tet,
        * derived from the SAME tet-linear kinematic field that
        * compute_tetra_displ uses for the displacement column above.
-       * cubeU[8] are the OWNING-CUBE's 8 nodal displacements (the
+       * The BKT-family GPU gather uses the owning cube's device-resident
+       * nodal displacements. In the host fallback, cubeU[8] are the
+       * OWNING-CUBE's 8 nodal displacements (the
        * cube whose 4 tet vertices are myTopoStations[].nodes_to_
        * interpolate; psolve's station setup already stored the 8
        * cube lnids in Param.myStations[].nodestointerpolate). The
@@ -27543,35 +27614,47 @@ static int interpolate_station_displacements(int32_t step) {
        */
       if ((Param.printStationStrains == YES) ||
           (Param.printStationStresses == YES)) {
-        fvector_t cubeU[8];
-        int32_t* cubeLnid =
-            Param.myStations[iStation].nodestointerpolate;
-        for (iPhi = 0; iPhi < 8; iPhi++) {
-          cubeU[iPhi] = Global.mySolver->tm1[cubeLnid[iPhi]];
-        }
+        const double* st_eps_gpu = solver_station_strain_get(iStation);
+        const double* st_sig_gpu = solver_station_ve_stress_get(iStation);
+        const int needHostStrain =
+            ((Param.printStationStrains == YES) && (st_eps_gpu == NULL)) ||
+            ((Param.printStationStresses == YES) && (st_sig_gpu == NULL));
         tensor_t st_eps;
-        const double hcube = Param.myStations[iStation].h;
-        if (!compute_tetra_strain(iStation, cubeU, hcube, &st_eps)) {
-          st_eps = point_strain(cubeU, localCoords.x[0], localCoords.x[1],
-                                localCoords.x[2], hcube);
+        if (needHostStrain) {
+          fvector_t cubeU[8];
+          int32_t* cubeLnid =
+              Param.myStations[iStation].nodestointerpolate;
+          for (iPhi = 0; iPhi < 8; iPhi++) {
+            cubeU[iPhi] = Global.mySolver->tm1[cubeLnid[iPhi]];
+          }
+          const double hcube = Param.myStations[iStation].h;
+          if (!compute_tetra_strain(iStation, cubeU, hcube, &st_eps)) {
+            st_eps = point_strain(cubeU, localCoords.x[0], localCoords.x[1],
+                                  localCoords.x[2], hcube);
+          }
         }
         if (Param.printStationStrains == YES) {
-          fprintf(Param.myStations[iStation].fpoutputfile,
-                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
-                  st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
-        }
-        if (Param.printStationStresses == YES) {
-          /* v3: prefer the GPU-gathered viscoelastic stress (correct
-           * under BKT-family damping); fall back to v2's elastic
-           * constitutive on the kinematic strain otherwise. Both paths
-           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
-          const double* st_sig_v3 =
-              solver_station_ve_stress_get(iStation);
-          if (st_sig_v3 != NULL) {
+          if (st_eps_gpu != NULL) {
             fprintf(Param.myStations[iStation].fpoutputfile,
                     " % 8e % 8e % 8e % 8e % 8e % 8e",
-                    st_sig_v3[0], st_sig_v3[1], st_sig_v3[2],
-                    st_sig_v3[3], st_sig_v3[4], st_sig_v3[5]);
+                    st_eps_gpu[0], st_eps_gpu[1], st_eps_gpu[2],
+                    st_eps_gpu[3], st_eps_gpu[4], st_eps_gpu[5]);
+          } else {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
+                    st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
+          }
+        }
+        if (Param.printStationStresses == YES) {
+          /* Prefer the GPU-gathered viscoelastic stress under BKT-family
+           * damping; fall back to the elastic constitutive on kinematic
+           * strain otherwise. Both paths
+           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
+          if (st_sig_gpu != NULL) {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e",
+                    st_sig_gpu[0], st_sig_gpu[1], st_sig_gpu[2],
+                    st_sig_gpu[3], st_sig_gpu[4], st_sig_gpu[5]);
           } else {
             tensor_t st_sig =
                 point_stress(st_eps, Param.myStations[iStation].mu,
@@ -27674,36 +27757,51 @@ static int interpolate_station_displacements(int32_t step) {
        * Linear strain/stress (reciprocity / fault inversion). Elastic
        * (this branch => pressure_is_defined==0); cube-trilinear strain
        * from the 8 nodal displacements (tm1) at the station's local
-       * coords via point_strain (tensor strain; sigma = 2*mu*eps +
-       * lambda*tr(eps)*I). Topography cut-cell stations are handled in
-       * the (above) topography branch via compute_tetra_strain.
+       * coords. BKT-family output uses the packed GPU tensor gather;
+       * other damping modes fall back to point_strain (tensor strain;
+       * sigma = 2*mu*eps + lambda*tr(eps)*I). Topography cut-cell stations
+       * use the corresponding VT-tet GPU interpolation or the host
+       * compute_tetra_strain fallback above.
        */
       if ((Param.printStationStrains == YES) ||
           (Param.printStationStresses == YES)) {
-        fvector_t ue[8];
-        for (iPhi = 0; iPhi < 8; iPhi++) {
-          ue[iPhi] = Global.mySolver->tm1[nodesToInterpolate[iPhi]];
+        const double* st_eps_gpu = solver_station_strain_get(iStation);
+        const double* st_sig_gpu = solver_station_ve_stress_get(iStation);
+        const int needHostStrain =
+            ((Param.printStationStrains == YES) && (st_eps_gpu == NULL)) ||
+            ((Param.printStationStresses == YES) && (st_sig_gpu == NULL));
+        tensor_t st_eps;
+        if (needHostStrain) {
+          fvector_t ue[8];
+          for (iPhi = 0; iPhi < 8; iPhi++) {
+            ue[iPhi] = Global.mySolver->tm1[nodesToInterpolate[iPhi]];
+          }
+          st_eps = point_strain(ue, localCoords.x[0], localCoords.x[1],
+                                localCoords.x[2],
+                                Param.myStations[iStation].h);
         }
-        tensor_t st_eps =
-            point_strain(ue, localCoords.x[0], localCoords.x[1],
-                         localCoords.x[2], Param.myStations[iStation].h);
         if (Param.printStationStrains == YES) {
-          fprintf(Param.myStations[iStation].fpoutputfile,
-                  " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
-                  st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
-        }
-        if (Param.printStationStresses == YES) {
-          /* v3: prefer the GPU-gathered viscoelastic stress (correct
-           * under BKT-family damping); fall back to v2's elastic
-           * constitutive on the kinematic strain otherwise. Both paths
-           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
-          const double* st_sig_v3 =
-              solver_station_ve_stress_get(iStation);
-          if (st_sig_v3 != NULL) {
+          if (st_eps_gpu != NULL) {
             fprintf(Param.myStations[iStation].fpoutputfile,
                     " % 8e % 8e % 8e % 8e % 8e % 8e",
-                    st_sig_v3[0], st_sig_v3[1], st_sig_v3[2],
-                    st_sig_v3[3], st_sig_v3[4], st_sig_v3[5]);
+                    st_eps_gpu[0], st_eps_gpu[1], st_eps_gpu[2],
+                    st_eps_gpu[3], st_eps_gpu[4], st_eps_gpu[5]);
+          } else {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e", st_eps.xx, st_eps.yy,
+                    st_eps.zz, st_eps.xy, st_eps.yz, st_eps.xz);
+          }
+        }
+        if (Param.printStationStresses == YES) {
+          /* Prefer the GPU-gathered viscoelastic stress under BKT-family
+           * damping; fall back to the elastic constitutive on kinematic
+           * strain otherwise. Both paths
+           * write the same 6-column order XX,YY,ZZ,XY,YZ,XZ. */
+          if (st_sig_gpu != NULL) {
+            fprintf(Param.myStations[iStation].fpoutputfile,
+                    " % 8e % 8e % 8e % 8e % 8e % 8e",
+                    st_sig_gpu[0], st_sig_gpu[1], st_sig_gpu[2],
+                    st_sig_gpu[3], st_sig_gpu[4], st_sig_gpu[5]);
           } else {
             tensor_t st_sig =
                 point_stress(st_eps, Param.myStations[iStation].mu,

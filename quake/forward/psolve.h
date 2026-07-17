@@ -657,15 +657,15 @@ typedef struct gpu_data_t {
     int           acousticInterfaceProjectionMode;
     double        acousticStiffnessDampingBeta; /* Kelvin-Voigt beta; 0=lossless */
 
-    /* v3 station viscoelastic stress gather (print_station_strains /
+    /* GPU station tensor gather (print_station_strains /
      * print_station_stresses under BKT-family damping). Populated only
-     * when the v3 path is enabled; otherwise all NULL / zero. The
-     * gather kernel computes per-station tensor strain from the
-     * modified-displacement shearVectorDevice / kappaVectorDevice
-     * (deviatoric channel / volumetric channel) and forms the
-     * viscoelastic stress sigma_visco = 2*mu*dev(eps^s) + K*tr(eps^k)*I
-     * (K = lambda + 2*mu/3); writes 12 doubles (6 eps^s + 6 sigma)
-     * per station into stationVEStressArrayDevice for a single
+     * when the path is enabled; otherwise all NULL / zero. The gather
+     * kernel computes the kinematic strain from tm1Device when requested.
+     * For stress it derives the modified strains from shearVectorDevice /
+     * kappaVectorDevice and forms
+     * sigma_visco = 2*mu*dev(eps^s) + K*tr(eps^k)*I
+     * (K = lambda + 2*mu/3). Requested 6-component tensors are packed
+     * contiguously into stationTensorArrayDevice for one small
      * cudaMemcpyAsync back to host each station-output step. */
     int32_t       stationGatherCount;        /* # elastic non-acoustic stations on this rank */
     int32_t*      stationGatherEindexDevice; /* owning element id, per station */
@@ -677,7 +677,7 @@ typedef struct gpu_data_t {
     double*       stationGatherLambdaDevice; /* per-station Lame lambda */
     int*          stationGatherTethIDevice;  /* tet index (0..4) or -1 for regular cube */
     int*          stationGatherCubePartDevice; /* 1 or 2 (VT cut pattern); 0 ignored */
-    double*       stationVEStressArrayDevice;  /* 12 * stationGatherCount: [eps,sig]*6 */
+    double*       stationTensorArrayDevice;  /* 6 or 12 values/station */
 
 } gpu_data_t;
 

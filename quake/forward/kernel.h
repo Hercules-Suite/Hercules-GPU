@@ -109,15 +109,14 @@ __global__  void kernelDispCalc(int32_t nharbored,
 					gpu_data_t* gpuData,
 	                                noyesflag_t printAccel);
 
-/* v3 station viscoelastic stress gather: one thread per station; reads
- * the 8-node shearVector/kappaVector slot of the station's owning
- * element, computes the deviatoric (shear) and volumetric (kappa)
- * modified strains via inline trilinear-hex or VT-tet shape-function
- * derivatives, and writes [eps_s_xx..xz, sig_visco_xx..xz] (12 doubles
- * per station) into gpuData->stationVEStressArrayDevice. Launched only
- * when v3 is active (print_station_strains||print_station_stresses,
- * type_of_damping >= BKT). */
+/* GPU station tensor gather: one thread per station. Kinematic strain is
+ * derived from tm1Device; BKT-family viscoelastic stress is derived from
+ * shearVectorDevice/kappaVectorDevice. Negative offsets disable a tensor,
+ * allowing strain-only and stress-only runs to avoid unused work. */
 __global__ void kernelStationVEStressGather(int32_t stationCount,
+                                            int32_t outputStride,
+                                            int32_t strainOffset,
+                                            int32_t stressOffset,
                                             gpu_data_t* gpuData);
 
 __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,

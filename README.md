@@ -1018,13 +1018,12 @@ needed.
 	off-diagonals (the true strain tensor, matching Hercules' existing
 	nonlinear output — *not* engineering shear). **Strain (`Eps_*`)** is
 	always the kinematic `ε = ½(∇u + ∇uᵀ)` of the current displacement
-	`u(t)` — correct for both elastic and viscoelastic runs, recovered
-	from the owning element's 8 nodal displacements at the station's
-	local coordinates via the shared `point_strain` helper (regular
-	cubes) or `point_strain_tetrah` via `compute_tetra_strain` (VT
-	cut-cell topography stations, consistent with how
-	`compute_tetra_displ` interpolates the displacement column there).
-	No extra GPU transfer on the host path; no kernel changes.
+	`u(t)` — correct for both elastic and viscoelastic runs. In BKT-family
+	runs the station gather kernel reads only the owning element's eight
+	nodes from the device-resident displacement and element-node arrays,
+	then applies the regular-hex or VT-tet strain interpolation directly
+	on the GPU. The host `point_strain` / `compute_tetra_strain` path remains
+	the fallback for non-BKT damping.
 	**Stress (`Sig_*`) is *physically correct* under viscoelastic
 	damping (BKT-family).** When `type_of_damping` is BKT/BKT2/BKT3/
 	BKT3F, a small GPU gather kernel (`kernelStationVEStressGather`)
@@ -1034,9 +1033,14 @@ needed.
 	`σ_visco = 2μ·dev(ε_shearVector) + K·tr(ε_kappaVector)·I` with
 	`K = λ + 2μ/3` (so off-diagonals are pure deviatoric `2μ·ε^s_ij`
 	from `shearVector`, and the diagonal carries both the shear-channel
-	and the bulk-channel SLS memory). One small `cudaMemcpyAsync` per
-	station-output step ships the per-station tensors to host; no bulk
-	transfer of the full per-node arrays. Under non-BKT damping
+	and the bulk-channel SLS memory). The GPU kernel and its host transfer
+	are request-aware: strain-only and stress-only output compute and copy
+	only one packed 6-component tensor per station, while requesting both
+	uses 12 packed values. One small `cudaMemcpyAsync` per station-output
+	step ships those tensors to host; no bulk transfer of the full per-node
+	arrays and no redundant host strain reconstruction. The cumulative
+	kernel-plus-copy wait is reported separately as `Station Tensor Gather`
+	inside the `Stations` and `Solver I/O` timers. Under non-BKT damping
 	(`none`/`rayleigh`/`mass`) the GPU gather is skipped and `Sig_*`
 	falls back to the elastic constitutive `σ = 2μ ε + λ tr(ε) I` on
 	the kinematic strain (which IS the physical stress in that regime).
@@ -1047,7 +1051,7 @@ needed.
 	`Eps_*`. Negligible for the typical reciprocity / kinematic-
 	inversion sample rate and easily corrected post-hoc if needed.
 	Acoustic/fluid stations (which have `print_station_pressures`
-	instead) get no strain/stress columns. v3 plumbing is fully
+	instead) get no strain/stress columns. The GPU plumbing is fully
 	gated: with both flags off and/or non-BKT damping, no extra device
 	allocation, no kernel launch, no memcpy — byte-identical to before.
 
