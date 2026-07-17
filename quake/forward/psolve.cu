@@ -281,12 +281,15 @@ static solver_float* g_pressureSparseBufferDevice = NULL;
 static int32_t g_pressureSparseNodeCount = 0;
 static int32_t g_pressureSparseHostPinned = 0;
 static int32_t g_acousticPressureStationSyncReady = 0;
-static int32_t* g_acousticPressureStationNodesHost = NULL;
+static int32_t* g_acousticPressureStationSlotsHost = NULL;
 static int32_t* g_acousticPressureStationNodesDevice = NULL;
-static solver_float* g_acousticPressureStationBufferHost = NULL;
-static solver_float* g_acousticPressureStationBufferDevice = NULL;
-static int32_t g_acousticPressureStationNodeCount = 0;
+static double* g_acousticPressureStationCoordsDevice = NULL;
+static double* g_acousticPressureStationHDevice = NULL;
+static double* g_acousticPressureStationResultsHost = NULL;
+static double* g_acousticPressureStationResultsDevice = NULL;
+static int32_t g_acousticPressureStationCount = 0;
 static int32_t g_acousticPressureStationHostPinned = 0;
+static int32_t g_acousticPressureStationDataReady = 0;
 static int32_t g_acousticPressureSyncReported = 0;
 static int32_t g_acousticPlanePressureSyncReady = 0;
 static int32_t* g_acousticPlanePressureNodesHost = NULL;
@@ -321,12 +324,14 @@ static int32_t* g_porePressureAdjustDistEdgeDnDevice = NULL;
 static int32_t* g_porePressureAdjustDistRunParentBase3Device = NULL;
 static int32_t* g_porePressureAdjustDistRunOffsetsDevice = NULL;
 static int32_t g_porePressureStationSyncReady = 0;
-static int32_t* g_porePressureStationNodesHost = NULL;
+static int32_t* g_porePressureStationSlotsHost = NULL;
 static int32_t* g_porePressureStationNodesDevice = NULL;
-static solver_float* g_porePressureStationBufferHost = NULL;
-static solver_float* g_porePressureStationBufferDevice = NULL;
-static int32_t g_porePressureStationNodeCount = 0;
+static double* g_porePressureStationCoordsDevice = NULL;
+static double* g_porePressureStationResultsHost = NULL;
+static double* g_porePressureStationResultsDevice = NULL;
+static int32_t g_porePressureStationCount = 0;
 static int32_t g_porePressureStationHostPinned = 0;
+static int32_t g_porePressureStationDataReady = 0;
 
 #define DN_DIAG_METRIC_COUNT 9
 enum {
@@ -19935,10 +19940,13 @@ static void solver_vector_device_adjust(mysolver_t* solver,
 }
 
 static void solver_init_acoustic_pressure_station_sync(mysolver_t* solver) {
-  int32_t capacity;
   int32_t count = 0;
-  int32_t uniqueCount = 0;
-  int32_t* nodes;
+  int32_t packed = 0;
+  int32_t* nodes = NULL;
+  double* coords = NULL;
+  double* h = NULL;
+
+  (void)solver;
 
   if (g_acousticPressureStationSyncReady != 0 ||
       !acoustic_pressure_device_sync_enabled()) {
@@ -19950,122 +19958,167 @@ static void solver_init_acoustic_pressure_station_sync(mysolver_t* solver) {
     return;
   }
 
-  capacity = 8 * Param.myNumberOfStations;
-  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
-  if (nodes == NULL) {
+  g_acousticPressureStationSlotsHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)Param.myNumberOfStations);
+  if (g_acousticPressureStationSlotsHost == NULL) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating acoustic station-node list\n");
+                 "Failed allocating acoustic station-slot map\n");
+  }
+  for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
+    g_acousticPressureStationSlotsHost[station] = -1;
+    if (Param.myStations[station].pressure_is_defined != 0) {
+      count++;
+    }
+  }
+
+  g_acousticPressureStationCount = count;
+  if (count <= 0) {
+    g_acousticPressureStationSyncReady = 1;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)count * 8);
+  coords = (double*)malloc(sizeof(double) * (size_t)count * 3);
+  h = (double*)malloc(sizeof(double) * (size_t)count);
+  if ((nodes == NULL) || (coords == NULL) || (h == NULL)) {
+    free(nodes);
+    free(coords);
+    free(h);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating acoustic station interpolation metadata\n");
   }
 
   for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
     if (Param.myStations[station].pressure_is_defined == 0) {
       continue;
     }
+    g_acousticPressureStationSlotsHost[station] = packed;
+    coords[(size_t)packed * 3] =
+        Param.myStations[station].localcoords.x[0];
+    coords[(size_t)packed * 3 + 1] =
+        Param.myStations[station].localcoords.x[1];
+    coords[(size_t)packed * 3 + 2] =
+        Param.myStations[station].localcoords.x[2];
+    h[packed] = Param.myStations[station].h;
+    if (h[packed] <= 0.0) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Acoustic station %d has invalid element size %.17g\n",
+                   station, h[packed]);
+    }
     for (int32_t corner = 0; corner < 8; corner++) {
       const int32_t node = Param.myStations[station].nodestointerpolate[corner];
-      if ((node >= 0) && (node < Global.myMesh->nharbored)) {
-        nodes[count++] = node;
+      if ((node < 0) || (node >= Global.myMesh->nharbored)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Acoustic station %d corner %d has invalid node %d\n",
+                     station, corner, node);
       }
+      nodes[(size_t)packed * 8 + corner] = node;
     }
+    packed++;
   }
-
-  if (count > 0) {
-    qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
-    for (int32_t i = 0; i < count; i++) {
-      if ((i == 0) || (nodes[i] != nodes[i - 1])) {
-        nodes[uniqueCount++] = nodes[i];
-      }
-    }
-  }
-
-  g_acousticPressureStationNodeCount = uniqueCount;
-  if (uniqueCount <= 0) {
-    free(nodes);
-    g_acousticPressureStationSyncReady = 1;
-    return;
-  }
-
-  g_acousticPressureStationNodesHost =
-      (int32_t*)malloc(sizeof(int32_t) * (size_t)uniqueCount);
-  if (g_acousticPressureStationNodesHost == NULL) {
-    free(nodes);
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating acoustic station-node copy\n");
-  }
-  memcpy(g_acousticPressureStationNodesHost, nodes,
-         sizeof(int32_t) * (size_t)uniqueCount);
-  free(nodes);
 
   solver_pore_pressure_device_copy_int32(
-      &g_acousticPressureStationNodesDevice, g_acousticPressureStationNodesHost,
-      uniqueCount, "acoustic station-node copy");
+      &g_acousticPressureStationNodesDevice, nodes, count * 8,
+      "acoustic station-node copy");
   solver_pore_pressure_device_check(
-      cudaMalloc((void**)&g_acousticPressureStationBufferDevice,
-                 sizeof(solver_float) * (size_t)uniqueCount),
-      "acoustic station device buffer");
-  if (cudaHostAlloc((void**)&g_acousticPressureStationBufferHost,
-                    sizeof(solver_float) * (size_t)uniqueCount,
+      cudaMalloc((void**)&g_acousticPressureStationCoordsDevice,
+                 sizeof(double) * (size_t)count * 3),
+      "acoustic station-coordinate allocation");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_acousticPressureStationCoordsDevice, coords,
+                 sizeof(double) * (size_t)count * 3, cudaMemcpyHostToDevice),
+      "acoustic station-coordinate copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_acousticPressureStationHDevice,
+                 sizeof(double) * (size_t)count),
+      "acoustic station-size allocation");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_acousticPressureStationHDevice, h,
+                 sizeof(double) * (size_t)count, cudaMemcpyHostToDevice),
+      "acoustic station-size copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_acousticPressureStationResultsDevice,
+                 sizeof(double) * (size_t)count * 4),
+      "acoustic station result allocation");
+  if (cudaHostAlloc((void**)&g_acousticPressureStationResultsHost,
+                    sizeof(double) * (size_t)count * 4,
                     cudaHostAllocDefault) == cudaSuccess) {
     g_acousticPressureStationHostPinned = 1;
   } else {
-    g_acousticPressureStationBufferHost = NULL;
-    g_acousticPressureStationBufferHost =
-        (solver_float*)malloc(sizeof(solver_float) * (size_t)uniqueCount);
-    if (g_acousticPressureStationBufferHost == NULL) {
+    g_acousticPressureStationResultsHost = NULL;
+    g_acousticPressureStationResultsHost =
+        (double*)malloc(sizeof(double) * (size_t)count * 4);
+    if (g_acousticPressureStationResultsHost == NULL) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Failed allocating acoustic station host buffer\n");
     }
   }
 
+  free(nodes);
+  free(coords);
+  free(h);
+
   g_acousticPressureStationSyncReady = 1;
 }
 
-static void solver_sync_acoustic_pressure_station_field(
-    mysolver_t* solver, const solver_float* sourceDevice,
-    solver_float* destinationHost) {
-  const int32_t blocksize = 256;
-  const int32_t gridsize =
-      (g_acousticPressureStationNodeCount + blocksize - 1) / blocksize;
-
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
-      g_acousticPressureStationNodeCount, g_acousticPressureStationNodesDevice,
-      sourceDevice, g_acousticPressureStationBufferDevice);
-  solver_pore_pressure_device_check(cudaGetLastError(),
-                                    "acoustic station gather");
-  solver_pore_pressure_device_check(
-      cudaMemcpyAsync(g_acousticPressureStationBufferHost,
-                      g_acousticPressureStationBufferDevice,
-                      sizeof(solver_float) *
-                          (size_t)g_acousticPressureStationNodeCount,
-                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
-      "acoustic station D2H");
-  solver->gpu_spec->numbytespci +=
-      g_acousticPressureStationNodeCount * (int64_t)sizeof(solver_float);
-  solver_pore_pressure_device_check(
-      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
-      "acoustic station D2H sync");
-
-  for (int32_t i = 0; i < g_acousticPressureStationNodeCount; i++) {
-    destinationHost[g_acousticPressureStationNodesHost[i]] =
-        g_acousticPressureStationBufferHost[i];
-  }
-}
-
 static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
+  const int32_t blocksize = 128;
+
+  g_acousticPressureStationDataReady = 0;
   if (!acoustic_pressure_device_sync_enabled()) {
     return;
   }
 
   solver_init_acoustic_pressure_station_sync(solver);
-  if (g_acousticPressureStationNodeCount <= 0) {
+  if (g_acousticPressureStationCount <= 0) {
     return;
   }
 
-  solver_sync_acoustic_pressure_station_field(
-      solver, solver->gpuData->pressureTm1Device, solver->pressure_tm1);
-  solver_sync_acoustic_pressure_station_field(
-      solver, solver->gpuData->pressureTm2Device, solver->pressure_tm2);
+  const int32_t gridsize =
+      (g_acousticPressureStationCount + blocksize - 1) / blocksize;
+  const int32_t velocityPotential =
+      (Param.theAcousticVelocityPotential == 1) && (Param.theDeltaT > 0.0);
+  const double inverseDt = velocityPotential ? (1.0 / Param.theDeltaT) : 0.0;
+
+  Timer_Start("Acoustic Station Gather");
+  kernelAcousticStationInterpolate<<<
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_acousticPressureStationCount, g_acousticPressureStationNodesDevice,
+      g_acousticPressureStationCoordsDevice,
+      g_acousticPressureStationHDevice, solver->gpuData->pressureTm1Device,
+      solver->gpuData->pressureTm2Device, velocityPotential, inverseDt,
+      g_acousticPressureStationResultsDevice);
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "acoustic station interpolation");
+  solver_pore_pressure_device_check(
+      cudaMemcpyAsync(g_acousticPressureStationResultsHost,
+                      g_acousticPressureStationResultsDevice,
+                      sizeof(double) *
+                          (size_t)g_acousticPressureStationCount * 4,
+                      cudaMemcpyDeviceToHost,
+                      solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic station result D2H");
+  solver->gpu_spec->numbytespci +=
+      g_acousticPressureStationCount * 4 * (int64_t)sizeof(double);
+  solver_pore_pressure_device_check(
+      cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+      "acoustic station result D2H sync");
+  Timer_Stop("Acoustic Station Gather");
+  g_acousticPressureStationDataReady = 1;
+}
+
+static inline const double* solver_acoustic_station_result(
+    int32_t iStation) {
+  if ((g_acousticPressureStationDataReady == 0) ||
+      (g_acousticPressureStationSlotsHost == NULL) ||
+      (g_acousticPressureStationResultsHost == NULL) || (iStation < 0) ||
+      (iStation >= Param.myNumberOfStations)) {
+    return NULL;
+  }
+  const int32_t slot = g_acousticPressureStationSlotsHost[iStation];
+  return (slot >= 0)
+             ? g_acousticPressureStationResultsHost + (size_t)slot * 4
+             : NULL;
 }
 
 static int32_t solver_count_valid_acoustic_plane_pressure_nodes(void) {
@@ -20239,10 +20292,12 @@ static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {
 }
 
 static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
-  int32_t capacity;
   int32_t count = 0;
-  int32_t uniqueCount = 0;
-  int32_t* nodes;
+  int32_t packed = 0;
+  int32_t* nodes = NULL;
+  double* coords = NULL;
+
+  (void)solver;
 
   if (g_porePressureStationSyncReady != 0 ||
       !gpu_device_sync_enabled()) {
@@ -20255,114 +20310,143 @@ static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
     return;
   }
 
-  capacity = 8 * Param.myNumberOfStations;
-  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
-  if (nodes == NULL) {
+  g_porePressureStationSlotsHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)Param.myNumberOfStations);
+  if (g_porePressureStationSlotsHost == NULL) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating pore-pressure station-node list\n");
+                 "Failed allocating pore-pressure station-slot map\n");
+  }
+  for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
+    g_porePressureStationSlotsHost[station] = -1;
+    if (Param.myStations[station].pore_pressure_is_defined != 0) {
+      count++;
+    }
+  }
+
+  g_porePressureStationCount = count;
+  if (count <= 0) {
+    g_porePressureStationSyncReady = 1;
+    return;
+  }
+
+  nodes = (int32_t*)malloc(sizeof(int32_t) * (size_t)count * 8);
+  coords = (double*)malloc(sizeof(double) * (size_t)count * 3);
+  if ((nodes == NULL) || (coords == NULL)) {
+    free(nodes);
+    free(coords);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Failed allocating pore-pressure interpolation metadata\n");
   }
 
   for (int32_t station = 0; station < Param.myNumberOfStations; station++) {
     if (Param.myStations[station].pore_pressure_is_defined == 0) {
       continue;
     }
+    g_porePressureStationSlotsHost[station] = packed;
+    coords[(size_t)packed * 3] =
+        Param.myStations[station].localcoords.x[0];
+    coords[(size_t)packed * 3 + 1] =
+        Param.myStations[station].localcoords.x[1];
+    coords[(size_t)packed * 3 + 2] =
+        Param.myStations[station].localcoords.x[2];
     for (int32_t corner = 0; corner < 8; corner++) {
       const int32_t node = Param.myStations[station].nodestointerpolate[corner];
-      if ((node >= 0) && (node < Global.myMesh->nharbored)) {
-        nodes[count++] = node;
+      if ((node < 0) || (node >= Global.myMesh->nharbored)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Pore-pressure station %d corner %d has invalid node %d\n",
+                     station, corner, node);
       }
+      nodes[(size_t)packed * 8 + corner] = node;
     }
+    packed++;
   }
-
-  if (count > 0) {
-    qsort(nodes, (size_t)count, sizeof(int32_t), compare_int32_asc);
-    for (int32_t i = 0; i < count; i++) {
-      if ((i == 0) || (nodes[i] != nodes[i - 1])) {
-        nodes[uniqueCount++] = nodes[i];
-      }
-    }
-  }
-
-  g_porePressureStationNodeCount = uniqueCount;
-  if (uniqueCount <= 0) {
-    free(nodes);
-    g_porePressureStationSyncReady = 1;
-    return;
-  }
-
-  g_porePressureStationNodesHost =
-      (int32_t*)malloc(sizeof(int32_t) * (size_t)uniqueCount);
-  if (g_porePressureStationNodesHost == NULL) {
-    free(nodes);
-    solver_abort(__FUNCTION_NAME, NULL,
-                 "Failed allocating pore-pressure station-node copy\n");
-  }
-  memcpy(g_porePressureStationNodesHost, nodes,
-         sizeof(int32_t) * (size_t)uniqueCount);
-  free(nodes);
 
   solver_pore_pressure_device_copy_int32(
-      &g_porePressureStationNodesDevice, g_porePressureStationNodesHost,
-      uniqueCount, "pore-pressure station-node copy");
+      &g_porePressureStationNodesDevice, nodes, count * 8,
+      "pore-pressure station-node copy");
   solver_pore_pressure_device_check(
-      cudaMalloc((void**)&g_porePressureStationBufferDevice,
-                 sizeof(solver_float) * (size_t)uniqueCount),
-      "pore-pressure station device buffer");
-  if (cudaHostAlloc((void**)&g_porePressureStationBufferHost,
-                    sizeof(solver_float) * (size_t)uniqueCount,
+      cudaMalloc((void**)&g_porePressureStationCoordsDevice,
+                 sizeof(double) * (size_t)count * 3),
+      "pore-pressure station-coordinate allocation");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_porePressureStationCoordsDevice, coords,
+                 sizeof(double) * (size_t)count * 3, cudaMemcpyHostToDevice),
+      "pore-pressure station-coordinate copy");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_porePressureStationResultsDevice,
+                 sizeof(double) * (size_t)count),
+      "pore-pressure station result allocation");
+  if (cudaHostAlloc((void**)&g_porePressureStationResultsHost,
+                    sizeof(double) * (size_t)count,
                     cudaHostAllocDefault) == cudaSuccess) {
     g_porePressureStationHostPinned = 1;
   } else {
-    g_porePressureStationBufferHost = NULL;
-    g_porePressureStationBufferHost =
-        (solver_float*)malloc(sizeof(solver_float) * (size_t)uniqueCount);
-    if (g_porePressureStationBufferHost == NULL) {
+    g_porePressureStationResultsHost = NULL;
+    g_porePressureStationResultsHost =
+        (double*)malloc(sizeof(double) * (size_t)count);
+    if (g_porePressureStationResultsHost == NULL) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Failed allocating pore-pressure station host buffer\n");
     }
   }
 
+  free(nodes);
+  free(coords);
+
   g_porePressureStationSyncReady = 1;
 }
 
 static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
-  const int32_t blocksize = 256;
+  const int32_t blocksize = 128;
 
+  g_porePressureStationDataReady = 0;
   if (!poroelastic_gpu_active() || !gpu_device_sync_enabled()) {
     return;
   }
 
   solver_init_pore_pressure_station_sync(solver);
-  if (g_porePressureStationNodeCount <= 0) {
+  if (g_porePressureStationCount <= 0) {
     return;
   }
 
   const int32_t gridsize =
-      (g_porePressureStationNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
-      g_porePressureStationNodeCount, g_porePressureStationNodesDevice,
+      (g_porePressureStationCount + blocksize - 1) / blocksize;
+  Timer_Start("Pore-pressure Station Gather");
+  kernelPorePressureStationInterpolate<<<
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+      g_porePressureStationCount, g_porePressureStationNodesDevice,
+      g_porePressureStationCoordsDevice,
       solver->gpuData->porePressureTm1Device,
-      g_porePressureStationBufferDevice);
+      solver->gpuData->porePressureMassDevice,
+      g_porePressureStationResultsDevice);
+  solver_pore_pressure_device_check(cudaGetLastError(),
+                                    "pore-pressure station interpolation");
   solver_pore_pressure_device_check(
-      cudaGetLastError(), "pore-pressure station gather");
-  solver_pore_pressure_device_check(
-      cudaMemcpyAsync(g_porePressureStationBufferHost,
-                      g_porePressureStationBufferDevice,
-                      sizeof(solver_float) *
-                          (size_t)g_porePressureStationNodeCount,
-                      cudaMemcpyDeviceToHost, solver->streams[CUDA_STREAM_MAIN]),
-      "pore-pressure station D2H");
+      cudaMemcpyAsync(g_porePressureStationResultsHost,
+                      g_porePressureStationResultsDevice,
+                      sizeof(double) * (size_t)g_porePressureStationCount,
+                      cudaMemcpyDeviceToHost,
+                      solver->streams[CUDA_STREAM_MAIN]),
+      "pore-pressure station result D2H");
   solver->gpu_spec->numbytespci +=
-      g_porePressureStationNodeCount * (int64_t)sizeof(solver_float);
+      g_porePressureStationCount * (int64_t)sizeof(double);
   solver_pore_pressure_device_check(
       cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
-      "pore-pressure station D2H sync");
+      "pore-pressure station result D2H sync");
+  Timer_Stop("Pore-pressure Station Gather");
+  g_porePressureStationDataReady = 1;
+}
 
-  for (int32_t i = 0; i < g_porePressureStationNodeCount; i++) {
-    solver->pore_pressure_tm1[g_porePressureStationNodesHost[i]] =
-        g_porePressureStationBufferHost[i];
+static inline const double* solver_pore_pressure_station_result(
+    int32_t iStation) {
+  if ((g_porePressureStationDataReady == 0) ||
+      (g_porePressureStationSlotsHost == NULL) ||
+      (g_porePressureStationResultsHost == NULL) || (iStation < 0) ||
+      (iStation >= Param.myNumberOfStations)) {
+    return NULL;
   }
+  const int32_t slot = g_porePressureStationSlotsHost[iStation];
+  return (slot >= 0) ? g_porePressureStationResultsHost + slot : NULL;
 }
 
 static void solver_free_pore_pressure_device_sync(void) {
@@ -20387,13 +20471,15 @@ static void solver_free_pore_pressure_device_sync(void) {
     }
   }
   cudaFree(g_acousticPressureStationNodesDevice);
-  cudaFree(g_acousticPressureStationBufferDevice);
-  free(g_acousticPressureStationNodesHost);
-  if (g_acousticPressureStationBufferHost != NULL) {
+  cudaFree(g_acousticPressureStationCoordsDevice);
+  cudaFree(g_acousticPressureStationHDevice);
+  cudaFree(g_acousticPressureStationResultsDevice);
+  free(g_acousticPressureStationSlotsHost);
+  if (g_acousticPressureStationResultsHost != NULL) {
     if (g_acousticPressureStationHostPinned != 0) {
-      cudaFreeHost(g_acousticPressureStationBufferHost);
+      cudaFreeHost(g_acousticPressureStationResultsHost);
     } else {
-      free(g_acousticPressureStationBufferHost);
+      free(g_acousticPressureStationResultsHost);
     }
   }
   cudaFree(g_acousticPlanePressureNodesDevice);
@@ -20415,13 +20501,14 @@ static void solver_free_pore_pressure_device_sync(void) {
   cudaFree(g_porePressureAdjustDistRunParentBase3Device);
   cudaFree(g_porePressureAdjustDistRunOffsetsDevice);
   cudaFree(g_porePressureStationNodesDevice);
-  cudaFree(g_porePressureStationBufferDevice);
-  free(g_porePressureStationNodesHost);
-  if (g_porePressureStationBufferHost != NULL) {
+  cudaFree(g_porePressureStationCoordsDevice);
+  cudaFree(g_porePressureStationResultsDevice);
+  free(g_porePressureStationSlotsHost);
+  if (g_porePressureStationResultsHost != NULL) {
     if (g_porePressureStationHostPinned != 0) {
-      cudaFreeHost(g_porePressureStationBufferHost);
+      cudaFreeHost(g_porePressureStationResultsHost);
     } else {
-      free(g_porePressureStationBufferHost);
+      free(g_porePressureStationResultsHost);
     }
   }
 
@@ -20448,12 +20535,15 @@ static void solver_free_pore_pressure_device_sync(void) {
   g_porePressureAdjustDistEdgeDnDevice = NULL;
   g_porePressureAdjustDistRunParentBase3Device = NULL;
   g_porePressureAdjustDistRunOffsetsDevice = NULL;
-  g_acousticPressureStationNodesHost = NULL;
+  g_acousticPressureStationSlotsHost = NULL;
   g_acousticPressureStationNodesDevice = NULL;
-  g_acousticPressureStationBufferHost = NULL;
-  g_acousticPressureStationBufferDevice = NULL;
-  g_acousticPressureStationNodeCount = 0;
+  g_acousticPressureStationCoordsDevice = NULL;
+  g_acousticPressureStationHDevice = NULL;
+  g_acousticPressureStationResultsHost = NULL;
+  g_acousticPressureStationResultsDevice = NULL;
+  g_acousticPressureStationCount = 0;
   g_acousticPressureStationHostPinned = 0;
+  g_acousticPressureStationDataReady = 0;
   g_acousticPressureStationSyncReady = 0;
   g_acousticPressureSyncReported = 0;
   g_acousticPlanePressureNodesHost = NULL;
@@ -20464,12 +20554,14 @@ static void solver_free_pore_pressure_device_sync(void) {
   g_acousticPlanePressureHostPinned = 0;
   g_acousticPlanePressureSyncReady = 0;
   g_acousticPlanePressureReported = 0;
-  g_porePressureStationNodesHost = NULL;
+  g_porePressureStationSlotsHost = NULL;
   g_porePressureStationNodesDevice = NULL;
-  g_porePressureStationBufferHost = NULL;
-  g_porePressureStationBufferDevice = NULL;
-  g_porePressureStationNodeCount = 0;
+  g_porePressureStationCoordsDevice = NULL;
+  g_porePressureStationResultsHost = NULL;
+  g_porePressureStationResultsDevice = NULL;
+  g_porePressureStationCount = 0;
   g_porePressureStationHostPinned = 0;
+  g_porePressureStationDataReady = 0;
   g_porePressureStationSyncReady = 0;
   g_deviceAdjustReady = 0;
   g_scalarDeviceScheduleReady = 0;
@@ -21782,6 +21874,10 @@ static void solver_run_collect_timers(void) {
   solver_reduce_timer_if_any("Print Stations",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Station Tensor Gather",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Acoustic Station Gather",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Pore-pressure Station Gather",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Compute Non-linear Entities",
                              (TimerKind)(MAX | MIN | AVERAGE));
@@ -26556,6 +26652,20 @@ static void print_timing_stat() {
         Timer_Value("Station Tensor Gather", AVERAGE),
         Timer_Value("Station Tensor Gather", MAX),
         Timer_Value("Station Tensor Gather", MIN));
+  if (Timer_Exists("Acoustic Station Gather"))
+    printf(
+        "        Acoustic station gather     : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Acoustic Station Gather", AVERAGE),
+        Timer_Value("Acoustic Station Gather", MAX),
+        Timer_Value("Acoustic Station Gather", MIN));
+  if (Timer_Exists("Pore-pressure Station Gather"))
+    printf(
+        "          Pore-pressure gather      : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Pore-pressure Station Gather", AVERAGE),
+        Timer_Value("Pore-pressure Station Gather", MAX),
+        Timer_Value("Pore-pressure Station Gather", MIN));
   if (Timer_Exists("Checkpoint"))
     printf("        Checkpoint                  : %.2f\n",
            Timer_Value("Checkpoint", (TimerKind)0));
@@ -27398,8 +27508,19 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
   grad[2] = 0.0;
 
   if ((Param.myStations[iStation].pressure_is_defined == 0) ||
-      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL) ||
-      (h <= 0.0)) {
+      (Global.mySolver == NULL) || (h <= 0.0)) {
+    return 0;
+  }
+
+  const double* gpuResult = solver_acoustic_station_result(iStation);
+  if (gpuResult != NULL) {
+    grad[0] = gpuResult[1];
+    grad[1] = gpuResult[2];
+    grad[2] = gpuResult[3];
+    return 1;
+  }
+
+  if (Global.mySolver->pressure_tm1 == NULL) {
     return 0;
   }
 
@@ -27441,7 +27562,9 @@ static void solver_update_acoustic_station_kinematics(int32_t step) {
   int32_t iStation;
 
   if ((!acoustic_pressure_enabled()) || (Param.myNumberOfStations == 0) ||
-      (Global.mySolver == NULL) || (Global.mySolver->pressure_tm1 == NULL)) {
+      (Global.mySolver == NULL) ||
+      ((g_acousticPressureStationDataReady == 0) &&
+       (Global.mySolver->pressure_tm1 == NULL))) {
     return;
   }
 
@@ -27843,8 +27966,14 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   }
 
   if (Param.myStations[iStation].pressure_is_defined != 0) {
-    if ((!acoustic_pressure_enabled()) ||
-        (Global.mySolver->pressure_tm1 == NULL)) {
+    if (!acoustic_pressure_enabled()) {
+      return NAN;
+    }
+    const double* gpuResult = solver_acoustic_station_result(iStation);
+    if (gpuResult != NULL) {
+      return gpuResult[0];
+    }
+    if (Global.mySolver->pressure_tm1 == NULL) {
       return NAN;
     }
     for (iPhi = 0; iPhi < 8; iPhi++) {
@@ -27866,8 +27995,15 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   }
 
   if ((Param.myStations[iStation].pore_pressure_is_defined != 0) &&
-      poroelastic_enabled() && (Global.mySolver->pore_pressure_tm1 != NULL) &&
-      (Global.mySolver->pore_pressure_mass != NULL)) {
+      poroelastic_enabled()) {
+    const double* gpuResult = solver_pore_pressure_station_result(iStation);
+    if (gpuResult != NULL) {
+      return gpuResult[0];
+    }
+    if ((Global.mySolver->pore_pressure_tm1 == NULL) ||
+        (Global.mySolver->pore_pressure_mass == NULL)) {
+      return NAN;
+    }
     double massWeight = 0.0;
 
     for (iPhi = 0; iPhi < 8; iPhi++) {

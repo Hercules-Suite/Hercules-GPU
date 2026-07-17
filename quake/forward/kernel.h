@@ -119,6 +119,20 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
                                             int32_t stressOffset,
                                             gpu_data_t* gpuData);
 
+/* Fused station interpolation kernels. Acoustic output contains pressure and
+ * its x/y/z gradient (4 doubles/station); poroelastic output contains one
+ * interpolated pore-pressure value per station. */
+__global__ void kernelAcousticStationInterpolate(
+    int32_t stationCount, const int32_t* stationNodes,
+    const double* stationCoords, const double* stationH,
+    const solver_float* pressureTm1, const solver_float* pressureTm2,
+    int32_t velocityPotential, double inverseDt, double* stationOutput);
+
+__global__ void kernelPorePressureStationInterpolate(
+    int32_t stationCount, const int32_t* stationNodes,
+    const double* stationCoords, const solver_float* porePressureTm1,
+    const solver_float* porePressureMass, double* stationOutput);
+
 __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
 							   gpu_data_t* gpuData,
 							   double deltaT2,

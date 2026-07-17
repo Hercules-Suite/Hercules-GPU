@@ -75,12 +75,15 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 - `HERCULES_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
 	Selects acoustic pressure-force synchronization before the scalar MPI/adjust phase. Default is `sparse`, which gathers only the pressure nodes touched by communication schedules and hanging-node adjustment, exchanges on the existing host schedule path, and scatters only those force entries back to the GPU. `full` restores the legacy full `nharbored` pressure-force D2H/H2D copies.
 - `HERCULES_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
-	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Full pressure D2H is still performed so station/plane/checkpoint output remains host-visible. `full` restores the legacy full pressure-field H2D load each step; checkpoint restart also forces `full`.
+	Selects acoustic pressure-field host/device synchronization. Default is `resident`, which keeps pressure history arrays resident on the GPU, swaps their device pointers between steps, and patches only schedule/adjusted pressure nodes back to the current device field after host-side pressure sharing. Station output uses fused GPU interpolation, reconstructed planes use a sparse pressure-node patch, and checkpoint/restart forces the legacy `full` host-visible path.
 	When both acoustic pressure synchronization modes are sparse/resident,
 	`HERCULES_GPU_MPI_BACKEND=cuda_aware` sends both acoustic pressure arrays
 	directly from GPU memory and applies the scalar hanging-node adjustment on
-	the GPU. Acoustic station output gathers only its local station nodes from
-	the two device histories. Reconstructed acoustic plane output gathers only
+	the GPU. Acoustic station output is interpolated directly on the GPU: one
+	fused kernel reads each local eight-node stencil from the two device
+	histories and returns only pressure plus its three-component gradient. This
+	supports every-step acoustic motion reconstruction without patching station
+	nodal pressure arrays on the host. Reconstructed acoustic plane output gathers only
 	the local plane pressure nodes needed for host-side pressure gradients, so
 	it no longer forces a full acoustic pressure-field host path.
 - `HERCULES_PORE_PRESSURE_FORCE_SYNC_MODE=sparse|full` (or `1|0`)
@@ -92,9 +95,10 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 - `HERCULES_PORE_PRESSURE_FIELD_SYNC_MODE=resident|full` (or `1|0`)
 	Selects poroelastic pore-pressure field synchronization. Default is
 	`resident`, which keeps pore-pressure histories resident on the GPU and
-	patches only MPI/adjust nodes plus local pore-pressure station interpolation
-	nodes, when station pressure output is enabled, back to the current device
-	field after host-side pressure sharing.
+	patches only MPI/adjust nodes after host-side pressure sharing. When station
+	pressure output is enabled, a fused GPU interpolator returns one scalar per
+	local poroelastic station directly from the resident field and nodal mass
+	mask; it does not patch station stencils into a host field.
 	`full` restores full `nharbored` field D2H/H2D copies.
 
 - `HERCULES_GPU_MPI_BACKEND=host|cuda_aware`
@@ -492,7 +496,9 @@ Acoustic-elastic input flags (input file):
 	the pressure gradient; for elastic stations they continue to use the
 	elastic displacement field. The pressure column is `nan` for stations whose
 	containing element has neither acoustic pressure nor poroelastic pore
-	pressure.
+	pressure. CUDA-aware resident runs report the rank-reduced
+	`Acoustic Station Gather` and `Pore-pressure Station Gather`
+	kernel-plus-copy timings when those paths are active.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the

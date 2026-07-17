@@ -3414,3 +3414,90 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
         out[5] = two_mu * esxz;
     }
 }
+
+/* Interpolate acoustic pressure and pressure gradient directly from the two
+ * device-resident history fields. The shape-function algebra and component
+ * ordering mirror interpolate_station_pressure_value and
+ * station_pressure_gradient in psolve.cu. */
+__global__ void kernelAcousticStationInterpolate(
+    int32_t stationCount, const int32_t* stationNodes,
+    const double* stationCoords, const double* stationH,
+    const solver_float* pressureTm1, const solver_float* pressureTm2,
+    int32_t velocityPotential, double inverseDt, double* stationOutput)
+{
+    const int32_t station = blockIdx.x * blockDim.x + threadIdx.x;
+    if (station >= stationCount) return;
+
+    const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+    const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+    const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+    const double xi = stationCoords[(size_t)station * 3];
+    const double eta = stationCoords[(size_t)station * 3 + 1];
+    const double zeta = stationCoords[(size_t)station * 3 + 2];
+    const double inv4h = 0.25 / stationH[station];
+    double pressure = 0.0;
+    double gradX = 0.0;
+    double gradY = 0.0;
+    double gradZ = 0.0;
+
+    #pragma unroll
+    for (int corner = 0; corner < 8; corner++) {
+        const int32_t node = stationNodes[(size_t)station * 8 + corner];
+        const solver_float currentField = pressureTm1[node];
+        const double current = (double)currentField;
+        const double value =
+            velocityPotential
+                ? -(double)(currentField - pressureTm2[node]) * inverseDt
+                : current;
+        const double oneX = 1.0 + sx[corner] * xi;
+        const double oneY = 1.0 + sy[corner] * eta;
+        const double oneZ = 1.0 + sz[corner] * zeta;
+        pressure += 0.125 * oneX * oneY * oneZ * value;
+        gradX += sx[corner] * oneY * oneZ * inv4h * value;
+        gradY += sy[corner] * oneX * oneZ * inv4h * value;
+        gradZ += sz[corner] * oneX * oneY * inv4h * value;
+    }
+
+    double* const out = stationOutput + (size_t)station * 4;
+    out[0] = pressure;
+    out[1] = gradX;
+    out[2] = gradY;
+    out[3] = gradZ;
+}
+
+/* Match the host poroelastic station interpolation exactly: inactive nodal
+ * pressure masses are skipped and the surviving trilinear weights are
+ * renormalized. */
+__global__ void kernelPorePressureStationInterpolate(
+    int32_t stationCount, const int32_t* stationNodes,
+    const double* stationCoords, const solver_float* porePressureTm1,
+    const solver_float* porePressureMass, double* stationOutput)
+{
+    const int32_t station = blockIdx.x * blockDim.x + threadIdx.x;
+    if (station >= stationCount) return;
+
+    const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
+    const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
+    const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+    const double xi = stationCoords[(size_t)station * 3];
+    const double eta = stationCoords[(size_t)station * 3 + 1];
+    const double zeta = stationCoords[(size_t)station * 3 + 2];
+    double pressure = 0.0;
+    double weight = 0.0;
+
+    #pragma unroll
+    for (int corner = 0; corner < 8; corner++) {
+        const int32_t node = stationNodes[(size_t)station * 8 + corner];
+        if ((double)porePressureMass[node] > 0.0) {
+            const double shape =
+                0.125 * (1.0 + sx[corner] * xi) *
+                (1.0 + sy[corner] * eta) *
+                (1.0 + sz[corner] * zeta);
+            pressure += shape * (double)porePressureTm1[node];
+            weight += shape;
+        }
+    }
+
+    stationOutput[station] =
+        (weight > 0.0) ? (pressure / weight) : nan("");
+}
