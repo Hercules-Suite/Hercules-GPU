@@ -30,13 +30,19 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Enables or disables OpenMP parallelization for full-array host force clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
 	(enabled).
 - `HERCULES_STATION_IO_OMP=1|0`
-	Enables or disables OpenMP parallelization for station displacement interpolation and per-station file writes. Default is `1` (enabled).
+	Enables or disables OpenMP parallelization for host-side station setup,
+	displacement/kinematic processing, acoustic kinematic reconstruction,
+	formatting, and per-station file writes. Default is `1` (enabled). CUDA
+	pressure, pore-pressure, strain, and stress interpolation/gather kernels are
+	not controlled by this setting.
 - `HERCULES_STATION_ROUTE_MODE=interval|all`
 	Controls station ownership lookup during setup. Default is `interval`, which uses the octree partition interval to skip stations that cannot belong to the current rank before calling the local octree search. `all` restores the older behavior where every rank searches every station.
 - `HERCULES_PLANE_IO_OMP=1|0`
-	Enables or disables OpenMP parallelization for the legacy host-side
-	per-strip plane interpolation before MPI send/write. Default is `1`
-	(enabled). The GPU/MPI-IO backend does not use this setting.
+	Enables or disables OpenMP parallelization for plane-strip construction and
+	metadata setup in both output backends, reconstructed acoustic-plane
+	kinematics on each timestep, and legacy host-side plane interpolation.
+	Default is `1` (enabled). This setting does not control CUDA plane
+	interpolation, packed-result device-to-host transfer, or MPI-IO writing.
 - `HERCULES_PLANE_IO_MODE=auto|mpiio|legacy`
 	Selects the plane-output backend. Default is `auto`, which uses fused GPU
 	interpolation plus distributed MPI-IO whenever `IO_pool_pe_count=0`, and
