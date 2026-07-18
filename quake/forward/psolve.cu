@@ -16016,10 +16016,10 @@ static void solver_output_planes(mysolver_t* solver, int my_id, int step) {
   if (Param.theNumberOfPlanes != 0) {
     if (step % Param.thePlanePrintRate == 0) {
       Timer_Start("Print Planes");
-      if (planes_gpu_mpiio_enabled()) {
+      if (planes_gpu_output_enabled()) {
         if (!solver_output_planes_gpu(solver, my_id)) {
           solver_abort(__FUNCTION_NAME, NULL,
-                       "GPU/MPI-IO plane output failed at step %d", step);
+                       "GPU plane output failed at step %d", step);
         }
       } else {
         planes_print(my_id, Param.IO_pool_pe_count, Param.theNumberOfPlanes,
@@ -18678,7 +18678,7 @@ static void solver_report_displacement_output_patch_count(
         "Displacement output patch nodes: %lld globally "
         "(max/rank=%lld) for station%s output%s\n",
         globalCount, maxCount,
-        planes_gpu_mpiio_enabled() ? "" : "/plane",
+        planes_gpu_output_enabled() ? "" : "/plane",
         solver_displacement_output_needs_previous() ? " (tm1+tm2)" : " (tm1)");
   }
   g_dispOutputReported = 1;
@@ -18690,9 +18690,9 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
   int32_t uniqueCount = 0;
   int32_t* nodes = NULL;
   const int32_t planeNodeCount =
-      planes_gpu_mpiio_enabled() ? 0 : planes_displacement_node_count();
+      planes_gpu_output_enabled() ? 0 : planes_displacement_node_count();
   const int32_t* planeNodes =
-      planes_gpu_mpiio_enabled() ? NULL : planes_displacement_nodes();
+      planes_gpu_output_enabled() ? NULL : planes_displacement_nodes();
   const int32_t topoStationNodeCount = topography_station_node_count();
 
   (void)solver;
@@ -18848,7 +18848,7 @@ static void solver_init_plane_gpu_output(mysolver_t* solver) {
   double* coordsHost = NULL;
   int32_t* modesHost = NULL;
 
-  if (g_planeGpuOutputReady != 0 || !planes_gpu_mpiio_enabled()) {
+  if (g_planeGpuOutputReady != 0 || !planes_gpu_output_enabled()) {
     return;
   }
 
@@ -18937,9 +18937,7 @@ static void solver_init_plane_gpu_output(mysolver_t* solver) {
 
   g_planeGpuOutputReady = 1;
   if (Global.myID == 0) {
-    monitor_print(
-        "GPU plane interpolation enabled (packed local results, MPI-IO "
-        "output; one shared file per configured plane).\n");
+    monitor_print("GPU plane interpolation enabled (packed local results).\n");
   }
 }
 
@@ -18989,9 +18987,8 @@ static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID) {
     }
   }
 
-  return planes_print_gpu_mpiio(myID, Param.theNumberOfPlanes,
-                                g_planeGpuValuesHost,
-                                g_planeGpuPointCount);
+  return planes_print_gpu(myID, Param.theNumberOfPlanes,
+                          g_planeGpuValuesHost, g_planeGpuPointCount);
 }
 
 static void solver_free_plane_gpu_output(void) {
@@ -22072,6 +22069,10 @@ static void solver_run_collect_timers(void) {
   solver_reduce_timer_if_any("Plane Result D2H",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Plane Host Patch",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Root Gather",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Root fwrite",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Plane MPI-IO Write",
                              (TimerKind)(MAX | MIN | AVERAGE));
@@ -26864,6 +26865,20 @@ static void print_timing_stat() {
         Timer_Value("Plane Host Patch", AVERAGE),
         Timer_Value("Plane Host Patch", MAX),
         Timer_Value("Plane Host Patch", MIN));
+  if (Timer_Exists("Plane Root Gather"))
+    printf(
+        "          Plane rank-0 gather      : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Root Gather", AVERAGE),
+        Timer_Value("Plane Root Gather", MAX),
+        Timer_Value("Plane Root Gather", MIN));
+  if (Timer_Exists("Plane Root fwrite"))
+    printf(
+        "          Plane rank-0 fwrite      : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Root fwrite", AVERAGE),
+        Timer_Value("Plane Root fwrite", MAX),
+        Timer_Value("Plane Root fwrite", MIN));
   if (Timer_Exists("Plane MPI-IO Write"))
     printf(
         "          Plane MPI-IO write       : %.2f (Average)   %.2f (Max) "

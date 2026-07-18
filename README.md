@@ -39,24 +39,25 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Controls station ownership lookup during setup. Default is `interval`, which uses the octree partition interval to skip stations that cannot belong to the current rank before calling the local octree search. `all` restores the older behavior where every rank searches every station.
 - `HERCULES_PLANE_IO_OMP=1|0`
 	Enables or disables OpenMP parallelization for plane-strip construction and
-	metadata setup in both output backends, reconstructed acoustic-plane
+	metadata setup in all output backends, reconstructed acoustic-plane
 	kinematics on each timestep, and legacy host-side plane interpolation.
 	Default is `1` (enabled). This setting does not control CUDA plane
-	interpolation, packed-result device-to-host transfer, or MPI-IO writing.
-- `HERCULES_PLANE_IO_MODE=auto|mpiio|legacy`
-	Selects the plane-output backend. Default is `auto`, which uses fused GPU
-	interpolation plus distributed MPI-IO whenever `IO_pool_pe_count=0`, and
-	keeps the existing dedicated-I/O-rank backend when an I/O pool is configured.
-	`mpiio` explicitly requests the GPU/MPI-IO path; `legacy` restores CPU
-	interpolation, rank-0 gather/write, and the per-plane barrier. The scalable
-	path writes the same `planedisplacements.N` binary layout (one shared file
-	per configured plane): each rank writes its owned strips into a precomputed
-	MPI file view, while only the final three-component value per plane point
-	crosses from GPU to host. Plane nodes
+	interpolation, packed-result device-to-host transfer, or file writing.
+- `HERCULES_PLANE_IO_MODE=auto|hybrid|mpiio|legacy`
+	Selects the plane-output backend. Default is `auto`, which uses the hybrid
+	backend whenever `IO_pool_pe_count=0`: fused GPU interpolation and one packed
+	device-to-host transfer are followed by the proven rank-0 strip gather and
+	buffered `fwrite` writer. `hybrid` explicitly selects this path. `mpiio`
+	selects the experimental distributed MPI-IO writer, in which each rank writes
+	its owned strips through a precomputed file view. `legacy` restores CPU
+	interpolation with the same rank-0 gather/write path. A configured dedicated
+	I/O pool continues to select the existing I/O-pool backend. All backends
+	preserve the `planedisplacements.N` binary layout. Plane nodes
 	are excluded from the every-step displacement-output patch and are evaluated
-	only at `output_planes_print_rate`. Timers report `Plane GPU Interpolation`,
-	`Plane Result D2H`, `Plane Host Patch` (only for reconstructed acoustic
-	points), and `Plane MPI-IO Write` inside `Print Planes`/`Solver I/O`.
+	only at `output_planes_print_rate` for the GPU backends. Timers report
+	`Plane GPU Interpolation`, `Plane Result D2H`, `Plane Host Patch` (only for
+	reconstructed acoustic points), and either `Plane Root Gather` plus
+	`Plane Root fwrite` or `Plane MPI-IO Write` inside `Print Planes`/`Solver I/O`.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_CONTRIB_UNPACK_OMP=1|0`
@@ -320,6 +321,8 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_STATION_ROUTE_MODE=all
 # export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_PLANE_IO_MODE=hybrid
+# export HERCULES_PLANE_IO_MODE=mpiio
 # export HERCULES_PLANE_IO_MODE=legacy
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
