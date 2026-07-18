@@ -39,7 +39,6 @@ extern int planes_patch_host_only_values(double* packedValues,
 extern int planes_print_gpu_mpiio(int32_t myID, int theNumberOfPlanes,
                                   const double* packedValues,
                                   int32_t pointCount);
-extern int planes_flush_gpu_mpiio(void);
 extern void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,
