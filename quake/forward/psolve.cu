@@ -22517,6 +22517,20 @@ static void solver_run() {
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
 
+  /* Flush a partial plane MPI-IO batch while Solver/Print Planes timers are
+   * still active and before their collective reductions. Full batches are
+   * written at their output steps. */
+  if ((Param.theNumberOfPlanes > 0) && planes_gpu_mpiio_enabled()) {
+    Timer_Start("Solver I/O");
+    Timer_Start("Print Planes");
+    if (!planes_flush_gpu_mpiio()) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to flush final plane MPI-IO batch");
+    }
+    Timer_Stop("Print Planes");
+    Timer_Stop("Solver I/O");
+  }
+
   solver_drm_close();
   solver_output_wavefield_close();
   solver_run_collect_timers();
