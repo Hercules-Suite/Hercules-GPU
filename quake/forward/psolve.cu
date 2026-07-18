@@ -25691,26 +25691,18 @@ static void print_timing_stat() {
   double TotalMeshingTime;
   double UnifiedHandoffTime = 0.0;
   double OtherPhasesTime = 0.0;
-  double TotalMeshingTimeMax;
-  double UnifiedHandoffTimeMax = 0.0;
-  double OtherPhasesTimeMax = 0.0;
   double BalanceTime = 0.0;
-  double BalanceTimeMax = 0.0;
   double CorrectPropsTime = 0.0;
-  double CorrectPropsTimeMax = 0.0;
-  double SourceInitMax;
-  double SourceInitForAccounting;
-  double SolverMax;
+  double SourceInitForAccounting = 0.0;
+  double AccountedLocal;
   double TotalWallClockMax;
-  double AccountedMax;
+  double AccountedMax = 0.0;
   double UnaccountedMax;
   if (Timer_Exists("Octor Balancetree")) {
     BalanceTime = Timer_Value("Octor Balancetree", (TimerKind)0);
-    BalanceTimeMax = Timer_Value("Octor Balancetree", MAX);
   }
   if (Timer_Exists("Mesh correct properties")) {
     CorrectPropsTime = Timer_Value("Mesh correct properties", (TimerKind)0);
-    CorrectPropsTimeMax = Timer_Value("Mesh correct properties", MAX);
   }
 
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
@@ -25733,93 +25725,68 @@ static void print_timing_stat() {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
   }
 
-  TotalMeshingTimeMax = Timer_Value("Octor Newtree", MAX) +
-                        Timer_Value("Octor Refinetree", MAX) +
-                        BalanceTimeMax +
-                        Timer_Value("Octor Partitiontree", MAX) +
-                        Timer_Value("Octor Extractmesh", MAX) +
-                        CorrectPropsTimeMax +
-                        Timer_Value("Mesh Stats Print", MAX);
-
-  if (Timer_Exists("Slice CVM")) {
-    TotalMeshingTimeMax += Timer_Value("Slice CVM", MAX);
-  }
-
-  if (Timer_Exists("Mesh Out")) {
-    TotalMeshingTimeMax += Timer_Value("Mesh Out", MAX);
-  }
-
-  if (Param.includeBuildings == YES && Timer_Exists("Carve Buildings")) {
-    TotalMeshingTimeMax += Timer_Value("Carve Buildings", MAX);
-  }
-
   /* Tree import is nested inside transfer. Setup, packing, transfer, and the
    * post-transfer reconstruction are otherwise nonoverlapping. */
   if (Timer_Exists("Unified Handoff Setup")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Setup", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Setup", MAX);
   }
   if (Timer_Exists("Unified Handoff Pack")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Pack", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Pack", MAX);
   }
   if (Timer_Exists("Unified Handoff Transfer")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Transfer", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Transfer", MAX);
   }
   if (Timer_Exists("Unified Handoff Reconstruction")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Reconstruction", (TimerKind)0);
-    UnifiedHandoffTimeMax +=
-        Timer_Value("Unified Handoff Reconstruction", MAX);
   }
 
   if (Timer_Exists("Global Init")) {
     OtherPhasesTime += Timer_Value("Global Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Global Init", MAX);
   }
   if (Timer_Exists("Pre Solver Setup")) {
     OtherPhasesTime += Timer_Value("Pre Solver Setup", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Pre Solver Setup", MAX);
   }
   if (Timer_Exists("Post Solver Finalize")) {
     OtherPhasesTime += Timer_Value("Post Solver Finalize", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Post Solver Finalize", MAX);
   }
 
   if (Timer_Exists("Phase Sync/Coordination")) {
     OtherPhasesTime += Timer_Value("Phase Sync/Coordination", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Phase Sync/Coordination", MAX);
-  }
-
-  if (Timer_Exists("Init Drm Parameters")) {
-    OtherPhasesTime += Timer_Value("Init Drm Parameters", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Init Drm Parameters", MAX);
   }
 
   if (Timer_Exists("Drm Init")) {
     OtherPhasesTime += Timer_Value("Drm Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Drm Init", MAX);
   }
 
   if (Timer_Exists("Topography Solver Init")) {
     OtherPhasesTime += Timer_Value("Topography Solver Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Topography Solver Init", MAX);
   }
 
-  SourceInitMax = Timer_Value("Source Init", MAX);
-  SourceInitForAccounting = SourceInitMax;
-  if (Timer_Exists("Pre Solver Setup")) {
-    SourceInitForAccounting = 0.0;
+  if (Timer_Exists("Source Init") && !Timer_Exists("Pre Solver Setup")) {
+    SourceInitForAccounting =
+        Timer_Value("Source Init", (TimerKind)0);
   }
-  SolverMax = Timer_Value("Solver", MAX);
+
+  /* Sum nonoverlapping timers on each rank first. Summing independently
+   * reduced component maxima can combine different ranks and exceed the wall
+   * clock even when every rank's local accounting is valid. Init DRM
+   * Parameters is also intentionally omitted because it is nested in Global
+   * Init, just as Source Init is nested in Pre Solver Setup. */
+  AccountedLocal = TotalMeshingTime + UnifiedHandoffTime +
+                   SourceInitForAccounting +
+                   Timer_Value("Solver", (TimerKind)0) + OtherPhasesTime;
+  MPI_Reduce(&AccountedLocal, &AccountedMax, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+
+  if (Global.myID != 0) {
+    return;
+  }
+
   TotalWallClockMax = Timer_Value("Total Wall Clock", MAX);
-  AccountedMax =
-      TotalMeshingTimeMax + UnifiedHandoffTimeMax + SourceInitForAccounting +
-      SolverMax + OtherPhasesTimeMax;
   UnaccountedMax = TotalWallClockMax - AccountedMax;
 
   printf(
@@ -25843,13 +25810,12 @@ static void print_timing_stat() {
   printf("DeltaT used               : %.6f seconds\n", Param.theDeltaT);
   printf("Critical deltaT           : %.6f seconds\n", Global.theCriticalT);
   printf("\n");
-  printf("Accounted (MAX basis)     : %.2f seconds\n", AccountedMax);
-    printf("Unaccounted vs wall clock (MAX basis): %.2f seconds\n",
-      UnaccountedMax);
+  printf("Accounted (rank-sum MAX)  : %.2f seconds\n", AccountedMax);
+  printf("Unaccounted vs wall clock : %.2f seconds\n", UnaccountedMax);
   printf("\n");
   printf("Total Wall Clock          : %.2f seconds\n",
          Timer_Value("Total Wall Clock", (TimerKind)0));
-    printf("Total Wall Clock (MAX)    : %.2f seconds\n", TotalWallClockMax);
+  printf("Total Wall Clock (MAX)    : %.2f seconds\n", TotalWallClockMax);
   printf("Time/step                 : %.6f seconds\n",
          Timer_Value("Solver", (TimerKind)0) / Param.theTotalSteps);
   printf("Time/step/(elem/PE)       : %.6f millisec\n",
@@ -25985,12 +25951,12 @@ static void print_timing_stat() {
   }
 
   printf(
-      "SOURCE INITIALIZATION               : %.2f (Max) %.2f (Min) seconds\n",
+      "SOURCE INITIALIZATION (nested setup): %.2f (Max) %.2f (Min) seconds\n",
       Timer_Value("Source Init", MAX), Timer_Value("Source Init", MIN));
   if (Timer_Exists("Global Init") || Timer_Exists("Pre Solver Setup") ||
       Timer_Exists("Post Solver Finalize") ||
       Timer_Exists("Topography Solver Init")) {
-    printf("OTHER PHASES (outside mesh/solver/source): %.2f seconds\n",
+    printf("OTHER PHASES (outside mesh/solver)  : %.2f seconds\n",
            OtherPhasesTime);
     if (Timer_Exists("Global Init")) {
       printf("    Global Init                    : %.2f (Average)   %.2f (Max) %.2f "
@@ -30078,10 +30044,9 @@ int main(int argc, char** argv) {
                  comm_solver);
   }
 
-  /* Print out the timing stat */
-  if (Global.myID == 0) {
-    print_timing_stat();
-  }
+  /* Collective because the wall-clock reconciliation reduces a complete
+   * rank-local timer sum before rank 0 prints the report. */
+  print_timing_stat();
 
   /* TODO: Think of a better place for this */
   if (Param.includeNonlinearAnalysis == YES) {
