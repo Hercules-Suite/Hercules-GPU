@@ -188,9 +188,7 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
 
     if ((env == NULL) || (env[0] == '\0') ||
         (strcasecmp(env, "auto") == 0)) {
-        requestedBackend = (io_pool_pe_count == 0)
-                               ? PLANE_BACKEND_GPU_ROOT
-                               : PLANE_BACKEND_LEGACY;
+        requestedBackend = PLANE_BACKEND_LEGACY;
     } else if ((strcasecmp(env, "mpiio") == 0) ||
                (strcasecmp(env, "mpi-io") == 0)) {
         requestedBackend = PLANE_BACKEND_GPU_MPIIO;

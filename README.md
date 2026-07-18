@@ -44,13 +44,13 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Default is `1` (enabled). This setting does not control CUDA plane
 	interpolation, packed-result device-to-host transfer, or file writing.
 - `HERCULES_PLANE_IO_MODE=auto|hybrid|mpiio|legacy`
-	Selects the plane-output backend. Default is `auto`, which uses the hybrid
-	backend whenever `IO_pool_pe_count=0`: fused GPU interpolation and one packed
-	device-to-host transfer are followed by the proven rank-0 strip gather and
-	buffered `fwrite` writer. `hybrid` explicitly selects this path. `mpiio`
+	Selects the plane-output backend. Default is `auto`, which selects legacy CPU
+	interpolation followed by the rank-0 strip gather and buffered `fwrite`
+	writer. `hybrid` explicitly selects fused GPU interpolation and one packed
+	device-to-host transfer followed by that same rank-0 writer. `mpiio`
 	selects the experimental distributed MPI-IO writer, in which each rank writes
-	its owned strips through a precomputed file view. `legacy` restores CPU
-	interpolation with the same rank-0 gather/write path. A configured dedicated
+	its owned strips through a precomputed file view. `legacy` explicitly selects
+	the default CPU interpolation and rank-0 path. A configured dedicated
 	I/O pool continues to select the existing I/O-pool backend. All backends
 	preserve the `planedisplacements.N` binary layout. Plane nodes
 	are excluded from the every-step displacement-output patch and are evaluated
