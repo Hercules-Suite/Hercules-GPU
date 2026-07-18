@@ -269,6 +269,14 @@ static fvector_t* g_dispOutputBufferDevice = NULL;
 static int32_t g_dispOutputNodeCount = 0;
 static int32_t g_dispOutputHostPinned = 0;
 static int32_t g_dispOutputReported = 0;
+static int32_t g_planeGpuOutputReady = 0;
+static int32_t g_planeGpuPointCount = 0;
+static int32_t* g_planeGpuNodesDevice = NULL;
+static double* g_planeGpuCoordsDevice = NULL;
+static int32_t* g_planeGpuModesDevice = NULL;
+static double* g_planeGpuValuesDevice = NULL;
+static double* g_planeGpuValuesHost = NULL;
+static int32_t g_planeGpuValuesHostPinned = 0;
 static int32_t g_pressureForceSyncMode = -1;
 static int32_t g_pressureForceSyncReported = 0;
 static int32_t g_pressureFieldSyncMode = -1;
@@ -836,6 +844,9 @@ static void solver_sync_pore_pressure_station_values(mysolver_t* solver);
 static void solver_free_pore_pressure_device_sync(void);
 static void solver_finalize_disp_boundary_download(mysolver_t* solver);
 static void solver_sync_displacement_output_values(mysolver_t* solver);
+static void solver_init_plane_gpu_output(mysolver_t* solver);
+static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID);
+static void solver_free_plane_gpu_output(void);
 static void solver_upload_disp_boundary_gpu(mysolver_t* solver);
 static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh);
 static void solver_record_force_upload_source_event(mysolver_t* solver);
@@ -15339,6 +15350,7 @@ static void solver_delete() {
   }
 
   /* Free device memory */
+  solver_free_plane_gpu_output();
   // cudaFree(Global.gpuData.elemTableDevice);
   // cudaFree(Global.gpuData.eTableDevice);
   // cudaFree(Global.gpuData.nTableDevice);
@@ -16004,8 +16016,15 @@ static void solver_output_planes(mysolver_t* solver, int my_id, int step) {
   if (Param.theNumberOfPlanes != 0) {
     if (step % Param.thePlanePrintRate == 0) {
       Timer_Start("Print Planes");
-      planes_print(my_id, Param.IO_pool_pe_count, Param.theNumberOfPlanes,
-                   solver);
+      if (planes_gpu_output_enabled()) {
+        if (!solver_output_planes_gpu(solver, my_id)) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "GPU plane output failed at step %d", step);
+        }
+      } else {
+        planes_print(my_id, Param.IO_pool_pe_count, Param.theNumberOfPlanes,
+                     solver);
+      }
       Timer_Stop("Print Planes");
     }
   }
@@ -18657,8 +18676,9 @@ static void solver_report_displacement_output_patch_count(
   if (Global.myID == 0) {
     monitor_print(
         "Displacement output patch nodes: %lld globally "
-        "(max/rank=%lld) for station/plane output%s\n",
+        "(max/rank=%lld) for station%s output%s\n",
         globalCount, maxCount,
+        planes_gpu_output_enabled() ? "" : "/plane",
         solver_displacement_output_needs_previous() ? " (tm1+tm2)" : " (tm1)");
   }
   g_dispOutputReported = 1;
@@ -18669,8 +18689,10 @@ static void solver_init_displacement_output_sync(mysolver_t* solver) {
   int32_t count = 0;
   int32_t uniqueCount = 0;
   int32_t* nodes = NULL;
-  const int32_t planeNodeCount = planes_displacement_node_count();
-  const int32_t* planeNodes = planes_displacement_nodes();
+  const int32_t planeNodeCount =
+      planes_gpu_output_enabled() ? 0 : planes_displacement_node_count();
+  const int32_t* planeNodes =
+      planes_gpu_output_enabled() ? NULL : planes_displacement_nodes();
   const int32_t topoStationNodeCount = topography_station_node_count();
 
   (void)solver;
@@ -18819,6 +18841,177 @@ static void solver_sync_displacement_output_values(mysolver_t* solver) {
                                           "displacement output tm2 gather");
   }
   Timer_Stop("Disp output D2H patch");
+}
+
+static void solver_init_plane_gpu_output(mysolver_t* solver) {
+  int32_t* nodesHost = NULL;
+  double* coordsHost = NULL;
+  int32_t* modesHost = NULL;
+
+  if (g_planeGpuOutputReady != 0 || !planes_gpu_output_enabled()) {
+    return;
+  }
+
+  g_planeGpuPointCount = planes_local_interpolation_point_count();
+  if (g_planeGpuPointCount <= 0) {
+    g_planeGpuOutputReady = 1;
+    return;
+  }
+  if ((solver == NULL) || (solver->gpuData == NULL) ||
+      (solver->gpuData->tm1Device == NULL)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "GPU plane output requested without device displacement "
+                 "state");
+  }
+
+  nodesHost = (int32_t*)malloc(sizeof(int32_t) *
+                              (size_t)g_planeGpuPointCount * 8);
+  coordsHost =
+      (double*)malloc(sizeof(double) * (size_t)g_planeGpuPointCount * 3);
+  modesHost =
+      (int32_t*)malloc(sizeof(int32_t) * (size_t)g_planeGpuPointCount);
+  if ((nodesHost == NULL) || (coordsHost == NULL) || (modesHost == NULL)) {
+    free(nodesHost);
+    free(coordsHost);
+    free(modesHost);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to allocate GPU plane interpolation metadata");
+  }
+  if (!planes_export_gpu_interpolation_metadata(
+          g_planeGpuPointCount, nodesHost, coordsHost, modesHost)) {
+    free(nodesHost);
+    free(coordsHost);
+    free(modesHost);
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to export GPU plane interpolation metadata");
+  }
+
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuNodesDevice,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount * 8),
+      "plane interpolation-node allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuCoordsDevice,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3),
+      "plane interpolation-coordinate allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuModesDevice,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount),
+      "plane interpolation-mode allocation");
+  solver_pore_pressure_device_check(
+      cudaMalloc((void**)&g_planeGpuValuesDevice,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3),
+      "plane result allocation");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuNodesDevice, nodesHost,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount * 8,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-node copy");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuCoordsDevice, coordsHost,
+                 sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-coordinate copy");
+  solver_pore_pressure_device_check(
+      cudaMemcpy(g_planeGpuModesDevice, modesHost,
+                 sizeof(int32_t) * (size_t)g_planeGpuPointCount,
+                 cudaMemcpyHostToDevice),
+      "plane interpolation-mode copy");
+
+  free(nodesHost);
+  free(coordsHost);
+  free(modesHost);
+
+  if (cudaHostAlloc((void**)&g_planeGpuValuesHost,
+                    sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                    cudaHostAllocDefault) == cudaSuccess) {
+    g_planeGpuValuesHostPinned = 1;
+  } else {
+    g_planeGpuValuesHost = (double*)malloc(
+        sizeof(double) * (size_t)g_planeGpuPointCount * 3);
+    if (g_planeGpuValuesHost == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to allocate host plane-result buffer");
+    }
+  }
+
+  g_planeGpuOutputReady = 1;
+  if (Global.myID == 0) {
+    monitor_print("GPU plane interpolation enabled (packed local results).\n");
+  }
+}
+
+static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID) {
+  const int32_t blocksize = 256;
+
+  solver_init_plane_gpu_output(solver);
+  if (g_planeGpuPointCount > 0) {
+    const int32_t gridsize =
+        (g_planeGpuPointCount + blocksize - 1) / blocksize;
+
+    Timer_Start("Plane GPU Interpolation");
+    kernelPlaneDisplacementInterpolate<<<
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+        g_planeGpuPointCount, g_planeGpuNodesDevice, g_planeGpuCoordsDevice,
+        g_planeGpuModesDevice, solver->gpuData->tm1Device,
+        g_planeGpuValuesDevice);
+    solver_pore_pressure_device_check(cudaGetLastError(),
+                                      "plane interpolation kernel");
+    solver_pore_pressure_device_check(
+        cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+        "plane interpolation sync");
+    Timer_Stop("Plane GPU Interpolation");
+
+    Timer_Start("Plane Result D2H");
+    solver_pore_pressure_device_check(
+        cudaMemcpyAsync(g_planeGpuValuesHost, g_planeGpuValuesDevice,
+                        sizeof(double) * (size_t)g_planeGpuPointCount * 3,
+                        cudaMemcpyDeviceToHost,
+                        solver->streams[CUDA_STREAM_MAIN]),
+        "plane result D2H");
+    solver->gpu_spec->numbytespci +=
+        (int64_t)g_planeGpuPointCount * 3 * (int64_t)sizeof(double);
+    solver_pore_pressure_device_check(
+        cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]),
+        "plane result D2H sync");
+    Timer_Stop("Plane Result D2H");
+
+    if (planes_host_only_point_count() > 0) {
+      Timer_Start("Plane Host Patch");
+      if (!planes_patch_host_only_values(g_planeGpuValuesHost,
+                                         g_planeGpuPointCount)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to patch host-only acoustic plane values");
+      }
+      Timer_Stop("Plane Host Patch");
+    }
+  }
+
+  return planes_print_gpu(myID, Param.theNumberOfPlanes,
+                          g_planeGpuValuesHost, g_planeGpuPointCount);
+}
+
+static void solver_free_plane_gpu_output(void) {
+  cudaFree(g_planeGpuNodesDevice);
+  cudaFree(g_planeGpuCoordsDevice);
+  cudaFree(g_planeGpuModesDevice);
+  cudaFree(g_planeGpuValuesDevice);
+  if (g_planeGpuValuesHost != NULL) {
+    if (g_planeGpuValuesHostPinned != 0) {
+      cudaFreeHost(g_planeGpuValuesHost);
+    } else {
+      free(g_planeGpuValuesHost);
+    }
+  }
+
+  g_planeGpuNodesDevice = NULL;
+  g_planeGpuCoordsDevice = NULL;
+  g_planeGpuModesDevice = NULL;
+  g_planeGpuValuesDevice = NULL;
+  g_planeGpuValuesHost = NULL;
+  g_planeGpuValuesHostPinned = 0;
+  g_planeGpuPointCount = 0;
+  g_planeGpuOutputReady = 0;
 }
 
 static void solver_init_pressure_sparse_sync(mysolver_t* solver) {
@@ -21870,6 +22063,18 @@ static void solver_run_collect_timers(void) {
    * this is NOT best and worst single step times
    */
   solver_reduce_timer_if_any("Print Planes",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane GPU Interpolation",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Result D2H",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Host Patch",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Root Gather",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane Root fwrite",
+                             (TimerKind)(MAX | MIN | AVERAGE));
+  solver_reduce_timer_if_any("Plane MPI-IO Write",
                              (TimerKind)(MAX | MIN | AVERAGE));
   solver_reduce_timer_if_any("Print Stations",
                              (TimerKind)(MAX | MIN | AVERAGE));
@@ -25486,26 +25691,18 @@ static void print_timing_stat() {
   double TotalMeshingTime;
   double UnifiedHandoffTime = 0.0;
   double OtherPhasesTime = 0.0;
-  double TotalMeshingTimeMax;
-  double UnifiedHandoffTimeMax = 0.0;
-  double OtherPhasesTimeMax = 0.0;
   double BalanceTime = 0.0;
-  double BalanceTimeMax = 0.0;
   double CorrectPropsTime = 0.0;
-  double CorrectPropsTimeMax = 0.0;
-  double SourceInitMax;
-  double SourceInitForAccounting;
-  double SolverMax;
+  double SourceInitForAccounting = 0.0;
+  double AccountedLocal;
   double TotalWallClockMax;
-  double AccountedMax;
+  double AccountedMax = 0.0;
   double UnaccountedMax;
   if (Timer_Exists("Octor Balancetree")) {
     BalanceTime = Timer_Value("Octor Balancetree", (TimerKind)0);
-    BalanceTimeMax = Timer_Value("Octor Balancetree", MAX);
   }
   if (Timer_Exists("Mesh correct properties")) {
     CorrectPropsTime = Timer_Value("Mesh correct properties", (TimerKind)0);
-    CorrectPropsTimeMax = Timer_Value("Mesh correct properties", MAX);
   }
 
   TotalMeshingTime = Timer_Value("Octor Newtree", (TimerKind)0) +
@@ -25528,93 +25725,68 @@ static void print_timing_stat() {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
   }
 
-  TotalMeshingTimeMax = Timer_Value("Octor Newtree", MAX) +
-                        Timer_Value("Octor Refinetree", MAX) +
-                        BalanceTimeMax +
-                        Timer_Value("Octor Partitiontree", MAX) +
-                        Timer_Value("Octor Extractmesh", MAX) +
-                        CorrectPropsTimeMax +
-                        Timer_Value("Mesh Stats Print", MAX);
-
-  if (Timer_Exists("Slice CVM")) {
-    TotalMeshingTimeMax += Timer_Value("Slice CVM", MAX);
-  }
-
-  if (Timer_Exists("Mesh Out")) {
-    TotalMeshingTimeMax += Timer_Value("Mesh Out", MAX);
-  }
-
-  if (Param.includeBuildings == YES && Timer_Exists("Carve Buildings")) {
-    TotalMeshingTimeMax += Timer_Value("Carve Buildings", MAX);
-  }
-
   /* Tree import is nested inside transfer. Setup, packing, transfer, and the
    * post-transfer reconstruction are otherwise nonoverlapping. */
   if (Timer_Exists("Unified Handoff Setup")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Setup", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Setup", MAX);
   }
   if (Timer_Exists("Unified Handoff Pack")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Pack", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Pack", MAX);
   }
   if (Timer_Exists("Unified Handoff Transfer")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Transfer", (TimerKind)0);
-    UnifiedHandoffTimeMax += Timer_Value("Unified Handoff Transfer", MAX);
   }
   if (Timer_Exists("Unified Handoff Reconstruction")) {
     UnifiedHandoffTime +=
         Timer_Value("Unified Handoff Reconstruction", (TimerKind)0);
-    UnifiedHandoffTimeMax +=
-        Timer_Value("Unified Handoff Reconstruction", MAX);
   }
 
   if (Timer_Exists("Global Init")) {
     OtherPhasesTime += Timer_Value("Global Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Global Init", MAX);
   }
   if (Timer_Exists("Pre Solver Setup")) {
     OtherPhasesTime += Timer_Value("Pre Solver Setup", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Pre Solver Setup", MAX);
   }
   if (Timer_Exists("Post Solver Finalize")) {
     OtherPhasesTime += Timer_Value("Post Solver Finalize", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Post Solver Finalize", MAX);
   }
 
   if (Timer_Exists("Phase Sync/Coordination")) {
     OtherPhasesTime += Timer_Value("Phase Sync/Coordination", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Phase Sync/Coordination", MAX);
-  }
-
-  if (Timer_Exists("Init Drm Parameters")) {
-    OtherPhasesTime += Timer_Value("Init Drm Parameters", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Init Drm Parameters", MAX);
   }
 
   if (Timer_Exists("Drm Init")) {
     OtherPhasesTime += Timer_Value("Drm Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Drm Init", MAX);
   }
 
   if (Timer_Exists("Topography Solver Init")) {
     OtherPhasesTime += Timer_Value("Topography Solver Init", (TimerKind)0);
-    OtherPhasesTimeMax += Timer_Value("Topography Solver Init", MAX);
   }
 
-  SourceInitMax = Timer_Value("Source Init", MAX);
-  SourceInitForAccounting = SourceInitMax;
-  if (Timer_Exists("Pre Solver Setup")) {
-    SourceInitForAccounting = 0.0;
+  if (Timer_Exists("Source Init") && !Timer_Exists("Pre Solver Setup")) {
+    SourceInitForAccounting =
+        Timer_Value("Source Init", (TimerKind)0);
   }
-  SolverMax = Timer_Value("Solver", MAX);
+
+  /* Sum nonoverlapping timers on each rank first. Summing independently
+   * reduced component maxima can combine different ranks and exceed the wall
+   * clock even when every rank's local accounting is valid. Init DRM
+   * Parameters is also intentionally omitted because it is nested in Global
+   * Init, just as Source Init is nested in Pre Solver Setup. */
+  AccountedLocal = TotalMeshingTime + UnifiedHandoffTime +
+                   SourceInitForAccounting +
+                   Timer_Value("Solver", (TimerKind)0) + OtherPhasesTime;
+  MPI_Reduce(&AccountedLocal, &AccountedMax, 1, MPI_DOUBLE, MPI_MAX, 0,
+             comm_solver);
+
+  if (Global.myID != 0) {
+    return;
+  }
+
   TotalWallClockMax = Timer_Value("Total Wall Clock", MAX);
-  AccountedMax =
-      TotalMeshingTimeMax + UnifiedHandoffTimeMax + SourceInitForAccounting +
-      SolverMax + OtherPhasesTimeMax;
   UnaccountedMax = TotalWallClockMax - AccountedMax;
 
   printf(
@@ -25638,13 +25810,12 @@ static void print_timing_stat() {
   printf("DeltaT used               : %.6f seconds\n", Param.theDeltaT);
   printf("Critical deltaT           : %.6f seconds\n", Global.theCriticalT);
   printf("\n");
-  printf("Accounted (MAX basis)     : %.2f seconds\n", AccountedMax);
-    printf("Unaccounted vs wall clock (MAX basis): %.2f seconds\n",
-      UnaccountedMax);
+  printf("Accounted (rank-sum MAX)  : %.2f seconds\n", AccountedMax);
+  printf("Unaccounted vs wall clock : %.2f seconds\n", UnaccountedMax);
   printf("\n");
   printf("Total Wall Clock          : %.2f seconds\n",
          Timer_Value("Total Wall Clock", (TimerKind)0));
-    printf("Total Wall Clock (MAX)    : %.2f seconds\n", TotalWallClockMax);
+  printf("Total Wall Clock (MAX)    : %.2f seconds\n", TotalWallClockMax);
   printf("Time/step                 : %.6f seconds\n",
          Timer_Value("Solver", (TimerKind)0) / Param.theTotalSteps);
   printf("Time/step/(elem/PE)       : %.6f millisec\n",
@@ -25780,12 +25951,12 @@ static void print_timing_stat() {
   }
 
   printf(
-      "SOURCE INITIALIZATION               : %.2f (Max) %.2f (Min) seconds\n",
+      "SOURCE INITIALIZATION (nested setup): %.2f (Max) %.2f (Min) seconds\n",
       Timer_Value("Source Init", MAX), Timer_Value("Source Init", MIN));
   if (Timer_Exists("Global Init") || Timer_Exists("Pre Solver Setup") ||
       Timer_Exists("Post Solver Finalize") ||
       Timer_Exists("Topography Solver Init")) {
-    printf("OTHER PHASES (outside mesh/solver/source): %.2f seconds\n",
+    printf("OTHER PHASES (outside mesh/solver)  : %.2f seconds\n",
            OtherPhasesTime);
     if (Timer_Exists("Global Init")) {
       printf("    Global Init                    : %.2f (Average)   %.2f (Max) %.2f "
@@ -26639,6 +26810,48 @@ static void print_timing_stat() {
         "%.2f (Min) seconds\n",
         Timer_Value("Print Planes", AVERAGE), Timer_Value("Print Planes", MAX),
         Timer_Value("Print Planes", MIN));
+  if (Timer_Exists("Plane GPU Interpolation"))
+    printf(
+        "          Plane GPU interpolation  : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane GPU Interpolation", AVERAGE),
+        Timer_Value("Plane GPU Interpolation", MAX),
+        Timer_Value("Plane GPU Interpolation", MIN));
+  if (Timer_Exists("Plane Result D2H"))
+    printf(
+        "          Plane packed-result D2H  : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Result D2H", AVERAGE),
+        Timer_Value("Plane Result D2H", MAX),
+        Timer_Value("Plane Result D2H", MIN));
+  if (Timer_Exists("Plane Host Patch"))
+    printf(
+        "          Plane acoustic host patch: %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Host Patch", AVERAGE),
+        Timer_Value("Plane Host Patch", MAX),
+        Timer_Value("Plane Host Patch", MIN));
+  if (Timer_Exists("Plane Root Gather"))
+    printf(
+        "          Plane rank-0 gather      : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Root Gather", AVERAGE),
+        Timer_Value("Plane Root Gather", MAX),
+        Timer_Value("Plane Root Gather", MIN));
+  if (Timer_Exists("Plane Root fwrite"))
+    printf(
+        "          Plane rank-0 fwrite      : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane Root fwrite", AVERAGE),
+        Timer_Value("Plane Root fwrite", MAX),
+        Timer_Value("Plane Root fwrite", MIN));
+  if (Timer_Exists("Plane MPI-IO Write"))
+    printf(
+        "          Plane MPI-IO write       : %.2f (Average)   %.2f (Max) "
+        "%.2f (Min) seconds\n",
+        Timer_Value("Plane MPI-IO Write", AVERAGE),
+        Timer_Value("Plane MPI-IO Write", MAX),
+        Timer_Value("Plane MPI-IO Write", MIN));
   if (Timer_Exists("Print Stations"))
     printf(
         "        Stations                    : %.2f (Average)   %.2f (Max) "
@@ -29831,10 +30044,9 @@ int main(int argc, char** argv) {
                  comm_solver);
   }
 
-  /* Print out the timing stat */
-  if (Global.myID == 0) {
-    print_timing_stat();
-  }
+  /* Collective because the wall-clock reconciliation reduces a complete
+   * rank-local timer sum before rank 0 prints the report. */
+  print_timing_stat();
 
   /* TODO: Think of a better place for this */
   if (Param.includeNonlinearAnalysis == YES) {

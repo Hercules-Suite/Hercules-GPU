@@ -29,6 +29,16 @@ extern int32_t planes_displacement_node_count(void);
 extern const int32_t* planes_displacement_nodes(void);
 extern int32_t planes_acoustic_pressure_node_count(void);
 extern const int32_t* planes_acoustic_pressure_nodes(void);
+extern int32_t planes_gpu_output_enabled(void);
+extern int32_t planes_local_interpolation_point_count(void);
+extern int32_t planes_host_only_point_count(void);
+extern int planes_export_gpu_interpolation_metadata(
+    int32_t pointCount, int32_t* nodes, double* coords, int32_t* modes);
+extern int planes_patch_host_only_values(double* packedValues,
+                                         int32_t pointCount);
+extern int planes_print_gpu(int32_t myID, int theNumberOfPlanes,
+                            const double* packedValues,
+                            int32_t pointCount);
 extern void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,

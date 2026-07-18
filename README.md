@@ -30,12 +30,34 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Enables or disables OpenMP parallelization for full-array host force clear when `HERCULES_SPARSE_CLEAR_MODE=full`. Default is `1`
 	(enabled).
 - `HERCULES_STATION_IO_OMP=1|0`
-	Enables or disables OpenMP parallelization for station displacement interpolation and per-station file writes. Default is `1` (enabled).
+	Enables or disables OpenMP parallelization for host-side station setup,
+	displacement/kinematic processing, acoustic kinematic reconstruction,
+	formatting, and per-station file writes. Default is `1` (enabled). CUDA
+	pressure, pore-pressure, strain, and stress interpolation/gather kernels are
+	not controlled by this setting.
 - `HERCULES_STATION_ROUTE_MODE=interval|all`
 	Controls station ownership lookup during setup. Default is `interval`, which uses the octree partition interval to skip stations that cannot belong to the current rank before calling the local octree search. `all` restores the older behavior where every rank searches every station.
 - `HERCULES_PLANE_IO_OMP=1|0`
-	Enables or disables OpenMP parallelization for per-strip plane
-	interpolation before MPI send/write. Default is `1` (enabled).
+	Enables or disables OpenMP parallelization for plane-strip construction and
+	metadata setup in all output backends, reconstructed acoustic-plane
+	kinematics on each timestep, and legacy host-side plane interpolation.
+	Default is `1` (enabled). This setting does not control CUDA plane
+	interpolation, packed-result device-to-host transfer, or file writing.
+- `HERCULES_PLANE_IO_MODE=auto|hybrid|mpiio|legacy`
+	Selects the plane-output backend. Default is `auto`, which selects legacy CPU
+	interpolation followed by the rank-0 strip gather and buffered `fwrite`
+	writer. `hybrid` explicitly selects fused GPU interpolation and one packed
+	device-to-host transfer followed by that same rank-0 writer. `mpiio`
+	selects the experimental distributed MPI-IO writer, in which each rank writes
+	its owned strips through a precomputed file view. `legacy` explicitly selects
+	the default CPU interpolation and rank-0 path. A configured dedicated
+	I/O pool continues to select the existing I/O-pool backend. All backends
+	preserve the `planedisplacements.N` binary layout. Plane nodes
+	are excluded from the every-step displacement-output patch and are evaluated
+	only at `output_planes_print_rate` for the GPU backends. Timers report
+	`Plane GPU Interpolation`, `Plane Result D2H`, `Plane Host Patch` (only for
+	reconstructed acoustic points), and either `Plane Root Gather` plus
+	`Plane Root fwrite` or `Plane MPI-IO Write` inside `Print Planes`/`Solver I/O`.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_CONTRIB_UNPACK_OMP=1|0`
@@ -62,10 +84,12 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	`boundary` sends those displacement boundary values directly from device
 	memory and performs the hanging-node adjustment on the GPU, eliminating the
 	host staging for that exchange.
-	Station and plane output no longer force a full displacement host path:
-	when `boundary` is active, the solver patches only the station/plane
-	interpolation nodes needed by host-side output before printing, including
-	the separate tetrahedral station stencil used by VT topography. For
+	Station and plane output no longer force a full displacement host path.
+	With the default scalable plane backend, plane interpolation reads
+	device-resident displacements directly and does not enter the every-step
+	host output patch. The legacy plane backend and station fallback paths patch
+	only their interpolation nodes, including the separate tetrahedral station
+	stencil used by VT topography. For
 	correctness, `boundary` still falls back to `full` when checkpoint/DRM/
 	nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host
 	displacement arrays. Completed station and plane output files are flushed
@@ -297,6 +321,9 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_STATION_ROUTE_MODE=all
 # export HERCULES_PLANE_IO_OMP=0
+# export HERCULES_PLANE_IO_MODE=hybrid
+# export HERCULES_PLANE_IO_MODE=mpiio
+# export HERCULES_PLANE_IO_MODE=legacy
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
 # export HERCULES_TOPO_FORCE_MODE=cpu
