@@ -57,6 +57,16 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	only at `output_planes_print_rate`. Timers report `Plane GPU Interpolation`,
 	`Plane Result D2H`, `Plane Host Patch` (only for reconstructed acoustic
 	points), and `Plane MPI-IO Write` inside `Print Planes`/`Solver I/O`.
+- `HERCULES_PLANE_MPIIO_BATCH=<snapshots>`
+	Sets the number of packed plane snapshots accumulated per rank before each
+	collective MPI-IO write. Default is `64`; use `1` to restore one collective
+	write per snapshot. A partial final batch is flushed before solver timing is
+	reduced and again defensively when the files are closed. Buffer memory scales
+	with the sum of the local per-plane payloads times this value; the run log
+	reports the selected batch size and maximum buffer allocation per rank.
+	Snapshots become visible in the output files when their batch is flushed;
+	use `1` when immediate per-snapshot visibility is required. This setting has
+	no effect on the `legacy` backend.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_CONTRIB_UNPACK_OMP=1|0`
@@ -321,6 +331,7 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_STATION_ROUTE_MODE=all
 # export HERCULES_PLANE_IO_OMP=0
 # export HERCULES_PLANE_IO_MODE=legacy
+# export HERCULES_PLANE_MPIIO_BATCH=64
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
 # export HERCULES_SPARSE_UPLOAD_MODE=range
 # export HERCULES_TOPO_FORCE_MODE=cpu

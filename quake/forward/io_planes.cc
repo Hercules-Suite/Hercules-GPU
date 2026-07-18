@@ -75,6 +75,7 @@ static void print_planeinfo(int32_t myID, int theNumberOfPlanes);
 static void planes_select_output_mode(int32_t myID, int io_pool_pe_count);
 static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
                                const char* planeDirOut);
+static int planes_mpiio_flush_batch(void);
 static void planes_mpiio_close(int theNumberOfPlanes);
 
 int  Old_planes_print(int32_t myID, mysolver_t* mySolver, int theNumberOfPlanes);
@@ -152,6 +153,11 @@ static MPI_Datatype* g_planeMpiFileTypes = NULL;
 static int32_t* g_planeLocalPointOffsets = NULL;
 static int32_t* g_planeLocalValueCounts = NULL;
 static MPI_Offset* g_planeSnapshotBytes = NULL;
+static double** g_planeMpiBatchBuffers = NULL;
+static int32_t g_planeMpiBatchCapacity = 64;
+static int32_t g_planeMpiBatchCount = 0;
+static int32_t g_planeMpiBatchStartSequence = 0;
+static int64_t g_planeMpiBatchFlushCount = 0;
 static int32_t g_planeLocalPointCount = 0;
 static int32_t g_planeMpiPlaneCount = 0;
 static int32_t g_planeHostOnlyPointCount = 0;
@@ -168,6 +174,32 @@ static void planes_mpi_check(int errorCode, const char* operation) {
             errorLength, errorText);
     MPI_Abort(comm_solver, errorCode);
     exit(1);
+}
+
+static int32_t planes_mpiio_batch_capacity(int32_t myID) {
+    int32_t capacity = 64;
+
+    if (myID == 0) {
+        const char* env = getenv("HERCULES_PLANE_MPIIO_BATCH");
+        if ((env != NULL) && (env[0] != '\0')) {
+            char* end = NULL;
+            long parsed;
+
+            errno = 0;
+            parsed = strtol(env, &end, 10);
+            if ((errno != 0) || (end == env) || (*end != '\0') ||
+                (parsed < 1) || (parsed > INT32_MAX)) {
+                solver_abort("planes_mpiio_batch_capacity", NULL,
+                             "Invalid HERCULES_PLANE_MPIIO_BATCH=%s; "
+                             "expected an integer >= 1",
+                             env);
+            }
+            capacity = (int32_t)parsed;
+        }
+    }
+
+    MPI_Bcast(&capacity, 1, MPI_INT, 0, comm_solver);
+    return capacity;
 }
 
 static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
@@ -212,6 +244,9 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
 
     g_planeGpuMpiioEnabled = requestedMpiio;
     g_planePrintSequence = 0;
+    g_planeMpiBatchCount = 0;
+    g_planeMpiBatchStartSequence = 0;
+    g_planeMpiBatchFlushCount = 0;
     g_planeHostOnlyPointCount = 0;
     if (myID == 0) {
         printf("Plane output backend: %s\n",
@@ -223,12 +258,19 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
 static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
                                const char* planeDirOut) {
     int64_t localPointCount = 0;
+    int64_t localBatchBytes = 0;
     long long globalPointCount = 0;
     long long maxRankPointCount = 0;
+    long long maxRankBatchBytes = 0;
 
     if (!g_planeGpuMpiioEnabled || (theNumberOfPlanes <= 0)) {
         return;
     }
+
+    g_planeMpiBatchCapacity = planes_mpiio_batch_capacity(myID);
+    g_planeMpiBatchCount = 0;
+    g_planeMpiBatchStartSequence = 0;
+    g_planeMpiBatchFlushCount = 0;
 
     g_planeMpiFiles = (MPI_File*)calloc((size_t)theNumberOfPlanes,
                                         sizeof(MPI_File));
@@ -240,10 +282,13 @@ static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
         (size_t)theNumberOfPlanes, sizeof(int32_t));
     g_planeSnapshotBytes = (MPI_Offset*)calloc(
         (size_t)theNumberOfPlanes, sizeof(MPI_Offset));
+    g_planeMpiBatchBuffers = (double**)calloc(
+        (size_t)theNumberOfPlanes, sizeof(double*));
     if ((g_planeMpiFiles == NULL) || (g_planeMpiFileTypes == NULL) ||
         (g_planeLocalPointOffsets == NULL) ||
         (g_planeLocalValueCounts == NULL) ||
-        (g_planeSnapshotBytes == NULL)) {
+        (g_planeSnapshotBytes == NULL) ||
+        (g_planeMpiBatchBuffers == NULL)) {
         solver_abort("planes_mpiio_setup", NULL,
                      "Unable to allocate plane MPI-IO state");
     }
@@ -327,6 +372,37 @@ static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
         g_planeLocalPointOffsets[iPlane] = (int32_t)localPointCount;
         g_planeLocalValueCounts[iPlane] = (int32_t)localValues64;
         g_planeSnapshotBytes[iPlane] = (MPI_Offset)snapshotBytes64;
+        if ((localValues64 > 0) &&
+            ((localValues64 > INT_MAX / g_planeMpiBatchCapacity) ||
+             ((uint64_t)localValues64 >
+              SIZE_MAX / sizeof(double) /
+                  (uint64_t)g_planeMpiBatchCapacity))) {
+            solver_abort("planes_mpiio_setup", NULL,
+                         "Plane %d MPI-IO batch size %d exceeds count or "
+                         "address-space limits on this rank",
+                         iPlane, g_planeMpiBatchCapacity);
+        }
+        if (localValues64 > 0) {
+            const size_t batchValues =
+                (size_t)localValues64 * (size_t)g_planeMpiBatchCapacity;
+            const size_t batchBytes = batchValues * sizeof(double);
+
+            g_planeMpiBatchBuffers[iPlane] =
+                (double*)malloc(batchBytes);
+            if (g_planeMpiBatchBuffers[iPlane] == NULL) {
+                solver_abort("planes_mpiio_setup", NULL,
+                             "Unable to allocate %zu-byte MPI-IO batch "
+                             "buffer for plane %d",
+                             batchBytes, iPlane);
+            }
+            if ((uint64_t)batchBytes >
+                (uint64_t)INT64_MAX - (uint64_t)localBatchBytes) {
+                solver_abort("planes_mpiio_setup", NULL,
+                             "Total local plane MPI-IO batch memory "
+                             "exceeds INT64_MAX");
+            }
+            localBatchBytes += (int64_t)batchBytes;
+        }
         localPointCount += localValues64 / 3;
         if (localPointCount > INT32_MAX) {
             solver_abort("planes_mpiio_setup", NULL,
@@ -365,17 +441,110 @@ static void planes_mpiio_setup(int32_t myID, int theNumberOfPlanes,
                    comm_solver);
         MPI_Reduce(&local, &maxRankPointCount, 1, MPI_LONG_LONG, MPI_MAX, 0,
                    comm_solver);
+        {
+            const long long localBytes = (long long)localBatchBytes;
+            MPI_Reduce(&localBytes, &maxRankBatchBytes, 1, MPI_LONG_LONG,
+                       MPI_MAX, 0, comm_solver);
+        }
     }
     if (myID == 0) {
         printf("Plane GPU/MPI-IO layout: %lld interpolation points globally "
                "(max/rank=%lld)\n",
                globalPointCount, maxRankPointCount);
+        printf("Plane MPI-IO batching: %d snapshots/collective "
+               "(max buffer/rank=%.2f MiB)\n",
+               g_planeMpiBatchCapacity,
+               (double)maxRankBatchBytes / (1024.0 * 1024.0));
     }
 }
 
+static int planes_mpiio_flush_batch(void) {
+    static double emptyBuffer = 0.0;
+
+    if (!g_planeGpuMpiioEnabled || (g_planeMpiFiles == NULL) ||
+        (g_planeMpiBatchBuffers == NULL) ||
+        (g_planeMpiBatchCount < 0) ||
+        (g_planeMpiBatchCount > g_planeMpiBatchCapacity)) {
+        return 0;
+    }
+    if (g_planeMpiBatchCount == 0) {
+        return 1;
+    }
+    if ((g_planeMpiBatchStartSequence + g_planeMpiBatchCount) !=
+        g_planePrintSequence) {
+        return 0;
+    }
+
+    for (int iPlane = 0; iPlane < g_planeMpiPlaneCount; iPlane++) {
+        MPI_Status status;
+        const int32_t localValues = g_planeLocalValueCounts[iPlane];
+        const int64_t writeCount64 =
+            (int64_t)localValues * (int64_t)g_planeMpiBatchCount;
+        int writeCount;
+        const MPI_Offset fileOffset =
+            (MPI_Offset)g_planeMpiBatchStartSequence *
+            (MPI_Offset)localValues;
+        const double* buffer =
+            (localValues > 0) ? g_planeMpiBatchBuffers[iPlane]
+                              : &emptyBuffer;
+
+        if ((writeCount64 < 0) || (writeCount64 > INT_MAX) ||
+            ((localValues > 0) && (buffer == NULL))) {
+            return 0;
+        }
+        writeCount = (int)writeCount64;
+        planes_mpi_check(
+            MPI_File_write_at_all(g_planeMpiFiles[iPlane], fileOffset,
+                                  (void*)buffer, writeCount, MPI_DOUBLE,
+                                  &status),
+            "batched collective write");
+        if (writeCount > 0) {
+            int written = 0;
+            planes_mpi_check(MPI_Get_count(&status, MPI_DOUBLE, &written),
+                             "batched write count");
+            if (written != writeCount) {
+                solver_abort("planes_mpiio_flush_batch", NULL,
+                             "Short plane MPI-IO batch write: expected %d "
+                             "doubles, wrote %d",
+                             writeCount, written);
+            }
+        }
+    }
+
+    g_planeMpiBatchCount = 0;
+    g_planeMpiBatchStartSequence = g_planePrintSequence;
+    g_planeMpiBatchFlushCount++;
+    return 1;
+}
+
+int planes_flush_gpu_mpiio(void) {
+    int result;
+
+    if (!g_planeGpuMpiioEnabled || (g_planeMpiBatchCount == 0)) {
+        return 1;
+    }
+    Timer_Start("Plane MPI-IO Write");
+    result = planes_mpiio_flush_batch();
+    Timer_Stop("Plane MPI-IO Write");
+    return result;
+}
+
 static void planes_mpiio_close(int theNumberOfPlanes) {
+    int solverRank = -1;
+
     if (!g_planeGpuMpiioEnabled || (g_planeMpiFiles == NULL)) {
         return;
+    }
+
+    if (!planes_mpiio_flush_batch()) {
+        solver_abort("planes_mpiio_close", NULL,
+                     "Unable to flush final plane MPI-IO batch");
+    }
+    MPI_Comm_rank(comm_solver, &solverRank);
+    if (solverRank == 0) {
+        printf("Plane MPI-IO completed: %" PRId64
+               " collective batches for %d snapshots\n",
+               g_planeMpiBatchFlushCount, g_planePrintSequence);
     }
 
     for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
@@ -388,6 +557,7 @@ static void planes_mpiio_close(int theNumberOfPlanes) {
         if (g_planeMpiFileTypes[iPlane] != MPI_DATATYPE_NULL) {
             MPI_Type_free(&g_planeMpiFileTypes[iPlane]);
         }
+        free(g_planeMpiBatchBuffers[iPlane]);
     }
 
     free(g_planeMpiFiles);
@@ -395,11 +565,17 @@ static void planes_mpiio_close(int theNumberOfPlanes) {
     free(g_planeLocalPointOffsets);
     free(g_planeLocalValueCounts);
     free(g_planeSnapshotBytes);
+    free(g_planeMpiBatchBuffers);
     g_planeMpiFiles = NULL;
     g_planeMpiFileTypes = NULL;
     g_planeLocalPointOffsets = NULL;
     g_planeLocalValueCounts = NULL;
     g_planeSnapshotBytes = NULL;
+    g_planeMpiBatchBuffers = NULL;
+    g_planeMpiBatchCapacity = 64;
+    g_planeMpiBatchCount = 0;
+    g_planeMpiBatchStartSequence = 0;
+    g_planeMpiBatchFlushCount = 0;
     g_planeLocalPointCount = 0;
     g_planeMpiPlaneCount = 0;
     g_planeHostOnlyPointCount = 0;
@@ -717,10 +893,12 @@ int planes_patch_host_only_values(double* packedValues,
 int planes_print_gpu_mpiio(int32_t myID, int theNumberOfPlanes,
                            const double* packedValues,
                            int32_t pointCount) {
-	static double emptyBuffer = 0.0;
 	(void)myID;
 
 	if (!g_planeGpuMpiioEnabled || (g_planeMpiFiles == NULL) ||
+	    (g_planeMpiBatchBuffers == NULL) ||
+	    (g_planeMpiBatchCount < 0) ||
+	    (g_planeMpiBatchCount >= g_planeMpiBatchCapacity) ||
 	    (theNumberOfPlanes != g_planeMpiPlaneCount) ||
 	    (pointCount != g_planeLocalPointCount) ||
 	    ((pointCount > 0) && (packedValues == NULL))) {
@@ -728,35 +906,35 @@ int planes_print_gpu_mpiio(int32_t myID, int theNumberOfPlanes,
 	}
 
 	Timer_Start("Plane MPI-IO Write");
+	if (g_planeMpiBatchCount == 0) {
+		g_planeMpiBatchStartSequence = g_planePrintSequence;
+	}
+	if ((g_planeMpiBatchStartSequence + g_planeMpiBatchCount) !=
+	    g_planePrintSequence) {
+		Timer_Stop("Plane MPI-IO Write");
+		return 0;
+	}
 	for (int iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
-		MPI_Status status;
 		const int32_t localValues = g_planeLocalValueCounts[iPlane];
 		const int32_t pointOffset = g_planeLocalPointOffsets[iPlane];
-		const MPI_Offset fileOffset =
-			(MPI_Offset)g_planePrintSequence * (MPI_Offset)localValues;
-		const double* buffer =
-			(localValues > 0) ? packedValues + (size_t)pointOffset * 3
-			                  : &emptyBuffer;
-
-		planes_mpi_check(
-			MPI_File_write_at_all(g_planeMpiFiles[iPlane], fileOffset,
-			                      (void*)buffer, localValues, MPI_DOUBLE,
-			                      &status),
-			"collective write");
 		if (localValues > 0) {
-			int written = 0;
-			planes_mpi_check(MPI_Get_count(&status, MPI_DOUBLE, &written),
-			                 "write count");
-			if (written != localValues) {
-				solver_abort("planes_print_gpu_mpiio", NULL,
-				             "Short plane MPI-IO write: expected %d doubles, "
-				             "wrote %d",
-				             localValues, written);
-			}
+			double* const batchDestination =
+				g_planeMpiBatchBuffers[iPlane] +
+				(size_t)g_planeMpiBatchCount * (size_t)localValues;
+			const double* const planeValues =
+				packedValues + (size_t)pointOffset * 3;
+			memcpy(batchDestination, planeValues,
+			       (size_t)localValues * sizeof(double));
 		}
 	}
-	Timer_Stop("Plane MPI-IO Write");
+	g_planeMpiBatchCount++;
 	g_planePrintSequence++;
+	if ((g_planeMpiBatchCount == g_planeMpiBatchCapacity) &&
+	    !planes_mpiio_flush_batch()) {
+		Timer_Stop("Plane MPI-IO Write");
+		return 0;
+	}
+	Timer_Stop("Plane MPI-IO Write");
 	return 1;
 }
 
