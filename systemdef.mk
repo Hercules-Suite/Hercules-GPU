@@ -19,8 +19,26 @@
 -include $(WORKDIR)/user.mk
 
 ifndef SYSTEM
-	SYSTEM = nvl72
+	SYSTEM = horizon
 endif
+
+ifeq ($(SYSTEM), horizon)
+        CC      = mpicc
+        CXX     = mpicxx
+        LD      = mpicxx
+        CFLAGS  += -DBIGBEN
+        CFLAGS  += -g -I/scratch/08458/wz_tacc/software/proj/9.8.1-nvhpc-26.5/include
+        CPPFLAGS += -g -I/scratch/08458/wz_tacc/software/proj/9.8.1-nvhpc-26.5/include
+        CC += -I/scratch/08458/wz_tacc/software/gsl/2.8-nvhpc-26.5/include
+        CXX += -I/scratch/08458/wz_tacc/software/gsl/2.8-nvhpc-26.5/include
+        LDFLAGS += -L/scratch/08458/wz_tacc/software/gsl/2.8-nvhpc-26.5/lib -L/scratch/08458/wz_tacc/software/proj/9.8.1-nvhpc-26.5/lib
+        LDFLAGS += -lgsl -lgslcblas -lproj
+#               LDFLAGS  += -L$(CUDA_DIR)/lib64 -lcudart
+        CPPFLAGS += -D_USE_FILE_OFFSET64 -D_FILE_OFFSET_BITS=64 -D_USE_LARGEFILE64 -DPROJ
+        NVCC    = nvcc -arch=sm_100
+        NVCC += -I/scratch/08458/wz_tacc/software/gsl/2.8-nvhpc-26.5/include
+endif
+
 
 ifeq ($(SYSTEM), nvl72)
         CC      = mpicc
