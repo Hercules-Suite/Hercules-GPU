@@ -47,12 +47,12 @@ etree:
 octor:
 	$(MAKE) -C $(OCTOR_DIR)   SYSTEM=$(SYSTEM) WORKDIR=$(WORKDIR)
 
-# Build the cvm target
-cvm:
+# Build the cvm target after its etree link dependency
+cvm: etree
 	$(MAKE) -C $(CVM_DIR)     SYSTEM=$(SYSTEM) WORKDIR=$(WORKDIR)
 
-# Build the forward target
-forward:
+# Build the forward target after all linked libraries and objects
+forward: etree octor cvm
 	$(MAKE) -C $(FORWARD_DIR) SYSTEM=$(SYSTEM) WORKDIR=$(WORKDIR)
 
 # Clean targets
