@@ -152,10 +152,12 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	and large rank-count mesh builds should avoid mlx5 reliable-connection
 	endpoint pressure. For Phase B, the wrapper defaults CUDA-aware Open MPI runs
 	to `OMPI_MCA_pml=ucx`, unsets `OMPI_MCA_btl`, and sets
-	`UCX_TLS=dc,sm,self,cuda_copy`. The scalable DC transport avoids the per-peer
-	reliable-connection queue-pair pressure observed in large jobs, while
-	`cuda_copy` retains CUDA-memory handling without enabling `cuda_ipc`, which
-	has intermittently failed to open device IPC handles on Vista GB nodes.
+	`UCX_TLS=dc,sm,self,cuda_copy,cuda_ipc`. The scalable DC transport avoids the
+	per-peer reliable-connection queue-pair pressure observed in large jobs,
+	while `cuda_ipc` enables direct intra-node transfers between GPU ranks and
+	`cuda_copy` provides the general CUDA-memory fallback. On systems whose UCX
+	stack cannot open CUDA IPC handles reliably, set
+	`PHASE_B_UCX_TLS=dc,sm,self,cuda_copy` to disable only the IPC transport.
 	Unified mode applies this setting to its single MPI job from startup, so it
 	also covers the larger Phase-A rank set. Set `PHASE_B_UCX_TLS` or
 	`PHASE_B_OMPI_MCA_PML` only when intentionally overriding the Phase B
@@ -253,13 +255,14 @@ Advanced/diagnostic toggles:
 	adds extra timing/reduction work.
 - `OCTOR_SETCOM_ALL2ALL=0|1`
 	Controls construction of Octor's communication manager during mesh
-	extraction. The two-phase launcher defaults Phase A to `1`; mesh-input
-	Phase B and unified in-memory reconstruction also default to `1`. This
-	constructs the peer table directly instead of scanning every local leaf to
-	rediscover neighboring ranks. It is important when a rank owns millions of
-	elements. Set it explicitly to `0` only for diagnostic comparison with the
-	legacy neighbor-discovery path. Unified Phase-A generation is unchanged
-	unless this variable is explicitly exported for the whole unified launch.
+	extraction. The two-phase launcher defaults Phase A to `0`, using Octor's
+	neighbor-discovery path; the all-to-all shortcut produced invalid hanging-node
+	topology during extraction of a 2,304-rank production mesh. Mesh-input Phase B
+	and unified in-memory reconstruction still default to `1` because their
+	distributed ownership is already known. Set `1` explicitly for two-phase Phase
+	A only after validating the generated mesh at the intended rank count. Unified
+	Phase-A generation is unchanged unless this variable is explicitly exported
+	for the whole unified launch.
 - `OCTOR_NODE_SORT_MODE=radix|qsort`
 	Controls the node-table Morton/Z-order sort inside `octor_extractmesh()`.
 	Default is `radix`, a linear-time 8-bucket radix sort over the 30 Morton
