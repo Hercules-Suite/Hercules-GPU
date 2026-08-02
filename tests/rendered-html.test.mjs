@@ -200,4 +200,9 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /np\.meshgrid/);
   assert.match(html, /values\.reshape\(nx, ny\)/);
   assert.match(html, /perimeter range/);
+  assert.match(html, /benchmark_inputs\/taper_topography\.py/);
+  assert.match(html, /--flat-margin 1500/);
+  assert.match(html, /--pml-thickness.*does not configure Hercules/s);
+  assert.match(html, /max \|z_boundary - z_ref\| = 0/);
+  assert.match(html, /cpml_3d_material_extension/);
 });

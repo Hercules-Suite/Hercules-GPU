@@ -622,6 +622,59 @@ export const docPages: Record<string, DocPageContent> = {
         code: "import numpy as np\n\nlength_north = 40_000.0\nlength_east = 40_000.0\ntopography_base = 1_250.0\nraw = np.loadtxt(\"input/topography/topography.in\")\nspacing, values = raw[0], raw[1:]\nnx = int(round(length_north / spacing)) + 1\nny = int(round(length_east / spacing)) + 1\nif not np.isclose((nx-1)*spacing, length_north) or not np.isclose((ny-1)*spacing, length_east):\n    raise ValueError(\"topographic spacing does not divide the domain\")\nif values.size != nx * ny:\n    raise ValueError(f\"expected {nx*ny} elevations, found {values.size}\")\nif not np.isfinite(values).all():\n    raise ValueError(\"topography contains NaN or infinite values\")\nelevation = values.reshape(nx, ny)  # [north index, east index]\nif topography_base <= elevation.max():\n    raise ValueError(\"topographybase_zcoord must exceed the highest elevation\")\nperimeter = np.r_[elevation[0,:], elevation[-1,:], elevation[:,0], elevation[:,-1]]\nprint(f\"grid={nx}x{ny}, range={elevation.min():.3f}..{elevation.max():.3f} m\")\nprint(f\"perimeter range={np.ptp(perimeter):.6g} m\")",
         note: "For CPML runs, taper real relief smoothly to one flat reference within an interior buffer that becomes fully flat before the PML inner edge. The solver's flatten-PML route is a stability backstop, not a substitute for preprocessing the surface.",
       },
+      {
+        id: "topography-cpml",
+        title: "Why topography must be tapered before C-PML",
+        paragraphs: [
+          "C-PML is a regular, axis-aligned absorbing layer with a flat top. With computation_method=vt, Hercules can force topography-intersecting lateral PML elements back onto a flat cube-and-CPML path. This flatten-PML route prevents an unstable element treatment, but it does not remove the artificial scattering produced when substantial relief is cut off abruptly at the PML inner edge.",
+          "For a production model, begin the transition inside the physical domain. Leave the deep-interior elevations unchanged, reduce their deviation from a chosen reference elevation through a smooth raised-cosine ramp, and provide an exactly flat outer collar that covers the complete PML thickness with extra margin.",
+          "The repository helper applies z_out = z_ref + factor × (z_in - z_ref). The factor is one in the interior, follows a C1 raised-cosine through the taper ramp, and is exactly zero throughout the outer flat collar.",
+        ],
+        note: "Surface tapering and cpml_3d_material_extension solve different problems. The taper flattens the PML's top surface; material extension controls the 3-D material or water mask inside the PML volume.",
+      },
+      {
+        id: "topography-taper-command",
+        title: "Use benchmark_inputs/taper_topography.py",
+        paragraphs: [
+          "Run the dependency-free Python 3 helper from the Hercules_GPU repository. It reads the grid spacing from the first line, checks the supplied domain dimensions and point count, and writes another file in the same topography.in format. Create the output directory first because the script does not create parent directories.",
+          "This example is configured for the bundled 40 km × 40 km benchmark. Replace every dimensional value with the actual case values. Set the PML thickness from the realized thickness printed by Hercules at startup rather than assuming the benchmark value applies to another mesh.",
+        ],
+        codeLabel: "shell — run from the Hercules_GPU repository",
+        code: "mkdir -p input/topography_pml\n\npython3 benchmark_inputs/taper_topography.py \\\n  input/topography_raw/topography.in \\\n  --out input/topography_pml/topography.in \\\n  --lx 40000 \\\n  --ly 40000 \\\n  --buffer 6000 \\\n  --flat-margin 1500 \\\n  --pml-thickness 780 \\\n  --z-ref auto",
+        note: "The input is kept unchanged. If the output already exists, the script stops; add --force only when replacing that output intentionally. Hercules requires the final filename to be topography.in.",
+      },
+      {
+        id: "topography-taper-options",
+        title: "Choose the taper dimensions",
+        table: {
+          headers: ["Option", "Meaning", "How to choose it"],
+          rows: [
+            ["--lx / --ly", "North-south and east-west domain lengths in metres", "Match region_length_north_m and region_length_east_m; the file spacing must divide both exactly"],
+            ["--buffer", "Total inward band occupied by the flat collar plus the cosine ramp", "Make it wide enough for a gradual transition; it must exceed --flat-margin, and opposite tapers must not overlap"],
+            ["--flat-margin", "Exactly flat collar measured inward from every lateral boundary", "Set it at least as wide as the realized PML, with additional margin"],
+            ["--pml-thickness", "Thickness used by the helper's safety warning", "Match the startup-reported PML thickness; this option does not configure Hercules"],
+            ["--z-ref", "Elevation of the flat collar", "Use a fixed elevation such as 0.0, or auto for the mean of the first interior ring when a DEM has a large elevation offset"],
+            ["--force", "Permit overwriting the selected output", "Use only for an intentional rerun; it also permits in-place replacement when input and output are identical"],
+          ],
+        },
+        note: "The script rejects 2 × buffer greater than or equal to the shorter domain extent because the tapers from opposite boundaries would overlap.",
+      },
+      {
+        id: "topography-taper-enable",
+        title: "Enable the tapered surface and verify it",
+        paragraphs: [
+          "Point topography_directory at the directory containing the generated topography.in. The helper's --pml-thickness value is only a consistency check, so configure C-PML independently in parameters.in.",
+        ],
+        codeLabel: "parameters.in — matching the example above",
+        code: "abc_type                    = cpml\ncpml_thickness_m            = 780.0\ninclude_topography           = yes\ncomputation_method           = vt\ntopography_directory         = input/topography_pml",
+        bullets: [
+          "Require the helper's perimeter-flatness result to end in OK with max |z_boundary - z_ref| = 0.",
+          "Confirm the helper reports the expected grid dimensions, flat-collar width, ramp width, reference elevation, and number of modified points.",
+          "At solver startup, compare the realized PML thickness with --flat-margin and confirm the latter is larger with reasonable slack.",
+          "Inspect the tapered surface or several boundary-to-interior profiles before a large production run; the outer collar should be constant, the ramp smooth, and the central model unchanged.",
+        ],
+        note: "Do not use the boundary-reaching topography_tilt_boundary benchmark as a production setup. It deliberately exercises the flatten-PML backstop; real surfaces should be tapered first.",
+      },
     ],
   },
   "source-models": {
