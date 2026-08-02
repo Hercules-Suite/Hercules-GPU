@@ -1,0 +1,13 @@
+==========
+References
+==========
+
+* Tu, T., H. Yu, L. Ramírez-Guzmán, J. Bielak, O. Ghattas, K.L. Ma, D.R. O'Hallaron (2006). From Mesh Generation to Scientific Visualization: An End-to-End Approach to Parallel Supercomputing. In SC'06: Proc. of the 2006 ACM/IEEE Int. Conf. for High Performance Computing, Networking, Storage and Analysis, IEEE Computer Society, November, Tampa, FL, 15 pp, doi: `10.1109/SC.2006.32 <http://dx.doi.org/10.1109/SC.2006.32>`_.
+* Taborda, R., J. López, H. Karaoglu, J. Urbanic, J. Bielak (2010). Speeding Up Finite Element Wave Propagation for Large-Scale Earthquake Simulations, Carnegie Mellon University, Parallel Data Lab, Technical Report No. `CMU-PDL-10-109 <http://www.pdl.cmu.edu/PDL-FTP/AstroDISC/CMU-PDL-10-109.pdf>`_.
+* Bielak, J., H. Karaoglu, R. Taborda (2011). Memory-Efficient Displacement-Based Internal Friction for Wave Propagation Simulation. Geophysics 76(6): T131-T145, doi: `10.1190/geo2011-0019.1 <http://dx.doi.org/10.1190/geo2011-0019.1>`_.
+* Taborda, R., S. Azizzadeh-Roodpish, N. Khoshnevis, and K. Cheng (2016). Evaluation of the Southern California Seismic Velocity Models through Simulation of Recorded Events, Geophys. J. Int. 205(3): 1342-1364, doi: `10.1093/gji/ggw085 <http://dx.doi.org/10.1093/gji/ggw085>`_.
+* Taborda, R., J. Bielak (2014). Ground-Motion Simulation and Validation of the 2008 Chino Hills, California, Earthquake using different velocity models. Bull. Seismol. Soc. Am. 104(4): 1876-1898, doi: `10.1785/0120130266 <http://dx.doi.org/10.1785/0120130266>`_.
+* Taborda, R., J. Bielak (2013). Ground-Motion Simulation and Validation of the 2008 Chino Hills, California, Earthquake. Bull. Seismol. Soc. Am. 103(1): 131-156, doi: `10.1785/0120110325 <http://dx.doi.org/10.1785/0120110325>`_.
+* Restrepo D., J. Bielak, R. Serrano, J. Gómez, J. Jaramillo (2016). Effects of Realistic Topography on the Ground Motion of the Colombian Andes -- A Case Study at the Aburrá Valley, Antioquia, Geophys. J. Int. 204(3): 1801-1816, doi: `10.1093/gji/ggv556 <http://dx.doi.org/10.1093/gji/ggv556>`_.
+* Restrepo D., J. Bielak (2014). Virtual Topography -- A Fictitious Domain Approach for Analyzing Free-Surface Irregularities in Large-Scale Earthquake Ground Motion Simulation. Int. J. Num. Meth. Eng. 100(7): 504-533, doi: `10.1002/nme.4756 <http://dx.doi.org/10.1002/nme.4756>`_.
+* Taborda, R., J. Bielak (2009). `Three-dimensional modeling of earthquake ground motion in basins, including nonlinear wave propagation in soils. <https://www.researchgate.net/publication/241677937_Three-dimensional_modeling_of_earthquake_ground_motion_in_basins_including_nonlinear_wave_propagation_in_soils>`_ 
