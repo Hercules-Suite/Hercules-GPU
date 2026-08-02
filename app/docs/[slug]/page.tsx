@@ -112,7 +112,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           <a href={`#${section.id}`} key={section.id}>{section.title}</a>
         ))}
         <div className="tocRule" />
-        <a href="https://github.com/zwyll/GPU_new" target="_blank" rel="noreferrer">
+        <a href="https://github.com/zwyll/Hercules_GPU" target="_blank" rel="noreferrer">
           Edit on GitHub ↗
         </a>
       </aside>

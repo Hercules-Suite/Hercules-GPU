@@ -64,11 +64,11 @@ export const docPages: Record<string, DocPageContent> = {
         id: "launch",
         title: "3. Launch",
         paragraphs: [
-          "The launcher is run_phaseA_phaseB.sh in the top level of the GPU_new repository. Run it from the case directory so relative paths inside parameters.in resolve against that directory. BASE_IN is the path to the parameters.in file, not the case directory.",
+          "The launcher is run_phaseA_phaseB.sh in the top level of the Hercules_GPU repository. Run it from the case directory so relative paths inside parameters.in resolve against that directory. BASE_IN is the path to the parameters.in file, not the case directory.",
         ],
         codeLabel: "shell",
-        code: "cd /path/to/my-case\n\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=64\nexport PHASE_B_NP=8\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
-        note: "PSOLVE_BIN may be omitted only when the executable is already at GPU_new/quake/forward/psolve or GPU_new/psolve. Setting the absolute path explicitly is recommended in job scripts.",
+        code: "cd /path/to/my-case\n\nexport PSOLVE_BIN=/path/to/Hercules_GPU/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=64\nexport PHASE_B_NP=8\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/Hercules_GPU/run_phaseA_phaseB.sh",
+        note: "PSOLVE_BIN may be omitted only when the executable is already at Hercules_GPU/quake/forward/psolve or Hercules_GPU/psolve. Setting the absolute path explicitly is recommended in job scripts.",
       },
       {
         id: "verify",
@@ -176,11 +176,11 @@ export const docPages: Record<string, DocPageContent> = {
         id: "launcher",
         title: "Launcher location and working directory",
         paragraphs: [
-          "run_phaseA_phaseB.sh is located in the top level of the GPU_new repository, next to the quake and octor directories. It is executable and may be called by absolute path from any case directory.",
+          "run_phaseA_phaseB.sh is located in the top level of the Hercules_GPU repository, next to the quake and octor directories. It is executable and may be called by absolute path from any case directory.",
           "The launcher records the current directory as the run directory. Start it from the directory containing parameters.in when that file uses relative paths such as sourcefiles, models, or output.",
         ],
         codeLabel: "repository layout",
-        code: "GPU_new/\n├── run_phaseA_phaseB.sh\n├── quake/\n│   └── forward/\n│       └── psolve\n├── octor/\n└── ...",
+        code: "Hercules_GPU/\n├── run_phaseA_phaseB.sh\n├── quake/\n│   └── forward/\n│       └── psolve\n├── octor/\n└── ...",
       },
       {
         id: "launcher-inputs",
@@ -196,7 +196,7 @@ export const docPages: Record<string, DocPageContent> = {
             ["MPI_RUN", "No", "MPI launcher command; defaults to mpirun"],
           ],
         },
-        note: "PSOLVE_BIN is auto-detected only at GPU_new/quake/forward/psolve or GPU_new/psolve. A fresh source checkout has no psolve executable until Hercules is built.",
+        note: "PSOLVE_BIN is auto-detected only at Hercules_GPU/quake/forward/psolve or Hercules_GPU/psolve. A fresh source checkout has no psolve executable until Hercules is built.",
       },
       {
         id: "phase-modes",
@@ -213,7 +213,7 @@ export const docPages: Record<string, DocPageContent> = {
         id: "unified",
         title: "Unified launch",
         codeLabel: "shell",
-        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=unified\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
+        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=unified\nexport PSOLVE_BIN=/path/to/Hercules_GPU/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/Hercules_GPU/run_phaseA_phaseB.sh",
         paragraphs: [
           "Unified is the default phase mode. The launcher reads BASE_IN, creates temporary Phase A, Phase B, and unified variants of the same parameter file, and adjusts the mesh-mode settings required by each stage.",
           "The MPI job is launched with PHASE_A_NP total ranks. PHASE_B_NP of those ranks become active solver ranks after mesh construction. Active GPU ranks divide each node's allowed CPU affinity mask into disjoint blocks while inactive ranks wait for Phase B to finish.",
@@ -226,7 +226,7 @@ export const docPages: Record<string, DocPageContent> = {
           "The first three launcher arguments override PHASE_A_NP, PHASE_B_NP, and BASE_IN respectively. Environment variables remain useful for PSOLVE_BIN and thread placement.",
         ],
         codeLabel: "shell",
-        code: "cd /scratch/project/case\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh 2304 256 $PWD/parameters.in",
+        code: "cd /scratch/project/case\nexport PSOLVE_BIN=/path/to/Hercules_GPU/quake/forward/psolve\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/Hercules_GPU/run_phaseA_phaseB.sh 2304 256 $PWD/parameters.in",
       },
       {
         id: "two-phase",
@@ -235,7 +235,7 @@ export const docPages: Record<string, DocPageContent> = {
           "Two-phase mode is useful when a mesh will be reused. With BASE_IN set, the launcher derives separate mesh-only and solver-only parameter files from the same parameters.in. The sharded backend lets Phase A ranks write concurrently; the MPI-IO backend creates one indexed archive; single retains the serialized compatibility path.",
         ],
         codeLabel: "shell",
-        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=two-phase\nexport HERCULES_MESH_IO_MODE=sharded\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
+        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=two-phase\nexport HERCULES_MESH_IO_MODE=sharded\nexport PSOLVE_BIN=/path/to/Hercules_GPU/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/Hercules_GPU/run_phaseA_phaseB.sh",
       },
       {
         id: "preflight",

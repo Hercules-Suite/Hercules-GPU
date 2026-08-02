@@ -60,4 +60,6 @@ test("documents the phase launcher contract", async () => {
   assert.match(html, /BASE_IN/);
   assert.match(html, /Path to the complete parameters\.in file/);
   assert.match(html, /file, not a directory/);
+  assert.match(html, /Hercules_GPU/);
+  assert.doesNotMatch(html, /GPU_new/);
 });
