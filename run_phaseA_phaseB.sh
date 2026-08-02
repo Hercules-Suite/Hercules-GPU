@@ -87,7 +87,7 @@ if [[ "${HERCULES_PHASE_MODE}" == "two-phase" ]]; then
     PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE="${OCTOR_SETCOM_ALL2ALL}"
     PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE="user"
   else
-    PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE="1"
+    PHASE_A_OCTOR_SETCOM_ALL2ALL_VALUE="0"
     PHASE_A_OCTOR_SETCOM_ALL2ALL_SOURCE="two-phase default"
   fi
 fi
@@ -489,7 +489,7 @@ else
     PHASE_B_UCX_TLS_VALUE="${PHASE_B_UCX_TLS}"
     PHASE_B_UCX_TLS_SOURCE="phase-b user"
   elif [[ "${MPI_HAS_CUDA_SUPPORT}" -eq 1 ]]; then
-    PHASE_B_UCX_TLS_VALUE="dc,sm,self,cuda_copy"
+    PHASE_B_UCX_TLS_VALUE="dc,sm,self,cuda_copy,cuda_ipc"
     PHASE_B_UCX_TLS_SOURCE="phase-b cuda-aware default"
   fi
 fi
