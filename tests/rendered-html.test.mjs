@@ -185,3 +185,19 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /station_mediums\.txt/);
   assert.match(html, /output_displacement_file/);
 });
+
+test("provides complete examples for 3-D material and topography inputs", async () => {
+  const response = await render("/docs/input-files");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /3D_velocity_model_directory/);
+  assert.match(html, /rho\.in.*multiplies by 1000/s);
+  assert.match(html, /qs\.in and qp\.in/);
+  assert.match(html, /index\.in does not define one ordered profile/);
+  assert.match(html, /topography\.in — 3 × 3 grid/);
+  assert.match(html, /flat_index = x_index \* n_east \+ y_index/);
+  assert.match(html, /np\.meshgrid/);
+  assert.match(html, /values\.reshape\(nx, ny\)/);
+  assert.match(html, /perimeter range/);
+});
