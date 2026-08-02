@@ -49,3 +49,15 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
 });
+
+test("documents the phase launcher contract", async () => {
+  const response = await render("/docs/running");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /run_phaseA_phaseB\.sh/);
+  assert.match(html, /PSOLVE_BIN/);
+  assert.match(html, /BASE_IN/);
+  assert.match(html, /Path to the complete parameters\.in file/);
+  assert.match(html, /file, not a directory/);
+});

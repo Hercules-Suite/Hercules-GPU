@@ -64,10 +64,11 @@ export const docPages: Record<string, DocPageContent> = {
         id: "launch",
         title: "3. Launch",
         paragraphs: [
-          "The unified workflow keeps the Phase A MPI world alive, builds or imports the adaptive mesh, and transfers leaves directly to the GPU solver ranks. It is the default scalable workflow in the current codebase.",
+          "The launcher is run_phaseA_phaseB.sh in the top level of the GPU_new repository. Run it from the case directory so relative paths inside parameters.in resolve against that directory. BASE_IN is the path to the parameters.in file, not the case directory.",
         ],
         codeLabel: "shell",
-        code: "export BASE_IN=/path/to/my-case\nexport PHASE_A_NP=64\nexport PHASE_B_NP=8\nexport PHASE_B_OMP_NUM_THREADS=8\n\n./run_phaseA_phaseB.sh",
+        code: "cd /path/to/my-case\n\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=64\nexport PHASE_B_NP=8\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
+        note: "PSOLVE_BIN may be omitted only when the executable is already at GPU_new/quake/forward/psolve or GPU_new/psolve. Setting the absolute path explicitly is recommended in job scripts.",
       },
       {
         id: "verify",
@@ -169,8 +170,34 @@ export const docPages: Record<string, DocPageContent> = {
     eyebrow: "Run simulations",
     title: "Running Hercules at scale",
     summary:
-      "Choose a phase workflow, map ranks deliberately, and make launch assumptions visible in every production log.",
+      "Use the repository launcher to connect one parameters.in file to mesh construction and GPU solving, with explicit executable and resource settings.",
     sections: [
+      {
+        id: "launcher",
+        title: "Launcher location and working directory",
+        paragraphs: [
+          "run_phaseA_phaseB.sh is located in the top level of the GPU_new repository, next to the quake and octor directories. It is executable and may be called by absolute path from any case directory.",
+          "The launcher records the current directory as the run directory. Start it from the directory containing parameters.in when that file uses relative paths such as sourcefiles, models, or output.",
+        ],
+        codeLabel: "repository layout",
+        code: "GPU_new/\n├── run_phaseA_phaseB.sh\n├── quake/\n│   └── forward/\n│       └── psolve\n├── octor/\n└── ...",
+      },
+      {
+        id: "launcher-inputs",
+        title: "Launcher inputs",
+        table: {
+          headers: ["Setting", "Required", "Meaning"],
+          rows: [
+            ["PSOLVE_BIN", "When not auto-detected", "Absolute path to the executable psolve binary"],
+            ["BASE_IN", "Unified mode", "Path to the complete parameters.in file; this is a file, not a directory"],
+            ["PHASE_A_NP", "Unified mode", "Total MPI ranks launched for Phase A mesh work"],
+            ["PHASE_B_NP", "Recommended", "Ranks that become active GPU solver ranks, normally nodes × GPUs per node"],
+            ["PHASE_B_OMP_NUM_THREADS", "Unified mode when not inferred", "OpenMP threads assigned to each active Phase B rank"],
+            ["MPI_RUN", "No", "MPI launcher command; defaults to mpirun"],
+          ],
+        },
+        note: "PSOLVE_BIN is auto-detected only at GPU_new/quake/forward/psolve or GPU_new/psolve. A fresh source checkout has no psolve executable until Hercules is built.",
+      },
       {
         id: "phase-modes",
         title: "Phase modes",
@@ -186,19 +213,40 @@ export const docPages: Record<string, DocPageContent> = {
         id: "unified",
         title: "Unified launch",
         codeLabel: "shell",
-        code: "export HERCULES_PHASE_MODE=unified\nexport BASE_IN=/scratch/project/case\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\nsrun ./run_phaseA_phaseB.sh",
+        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=unified\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
         paragraphs: [
-          "Active GPU ranks divide each node's allowed CPU affinity mask into disjoint blocks. Inactive Phase A ranks use a targeted sleep-and-poll loop while Phase B advances, avoiding unnecessary CPU contention.",
+          "Unified is the default phase mode. The launcher reads BASE_IN, creates temporary Phase A, Phase B, and unified variants of the same parameter file, and adjusts the mesh-mode settings required by each stage.",
+          "The MPI job is launched with PHASE_A_NP total ranks. PHASE_B_NP of those ranks become active solver ranks after mesh construction. Active GPU ranks divide each node's allowed CPU affinity mask into disjoint blocks while inactive ranks wait for Phase B to finish.",
         ],
+      },
+      {
+        id: "positional",
+        title: "Equivalent positional form",
+        paragraphs: [
+          "The first three launcher arguments override PHASE_A_NP, PHASE_B_NP, and BASE_IN respectively. Environment variables remain useful for PSOLVE_BIN and thread placement.",
+        ],
+        codeLabel: "shell",
+        code: "cd /scratch/project/case\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh 2304 256 $PWD/parameters.in",
       },
       {
         id: "two-phase",
         title: "Two-phase launch",
         paragraphs: [
-          "Two-phase mode is useful when a mesh will be reused. The sharded backend lets Phase A ranks write concurrently; the MPI-IO backend creates one indexed archive; single retains the serialized compatibility path.",
+          "Two-phase mode is useful when a mesh will be reused. With BASE_IN set, the launcher derives separate mesh-only and solver-only parameter files from the same parameters.in. The sharded backend lets Phase A ranks write concurrently; the MPI-IO backend creates one indexed archive; single retains the serialized compatibility path.",
         ],
         codeLabel: "shell",
-        code: "export HERCULES_PHASE_MODE=two-phase\nexport HERCULES_MESH_IO_MODE=sharded\n./run_phaseA_phaseB.sh",
+        code: "cd /scratch/project/case\n\nexport HERCULES_PHASE_MODE=two-phase\nexport HERCULES_MESH_IO_MODE=sharded\nexport PSOLVE_BIN=/path/to/GPU_new/quake/forward/psolve\nexport BASE_IN=$PWD/parameters.in\nexport PHASE_A_NP=2304\nexport PHASE_B_NP=256\nexport PHASE_B_OMP_NUM_THREADS=8\n\n/path/to/GPU_new/run_phaseA_phaseB.sh",
+      },
+      {
+        id: "preflight",
+        title: "Check the launcher summary",
+        bullets: [
+          "Confirm the printed psolve binary is the executable built for the target system.",
+          "Confirm Base input points to the intended parameters.in file.",
+          "Confirm the current run directory matches the base directory for relative input and output paths.",
+          "Confirm Phase A ranks, Phase B ranks, OpenMP threads, phase mode, and mesh I/O mode match the allocation.",
+          "On multi-GPU nodes, use a PHASE_B_NP value divisible by the allocated node count.",
+        ],
       },
     ],
   },
