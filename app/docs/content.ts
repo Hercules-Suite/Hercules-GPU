@@ -96,6 +96,7 @@ export const docPages: Record<string, DocPageContent> = {
           rows: [
             ["C/C++ and CUDA toolchains", "Compile Octor and the GPU solver", "Use versions supported by the target CUDA toolkit"],
             ["MPI", "Distributed mesh and solver communication", "CUDA-aware support enables direct device-buffer exchange"],
+            ["GNU Scientific Library (GSL)", "Polynomial, root-finding, vector, and nonlinear solver routines", "Both GSL headers and the gsl/gslcblas libraries are required"],
             ["PROJ", "Geographic coordinate conversion", "Headers and libraries must both be visible"],
             ["zlib / bzip2", "Compressed inputs and outputs", "Usually supplied by the system environment"],
             ["Make", "Project build orchestration", "GNU Make is recommended"],
@@ -109,8 +110,19 @@ export const docPages: Record<string, DocPageContent> = {
           "user.mk is the supported customization surface. Set compiler wrappers, include directories, library directories, optimization flags, and CUDA architecture there instead of editing shared makefiles.",
         ],
         codeLabel: "user.mk — illustrative only",
-        code: "CC          = mpicc\nCXX         = mpicxx\nNVCC        = nvcc\nPROJ_DIR    = /path/to/proj\nCUDA_DIR    = /path/to/cuda\n\nCFLAGS     += -O3\nCXXFLAGS   += -O3",
+        code: "CC       = mpicc\nCXX      = mpicxx\nLD       = mpicxx\nNVCC     = nvcc\n\nGSL_DIR  = /path/to/gsl\nPROJ_DIR = /path/to/proj\nCUDA_DIR = /path/to/cuda\n\nCFLAGS   += -O3 -I$(GSL_DIR)/include\nCXXFLAGS += -O3 -I$(GSL_DIR)/include\nCPPFLAGS += -I$(GSL_DIR)/include -I$(PROJ_DIR)/include -DPROJ\nNVCC     += -I$(GSL_DIR)/include\nLDFLAGS  += -L$(GSL_DIR)/lib -lgsl -lgslcblas\nLDFLAGS  += -L$(PROJ_DIR)/lib -lproj",
         note: "Exact variables differ across existing site configurations. Begin with the closest checked-in example and preserve your center's compiler-wrapper conventions.",
+      },
+      {
+        id: "gsl",
+        title: "Make GSL visible to every compiler stage",
+        paragraphs: [
+          "Hercules compiles source that includes gsl_poly.h, gsl_vector.h, gsl_multiroots.h, gsl_roots.h, and related headers. The final solver is linked with libgsl and libgslcblas.",
+          "On a module-based HPC system, load the GSL module before compiling and running. Otherwise, add its include and library directories to user.mk. CUDA compilation also needs the GSL include directory because solver headers are visible to nvcc.",
+        ],
+        codeLabel: "module-based environment",
+        code: "module load gsl\n\n# Verify that the active environment exposes GSL\nprintenv TACC_GSL_INC\nprintenv TACC_GSL_LIB",
+        note: "TACC_GSL_INC and TACC_GSL_LIB are site-specific variables used by existing TACC configurations. Other systems may expose different module variables; use the actual include and library paths supplied by that system.",
       },
       {
         id: "build",
@@ -118,6 +130,7 @@ export const docPages: Record<string, DocPageContent> = {
         codeLabel: "shell",
         code: "make clean\nmake -j 8\n\n# Expected executables\nls octor/octor quake/forward/psolve",
         bullets: [
+          "Treat missing gsl headers as an include-path problem and missing gsl_* symbols as a GSL link-path or link-order problem.",
           "Treat missing PROJ symbols as a link-path problem before changing source.",
           "Ensure the host compiler used by nvcc matches the supported CUDA combination.",
           "Build on the target platform when cluster login and compute nodes differ materially.",

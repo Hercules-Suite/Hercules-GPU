@@ -63,3 +63,13 @@ test("documents the phase launcher contract", async () => {
   assert.match(html, /Hercules_GPU/);
   assert.doesNotMatch(html, /GPU_new/);
 });
+
+test("lists GSL as a required build dependency", async () => {
+  const response = await render("/docs/installation");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /GNU Scientific Library \(GSL\)/);
+  assert.match(html, /-lgsl -lgslcblas/);
+  assert.match(html, /GSL include directory/);
+});
