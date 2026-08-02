@@ -5601,13 +5601,15 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
  */
 int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
                   double x_m, double y_m, double z_m) {
-  double output[3] = {0.0};
+  double output[5] = {0.0};
+  int has_quality_factors = 0;
   cpml_extend_3d_material_query(&x_m, &y_m, &z_m);
   double x_rel = x_m - threeDVelModel_origin.x[0];
   double y_rel = y_m - threeDVelModel_origin.x[1];
   int res = getMaterialFrom3DVelocityModel(x_rel, y_rel, z_m, output,
                                            threeDVelModel_origin.x[0],
-                                           threeDVelModel_origin.x[1]);
+                                           threeDVelModel_origin.x[1],
+                                           &has_quality_factors);
   if (res != 0) {
     if (Param.useProfile == NO) {
       res = cvm_query(Global.theCVMEp, y_m, x_m, z_m, g_props);
@@ -5625,9 +5627,14 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
       g_props->Vs = Param.theVsCut;
     }
 
-    g_props->Qs =
-        g_props->Vs * 0.1;  // Same simple expression as in la Habra runs
-    g_props->Qp = 2.0 * g_props->Qs;
+    if (has_quality_factors) {
+      g_props->Qs = output[3];
+      g_props->Qp = output[4];
+    } else {
+      g_props->Qs =
+          g_props->Vs * 0.1;  // Same simple expression as in la Habra runs
+      g_props->Qp = 2.0 * g_props->Qs;
+    }
   }
   return res;
 }
@@ -28818,6 +28825,9 @@ static void mesh_correct_properties(etree_t* cvm) {
   double acoustic_vp, acoustic_rho, acoustic_qp;
   double elastic_vp, elastic_vs, elastic_rho, elastic_qp, elastic_qs;
   double points[3];
+  const int use_3d_quality_factors =
+      (Param.threeDVelocityModel == YES) &&
+      general3DVelocityModel_hasQualityFactors();
   int32_t lnid0;
   int64_t acoustic_elements = 0;
   int64_t mixed_elements = 0;
@@ -29128,6 +29138,8 @@ static void mesh_correct_properties(etree_t* cvm) {
     if (Param.theTypeOfDamping >= BKT) {
       double vs_vp_Ratio, vksquared;
       double vs_kms = edata->Vs * 0.001; /* Vs in km/s */
+      const int use_material_quality_factors =
+          (Param.useProfile == YES) || use_3d_quality_factors;
 
       vksquared = edata->Vp * edata->Vp - 4. / 3. * edata->Vs * edata->Vs;
 
@@ -29150,7 +29162,7 @@ static void mesh_correct_properties(etree_t* cvm) {
          * paper Taborda and Bielak (2013, BSSA) which is
          * based on the idea of Brocher (2005)
          */
-        if (Param.useProfile == YES)
+        if (use_material_quality_factors)
           Qs = qs;
         else
           Qs =
@@ -29165,7 +29177,7 @@ static void mesh_correct_properties(etree_t* cvm) {
       }
 
       /* Default option for Qp */
-      if (Param.useProfile == YES)
+      if (use_material_quality_factors)
         Qp = qp;
       else
         Qp = 2. * Qs;
