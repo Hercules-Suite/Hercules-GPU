@@ -134,3 +134,54 @@ test("lists GSL as a required build dependency", async () => {
   assert.match(html, /-lgsl -lgslcblas/);
   assert.match(html, /GSL include directory/);
 });
+
+test("documents every supported source model and its auxiliary inputs", async () => {
+  const response = await render("/docs/source-models");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  for (const sourceType of ["point", "force", "base_force", "plane", "planewithkinks", "srfh"]) {
+    assert.match(html, new RegExp(`>${sourceType}<`));
+  }
+  const sourceKeys = [
+    "source_is_filtered", "threshold_frequency", "number_of_poles",
+    "type_of_source", "source_function_type", "average_risetime_sec",
+    "ricker_Ts", "ricker_Tp", "moment_magnitude", "moment_amplitude",
+    "lonlat_or_cartesian", "hypocenter_lat_deg", "hypocenter_long_deg",
+    "hypocenter_x", "hypocenter_y", "hypocenter_depth_m",
+    "source_strike_deg", "source_dip_deg", "source_rake_deg",
+    "force_x_n", "force_y_n", "force_z_n", "base_force_rho_kgm3",
+    "base_force_vs_mps", "base_force_direction_x", "base_force_direction_y",
+    "base_force_direction_z", "base_force_scale", "base_force_depth_m",
+    "base_force_tolerance_m", "number_of_time_windows", "time_windows",
+    "extended_cell_size_down_dip_m", "extended_isminimumedgeautomatic",
+    "extended_depth_m", "extended_cells_along_strike",
+    "extended_cells_down_dip", "extended_hypocenter_along_strike_m",
+    "extended_hypocenter_down_dip_m", "extended_average_rupture_velocity",
+    "extended_cell_size_along_strike_m", "extended_lat_deg",
+    "extended_long_deg", "extended_strike_deg", "extended_dip_deg",
+    "extended_minimum_edge_m", "extended_number_of_kinks",
+    "extended_kinks", "number_of_point_sources",
+  ];
+  for (const key of sourceKeys) assert.match(html, new RegExp(key));
+  assert.match(html, /forcefunction\.in/);
+  assert.match(html, /baseforcefunction\.in/);
+  assert.match(html, /slipfunction\.in/);
+  assert.match(html, /extended_number_of_kinks/);
+  assert.match(html, /number_of_point_sources/);
+  assert.match(html, /x north, y east, and z positive downward/);
+});
+
+test("provides configuration and reader examples for output files", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /np\.loadtxt/);
+  assert.match(html, /np\.fromfile/);
+  assert.match(html, /raw\.reshape/);
+  assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);
+  assert.match(html, /mesh_coordinates\.0/);
+  assert.match(html, /station_mediums\.txt/);
+  assert.match(html, /output_displacement_file/);
+});

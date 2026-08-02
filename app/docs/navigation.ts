@@ -68,6 +68,11 @@ export const navGroups: NavGroup[] = [
         title: "Input files and directories",
         description: "Source, material, topography, and auxiliary inputs.",
       },
+      {
+        slug: "source-models",
+        title: "Source models",
+        description: "Point, force, finite-fault, kinked-fault, and SRFH sources.",
+      },
     ],
   },
   {
