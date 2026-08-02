@@ -5,6 +5,9 @@ export function DocsSidebar({ currentSlug }: { currentSlug?: string }) {
   return (
     <aside className="docsSidebar" aria-label="Documentation navigation">
       <div className="sidebarScroll">
+        <Link className="sidebarHome" href="/docs">
+          Documentation home
+        </Link>
         {navGroups.map((group) => (
           <section className="sidebarGroup" key={group.label}>
             <h2>{group.label}</h2>
@@ -19,13 +22,6 @@ export function DocsSidebar({ currentSlug }: { currentSlug?: string }) {
             ))}
           </section>
         ))}
-        <div className="sidebarStatus">
-          <span className="statusDot" />
-          <div>
-            <strong>GPU documentation</strong>
-            <small>Continuously evolving</small>
-          </div>
-        </div>
       </div>
     </aside>
   );

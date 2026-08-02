@@ -40,7 +40,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           <h1>{page.title}</h1>
           <p className="docLead">{page.summary}</p>
           <div className="docUpdated">
-            <span className="statusDot" /> Updated for the GPU execution path
+            Current Hercules GPU code path
           </div>
         </header>
 
@@ -76,7 +76,6 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
             {section.code && (
               <div className="codeBlock">
                 <div className="codeHeader">
-                  <span><i /><i /><i /></span>
                   <small>{section.codeLabel ?? "configuration"}</small>
                 </div>
                 <pre><code>{section.code}</code></pre>

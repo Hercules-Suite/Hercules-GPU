@@ -1,8 +1,8 @@
 # Hercules Documentation
 
-Modern documentation for the Hercules adaptive finite-element earthquake
-simulation framework. The site covers GPU-resident execution, coupled physics,
-input and output reference, validation, and troubleshooting.
+Technical documentation for the Hercules adaptive finite-element seismic wave
+simulation code. The site covers installation, parameter and input files,
+GPU/MPI execution, physical models, outputs, validation, and troubleshooting.
 
 ## Quick start
 

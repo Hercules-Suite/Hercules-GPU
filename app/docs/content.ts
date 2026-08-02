@@ -55,10 +55,10 @@ export const docPages: Record<string, DocPageContent> = {
         id: "prepare-inputs",
         title: "2. Prepare a case",
         paragraphs: [
-          "A run is defined by numerical and physics parameter files plus the model and source inputs they reference. Start from examples/simple or one of the benchmark_inputs cases so directory layout and units are explicit.",
+          "A run is configured by one parameters.in file plus the source, material, and geometry inputs it references. Start from a current benchmark_inputs case so the directory layout, units, and optional physics settings are explicit.",
         ],
         codeLabel: "typical case layout",
-        code: "my-case/\n├── numerical.in\n├── physics.in\n├── sourcefiles/\n├── models/\n└── output/",
+        code: "my-case/\n├── parameters.in\n├── sourcefiles/\n├── models/\n└── output/",
       },
       {
         id: "launch",
@@ -147,7 +147,7 @@ export const docPages: Record<string, DocPageContent> = {
         id: "lifecycle",
         title: "Simulation lifecycle",
         bullets: [
-          "Read numerical, physics, source, model, and output configuration.",
+          "Read parameters.in and the source, model, and output paths it defines.",
           "Refine the octree to satisfy wavelength, material, topography, and feature constraints.",
           "Balance and partition leaves across Phase A ranks.",
           "Persist or redistribute the mesh, depending on the selected phase mode.",
@@ -334,20 +334,96 @@ export const docPages: Record<string, DocPageContent> = {
       },
     ],
   },
-  "input-files": {
-    eyebrow: "Reference",
-    title: "Input files",
+  "parameter-file": {
+    eyebrow: "Setting up simulations",
+    title: "The parameters.in file",
     summary:
-      "Keep numerical controls, physical assumptions, sources, and spatial models explicit and versioned with every case.",
+      "Current Hercules runs use one parameter file. It combines domain, numerical, physical, source, and output settings in a single readable configuration.",
+    sections: [
+      {
+        id: "single-file",
+        title: "One file per simulation",
+        paragraphs: [
+          "The solver accepts one positional input: the path to parameters.in. The file may have another name, but parameters.in is the established convention and is used throughout this documentation.",
+          "Some legacy examples, scripts, and source comments still refer to separate numerical.in and physics.in files. That split is not the current psolve interface and should not be used when creating a new case.",
+        ],
+        codeLabel: "shell",
+        code: "mpirun -np <ranks> /path/to/psolve parameters.in",
+        note: "Keep parameters.in under version control with the exact source files, model data, executable revision, and monitor log used for a scientific result.",
+      },
+      {
+        id: "syntax",
+        title: "Basic syntax",
+        paragraphs: [
+          "A scalar parameter is written as a name, an equals sign, and one value. A parameter may also introduce a list or table whose values continue on following lines.",
+        ],
+        codeLabel: "parameters.in",
+        code: "# Scalar values\noutput_mesh = 0\ntype_of_damping = none\nregion_origin_latitude_deg = 40.69146389\nsimulation_delta_time_sec = 1.0e-05\n\n# A multi-row value\nnumber_profile_layers = 2\nprofile_layers =\n     0  2880  1800  2200  100  100\n  1000  3600  2250  2300  100  100",
+        bullets: [
+          "Values may be integers, floating-point numbers, strings, paths, 0/1 booleans, yes/no switches, or multi-value records.",
+          "Scientific notation is accepted for floating-point values.",
+          "A line beginning with # is a comment and is ignored by Hercules.",
+          "Whitespace around the name, equals sign, and values is flexible.",
+          "Parameters may appear in any order, provided every required or conditionally required setting is present.",
+        ],
+      },
+      {
+        id: "required-conditional",
+        title: "Required and conditional parameters",
+        paragraphs: [
+          "Many core settings are required. Others become required only when a related feature is enabled. For example, enabling an output or physical model also requires the paths and settings needed by that feature.",
+          "For reproducible production cases, leave important choices explicit instead of relying on defaults that may change between revisions.",
+        ],
+        table: {
+          headers: ["Status", "Meaning"],
+          rows: [
+            ["Required", "Every simulation must define the parameter."],
+            ["Conditional", "Required when another feature or output is enabled."],
+            ["Optional", "May be omitted; Hercules uses the documented default."],
+          ],
+        },
+      },
+      {
+        id: "groups",
+        title: "Parameter groups",
+        table: {
+          headers: ["Group", "What it controls"],
+          rows: [
+            ["Domain", "Origin, dimensions, depth range, azimuth, and coordinate conventions"],
+            ["Time and resolution", "Start/end time, time step, maximum frequency, and nodes per wavelength"],
+            ["Material", "Profiles, velocity models, density, damping, and constitutive settings"],
+            ["Physics", "Elastic, acoustic, poroelastic, nonlinear, PML, and coupling choices"],
+            ["Source", "Source directories, source representation, and incident waves"],
+            ["Mesh", "Mesh generation/import mode, refinement inputs, and mesh output"],
+            ["Output", "Monitor, station, plane, displacement, velocity, and checkpoint settings"],
+            ["Optional features", "Topography, buildings, DRM, and site-specific model options"],
+          ],
+        },
+      },
+      {
+        id: "minimal-structure",
+        title: "Representative structure",
+        paragraphs: [
+          "A practical file is usually organized into commented blocks even though the parser does not require a particular order. The example below shows the shape of a file, not a complete simulation recipe.",
+        ],
+        codeLabel: "parameters.in",
+        code: "# Domain\nregion_origin_latitude_deg  = 0.0\nregion_origin_longitude_deg = 0.0\nregion_length_east_m        = 1000.0\nregion_length_north_m       = 1000.0\nregion_depth_deep_m         = 1000.0\n\n# Time and mesh resolution\nsimulation_start_time_sec      = 0.0\nsimulation_end_time_sec        = 10.0\nsimulation_delta_time_sec      = 0.001\nsimulation_wave_max_freq_hz    = 2.0\nsimulation_node_per_wavelength = 8\n\n# Referenced inputs\nsource_directory = sourcefiles\ncvmdb_input_file = profile\n\n# Outputs\nmonitor_file = output/monitor.txt\nnumber_output_stations = 0\nnumber_output_planes   = 0",
+      },
+    ],
+  },
+  "input-files": {
+    eyebrow: "Setting up simulations",
+    title: "Input files and directories",
+    summary:
+      "parameters.in is the single configuration entry point. It references the source, material, topography, and other data required by the selected simulation features.",
     sections: [
       {
         id: "overview",
-        title: "Input families",
+        title: "Required input structure",
         table: {
           headers: ["Input", "Contains"],
           rows: [
-            ["numerical.in", "Domain dimensions, resolution, time stepping, partitioning, and output controls"],
-            ["physics.in", "Material model, damping, analysis type, topography, DRM, and related physics"],
+            ["parameters.in", "All numerical, physical, domain, source-path, and output configuration"],
             ["source files", "Point, force, rupture-plane, or incident-wave definitions and histories"],
             ["material models", "Layered, basin, etree, or other spatial velocity/density descriptions"],
             ["topography", "Surface samples or topographic configuration"],
@@ -356,19 +432,53 @@ export const docPages: Record<string, DocPageContent> = {
       },
       {
         id: "rules",
-        title: "Parameter-file rules",
+        title: "Path and case rules",
         bullets: [
-          "Use one assignment per line and preserve units in nearby comments.",
+          "Keep paths and units documented in parameters.in with nearby comments.",
           "Treat paths as relative to the run directory unless a site workflow requires absolute paths.",
-          "Keep optional settings explicit in production cases so future default changes are visible.",
+          "Create output directories before launch unless the selected output path is documented to create them automatically.",
           "Archive the exact inputs with the monitor log and executable revision.",
         ],
+        note: "Do not create separate numerical.in and physics.in files for a current psolve case. Their settings belong together in parameters.in.",
+      },
+      {
+        id: "layout",
+        title: "Typical case layout",
+        paragraphs: [
+          "Only the inputs enabled by parameters.in are required. Keeping each simulation self-contained makes it easier to move between systems and archive with a publication.",
+        ],
+        codeLabel: "directory tree",
+        code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
       },
       {
         id: "sources",
-        title: "Sources",
+        title: "Source input",
         paragraphs: [
-          "Hercules supports concentrated point and force sources, rupture-plane descriptions, kinked planes, and incident plane waves. Source coordinates, orientation, moment or force scaling, and time histories should be validated independently before a large simulation.",
+          "The source file uses the same assignment and comment syntax as parameters.in. For a point source, it defines the source function, amplitude, position, and orientation. Hercules also supports force sources, rupture-plane descriptions, kinked planes, and incident plane waves.",
+        ],
+        codeLabel: "source.in — abbreviated point source",
+        code: "type_of_source       = point\nsource_function_type = quadratic\naverage_risetime_sec = 0.5\nmoment_amplitude     = 1.0e15\n\nlonlat_or_cartesian  = 0\nhypocenter_lat_deg   = 38.419\nhypocenter_long_deg  = 27.129\nhypocenter_depth_m   = 500\nsource_strike_deg    = 0\nsource_dip_deg       = 90\nsource_rake_deg      = 0",
+        note: "Validate source coordinates, units, orientation conventions, amplitude, and time history independently before scaling a simulation.",
+      },
+      {
+        id: "velocity-model",
+        title: "Three-dimensional velocity model",
+        paragraphs: [
+          "The structured 3D model is stored as seven files: x.in, y.in, z.in, vs.in, vp.in, rho.in, and index.in. x.in and y.in contain the unique horizontal coordinates. The z, velocity, and density arrays contain the vertical profiles; index.in identifies where each horizontal profile begins.",
+        ],
+        bullets: [
+          "Write x and y coordinates in ascending order and without duplicates.",
+          "For each horizontal point, write z coordinates in ascending order and without duplicates.",
+          "Use metres for coordinates, metres per second for Vs and Vp, and the density units expected by the selected model workflow.",
+          "The first value in each file records the number of entries that follow.",
+        ],
+      },
+      {
+        id: "topography",
+        title: "Topography",
+        paragraphs: [
+          "When topography is enabled, topography_directory contains topography.in. Its first value is the regular spacing in the horizontal directions; subsequent values are surface elevations in metres.",
+          "Samples begin at the lower-left domain corner. Complete the south-to-north sequence for one west-to-east position before moving to the next position.",
         ],
       },
     ],

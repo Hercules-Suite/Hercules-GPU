@@ -24,8 +24,8 @@ test("server-renders the Hercules documentation home", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Hercules Documentation<\/title>/i);
-  assert.match(html, /Earthquake simulation/);
-  assert.match(html, /GPU-accelerated wave propagation/);
+  assert.match(html, /parallel, octree-based finite-element code/);
+  assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
@@ -37,5 +37,15 @@ test("server-renders a structured documentation page", async () => {
   const html = await response.text();
   assert.match(html, /Run your first Hercules simulation/);
   assert.match(html, /Before you begin/);
-  assert.match(html, /GPU execution path/);
+  assert.match(html, /Current Hercules GPU code path/);
+});
+
+test("documents the current single parameter-file interface", async () => {
+  const response = await render("/docs/parameter-file");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /The parameters\.in file/);
+  assert.match(html, /psolve parameters\.in/);
+  assert.match(html, /not the current psolve interface/);
 });

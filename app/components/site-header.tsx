@@ -3,9 +3,8 @@ import { SearchBox } from "./search-box";
 import { ThemeToggle } from "./theme-toggle";
 
 const topLinks = [
-  { href: "/docs/getting-started", label: "Docs" },
-  { href: "/docs/running", label: "Guides" },
-  { href: "/docs/validation", label: "Benchmarks" },
+  { href: "/docs", label: "Documentation" },
+  { href: "/docs/parameter-file", label: "Parameter reference" },
 ];
 
 export function SiteHeader() {
@@ -17,10 +16,9 @@ export function SiteHeader() {
             H
           </span>
           <span className="brandCopy">
-            <strong>Hercules</strong>
-            <small>Documentation</small>
+            <strong>Hercules Documentation</strong>
           </span>
-          <span className="versionTag">GPU</span>
+          <span className="versionTag">current</span>
         </Link>
 
         <nav className="topNav" aria-label="Primary navigation">
