@@ -589,6 +589,24 @@ Acoustic-elastic input flags (input file):
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
 
+3D velocity-model quality factors:
+
+- With `3D_velocity_model=yes`, the material directory may contain optional
+	`qs.in` and `qp.in` files alongside `vs.in`, `vp.in`, and `rho.in`.
+	Each file uses the same count-prefixed layout, contains one value for every
+	entry in `z.in`, and follows the same `index.in` column/layer ordering.
+	Hercules selects the same vertical layer at each of the four surrounding
+	horizontal columns and interpolates `Qs` and `Qp` with the same shape
+	functions used for `Vs`, `Vp`, and density. With parametric Q disabled,
+	the BKT-family damping setup uses these interpolated values independently
+	of the fallback `cvmdb_input_file` mode.
+- `qs.in` and `qp.in` must either both be present or both be absent, and their
+	value counts must match `z.in`. If both are absent, Hercules preserves the
+	legacy behavior `Qs = 0.1*Vs` and `Qp = 2*Qs`. If only one is present or a
+	count differs, initialization stops with an explicit error. Because Q values
+	are stored in element material data, regenerate or re-correct the mesh after
+	adding or changing these files.
+
 Poroelastic U-P input flags (experimental V1):
 
 - `include_poroelastic`

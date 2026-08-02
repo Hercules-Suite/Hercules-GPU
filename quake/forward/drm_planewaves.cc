@@ -18,6 +18,7 @@
  */
 
 #include <inttypes.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -1651,6 +1652,8 @@ void Istanbul_init ( int32_t myID ) {
  * ----------------------------------------------------------------------------
  */
 static double *Soil_Vp_data;
+static double *Soil_Qs_data;
+static double *Soil_Qp_data;
 static double *Soil_point_x;
 static double *Soil_point_y;
 static double *Soil_point_z;
@@ -1663,6 +1666,7 @@ static struct Params_soil_t {
     int numPointX;
     int numPointY;
     int numData;
+    int hasQualityFactors;
     double minPointZ;
     double maxPointZ;
 } Params_soil;
@@ -1730,14 +1734,18 @@ double min(double arr[], int size) {
     return min;
 }
 
-int getMaterialFrom3DVelocityModel(double x_input, double y_input, double z_input, double output[3], double DRM_southwest_x, double DRM_southwest_y) {
+int getMaterialFrom3DVelocityModel(double x_input, double y_input,
+                                   double z_input, double output[5],
+                                   double DRM_southwest_x,
+                                   double DRM_southwest_y,
+                                   int *has_quality_factors) {
     /* The z_input is the depth from the surface. If the topography is considered, 
     it should has been corrected before calling this function. */
     int i, k;
 
-    double zd_vs[4], zd_vp[4], zd_rho[4];
+    double zd_vs[4], zd_vp[4], zd_rho[4], zd_qs[4], zd_qp[4];
     int row1, numLayers;
-    double zi_elevation, zi_vs, zi_vp, zi_rho;
+    double zi_elevation, zi_vs, zi_vp, zi_rho, zi_qs, zi_qp;
 
     double xmin = Soil_point_x[0];
     double xmax = Soil_point_x[Params_soil.numPointX - 1];
@@ -1830,12 +1838,20 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input, double z_inpu
                 zd_vs[i] = Soil_Vs_data[row1 + k];
                 zd_vp[i] = Soil_Vp_data[row1 + k];
                 zd_rho[i] = Soil_rho_data[row1 + k];
+                if (Params_soil.hasQualityFactors) {
+                    zd_qs[i] = Soil_Qs_data[row1 + k];
+                    zd_qp[i] = Soil_Qp_data[row1 + k];
+                }
                 break;
             }
             if (k == 0) { // In case Z is above the top layer specified in the model
                 zd_vs[i] = Soil_Vs_data[row1];
                 zd_vp[i] = Soil_Vp_data[row1];
                 zd_rho[i] = Soil_rho_data[row1];
+                if (Params_soil.hasQualityFactors) {
+                    zd_qs[i] = Soil_Qs_data[row1];
+                    zd_qp[i] = Soil_Qp_data[row1];
+                }
             }
         }
     }
@@ -1844,11 +1860,22 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input, double z_inpu
     zi_vs = N1 * zd_vs[0] + N2 * zd_vs[1] + N3 * zd_vs[2] + N4 * zd_vs[3];
     zi_vp = N1 * zd_vp[0] + N2 * zd_vp[1] + N3 * zd_vp[2] + N4 * zd_vp[3];
     zi_rho = N1 * zd_rho[0] + N2 * zd_rho[1] + N3 * zd_rho[2] + N4 * zd_rho[3];
+    if (Params_soil.hasQualityFactors) {
+        zi_qs = N1 * zd_qs[0] + N2 * zd_qs[1] + N3 * zd_qs[2] + N4 * zd_qs[3];
+        zi_qp = N1 * zd_qp[0] + N2 * zd_qp[1] + N3 * zd_qp[2] + N4 * zd_qp[3];
+    }
 
     output[0] = zi_vs;
     output[1] = zi_vp;
     output[2] = zi_rho * 1000;
+    output[3] = Params_soil.hasQualityFactors ? zi_qs : 0.0;
+    output[4] = Params_soil.hasQualityFactors ? zi_qp : 0.0;
+    *has_quality_factors = Params_soil.hasQualityFactors;
     return 0;
+}
+
+int general3DVelocityModel_hasQualityFactors(void) {
+    return Params_soil.hasQualityFactors;
 }
 
 void loadDoubleArrayDynamically(const char *filename, double **numbers, int *count) {
@@ -1911,10 +1938,42 @@ void loadIntArrayDynamically(const char *filename, int **numbers, int *count) {
     fclose(file);
 }
 
+static int optionalMaterialFileStatus(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (file != NULL) {
+        fclose(file);
+        return 1;
+    }
+    if (errno == ENOENT) {
+        return 0;
+    }
+    fprintf(stderr, "Error opening optional material file %s: %s\n",
+            filename, strerror(errno));
+    return -1;
+}
+
+static int load3DMaterialProperty(const char *filename, double **values,
+                                  int expected_count) {
+    int count = 0;
+    loadDoubleArrayDynamically(filename, values, &count);
+    if (count != expected_count) {
+        fprintf(stderr,
+                "3D material file %s contains %d values; expected %d to "
+                "match z.in\n",
+                filename, count, expected_count);
+        free(*values);
+        *values = NULL;
+        return -1;
+    }
+    return 0;
+}
+
 int32_t
 general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     char    layerID_file[256], x_file[256], y_file[256], z_file[256], soilVs_file[256], 
-            soilVp_file[256], soilRho_file[256];
+            soilVp_file[256], soilRho_file[256], soilQs_file[256],
+            soilQp_file[256];
+    int qs_status, qp_status;
     /* read material info */
     sprintf( layerID_file,   "%s/index.in", the3DVelModelDir );
     sprintf( x_file,         "%s/x.in",     the3DVelModelDir );
@@ -1923,6 +1982,21 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     sprintf( soilVs_file,    "%s/vs.in",    the3DVelModelDir );
     sprintf( soilVp_file,    "%s/vp.in",    the3DVelModelDir );
     sprintf( soilRho_file,   "%s/rho.in",   the3DVelModelDir );
+    sprintf( soilQs_file,    "%s/qs.in",    the3DVelModelDir );
+    sprintf( soilQp_file,    "%s/qp.in",    the3DVelModelDir );
+    qs_status = optionalMaterialFileStatus(soilQs_file);
+    qp_status = optionalMaterialFileStatus(soilQp_file);
+    if ((qs_status < 0) || (qp_status < 0)) {
+        return -1;
+    }
+    if (qs_status != qp_status) {
+        fprintf(stderr,
+                "3D material quality factors must provide both %s and %s, "
+                "or neither file\n",
+                soilQs_file, soilQp_file);
+        return -1;
+    }
+    Params_soil.hasQualityFactors = qs_status;
     /* Load the data from the files */
     loadIntArrayDynamically(layerID_file, &Layer_start_ID, &Params_soil.numLayerID);
     loadDoubleArrayDynamically(x_file, &Soil_point_x, &Params_soil.numPointX);
@@ -1930,9 +2004,21 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     loadDoubleArrayDynamically(z_file, &Soil_point_z, &Params_soil.numData);
     Params_soil.minPointZ = min(Soil_point_z, Params_soil.numData);
     Params_soil.maxPointZ = max(Soil_point_z, Params_soil.numData);
-    loadDoubleArrayDynamically(soilVs_file, &Soil_Vs_data, &Params_soil.numData);
-    loadDoubleArrayDynamically(soilVp_file, &Soil_Vp_data, &Params_soil.numData);
-    loadDoubleArrayDynamically(soilRho_file, &Soil_rho_data, &Params_soil.numData);
+    if ((load3DMaterialProperty(soilVs_file, &Soil_Vs_data,
+                                Params_soil.numData) != 0) ||
+        (load3DMaterialProperty(soilVp_file, &Soil_Vp_data,
+                                Params_soil.numData) != 0) ||
+        (load3DMaterialProperty(soilRho_file, &Soil_rho_data,
+                                Params_soil.numData) != 0)) {
+        return -1;
+    }
+    if (Params_soil.hasQualityFactors &&
+        ((load3DMaterialProperty(soilQs_file, &Soil_Qs_data,
+                                 Params_soil.numData) != 0) ||
+         (load3DMaterialProperty(soilQp_file, &Soil_Qp_data,
+                                 Params_soil.numData) != 0))) {
+        return -1;
+    }
     return 0;
 }
 
@@ -1947,16 +2033,18 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
         }
     }
 
-    int int_message[4];
+    int int_message[5];
     int_message[0] = Params_soil.numLayerID;
     int_message[1] = Params_soil.numPointX;
     int_message[2] = Params_soil.numPointY;
     int_message[3] = Params_soil.numData;
-    MPI_Bcast(int_message, 4, MPI_INT, 0, comm_solver);
+    int_message[4] = Params_soil.hasQualityFactors;
+    MPI_Bcast(int_message, 5, MPI_INT, 0, comm_solver);
     Params_soil.numLayerID = int_message[0];
     Params_soil.numPointX = int_message[1];
     Params_soil.numPointY = int_message[2];
     Params_soil.numData = int_message[3];
+    Params_soil.hasQualityFactors = int_message[4];
 
     double double_message[2];
     double_message[0] = Params_soil.minPointZ;
@@ -1973,6 +2061,22 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
         Soil_Vs_data    = (double*)malloc( sizeof(double) * Params_soil.numData );
         Soil_Vp_data    = (double*)malloc( sizeof(double) * Params_soil.numData );
         Soil_rho_data   = (double*)malloc( sizeof(double) * Params_soil.numData );
+        if (Params_soil.hasQualityFactors) {
+            Soil_Qs_data = (double*)malloc(sizeof(double) * Params_soil.numData);
+            Soil_Qp_data = (double*)malloc(sizeof(double) * Params_soil.numData);
+        }
+    }
+    if ((Layer_start_ID == NULL) || (Soil_point_x == NULL) ||
+        (Soil_point_y == NULL) || (Soil_point_z == NULL) ||
+        (Soil_Vs_data == NULL) || (Soil_Vp_data == NULL) ||
+        (Soil_rho_data == NULL) ||
+        (Params_soil.hasQualityFactors &&
+         ((Soil_Qs_data == NULL) || (Soil_Qp_data == NULL)))) {
+        fprintf(stderr,
+                "Thread %d: cannot allocate general 3D material arrays\n",
+                myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
     }
 
     /* Broadcast table of properties */
@@ -1983,6 +2087,18 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     MPI_Bcast(Soil_Vs_data,    Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(Soil_Vp_data,    Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(Soil_rho_data,   Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
+    if (Params_soil.hasQualityFactors) {
+        MPI_Bcast(Soil_Qs_data, Params_soil.numData, MPI_DOUBLE, 0,
+                  comm_solver);
+        MPI_Bcast(Soil_Qp_data, Params_soil.numData, MPI_DOUBLE, 0,
+                  comm_solver);
+    }
+    if (myID == 0) {
+        fprintf(stderr, "3D velocity model quality factors: %s\n",
+                Params_soil.hasQualityFactors
+                    ? "interpolated from qs.in and qp.in"
+                    : "legacy Qs=0.1*Vs and Qp=2*Qs (qs.in/qp.in absent)");
+    }
 
     return;
 }
