@@ -134,7 +134,6 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	local poroelastic station directly from the resident field and nodal mass
 	mask; it does not patch station stencils into a host field.
 	`full` restores full `nharbored` field D2H/H2D copies.
-
 - `HERCULES_GPU_MPI_BACKEND=host|cuda_aware`
 	Selects the MPI exchange backend for GPU-resident scalar and vector fields.
 	The default is `cuda_aware` when the linked Open MPI reports CUDA-buffer
