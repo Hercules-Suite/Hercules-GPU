@@ -63,6 +63,8 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /acoustic_interface_face_filter/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
+  assert.match(html, /parameterReferenceMain/);
+  assert.match(html, /data-label="Parameter"/);
 });
 
 test("documents every parameters.in key parsed by the current source tree", () => {

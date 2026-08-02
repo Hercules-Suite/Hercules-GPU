@@ -28,7 +28,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
   const next = index < allNavItems.length - 1 ? allNavItems[index + 1] : undefined;
 
   return (
-    <main className="docsMain">
+    <main className={`docsMain ${page.eyebrow === "Parameter reference" ? "parameterReferenceMain" : ""}`}>
       <article className="docsArticle">
         <div className="docBreadcrumbs">
           <Link href="/docs">Docs</Link>
@@ -55,6 +55,9 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
             )}
             {section.table && (
               <div className={`tableWrap ${section.table.headers[0] === "Parameter" ? "parameterTableWrap" : ""}`}>
+                {section.table.headers[0] === "Parameter" && (
+                  <div className="parameterTableHint">Scroll horizontally to see every column.</div>
+                )}
                 <table className={section.table.headers[0] === "Parameter" ? "parameterTable" : undefined}>
                   <thead>
                     <tr>
@@ -66,6 +69,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                       <tr key={row.join("-")}>
                         {row.map((cell, cellIndex) => (
                           <td
+                            data-label={section.table?.headers[0] === "Parameter" ? section.table.headers[cellIndex] : undefined}
                             data-requirement={cellIndex === 1 ? cell : undefined}
                             key={`${cell}-${cellIndex}`}
                           >

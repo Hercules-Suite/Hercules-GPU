@@ -330,8 +330,16 @@ code { font-family: var(--font-mono); }
 .tableWrap td { padding: 11px 12px; border-bottom: 1px solid var(--line); color: var(--ink); vertical-align: top; }
 .tableWrap tr:last-child td { border-bottom: 0; }
 .tableWrap td:first-child { color: var(--accent-strong); font-family: var(--font-mono); font-size: 11px; font-weight: 650; }
-.parameterTableWrap { margin-inline: calc((min(96vw, 1060px) - 100%) / -2); }
-.parameterTable { min-width: 980px; table-layout: fixed; }
+.parameterReferenceMain { grid-template-columns: minmax(0, 980px); }
+.parameterReferenceMain .onThisPage { display: none; }
+.parameterTableWrap {
+  max-width: 100%;
+  margin-inline: 0;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+.parameterTableHint { display: none; padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--ink-soft); background: var(--surface-muted); font-size: 10px; }
+.parameterTable { width: 100%; min-width: 880px; table-layout: fixed; }
 .parameterTable th:nth-child(1) { width: 20%; }
 .parameterTable th:nth-child(2) { width: 11%; }
 .parameterTable th:nth-child(3) { width: 15%; }
@@ -378,6 +386,7 @@ code { font-family: var(--font-mono); }
   .mobileMenu { display: block; }
   .docsMain { grid-template-columns: minmax(0, 780px); padding-inline: 42px; }
   .onThisPage { display: none; }
+  .parameterTableHint { display: block; }
 }
 
 @media (max-width: 780px) {
@@ -391,7 +400,27 @@ code { font-family: var(--font-mono); }
   .search kbd { display: none; }
   .search > input:focus { position: fixed; z-index: 101; top: 10px; left: 14px; width: calc(100vw - 28px); padding: 0 38px 0 35px; color: var(--ink); }
   .search:focus-within .searchIcon { position: fixed; z-index: 102; top: 20px; left: 26px; }
-  .parameterTableWrap { margin-inline: -3px; }
+  .parameterTableWrap { margin-inline: 0; overflow: visible; border: 0; scrollbar-gutter: auto; }
+  .parameterTableHint { display: none; }
+  .parameterTable { min-width: 0; table-layout: auto; border-collapse: separate; background: transparent; }
+  .parameterTable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .parameterTable tbody { display: grid; gap: 12px; }
+  .parameterTable tr { display: block; border: 1px solid var(--line-strong); background: var(--surface); }
+  .parameterTable td,
+  .parameterTable td:first-child {
+    display: grid;
+    grid-template-columns: minmax(104px, 32%) minmax(0, 1fr);
+    gap: 12px;
+    padding: 9px 11px;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 400;
+  }
+  .parameterTable td:last-child { border-bottom: 0; }
+  .parameterTable td::before { content: attr(data-label); color: var(--ink-soft); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .parameterTable td:first-child { color: var(--accent-strong); font-family: var(--font-mono); font-weight: 650; }
   .searchResults { position: fixed; z-index: 103; top: 50px; left: 14px; right: 14px; width: auto; }
   .docsShell { display: block; }
   .docsSidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
