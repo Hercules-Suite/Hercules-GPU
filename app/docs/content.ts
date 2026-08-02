@@ -1,3 +1,5 @@
+import { parameterReferencePages, parameterReferenceSummary } from "./parameter-reference";
+
 export type DocTable = {
   headers: string[];
   rows: string[][];
@@ -446,32 +448,28 @@ export const docPages: Record<string, DocPageContent> = {
       },
       {
         id: "groups",
-        title: "Parameter groups",
+        title: "Complete parameter reference",
+        paragraphs: [
+          "The categorized pages below document all 206 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
+        ],
         table: {
-          headers: ["Group", "What it controls"],
-          rows: [
-            ["Domain", "Origin, dimensions, depth range, azimuth, and coordinate conventions"],
-            ["Time and resolution", "Start/end time, time step, maximum frequency, and nodes per wavelength"],
-            ["Material", "Profiles, velocity models, density, damping, and constitutive settings"],
-            ["Physics", "Elastic, acoustic, poroelastic, nonlinear, PML, and coupling choices"],
-            ["Source", "Source directories, source representation, and incident waves"],
-            ["Mesh", "Mesh generation/import mode, refinement inputs, and mesh output"],
-            ["Output", "Monitor, station, plane, displacement, velocity, and checkpoint settings"],
-            ["Optional features", "Topography, buildings, DRM, and site-specific model options"],
-          ],
+          headers: ["Reference page", "Documented entries"],
+          rows: parameterReferenceSummary.map((group) => [group.title, String(group.count)]),
         },
+        note: "Source-specific controls such as type_of_source, force_x_n, and source_function_type are intentionally not counted here: they are parsed from source.in, not parameters.in.",
       },
       {
         id: "minimal-structure",
-        title: "Representative structure",
+        title: "Minimal elastic-profile skeleton",
         paragraphs: [
-          "A practical file is usually organized into commented blocks even though the parser does not require a particular order. The example below shows the shape of a file, not a complete simulation recipe.",
+          "This skeleton contains the unconditional solver controls and a one-layer profile. It still needs a valid sourcefiles/source.in and appropriate scientific values; output and optional-physics blocks may then be added from the reference pages.",
         ],
         codeLabel: "parameters.in",
-        code: "# Domain\nregion_origin_latitude_deg  = 0.0\nregion_origin_longitude_deg = 0.0\nregion_length_east_m        = 1000.0\nregion_length_north_m       = 1000.0\nregion_depth_deep_m         = 1000.0\n\n# Time and mesh resolution\nsimulation_start_time_sec      = 0.0\nsimulation_end_time_sec        = 10.0\nsimulation_delta_time_sec      = 0.001\nsimulation_wave_max_freq_hz    = 2.0\nsimulation_node_per_wavelength = 8\n\n# Referenced inputs\nsource_directory = sourcefiles\ncvmdb_input_file = profile\n\n# Outputs\nmonitor_file = output/monitor.txt\nnumber_output_stations = 0\nnumber_output_planes   = 0",
+        code: "# Domain\nregion_origin_latitude_deg   = 0.0\nregion_origin_longitude_deg  = 0.0\nregion_depth_shallow_m       = 0.0\nregion_length_east_m         = 1000.0\nregion_length_north_m        = 1000.0\nregion_depth_deep_m          = 1000.0\nregion_azimuth_leftface_deg  = 0.0\n\n# Time and mesh resolution\nsimulation_end_time_sec        = 10.0\nsimulation_delta_time_sec      = 0.001\nsimulation_wave_max_freq_hz    = 2.0\nsimulation_node_per_wavelength = 8\nsimulation_shear_velocity_min  = 500.0\n\n# Material and damping\ntype_of_damping          = none\nthe_threshold_damping    = 0.05\nthe_threshold_Vp_over_Vs = 3.0\ncvmdb_input_file         = profile\nnumber_profile_layers    = 1\nprofile_layers =\n  0.0  3000.0  1700.0  2300.0  1000.0  1000.0\n\n# Source path; source physics stays in sourcefiles/source.in\nsource_directory = sourcefiles",
       },
     ],
   },
+  ...parameterReferencePages,
   "input-files": {
     eyebrow: "Setting up simulations",
     title: "Input files and directories",

@@ -71,6 +71,51 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    label: "Parameter reference",
+    items: [
+      {
+        slug: "parameters-domain-time",
+        title: "Domain, time & resolution",
+        description: "Coordinates, dimensions, duration, time step, and wavelength resolution.",
+      },
+      {
+        slug: "parameters-material-mesh",
+        title: "Material, source & mesh",
+        description: "Profiles, regional models, source paths, and mesh modes.",
+      },
+      {
+        slug: "parameters-damping-cpml",
+        title: "Damping & CPML",
+        description: "Attenuation, damping limits, dashpots, and CPML controls.",
+      },
+      {
+        slug: "parameters-coupled-physics",
+        title: "Acoustic & poroelastic",
+        description: "Scalar acoustics, saturated media, groundwater, and interfaces.",
+      },
+      {
+        slug: "parameters-output",
+        title: "Output & diagnostics",
+        description: "Stations, planes, checkpoints, field output, and diagnostics.",
+      },
+      {
+        slug: "parameters-topography-buildings",
+        title: "Topography & buildings",
+        description: "Surface geometry, structures, fixed-base input, and push-downs.",
+      },
+      {
+        slug: "parameters-nonlinear",
+        title: "Nonlinear analysis",
+        description: "Geostatic state, constitutive models, and material tables.",
+      },
+      {
+        slug: "parameters-drm-waves",
+        title: "DRM & incident waves",
+        description: "DRM stages, plane waves, histories, and homogeneous half-space.",
+      },
+    ],
+  },
+  {
     label: "Output and validation",
     items: [
       {

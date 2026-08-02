@@ -54,8 +54,8 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
               </ul>
             )}
             {section.table && (
-              <div className="tableWrap">
-                <table>
+              <div className={`tableWrap ${section.table.headers[0] === "Parameter" ? "parameterTableWrap" : ""}`}>
+                <table className={section.table.headers[0] === "Parameter" ? "parameterTable" : undefined}>
                   <thead>
                     <tr>
                       {section.table.headers.map((header) => <th key={header}>{header}</th>)}
@@ -65,7 +65,12 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                     {section.table.rows.map((row) => (
                       <tr key={row.join("-")}>
                         {row.map((cell, cellIndex) => (
-                          <td key={`${cell}-${cellIndex}`}>{cell}</td>
+                          <td
+                            data-requirement={cellIndex === 1 ? cell : undefined}
+                            key={`${cell}-${cellIndex}`}
+                          >
+                            {cell}
+                          </td>
                         ))}
                       </tr>
                     ))}
