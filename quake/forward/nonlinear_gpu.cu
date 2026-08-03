@@ -18,6 +18,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "util.h"
 #include "psolve.h"
 #include "kernel.h"
 #include "nonlinear_gpu.h"

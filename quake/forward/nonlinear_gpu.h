@@ -3,6 +3,7 @@
 #define HERCULES_NONLINEAR_GPU_H
 
 #include "nonlinear.h"
+#include "quake_util.h"
 
 typedef struct nonlinear_gpu_config_t {
     materialmodel_t material_model;

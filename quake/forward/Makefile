@@ -123,7 +123,8 @@ nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h
 stiffness.o: stiffness.cu stiffness.o
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
-nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h
+nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h \
+	util.h quake_util.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 kernel.o: kernel.cu kernel.h
