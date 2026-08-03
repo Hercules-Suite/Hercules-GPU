@@ -5,5 +5,3 @@ declare module "cloudflare:workers" {
 interface Fetcher {
   fetch(request: Request): Promise<Response>;
 }
-
-type D1Database = any;
