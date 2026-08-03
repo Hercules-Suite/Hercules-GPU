@@ -360,6 +360,7 @@ export const docPages: Record<string, DocPageContent> = {
           "Set include_nonlinear_analysis=yes to activate history-dependent constitutive updates in eligible solid elements. Hercules evaluates stress against the selected yield or backbone relation, evolves plastic strain and internal variables, and can retain permanent deformation after unloading.",
           "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
           "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and select eligible elements from the Vs range covered by material_properties_list.",
+          "For non-Istanbul vonMises_baE, material_properties_list supplies Su through alpha_cohesion and the exponential hardening parameters through psi and m; non-Istanbul vonMises_ep takes Su from alpha_cohesion. The built-in nl_id constants for these models remain limited to Istanbul_velocity_model=yes.",
         ],
         table: {
           headers: ["Family", "Available material_model values", "Role"],
@@ -373,6 +374,17 @@ export const docPages: Record<string, DocPageContent> = {
         codeLabel: "parameters.in — feature selection (additional nonlinear controls are required)",
         code: "include_nonlinear_analysis = yes\nmaterial_model = vonMises_ep\nmaterial_plasticity_type = rate_independent",
         note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and 16-column material_properties_list values. Use the Nonlinear & plastic analysis parameter page and validate the selected constitutive model against an appropriate reference before a large run.",
+      },
+      {
+        id: "nonlinear-material-properties",
+        title: "Non-Istanbul BAE property table",
+        paragraphs: [
+          "Rows are ordered by increasing Vs_limit. For non-Istanbul models, the first and last limits define the inclusive nonlinear range and Hercules linearly interpolates active properties for intermediate Vs. BAE reads Su from alpha_cohesion and its exponential hardening parameters from psi and m.",
+          "The example brackets a homogeneous Vs=1000 m/s profile. Repeated values make its active BAE properties constant across the selected range; replace them with calibrated strength and modulus-reduction parameters for scientific use.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax example, not a calibration",
+        code: "Istanbul_velocity_model = no\nmaterial_model = vonMises_baE\nmaterial_plasticity_type = rate_independent\nmaterial_properties_count = 2\nmaterial_properties_list =\n# Vs   Su(Pa) phi rate sensitivity hardening dilatancy gamma0 psi m   theta1 theta2 theta3 theta4 theta5 phi_RO\n  900  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0\n 1100  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0",
+        note: "Su, psi, and m are case-specific constitutive inputs and cannot be inferred from Vs alone. Confirm the selected nonlinear-element count in the setup output before timing or production runs.",
       },
       {
         id: "coupling",

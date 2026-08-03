@@ -146,6 +146,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /legacy Istanbul nl_id classification/);
   assert.match(physics, /Vs range covered by material_properties_list/);
+  assert.match(physics, /non-Istanbul vonMises_baE/);
+  assert.match(physics, /built-in nl_id constants/);
+  assert.match(physics, /Non-Istanbul BAE property table/);
+  assert.match(physics, /synthetic syntax example, not a calibration/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
   assert.equal(parameterResponse.status, 200);
@@ -153,6 +157,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /Nonlinear and plastic analysis parameters/);
   assert.match(parameters, /include_nonlinear_analysis/);
   assert.match(parameters, /material_plasticity_type/);
+  assert.match(parameters, /inclusive nonlinear-element range/);
+  assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
 
   const gpuResponse = await render("/docs/gpu-execution");
@@ -166,6 +172,28 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /FA\/FAM quartic correctors/);
   assert.match(gpu, /current CPU dispatch ordering/);
   assert.match(gpu, /tensorial shear strains/);
+});
+
+test("scopes legacy von Mises constants to Istanbul inputs", () => {
+  const sourcePath = fileURLToPath(new URL("../../quake/forward/nonlinear.cc", import.meta.url));
+  if (!existsSync(sourcePath)) return;
+
+  const source = readFileSync(sourcePath, "utf8");
+  const bae = source.slice(
+    source.indexOf("case VONMISES_BAE:"),
+    source.indexOf("case VONMISES_BAH:"),
+  );
+  const ep = source.slice(
+    source.indexOf("case VONMISES_EP:"),
+    source.indexOf("case DRUCKERPRAGER:"),
+  );
+
+  assert.match(bae, /if \( theIstanbulVelocityModel == YES \)/);
+  assert.match(bae, /else \{\s*ecp->c\s*= get_cohesion\(elementVs\);/);
+  assert.match(bae, /ecp->psi0 = interpolate_property_value\(elementVs, thePsi\);/);
+  assert.match(bae, /ecp->m\s*= interpolate_property_value\(elementVs, theM\);/);
+  assert.match(ep, /if \( theIstanbulVelocityModel == YES \)/);
+  assert.match(ep, /else \{\s*ecp->c = get_cohesion\(elementVs\);/);
 });
 
 test("documents every supported source model and its auxiliary inputs", async () => {

@@ -902,6 +902,14 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 "Nonlinear element selection uses the material-properties "
                 "Vs range; legacy nl_id selection is disabled because "
                 "Istanbul_velocity_model is not yes.\n");
+        if (theMaterialModel == VONMISES_BAE ||
+            theMaterialModel == VONMISES_EP) {
+            fprintf(stdout,
+                    "Non-Istanbul %s constants use material_properties_list; "
+                    "legacy nl_id constants are disabled.\n",
+                    (theMaterialModel == VONMISES_BAE)
+                        ? "vonMises_baE" : "vonMises_ep");
+        }
     }
 
     return 0;
@@ -1331,41 +1339,47 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 ecp->Sstrain0  = 0.0;
                 ecp->h         = 0.0;
 
-                if ( edata->nl_id == 0.0 ) {
-                    fprintf(stdout," Linear element within array of nonlinear elements. \n"
-                                   " Check nonlinear identification function \n "); //should not get here
-                } else if ( edata->nl_id == 1.0  ) {
-                    ecp->psi0      = 1.5643;
-                    ecp->m         = 0.4461;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.05;
-                } else if ( edata->nl_id == 2.0  ) {
-                    ecp->psi0      = 0.9331;
-                    ecp->m         = 1.245;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0006;
-                } else if ( edata->nl_id == 3.0  ) {
-                    ecp->psi0      = 4.5149;
-                    ecp->m         = 0.9637;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0005;
-                } else if ( edata->nl_id == 4.0  ) {
-                    ecp->psi0      = 4.0711;
-                    ecp->m         = 0.0089;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0010;
-                } else if ( edata->nl_id == 5.0  ) {
-                    ecp->psi0      = 6.7447;
-                    ecp->m         = 0.9294;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0013;
-                } else if ( edata->nl_id == 6.0  ) {
-                    ecp->psi0      = 9.3248;
-                    ecp->m         = 0.9566;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0022;
-                } else if ( edata->nl_id == 8.0  ) {
-                    ecp->psi0      = 0.7235;
-                    ecp->m         = 1.4074;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.004;
-                } else if ( edata->nl_id == 9.0  ) {
-                    ecp->psi0      = 0.2973;
-                    ecp->m         = 1.1772;
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.005;
+                if ( theIstanbulVelocityModel == YES ) {
+                    if ( edata->nl_id == 0.0 ) {
+                        fprintf(stdout," Linear element within array of nonlinear elements. \n"
+                                       " Check nonlinear identification function \n "); //should not get here
+                    } else if ( edata->nl_id == 1.0  ) {
+                        ecp->psi0      = 1.5643;
+                        ecp->m         = 0.4461;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.05;
+                    } else if ( edata->nl_id == 2.0  ) {
+                        ecp->psi0      = 0.9331;
+                        ecp->m         = 1.245;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0006;
+                    } else if ( edata->nl_id == 3.0  ) {
+                        ecp->psi0      = 4.5149;
+                        ecp->m         = 0.9637;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0005;
+                    } else if ( edata->nl_id == 4.0  ) {
+                        ecp->psi0      = 4.0711;
+                        ecp->m         = 0.0089;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0010;
+                    } else if ( edata->nl_id == 5.0  ) {
+                        ecp->psi0      = 6.7447;
+                        ecp->m         = 0.9294;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0013;
+                    } else if ( edata->nl_id == 6.0  ) {
+                        ecp->psi0      = 9.3248;
+                        ecp->m         = 0.9566;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0022;
+                    } else if ( edata->nl_id == 8.0  ) {
+                        ecp->psi0      = 0.7235;
+                        ecp->m         = 1.4074;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.004;
+                    } else if ( edata->nl_id == 9.0  ) {
+                        ecp->psi0      = 0.2973;
+                        ecp->m         = 1.1772;
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.005;
+                    }
+                } else {
+                    ecp->c    = get_cohesion(elementVs);
+                    ecp->psi0 = interpolate_property_value(elementVs, thePsi);
+                    ecp->m    = interpolate_property_value(elementVs, theM);
                 }
 
                 break;
@@ -1429,28 +1443,29 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
 
             case VONMISES_EP:
-                //ecp->c         = get_cohesion(elementVs);
-                //ecp->c         = sqrt(3.0) * tau_max / 2.0;
-
-                if ( edata->nl_id == 0.0 ) {
-                    fprintf(stdout," Linear element within array of nonlinear elements. \n"
-                                   " Check nonlinear identification function \n "); //should not get here
-                } else if ( edata->nl_id == 1.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.05;
-                } else if ( edata->nl_id == 2.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0006;
-                } else if ( edata->nl_id == 3.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0005;
-                } else if ( edata->nl_id == 4.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0010;
-                } else if ( edata->nl_id == 5.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0013;
-                } else if ( edata->nl_id == 6.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0022;
-                } else if ( edata->nl_id == 8.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.004;
-                } else if ( edata->nl_id == 9.0  ) {
-                    ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.005;
+                if ( theIstanbulVelocityModel == YES ) {
+                    if ( edata->nl_id == 0.0 ) {
+                        fprintf(stdout," Linear element within array of nonlinear elements. \n"
+                                       " Check nonlinear identification function \n "); //should not get here
+                    } else if ( edata->nl_id == 1.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.05;
+                    } else if ( edata->nl_id == 2.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0006;
+                    } else if ( edata->nl_id == 3.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0005;
+                    } else if ( edata->nl_id == 4.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0010;
+                    } else if ( edata->nl_id == 5.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0013;
+                    } else if ( edata->nl_id == 6.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.0022;
+                    } else if ( edata->nl_id == 8.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.004;
+                    } else if ( edata->nl_id == 9.0  ) {
+                        ecp->c         = sqrt(3.0/8.0) * ecp->mu * 0.005;
+                    }
+                } else {
+                    ecp->c = get_cohesion(elementVs);
                 }
 
                 ecp->phi       = 0.0;
