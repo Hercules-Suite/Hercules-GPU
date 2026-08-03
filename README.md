@@ -1,5 +1,6 @@
-For instructions on how to build, install and execute Hercules, please read
-the documentation: https://clifford-yen.github.io/HerculesDoc/index.html 
+For instructions on how to build, install, configure, and run Hercules, see the
+[Hercules GPU Documentation](https://hercules-gpu-docs.liling-dpim.chatgpt.site).
+The documentation source is maintained with the solver in [`docs-site/`](docs-site/README.md).
 
 Some general description of the core components in this directory are given as follows.
 
