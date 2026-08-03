@@ -8,7 +8,8 @@ regional wave-propagation and coupled-physics studies.
 ## Documentation
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.liling-dpim.chatgpt.site) — installation, input parameters, source models, running, output, and validation
-- [Extended implementation and runtime notes](doc/Extended%20README.md) — detailed solver controls, performance settings, and development history moved from the former root README
+- [Runtime environment and launcher reference](doc/Extended%20README.md) — detailed environment variables, execution controls, and launcher guidance
+- [Technical implementation notes](doc/Technical%20README.md) — solver controls, performance settings, and development history moved from the former root README
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 - [`docs-site/`](docs-site/README.md) — source code for the documentation website
 
