@@ -1,6 +1,8 @@
 *.o
 *.a
 .DS_Store
+.pnpm-store/
+AGENTS.md
 quake/cvm/dumpcvm
 quake/cvm/pickrecord
 quake/cvm/querycvm
