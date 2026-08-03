@@ -1,0 +1,1847 @@
+/* -*- C++ -*- */
+/*
+ * Device-resident nonlinear constitutive update and force assembly.
+ *
+ * The legacy nonlinear.cc implementation remains the CPU/GSL reference.  This
+ * translation unit intentionally contains no GSL calls and performs no dynamic
+ * allocation from device code.
+ */
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#include <float.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "psolve.h"
+#include "kernel.h"
+#include "nonlinear_gpu.h"
+
+#define NL_GPU_QP 8
+#define NL_GPU_KAPPA_MIN 1.0e-10
+#define NL_GPU_PI 3.141592653589793238462643383279502884
+
+typedef struct nonlinear_gpu_element_t {
+    int32_t eindex;
+    double h;
+} nonlinear_gpu_element_t;
+
+typedef struct nonlinear_gpu_error_t {
+    int32_t code;
+    int32_t eindex;
+    int32_t qp;
+    double residual;
+    double value;
+} nonlinear_gpu_error_t;
+
+typedef struct nonlinear_gpu_state_t {
+    int32_t count;
+    nonlinear_gpu_element_t *elements;
+    nlconstants_t *constants;
+    qptensors_t *stresses;
+    qptensors_t *strains;
+    qptensors_t *strains1;
+    qptensors_t *pstrains1;
+    qptensors_t *pstrains2;
+    qptensors_t *alphastress1;
+    qptensors_t *alphastress2;
+    qpvectors_t *ep1;
+    qpvectors_t *ep2;
+    qpvectors_t *psi_n;
+    qpvectors_t *load_unload_n;
+    qpvectors_t *sv_n;
+    qpvectors_t *sv_max;
+    qpvectors_t *kappa;
+    qptensors_t *sref;
+    qpvectors_t *gamma1d;
+    qpvectors_t *tao1d;
+    qpvectors_t *ggmax;
+    nonlinear_gpu_error_t *error;
+} nonlinear_gpu_state_t;
+
+static nonlinear_gpu_state_t g_nl = {};
+static nonlinear_gpu_config_t g_config = {};
+static nonlinear_gpu_error_t g_error_host = {};
+static int g_backend_request = -1;
+static int g_active = 0;
+
+static int parse_boolean_gpu(const char *value)
+{
+    return (strcasecmp(value, "gpu") == 0 ||
+            strcasecmp(value, "device") == 0 ||
+            strcasecmp(value, "yes") == 0 ||
+            strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0);
+}
+
+static int parse_boolean_cpu(const char *value)
+{
+    return (strcasecmp(value, "cpu") == 0 ||
+            strcasecmp(value, "host") == 0 ||
+            strcasecmp(value, "no") == 0 ||
+            strcasecmp(value, "false") == 0 || strcmp(value, "0") == 0);
+}
+
+int nonlinear_gpu_requested(void)
+{
+    if (g_backend_request < 0) {
+        const char *value = getenv("HERCULES_NONLINEAR_BACKEND");
+        g_backend_request = 0;
+        if (value != NULL) {
+            if (parse_boolean_gpu(value)) {
+                g_backend_request = 1;
+            } else if (!parse_boolean_cpu(value)) {
+                fprintf(stderr,
+                        "HERCULES_NONLINEAR_BACKEND must be cpu or gpu; got '%s'\n",
+                        value);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+    return g_backend_request;
+}
+
+int nonlinear_gpu_active(void)
+{
+    return g_active;
+}
+
+__device__ static inline double nl_max(double a, double b)
+{
+    return a > b ? a : b;
+}
+
+__device__ static inline double nl_min(double a, double b)
+{
+    return a < b ? a : b;
+}
+
+__device__ static inline tensor_t nl_zero(void)
+{
+    tensor_t a = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    return a;
+}
+
+__device__ static inline tensor_t nl_add(tensor_t a, tensor_t b)
+{
+    tensor_t c = {a.xx + b.xx, a.yy + b.yy, a.zz + b.zz,
+                  a.xy + b.xy, a.yz + b.yz, a.xz + b.xz};
+    return c;
+}
+
+__device__ static inline tensor_t nl_sub(tensor_t a, tensor_t b)
+{
+    tensor_t c = {a.xx - b.xx, a.yy - b.yy, a.zz - b.zz,
+                  a.xy - b.xy, a.yz - b.yz, a.xz - b.xz};
+    return c;
+}
+
+__device__ static inline tensor_t nl_scale(tensor_t a, double s)
+{
+    tensor_t c = {a.xx * s, a.yy * s, a.zz * s,
+                  a.xy * s, a.yz * s, a.xz * s};
+    return c;
+}
+
+__device__ static inline tensor_t nl_iso(double s)
+{
+    tensor_t a = {s, s, s, 0.0, 0.0, 0.0};
+    return a;
+}
+
+__device__ static inline double nl_i1(tensor_t a)
+{
+    return a.xx + a.yy + a.zz;
+}
+
+__device__ static inline tensor_t nl_dev(tensor_t a)
+{
+    const double p = nl_i1(a) / 3.0;
+    a.xx -= p;
+    a.yy -= p;
+    a.zz -= p;
+    return a;
+}
+
+__device__ static inline double nl_j2(tensor_t a)
+{
+    return 0.5 * (a.xx * a.xx + a.yy * a.yy + a.zz * a.zz) +
+           a.xy * a.xy + a.yz * a.yz + a.xz * a.xz;
+}
+
+__device__ static inline double nl_ddot(tensor_t a, tensor_t b)
+{
+    return a.xx * b.xx + a.yy * b.yy + a.zz * b.zz +
+           2.0 * (a.xy * b.xy + a.yz * b.yz + a.xz * b.xz);
+}
+
+__device__ static inline double nl_comb_j2(tensor_t a, tensor_t b)
+{
+    return 0.5 * (a.xx * b.xx + a.yy * b.yy + a.zz * b.zz) +
+           a.xy * b.xy + a.yz * b.yz + a.xz * b.xz;
+}
+
+__device__ static inline tensor_t nl_stress(tensor_t strain,
+                                             double mu, double lambda)
+{
+    const double lkk = lambda * nl_i1(strain);
+    const double mu2 = 2.0 * mu;
+    tensor_t stress = {mu2 * strain.xx + lkk,
+                       mu2 * strain.yy + lkk,
+                       mu2 * strain.zz + lkk,
+                       mu2 * strain.xy,
+                       mu2 * strain.yz,
+                       mu2 * strain.xz};
+    return stress;
+}
+
+__device__ static inline tensor_t nl_elastic_strain(tensor_t stress,
+                                                     double mu, double bulk)
+{
+    const double skk = nl_i1(stress);
+    tensor_t dev = nl_dev(stress);
+    tensor_t strain = nl_scale(dev, 1.0 / (2.0 * mu));
+    const double ev = skk / (9.0 * bulk);
+    strain.xx += ev;
+    strain.yy += ev;
+    strain.zz += ev;
+    return strain;
+}
+
+__device__ static inline void nl_record_error(nonlinear_gpu_error_t *error,
+                                               int32_t code,
+                                               int32_t eindex, int32_t qp,
+                                               double residual, double value)
+{
+    if (atomicCAS(&error->code, 0, code) == 0) {
+        error->eindex = eindex;
+        error->qp = qp;
+        error->residual = residual;
+        error->value = value;
+    }
+}
+
+__device__ static inline void nl_point_dxi(double *dx, double *dy, double *dz,
+                                            double lx, double ly, double lz,
+                                            double h, int node)
+{
+    const int sx = (node & 1) ? 1 : -1;
+    const int sy = (node & 2) ? 1 : -1;
+    const int sz = (node & 4) ? 1 : -1;
+    const double jac = 0.25 / h;
+    *dx = jac * sx * (1.0 + sy * ly) * (1.0 + sz * lz);
+    *dy = jac * (1.0 + sx * lx) * sy * (1.0 + sz * lz);
+    *dz = jac * (1.0 + sx * lx) * (1.0 + sy * ly) * sz;
+}
+
+__device__ static tensor_t nl_hex_strain(const fvector_t u[8], int qp,
+                                          double h)
+{
+    const double q = 0.577350269189;
+    const double lx = (qp & 1) ? q : -q;
+    const double ly = (qp & 2) ? q : -q;
+    const double lz = (qp & 4) ? q : -q;
+    tensor_t strain = nl_zero();
+    for (int node = 0; node < 8; node++) {
+        double dx, dy, dz;
+        nl_point_dxi(&dx, &dy, &dz, lx, ly, lz, h, node);
+        strain.xx += dx * (double)u[node].f[0];
+        strain.yy += dy * (double)u[node].f[1];
+        strain.zz += dz * (double)u[node].f[2];
+        strain.xy += 0.5 * (dy * (double)u[node].f[0] +
+                            dx * (double)u[node].f[1]);
+        strain.yz += 0.5 * (dz * (double)u[node].f[1] +
+                            dy * (double)u[node].f[2]);
+        strain.xz += 0.5 * (dz * (double)u[node].f[0] +
+                            dx * (double)u[node].f[2]);
+    }
+    return strain;
+}
+
+__device__ static inline void nl_tetra_nodes(int part, int tet, int n[4])
+{
+    const int part1[5][4] = {{0,2,1,4}, {3,1,2,7}, {6,4,7,2},
+                             {5,7,4,1}, {2,4,7,1}};
+    const int part2[5][4] = {{0,3,1,5}, {0,2,3,6}, {4,5,6,0},
+                             {6,5,7,3}, {0,6,3,5}};
+    for (int i = 0; i < 4; i++) n[i] = (part == 1) ? part1[tet][i]
+                                                    : part2[tet][i];
+}
+
+__device__ static inline double nl_det3(const double a[3][3])
+{
+    return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+           a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+           a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+}
+
+__device__ static int nl_tetra_gradients(int part, int tet, double h,
+                                         int nodes[4], double grad[4][3],
+                                         double *volume)
+{
+    nl_tetra_nodes(part, tet, nodes);
+    double xyz[4][3];
+    for (int a = 0; a < 4; a++) {
+        xyz[a][0] = (nodes[a] & 1) ? h : 0.0;
+        xyz[a][1] = (nodes[a] & 2) ? h : 0.0;
+        xyz[a][2] = (nodes[a] & 4) ? h : 0.0;
+    }
+    double j[3][3];
+    for (int r = 0; r < 3; r++) {
+        j[r][0] = xyz[1][r] - xyz[0][r];
+        j[r][1] = xyz[2][r] - xyz[0][r];
+        j[r][2] = xyz[3][r] - xyz[0][r];
+    }
+    const double det = nl_det3(j);
+    if (fabs(det) < DBL_MIN) return 0;
+    const double invdet = 1.0 / det;
+    double inv[3][3];
+    inv[0][0] =  (j[1][1]*j[2][2]-j[1][2]*j[2][1])*invdet;
+    inv[0][1] = -(j[0][1]*j[2][2]-j[0][2]*j[2][1])*invdet;
+    inv[0][2] =  (j[0][1]*j[1][2]-j[0][2]*j[1][1])*invdet;
+    inv[1][0] = -(j[1][0]*j[2][2]-j[1][2]*j[2][0])*invdet;
+    inv[1][1] =  (j[0][0]*j[2][2]-j[0][2]*j[2][0])*invdet;
+    inv[1][2] = -(j[0][0]*j[1][2]-j[0][2]*j[1][0])*invdet;
+    inv[2][0] =  (j[1][0]*j[2][1]-j[1][1]*j[2][0])*invdet;
+    inv[2][1] = -(j[0][0]*j[2][1]-j[0][1]*j[2][0])*invdet;
+    inv[2][2] =  (j[0][0]*j[1][1]-j[0][1]*j[1][0])*invdet;
+
+    /* grad(N1..N3) are rows of J^-1; grad(N0) is their negative sum. */
+    for (int d = 0; d < 3; d++) {
+        grad[1][d] = inv[0][d];
+        grad[2][d] = inv[1][d];
+        grad[3][d] = inv[2][d];
+        grad[0][d] = -grad[1][d] - grad[2][d] - grad[3][d];
+    }
+    *volume = fabs(det) / 6.0;
+    return 1;
+}
+
+__device__ static tensor_t nl_tetra_strain(const fvector_t u[8], int part,
+                                            int tet, double h)
+{
+    int nodes[4];
+    double grad[4][3], volume;
+    tensor_t strain = nl_zero();
+    if (!nl_tetra_gradients(part, tet, h, nodes, grad, &volume)) return strain;
+    for (int a = 0; a < 4; a++) {
+        const fvector_t v = u[nodes[a]];
+        strain.xx += grad[a][0] * (double)v.f[0];
+        strain.yy += grad[a][1] * (double)v.f[1];
+        strain.zz += grad[a][2] * (double)v.f[2];
+        strain.xy += 0.5 * (grad[a][1] * (double)v.f[0] +
+                            grad[a][0] * (double)v.f[1]);
+        strain.yz += 0.5 * (grad[a][2] * (double)v.f[1] +
+                            grad[a][1] * (double)v.f[2]);
+        strain.xz += 0.5 * (grad[a][2] * (double)v.f[0] +
+                            grad[a][0] * (double)v.f[2]);
+    }
+    return strain;
+}
+
+__device__ static inline double nl_gqh_value(const nlconstants_t *c,
+                                              double gamma)
+{
+    const double t1 = c->thetaGQH[0], t2 = c->thetaGQH[1];
+    const double t3 = c->thetaGQH[2], t4 = c->thetaGQH[3];
+    const double t5 = c->thetaGQH[4];
+    const double gp = pow(nl_max(gamma, 0.0), t5);
+    const double theta = t1 + t2 * (t4 * gp) / (pow(t3, t5) + t4 * gp);
+    const double rad = nl_max((1.0 + gamma) * (1.0 + gamma) -
+                              4.0 * theta * gamma, 0.0);
+    return 2.0 * gamma / (1.0 + gamma + sqrt(rad));
+}
+
+__device__ static inline double nl_mkz_value(const nlconstants_t *c,
+                                              double gamma)
+{
+    return gamma / (1.0 + c->beta_MKZ * pow(nl_max(gamma, 0.0),
+                                             c->s_MKZ));
+}
+
+__device__ static double nl_backbone_gamma(const nlconstants_t *c,
+                                            materialmodel_t model,
+                                            double target, double tolerance)
+{
+    double lo = 0.0, hi = 1.0;
+    double fhi = (model == VONMISES_GQH) ? nl_gqh_value(c, hi)
+                                          : nl_mkz_value(c, hi);
+    for (int i = 0; i < 200 && fhi < target; i++) {
+        hi *= 2.0;
+        fhi = (model == VONMISES_GQH) ? nl_gqh_value(c, hi)
+                                       : nl_mkz_value(c, hi);
+    }
+    for (int i = 0; i < 200; i++) {
+        const double mid = 0.5 * (lo + hi);
+        const double value = (model == VONMISES_GQH) ? nl_gqh_value(c, mid)
+                                                      : nl_mkz_value(c, mid);
+        if (fabs(value - target) <= tolerance) return mid;
+        if (value < target) lo = mid; else hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+__device__ static double nl_hardening(const nlconstants_t *c,
+                                      materialmodel_t model, double kappa,
+                                      double gamma_n, double tolerance)
+{
+    const double g = c->mu;
+    if (kappa <= 0.0 && model != VONMISES_MKZ) return 0.0;
+    if (model == VONMISES_BAE)
+        return c->psi0 * g * pow(nl_max(kappa, 0.0), c->m);
+    if (model == VONMISES_BAH)
+        return 3.0 * g * kappa * kappa / (1.0 + 2.0 * kappa);
+    if (model == VONMISES_RO)
+        return 3.0 * g / (c->alpha_RO * c->eta_RO) *
+               pow(c->phi_RO * (1.0 + kappa), c->eta_RO - 1.0);
+
+    if (model == VONMISES_GQH || model == VONMISES_MKZ) {
+        double target = 1.0 / (1.0 + kappa);
+        if (model == VONMISES_MKZ) target /= c->phi_MKZ;
+        const double gamma = nl_backbone_gamma(c, model, target, tolerance);
+        double derivative;
+        if (model == VONMISES_MKZ) {
+            const double p = pow(nl_max(gamma, DBL_MIN), c->s_MKZ);
+            derivative = (1.0 + c->beta_MKZ * (1.0 - c->s_MKZ) * p) /
+                         ((1.0 + c->beta_MKZ * p) *
+                          (1.0 + c->beta_MKZ * p));
+        } else {
+            const double t1 = c->thetaGQH[0], t2 = c->thetaGQH[1];
+            const double t3 = c->thetaGQH[2], t4 = c->thetaGQH[3];
+            const double t5 = c->thetaGQH[4];
+            const double gp = pow(nl_max(gamma, DBL_MIN), t5);
+            const double t3p = pow(t3, t5);
+            const double denominator = t3p+t4*gp;
+            const double theta = t1+t2*t4*gp/denominator;
+            const double dtheta = t2*t3p*t4*t5*
+                pow(nl_max(gamma, DBL_MIN), t5-1.0) /
+                (denominator*denominator);
+            const double root = sqrt(nl_max(
+                (1.0+gamma)*(1.0+gamma)-4.0*theta*gamma,
+                DBL_MIN));
+            const double a = 1.0+gamma+root;
+            const double b = 1.0+(1.0+gamma-
+                2.0*(theta+gamma*dtheta))/root;
+            derivative = 2.0*(a-gamma*b)/(a*a);
+        }
+        derivative = nl_min(derivative, 1.0 - 1.0e-14);
+        return 3.0 * g * derivative / nl_max(1.0 - derivative, DBL_MIN);
+    }
+    (void)gamma_n;
+    return 0.0;
+}
+
+typedef struct nl_ba_params_t {
+    double a, b, c, d, e, f;
+    double gamma_n;
+    nlconstants_t constants;
+    materialmodel_t model;
+    double backbone_tolerance;
+} nl_ba_params_t;
+
+__device__ static double nl_ba_residual(double kappa,
+                                         const nl_ba_params_t *p)
+{
+    const double h = nl_hardening(&p->constants, p->model, kappa,
+                                  p->gamma_n, p->backbone_tolerance);
+    const double mu = p->constants.mu;
+    const double psi = (h + 3.0 * mu != 0.0)
+                           ? 2.0 * mu * h / (h + 3.0 * mu) : 0.0;
+    const double phi = psi * (1.0 + kappa);
+    const double rad = p->a + 2.0 * p->b * kappa +
+                       kappa * kappa * p->c + 2.0 * phi * p->d +
+                       2.0 * kappa * phi * p->e + phi * phi * p->f;
+    const double r = p->constants.c * sqrt(8.0 / 3.0);
+    return sqrt(nl_max(rad, 0.0)) - r;
+}
+
+__device__ static int nl_bracketed_bisection(const nl_ba_params_t *p,
+                                              double *lo, double *hi,
+                                              double tolerance,
+                                              double *root,
+                                              double *residual)
+{
+    double flo = nl_ba_residual(*lo, p);
+    double fhi = nl_ba_residual(*hi, p);
+    if (!isfinite(flo) || !isfinite(fhi) || flo * fhi > 0.0) return 0;
+    for (int i = 0; i < 1000; i++) {
+        const double mid = 0.5 * (*lo + *hi);
+        const double fm = nl_ba_residual(mid, p);
+        if (!isfinite(fm)) return 0;
+        if (fabs(fm) <= tolerance || fabs(*hi - *lo) <= DBL_EPSILON *
+                                                     nl_max(1.0, fabs(mid))) {
+            *root = mid;
+            *residual = fm;
+            return 1;
+        }
+        if (flo * fm <= 0.0) {
+            *hi = mid;
+            fhi = fm;
+        } else {
+            *lo = mid;
+            flo = fm;
+        }
+    }
+    *root = 0.5 * (*lo + *hi);
+    *residual = nl_ba_residual(*root, p);
+    return fabs(*residual) <= tolerance;
+}
+
+__device__ static void nl_von_mises_boundary(tensor_t sigma_n,
+                                              tensor_t de_dev,
+                                              tensor_t *sigma,
+                                              double g, double bulk,
+                                              double de_vol, double radius)
+{
+    tensor_t s_trial = nl_add(nl_dev(sigma_n), nl_scale(de_dev, 2.0 * g));
+    const double mag = sqrt(nl_max(nl_ddot(s_trial, s_trial), DBL_MIN));
+    tensor_t p = nl_iso(nl_i1(sigma_n) / 3.0 + bulk * de_vol);
+    *sigma = nl_add(p, nl_scale(s_trial, radius / mag));
+}
+
+__device__ static void nl_backbone_diagnostics(const nlconstants_t *c,
+                                                materialmodel_t model,
+                                                double kappa,
+                                                double gamma_n,
+                                                double tolerance,
+                                                double *gamma, double *tao,
+                                                double *ggmax)
+{
+    const double tao_max = 2.0 * c->c / sqrt(3.0);
+    const double tao_bar = 1.0 / (1.0 + kappa);
+    if (model == VONMISES_MKZ) {
+        const double target = tao_bar / c->phi_MKZ;
+        const double gb = nl_backbone_gamma(c, model, target, tolerance);
+        *gamma = gb * c->gammaref_MKZ;
+        *tao = tao_bar * tao_max;
+        *ggmax = 1.0 / (1.0 + c->beta_MKZ * pow(gb, c->s_MKZ));
+    } else if (model == VONMISES_BAH) {
+        const double gamma_ref = tao_max / c->mu;
+        const double gb = (tao_bar == 1.0) ? 0.10 / gamma_ref
+                                           : tao_bar / (1.0 - tao_bar);
+        *gamma = gb * gamma_ref;
+        *tao = tao_bar * tao_max;
+        *ggmax = 1.0 / (1.0 + gb);
+    } else if (model == VONMISES_BAE) {
+        const double points[10] = {
+             0.1488743389816312108848260,  0.4333953941292471907992659,
+             0.6794095682990244062343274,  0.8650633666889845107320967,
+             0.9739065285171717200779640, -0.1488743389816312108848260,
+            -0.4333953941292471907992659, -0.6794095682990244062343274,
+            -0.8650633666889845107320967, -0.9739065285171717200779640};
+        const double weights[10] = {
+            0.2955242247147528701738930, 0.2692667193099963550912269,
+            0.2190863625159820439955349, 0.1494513491505805931457763,
+            0.0666713443086881375935688, 0.2955242247147528701738930,
+            0.2692667193099963550912269, 0.2190863625159820439955349,
+            0.1494513491505805931457763, 0.0666713443086881375935688};
+        const double h = c->psi0*c->mu;
+        const double tau = tao_bar*tao_max;
+        double gamma_value = tau/c->mu;
+        double reduction = 0.0;
+        for (int i = 0; i < 10; i++) {
+            const double xi = 0.5*tau*(points[i] + 1.0);
+            gamma_value += 3.0/h*pow(xi/(tao_max-xi), c->m)*
+                           weights[i]*tau*0.5;
+            reduction += pow(2.0*xi/(tao_max-2.0*xi+tau), c->m)*
+                         weights[i]*tau;
+        }
+        *gamma = gamma_value;
+        *tao = tau;
+        *ggmax = 1.0/(1.0 + 3.0*c->mu*reduction/(2.0*h*tau));
+    }
+    /* The CPU reference currently leaves the GQH and Ramberg--Osgood
+     * station-only backbone diagnostic values unchanged. Preserve that
+     * behavior while still updating their constitutive stress and kappa. */
+    (void)gamma_n;
+    (void)tolerance;
+}
+
+__device__ static int nl_update_backbone(const nlconstants_t *c,
+                                          materialmodel_t model,
+                                          tensor_t strain,
+                                          tensor_t strain_prev,
+                                          tensor_t *sref,
+                                          tensor_t *sigma,
+                                          double *kappa,
+                                          double *gamma1d,
+                                          double *tao1d,
+                                          double *ggmax,
+                                          const nonlinear_gpu_config_t *cfg,
+                                          double *error)
+{
+    const double g = c->mu;
+    const double bulk = c->lambda + 2.0 * g / 3.0;
+    const tensor_t sigma_n = *sigma;
+    const double kappa_n = *kappa;
+    const double gamma_n = *gamma1d;
+    tensor_t sdev_n = nl_dev(sigma_n);
+    tensor_t de = nl_sub(strain, strain_prev);
+    const double de_vol = nl_i1(de);
+    tensor_t de_dev = nl_dev(de);
+    tensor_t sno = nl_sub(sdev_n, *sref);
+    const double den = nl_ddot(sdev_n, sno) + kappa_n * nl_ddot(sno, sno);
+    const tensor_t num = nl_add(nl_scale(sdev_n, 1.0 + kappa_n),
+                                nl_scale(sno, kappa_n * (1.0 + kappa_n)));
+    const double load_unload = (fabs(den) > DBL_MIN)
+                                   ? -nl_ddot(num, de_dev) / den : 0.0;
+    if (load_unload > 0.0) *sref = sdev_n;
+
+    sno = nl_sub(sdev_n, *sref);
+    nl_ba_params_t p;
+    p.a = nl_ddot(sdev_n, sdev_n);
+    p.b = nl_ddot(sdev_n, sno);
+    p.c = nl_ddot(sno, sno);
+    p.d = nl_ddot(sdev_n, de_dev);
+    p.e = nl_ddot(sno, de_dev);
+    p.f = nl_ddot(de_dev, de_dev);
+    p.gamma_n = gamma_n;
+    p.constants = *c;
+    p.model = model;
+    p.backbone_tolerance = cfg->backbone_error_tolerance;
+
+    double f0 = nl_ba_residual(0.0, &p);
+    if (fabs(f0) <= cfg->error_tolerance) {
+        *kappa = 0.0;
+        *error = f0;
+        nl_von_mises_boundary(sigma_n, de_dev, sigma, g, bulk, de_vol,
+                              c->c * sqrt(8.0 / 3.0));
+        nl_backbone_diagnostics(c, model, *kappa, gamma_n,
+                                cfg->backbone_error_tolerance,
+                                gamma1d, tao1d, ggmax);
+        return 1;
+    }
+
+    double lo, hi;
+    if (kappa_n == 100.0 || load_unload > 0.0) {
+        lo = 0.0;
+        hi = NL_GPU_KAPPA_MIN;
+    } else {
+        hi = nl_max(kappa_n, NL_GPU_KAPPA_MIN);
+        lo = 0.5 * hi;
+    }
+    double flo = nl_ba_residual(lo, &p);
+    double fhi = nl_ba_residual(hi, &p);
+    for (int i = 0; i < 1000 && flo * fhi > 0.0; i++) {
+        if (kappa_n != 100.0 && load_unload <= 0.0 && lo > NL_GPU_KAPPA_MIN) {
+            hi = lo;
+            fhi = flo;
+            lo *= 0.5;
+            flo = nl_ba_residual(lo, &p);
+        } else {
+            lo = hi;
+            flo = fhi;
+            hi *= 2.0;
+            fhi = nl_ba_residual(hi, &p);
+        }
+    }
+    if (flo * fhi > 0.0) {
+        lo = 0.0;
+        hi = NL_GPU_KAPPA_MIN;
+        flo = nl_ba_residual(lo, &p);
+        fhi = nl_ba_residual(hi, &p);
+        for (int i = 0; i < 1000 && flo * fhi > 0.0; i++) {
+            hi *= 2.0;
+            fhi = nl_ba_residual(hi, &p);
+        }
+    }
+    if (hi <= NL_GPU_KAPPA_MIN) {
+        *kappa = 0.0;
+        *error = f0;
+        nl_von_mises_boundary(sigma_n, de_dev, sigma, g, bulk, de_vol,
+                              c->c * sqrt(8.0 / 3.0));
+        nl_backbone_diagnostics(c, model, *kappa, gamma_n,
+                                cfg->backbone_error_tolerance,
+                                gamma1d, tao1d, ggmax);
+        return 1;
+    }
+
+    double root = 0.0, residual = DBL_MAX;
+    if (!nl_bracketed_bisection(&p, &lo, &hi, cfg->error_tolerance,
+                                &root, &residual)) {
+        *error = residual;
+        return 0;
+    }
+    *kappa = root;
+    *error = fabs(residual);
+    const double hmod = nl_hardening(c, model, root, gamma_n,
+                                     cfg->backbone_error_tolerance);
+    const double psi = 2.0 * g * hmod / nl_max(hmod + 3.0 * g, DBL_MIN);
+    *sigma = nl_add(nl_add(sigma_n, nl_iso(bulk * de_vol)),
+                    nl_scale(de_dev, psi));
+    nl_backbone_diagnostics(c, model, root, gamma_n,
+                            cfg->backbone_error_tolerance,
+                            gamma1d, tao1d, ggmax);
+    return 1;
+}
+
+__device__ static double nl_positive_quartic_root(double c1, double c2,
+                                                   double c3, double c4,
+                                                   double c5,
+                                                   double tolerance,
+                                                   int *ok)
+{
+    typedef struct nl_complex_t { double real, imag; } nl_complex_t;
+    if (fabs(c1) > DBL_MIN) {
+        const double a = c2/c1, b = c3/c1, c = c4/c1, d = c5/c1;
+        const double radius = 1.0+nl_max(nl_max(fabs(a), fabs(b)),
+                                         nl_max(fabs(c), fabs(d)));
+        nl_complex_t roots[4] = {{radius, 0.0},
+                                 {0.4*radius, 0.9*radius},
+                                 {-0.65*radius, 0.72*radius},
+                                 {-0.7*radius, -0.8*radius}};
+        for (int iteration = 0; iteration < 160; iteration++) {
+            double maximum_update = 0.0;
+            for (int i = 0; i < 4; i++) {
+                const nl_complex_t z = roots[i];
+                nl_complex_t value = {1.0, 0.0};
+                const double coefficients[4] = {a, b, c, d};
+                for (int k = 0; k < 4; k++) {
+                    const nl_complex_t next = {
+                        value.real*z.real-value.imag*z.imag+coefficients[k],
+                        value.real*z.imag+value.imag*z.real};
+                    value = next;
+                }
+                nl_complex_t product = {1.0, 0.0};
+                for (int j = 0; j < 4; j++) {
+                    if (j == i) continue;
+                    const nl_complex_t difference = {
+                        z.real-roots[j].real, z.imag-roots[j].imag};
+                    const nl_complex_t next = {
+                        product.real*difference.real-
+                            product.imag*difference.imag,
+                        product.real*difference.imag+
+                            product.imag*difference.real};
+                    product = next;
+                }
+                const double denominator = product.real*product.real+
+                                           product.imag*product.imag;
+                if (denominator <= DBL_MIN) continue;
+                const nl_complex_t update = {
+                    (value.real*product.real+value.imag*product.imag)/denominator,
+                    (value.imag*product.real-value.real*product.imag)/denominator};
+                roots[i].real -= update.real;
+                roots[i].imag -= update.imag;
+                maximum_update = nl_max(maximum_update,
+                    sqrt(update.real*update.real+update.imag*update.imag));
+            }
+            if (maximum_update <= DBL_EPSILON*radius*16.0) break;
+        }
+        double selected = DBL_MAX;
+        for (int i = 0; i < 4; i++) {
+            if (roots[i].real >= 0.0 &&
+                fabs(roots[i].imag) <= 1.0e-9*
+                    nl_max(1.0, fabs(roots[i].real))) {
+                selected = nl_min(selected, roots[i].real);
+            }
+        }
+        if (selected != DBL_MAX) {
+            const double residual = ((((c1*selected+c2)*selected+c3)*
+                                       selected+c4)*selected+c5);
+            const double scale = fabs(c5)+fabs(c4*selected)+
+                fabs(c3*selected*selected)+
+                fabs(c2*selected*selected*selected)+
+                fabs(c1*selected*selected*selected*selected)+1.0;
+            if (isfinite(residual) && fabs(residual) <=
+                nl_max(tolerance, 1.0e-10)*scale) {
+                *ok = 1;
+                return selected;
+            }
+        }
+    }
+
+    /* Degenerate or poorly conditioned fallback: locate a sign-changing
+     * interval on the non-negative real axis and bisect it. */
+    double lo = 0.0;
+    double flo = c5;
+    if (fabs(flo) <= tolerance) {
+        *ok = 1;
+        return 0.0;
+    }
+    double hi = 1.0e-16;
+    double fhi = ((((c1 * hi + c2) * hi + c3) * hi + c4) * hi + c5);
+    for (int i = 0; i < 256 && flo * fhi > 0.0; i++) {
+        lo = hi;
+        flo = fhi;
+        hi *= 2.0;
+        fhi = ((((c1 * hi + c2) * hi + c3) * hi + c4) * hi + c5);
+    }
+    if (!isfinite(fhi) || flo * fhi > 0.0) {
+        *ok = 0;
+        return 0.0;
+    }
+    for (int i = 0; i < 256; i++) {
+        const double mid = 0.5 * (lo + hi);
+        const double fm = ((((c1 * mid + c2) * mid + c3) * mid + c4) * mid + c5);
+        const double scale = fabs(c5) + fabs(c4 * mid) + fabs(c3 * mid * mid) +
+                             fabs(c2 * mid * mid * mid) +
+                             fabs(c1 * mid * mid * mid * mid) + 1.0;
+        if (fabs(fm) <= tolerance * scale ||
+            fabs(hi - lo) <= DBL_EPSILON * nl_max(1.0, mid)) {
+            *ok = 1;
+            return mid;
+        }
+        if (flo * fm <= 0.0) {
+            hi = mid;
+            fhi = fm;
+        } else {
+            lo = mid;
+            flo = fm;
+        }
+    }
+    *ok = 1;
+    return 0.5 * (lo + hi);
+}
+
+__device__ static int nl_update_fa(const nlconstants_t *c,
+                                    materialmodel_t model,
+                                    tensor_t dev_predictor,
+                                    tensor_t strain_prev,
+                                    tensor_t pstrain_prev,
+                                    tensor_t backstress_prev,
+                                    double epbar_prev,
+                                    tensor_t elastic_stress,
+                                    tensor_t *pstrain,
+                                    tensor_t *backstress,
+                                    tensor_t *sigma,
+                                    double *epbar,
+                                    double *fs,
+                                    double *psi_state,
+                                    double *load_unload_state,
+                                    double *tao_state,
+                                    double *tao_max_state,
+                                    double tolerance)
+{
+    double psi = c->psi0;
+    double su = c->c;
+    double sy = c->Sstrain0 * c->mu * sqrt(2.0);
+    if (model == VONMISES_FAM && *psi_state == 0.0) *psi_state = psi;
+
+    const double s_ss = 2.0 * nl_j2(dev_predictor);
+    const double s_aa = 2.0 * nl_j2(backstress_prev);
+    const double s_sa = 2.0 * nl_comb_j2(backstress_prev, dev_predictor);
+    double hkin = ((model == VONMISES_FAM) ? *psi_state : psi) * c->mu;
+    double hnlin = hkin / nl_max(sqrt(8.0 / 3.0) * su - sy, DBL_MIN);
+    double g1 = c->mu + 0.5 * hkin;
+
+    double c1 = (2.0 * c->mu * hnlin) * (2.0 * c->mu * hnlin);
+    double c2 = (4.0 * sy * c->mu * hnlin + 8.0 * c->mu * g1) * hnlin;
+    double c3 = hnlin * hnlin * (sy * sy - s_ss) + 4.0 * g1 * g1 +
+                4.0 * hnlin * sy * (c->mu + g1);
+    double c4 = 2.0 * hnlin * (sy * sy + s_sa - s_ss) + 4.0 * sy * g1;
+    double c5 = sy * sy - s_aa + 2.0 * s_sa - s_ss;
+    int ok = 0;
+    double dl = nl_positive_quartic_root(c1, c2, c3, c4, c5,
+                                         tolerance, &ok);
+    if (!ok) return 0;
+
+    double tlambda = 1.0 / (1.0 + hnlin * dl);
+    tensor_t z = nl_sub(dev_predictor, nl_scale(backstress_prev, tlambda));
+    const double magz = sqrt(nl_max(2.0 * nl_j2(z), DBL_MIN));
+    tensor_t n = nl_scale(z, 1.0 / magz);
+    *pstrain = nl_add(pstrain_prev, nl_scale(n, dl));
+    *epbar = epbar_prev + dl;
+    *backstress = nl_add(nl_scale(backstress_prev, tlambda),
+                         nl_scale(n, hkin * tlambda * dl));
+    *sigma = nl_sub(elastic_stress, nl_scale(n, 2.0 * c->mu * dl));
+    tensor_t sdev = nl_sub(dev_predictor, nl_scale(n, 2.0 * c->mu * dl));
+    *fs = sqrt(nl_max(2.0 * nl_j2(nl_sub(sdev, *backstress)), 0.0)) - sy;
+
+    if (model == VONMISES_FAM) {
+        double load_unload = 2.0 * nl_comb_j2(n, *backstress);
+        double tao = sqrt(nl_max(nl_j2(sdev), 0.0));
+        if ((*load_unload_state) * load_unload < 0.0 &&
+            *tao_state >= *tao_max_state) {
+            *tao_max_state = *tao_state;
+            tensor_t stress_prev = nl_stress(strain_prev, c->mu, c->lambda);
+            const double tao_elastic = sqrt(nl_max(nl_j2(nl_dev(stress_prev)),
+                                                   DBL_MIN));
+            su *= 2.0 / sqrt(3.0);
+            const double ratio = (su + *tao_max_state) /
+                                 nl_max(su - *tao_max_state, DBL_MIN);
+            *psi_state = log(nl_max(ratio, DBL_MIN)) * su /
+                         nl_max(tao_elastic - *tao_max_state, DBL_MIN);
+            hkin = *psi_state * c->mu;
+            hnlin = hkin / nl_max(sqrt(2.0) * su - sy, DBL_MIN);
+            g1 = c->mu + 0.5 * hkin;
+            c1 = (2.0 * c->mu * hnlin) * (2.0 * c->mu * hnlin);
+            c2 = (4.0 * sy * c->mu * hnlin + 8.0 * c->mu * g1) * hnlin;
+            c3 = hnlin * hnlin * (sy * sy - s_ss) + 4.0 * g1 * g1 +
+                 4.0 * hnlin * sy * (c->mu + g1);
+            c4 = 2.0 * hnlin * (sy * sy + s_sa - s_ss) + 4.0 * sy * g1;
+            c5 = sy * sy - s_aa + 2.0 * s_sa - s_ss;
+            dl = nl_positive_quartic_root(c1, c2, c3, c4, c5,
+                                          tolerance, &ok);
+            if (!ok) return 0;
+            tlambda = 1.0 / (1.0 + hnlin * dl);
+            z = nl_sub(dev_predictor, nl_scale(backstress_prev, tlambda));
+            n = nl_scale(z, 1.0 / sqrt(nl_max(2.0 * nl_j2(z), DBL_MIN)));
+            *pstrain = nl_add(pstrain_prev, nl_scale(n, dl));
+            *epbar = epbar_prev + dl;
+            *backstress = nl_add(nl_scale(backstress_prev, tlambda),
+                                 nl_scale(n, hkin * tlambda * dl));
+            *sigma = nl_sub(elastic_stress, nl_scale(n, 2.0 * c->mu * dl));
+            sdev = nl_sub(dev_predictor, nl_scale(n, 2.0 * c->mu * dl));
+            *fs = sqrt(nl_max(2.0 * nl_j2(nl_sub(sdev, *backstress)), 0.0)) - sy;
+            load_unload = 2.0 * nl_comb_j2(n, *backstress);
+            tao = sqrt(nl_max(nl_j2(sdev), 0.0));
+            *tao_max_state = nl_max(tao, *tao_state);
+        } else {
+            *tao_max_state = nl_max(tao, *tao_max_state);
+        }
+        *load_unload_state = load_unload;
+        *tao_state = tao;
+    }
+    return 1;
+}
+
+__device__ static void nl_jacobi_eigen(tensor_t a, double eig[3],
+                                        double vec[3][3])
+{
+    double m[3][3] = {{a.xx, a.xy, a.xz},
+                      {a.xy, a.yy, a.yz},
+                      {a.xz, a.yz, a.zz}};
+    vec[0][0] = vec[1][1] = vec[2][2] = 1.0;
+    vec[0][1] = vec[0][2] = vec[1][0] = 0.0;
+    vec[1][2] = vec[2][0] = vec[2][1] = 0.0;
+    for (int sweep = 0; sweep < 16; sweep++) {
+        for (int pair = 0; pair < 3; pair++) {
+            const int p = (pair == 0) ? 0 : (pair == 1 ? 0 : 1);
+            const int q = (pair == 0) ? 1 : (pair == 1 ? 2 : 2);
+            const double apq = m[p][q];
+            if (fabs(apq) <= DBL_EPSILON *
+                             (fabs(m[p][p]) + fabs(m[q][q]) + 1.0)) continue;
+            const double tau = (m[q][q] - m[p][p]) / (2.0 * apq);
+            const double t = copysign(1.0, tau) /
+                             (fabs(tau) + sqrt(1.0 + tau * tau));
+            const double cs = 1.0 / sqrt(1.0 + t * t);
+            const double sn = t * cs;
+            const double app = m[p][p], aqq = m[q][q];
+            m[p][p] = app - t * apq;
+            m[q][q] = aqq + t * apq;
+            m[p][q] = m[q][p] = 0.0;
+            for (int r = 0; r < 3; r++) {
+                if (r != p && r != q) {
+                    const double mrp = m[r][p], mrq = m[r][q];
+                    m[r][p] = m[p][r] = cs * mrp - sn * mrq;
+                    m[r][q] = m[q][r] = sn * mrp + cs * mrq;
+                }
+                const double vrp = vec[r][p], vrq = vec[r][q];
+                vec[r][p] = cs * vrp - sn * vrq;
+                vec[r][q] = sn * vrp + cs * vrq;
+            }
+        }
+    }
+    eig[0] = m[0][0]; eig[1] = m[1][1]; eig[2] = m[2][2];
+    for (int i = 0; i < 2; i++) {
+        int best = i;
+        for (int j = i + 1; j < 3; j++) if (eig[j] > eig[best]) best = j;
+        if (best != i) {
+            const double e = eig[i]; eig[i] = eig[best]; eig[best] = e;
+            for (int r = 0; r < 3; r++) {
+                const double v = vec[r][i]; vec[r][i] = vec[r][best];
+                vec[r][best] = v;
+            }
+        }
+    }
+}
+
+__device__ static tensor_t nl_spectral_recompose(const double eig[3],
+                                                  const double v[3][3])
+{
+    tensor_t s = nl_zero();
+    for (int a = 0; a < 3; a++) {
+        s.xx += eig[a] * v[0][a] * v[0][a];
+        s.yy += eig[a] * v[1][a] * v[1][a];
+        s.zz += eig[a] * v[2][a] * v[2][a];
+        s.xy += eig[a] * v[0][a] * v[1][a];
+        s.yz += eig[a] * v[1][a] * v[2][a];
+        s.xz += eig[a] * v[0][a] * v[2][a];
+    }
+    return s;
+}
+
+__device__ static void nl_mc_plane_return(double epbar_prev,
+                                           const double trial[3],
+                                           double phi, double dil,
+                                           double hmod, double cohesion,
+                                           double bulk, double g,
+                                           double out[3], double *epbar)
+{
+    const double denom = 4.0 * hmod * cos(phi) * cos(phi) +
+        4.0 * g * (1.0 + sin(dil) * sin(phi) / 3.0) +
+        4.0 * bulk * sin(phi) * sin(dil);
+    const double dg = (trial[0] - trial[2] + (trial[0] + trial[2]) * sin(phi) -
+                       2.0 * (cohesion + hmod * epbar_prev) * cos(phi)) /
+                      nl_max(denom, DBL_MIN);
+    out[0] = trial[0] - (2.0*g*(1.0 + sin(dil)/3.0) +
+                          2.0*bulk*sin(dil)) * dg;
+    out[1] = trial[1] + (4.0*g/3.0 - 2.0*bulk) * sin(dil) * dg;
+    out[2] = trial[2] + (2.0*g*(1.0 - sin(dil)/3.0) -
+                          2.0*bulk*sin(dil)) * dg;
+    *epbar = epbar_prev + 2.0 * cos(phi) * dg;
+}
+
+__device__ static void nl_mc_edge_return(double epbar_prev,
+                                          const double trial[3],
+                                          double phi, double dil,
+                                          double hmod, double cohesion,
+                                          double bulk, double g, int edge,
+                                          double out[3], double *epbar)
+{
+    const double aux = 2.0 * cos(phi) * (cohesion + hmod * epbar_prev);
+    const double fa = trial[0] - trial[2] + (trial[0] + trial[2])*sin(phi) - aux;
+    const double a = 4.0*g*(1.0 + sin(phi)*sin(dil)/3.0) +
+                     4.0*bulk*sin(phi)*sin(dil);
+    double b, fb;
+    if (edge == 1) {
+        b = 2.0*g*(1.0 + sin(phi) + sin(dil) -
+                   sin(phi)*sin(dil)/3.0) + 4.0*bulk*sin(phi)*sin(dil);
+        fb = trial[0] - trial[1] + (trial[0] + trial[1])*sin(phi) - aux;
+    } else {
+        b = 2.0*g*(1.0 - sin(phi) - sin(dil) -
+                   sin(phi)*sin(dil)/3.0) + 4.0*bulk*sin(phi)*sin(dil);
+        fb = trial[1] - trial[2] + (trial[1] + trial[2])*sin(phi) - aux;
+    }
+    const double aa = a + 4.0*hmod*cos(phi)*cos(phi);
+    const double bb = b + 4.0*hmod*cos(phi)*cos(phi);
+    const double det = nl_max(aa*aa - bb*bb, DBL_MIN);
+    const double d0 = (aa*fa - bb*fb)/det;
+    const double d1 = (aa*fb - bb*fa)/det;
+    const double sum = d0 + d1;
+    *epbar = epbar_prev + 2.0*cos(phi)*sum;
+    if (edge == 1) {
+        out[0] = trial[0] - (2.0*g*(1.0+sin(dil)/3.0)+2.0*bulk*sin(dil))*sum;
+        out[1] = trial[1] + (4.0*g/3.0-2.0*bulk)*sin(dil)*d0 +
+                 (2.0*g*(1.0-sin(dil)/3.0)-2.0*bulk*sin(dil))*d1;
+        out[2] = trial[2] + (2.0*g*(1.0-sin(dil)/3.0)-2.0*bulk*sin(dil))*d0 +
+                 (4.0*g/3.0-2.0*bulk)*sin(dil)*d1;
+    } else {
+        out[0] = trial[0] - (2.0*g*(1.0+sin(dil)/3.0)+2.0*bulk*sin(dil))*d0 +
+                 (4.0*g/3.0-2.0*bulk)*sin(dil)*d1;
+        out[1] = trial[1] + (4.0*g/3.0-2.0*bulk)*sin(dil)*d0 -
+                 (2.0*g*(1.0+sin(dil)/3.0)+2.0*bulk*sin(dil))*d1;
+        out[2] = trial[2] + (2.0*g*(1.0-sin(dil)/3.0)-2.0*bulk*sin(dil))*sum;
+    }
+}
+
+__device__ static void nl_mc_apex_return(double epbar_prev, double p_trial,
+                                          double phi, double dil,
+                                          double hmod, double cohesion,
+                                          double bulk, double out[3],
+                                          double *epbar)
+{
+    const double cot = cos(phi) / nl_max(sin(phi), DBL_MIN);
+    const double omega = sin(dil) / nl_max(cos(phi), DBL_MIN);
+    const double dep = (p_trial - (cohesion + hmod*epbar_prev)*cot) /
+                       nl_max(hmod*cot + omega*bulk, DBL_MIN);
+    *epbar = epbar_prev + dep;
+    out[0] = out[1] = out[2] = p_trial - bulk*omega*dep;
+}
+
+__device__ static int nl_mc_corner_zone(const double sigma[3], double sp,
+                                         double updated[3], double phi[5])
+{
+    const double tolerance = -1.0e-10;
+    phi[0] = sigma[0];
+    phi[1] = sp-sigma[2];
+    phi[2] = sigma[1];
+    phi[3] = sigma[2];
+    phi[4] = sp-sigma[1];
+    int active = 0;
+    for (int i = 0; i < 5; i++) active += (phi[i] > 0.0);
+    if (active > 3) return -1;
+    if (phi[2] > tolerance && phi[3] > tolerance) {
+        updated[0] = updated[1] = updated[2] = 0.0;
+        return 1;
+    }
+    if (phi[3] > tolerance && phi[4] > tolerance) {
+        updated[0] = 0.0; updated[1] = sp; updated[2] = 0.0;
+        return 3;
+    }
+    if (phi[1] > tolerance && phi[4] > tolerance) {
+        updated[0] = 0.0; updated[1] = sp; updated[2] = sp;
+        return 5;
+    }
+    if (phi[1] > tolerance && phi[2] > tolerance) {
+        updated[0] = 0.0; updated[1] = 0.0; updated[2] = sp;
+        return 7;
+    }
+    updated[0] = updated[1] = updated[2] = 0.0;
+    return 0;
+}
+
+__device__ static int nl_mc_tension_return(double bulk, double g,
+                                            double phi_angle,
+                                            double cohesion,
+                                            const double trial[3],
+                                            double updated[3])
+{
+    const double nphi = (1.0+sin(phi_angle)) /
+                        nl_max(1.0-sin(phi_angle), DBL_MIN);
+    const double sp = -2.0*cohesion*sqrt(nphi);
+    const double alpha1 = bulk+4.0*g/3.0;
+    const double alpha2 = bulk-2.0*g/3.0;
+    double first[3], second[3], planes[5];
+    int zone = nl_mc_corner_zone(trial, sp, first, planes);
+    if (zone < 0) return 0;
+    if (zone != 0) {
+        updated[0] = first[0]; updated[1] = first[1]; updated[2] = first[2];
+        return 1;
+    }
+
+    const double plane1 = planes[0];
+    double plane2 = 0.0;
+    int position = 0;
+    for (int i = 1; i < 5; i++) {
+        if (planes[i] > 0.0) {
+            plane2 = planes[i];
+            position = i;
+            break;
+        }
+    }
+    if (plane2 != 0.0) {
+        double bb = alpha2;
+        if (position == 2 || position == 5) bb = -bb;
+        const double determinant = alpha1*alpha1-bb*bb;
+        const double dl1 = (alpha1*plane1-bb*plane2)/determinant;
+        const double dl2 = (-bb*plane1+alpha1*plane2)/determinant;
+        if (position == 2) {
+            second[0] = trial[0]-(alpha1*dl1-alpha2*dl2);
+            second[1] = trial[1]-(alpha2*dl1-alpha2*dl2);
+            second[2] = trial[2]-(alpha2*dl1-alpha1*dl2);
+        } else if (position == 3) {
+            second[0] = trial[0]-(alpha1*dl1+alpha2*dl2);
+            second[1] = trial[1]-(alpha2*dl1+alpha1*dl2);
+            second[2] = trial[2]-(alpha2*dl1+alpha2*dl2);
+        } else if (position == 4) {
+            second[0] = trial[0]-(alpha1*dl1+alpha2*dl2);
+            second[1] = trial[1]-(alpha2*dl1+alpha2*dl2);
+            second[2] = trial[2]-(alpha2*dl1+alpha1*dl2);
+        } else {
+            second[0] = trial[0]-(alpha1*dl1-alpha2*dl2);
+            second[1] = trial[1]-(alpha2*dl1-alpha1*dl2);
+            second[2] = trial[2]-(alpha2*dl1-alpha2*dl2);
+        }
+    } else {
+        second[0] = trial[0]-plane1;
+        second[1] = trial[1]-alpha2*plane1/alpha1;
+        second[2] = trial[2]-alpha2*plane1/alpha1;
+    }
+
+    zone = nl_mc_corner_zone(second, sp, updated, planes);
+    if (zone < 0) return 0;
+    if (zone == 0) {
+        updated[0] = second[0]; updated[1] = second[1]; updated[2] = second[2];
+        if (updated[2] < sp) updated[2] = sp;
+        if (updated[1] < sp) updated[1] = sp;
+    }
+    return 1;
+}
+
+__device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
+                                              tensor_t strain,
+                                              tensor_t sigma_trial,
+                                              tensor_t *pstrain,
+                                              tensor_t *sigma,
+                                              double epbar_prev,
+                                              double *epbar,
+                                              double *fs,
+                                              noyesflag_t tension_cutoff)
+{
+    const double bulk = c->lambda + 2.0*c->mu/3.0;
+    double eig[3], vec[3][3];
+    nl_jacobi_eigen(sigma_trial, eig, vec);
+    if (tension_cutoff == YES) {
+        const double nphi = (1.0 + sin(c->phi)) /
+                            nl_max(1.0 - sin(c->phi), DBL_MIN);
+        const double alpha_p = sqrt(1.0+nphi*nphi)+nphi;
+        const double sp = -2.0*c->c*sqrt(nphi);
+        const double shear_tension = eig[0]+alpha_p*(eig[2]-sp);
+        if (shear_tension > 0.0 && eig[0] > 0.0) {
+            double corrected[3];
+            if (!nl_mc_tension_return(bulk, c->mu, c->phi, c->c,
+                                      eig, corrected)) return 0;
+            *sigma = nl_spectral_recompose(corrected, vec);
+            *pstrain = nl_sub(strain,
+                              nl_elastic_strain(*sigma, c->mu, bulk));
+            *epbar = 0.0;
+            *fs = corrected[0];
+            return 1;
+        }
+        if (shear_tension > 0.0 && eig[0] <= 0.0) {
+            *sigma = sigma_trial;
+            *epbar = epbar_prev;
+            *fs = eig[0];
+            return 1;
+        }
+    }
+    double yield = eig[0] - eig[2] + (eig[0] + eig[2])*sin(c->phi) -
+                   2.0*(c->c + c->h*epbar_prev)*cos(c->phi);
+    if (yield < 0.0) {
+        *sigma = sigma_trial;
+        *epbar = epbar_prev;
+        *fs = yield;
+        return 1;
+    }
+    double corrected[3];
+    nl_mc_plane_return(epbar_prev, eig, c->phi, c->dil_angle, c->h, c->c,
+                       bulk, c->mu, corrected, epbar);
+    if (corrected[0] <= corrected[1] || corrected[1] <= corrected[2]) {
+        const int edge = ((1.0-sin(c->dil_angle))*eig[0] - 2.0*eig[1] +
+                          (1.0+sin(c->dil_angle))*eig[2] > 0.0) ? 1 : -1;
+        nl_mc_edge_return(epbar_prev, eig, c->phi, c->dil_angle, c->h, c->c,
+                          bulk, c->mu, edge, corrected, epbar);
+        const double cond1 = corrected[0]-corrected[1];
+        const double cond2 = corrected[1]-corrected[2];
+        if ((cond1 <= 0.0 && fabs(cond1) >= 1.0e-3) ||
+            (cond2 <= 0.0 && fabs(cond2) >= 1.0e-3)) {
+            nl_mc_apex_return(epbar_prev, (eig[0]+eig[1]+eig[2])/3.0,
+                              c->phi, c->dil_angle, c->h, c->c, bulk,
+                              corrected, epbar);
+        }
+    }
+    *sigma = nl_spectral_recompose(corrected, vec);
+    *pstrain = nl_sub(strain, nl_elastic_strain(*sigma, c->mu, bulk));
+    *fs = corrected[0]-corrected[2] +
+          (corrected[0]+corrected[2])*sin(c->phi) -
+          2.0*(c->c+c->h*(*epbar))*cos(c->phi);
+    return isfinite(*fs);
+}
+
+__device__ static int nl_update_material(const nlconstants_t *c,
+                                          const nonlinear_gpu_config_t *cfg,
+                                          tensor_t strain,
+                                          tensor_t strain_prev,
+                                          tensor_t pstrain_prev,
+                                          tensor_t backstress_prev,
+                                          double epbar_prev,
+                                          tensor_t *pstrain,
+                                          tensor_t *backstress,
+                                          tensor_t *sigma,
+                                          double *epbar,
+                                          double *fs,
+                                          double *psi_state,
+                                          double *load_unload_state,
+                                          double *tao_state,
+                                          double *tao_max_state,
+                                          double *kappa,
+                                          tensor_t *sref,
+                                          double *gamma1d,
+                                          double *tao1d,
+                                          double *ggmax,
+                                          double *model_error)
+{
+    const materialmodel_t model = cfg->material_model;
+    if (model >= VONMISES_BAE) {
+        return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
+                                  kappa, gamma1d, tao1d, ggmax, cfg,
+                                  model_error);
+    }
+
+    tensor_t elastic_strain = nl_sub(strain, pstrain_prev);
+    tensor_t stress_predictor = nl_stress(elastic_strain, c->mu, c->lambda);
+    tensor_t relative_dev = nl_sub(nl_dev(stress_predictor), backstress_prev);
+    const double j2 = nl_j2(relative_dev);
+    const double i1 = nl_i1(stress_predictor);
+    double hardening;
+    if (model == VONMISES_EP) hardening = c->c * 2.0/sqrt(3.0);
+    else if (model == DRUCKERPRAGER)
+        hardening = c->gamma*(c->c+c->h*epbar_prev);
+    else if (model == VONMISES_FA) hardening = c->Sstrain0*c->mu;
+    else if (model == MOHR_COULOMB) {
+        double eig[3], vec[3][3];
+        nl_jacobi_eigen(stress_predictor, eig, vec);
+        hardening = 2.0*(c->c+c->h*epbar_prev)*cos(c->phi);
+        const double pred = eig[0]-eig[2]+(eig[0]+eig[2])*sin(c->phi)-hardening;
+        if (pred < 1.0e-3) {
+            *pstrain = pstrain_prev; *sigma = stress_predictor;
+            *epbar = epbar_prev; *fs = pred; return 1;
+        }
+        return nl_update_mohr_coulomb(c, strain, stress_predictor, pstrain,
+                                      sigma, epbar_prev, epbar, fs,
+                                      cfg->tension_cutoff);
+    } else hardening = 0.0;
+
+    const double surface = ((model == DRUCKERPRAGER) ? c->alpha*i1 : 0.0) +
+                           sqrt(nl_max(j2, 0.0));
+    const double predictor = surface-hardening;
+    if (model == LINEAR || predictor < 1.0e-3) {
+        *pstrain = pstrain_prev;
+        *backstress = backstress_prev;
+        *sigma = stress_predictor;
+        *epbar = epbar_prev;
+        *fs = predictor;
+        return 1;
+    }
+
+    if (model == VONMISES_FA || model == VONMISES_FAM) {
+        const tensor_t restored_dev = nl_add(relative_dev, backstress_prev);
+        return nl_update_fa(c, model, restored_dev, strain_prev,
+                            pstrain_prev, backstress_prev, epbar_prev,
+                            stress_predictor, pstrain, backstress, sigma,
+                            epbar, fs, psi_state, load_unload_state,
+                            tao_state, tao_max_state,
+                            cfg->error_tolerance);
+    }
+
+    const double bulk = c->lambda + 2.0*c->mu/3.0;
+    const double rootj2 = sqrt(nl_max(j2, DBL_MIN));
+    tensor_t direction = nl_scale(relative_dev, 1.0/(2.0*rootj2));
+    direction.xx += c->beta; direction.yy += c->beta; direction.zz += c->beta;
+    const double dl = predictor /
+        nl_max(c->mu + 9.0*bulk*c->alpha*c->beta +
+               c->h*c->gamma*c->gamma, DBL_MIN);
+    *pstrain = nl_add(pstrain_prev, nl_scale(direction, dl));
+    *sigma = nl_stress(nl_sub(strain, *pstrain), c->mu, c->lambda);
+    *epbar = epbar_prev + dl*c->gamma;
+    tensor_t updated_dev = nl_dev(*sigma);
+    double updated_j2 = nl_j2(updated_dev);
+    *fs = ((model == DRUCKERPRAGER) ? c->alpha*nl_i1(*sigma) : 0.0) +
+          sqrt(nl_max(updated_j2, 0.0));
+    if (model == VONMISES_EP) *fs -= c->c*2.0/sqrt(3.0);
+    else *fs -= c->gamma*(c->c+c->h*(*epbar));
+
+    if (model == DRUCKERPRAGER && rootj2-c->mu*dl < 0.0) {
+        const double dl_apex = (c->alpha*i1-
+            c->gamma*(c->c+c->h*epbar_prev)) /
+            nl_max(9.0*bulk*c->alpha*c->beta+
+                   c->h*c->gamma*c->gamma, DBL_MIN);
+        *epbar = epbar_prev+dl_apex*c->gamma;
+        const double skk = i1-9.0*bulk*c->beta*dl_apex;
+        *sigma = nl_iso(skk/3.0);
+        *pstrain = nl_sub(strain, nl_elastic_strain(*sigma, c->mu, bulk));
+        *fs = c->alpha*skk-c->gamma*(c->c+c->h*(*epbar));
+    }
+    *model_error = fabs(*fs);
+    return isfinite(*fs);
+}
+
+__global__ static void kernel_nonlinear_material_point_history(
+    nlconstants_t constants,
+    nonlinear_gpu_config_t config,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    tensor_t strain_prev = nl_zero();
+    tensor_t plastic_strain = nl_zero();
+    tensor_t backstress = nl_zero();
+    tensor_t stress_reference = nl_zero();
+    tensor_t stress = nl_zero();
+    double ep_bar = 0.0;
+    double psi = 0.0;
+    double load_unload = 0.0;
+    double tao = 0.0;
+    double tao_max = 0.0;
+    double kappa = (config.material_model >= VONMISES_BAE) ? 100.0 : 0.0;
+    double gamma1d = (config.material_model >= VONMISES_BAE) ? 1.0e-10 : 0.0;
+    double tao1d = 0.0;
+    double ggmax = (config.material_model >= VONMISES_BAE) ? 1.0 : 0.0;
+
+    for (int32_t step = 0; step < steps; step++) {
+        tensor_t plastic_next = plastic_strain;
+        tensor_t backstress_next = backstress;
+        double ep_bar_next = ep_bar;
+        double fs = 0.0;
+        double model_error = 0.0;
+
+        const int ok = nl_update_material(
+            &constants, &config, strain_history[step], strain_prev,
+            plastic_strain, backstress, ep_bar,
+            &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
+            &psi, &load_unload, &tao, &tao_max, &kappa,
+            &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error);
+
+        nonlinear_material_point_result_t result = {};
+        result.stress = stress;
+        result.plastic_strain = plastic_next;
+        result.backstress = backstress_next;
+        result.ep_bar = ep_bar_next;
+        result.fs = (config.material_model >= VONMISES_BAE)
+            ? model_error : fs;
+        result.psi = psi;
+        result.load_unload = load_unload;
+        result.tao = tao;
+        result.tao_max = tao_max;
+        result.kappa = kappa;
+        result.stress_reference = stress_reference;
+        result.gamma1d = gamma1d;
+        result.tao1d = tao1d;
+        result.ggmax = ggmax;
+        result.model_error = (config.material_model >= VONMISES_BAE)
+            ? model_error : 0.0;
+        result.status = ok ? 0 : 1;
+        results[step] = result;
+
+        /* Every history variable returned by step n is the previous state for
+         * step n+1. The production element loop must obey the same rule. */
+        strain_prev = strain_history[step];
+        plastic_strain = plastic_next;
+        backstress = backstress_next;
+        ep_bar = ep_bar_next;
+    }
+}
+
+__device__ static inline void nl_accumulate_stress_force(
+    fvector_t local_force[8], int node, tensor_t stress,
+    double dx, double dy, double dz, double weight)
+{
+    local_force[node].f[0] += (solver_float)(
+        (dx*stress.xx + dy*stress.xy + dz*stress.xz)*weight);
+    local_force[node].f[1] += (solver_float)(
+        (dy*stress.yy + dx*stress.xy + dz*stress.yz)*weight);
+    local_force[node].f[2] += (solver_float)(
+        (dz*stress.zz + dy*stress.yz + dx*stress.xz)*weight);
+}
+
+__device__ static void nl_hex_internal_force(const qptensors_t *stresses,
+                                              double h,
+                                              fvector_t local_force[8])
+{
+    const double q = 0.577350269189;
+    const double weight = h*h*h*0.125;
+    for (int node = 0; node < 8; node++) {
+        for (int qp = 0; qp < 8; qp++) {
+            const double lx = (qp & 1) ? q : -q;
+            const double ly = (qp & 2) ? q : -q;
+            const double lz = (qp & 4) ? q : -q;
+            double dx, dy, dz;
+            nl_point_dxi(&dx, &dy, &dz, lx, ly, lz, h, node);
+            nl_accumulate_stress_force(local_force, node, stresses->qp[qp],
+                                       dx, dy, dz, weight);
+        }
+    }
+}
+
+__device__ static void nl_tetra_internal_force(const qptensors_t *stresses,
+                                                const nlconstants_t *c,
+                                                double h,
+                                                fvector_t local_force[8])
+{
+    for (int tet = 0; tet < 5; tet++) {
+        if (c->tetraVol[tet] == 0.0) continue;
+        int nodes[4];
+        double grad[4][3], volume;
+        if (!nl_tetra_gradients(c->topoPart, tet, h, nodes, grad, &volume))
+            continue;
+        const double weight = volume*c->tetraVol[tet];
+        for (int a = 0; a < 4; a++) {
+            nl_accumulate_stress_force(local_force, nodes[a],
+                                       stresses->qp[tet],
+                                       grad[a][0], grad[a][1], grad[a][2],
+                                       weight);
+        }
+    }
+}
+
+__device__ static void nl_elastic_internal_force(const fvector_t u[8],
+                                                  const nlconstants_t *c,
+                                                  double h,
+                                                  fvector_t local_force[8])
+{
+    qptensors_t stresses = {};
+    if (c->isTopoNonlin == 0) {
+        for (int qp = 0; qp < 8; qp++)
+            stresses.qp[qp] = nl_stress(nl_hex_strain(u, qp, h),
+                                        c->mu, c->lambda);
+        nl_hex_internal_force(&stresses, h, local_force);
+    } else {
+        for (int tet = 0; tet < 5; tet++) {
+            if (c->tetraVol[tet] != 0.0)
+                stresses.qp[tet] = nl_stress(
+                    nl_tetra_strain(u, c->topoPart, tet, h),
+                    c->mu, c->lambda);
+        }
+        nl_tetra_internal_force(&stresses, c, h, local_force);
+    }
+}
+
+__device__ static inline void nl_atomic_add(solver_float *address,
+                                             solver_float value)
+{
+    atomicAdd(address, value);
+}
+
+__global__ static void kernel_nonlinear_update_force(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
+    gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
+{
+    const int32_t nl_eindex = (int32_t)(blockIdx.x*blockDim.x + threadIdx.x);
+    if (nl_eindex >= state.count) return;
+
+    const nonlinear_gpu_element_t element = state.elements[nl_eindex];
+    const int32_t eindex = element.eindex;
+    nlconstants_t *c = state.constants + nl_eindex;
+    fvector_t u[8], du[8];
+    int any_displacement = 0;
+    for (int node = 0; node < 8; node++) {
+        const int32_t lnid = gpu->lnidArrayDevice[eindex + node*gpu->lenum];
+        u[node] = gpu->tm1Device[lnid];
+        for (int d = 0; d < 3; d++) {
+            any_displacement |= (u[node].f[d] != (solver_float)0);
+            du[node].f[d] = 0;
+        }
+    }
+
+    if (step == 0 && cfg.material_model >= VONMISES_BAE) {
+        for (int qp = 0; qp < NL_GPU_QP; qp++) {
+            state.kappa[nl_eindex].qv[qp] = 100.0;
+            state.gamma1d[nl_eindex].qv[qp] = 1.0e-10;
+            state.ggmax[nl_eindex].qv[qp] = 1.0;
+        }
+    }
+
+    if (any_displacement) {
+        const int ngp = c->isTopoNonlin ? 5 : 8;
+        for (int qp = 0; qp < ngp; qp++) {
+            if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
+
+            const tensor_t strain_prev = state.strains[nl_eindex].qp[qp];
+            state.strains1[nl_eindex].qp[qp] = strain_prev;
+            const tensor_t strain = c->isTopoNonlin
+                ? nl_tetra_strain(u, c->topoPart, qp, element.h)
+                : nl_hex_strain(u, qp, element.h);
+            state.strains[nl_eindex].qp[qp] = strain;
+            state.pstrains1[nl_eindex].qp[qp] =
+                state.pstrains2[nl_eindex].qp[qp];
+            state.alphastress1[nl_eindex].qp[qp] =
+                state.alphastress2[nl_eindex].qp[qp];
+            state.ep1[nl_eindex].qv[qp] = state.ep2[nl_eindex].qv[qp];
+
+            if (cfg.material_model == LINEAR ||
+                step <= cfg.geostatic_final_step) {
+                state.stresses[nl_eindex].qp[qp] =
+                    nl_stress(strain, c->mu, c->lambda);
+                continue;
+            }
+
+            double model_error = 0.0;
+            const int ok = nl_update_material(
+                c, &cfg, strain, strain_prev,
+                state.pstrains1[nl_eindex].qp[qp],
+                state.alphastress1[nl_eindex].qp[qp],
+                state.ep1[nl_eindex].qv[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                &state.alphastress2[nl_eindex].qp[qp],
+                &state.stresses[nl_eindex].qp[qp],
+                &state.ep2[nl_eindex].qv[qp], &c->fs[qp],
+                &state.psi_n[nl_eindex].qv[qp],
+                &state.load_unload_n[nl_eindex].qv[qp],
+                &state.sv_n[nl_eindex].qv[qp],
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.kappa[nl_eindex].qv[qp],
+                &state.sref[nl_eindex].qp[qp],
+                &state.gamma1d[nl_eindex].qv[qp],
+                &state.tao1d[nl_eindex].qv[qp],
+                &state.ggmax[nl_eindex].qv[qp], &model_error);
+
+            if (cfg.material_model >= VONMISES_BAE) {
+                c->fs[qp] = model_error;
+                if (!ok || !isfinite(model_error) ||
+                    model_error > cfg.error_tolerance) {
+                    nl_record_error(state.error, 2, eindex, qp,
+                                    model_error,
+                                    state.stresses[nl_eindex].qp[qp].xx);
+                }
+            } else if (!ok || !isfinite(c->fs[qp])) {
+                nl_record_error(state.error, 1, eindex, qp, c->fs[qp],
+                                state.stresses[nl_eindex].qp[qp].xx);
+            }
+        }
+    }
+
+    fvector_t local_force[8] = {};
+    if (c->isTopoNonlin)
+        nl_tetra_internal_force(state.stresses + nl_eindex, c, element.h,
+                                local_force);
+    else
+        nl_hex_internal_force(state.stresses + nl_eindex, element.h,
+                              local_force);
+
+    fvector_t local_damping[8] = {};
+    double damping_scale = 0.0;
+    if (cfg.stiff_damp != 0.0 && cfg.stiff_damp_frequency != 0.0 &&
+        delta_t > 0.0) {
+        const double b_over_dt = cfg.stiff_damp /
+            (cfg.stiff_damp_frequency*NL_GPU_PI*delta_t);
+        int any_delta = 0;
+        for (int node = 0; node < 8; node++) {
+            const int32_t lnid = gpu->lnidArrayDevice[eindex + node*gpu->lenum];
+            for (int d = 0; d < 3; d++) {
+                du[node].f[d] = (solver_float)(
+                    ((double)gpu->tm1Device[lnid].f[d] -
+                     (double)gpu->tm2Device[lnid].f[d])*b_over_dt);
+                any_delta |= (du[node].f[d] != (solver_float)0);
+            }
+        }
+        if (any_delta) {
+            nl_elastic_internal_force(du, c, element.h, local_damping);
+            /* Preserve the legacy topographic damping convention. */
+            damping_scale = c->isTopoNonlin ? 1.0 : delta_t_squared;
+        }
+    }
+
+    for (int node = 0; node < 8; node++) {
+        const int32_t lnid = gpu->lnidArrayDevice[eindex + node*gpu->lenum];
+        for (int d = 0; d < 3; d++) {
+            const solver_float value = (solver_float)(
+                -(double)local_force[node].f[d]*delta_t_squared -
+                 (double)local_damping[node].f[d]*damping_scale);
+            nl_atomic_add(&gpu->forceDevice[lnid].f[d], value);
+        }
+    }
+}
+
+static int nonlinear_cuda_failure(int32_t myID, cudaError_t error,
+                                  const char *operation)
+{
+    if (error == cudaSuccess) return 0;
+    fprintf(stderr, "Thread %d: nonlinear GPU %s failed: %s\n",
+            myID, operation, cudaGetErrorString(error));
+    return -1;
+}
+
+template <typename T>
+static int nonlinear_alloc_copy(int32_t myID, T **device, const T *host,
+                                size_t count, const char *name)
+{
+    *device = NULL;
+    if (count == 0) return 0;
+    cudaError_t error = cudaMalloc((void **)device, count*sizeof(T));
+    if (nonlinear_cuda_failure(myID, error, name) != 0) return -1;
+    error = cudaMemcpy(*device, host, count*sizeof(T), cudaMemcpyHostToDevice);
+    if (nonlinear_cuda_failure(myID, error, name) != 0) return -1;
+    return 0;
+}
+
+#define NL_ALLOC_COPY(field, host_field)                                      \
+    do {                                                                       \
+        if (nonlinear_alloc_copy(myID, &g_nl.field, host_state->host_field,    \
+                                 count, #field) != 0) return -1;               \
+    } while (0)
+
+int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
+                             int32_t count, const int32_t *mapping,
+                             nlsolver_t *host_state,
+                             const nonlinear_gpu_config_t *config)
+{
+    if (!nonlinear_gpu_requested()) return 0;
+    if (mesh == NULL || solver == NULL || host_state == NULL || config == NULL ||
+        count < 0) return -1;
+
+    nonlinear_gpu_element_t *elements = NULL;
+    if (count > 0) {
+        elements = (nonlinear_gpu_element_t *)malloc(
+            (size_t)count*sizeof(nonlinear_gpu_element_t));
+        if (elements == NULL) return -1;
+        for (int32_t i = 0; i < count; i++) {
+            const int32_t eindex = mapping[i];
+            edata_t *edata = (edata_t *)mesh->elemTable[eindex].data;
+            elements[i].eindex = eindex;
+            elements[i].h = (double)edata->edgesize;
+        }
+    }
+
+    g_nl.count = count;
+    g_config = *config;
+    if (nonlinear_alloc_copy(myID, &g_nl.elements, elements, count,
+                             "element metadata") != 0) {
+        free(elements);
+        return -1;
+    }
+    free(elements);
+
+    NL_ALLOC_COPY(constants, constants);
+    NL_ALLOC_COPY(stresses, stresses);
+    NL_ALLOC_COPY(strains, strains);
+    NL_ALLOC_COPY(strains1, strains1);
+    NL_ALLOC_COPY(pstrains1, pstrains1);
+    NL_ALLOC_COPY(pstrains2, pstrains2);
+    NL_ALLOC_COPY(alphastress1, alphastress1);
+    NL_ALLOC_COPY(alphastress2, alphastress2);
+    NL_ALLOC_COPY(ep1, ep1);
+    NL_ALLOC_COPY(ep2, ep2);
+    NL_ALLOC_COPY(psi_n, psi_n);
+    NL_ALLOC_COPY(load_unload_n, LoUnlo_n);
+    NL_ALLOC_COPY(sv_n, Sv_n);
+    NL_ALLOC_COPY(sv_max, Sv_max);
+    NL_ALLOC_COPY(kappa, kappa);
+    NL_ALLOC_COPY(sref, Sref);
+    NL_ALLOC_COPY(gamma1d, gamma1d);
+    NL_ALLOC_COPY(tao1d, tao1d);
+    NL_ALLOC_COPY(ggmax, GGmax);
+
+    if (nonlinear_cuda_failure(myID,
+            cudaMalloc((void **)&g_nl.error, sizeof(nonlinear_gpu_error_t)),
+            "error buffer allocation") != 0 ||
+        nonlinear_cuda_failure(myID,
+            cudaMemset(g_nl.error, 0, sizeof(nonlinear_gpu_error_t)),
+            "error buffer initialization") != 0) return -1;
+
+    g_active = 1;
+    if (myID == 0) {
+        fprintf(stdout,
+                "Nonlinear backend: GPU (double-precision constitutive state, "
+                "%d local elements on rank 0)\n", count);
+        fflush(stdout);
+    }
+    return 0;
+}
+
+#undef NL_ALLOC_COPY
+
+void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
+                           double delta_t, double delta_t_squared)
+{
+    if (!g_active || g_nl.count == 0) return;
+    cudaStream_t stream = solver->streams[CUDA_STREAM_MAIN];
+    cudaMemsetAsync(g_nl.error, 0, sizeof(nonlinear_gpu_error_t), stream);
+    const int block_size = 128;
+    const int grid_size = (g_nl.count + block_size - 1)/block_size;
+#ifdef __CUDACC__
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        g_nl, g_config, solver->gpuDataDevice, step, delta_t,
+        delta_t_squared);
+#else
+    (void)grid_size;
+#endif
+    const cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Nonlinear GPU kernel launch failed: %s\n",
+                cudaGetErrorString(error));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+}
+
+#define NL_DOWNLOAD(field, host_field)                                        \
+    cudaMemcpy(host_state->host_field, g_nl.field,                            \
+               (size_t)g_nl.count*sizeof(*host_state->host_field),            \
+               cudaMemcpyDeviceToHost)
+
+void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state)
+{
+    if (!g_active || g_nl.count == 0 || host_state == NULL) return;
+    cudaStreamSynchronize(solver->streams[CUDA_STREAM_MAIN]);
+    cudaError_t error = cudaSuccess;
+    error = NL_DOWNLOAD(constants, constants);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(stresses, stresses);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(strains, strains);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(strains1, strains1);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(pstrains1, pstrains1);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(pstrains2, pstrains2);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(alphastress1, alphastress1);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(alphastress2, alphastress2);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(ep1, ep1);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(ep2, ep2);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(psi_n, psi_n);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(load_unload_n, LoUnlo_n);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(sv_n, Sv_n);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(sv_max, Sv_max);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(kappa, kappa);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(sref, Sref);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(gamma1d, gamma1d);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(tao1d, tao1d);
+    if (error == cudaSuccess) error = NL_DOWNLOAD(ggmax, GGmax);
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Nonlinear GPU state download failed: %s\n",
+                cudaGetErrorString(error));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+}
+
+#undef NL_DOWNLOAD
+
+void nonlinear_gpu_check_error(int32_t myID)
+{
+    if (!g_active || g_nl.count == 0) return;
+    const cudaError_t error = cudaMemcpy(&g_error_host, g_nl.error,
+        sizeof(g_error_host), cudaMemcpyDeviceToHost);
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Thread %d: nonlinear GPU error check failed: %s\n",
+                myID, cudaGetErrorString(error));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+    if (g_error_host.code != 0) {
+        fprintf(stderr,
+                "Thread %d: nonlinear GPU constitutive failure "
+                "(code=%d element=%d qp=%d residual=%12.8E value=%12.8E)\n",
+                myID, g_error_host.code, g_error_host.eindex,
+                g_error_host.qp, g_error_host.residual, g_error_host.value);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+}
+
+int nonlinear_gpu_material_point_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results)
+{
+    if (constants == NULL || config == NULL || strain_history == NULL ||
+        results == NULL || steps <= 0) {
+        return -1;
+    }
+
+    tensor_t *strain_device = NULL;
+    nonlinear_material_point_result_t *result_device = NULL;
+    cudaError_t error = cudaMalloc((void **)&strain_device,
+                                   (size_t)steps*sizeof(*strain_device));
+    if (error == cudaSuccess) {
+        error = cudaMalloc((void **)&result_device,
+                           (size_t)steps*sizeof(*result_device));
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(strain_device, strain_history,
+                           (size_t)steps*sizeof(*strain_device),
+                           cudaMemcpyHostToDevice);
+    }
+    if (error == cudaSuccess) {
+        kernel_nonlinear_material_point_history<<<1, 1>>>(
+            *constants, *config, strain_device, steps, result_device);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        error = cudaDeviceSynchronize();
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(results, result_device,
+                           (size_t)steps*sizeof(*result_device),
+                           cudaMemcpyDeviceToHost);
+    }
+
+    if (result_device != NULL) cudaFree(result_device);
+    if (strain_device != NULL) cudaFree(strain_device);
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Nonlinear GPU material-point test failed: %s\n",
+                cudaGetErrorString(error));
+        return -1;
+    }
+    return 0;
+}
+
+void nonlinear_gpu_finalize(void)
+{
+#define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
+    NL_FREE(elements); NL_FREE(constants);
+    NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);
+    NL_FREE(pstrains1); NL_FREE(pstrains2);
+    NL_FREE(alphastress1); NL_FREE(alphastress2);
+    NL_FREE(ep1); NL_FREE(ep2); NL_FREE(psi_n); NL_FREE(load_unload_n);
+    NL_FREE(sv_n); NL_FREE(sv_max); NL_FREE(kappa); NL_FREE(sref);
+    NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
+#undef NL_FREE
+    memset(&g_nl, 0, sizeof(g_nl));
+    g_active = 0;
+}

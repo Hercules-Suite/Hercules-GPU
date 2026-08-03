@@ -43,6 +43,7 @@
 #include "drm.h"
 
 #include  "kernel.h"
+#include  "nonlinear_gpu.h"
 
 #define KAPPA_MIN      1.0E-010
 #define  QC  qc = 0.577350269189 /* sqrt(3.0)/3.0; */
@@ -79,6 +80,7 @@ static plasticitytype_t      thePlasticityModel;
 static noyesflag_t           theApproxGeoState  = NO;
 static noyesflag_t           theSurfaceGroundwaterTable  = NO;
 static noyesflag_t           theTensionCutoff   = NO;
+static noyesflag_t           theIstanbulVelocityModel = NO;
 static double               *theVsLimits;
 static double               *theAlphaCohes;
 static double               *theKayPhis;
@@ -146,31 +148,28 @@ int isThisElementNonLinear(mesh_t *myMesh, int32_t eindex) {
     edata = (edata_t *)elemp->data;
     esize = edata->edgesize;
 
+    /* nl_id is a legacy classification belonging to the Istanbul velocity
+     * model. All other material sources use the material-properties Vs range
+     * and must not depend on a stale or uninitialized nl_id payload value. */
+    if ( theIstanbulVelocityModel == YES ) {
+        if ( edata->nl_id == 0.0 )
+            return NO;
+    } else if ( ( edata->Vs < theVsLimits[0] ) ||
+                ( edata->Vs > theVsLimits[thePropertiesCount-1] ) ) {
+        return NO;
+    }
+
     int32_t lnid0 = myMesh->elemTable[eindex].lnid[0];
 
     double xo = (myMesh->ticksize) * (double)myMesh->nodeTable[lnid0].x;
     double yo = (myMesh->ticksize) * (double)myMesh->nodeTable[lnid0].y;
     double zo = (myMesh->ticksize) * (double)myMesh->nodeTable[lnid0].z;
 
-    //if ( ( edata->Vs <=  theVsLimits[thePropertiesCount-1] ) && ( edata->Vs >=  theVsLimits[0] ) ) {
+    if ( ( DRMActive == YES ) && ( whichDrmPart == PART2 ) ) {
 
-    if (  edata->nl_id != 0.0 ) {
-
-        if ( ( DRMActive == YES ) && ( whichDrmPart == PART2 ) ) {
-
-            if ( ( xo > DRMXMin ) && ( xo + esize < DRMXMax )  &&
-                 ( yo > DRMYMin ) && ( yo + esize < DRMYMax )  &&
-                 ( zo + esize < DRMDepth ) ) { // Todo: Dorian says: I need to double check this when topo+drm get merged
-
-                if ( ( get_thebase_topo()==0.0  ) || ( get_topo_nonlin_flag() )  ) {
-                    return YES;
-                } else {
-                    if ( !get_topo_nonlin_flag() && isTopoElement ( myMesh, eindex, 0 ) == 0  )
-                        return YES;
-                }
-            } else
-                return NO;
-        } else {
+        if ( ( xo > DRMXMin ) && ( xo + esize < DRMXMax )  &&
+             ( yo > DRMYMin ) && ( yo + esize < DRMYMax )  &&
+             ( zo + esize < DRMDepth ) ) { // Todo: Dorian says: I need to double check this when topo+drm get merged
 
             if ( ( get_thebase_topo()==0.0  ) || ( get_topo_nonlin_flag() )  ) {
                 return YES;
@@ -178,6 +177,15 @@ int isThisElementNonLinear(mesh_t *myMesh, int32_t eindex) {
                 if ( !get_topo_nonlin_flag() && isTopoElement ( myMesh, eindex, 0 ) == 0  )
                     return YES;
             }
+        } else
+            return NO;
+    } else {
+
+        if ( ( get_thebase_topo()==0.0  ) || ( get_topo_nonlin_flag() )  ) {
+            return YES;
+        } else {
+            if ( !get_topo_nonlin_flag() && isTopoElement ( myMesh, eindex, 0 ) == 0  )
+                return YES;
         }
     }
 
@@ -505,7 +513,7 @@ void nonlinear_init( int32_t     myID,
                      double      theEndT )
 {
     double  double_message[11];
-    int     int_message[11];
+    int     int_message[12];
 
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
@@ -541,9 +549,10 @@ void nonlinear_init( int32_t     myID,
     int_message[8]  = (int)theSurfaceGroundwaterTable;
     int_message[9]  = (int)DRMActive;
     int_message[10] = (int)whichDrmPart;
+    int_message[11] = (int)theIstanbulVelocityModel;
 
     MPI_Bcast(double_message, 11, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    11, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    12, MPI_INT,    0, comm_solver);
 
     theGeostaticLoadingT  = double_message[0];
     theGeostaticCushionT  = double_message[1];
@@ -568,6 +577,7 @@ void nonlinear_init( int32_t     myID,
     theSurfaceGroundwaterTable = (noyesflag_t)int_message[8];
     DRMActive                  = (noyesflag_t)int_message[9];
     whichDrmPart               = (drm_part_t)int_message[10];
+    theIstanbulVelocityModel   = (noyesflag_t)int_message[11];
 
     /* allocate table of properties for all other PEs */
 
@@ -621,12 +631,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     int      row;
     double   geostatic_loading_t, geostatic_cushion_t, errorTol, backbone_errorTol,
             *auxiliar, stff_dmp, stff_dmp_freq;
-    char     material_model[64], 
+    char     material_model[64],
              plasticity_type[64], approx_geostatic_state[64], tension_cutoff[64],
              DRMPart[64];
     /* Optional parameters */
     char surf_groundwatertable[64] = "no", // TODO: It seems this parameter does not have any effect anywhere in Hercules.
-        isDRMActive[64] = "no";
+        isDRMActive[64] = "no", istanbul_velocity_model[64] = "no";
 
     materialmodel_t      materialmodel;
     plasticitytype_t     plasticitytype;
@@ -664,6 +674,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     not set in the input file, their values will just be "no". */
     parsetext(fp, "surface_groundwatertable", 's', &surf_groundwatertable);
     parsetext(fp, "implement_drm", 's', &isDRMActive);
+    parsetext(fp, "Istanbul_velocity_model", 's', &istanbul_velocity_model);
 
     /* Performs sanity checks */
 
@@ -789,6 +800,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
 
+    if ( strcasecmp(istanbul_velocity_model, "yes") == 0 ) {
+        theIstanbulVelocityModel = YES;
+    } else if ( strcasecmp(istanbul_velocity_model, "no") == 0 ) {
+        theIstanbulVelocityModel = NO;
+    } else {
+        fprintf(stderr, "Unknown Istanbul_velocity_model value: %s\n",
+                istanbul_velocity_model);
+        return -1;
+    }
+
     if ( ( (geostatic_loading_t > 0) || (geostatic_cushion_t > 0) ) &&
          ( approxgeostatic == YES ) ) {
         fprintf(stderr, "Approximate geostatic-state must be set to (no) when geostatic loading/cushion time > 0. %s\n",
@@ -875,6 +896,13 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     }
 
     theNonlinearFlag = 1;
+
+    if (theIstanbulVelocityModel != YES) {
+        fprintf(stdout,
+                "Nonlinear element selection uses the material-properties "
+                "Vs range; legacy nl_id selection is disabled because "
+                "Istanbul_velocity_model is not yes.\n");
+    }
 
     return 0;
 }
@@ -1099,7 +1127,8 @@ void nonlinear_stats(int32_t myID, int32_t theGroupSize) {
  * nonlinear_solver_init: Initialize all the structures needed for nonlinear
  *                        analysis and the material/element constants.
  */
-void nonlinear_solver_init(int32_t myID, mesh_t *myMesh, double depth) {
+void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
+                           mysolver_t *mySolver, double depth) {
 
     int32_t eindex, nl_eindex;
 
@@ -1486,6 +1515,37 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh, double depth) {
 
     } /* for all elements */
 
+    if (nonlinear_gpu_requested()) {
+        nonlinear_gpu_config_t gpuConfig;
+        gpuConfig.material_model = theMaterialModel;
+        gpuConfig.approximate_geostatic_state = theApproxGeoState;
+        gpuConfig.tension_cutoff = theTensionCutoff;
+        gpuConfig.geostatic_final_step = theGeostaticFinalStep;
+        gpuConfig.no_substeps = theNoSubsteps;
+        gpuConfig.error_tolerance = theErrorTol;
+        gpuConfig.backbone_error_tolerance = theBackboneErrorTol;
+        gpuConfig.stiff_damp = theStiffDamp;
+        gpuConfig.stiff_damp_frequency = theStiffDampFreq;
+
+        if (nonlinear_gpu_initialize(myID, myMesh, mySolver,
+                                     myNonlinElementsCount,
+                                     myNonlinElementsMapping,
+                                     myNonlinSolver, &gpuConfig) != 0) {
+            fprintf(stderr,
+                    "Thread %d: nonlinear GPU backend initialization failed\n",
+                    myID);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+    }
+
+}
+
+void nonlinear_gpu_sync_host_state(mysolver_t *mySolver)
+{
+    if (nonlinear_gpu_active()) {
+        nonlinear_gpu_download_state(mySolver, myNonlinSolver);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4285,6 +4345,390 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 
 }
 
+/* -------------------------------------------------------------------------- */
+/*                    Standalone material-point regression                    */
+/* -------------------------------------------------------------------------- */
+
+#define MATERIAL_POINT_CONSTANT_COUNT 24
+#define MATERIAL_POINT_RESULT_VALUE_COUNT 35
+
+static const char *material_point_result_names[
+    MATERIAL_POINT_RESULT_VALUE_COUNT] = {
+    "sig_xx", "sig_yy", "sig_zz", "sig_xy", "sig_yz", "sig_xz",
+    "ep_xx", "ep_yy", "ep_zz", "ep_xy", "ep_yz", "ep_xz",
+    "eta_xx", "eta_yy", "eta_zz", "eta_xy", "eta_yz", "eta_xz",
+    "ep_bar", "fs", "psi", "load_unload", "tao", "tao_max", "kappa",
+    "sref_xx", "sref_yy", "sref_zz", "sref_xy", "sref_yz", "sref_xz",
+    "gamma1d", "tao1d", "ggmax", "model_error"
+};
+
+static int material_point_parse_model(const char *name,
+                                      materialmodel_t *model)
+{
+    if (strcasecmp(name, "linear") == 0) *model = LINEAR;
+    else if (strcasecmp(name, "vonMises_ep") == 0) *model = VONMISES_EP;
+    else if (strcasecmp(name, "vonMises_fa") == 0) *model = VONMISES_FA;
+    else if (strcasecmp(name, "vonMises_faM") == 0) *model = VONMISES_FAM;
+    else if (strcasecmp(name, "vonMises_baE") == 0) *model = VONMISES_BAE;
+    else if (strcasecmp(name, "vonMises_baH") == 0) *model = VONMISES_BAH;
+    else if (strcasecmp(name, "vonMises_GQH") == 0) *model = VONMISES_GQH;
+    else if (strcasecmp(name, "vonMises_MKZ") == 0) *model = VONMISES_MKZ;
+    else if (strcasecmp(name, "vonMises_RO") == 0) *model = VONMISES_RO;
+    else if (strcasecmp(name, "MohrCoulomb") == 0) *model = MOHR_COULOMB;
+    else if (strcasecmp(name, "DruckerPrager") == 0) *model = DRUCKERPRAGER;
+    else return -1;
+    return 0;
+}
+
+static void material_point_load_constants(nlconstants_t *constants,
+                                          const double values[24])
+{
+    memset(constants, 0, sizeof(*constants));
+    constants->lambda = values[0];
+    constants->mu = values[1];
+    constants->alpha = values[2];
+    constants->beta = values[3];
+    constants->gamma = values[4];
+    constants->c = values[5];
+    constants->phi = values[6];
+    constants->dil_angle = values[7];
+    constants->h = values[8];
+    constants->Sstrain0 = values[9];
+    constants->psi0 = values[10];
+    constants->m = values[11];
+    for (int i = 0; i < 5; i++) constants->thetaGQH[i] = values[12+i];
+    constants->beta_MKZ = values[17];
+    constants->s_MKZ = values[18];
+    constants->phi_MKZ = values[19];
+    constants->gammaref_MKZ = values[20];
+    constants->alpha_RO = values[21];
+    constants->eta_RO = values[22];
+    constants->phi_RO = values[23];
+}
+
+static int material_point_cpu_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const tensor_t *strain_history,
+    int32_t steps,
+    double dt,
+    nonlinear_material_point_result_t *results)
+{
+    tensor_t strain_prev = zero_tensor();
+    tensor_t plastic_strain = zero_tensor();
+    tensor_t backstress = zero_tensor();
+    tensor_t stress_reference = zero_tensor();
+    tensor_t stress = zero_tensor();
+    const tensor_t sigma0 = zero_tensor();
+    double ep_bar = 0.0;
+    double psi = 0.0;
+    double load_unload = 0.0;
+    double tao = 0.0;
+    double tao_max = 0.0;
+    double kappa = (config->material_model >= VONMISES_BAE) ? 100.0 : 0.0;
+    double gamma1d = (config->material_model >= VONMISES_BAE) ? 1.0e-10 : 0.0;
+    double tao1d = 0.0;
+    double ggmax = (config->material_model >= VONMISES_BAE) ? 1.0 : 0.0;
+
+    theMaterialModel = config->material_model;
+    thePlasticityModel = RATE_INDEPENDENT;
+    theTensionCutoff = config->tension_cutoff;
+    theErrorTol = config->error_tolerance;
+    theBackboneErrorTol = config->backbone_error_tolerance;
+    theNoSubsteps = config->no_substeps;
+
+    for (int32_t step = 0; step < steps; step++) {
+        tensor_t plastic_next = plastic_strain;
+        tensor_t backstress_next = backstress;
+        double ep_bar_next = ep_bar;
+        double fs = 0.0;
+        double model_error = 0.0;
+        int flag_tolerance_substeps = 0;
+        int flag_no_substeps = 0;
+
+        material_update(*constants, strain_history[step], strain_prev,
+                        plastic_strain, backstress, ep_bar, sigma0, dt,
+                        &plastic_next, &backstress_next, &stress,
+                        &ep_bar_next, &fs, &psi, &load_unload, &tao,
+                        &tao_max, &kappa, &stress_reference,
+                        &flag_tolerance_substeps, &flag_no_substeps,
+                        &model_error, &gamma1d, &tao1d, &ggmax);
+
+        nonlinear_material_point_result_t result;
+        memset(&result, 0, sizeof(result));
+        result.stress = stress;
+        result.plastic_strain = plastic_next;
+        result.backstress = backstress_next;
+        result.ep_bar = ep_bar_next;
+        result.fs = (config->material_model >= VONMISES_BAE)
+            ? model_error : fs;
+        result.psi = psi;
+        result.load_unload = load_unload;
+        result.tao = tao;
+        result.tao_max = tao_max;
+        result.kappa = kappa;
+        result.stress_reference = stress_reference;
+        result.gamma1d = gamma1d;
+        result.tao1d = tao1d;
+        result.ggmax = ggmax;
+        if (config->material_model >= VONMISES_BAE) {
+            result.model_error = model_error;
+        }
+        result.status = (isfinite(stress.xx) && isfinite(stress.yy) &&
+                         isfinite(stress.zz) && isfinite(stress.xy) &&
+                         isfinite(stress.yz) && isfinite(stress.xz) &&
+                         isfinite(ep_bar_next) && isfinite(result.fs)) ? 0 : 1;
+        results[step] = result;
+
+        /* Explicitly advance every history variable. This is also an
+         * assertion of the state contract expected from the production loop. */
+        strain_prev = strain_history[step];
+        plastic_strain = plastic_next;
+        backstress = backstress_next;
+        ep_bar = ep_bar_next;
+    }
+    return 0;
+}
+
+static int material_point_result_values(
+    const nonlinear_material_point_result_t *result,
+    double values[MATERIAL_POINT_RESULT_VALUE_COUNT])
+{
+    int i = 0;
+#define MP_TENSOR_VALUES(t) do { \
+    values[i++] = (t).xx; values[i++] = (t).yy; values[i++] = (t).zz; \
+    values[i++] = (t).xy; values[i++] = (t).yz; values[i++] = (t).xz; \
+} while (0)
+    MP_TENSOR_VALUES(result->stress);
+    MP_TENSOR_VALUES(result->plastic_strain);
+    MP_TENSOR_VALUES(result->backstress);
+    values[i++] = result->ep_bar;
+    values[i++] = result->fs;
+    values[i++] = result->psi;
+    values[i++] = result->load_unload;
+    values[i++] = result->tao;
+    values[i++] = result->tao_max;
+    values[i++] = result->kappa;
+    MP_TENSOR_VALUES(result->stress_reference);
+    values[i++] = result->gamma1d;
+    values[i++] = result->tao1d;
+    values[i++] = result->ggmax;
+    values[i++] = result->model_error;
+#undef MP_TENSOR_VALUES
+    return i;
+}
+
+static int material_point_write_csv(
+    const char *path,
+    const tensor_t *strain_history,
+    const nonlinear_material_point_result_t *results,
+    int32_t steps,
+    double dt)
+{
+    FILE *fp = fopen(path, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "Cannot open material-point output %s\n", path);
+        return -1;
+    }
+    fputs("step,time,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,"
+          "sig_xx,sig_yy,sig_zz,sig_xy,sig_yz,sig_xz,"
+          "ep_xx,ep_yy,ep_zz,ep_xy,ep_yz,ep_xz,"
+          "eta_xx,eta_yy,eta_zz,eta_xy,eta_yz,eta_xz,"
+          "ep_bar,fs,psi,load_unload,tao,tao_max,kappa,"
+          "sref_xx,sref_yy,sref_zz,sref_xy,sref_yz,sref_xz,"
+          "gamma1d,tao1d,ggmax,model_error,status\n", fp);
+    for (int32_t step = 0; step < steps; step++) {
+        const tensor_t e = strain_history[step];
+        double values[MATERIAL_POINT_RESULT_VALUE_COUNT];
+        const int count = material_point_result_values(&results[step], values);
+        fprintf(fp, "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e",
+                step, step*dt, e.xx, e.yy, e.zz, e.xy, e.yz, e.xz);
+        for (int i = 0; i < count; i++) fprintf(fp, ",%.17e", values[i]);
+        fprintf(fp, ",%d\n", results[step].status);
+    }
+    fclose(fp);
+    return 0;
+}
+
+int nonlinear_material_point_test(const char *input_path, int32_t myID)
+{
+    FILE *fp = NULL;
+    tensor_t *strain_history = NULL;
+    double *strain_values = NULL;
+    nonlinear_material_point_result_t *cpu_results = NULL;
+    nonlinear_material_point_result_t *gpu_results = NULL;
+    int result = 1;
+    int steps = 0;
+    int no_substeps = 0;
+    double dt = 0.0;
+    double rtol = 1.0e-6;
+    double atol = 1.0e-9;
+    double error_tolerance = 1.0e-3;
+    double backbone_tolerance = 1.0e-5;
+    double constants_values[MATERIAL_POINT_CONSTANT_COUNT];
+    char material_name[64] = "";
+    char tension_name[64] = "no";
+    char output_prefix[256] = "material-point";
+    char cpu_path[320] = "";
+    char gpu_path[320] = "";
+    materialmodel_t material_model;
+    noyesflag_t tension_cutoff = NO;
+    nlconstants_t constants;
+    nonlinear_gpu_config_t config;
+    double maximum_absolute = 0.0;
+    double maximum_relative = 0.0;
+
+    if (myID != 0) return 0;
+    fp = fopen(input_path, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Cannot open material-point input %s\n", input_path);
+        goto cleanup;
+    }
+    if (parsetext(fp, "material_model", 's', material_name) != 0 ||
+        parsetext(fp, "material_point_delta_time_sec", 'd', &dt) != 0 ||
+        parsetext(fp, "material_point_steps", 'i', &steps) != 0 ||
+        parsetext(fp, "no_substeps", 'i', &no_substeps) != 0 ||
+        parsetext(fp, "error_tolerance", 'd', &error_tolerance) != 0 ||
+        parsetext(fp, "backbone_errTol", 'd', &backbone_tolerance) != 0 ||
+        parsetext(fp, "tension_cutoff", 's', tension_name) != 0 ||
+        parsedarray(fp, "material_point_constants",
+                    MATERIAL_POINT_CONSTANT_COUNT, constants_values) != 0) {
+        fprintf(stderr, "Invalid or incomplete material-point input %s\n",
+                input_path);
+        goto cleanup;
+    }
+    parsetext(fp, "material_point_compare_rtol", 'd', &rtol);
+    parsetext(fp, "material_point_compare_atol", 'd', &atol);
+    parsetext(fp, "material_point_output_prefix", 's', output_prefix);
+
+    if (material_point_parse_model(material_name, &material_model) != 0) {
+        fprintf(stderr, "Unknown material-point model %s\n", material_name);
+        goto cleanup;
+    }
+    if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
+    else if (strcasecmp(tension_name, "no") != 0) {
+        fprintf(stderr, "tension_cutoff must be yes or no\n");
+        goto cleanup;
+    }
+    if (tension_cutoff == YES && material_model != MOHR_COULOMB &&
+        material_model != DRUCKERPRAGER) {
+        fprintf(stderr, "tension_cutoff=yes requires MohrCoulomb or "
+                        "DruckerPrager\n");
+        goto cleanup;
+    }
+    if (steps <= 0 || dt <= 0.0 || no_substeps <= 0 || rtol < 0.0 ||
+        atol < 0.0 || error_tolerance <= 0.0 || backbone_tolerance <= 0.0) {
+        fprintf(stderr, "Illegal material-point step, time, substep, or "
+                        "tolerance value\n");
+        goto cleanup;
+    }
+
+    strain_history = (tensor_t *)calloc((size_t)steps, sizeof(*strain_history));
+    strain_values = (double *)calloc((size_t)steps*6, sizeof(*strain_values));
+    cpu_results = (nonlinear_material_point_result_t *)calloc(
+        (size_t)steps, sizeof(*cpu_results));
+    gpu_results = (nonlinear_material_point_result_t *)calloc(
+        (size_t)steps, sizeof(*gpu_results));
+    if (strain_history == NULL || strain_values == NULL ||
+        cpu_results == NULL || gpu_results == NULL) {
+        fprintf(stderr, "Out of memory in material-point test\n");
+        goto cleanup;
+    }
+    if (parsedarray(fp, "material_point_strain_history", steps*6,
+                    strain_values) != 0) {
+        fprintf(stderr, "Cannot read %d material-point strain rows\n", steps);
+        goto cleanup;
+    }
+    for (int32_t step = 0; step < steps; step++) {
+        strain_history[step].xx = strain_values[step*6];
+        strain_history[step].yy = strain_values[step*6+1];
+        strain_history[step].zz = strain_values[step*6+2];
+        strain_history[step].xy = strain_values[step*6+3];
+        strain_history[step].yz = strain_values[step*6+4];
+        strain_history[step].xz = strain_values[step*6+5];
+    }
+
+    material_point_load_constants(&constants, constants_values);
+    memset(&config, 0, sizeof(config));
+    config.material_model = material_model;
+    config.tension_cutoff = tension_cutoff;
+    config.geostatic_final_step = -1;
+    config.no_substeps = no_substeps;
+    config.error_tolerance = error_tolerance;
+    config.backbone_error_tolerance = backbone_tolerance;
+
+    snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
+    snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
+    material_point_cpu_history(&constants, &config, strain_history, steps, dt,
+                               cpu_results);
+    if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
+                                 dt) != 0) {
+        goto cleanup;
+    }
+    if (nonlinear_gpu_material_point_history(&constants, &config,
+                                             strain_history, steps,
+                                             gpu_results) != 0) {
+        goto cleanup;
+    }
+    if (material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
+                                 dt) != 0) {
+        goto cleanup;
+    }
+
+    for (int32_t step = 0; step < steps; step++) {
+        if (cpu_results[step].status != gpu_results[step].status) {
+            fprintf(stderr, "Material-point status mismatch at step %d: "
+                            "CPU=%d GPU=%d\n", step,
+                    cpu_results[step].status, gpu_results[step].status);
+            goto cleanup;
+        }
+        double cpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT];
+        double gpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT];
+        const int count = material_point_result_values(&cpu_results[step],
+                                                       cpu_values);
+        material_point_result_values(&gpu_results[step], gpu_values);
+        for (int i = 0; i < count; i++) {
+            if (!isfinite(cpu_values[i]) || !isfinite(gpu_values[i])) {
+                fprintf(stderr, "Non-finite material-point value at step %d "
+                                "field %s: CPU=%g GPU=%g\n",
+                        step, material_point_result_names[i], cpu_values[i],
+                        gpu_values[i]);
+                goto cleanup;
+            }
+            const double absolute = fabs(cpu_values[i]-gpu_values[i]);
+            const double scale = MAX(fabs(cpu_values[i]), fabs(gpu_values[i]));
+            const double relative = absolute/MAX(scale, DBL_MIN);
+            maximum_absolute = MAX(maximum_absolute, absolute);
+            maximum_relative = MAX(maximum_relative, relative);
+            if (absolute > atol && absolute > rtol*scale) {
+                fprintf(stderr, "Material-point mismatch at step %d field %s: "
+                                "CPU=%.17e GPU=%.17e abs=%.3e rel=%.3e\n",
+                        step, material_point_result_names[i], cpu_values[i],
+                        gpu_values[i], absolute, relative);
+                goto cleanup;
+            }
+        }
+    }
+
+    printf("Material-point model: %s; steps: %d\n", material_name, steps);
+    printf("CPU output: %s\nGPU output: %s\n", cpu_path, gpu_path);
+    printf("Maximum absolute difference: %.6e\n", maximum_absolute);
+    printf("Maximum relative difference: %.6e\n", maximum_relative);
+    printf("PASS: CPU/GPU material-point histories agree\n");
+    result = 0;
+
+cleanup:
+    if (fp != NULL) fclose(fp);
+    free(strain_history);
+    free(strain_values);
+    free(cpu_results);
+    free(gpu_results);
+    return result;
+}
+
+#undef MATERIAL_POINT_CONSTANT_COUNT
+#undef MATERIAL_POINT_RESULT_VALUE_COUNT
+
 /* computes the derivatives of the flow potential for a Drucker-Prager material */
 tensor_t compute_dfds (tensor_t dev, double J2, double beta) {
 
@@ -6120,6 +6564,7 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
             /* strain and backstress predictor  */
             pstrains1->qp[i]    = copy_tensor ( pstrains2->qp[i] );     /* The strain predictor assumes that the current plastic strains equal those from the previous step   */
             alphastress1->qp[i] = copy_tensor ( alphastress2->qp[i] );
+            epstr1->qv[i]       = epstr2->qv[i];
 
             /* Calculate stresses */
             if ( ( theMaterialModel == LINEAR ) || ( step <= theGeostaticFinalStep ) ){

@@ -71,8 +71,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 206);
-  assert.equal(documented.length, 206, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 213);
+  assert.equal(documented.length, 213, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -144,6 +144,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /vonMises_ep/);
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
+  assert.match(physics, /legacy Istanbul nl_id classification/);
+  assert.match(physics, /Vs range covered by material_properties_list/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
   assert.equal(parameterResponse.status, 200);
@@ -152,6 +154,16 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /include_nonlinear_analysis/);
   assert.match(parameters, /material_plasticity_type/);
   assert.match(parameters, /plastic-strain evolution/);
+
+  const gpuResponse = await render("/docs/gpu-execution");
+  assert.equal(gpuResponse.status, 200);
+  const gpu = await gpuResponse.text();
+  assert.match(gpu, /HERCULES_NONLINEAR_BACKEND/);
+  assert.match(gpu, /constitutive calculations in double precision/);
+  assert.match(gpu, /CPU\/GSL implementation/);
+  assert.match(gpu, /Material-point CPU\/GPU regression/);
+  assert.match(gpu, /--nonlinear-material-point/);
+  assert.match(gpu, /tensorial shear strains/);
 });
 
 test("documents every supported source model and its auxiliary inputs", async () => {

@@ -285,10 +285,34 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Resident-field strategy",
         bullets: [
           "Elastic displacement history remains on the GPU; only boundary and adjustment nodes move when required.",
+          "With HERCULES_NONLINEAR_BACKEND=gpu, nonlinear-solid stress, plastic strain, hardening/backbone state, and internal-force assembly remain on the GPU; CPU remains the default reference backend.",
           "Acoustic pressure histories swap device pointers and patch only schedule or adjustment nodes.",
           "Poroelastic pore pressure uses the same sparse/resident pattern.",
           "Station interpolation runs on the GPU for supported fields and returns compact observations.",
         ],
+      },
+      {
+        id: "nonlinear-backend",
+        title: "Nonlinear solid backend",
+        paragraphs: [
+          "Set HERCULES_NONLINEAR_BACKEND=gpu to opt into the CUDA nonlinear constitutive and force path. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Leave the variable unset, or set it to cpu, for the established CPU/GSL implementation.",
+          "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
+        ],
+        codeLabel: "shell",
+        code: "export HERCULES_NONLINEAR_BACKEND=gpu\nexport HERCULES_GPU_MPI_BACKEND=cuda_aware\nexport HERCULES_DISP_SYNC_MODE=boundary",
+        note: "The GPU backend changes execution only. Nonlinear geostatic, tolerance, damping, substep, and material_properties_list values remain case-specific physical/numerical inputs.",
+      },
+      {
+        id: "nonlinear-material-point",
+        title: "Material-point CPU/GPU regression",
+        paragraphs: [
+          "Before an element or production comparison, run a prescribed tensor-strain history through the CPU and CUDA constitutive routines with the standalone material-point mode. It writes complete CPU and GPU state histories and returns nonzero on a status, finite-value, or tolerance mismatch.",
+          "Run vonmises_ep_synthetic.in first for a short yielding/state smoke test, then vonmises_bae_legacy_id2_synthetic.in to compare the CPU GSL-backed Borja--Amies root solver against the CUDA root solver.",
+          "The fixture constants and strain path are test inputs, not a substitute for calibrated production properties. Off-diagonal inputs are tensorial shear strains, so epsilon_xy equals one half of engineering gamma_xy. A single point validates correctness only; use a many-element case for performance measurement.",
+        ],
+        codeLabel: "shell",
+        code: "mpirun -np 1 ./quake/forward/psolve \\\n  --nonlinear-material-point \\\n  benchmark_inputs/nonlinear_material_point/vonmises_ep_synthetic.in",
+        note: "The supplied von Mises fixtures are synthetic numerical regression tests. Replace them with constants and histories derived from the calibrated case for scientific validation.",
       },
       {
         id: "transport",
@@ -334,6 +358,7 @@ export const docPages: Record<string, DocPageContent> = {
         paragraphs: [
           "Set include_nonlinear_analysis=yes to activate history-dependent constitutive updates in eligible solid elements. Hercules evaluates stress against the selected yield or backbone relation, evolves plastic strain and internal variables, and can retain permanent deformation after unloading.",
           "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
+          "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and select eligible elements from the Vs range covered by material_properties_list.",
         ],
         table: {
           headers: ["Family", "Available material_model values", "Role"],
@@ -388,6 +413,7 @@ export const docPages: Record<string, DocPageContent> = {
           rows: [
             ["HERCULES_PHASE_MODE", "unified | two-phase", "Select mesh/solver orchestration"],
             ["HERCULES_GPU_MPI_BACKEND", "host | cuda_aware", "Select field-exchange backend"],
+            ["HERCULES_NONLINEAR_BACKEND", "cpu | gpu", "Select nonlinear constitutive and force backend; default: cpu"],
             ["HERCULES_DISP_SYNC_MODE", "auto | full | boundary", "Control elastic host/device synchronization"],
             ["HERCULES_MESH_IO_MODE", "mpiio | sharded | single", "Select Phase A mesh storage"],
             ["HERCULES_PLANE_IO_MODE", "auto | hybrid | mpiio | legacy", "Select plane interpolation and writing"],

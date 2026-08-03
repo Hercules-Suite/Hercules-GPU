@@ -273,7 +273,13 @@ void nonlinear_print_stats(int32_t *nonlinElementsCount,
                            int32_t  theGroupSize);
 
 void nonlinear_stats(int32_t myID, int32_t theGroupSize);
-void nonlinear_solver_init(int32_t myID, mesh_t *myMesh, double depth);
+void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
+                           mysolver_t *mySolver, double depth);
+void nonlinear_gpu_sync_host_state(mysolver_t *mySolver);
+
+/* Run the standalone CPU/CUDA constitutive parity test described by the
+ * supplied material-point input file. */
+int nonlinear_material_point_test(const char *input_path, int32_t myID);
 
 /* -------------------------------------------------------------------------- */
 /*                   Auxiliary tensor manipulation methods                    */
@@ -467,9 +473,6 @@ void nonlinear_yield_stats(mesh_t *myMesh, int32_t myID, int32_t theTotalSteps, 
 void check_balance( int32_t myID );
 
 #endif /* Q_NONLINEAR_H */
-
-
-
 
 
 

@@ -1,0 +1,65 @@
+# Nonlinear material-point CPU/GPU test
+
+This test drives one constitutive point with a prescribed strain history. It
+does not build a mesh, read a source, or advance the wave solver. Its purpose is
+to isolate CPU/CUDA constitutive parity before running an element or production
+benchmark.
+
+Build `quake/forward/psolve` normally on a CUDA system, then run with exactly
+one MPI rank:
+
+```bash
+cd benchmark_inputs/nonlinear_material_point
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point vonmises_ep_synthetic.in
+
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point vonmises_bae_legacy_id2_synthetic.in
+```
+
+The command runs the complete history through the production CPU
+`material_update` routine and the CUDA material-update routine, writes
+`<material_point_output_prefix>.cpu.csv` and `.gpu.csv`, and returns nonzero on
+a status, finite-value, or tolerance mismatch.
+
+`material_point_strain_history` contains tensor strains in this order:
+
+```text
+epsilon_xx epsilon_yy epsilon_zz epsilon_xy epsilon_yz epsilon_xz
+```
+
+Off-diagonal values are tensorial shear strains. For an engineering shear
+history `gamma_xy`, provide `epsilon_xy = gamma_xy / 2`.
+
+`material_point_constants` contains 24 values in this order:
+
+```text
+lambda mu alpha beta gamma cohesion phi dilatancy hardening
+yield_strain psi0 m
+theta1 theta2 theta3 theta4 theta5
+beta_MKZ s_MKZ phi_MKZ gamma_ref_MKZ
+alpha_RO eta_RO phi_RO
+```
+
+Stress-like values use Pa; angles use radians. Unused model-specific entries
+must be present and may be zero. The supplied fixtures are synthetic numerical
+regression cases, not production soil calibrations:
+
+- `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
+  plastic-state advancement.
+- `vonmises_bae_legacy_id2_synthetic.in` uses the constants currently assigned
+  to legacy Istanbul material ID 2. Its CPU history enters the GSL-backed
+  Borja--Amies root solver, while its GPU history uses the CUDA root solver.
+
+For scientific validation, replace the constants and strain history with
+values derived from the calibrated case being studied and retain its
+geostatic, tolerance, substep, damping, and material-property provenance.
+
+The material-point runner currently exercises rate-independent constitutive
+updates, matching the implemented CUDA path. Do not use it to claim validation
+of the unfinished rate-dependent branch.
+
+The default comparison tolerances are `rtol=1e-6` and `atol=1e-9`; the fixture
+may override them with `material_point_compare_rtol` and
+`material_point_compare_atol`. A single point is a correctness test only and
+must not be used to measure GPU speedup.
