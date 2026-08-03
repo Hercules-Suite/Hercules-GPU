@@ -364,11 +364,44 @@ __device__ static inline double nl_mkz_value(const nlconstants_t *c,
                                              c->s_MKZ));
 }
 
+__device__ static inline double nl_gqh_derivative(const nlconstants_t *c,
+                                                   double gamma)
+{
+    const double t1 = c->thetaGQH[0], t2 = c->thetaGQH[1];
+    const double t3 = c->thetaGQH[2], t4 = c->thetaGQH[3];
+    const double t5 = c->thetaGQH[4];
+    const double gp = pow(nl_max(gamma, DBL_MIN), t5);
+    const double t3p = pow(t3, t5);
+    const double denominator = t3p + t4 * gp;
+    const double theta = t1 + t2 * t4 * gp / denominator;
+    const double dtheta = t2 * t3p * t4 * t5 *
+        pow(nl_max(gamma, DBL_MIN), t5 - 1.0) /
+        (denominator * denominator);
+    const double root = sqrt(nl_max(
+        (1.0 + gamma) * (1.0 + gamma) - 4.0 * theta * gamma,
+        DBL_MIN));
+    const double a = 1.0 + gamma + root;
+    const double b = 1.0 + (1.0 + gamma -
+        2.0 * (theta + gamma * dtheta)) / root;
+    return 2.0 * (a - gamma * b) / (a * a);
+}
+
+__device__ static inline double nl_mkz_derivative(const nlconstants_t *c,
+                                                   double gamma)
+{
+    const double p = pow(nl_max(gamma, DBL_MIN), c->s_MKZ);
+    return (1.0 + c->beta_MKZ * (1.0 - c->s_MKZ) * p) /
+           ((1.0 + c->beta_MKZ * p) *
+            (1.0 + c->beta_MKZ * p));
+}
+
 __device__ static double nl_backbone_gamma(const nlconstants_t *c,
                                             materialmodel_t model,
                                             double target, double tolerance)
 {
     double lo = 0.0, hi = 1.0;
+    double flo = (model == VONMISES_GQH) ? nl_gqh_value(c, lo)
+                                          : nl_mkz_value(c, lo);
     double fhi = (model == VONMISES_GQH) ? nl_gqh_value(c, hi)
                                           : nl_mkz_value(c, hi);
     for (int i = 0; i < 200 && fhi < target; i++) {
@@ -376,14 +409,43 @@ __device__ static double nl_backbone_gamma(const nlconstants_t *c,
         fhi = (model == VONMISES_GQH) ? nl_gqh_value(c, hi)
                                        : nl_mkz_value(c, hi);
     }
+
+    /* This inversion is nested inside the Borja--Amies stress-residual
+     * solve. Stopping at the user-facing dimensionless backbone tolerance
+     * quantizes H(kappa), so the outer residual can stall well above its
+     * Pa-valued tolerance. Refine to roundoff here; this remains stricter
+     * than the configured backbone tolerance and makes the outer function
+     * continuous at the accuracy it requires. */
+    const double solve_tolerance = nl_min(
+        tolerance, DBL_EPSILON * nl_max(1.0, fabs(target)));
+    double gamma = 0.5 * (lo + hi);
     for (int i = 0; i < 200; i++) {
-        const double mid = 0.5 * (lo + hi);
-        const double value = (model == VONMISES_GQH) ? nl_gqh_value(c, mid)
-                                                      : nl_mkz_value(c, mid);
-        if (fabs(value - target) <= tolerance) return mid;
-        if (value < target) lo = mid; else hi = mid;
+        const double value = (model == VONMISES_GQH)
+                                 ? nl_gqh_value(c, gamma)
+                                 : nl_mkz_value(c, gamma);
+        const double residual = value - target;
+        if (fabs(value - target) <= solve_tolerance) return gamma;
+        if (residual < 0.0) {
+            lo = gamma;
+            flo = value;
+        } else {
+            hi = gamma;
+            fhi = value;
+        }
+
+        const double derivative = (model == VONMISES_GQH)
+                                      ? nl_gqh_derivative(c, gamma)
+                                      : nl_mkz_derivative(c, gamma);
+        double candidate = gamma - residual / derivative;
+        if (!isfinite(candidate) || derivative <= 0.0 || candidate <= lo ||
+            candidate >= hi) {
+            candidate = 0.5 * (lo + hi);
+        }
+        if (candidate == gamma)
+            return (fabs(flo - target) <= fabs(fhi - target)) ? lo : hi;
+        gamma = candidate;
     }
-    return 0.5 * (lo + hi);
+    return (fabs(flo - target) <= fabs(fhi - target)) ? lo : hi;
 }
 
 __device__ static double nl_hardening(const nlconstants_t *c,
@@ -404,31 +466,9 @@ __device__ static double nl_hardening(const nlconstants_t *c,
         double target = 1.0 / (1.0 + kappa);
         if (model == VONMISES_MKZ) target /= c->phi_MKZ;
         const double gamma = nl_backbone_gamma(c, model, target, tolerance);
-        double derivative;
-        if (model == VONMISES_MKZ) {
-            const double p = pow(nl_max(gamma, DBL_MIN), c->s_MKZ);
-            derivative = (1.0 + c->beta_MKZ * (1.0 - c->s_MKZ) * p) /
-                         ((1.0 + c->beta_MKZ * p) *
-                          (1.0 + c->beta_MKZ * p));
-        } else {
-            const double t1 = c->thetaGQH[0], t2 = c->thetaGQH[1];
-            const double t3 = c->thetaGQH[2], t4 = c->thetaGQH[3];
-            const double t5 = c->thetaGQH[4];
-            const double gp = pow(nl_max(gamma, DBL_MIN), t5);
-            const double t3p = pow(t3, t5);
-            const double denominator = t3p+t4*gp;
-            const double theta = t1+t2*t4*gp/denominator;
-            const double dtheta = t2*t3p*t4*t5*
-                pow(nl_max(gamma, DBL_MIN), t5-1.0) /
-                (denominator*denominator);
-            const double root = sqrt(nl_max(
-                (1.0+gamma)*(1.0+gamma)-4.0*theta*gamma,
-                DBL_MIN));
-            const double a = 1.0+gamma+root;
-            const double b = 1.0+(1.0+gamma-
-                2.0*(theta+gamma*dtheta))/root;
-            derivative = 2.0*(a-gamma*b)/(a*a);
-        }
+        double derivative = (model == VONMISES_MKZ)
+                                ? nl_mkz_derivative(c, gamma)
+                                : nl_gqh_derivative(c, gamma);
         derivative = nl_min(derivative, 1.0 - 1.0e-14);
         return 3.0 * g * derivative / nl_max(1.0 - derivative, DBL_MIN);
     }
@@ -473,11 +513,15 @@ __device__ static int nl_bracketed_bisection(const nl_ba_params_t *p,
         const double mid = 0.5 * (*lo + *hi);
         const double fm = nl_ba_residual(mid, p);
         if (!isfinite(fm)) return 0;
-        if (fabs(fm) <= tolerance || fabs(*hi - *lo) <= DBL_EPSILON *
-                                                     nl_max(1.0, fabs(mid))) {
+        if (fabs(fm) <= tolerance) {
             *root = mid;
             *residual = fm;
             return 1;
+        }
+        if (fabs(*hi - *lo) <= DBL_EPSILON * nl_max(1.0, fabs(mid))) {
+            *root = mid;
+            *residual = fm;
+            return 0;
         }
         if (flo * fm <= 0.0) {
             *hi = mid;
