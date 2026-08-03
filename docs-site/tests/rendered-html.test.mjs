@@ -135,6 +135,25 @@ test("lists GSL as a required build dependency", async () => {
   assert.match(html, /GSL include directory/);
 });
 
+test("documents nonlinear and plastic simulation capability", async () => {
+  const physicsResponse = await render("/docs/physics");
+  assert.equal(physicsResponse.status, 200);
+  const physics = await physicsResponse.text();
+  assert.match(physics, /Nonlinear\/plastic solid/);
+  assert.match(physics, /plastic strain/i);
+  assert.match(physics, /vonMises_ep/);
+  assert.match(physics, /MohrCoulomb/);
+  assert.match(physics, /DruckerPrager/);
+
+  const parameterResponse = await render("/docs/parameters-nonlinear");
+  assert.equal(parameterResponse.status, 200);
+  const parameters = await parameterResponse.text();
+  assert.match(parameters, /Nonlinear and plastic analysis parameters/);
+  assert.match(parameters, /include_nonlinear_analysis/);
+  assert.match(parameters, /material_plasticity_type/);
+  assert.match(parameters, /plastic-strain evolution/);
+});
+
 test("documents every supported source model and its auxiliary inputs", async () => {
   const response = await render("/docs/source-models");
   assert.equal(response.status, 200);

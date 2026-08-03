@@ -10,7 +10,8 @@ export default function DocsOverview() {
         <p className="docLead">
           Hercules is a parallel, octree-based finite-element code for three-dimensional
           seismic wave propagation. It combines adaptive mesh generation, distributed
-          execution, and GPU-accelerated solvers for large scientific simulations.
+          execution, and GPU-accelerated solvers for linear, nonlinear elastoplastic,
+          and coupled-physics simulations.
         </p>
         <div className="overviewSummary">
           <p>This documentation covers the complete simulation workflow:</p>
@@ -18,7 +19,8 @@ export default function DocsOverview() {
             <li>building Hercules for an MPI and CUDA environment;</li>
             <li>preparing a case with one <code>parameters.in</code> file;</li>
             <li>running mesh generation and the solver on local or HPC systems;</li>
-            <li>selecting physical models, outputs, and performance paths; and</li>
+            <li>selecting linear, nonlinear/plastic, and coupled physical models;</li>
+            <li>configuring outputs and performance paths; and</li>
             <li>validating numerical and physical results.</li>
           </ul>
         </div>

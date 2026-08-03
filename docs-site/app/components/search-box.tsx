@@ -60,11 +60,19 @@ export function SearchBox() {
         onFocus={() => setOpen(true)}
         placeholder="Search documentation"
         aria-label="Search documentation"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls={open ? "documentation-search-results" : undefined}
         aria-expanded={open}
       />
       <kbd>⌘K</kbd>
       {open && (
-        <div className="searchResults" role="listbox" aria-label="Documentation pages">
+        <div
+          className="searchResults"
+          id="documentation-search-results"
+          role="listbox"
+          aria-label="Documentation pages"
+        >
           <p className="searchResultsLabel">
             {query ? "Matching pages" : "Popular pages"}
           </p>

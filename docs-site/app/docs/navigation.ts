@@ -61,7 +61,7 @@ export const navGroups: NavGroup[] = [
       {
         slug: "physics",
         title: "Physical models",
-        description: "Elastic, acoustic, poroelastic, damping, and PML.",
+        description: "Elastic, nonlinear plasticity, acoustic, poroelastic, damping, and PML.",
       },
       {
         slug: "input-files",
@@ -110,8 +110,8 @@ export const navGroups: NavGroup[] = [
       },
       {
         slug: "parameters-nonlinear",
-        title: "Nonlinear analysis",
-        description: "Geostatic state, constitutive models, and material tables.",
+        title: "Nonlinear & plastic analysis",
+        description: "Geostatic state, elastoplastic models, plasticity controls, and material tables.",
       },
       {
         slug: "parameters-drm-waves",

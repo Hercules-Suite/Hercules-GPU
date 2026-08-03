@@ -3,7 +3,8 @@
 Hercules GPU is a parallel, octree-based finite-element code for large-scale
 three-dimensional seismic-wave simulations. It combines adaptive mesh
 generation, MPI domain decomposition, and CUDA-accelerated time integration for
-regional wave-propagation and coupled-physics studies.
+regional wave propagation, nonlinear/plastic response, and coupled-physics
+studies.
 
 ## Documentation
 
@@ -19,6 +20,7 @@ regional wave-propagation and coupled-physics studies.
 - Distributed-memory execution with MPI
 - CUDA-accelerated finite-element time stepping
 - Elastic, viscoelastic, acoustic–elastic, and poroelastic simulations
+- Nonlinear solid analysis with elastoplastic/plastic and hysteretic constitutive models
 - Multiple point, force, finite-fault, plane-wave, and compliant-base sources
 - Stations, output planes, checkpoints, and mesh diagnostics
 - Three-dimensional material models and topography

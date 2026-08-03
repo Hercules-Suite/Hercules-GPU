@@ -15,18 +15,18 @@ export async function generateMetadata(): Promise<Metadata> {
       template: "%s · Hercules Documentation",
     },
     description:
-      "Technical documentation for the Hercules adaptive finite-element seismic wave simulation code.",
+      "Technical documentation for Hercules linear, nonlinear/plastic, and coupled-physics seismic simulations.",
     metadataBase: base,
     openGraph: {
       title: "Hercules Documentation",
-      description: "Build, configure, run, and validate Hercules simulations.",
+      description: "Build, configure, run, and validate Hercules linear, nonlinear/plastic, and coupled-physics simulations.",
       type: "website",
       images: [{ url: socialImage, width: 1732, height: 909, alt: "Hercules Documentation" }],
     },
     twitter: {
       card: "summary_large_image",
       title: "Hercules Documentation",
-      description: "Build, configure, run, and validate Hercules simulations.",
+      description: "Build, configure, run, and validate Hercules linear, nonlinear/plastic, and coupled-physics simulations.",
       images: [socialImage],
     },
   };

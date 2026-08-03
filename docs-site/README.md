@@ -2,7 +2,8 @@
 
 Technical documentation for the Hercules adaptive finite-element seismic wave
 simulation code. The site covers installation, parameter and input files,
-GPU/MPI execution, physical models, outputs, validation, and troubleshooting.
+GPU/MPI execution, linear and nonlinear/plastic physical models, outputs,
+validation, and troubleshooting.
 
 The site source is maintained in `docs-site/` alongside the Hercules solver so
 that implementation and documentation changes can be reviewed together. The
