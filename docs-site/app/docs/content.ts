@@ -286,6 +286,7 @@ export const docPages: Record<string, DocPageContent> = {
         bullets: [
           "Elastic displacement history remains on the GPU; only boundary and adjustment nodes move when required.",
           "With HERCULES_NONLINEAR_BACKEND=gpu, nonlinear-solid stress, plastic strain, hardening/backbone state, and internal-force assembly remain on the GPU; CPU remains the default reference backend.",
+          "Nonlinear station output gathers compact quadrature-point records only for local station elements; it does not download the full nonlinear state at each output step.",
           "Acoustic pressure histories swap device pointers and patch only schedule or adjustment nodes.",
           "Poroelastic pore pressure uses the same sparse/resident pattern.",
           "Station interpolation runs on the GPU for supported fields and returns compact observations.",
@@ -297,6 +298,7 @@ export const docPages: Record<string, DocPageContent> = {
         paragraphs: [
           "Set HERCULES_NONLINEAR_BACKEND=gpu to opt into the CUDA nonlinear constitutive and force path. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Leave the variable unset, or set it to cpu, for the established CPU/GSL implementation.",
           "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
+          "For production timing, verify both the total element count and the nonlinear count after regenerating any mesh whose velocity profile changed. Reusing an older mesh also reuses its stored Vs payload and can unintentionally select nearly the entire domain.",
         ],
         codeLabel: "shell",
         code: "export HERCULES_NONLINEAR_BACKEND=gpu\nexport HERCULES_GPU_MPI_BACKEND=cuda_aware\nexport HERCULES_DISP_SYNC_MODE=boundary",

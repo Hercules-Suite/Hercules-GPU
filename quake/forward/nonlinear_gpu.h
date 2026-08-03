@@ -53,8 +53,17 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step, double dt,
                            double dt_squared);
 
-/* Copy device state into the existing host structures. This is used only on
- * nonlinear station output steps and at finalization/statistics. */
+/* Configure and download compact nonlinear-station records. The supplied
+ * indices address the nonlinear-element arrays, not the full mesh arrays. */
+int nonlinear_gpu_configure_station_output(
+    int32_t myID, int32_t station_count,
+    const int32_t *station_nonlinear_indices);
+void nonlinear_gpu_download_station_state(mysolver_t *solver,
+                                          nlsolver_t *host_state);
+
+/* Copy the complete device state into the existing host structures. This is
+ * reserved for finalization/statistics; station output uses the sparse gather
+ * above. */
 void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state);
 
 /* Called after the force-stream wait. Reports the first numerical failure

@@ -40,6 +40,29 @@ typedef struct nonlinear_gpu_error_t {
     double value;
 } nonlinear_gpu_error_t;
 
+/* Only these quadrature-point values are consumed by
+ * print_nonlinear_stations(). Keeping the record compact prevents station
+ * output from downloading every per-element history array. */
+typedef struct nonlinear_gpu_station_state_t {
+    int32_t nonlinear_index;
+    tensor_t stress;
+    tensor_t strain;
+    double fs;
+    double kappa;
+    double gamma1d;
+    double tao1d;
+    double ggmax;
+    double sigma_z_static;
+    double phi;
+} nonlinear_gpu_station_state_t;
+
+typedef struct nonlinear_gpu_station_buffers_t {
+    int32_t count;
+    int32_t *indices;
+    nonlinear_gpu_station_state_t *device;
+    nonlinear_gpu_station_state_t *host;
+} nonlinear_gpu_station_buffers_t;
+
 typedef struct nonlinear_gpu_state_t {
     int32_t count;
     nonlinear_gpu_element_t *elements;
@@ -66,6 +89,7 @@ typedef struct nonlinear_gpu_state_t {
 } nonlinear_gpu_state_t;
 
 static nonlinear_gpu_state_t g_nl = {};
+static nonlinear_gpu_station_buffers_t g_station = {};
 static nonlinear_gpu_config_t g_config = {};
 static nonlinear_gpu_error_t g_error_host = {};
 static int g_backend_request = -1;
@@ -1648,6 +1672,31 @@ __global__ static void kernel_nonlinear_update_force(
     }
 }
 
+__global__ static void kernel_nonlinear_gather_station_state(
+    nonlinear_gpu_state_t state, int32_t station_count,
+    const int32_t *station_indices,
+    nonlinear_gpu_station_state_t *station_state)
+{
+    const int32_t station =
+        (int32_t)(blockIdx.x*blockDim.x + threadIdx.x);
+    if (station >= station_count) return;
+
+    const int32_t nl_eindex = station_indices[station];
+    const int qp = 4;
+    nonlinear_gpu_station_state_t result = {};
+    result.nonlinear_index = nl_eindex;
+    result.stress = state.stresses[nl_eindex].qp[qp];
+    result.strain = state.strains[nl_eindex].qp[qp];
+    result.fs = state.constants[nl_eindex].fs[qp];
+    result.kappa = state.kappa[nl_eindex].qv[qp];
+    result.gamma1d = state.gamma1d[nl_eindex].qv[qp];
+    result.tao1d = state.tao1d[nl_eindex].qv[qp];
+    result.ggmax = state.ggmax[nl_eindex].qv[qp];
+    result.sigma_z_static = state.constants[nl_eindex].sigmaZ_st;
+    result.phi = state.constants[nl_eindex].phi;
+    station_state[station] = result;
+}
+
 static int nonlinear_cuda_failure(int32_t myID, cudaError_t error,
                                   const char *operation)
 {
@@ -1770,6 +1819,105 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
     }
 }
 
+static void nonlinear_gpu_release_station_output(void)
+{
+    if (g_station.indices != NULL) cudaFree(g_station.indices);
+    if (g_station.device != NULL) cudaFree(g_station.device);
+    if (g_station.host != NULL) cudaFreeHost(g_station.host);
+    memset(&g_station, 0, sizeof(g_station));
+}
+
+int nonlinear_gpu_configure_station_output(
+    int32_t myID, int32_t station_count,
+    const int32_t *station_nonlinear_indices)
+{
+    if (!g_active || station_count < 0 ||
+        (station_count > 0 && station_nonlinear_indices == NULL)) return -1;
+
+    nonlinear_gpu_release_station_output();
+    if (station_count == 0) return 0;
+
+    for (int32_t i = 0; i < station_count; i++) {
+        if (station_nonlinear_indices[i] < 0 ||
+            station_nonlinear_indices[i] >= g_nl.count) {
+            fprintf(stderr,
+                    "Thread %d: nonlinear GPU station %d has invalid "
+                    "nonlinear index %d (count=%d)\n",
+                    myID, i, station_nonlinear_indices[i], g_nl.count);
+            return -1;
+        }
+    }
+
+    g_station.count = station_count;
+    cudaError_t error = cudaMalloc(
+        (void **)&g_station.indices,
+        (size_t)station_count*sizeof(*g_station.indices));
+    if (nonlinear_cuda_failure(myID, error,
+                               "station index allocation") != 0) goto fail;
+    error = cudaMemcpy(g_station.indices, station_nonlinear_indices,
+                       (size_t)station_count*sizeof(*g_station.indices),
+                       cudaMemcpyHostToDevice);
+    if (nonlinear_cuda_failure(myID, error,
+                               "station index upload") != 0) goto fail;
+    error = cudaMalloc(
+        (void **)&g_station.device,
+        (size_t)station_count*sizeof(*g_station.device));
+    if (nonlinear_cuda_failure(myID, error,
+                               "station state allocation") != 0) goto fail;
+    error = cudaMallocHost(
+        (void **)&g_station.host,
+        (size_t)station_count*sizeof(*g_station.host));
+    if (nonlinear_cuda_failure(myID, error,
+                               "station host buffer allocation") != 0) {
+        goto fail;
+    }
+    return 0;
+
+fail:
+    nonlinear_gpu_release_station_output();
+    return -1;
+}
+
+void nonlinear_gpu_download_station_state(mysolver_t *solver,
+                                           nlsolver_t *host_state)
+{
+    if (!g_active || g_station.count == 0 || host_state == NULL) return;
+
+    cudaStream_t stream = solver->streams[CUDA_STREAM_MAIN];
+    const int block_size = 128;
+    const int grid_size = (g_station.count + block_size - 1)/block_size;
+    kernel_nonlinear_gather_station_state<<<grid_size, block_size, 0, stream>>>(
+        g_nl, g_station.count, g_station.indices, g_station.device);
+    cudaError_t error = cudaGetLastError();
+    if (error == cudaSuccess) {
+        error = cudaMemcpyAsync(
+            g_station.host, g_station.device,
+            (size_t)g_station.count*sizeof(*g_station.host),
+            cudaMemcpyDeviceToHost, stream);
+    }
+    if (error == cudaSuccess) error = cudaStreamSynchronize(stream);
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Nonlinear GPU station-state gather failed: %s\n",
+                cudaGetErrorString(error));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    for (int32_t i = 0; i < g_station.count; i++) {
+        const nonlinear_gpu_station_state_t *record = g_station.host + i;
+        const int32_t nl_eindex = record->nonlinear_index;
+        host_state->stresses[nl_eindex].qp[4] = record->stress;
+        host_state->strains[nl_eindex].qp[4] = record->strain;
+        host_state->constants[nl_eindex].fs[4] = record->fs;
+        host_state->kappa[nl_eindex].qv[4] = record->kappa;
+        host_state->gamma1d[nl_eindex].qv[4] = record->gamma1d;
+        host_state->tao1d[nl_eindex].qv[4] = record->tao1d;
+        host_state->GGmax[nl_eindex].qv[4] = record->ggmax;
+        host_state->constants[nl_eindex].sigmaZ_st = record->sigma_z_static;
+        host_state->constants[nl_eindex].phi = record->phi;
+    }
+}
+
 #define NL_DOWNLOAD(field, host_field)                                        \
     cudaMemcpy(host_state->host_field, g_nl.field,                            \
                (size_t)g_nl.count*sizeof(*host_state->host_field),            \
@@ -1882,6 +2030,7 @@ int nonlinear_gpu_material_point_history(
 
 void nonlinear_gpu_finalize(void)
 {
+    nonlinear_gpu_release_station_output();
 #define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
     NL_FREE(elements); NL_FREE(constants);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);

@@ -17172,7 +17172,7 @@ static void solver_finish_nonlinear_gpu(mysolver_t* solver, mesh_t* mesh,
   if (Param.theNumberOfStations != 0 && Param.theStationsPrintRate > 0 &&
       (step % Param.theStationsPrintRate) == 0) {
     Timer_Start("Download Non-linear State");
-    nonlinear_gpu_sync_host_state(solver);
+    nonlinear_gpu_sync_station_state(solver);
     Timer_Stop("Download Non-linear State");
     Timer_Start("Print Stations");
     print_nonlinear_stations(mesh, solver, Param.myStations,
@@ -29939,6 +29939,7 @@ int main(int argc, char** argv) {
     if (Param.theNumberOfStations != 0) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,
                               Param.myNumberOfStations);
+      nonlinear_gpu_prepare_station_output(Global.myID);
     }
     nonlinear_stats(Global.myID, Global.theGroupSize);
     Timer_Stop("Pre Setup Nonlinear Init");

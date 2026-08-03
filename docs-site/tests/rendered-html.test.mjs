@@ -172,6 +172,26 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /FA\/FAM quartic correctors/);
   assert.match(gpu, /current CPU dispatch ordering/);
   assert.match(gpu, /tensorial shear strains/);
+  assert.match(gpu, /compact quadrature-point records/);
+  assert.match(gpu, /does not download the full nonlinear state/);
+});
+
+test("uses sparse CUDA state gathering for nonlinear station output", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const finish = psolve.slice(
+    psolve.indexOf("static void solver_finish_nonlinear_gpu"),
+    psolve.indexOf("static void solver_compute_force_planewaves"),
+  );
+
+  assert.match(finish, /nonlinear_gpu_sync_station_state\(solver\)/);
+  assert.doesNotMatch(finish, /nonlinear_gpu_sync_host_state\(solver\)/);
+  assert.match(gpu, /kernel_nonlinear_gather_station_state/);
+  assert.match(gpu, /g_station\.count\s*\*\s*sizeof\(\*g_station\.host\)/);
+  assert.match(gpu, /record->nonlinear_index/);
 });
 
 test("scopes legacy von Mises constants to Istanbul inputs", () => {

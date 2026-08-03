@@ -4,6 +4,12 @@ Use a calibrated production-style nonlinear case in which at least 25% of the
 local/global solid elements are nonlinear. Keep the MPI placement, GPU count,
 input files, output rate, and launch environment identical between runs.
 
+CUDA nonlinear-station output gathers only the quadrature-point fields used by
+each local station. It does not download the complete nonlinear history arrays
+at every `output_stations_print_rate` step. Keep at least one nonlinear station
+when checking CPU/GPU histories, and report the total and nonlinear element
+counts so a reused single-layer mesh is not mistaken for a layered case.
+
 Run the established reference backend first:
 
 ```bash

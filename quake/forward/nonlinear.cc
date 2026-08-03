@@ -1563,6 +1563,40 @@ void nonlinear_gpu_sync_host_state(mysolver_t *mySolver)
     }
 }
 
+void nonlinear_gpu_prepare_station_output(int32_t myID)
+{
+    int32_t total_station_elements = 0;
+
+    if (!nonlinear_gpu_active()) return;
+
+    if (nonlinear_gpu_configure_station_output(
+            myID, myNumberOfNonlinStations,
+            myStationsElementIndices) != 0) {
+        fprintf(stderr,
+                "Thread %d: nonlinear GPU station-output initialization "
+                "failed\n", myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    MPI_Reduce(&myNumberOfNonlinStations, &total_station_elements, 1,
+               MPI_INT, MPI_SUM, 0, comm_solver);
+    if (myID == 0) {
+        fprintf(stdout,
+                "Nonlinear GPU station output: sparse gather enabled "
+                "(%d global nonlinear station elements)\n",
+                total_station_elements);
+        fflush(stdout);
+    }
+}
+
+void nonlinear_gpu_sync_station_state(mysolver_t *mySolver)
+{
+    if (nonlinear_gpu_active()) {
+        nonlinear_gpu_download_station_state(mySolver, myNonlinSolver);
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                   Auxiliary tensor manipulation methods                    */
 /* -------------------------------------------------------------------------- */
