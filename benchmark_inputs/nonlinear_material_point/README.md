@@ -61,5 +61,9 @@ of the unfinished rate-dependent branch.
 
 The default comparison tolerances are `rtol=1e-6` and `atol=1e-9`; the fixture
 may override them with `material_point_compare_rtol` and
-`material_point_compare_atol`. A single point is a correctness test only and
-must not be used to measure GPU speedup.
+`material_point_compare_atol`. Physical state fields are compared directly.
+For the bounding-surface families, the CPU/GSL and CUDA root residuals are
+instead checked independently against `error_tolerance`, because different
+root algorithms may stop at different residuals within the same accepted
+bound. A single point is a correctness test only and must not be used to
+measure GPU speedup.

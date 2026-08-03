@@ -4351,6 +4351,8 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 
 #define MATERIAL_POINT_CONSTANT_COUNT 24
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 35
+#define MATERIAL_POINT_FS_INDEX 19
+#define MATERIAL_POINT_MODEL_ERROR_INDEX 34
 
 static const char *material_point_result_names[
     MATERIAL_POINT_RESULT_VALUE_COUNT] = {
@@ -4577,6 +4579,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     nonlinear_gpu_config_t config;
     double maximum_absolute = 0.0;
     double maximum_relative = 0.0;
+    double maximum_cpu_residual = 0.0;
+    double maximum_gpu_residual = 0.0;
 
     if (myID != 0) return 0;
     fp = fopen(input_path, "r");
@@ -4695,11 +4699,37 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                         gpu_values[i]);
                 goto cleanup;
             }
+
+            /* The CPU/GSL and CUDA root solvers may stop at different
+             * residual values inside the same configured convergence bound.
+             * Validate those diagnostics independently; compare the actual
+             * constitutive state component-by-component below. */
+            if (material_model >= VONMISES_BAE &&
+                (i == MATERIAL_POINT_FS_INDEX ||
+                 i == MATERIAL_POINT_MODEL_ERROR_INDEX)) {
+                const double cpu_residual = fabs(cpu_values[i]);
+                const double gpu_residual = fabs(gpu_values[i]);
+                maximum_cpu_residual = MAX(maximum_cpu_residual, cpu_residual);
+                maximum_gpu_residual = MAX(maximum_gpu_residual, gpu_residual);
+                if (cpu_residual > error_tolerance ||
+                    gpu_residual > error_tolerance) {
+                    fprintf(stderr, "Material-point root residual exceeds "
+                            "error_tolerance at step %d field %s: CPU=%.3e "
+                            "GPU=%.3e tolerance=%.3e\n", step,
+                            material_point_result_names[i], cpu_residual,
+                            gpu_residual, error_tolerance);
+                    goto cleanup;
+                }
+                continue;
+            }
+
             const double absolute = fabs(cpu_values[i]-gpu_values[i]);
             const double scale = MAX(fabs(cpu_values[i]), fabs(gpu_values[i]));
             const double relative = absolute/MAX(scale, DBL_MIN);
             maximum_absolute = MAX(maximum_absolute, absolute);
-            maximum_relative = MAX(maximum_relative, relative);
+            if (absolute > atol) {
+                maximum_relative = MAX(maximum_relative, relative);
+            }
             if (absolute > atol && absolute > rtol*scale) {
                 fprintf(stderr, "Material-point mismatch at step %d field %s: "
                                 "CPU=%.17e GPU=%.17e abs=%.3e rel=%.3e\n",
@@ -4712,8 +4742,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     printf("Material-point model: %s; steps: %d\n", material_name, steps);
     printf("CPU output: %s\nGPU output: %s\n", cpu_path, gpu_path);
-    printf("Maximum absolute difference: %.6e\n", maximum_absolute);
-    printf("Maximum relative difference: %.6e\n", maximum_relative);
+    printf("Maximum state absolute difference: %.6e\n", maximum_absolute);
+    printf("Maximum state relative difference above atol: %.6e\n",
+           maximum_relative);
+    if (material_model >= VONMISES_BAE) {
+        printf("Maximum CPU/GPU root residuals: %.6e / %.6e "
+               "(tolerance %.6e)\n", maximum_cpu_residual,
+               maximum_gpu_residual, error_tolerance);
+    }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;
 
@@ -4728,6 +4764,8 @@ cleanup:
 
 #undef MATERIAL_POINT_CONSTANT_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
+#undef MATERIAL_POINT_FS_INDEX
+#undef MATERIAL_POINT_MODEL_ERROR_INDEX
 
 /* computes the derivatives of the flow potential for a Drucker-Prager material */
 tensor_t compute_dfds (tensor_t dev, double J2, double beta) {
