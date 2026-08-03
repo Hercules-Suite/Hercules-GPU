@@ -307,11 +307,12 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Material-point CPU/GPU regression",
         paragraphs: [
           "Before an element or production comparison, run a prescribed tensor-strain history through the CPU and CUDA constitutive routines with the standalone material-point mode. It writes complete CPU and GPU state histories and returns nonzero on a status, finite-value, or tolerance mismatch.",
-          "Run vonmises_ep_synthetic.in first for a short yielding/state smoke test, then vonmises_bae_legacy_id2_synthetic.in to compare the CPU GSL-backed Borja--Amies root solver against the CUDA root solver.",
+          "The eight-fixture suite covers EP, the FA/FAM quartic correctors, BAE and BAH, GQH, MKZ, and Ramberg--Osgood. It compares the CPU GSL-backed polynomial or scalar root solvers with the CUDA implementations and includes cyclic reversal paths.",
+          "The suite preserves the current CPU dispatch ordering as a compatibility baseline. A future change that dispatches bounding-surface families before the generic CPU elastic-predictor return is a separate physics change and requires saved before/after histories plus a deliberate rebaseline of both backends.",
           "The fixture constants and strain path are test inputs, not a substitute for calibrated production properties. Off-diagonal inputs are tensorial shear strains, so epsilon_xy equals one half of engineering gamma_xy. A single point validates correctness only; use a many-element case for performance measurement.",
         ],
         codeLabel: "shell",
-        code: "mpirun -np 1 ./quake/forward/psolve \\\n  --nonlinear-material-point \\\n  benchmark_inputs/nonlinear_material_point/vonmises_ep_synthetic.in",
+        code: "cd benchmark_inputs/nonlinear_material_point\n./run_suite.sh ../../quake/forward/psolve",
         note: "The supplied von Mises fixtures are synthetic numerical regression tests. Replace them with constants and histories derived from the calibrated case for scientific validation.",
       },
       {

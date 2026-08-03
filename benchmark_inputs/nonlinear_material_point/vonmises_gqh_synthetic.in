@@ -1,0 +1,44 @@
+# Synthetic CPU/GPU constitutive regression for the GQH backbone law.
+# These values are not a calibrated production material model.
+material_model = vonMises_GQH
+material_point_delta_time_sec = 0.001
+material_point_steps = 16
+no_substeps = 100
+error_tolerance = 1.0e-8
+backbone_errTol = 1.0e-8
+tension_cutoff = no
+
+material_point_compare_rtol = 1.0e-6
+material_point_compare_atol = 1.0e-9
+material_point_output_prefix = vonmises_gqh_synthetic
+
+# lambda mu alpha beta gamma cohesion phi dilatancy hardening
+# yield_strain psi0 m theta1..theta5 beta_MKZ s_MKZ phi_MKZ gamma_ref_MKZ
+# alpha_RO eta_RO phi_RO
+material_point_constants =
+  1.6000000000000000e8 8.0000000000000000e7
+  0.0 0.0 0.0 5.0000000000000000e4 0.0 0.0 0.0
+  0.0 0.0 0.0
+  0.0 1.0 1.0 1.0 1.0
+  0.0 0.0 0.0 0.0
+  0.0 0.0 0.0
+
+# Cyclic simple shear. theta4=theta5=1 selects the dedicated CPU GQH
+# inversion while CUDA uses its device backbone inversion.
+material_point_strain_history =
+  0.0 0.0 0.0  1.250000e-04 0.0 0.0
+  0.0 0.0 0.0  2.500000e-04 0.0 0.0
+  0.0 0.0 0.0  3.750000e-04 0.0 0.0
+  0.0 0.0 0.0  5.000000e-04 0.0 0.0
+  0.0 0.0 0.0  3.750000e-04 0.0 0.0
+  0.0 0.0 0.0  2.500000e-04 0.0 0.0
+  0.0 0.0 0.0  1.250000e-04 0.0 0.0
+  0.0 0.0 0.0  0.000000e+00 0.0 0.0
+  0.0 0.0 0.0 -1.250000e-04 0.0 0.0
+  0.0 0.0 0.0 -2.500000e-04 0.0 0.0
+  0.0 0.0 0.0 -3.750000e-04 0.0 0.0
+  0.0 0.0 0.0 -5.000000e-04 0.0 0.0
+  0.0 0.0 0.0 -3.750000e-04 0.0 0.0
+  0.0 0.0 0.0 -2.500000e-04 0.0 0.0
+  0.0 0.0 0.0 -1.250000e-04 0.0 0.0
+  0.0 0.0 0.0  0.000000e+00 0.0 0.0

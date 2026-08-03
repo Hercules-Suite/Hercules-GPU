@@ -5,16 +5,19 @@ does not build a mesh, read a source, or advance the wave solver. Its purpose is
 to isolate CPU/CUDA constitutive parity before running an element or production
 benchmark.
 
-Build `quake/forward/psolve` normally on a CUDA system, then run with exactly
-one MPI rank:
+Build `quake/forward/psolve` normally on a CUDA system, then run the complete
+suite with exactly one MPI rank:
 
 ```bash
 cd benchmark_inputs/nonlinear_material_point
-mpirun -np 1 ../../quake/forward/psolve \
-  --nonlinear-material-point vonmises_ep_synthetic.in
+./run_suite.sh ../../quake/forward/psolve
+```
 
+To isolate one model, invoke the runner directly, for example:
+
+```bash
 mpirun -np 1 ../../quake/forward/psolve \
-  --nonlinear-material-point vonmises_bae_legacy_id2_synthetic.in
+  --nonlinear-material-point vonmises_gqh_synthetic.in
 ```
 
 The command runs the complete history through the production CPU
@@ -47,9 +50,25 @@ regression cases, not production soil calibrations:
 
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
+- `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
+- `vonmises_fam_quartic_reversal_synthetic.in` exercises both the FAM quartic
+  corrector and its load-reversal recalibration.
 - `vonmises_bae_legacy_id2_synthetic.in` uses the constants currently assigned
   to legacy Istanbul material ID 2. Its CPU history enters the GSL-backed
   Borja--Amies root solver, while its GPU history uses the CUDA root solver.
+- `vonmises_bah_synthetic.in` exercises the hyperbolic Borja--Amies hardening
+  law.
+- `vonmises_gqh_synthetic.in` exercises the dedicated CPU GQH backbone
+  inversion and the corresponding CUDA inversion.
+- `vonmises_mkz_synthetic.in` exercises the MKZ backbone inversion.
+- `vonmises_ro_synthetic.in` exercises the Ramberg--Osgood hardening law.
+
+The suite intentionally preserves the current CPU dispatch ordering as its
+compatibility baseline. First establish CPU/CUDA agreement for all fixtures.
+Treat any later change that sends BAE, BAH, GQH, MKZ, or Ramberg--Osgood ahead
+of the generic CPU elastic-predictor return as a separate physics change: save
+the pre-change CSV histories, update both backends consistently, and review
+the changed unloading/reversal histories before accepting a new baseline.
 
 For scientific validation, replace the constants and strain history with
 values derived from the calibrated case being studied and retain its

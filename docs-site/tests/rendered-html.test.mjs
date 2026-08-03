@@ -162,7 +162,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /constitutive calculations in double precision/);
   assert.match(gpu, /CPU\/GSL implementation/);
   assert.match(gpu, /Material-point CPU\/GPU regression/);
-  assert.match(gpu, /--nonlinear-material-point/);
+  assert.match(gpu, /run_suite\.sh/);
+  assert.match(gpu, /FA\/FAM quartic correctors/);
+  assert.match(gpu, /current CPU dispatch ordering/);
   assert.match(gpu, /tensorial shear strains/);
 });
 
