@@ -1238,12 +1238,6 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                                           double *model_error)
 {
     const materialmodel_t model = cfg->material_model;
-    if (model >= VONMISES_BAE) {
-        return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
-                                  kappa, gamma1d, tao1d, ggmax, cfg,
-                                  model_error);
-    }
-
     tensor_t elastic_strain = nl_sub(strain, pstrain_prev);
     tensor_t stress_predictor = nl_stress(elastic_strain, c->mu, c->lambda);
     tensor_t relative_dev = nl_sub(nl_dev(stress_predictor), backstress_prev);
@@ -1278,6 +1272,16 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         *epbar = epbar_prev;
         *fs = predictor;
         return 1;
+    }
+
+    /* The CPU reference performs its generic elastic-predictor return before
+     * dispatching the bounding-surface families. Preserve that ordering: at
+     * a strain state inside the predictor tolerance, stress is reconstructed
+     * elastically and kappa/reference/backbone history remains unchanged. */
+    if (model >= VONMISES_BAE) {
+        return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
+                                  kappa, gamma1d, tao1d, ggmax, cfg,
+                                  model_error);
     }
 
     if (model == VONMISES_FA || model == VONMISES_FAM) {
