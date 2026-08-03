@@ -168,7 +168,7 @@ export const docPages: Record<string, DocPageContent> = {
           "Balance and partition leaves across Phase A ranks.",
           "Persist or redistribute the mesh, depending on the selected phase mode.",
           "Construct local finite-element data and communication schedules on Phase B ranks.",
-          "Advance elastic, acoustic, or poroelastic fields and write requested observations.",
+          "Advance elastic, acoustic, or poroelastic fields; eligible nonlinear solids additionally update stress, plastic strain, and constitutive internal variables.",
         ],
       },
       {
@@ -313,7 +313,7 @@ export const docPages: Record<string, DocPageContent> = {
     eyebrow: "Run simulations",
     title: "Physics models",
     summary:
-      "Model elastic solids, acoustic fluids, saturated porous media, attenuation, topography, and absorbing boundaries in one adaptive framework.",
+      "Model linear and nonlinear/plastic solids, acoustic fluids, saturated porous media, attenuation, topography, and absorbing boundaries in one adaptive framework.",
     sections: [
       {
         id: "models",
@@ -322,16 +322,37 @@ export const docPages: Record<string, DocPageContent> = {
           headers: ["Model", "Primary fields", "Typical use"],
           rows: [
             ["Elastic", "Three-component displacement", "Regional and site-scale seismic wave propagation"],
+            ["Nonlinear/plastic solid", "Displacement, stress, plastic strain, and constitutive state", "Yielding, permanent deformation, and nonlinear soil/site response"],
             ["Acoustic", "Scalar pressure", "Water layers and fluid domains"],
             ["Poroelastic u-p", "Solid displacement and pore pressure", "Saturated soils and fluid–solid interaction"],
           ],
         },
       },
       {
+        id: "nonlinear-plasticity",
+        title: "Nonlinear and plastic solid response",
+        paragraphs: [
+          "Set include_nonlinear_analysis=yes to activate history-dependent constitutive updates in eligible solid elements. Hercules evaluates stress against the selected yield or backbone relation, evolves plastic strain and internal variables, and can retain permanent deformation after unloading.",
+          "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
+        ],
+        table: {
+          headers: ["Family", "Available material_model values", "Role"],
+          rows: [
+            ["Elastic diagnostic", "linear", "Compute nonlinear diagnostic quantities while keeping elements elastic for comparison"],
+            ["von Mises / cyclic plasticity", "vonMises_ep, vonMises_fa, vonMises_faM", "Elastoplastic yielding with the selected hardening formulation"],
+            ["Nonlinear backbone models", "vonMises_baE, vonMises_baH, vonMises_GQH, vonMises_MKZ, vonMises_RO", "Nonlinear and hysteretic soil response using the selected backbone law"],
+            ["Pressure-dependent plasticity", "MohrCoulomb, DruckerPrager", "Frictional/cohesive yielding with optional tension cutoff"],
+          ],
+        },
+        codeLabel: "parameters.in — feature selection (additional nonlinear controls are required)",
+        code: "include_nonlinear_analysis = yes\nmaterial_model = vonMises_ep\nmaterial_plasticity_type = rate_independent",
+        note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and 16-column material_properties_list values. Use the Nonlinear & plastic analysis parameter page and validate the selected constitutive model against an appropriate reference before a large run.",
+      },
+      {
         id: "coupling",
         title: "Coupled interfaces",
         paragraphs: [
-          "Material classification determines which element formulation advances each region. Interface terms transfer the physically appropriate traction, motion, and pressure information between neighboring acoustic, elastic, and poroelastic domains.",
+          "Material classification determines which element formulation advances each region. Interface terms transfer the physically appropriate traction, motion, and pressure information between neighboring acoustic, solid, and poroelastic domains; eligible solid elements may use linear or nonlinear/plastic constitutive response.",
         ],
         note: "Always record the physical assumptions used at coupled interfaces; a numerically stable run can still encode the wrong boundary condition.",
       },
@@ -956,6 +977,16 @@ export const docPages: Record<string, DocPageContent> = {
         note: "With topography enabled, station depth is shifted to the local topographic surface. Check station_mediums.txt to confirm the owning medium, MPI rank, element, local coordinates, Vp, Vs, and density.",
       },
       {
+        id: "nonlinear-station-output",
+        title: "Interpret nonlinear and plastic station output",
+        paragraphs: [
+          "When include_nonlinear_analysis=yes, Hercules appends nonlinear solid-state columns to station files. These contain paired strain and stress tensor components plus volumetric strain/stress, yield-function state Fs, accumulated inelastic measure Kappa, one-dimensional strain/stress diagnostics Gamma1d and Tao1d, and GGmax.",
+          "Use these histories to identify yield onset, hysteresis, stiffness reduction, and permanent/plastic response. Read the station header instead of assuming fixed column offsets because velocity, acceleration, pressure, linear strain/stress, and nonlinear columns are controlled independently.",
+        ],
+        codeLabel: "nonlinear station columns",
+        code: "Epsilon_XX Sigma_XX  Epsilon_YY Sigma_YY  Epsilon_ZZ Sigma_ZZ\nEpsilon_KK Sigma_KK  Epsilon_XY Sigma_XY  Epsilon_YZ Sigma_YZ\nEpsilon_XZ Sigma_XZ  Fs Kappa Gamma1d Tao1d GGmax",
+      },
+      {
         id: "read-stations",
         title: "Read station.N with Python",
         paragraphs: [
@@ -1041,6 +1072,7 @@ export const docPages: Record<string, DocPageContent> = {
           "Compare time series after documenting filtering, sampling, alignment, and component conventions.",
           "Run mesh and time-step convergence separately.",
           "Compare optimized GPU paths against a deterministic or generic reference when available.",
+          "For nonlinear/plastic cases, validate yield onset, hysteresis, accumulated plastic deformation, and sensitivity to constitutive substeps and tolerances.",
           "Record both waveform metrics and conservation or interface diagnostics.",
         ],
       },
