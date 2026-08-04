@@ -2229,7 +2229,7 @@ static int material_values_are_acoustic(double Vp, double Vs, double rho) {
          (Vs <= ACOUSTIC_VS_EPS);
 }
 
-static int element_is_acoustic(const edata_t* edata) {
+int element_is_acoustic(const edata_t* edata) {
   return (edata != NULL) &&
          material_values_are_acoustic(edata->Vp, edata->Vs, edata->rho);
 }
@@ -29987,6 +29987,11 @@ int main(int argc, char** argv) {
       fprintf(stderr,
               "Nonlinear/CPML policy: solid PML elements remain linear "
               "elastic and are excluded from constitutive updates\n");
+    }
+    if ((Global.myID == 0) && (Param.includeAcoustic == YES)) {
+      fprintf(stderr,
+              "Nonlinear/acoustic policy: acoustic elements are excluded "
+              "from solid constitutive updates\n");
     }
     if (Param.theNumberOfStations != 0) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,

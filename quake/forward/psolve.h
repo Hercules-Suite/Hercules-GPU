@@ -844,6 +844,11 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
 int32_t search_point( vector3D_t point, octant_t **octant );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
+/* Returns 1 iff the current run classifies `edata` as acoustic material
+ * (include_acoustic=yes, Vp/rho positive, and Vs at or below the shared
+ * acoustic threshold). Shared by formulation setup and nonlinear mapping. */
+int element_is_acoustic( const edata_t *edata );
+
 /* Returns 1 iff `eindex` belongs to the volumetric CPML band. Membership is
  * retained as a compact setup-time bitset after the full face mask is freed.
  * Returns 0 for dashpot boundaries and invalid indices. */

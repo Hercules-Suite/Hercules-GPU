@@ -250,6 +250,41 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.match(parameters, /excluded from nonlinear constitutive updates/);
 });
 
+test("keeps acoustic elements out of nonlinear constitutive maps", async () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const classifier = cpu.slice(
+    cpu.indexOf("int isThisElementNonLinear"),
+    cpu.indexOf("double interpolate_property_value"),
+  );
+
+  assert.match(classifier, /element_is_acoustic\(edata\)[\s\S]*return NO/);
+  assert.ok(
+    classifier.indexOf("element_is_acoustic(edata)") <
+      classifier.indexOf("theIstanbulVelocityModel == YES"),
+    "acoustic exclusion must precede Istanbul nl_id selection",
+  );
+  assert.ok(
+    classifier.indexOf("element_is_acoustic(edata)") <
+      classifier.indexOf("edata->Vs < theVsLimits[0]"),
+    "acoustic exclusion must precede nonlinear material-range selection",
+  );
+  assert.match(psolve, /int element_is_acoustic\(const edata_t\* edata\)/);
+  assert.match(psolve, /Param\.includeAcoustic == YES/);
+  assert.match(psolve, /Nonlinear\/acoustic policy: acoustic elements are excluded/);
+
+  const gpu = await (await render("/docs/gpu-execution")).text();
+  assert.match(gpu, /acoustic elements are excluded from both CPU and GPU solid constitutive maps/);
+  assert.match(gpu, /never acquire plastic-strain or nonlinear solid history/);
+
+  const parameters = await (await render("/docs/parameters-nonlinear")).text();
+  assert.match(parameters, /Acoustic elements are always excluded/);
+  assert.match(parameters, /Acoustic elements remain excluded even when the range starts at zero/);
+});
+
 test("dispatches cyclic backbone models before the conventional predictor", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
