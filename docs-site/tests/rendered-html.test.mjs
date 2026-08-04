@@ -213,8 +213,10 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
 
   assert.match(selector, /g_backend_request = 1/);
   assert.match(selector, /parse_boolean_cpu\(value\)[\s\S]*g_backend_request = 0/);
-  assert.match(gpu, /Nonlinear backend: GPU \(default backend/);
-  assert.match(cpu, /Nonlinear backend: CPU \(explicit/);
+  assert.match(gpu, /fprintf\(stderr,\s*"Nonlinear backend: GPU \(default backend/);
+  assert.match(cpu, /fprintf\(stderr,\s*"Nonlinear backend: CPU \(explicit/);
+  assert.match(await (await render("/docs/gpu-execution")).text(),
+    /reported to standard error at startup/);
 });
 
 test("dispatches cyclic backbone models before the conventional predictor", () => {

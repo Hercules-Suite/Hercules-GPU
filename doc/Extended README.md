@@ -202,7 +202,8 @@ Nonlinear GPU execution (runtime environment):
 	device-resident force assembly. `cpu` explicitly selects the established
 	CPU/GSL reference implementation. Setting `gpu` explicitly remains useful
 	for reproducible launch environments. This setting changes execution, not
-	the calibrated values in `parameters.in`.
+	the calibrated values in `parameters.in`. The selected nonlinear backend is
+	reported to standard error during solver startup.
 - For a new material calibration, compare CPU and GPU nonlinear station
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and

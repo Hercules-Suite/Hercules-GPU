@@ -1553,10 +1553,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             exit(1);
         }
     } else if (myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "Nonlinear backend: CPU (explicit "
                 "HERCULES_NONLINEAR_BACKEND override, GSL reference path)\n");
-        fflush(stdout);
+        fflush(stderr);
     }
 
 }

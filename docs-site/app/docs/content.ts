@@ -296,7 +296,7 @@ export const docPages: Record<string, DocPageContent> = {
         id: "nonlinear-backend",
         title: "Nonlinear solid backend",
         paragraphs: [
-          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference implementation; setting it to gpu explicitly is supported for reproducible launch environments.",
+          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference implementation; setting it to gpu explicitly is supported for reproducible launch environments. The selected backend is reported to standard error at startup.",
           "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
           "For production timing, verify both the total element count and the nonlinear count after regenerating any mesh whose velocity profile changed. Reusing an older mesh also reuses its stored Vs payload and can unintentionally select nearly the entire domain.",
         ],

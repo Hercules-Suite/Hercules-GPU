@@ -1829,10 +1829,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 
     g_active = 1;
     if (myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
-        fflush(stdout);
+        fflush(stderr);
     }
     return 0;
 }
