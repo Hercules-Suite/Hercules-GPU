@@ -4,6 +4,10 @@ Use a calibrated production-style nonlinear case in which at least 25% of the
 local/global solid elements are nonlinear. Keep the MPI placement, GPU count,
 input files, output rate, and launch environment identical between runs.
 
+GPU is the production runtime default when `HERCULES_NONLINEAR_BACKEND` is
+unset. The commands below set both backends explicitly so acceptance results
+remain reproducible if defaults change.
+
 CUDA nonlinear-station output gathers only the quadrature-point fields used by
 each local station. It does not download the complete nonlinear history arrays
 at every `output_stations_print_rate` step. Keep at least one nonlinear station

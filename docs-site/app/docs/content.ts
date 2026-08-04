@@ -285,7 +285,7 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Resident-field strategy",
         bullets: [
           "Elastic displacement history remains on the GPU; only boundary and adjustment nodes move when required.",
-          "With HERCULES_NONLINEAR_BACKEND=gpu, nonlinear-solid stress, plastic strain, hardening/backbone state, and internal-force assembly remain on the GPU; CPU remains the default reference backend.",
+          "Nonlinear-solid stress, plastic strain, hardening/backbone state, and internal-force assembly remain on the GPU by default. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly to select the CPU/GSL reference backend.",
           "Nonlinear station output gathers compact quadrature-point records only for local station elements; it does not download the full nonlinear state at each output step.",
           "Acoustic pressure histories swap device pointers and patch only schedule or adjustment nodes.",
           "Poroelastic pore pressure uses the same sparse/resident pattern.",
@@ -296,7 +296,7 @@ export const docPages: Record<string, DocPageContent> = {
         id: "nonlinear-backend",
         title: "Nonlinear solid backend",
         paragraphs: [
-          "Set HERCULES_NONLINEAR_BACKEND=gpu to opt into the CUDA nonlinear constitutive and force path. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Leave the variable unset, or set it to cpu, for the established CPU/GSL implementation.",
+          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference implementation; setting it to gpu explicitly is supported for reproducible launch environments.",
           "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
           "For production timing, verify both the total element count and the nonlinear count after regenerating any mesh whose velocity profile changed. Reusing an older mesh also reuses its stored Vs payload and can unintentionally select nearly the entire domain.",
         ],
@@ -434,7 +434,7 @@ export const docPages: Record<string, DocPageContent> = {
           rows: [
             ["HERCULES_PHASE_MODE", "unified | two-phase", "Select mesh/solver orchestration"],
             ["HERCULES_GPU_MPI_BACKEND", "host | cuda_aware", "Select field-exchange backend"],
-            ["HERCULES_NONLINEAR_BACKEND", "cpu | gpu", "Select nonlinear constitutive and force backend; default: cpu"],
+            ["HERCULES_NONLINEAR_BACKEND", "cpu | gpu", "Select nonlinear constitutive and force backend; default: gpu"],
             ["HERCULES_DISP_SYNC_MODE", "auto | full | boundary", "Control elastic host/device synchronization"],
             ["HERCULES_MESH_IO_MODE", "mpiio | sharded | single", "Select Phase A mesh storage"],
             ["HERCULES_PLANE_IO_MODE", "auto | hybrid | mpiio | legacy", "Select plane interpolation and writing"],

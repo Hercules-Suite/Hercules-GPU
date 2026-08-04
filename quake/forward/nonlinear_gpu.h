@@ -40,7 +40,8 @@ typedef struct nonlinear_material_point_result_t {
 } nonlinear_material_point_result_t;
 
 /* Backend selection is deliberately runtime-only: it changes execution, not
- * the physical input model. CPU remains the default/reference path. */
+ * the physical input model. GPU is the default; CPU remains available as an
+ * explicit reference/diagnostic override. */
 int nonlinear_gpu_requested(void);
 int nonlinear_gpu_active(void);
 

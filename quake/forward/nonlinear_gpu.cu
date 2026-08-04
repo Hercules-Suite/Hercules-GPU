@@ -115,11 +115,16 @@ int nonlinear_gpu_requested(void)
 {
     if (g_backend_request < 0) {
         const char *value = getenv("HERCULES_NONLINEAR_BACKEND");
-        g_backend_request = 0;
+        /* This CUDA build defaults nonlinear constitutive updates and force
+         * assembly to the device path. Keep an explicit CPU override for
+         * reference comparisons and diagnosis. */
+        g_backend_request = 1;
         if (value != NULL) {
             if (parse_boolean_gpu(value)) {
                 g_backend_request = 1;
-            } else if (!parse_boolean_cpu(value)) {
+            } else if (parse_boolean_cpu(value)) {
+                g_backend_request = 0;
+            } else {
                 fprintf(stderr,
                         "HERCULES_NONLINEAR_BACKEND must be cpu or gpu; got '%s'\n",
                         value);
@@ -1825,8 +1830,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     g_active = 1;
     if (myID == 0) {
         fprintf(stdout,
-                "Nonlinear backend: GPU (double-precision constitutive state, "
-                "%d local elements on rank 0)\n", count);
+                "Nonlinear backend: GPU (default backend, double-precision "
+                "constitutive state, %d local elements on rank 0)\n", count);
         fflush(stdout);
     }
     return 0;

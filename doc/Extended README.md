@@ -197,11 +197,12 @@ Nonlinear GPU execution (runtime environment):
 
 - `HERCULES_NONLINEAR_BACKEND`
 	Selects the nonlinear constitutive-update and internal-force backend.
-	`cpu` is the default and uses the established CPU/GSL implementation.
-	`gpu` opts into the CUDA implementation for all current nonlinear material
-	models, using double-precision constitutive state and device-resident force
-	assembly. This setting changes execution, not the calibrated values in
-	`parameters.in`.
+	`gpu` is the default and uses the CUDA implementation for all current
+	nonlinear material models, with double-precision constitutive state and
+	device-resident force assembly. `cpu` explicitly selects the established
+	CPU/GSL reference implementation. Setting `gpu` explicitly remains useful
+	for reproducible launch environments. This setting changes execution, not
+	the calibrated values in `parameters.in`.
 - For a new material calibration, compare CPU and GPU nonlinear station
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and

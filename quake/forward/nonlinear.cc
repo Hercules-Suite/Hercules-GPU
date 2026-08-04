@@ -1552,6 +1552,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
+    } else if (myID == 0) {
+        fprintf(stdout,
+                "Nonlinear backend: CPU (explicit "
+                "HERCULES_NONLINEAR_BACKEND override, GSL reference path)\n");
+        fflush(stdout);
     }
 
 }

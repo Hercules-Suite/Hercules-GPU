@@ -165,8 +165,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.equal(gpuResponse.status, 200);
   const gpu = await gpuResponse.text();
   assert.match(gpu, /HERCULES_NONLINEAR_BACKEND/);
+  assert.match(gpu, /CUDA nonlinear constitutive and force path is the default/);
+  assert.match(gpu, /GPU by default/);
   assert.match(gpu, /constitutive calculations in double precision/);
-  assert.match(gpu, /CPU\/GSL implementation/);
+  assert.match(gpu, /CPU\/GSL reference/);
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
@@ -192,6 +194,27 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /tensorial shear strains/);
   assert.match(gpu, /compact quadrature-point records/);
   assert.match(gpu, /does not download the full nonlinear state/);
+});
+
+test("defaults nonlinear execution to GPU with an explicit CPU override", async () => {
+  const response = await render("/docs/configuration");
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /default: gpu/);
+
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const selector = gpu.slice(
+    gpu.indexOf("int nonlinear_gpu_requested"),
+    gpu.indexOf("int nonlinear_gpu_active"),
+  );
+
+  assert.match(selector, /g_backend_request = 1/);
+  assert.match(selector, /parse_boolean_cpu\(value\)[\s\S]*g_backend_request = 0/);
+  assert.match(gpu, /Nonlinear backend: GPU \(default backend/);
+  assert.match(cpu, /Nonlinear backend: CPU \(explicit/);
 });
 
 test("dispatches cyclic backbone models before the conventional predictor", () => {
