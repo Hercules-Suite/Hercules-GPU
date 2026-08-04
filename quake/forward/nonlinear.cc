@@ -155,6 +155,13 @@ int isThisElementNonLinear(mesh_t *myMesh, int32_t eindex) {
     edata = (edata_t *)elemp->data;
     esize = edata->edgesize;
 
+    /* Acoustic cells carry the selected scalar acoustic formulation, not a
+     * solid stress/plastic-strain history. Exclude them explicitly instead
+     * of relying on Vs=0 falling below material_properties_list: a table may
+     * legitimately start at zero, and Istanbul uses nl_id rather than Vs. */
+    if ( element_is_acoustic(edata) )
+        return NO;
+
     /* nl_id is a legacy classification belonging to the Istanbul velocity
      * model. All other material sources use the material-properties Vs range
      * and must not depend on a stale or uninitialized nl_id payload value. */
