@@ -208,6 +208,9 @@ Nonlinear GPU execution (runtime environment):
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
+- With `abc_type=cpml`, solid elements in the absorbing band are always
+	linear elastic and are excluded from the CPU and GPU nonlinear constitutive
+	maps, even when their `Vs` is covered by `material_properties_list`.
 - Before an element or production run, the standalone material-point mode can
 	drive a prescribed tensor-strain history through both constitutive backends
 	and fail on any state mismatch:

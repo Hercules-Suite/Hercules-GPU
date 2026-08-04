@@ -844,6 +844,11 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
 int32_t search_point( vector3D_t point, octant_t **octant );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
+/* Returns 1 iff `eindex` belongs to the volumetric CPML band. Membership is
+ * retained as a compact setup-time bitset after the full face mask is freed.
+ * Returns 0 for dashpot boundaries and invalid indices. */
+int cpml_pml_element( int32_t eindex );
+
 /* SPECFEM-style flat/regular PML: returns 1 iff element `eindex` is a
  * VT-topography CPML PML solid element whose body-fitted deformation
  * must be suppressed (abc_type=cpml AND include_topography=yes AND
@@ -857,9 +862,8 @@ int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
  * byte-identical. Air elements (Vp=-1) always return 0 (must not enter
  * the solid stiffness mapper). Single source of truth for the
  * linear/topo mapper partition (stiffness.cu), the topo GPU mapper
- * filter and the toponodes_mass gate. g_cpmlBuild.face_mask is filled
- * by solver_init() before stiffness_init()/the topo mapper, so it is
- * valid at all call sites. */
+ * filter and the toponodes_mass gate. Uses the persistent compact CPML
+ * membership bitset, so it remains valid after solver_init(). */
 int cpml_pml_flattened_element( int32_t eindex );
 
 

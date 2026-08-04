@@ -144,6 +144,13 @@ int isThisElementNonLinear(mesh_t *myMesh, int32_t eindex) {
     if ( theNonlinearFlag == 0 )
         return NO;
 
+    /* A CPML cell belongs to an artificial, linear time-invariant absorbing
+     * layer. Never dispatch it to a history-dependent constitutive model,
+     * even when its Vs lies inside material_properties_list. The CPML force
+     * operator assumes native linear elasticity plus its ADE correction. */
+    if ( cpml_pml_element(eindex) )
+        return NO;
+
     elemp = &myMesh->elemTable[eindex];
     edata = (edata_t *)elemp->data;
     esize = edata->edgesize;
