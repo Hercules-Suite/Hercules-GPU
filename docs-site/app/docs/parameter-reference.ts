@@ -146,7 +146,7 @@ const parameterPages: ParameterPage[] = [
       {
         id: "absorbing-boundary",
         title: "Absorbing boundary and CPML",
-        introduction: "All cpml_* settings are read only when abc_type=cpml. The present code accepts none or rayleigh for CPML material damping; BKT-family memory is intentionally not applied inside PML elements.",
+        introduction: "All cpml_* settings are read only when abc_type=cpml. Solid PML elements always use linear elasticity and are excluded from nonlinear constitutive updates, even when their Vs lies within material_properties_list. The present code accepts none or rayleigh for CPML material damping; BKT-family memory is intentionally not applied inside PML elements.",
         parameters: [
           p("abc_type", "Optional", "String", "Default: dashpot; dashpot | cpml", "Select the legacy first-order absorbing dashpot or the unsplit convolutional PML."),
           p("cpml_thickness_m", "Optional", "Float (m)", "Default: 0", "Physical PML thickness. If nonpositive, Hercules derives thickness from cpml_layers and the boundary element size."),

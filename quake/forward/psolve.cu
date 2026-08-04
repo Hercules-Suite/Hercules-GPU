@@ -705,6 +705,11 @@ typedef struct cpml_build_s {
   int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
+/* Persistent host-side CPML membership used by setup-time formulation
+ * partitioning after g_cpmlBuild.face_mask has been released. Keep one bit
+ * per local element instead of retaining the lenum-byte build mask. */
+static uint8_t* g_cpmlHostElementBits = NULL;
+static size_t g_cpmlHostElementCount = 0;
 static double g_cpmlMaterialExtensionThicknessM = -1.0;
 
 static int cpml_active_axis_count(uint8_t face_mask) {
@@ -13035,12 +13040,25 @@ static void solver_init() {
     {
       uint8_t* flag_host =
           (uint8_t*)malloc((size_t)Global.myMesh->lenum * sizeof(uint8_t));
-      if (flag_host == NULL) {
-        fprintf(stderr, "Thread %d: oom pmlFlag host buffer\n", Global.myID);
+      const size_t element_count = (size_t)Global.myMesh->lenum;
+      const size_t bit_bytes = (element_count + 7u) / 8u;
+      free(g_cpmlHostElementBits);
+      g_cpmlHostElementBits =
+          (uint8_t*)calloc(bit_bytes > 0 ? bit_bytes : 1u, sizeof(uint8_t));
+      g_cpmlHostElementCount = element_count;
+      if ((flag_host == NULL) || (g_cpmlHostElementBits == NULL)) {
+        fprintf(stderr,
+                "Thread %d: oom PML host classification buffers\n",
+                Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
       }
       for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
         flag_host[ei] = (g_cpmlBuild.face_mask[ei] != 0) ? 1u : 0u;
+        if (flag_host[ei] != 0) {
+          const size_t bit_index = (size_t)ei;
+          g_cpmlHostElementBits[bit_index >> 3] |=
+              (uint8_t)(1u << (bit_index & 7u));
+        }
       }
       if (cudaMemcpy(Global.gpuData.pmlFlagArrayDevice, flag_host,
                      (size_t)Global.myMesh->lenum * sizeof(uint8_t),
@@ -15480,6 +15498,9 @@ static void solver_delete() {
 
   /* CPML device arrays — both elastic and acoustic. cudaFree(NULL) and
    * free(NULL) are no-ops, so this is safe in dashpot mode too. */
+  free(g_cpmlHostElementBits);
+  g_cpmlHostElementBits = NULL;
+  g_cpmlHostElementCount = 0;
   cudaFree(Global.gpuData.pmlFlagArrayDevice);
   cudaFree(Global.gpuData.pmlClampNodeMaskDevice);
   cudaFree(Global.gpuData.pmlElasticElemMapperDevice);
@@ -24611,6 +24632,25 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
   return;
 }
 
+/* CPML membership is available from the full build mask while solver_init()
+ * is constructing the operator, then from a persistent one-bit-per-element
+ * map after the build arrays have been released. */
+int cpml_pml_element(int32_t eindex) {
+  if (Param.theAbcType != ABC_CPML) return 0;
+  if (Global.myMesh == NULL || eindex < 0 ||
+      eindex >= Global.myMesh->lenum) return 0;
+  if (g_cpmlBuild.face_mask != NULL) {
+    return g_cpmlBuild.face_mask[eindex] != 0;
+  }
+  if ((size_t)eindex >= g_cpmlHostElementCount) return 0;
+  if (g_cpmlHostElementBits == NULL) return 0;
+  {
+    const size_t bit_index = (size_t)eindex;
+    return (g_cpmlHostElementBits[bit_index >> 3] &
+            (uint8_t)(1u << (bit_index & 7u))) != 0;
+  }
+}
+
 /* SPECFEM-style flat/regular PML. A CPML PML element that also belongs
  * to topography would otherwise get a curvilinear native force (topo
  * kernel) plus the cube-based CPML delta -- a native+delta mismatch.
@@ -24622,9 +24662,7 @@ static void compute_setboundary(float size, float Vp, float Vs, float rho,
  * is the single source of truth. Returns 0 unless CPML is on AND
  * include_topography is on AND this is a PML element, so every
  * flat-surface CPML run (all Stage 1-4 validation) is byte-identical
- * and every non-CPML run is untouched. g_cpmlBuild.face_mask is filled
- * by solver_init() before stiffness_init() and the topo GPU mapper, so
- * this is valid at all call sites; NULL-guarded for safety. */
+ * and every non-CPML run is untouched. */
 int cpml_pml_flattened_element(int32_t eindex) {
   if (Param.theAbcType != ABC_CPML) return 0;
   if (Param.includeTopography != YES) return 0;
@@ -24637,15 +24675,14 @@ int cpml_pml_flattened_element(int32_t eindex) {
    * (BelongstoTopography()==YES, routed to the curvilinear topo kernel)
    * -- that is the case the flatten re-route targets. */
   if (get_topo_meth() != VT) return 0;
-  if (g_cpmlBuild.face_mask == NULL) return 0;
-  if (eindex < 0 || eindex >= Global.myMesh->lenum) return 0;
+  if (!cpml_pml_element(eindex)) return 0;
   /* Never re-route an air element (Vp=-1) into the solid stiffness
    * mapper -- it must stay excluded as the original predicate had it. */
   {
     edata_t* ed = (edata_t*)Global.myMesh->elemTable[eindex].data;
     if (ed->Vp == -1) return 0; /* air element (topography.cc convention) */
   }
-  return (g_cpmlBuild.face_mask[eindex] != 0) ? 1 : 0;
+  return 1;
 }
 
 /* CPML face-mask: which of the 5 absorbing faces an element touches.
@@ -29934,8 +29971,23 @@ int main(int argc, char** argv) {
   /* Initialize nonlinear solver analysis structures */
   if (Param.includeNonlinearAnalysis == YES) {
     Timer_Start("Pre Setup Nonlinear Init");
+    if ((Param.theAbcType == ABC_CPML) &&
+        ((g_cpmlHostElementBits == NULL) ||
+         (g_cpmlHostElementCount != (size_t)Global.myMesh->lenum))) {
+      fprintf(stderr,
+              "Thread %d: CPML membership is unavailable before nonlinear "
+              "element classification\n",
+              Global.myID);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    }
     nonlinear_solver_init(Global.myID, Global.myMesh, Global.mySolver,
                           Param.theDomainZ);
+    if ((Global.myID == 0) && (Param.theAbcType == ABC_CPML)) {
+      fprintf(stderr,
+              "Nonlinear/CPML policy: solid PML elements remain linear "
+              "elastic and are excluded from constitutive updates\n");
+    }
     if (Param.theNumberOfStations != 0) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,
                               Param.myNumberOfStations);

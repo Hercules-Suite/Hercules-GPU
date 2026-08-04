@@ -219,6 +219,37 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
     /reported to standard error at startup/);
 });
 
+test("keeps CPML elements out of nonlinear constitutive maps", async () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const classifier = cpu.slice(
+    cpu.indexOf("int isThisElementNonLinear"),
+    cpu.indexOf("double interpolate_property_value"),
+  );
+
+  assert.match(classifier, /cpml_pml_element\(eindex\)[\s\S]*return NO/);
+  assert.ok(
+    classifier.indexOf("cpml_pml_element(eindex)") <
+      classifier.indexOf("edata->Vs < theVsLimits[0]"),
+    "CPML exclusion must precede nonlinear material-range selection",
+  );
+  assert.match(psolve, /int cpml_pml_element\(int32_t eindex\)/);
+  assert.match(psolve, /g_cpmlBuild\.face_mask != NULL/);
+  assert.match(psolve, /g_cpmlHostElementBits\[bit_index >> 3\]/);
+  assert.match(psolve, /CPML membership is unavailable before nonlinear/);
+
+  const gpu = await (await render("/docs/gpu-execution")).text();
+  assert.match(gpu, /solid elements in the absorbing band remain linear elastic/);
+  assert.match(gpu, /excluded from both CPU and GPU nonlinear constitutive maps/);
+
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  assert.match(parameters, /Solid PML elements always use linear elasticity/);
+  assert.match(parameters, /excluded from nonlinear constitutive updates/);
+});
+
 test("dispatches cyclic backbone models before the conventional predictor", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
