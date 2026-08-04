@@ -293,6 +293,25 @@ def run_selftest(fixture_path: Path) -> int:
     assert math.isclose(fixture.bulk, 2.1333333333333333e8)
     assert math.isclose(fixture.psi0 * fixture.shear, 7.4648e7)
     assert any(fixture.strains[index] == fixture.strains[index - 1] for index in range(1, fixture.steps))
+    standalone = fixture_path.with_name("opensees_bae_synthetic.tcl").read_text(
+        encoding="utf-8"
+    )
+    gamma_match = re.search(r"set gammaHistory\s*\{(.*?)\}", standalone, re.DOTALL)
+    assert gamma_match is not None
+    standalone_gamma = tuple(float(value) for value in gamma_match.group(1).split())
+    assert standalone_gamma == tuple(2.0 * strain[3] for strain in fixture.strains)
+    for name, expected in {
+        "bulkModulus": fixture.bulk,
+        "shearModulus": fixture.shear,
+        "undrainedShearStrength": fixture.su,
+        "hardeningScale": fixture.psi0 * fixture.shear,
+        "hardeningExponent": fixture.exponent,
+    }.items():
+        value_match = re.search(rf"(?m)^set {name}\s+(\S+)$", standalone)
+        assert value_match is not None
+        assert math.isclose(float(value_match.group(1)), expected)
+    assert "set beta 1.0" in standalone
+    assert "sigma_xy,sigma_yz,sigma_xz" in standalone
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         driver = root / "driver.tcl"
@@ -350,7 +369,15 @@ def main() -> int:
         default=script_dir / "vonmises_bae_opensees_synthetic.in",
         help="Hercules BAE material-point fixture",
     )
-    parser.add_argument("--opensees", type=Path, help="OpenSees executable")
+    opensees_source = parser.add_mutually_exclusive_group()
+    opensees_source.add_argument(
+        "--opensees", type=Path, help="OpenSees executable to run"
+    )
+    opensees_source.add_argument(
+        "--opensees-csv",
+        type=Path,
+        help="existing OpenSees CSV produced by opensees_bae_synthetic.tcl",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--psolve", type=Path, help="Hercules psolve executable to run")
     source.add_argument("--hercules-csv", type=Path, help="existing Hercules CPU material-point CSV")
@@ -383,8 +410,8 @@ def main() -> int:
     fixture_path = args.fixture.resolve()
     if args.selftest:
         return run_selftest(fixture_path)
-    if args.opensees is None:
-        parser.error("--opensees is required unless --selftest is used")
+    if args.opensees is None and args.opensees_csv is None:
+        parser.error("provide either --opensees or --opensees-csv")
     if args.psolve is None and args.hercules_csv is None:
         parser.error("provide either --psolve or --hercules-csv")
     if not 0.0 <= args.beta <= 1.0:
@@ -411,15 +438,18 @@ def main() -> int:
     else:
         hercules_csv = args.hercules_csv.resolve()
 
-    tcl_pathname = output_dir / "opensees_bae_driver.tcl"
-    opensees_csv = output_dir / "opensees_bae.csv"
-    write_opensees_driver(fixture, tcl_pathname, opensees_csv, args.beta, args.k0)
-    run_command(
-        [str(args.opensees.resolve()), str(tcl_pathname)],
-        output_dir,
-        output_dir / "opensees.stdout.log",
-        output_dir / "opensees.stderr.log",
-    )
+    if args.opensees_csv is not None:
+        opensees_csv = args.opensees_csv.resolve()
+    else:
+        tcl_pathname = output_dir / "opensees_bae_driver.tcl"
+        opensees_csv = output_dir / "opensees_bae.csv"
+        write_opensees_driver(fixture, tcl_pathname, opensees_csv, args.beta, args.k0)
+        run_command(
+            [str(args.opensees.resolve()), str(tcl_pathname)],
+            output_dir,
+            output_dir / "opensees.stdout.log",
+            output_dir / "opensees.stderr.log",
+        )
     summary = compare_histories(
         fixture,
         read_csv(hercules_csv),
@@ -429,6 +459,8 @@ def main() -> int:
     summary.update(
         {
             "fixture": str(fixture_path),
+            "hercules_csv": str(hercules_csv),
+            "opensees_csv": str(opensees_csv),
             "parameter_mapping": {
                 "K": fixture.bulk,
                 "G": fixture.shear,

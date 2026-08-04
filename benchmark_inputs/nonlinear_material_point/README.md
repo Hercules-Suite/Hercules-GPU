@@ -111,6 +111,12 @@ parameter normally recommended by OpenSees. OpenSees consumes engineering
 shear, so the driver converts Hercules tensorial `epsilon_xy` to
 `gamma_xy=2*epsilon_xy`.
 
+`opensees_bae_synthetic.tcl` is a standalone version of the one-brick test. It
+contains the mapped constants and complete 20-step engineering-shear history,
+so Hercules and OpenSees do not need to be installed on the same machine. The
+17-step `vonmises_bae_legacy_id2_synthetic` history from `run_suite.sh` is not
+interchangeable with this dedicated 20-step cross-code fixture.
+
 First generate or reuse the Hercules CPU history, then provide an OpenSees
 executable that includes `MultiaxialCyclicPlasticity`:
 
@@ -128,6 +134,33 @@ python3 compare_opensees_bae.py \
   --fixture vonmises_bae_opensees_synthetic.in \
   --hercules-csv /path/to/vonmises_bae_opensees_synthetic.cpu.csv \
   --opensees /path/to/OpenSees
+```
+
+For a split Horizon/Stampede3 run, first produce the matching Hercules history
+on Horizon:
+
+```bash
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point vonmises_bae_opensees_synthetic.in
+```
+
+Run the standalone case from the same directory on Stampede3. The first
+command uses the closest `beta=1` mapping; the second is the OpenSees
+`beta=0.5` sensitivity run:
+
+```bash
+OpenSees opensees_bae_synthetic.tcl
+OpenSees opensees_bae_synthetic.tcl 0.5 opensees_bae_beta05.csv
+```
+
+Copy the resulting CSV back to Horizon and compare it without launching
+OpenSees there:
+
+```bash
+python3 compare_opensees_bae.py \
+  --hercules-csv vonmises_bae_opensees_synthetic.cpu.csv \
+  --opensees-csv opensees_bae_beta_1.csv \
+  --beta 1.0
 ```
 
 The script writes the generated Tcl driver, raw OpenSees history,
