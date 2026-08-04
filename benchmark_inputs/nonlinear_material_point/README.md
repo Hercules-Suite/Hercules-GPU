@@ -58,6 +58,11 @@ regression cases, not production soil calibrations:
   Borja--Amies root solver, while its GPU history uses the CUDA root solver. It
   distinguishes unloading through zero total strain from a repeated, true
   zero strain increment.
+- `vonmises_bae_virgin_onset_synthetic.in` starts with a purely volumetric
+  increment, accumulates sub-millipascal virgin deviatoric stress, crosses the
+  numerical onset floor, and applies another purely volumetric increment after
+  cyclic history exists. It guards the production wavefront case in which the
+  scalar kappa equation otherwise has no finite or numerically resolvable root.
 - `vonmises_bah_synthetic.in` exercises the hyperbolic Borja--Amies hardening
   law.
 - `vonmises_gqh_synthetic.in` exercises the dedicated CPU GQH backbone
@@ -74,6 +79,14 @@ the update boundary used by OpenSees
 [`MultiaxialCyclicPlasticity`](https://github.com/OpenSees/OpenSees/blob/master/SRC/material/nD/cyclicSoil/MultiaxialCyclicPlasticity.cpp),
 which owns its zero-increment and loading/reversal decisions inside the cyclic
 integrator.
+
+Because these von Mises backbones are pressure-insensitive, a purely
+volumetric increment updates only hydrostatic stress and preserves all cyclic
+history; it does not enter the scalar kappa solver. At untouched virgin state
+(`kappa=100`), deviatoric trial stress below `1.0e-3 Pa` uses the elastic
+asymptote and accumulates incrementally until the backbone root is resolvable.
+That numerical-onset rule is not used after cyclic history has been
+established, so unloading and reloading remain model-controlled.
 
 For scientific validation, replace the constants and strain history with
 values derived from the calibrated case being studied and retain its

@@ -1,0 +1,42 @@
+# Synthetic regression for the pressure-insensitive BAE onset guards. This is
+# not a calibrated production material model.
+material_model = vonMises_baE
+material_point_delta_time_sec = 0.001
+material_point_steps = 12
+no_substeps = 100
+error_tolerance = 1.0e-8
+backbone_errTol = 1.0e-8
+tension_cutoff = no
+
+material_point_compare_rtol = 1.0e-6
+material_point_compare_atol = 1.0e-9
+material_point_output_prefix = vonmises_bae_virgin_onset_synthetic
+
+# lambda mu alpha beta gamma cohesion phi dilatancy hardening
+# yield_strain psi0 m theta1..theta5 beta_MKZ s_MKZ phi_MKZ gamma_ref_MKZ
+# alpha_RO eta_RO phi_RO
+material_point_constants =
+  1.6000000000000000e8 8.0000000000000000e7
+  0.0 0.0 0.0 2.9393876913398140e4 0.0 0.0 0.0
+  0.0 9.3310000000000000e-1 1.2450000000000000e0
+  0.0 0.0 0.0 0.0 0.0
+  0.0 0.0 0.0 0.0
+  0.0 0.0 0.0
+
+# Tensorial strain history. Step 0 is purely volumetric. Steps 1--3 accumulate
+# virgin deviatoric trial stress below 1.0e-3 Pa; step 4 crosses that floor and
+# enters the scalar backbone solve. Step 5 is another purely volumetric update
+# after the cyclic state has been established, and step 6 is a true dwell.
+material_point_strain_history =
+  1.000000e-08 1.000000e-08 1.000000e-08  0.000000e+00 0.0 0.0
+  1.000000e-08 1.000000e-08 1.000000e-08  1.000000e-12 0.0 0.0
+  1.000000e-08 1.000000e-08 1.000000e-08  2.000000e-12 0.0 0.0
+  1.000000e-08 1.000000e-08 1.000000e-08  4.000000e-12 0.0 0.0
+  1.000000e-08 1.000000e-08 1.000000e-08  8.000000e-12 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  8.000000e-12 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  8.000000e-12 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  1.250000e-04 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  2.500000e-04 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  1.250000e-04 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  0.000000e+00 0.0 0.0
+  2.000000e-08 2.000000e-08 2.000000e-08  0.000000e+00 0.0 0.0

@@ -23,6 +23,11 @@
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_multiroots.h>
 
+/* Below this deviatoric stress scale, the virgin bounding/backbone root is
+ * numerically ill-conditioned and its response approaches the elastic
+ * asymptote. Keep this shared so CPU/GSL and CUDA use the same onset rule. */
+#define NONLINEAR_BACKBONE_STRESS_FLOOR_PA 1.0e-3
+
 /* -------------------------------------------------------------------------- */
 /*                        Structures and definitions                          */
 /* -------------------------------------------------------------------------- */
@@ -475,7 +480,5 @@ void nonlinear_yield_stats(mesh_t *myMesh, int32_t myID, int32_t theTotalSteps, 
 void check_balance( int32_t myID );
 
 #endif /* Q_NONLINEAR_H */
-
-
 
 

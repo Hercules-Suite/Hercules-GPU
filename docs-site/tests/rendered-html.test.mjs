@@ -170,8 +170,11 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
+  assert.match(gpu, /nine-fixture suite/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
+  assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
+  assert.match(gpu, /deviatoric trial stress below 1\.0e-3 Pa/);
   assert.match(gpu, /OpenSees MultiaxialCyclicPlasticity/);
   assert.match(gpu, /compare_opensees_bae\.py/);
   assert.match(gpu, /opensees_bae_synthetic\.tcl/);
@@ -210,6 +213,26 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   assert.ok(gpuUpdate.indexOf("nl_update_backbone") < gpuUpdate.indexOf("predictor < 1.0e-3"));
   assert.match(cpu, /A bounding-surface update is incremental[\s\S]*De\.xx == 0\.0/);
   assert.match(gpu, /The model is incremental[\s\S]*de\.xx == 0\.0/);
+  assert.match(cpu, /DSdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
+  assert.match(gpu, /dsdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
+  assert.match(cpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+  assert.match(gpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+});
+
+test("ships the BAE virgin-onset regression fixture", () => {
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const fixture = readFileSync(
+    `${benchmarkRoot}vonmises_bae_virgin_onset_synthetic.in`,
+    "utf8",
+  );
+
+  assert.match(suite, /vonmises_bae_virgin_onset_synthetic\.in/);
+  assert.match(fixture, /Step 0 is purely volumetric/);
+  assert.match(fixture, /crosses that floor/);
+  assert.match(fixture, /another purely volumetric update/);
 });
 
 test("ships the OpenSees BAE characterization fixture and driver", () => {

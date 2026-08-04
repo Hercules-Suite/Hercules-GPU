@@ -29,6 +29,7 @@ fixtures=(
   vonmises_ep_synthetic.in
   vonmises_fa_quartic_synthetic.in
   vonmises_fam_quartic_reversal_synthetic.in
+  vonmises_bae_virgin_onset_synthetic.in
   vonmises_bae_legacy_id2_synthetic.in
   vonmises_bah_synthetic.in
   vonmises_gqh_synthetic.in

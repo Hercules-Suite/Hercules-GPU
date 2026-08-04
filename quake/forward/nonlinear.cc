@@ -2818,6 +2818,39 @@ void MatUpd_BA_GSL_v2 ( nlconstants_t el_cnt, double   *kappa,
         return;
     }
 
+    /* The von Mises backbone controls only deviatoric response. Resolve a
+     * volumetric (or roundoff-only deviatoric) increment analytically so the
+     * scalar boundary equation is never asked to find a nonexistent kappa.
+     * This preserves the previously converged deviatoric stress and every
+     * cyclic history variable. */
+    tensor_t DSdev_elastic = scaled_tensor( De_dev, 2.0 * G );
+    double DSdev_measure = sqrt(MAX(tensor_J2(DSdev_elastic), 0.0));
+    double stress_scale = MAX(1.0, fabs(K * De_vol));
+    stress_scale = MAX(stress_scale,
+                       sqrt(MAX(tensor_J2(Sdev_n1), 0.0)));
+    if ( DSdev_measure <= 64.0 * DBL_EPSILON * stress_scale ) {
+        *sigma = add_tensors(sigma_n, isotropic_tensor(K * De_vol));
+        *ErrMax = 0.0;
+        return;
+    }
+
+    /* At virgin onset the boundary equation requires kappa -> infinity as
+     * the deviatoric trial stress tends to zero. Use that model's elastic
+     * asymptote below the established millipascal numerical floor, accumulating
+     * stress incrementally until the scalar root is resolvable. Limiting this
+     * shortcut to the kappa=100 virgin sentinel avoids recreating the old
+     * total-strain predictor behavior during unloading and reloading. */
+    tensor_t Sdev_trial = add_tensors(Sdev_n1, DSdev_elastic);
+    if ( kappa_n == 100.0 &&
+         sqrt(MAX(tensor_J2(Sdev_trial), 0.0)) <
+             NONLINEAR_BACKBONE_STRESS_FLOOR_PA ) {
+        *sigma = add_tensors(add_tensors(sigma_n,
+                                          isotropic_tensor(K * De_vol)),
+                             DSdev_elastic);
+        *ErrMax = 0.0;
+        return;
+    }
+
     Den1 = ddot_tensors(Sdev_n1, subtrac_tensors (Sdev_n1 , *sigma_ref));
     Den2 = kappa_n * ( ddot_tensors(subtrac_tensors (Sdev_n1 , *sigma_ref), subtrac_tensors (Sdev_n1 , *sigma_ref)) );
     Num  = add_tensors ( scaled_tensor( Sdev_n1, (1.0+kappa_n) ), scaled_tensor( (subtrac_tensors (Sdev_n1 , *sigma_ref) ) ,kappa_n*(1.0+kappa_n) ) );

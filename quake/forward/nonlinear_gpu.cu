@@ -662,6 +662,35 @@ __device__ static int nl_update_backbone(const nlconstants_t *c,
         return 1;
     }
 
+    /* Pressure-insensitive von Mises backbones have an analytic volumetric
+     * update. Do not send a zero or roundoff-only deviatoric increment to a
+     * scalar equation that has no finite kappa root. */
+    const tensor_t dsdev_elastic = nl_scale(de_dev, 2.0 * g);
+    const double dsdev_measure =
+        sqrt(nl_max(nl_j2(dsdev_elastic), 0.0));
+    double stress_scale = nl_max(1.0, fabs(bulk * de_vol));
+    stress_scale = nl_max(stress_scale,
+                          sqrt(nl_max(nl_j2(sdev_n), 0.0)));
+    if (dsdev_measure <= 64.0 * DBL_EPSILON * stress_scale) {
+        *sigma = nl_add(sigma_n, nl_iso(bulk * de_vol));
+        *error = 0.0;
+        return 1;
+    }
+
+    /* The kappa=100 sentinel denotes virgin state. Near zero deviatoric
+     * stress, use the elastic asymptote and accumulate it incrementally until
+     * the boundary root becomes numerically resolvable. This is deliberately
+     * not applied to established cyclic history. */
+    const tensor_t sdev_trial = nl_add(sdev_n, dsdev_elastic);
+    if (kappa_n == 100.0 &&
+        sqrt(nl_max(nl_j2(sdev_trial), 0.0)) <
+            NONLINEAR_BACKBONE_STRESS_FLOOR_PA) {
+        *sigma = nl_add(nl_add(sigma_n, nl_iso(bulk * de_vol)),
+                        dsdev_elastic);
+        *error = 0.0;
+        return 1;
+    }
+
     tensor_t sno = nl_sub(sdev_n, *sref);
     const double den = nl_ddot(sdev_n, sno) + kappa_n * nl_ddot(sno, sno);
     const tensor_t num = nl_add(nl_scale(sdev_n, 1.0 + kappa_n),
