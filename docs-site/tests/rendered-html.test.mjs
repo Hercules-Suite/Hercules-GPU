@@ -173,6 +173,11 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
   assert.match(gpu, /OpenSees MultiaxialCyclicPlasticity/);
+  assert.match(gpu, /compare_opensees_bae\.py/);
+  assert.match(gpu, /one-brick affine simple-shear test/);
+  assert.match(gpu, /integrated shear-work differences/);
+  assert.match(gpu, /Ho=0, h=psi0 times G, and beta=1/);
+  assert.match(gpu, /dwell and reload/);
   assert.match(gpu, /tensorial shear strains/);
   assert.match(gpu, /compact quadrature-point records/);
   assert.match(gpu, /does not download the full nonlinear state/);
@@ -197,6 +202,26 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   assert.ok(gpuUpdate.indexOf("nl_update_backbone") < gpuUpdate.indexOf("predictor < 1.0e-3"));
   assert.match(cpu, /A bounding-surface update is incremental[\s\S]*De\.xx == 0\.0/);
   assert.match(gpu, /The model is incremental[\s\S]*de\.xx == 0\.0/);
+});
+
+test("ships the OpenSees BAE characterization fixture and driver", () => {
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  const driver = readFileSync(`${benchmarkRoot}compare_opensees_bae.py`, "utf8");
+  const fixture = readFileSync(
+    `${benchmarkRoot}vonmises_bae_opensees_synthetic.in`,
+    "utf8",
+  );
+  const readme = readFileSync(`${benchmarkRoot}README.md`, "utf8");
+
+  assert.match(driver, /gamma_xy = 2\.0 \* epsilon_xy/);
+  assert.match(driver, /hardening_scale = fixture\.psi0 \* fixture\.shear/);
+  assert.match(driver, /element stdBrick/);
+  assert.match(driver, /OPEN_STRESS_FIELDS[\s\S]*sigma_xy[\s\S]*sigma_yz[\s\S]*sigma_xz/);
+  assert.match(fixture, /material_point_steps = 20/);
+  assert.match(fixture, /repeated zero-strain point/);
+  assert.match(readme, /characterization comparison, not an equivalence proof/i);
 });
 
 test("uses sparse CUDA state gathering for nonlinear station output", () => {

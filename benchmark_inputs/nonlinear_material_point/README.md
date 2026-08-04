@@ -91,3 +91,61 @@ instead checked independently against `error_tolerance`, because different
 root algorithms may stop at different residuals within the same accepted
 bound. A single point is a correctness test only and must not be used to
 measure GPU speedup.
+
+## OpenSees BAE comparison
+
+`compare_opensees_bae.py` runs the dedicated
+`vonmises_bae_opensees_synthetic.in` history through Hercules and an OpenSees
+one-brick affine simple-shear test. It maps the Hercules BAE constants to
+OpenSees `MultiaxialCyclicPlasticity` as follows:
+
+```text
+K = lambda + 2*mu/3    G = mu        Su = cohesion
+Ho = 0                 h = psi0*G    m = m
+beta = 1
+```
+
+`beta=1` is the closest match to the Hercules end-state hardening rule. Run a
+second comparison with `--beta 0.5` to measure sensitivity to the integration
+parameter normally recommended by OpenSees. OpenSees consumes engineering
+shear, so the driver converts Hercules tensorial `epsilon_xy` to
+`gamma_xy=2*epsilon_xy`.
+
+First generate or reuse the Hercules CPU history, then provide an OpenSees
+executable that includes `MultiaxialCyclicPlasticity`:
+
+```bash
+python3 compare_opensees_bae.py \
+  --fixture vonmises_bae_opensees_synthetic.in \
+  --psolve ../../quake/forward/psolve \
+  --opensees /path/to/OpenSees
+```
+
+To compare an existing Hercules CSV without rerunning `psolve`:
+
+```bash
+python3 compare_opensees_bae.py \
+  --fixture vonmises_bae_opensees_synthetic.in \
+  --hercules-csv /path/to/vonmises_bae_opensees_synthetic.cpu.csv \
+  --opensees /path/to/OpenSees
+```
+
+The script writes the generated Tcl driver, raw OpenSees history,
+component-by-component stress comparison, solver logs, and `summary.json` under
+`opensees_bae_comparison_output/`. It reports normalized shear-stress RMSE and
+the relative difference in integrated shear work. The default is report-only;
+use `--max-shear-nrmse` or `--max-work-relative-error` only after choosing and
+documenting case-appropriate acceptance thresholds.
+
+This is a characterization comparison, not an equivalence proof. OpenSees uses
+a coupled Newton update, strain splitting at the bounding surface, and resets
+its trial mapping modulus and kappa on a committed near-zero deviatoric
+increment. Hercules uses a scalar bracketed root and preserves its complete
+state on a true zero increment. The supplied history includes a repeated zero
+point followed by reloading so that difference is visible rather than hidden.
+
+Run the parser/driver-generation check without either solver:
+
+```bash
+python3 compare_opensees_bae.py --selftest
+```
