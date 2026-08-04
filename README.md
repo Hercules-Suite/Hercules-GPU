@@ -9,8 +9,8 @@ studies.
 ## Documentation
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.liling-dpim.chatgpt.site) — installation, input parameters, source models, running, output, and validation
-- [Runtime environment and launcher reference](doc/Extended%20README.md) — detailed environment variables, execution controls, and launcher guidance
-- [Technical implementation notes](doc/Technical%20README.md) — solver controls, performance settings, and development history moved from the former root README
+- [Technical README](doc/Technical%20README.md) — actively maintained detailed solver controls, runtime settings, performance notes, and development history moved from the former root README
+- [Legacy Extended README](doc/Extended%20README.md) — recovered historical reference retained separately from the current technical documentation
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 - [`docs-site/`](docs-site/README.md) — source code for the documentation website
 
