@@ -71,8 +71,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 206);
-  assert.equal(documented.length, 206, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 213);
+  assert.equal(documented.length, 213, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -144,6 +144,12 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /vonMises_ep/);
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
+  assert.match(physics, /legacy Istanbul nl_id classification/);
+  assert.match(physics, /Vs range covered by material_properties_list/);
+  assert.match(physics, /non-Istanbul vonMises_baE/);
+  assert.match(physics, /built-in nl_id constants/);
+  assert.match(physics, /Non-Istanbul BAE property table/);
+  assert.match(physics, /synthetic syntax example, not a calibration/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
   assert.equal(parameterResponse.status, 200);
@@ -151,7 +157,182 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /Nonlinear and plastic analysis parameters/);
   assert.match(parameters, /include_nonlinear_analysis/);
   assert.match(parameters, /material_plasticity_type/);
+  assert.match(parameters, /inclusive nonlinear-element range/);
+  assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
+
+  const gpuResponse = await render("/docs/gpu-execution");
+  assert.equal(gpuResponse.status, 200);
+  const gpu = await gpuResponse.text();
+  assert.match(gpu, /HERCULES_NONLINEAR_BACKEND/);
+  assert.match(gpu, /CUDA nonlinear constitutive and force path is the default/);
+  assert.match(gpu, /GPU by default/);
+  assert.match(gpu, /constitutive calculations in double precision/);
+  assert.match(gpu, /CPU\/GSL reference/);
+  assert.match(gpu, /Material-point CPU\/GPU regression/);
+  assert.match(gpu, /run_suite\.sh/);
+  assert.match(gpu, /FA\/FAM quartic correctors/);
+  assert.match(gpu, /nine-fixture suite/);
+  assert.match(gpu, /incremental bounding\/backbone update directly/);
+  assert.match(gpu, /true zero strain increment preserves/);
+  assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
+  assert.match(gpu, /deviatoric trial stress below 1\.0e-3 Pa/);
+  assert.match(gpu, /OpenSees MultiaxialCyclicPlasticity/);
+  assert.match(gpu, /compare_opensees_bae\.py/);
+  assert.match(gpu, /opensees_bae_synthetic\.tcl/);
+  assert.match(gpu, /--opensees-csv/);
+  assert.match(gpu, /17-step legacy BAE suite fixture is not interchangeable/);
+  assert.match(gpu, /Path time series and prescribed top-face displacement/);
+  assert.match(gpu, /marks its CSV as driver version 2/);
+  assert.match(gpu, /rejects older CSVs/);
+  assert.match(gpu, /penalty-enforcement shear-path error up to 1e-12/);
+  assert.match(gpu, /retains the actual OpenSees strain/);
+  assert.match(gpu, /one-brick affine simple-shear test/);
+  assert.match(gpu, /integrated shear-work differences/);
+  assert.match(gpu, /Ho=0, h=psi0 times G, and beta=1/);
+  assert.match(gpu, /dwell and reload/);
+  assert.match(gpu, /tensorial shear strains/);
+  assert.match(gpu, /compact quadrature-point records/);
+  assert.match(gpu, /does not download the full nonlinear state/);
+});
+
+test("defaults nonlinear execution to GPU with an explicit CPU override", async () => {
+  const response = await render("/docs/configuration");
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /default: gpu/);
+
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const selector = gpu.slice(
+    gpu.indexOf("int nonlinear_gpu_requested"),
+    gpu.indexOf("int nonlinear_gpu_active"),
+  );
+
+  assert.match(selector, /g_backend_request = 1/);
+  assert.match(selector, /parse_boolean_cpu\(value\)[\s\S]*g_backend_request = 0/);
+  assert.match(gpu, /fprintf\(stderr,\s*"Nonlinear backend: GPU \(default backend/);
+  assert.match(cpu, /fprintf\(stderr,\s*"Nonlinear backend: CPU \(explicit/);
+  assert.match(await (await render("/docs/gpu-execution")).text(),
+    /reported to standard error at startup/);
+});
+
+test("dispatches cyclic backbone models before the conventional predictor", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const cpuUpdate = cpu.slice(
+    cpu.indexOf("void material_update"),
+    cpu.indexOf("/* computes the derivatives of the flow potential"),
+  );
+  const gpuUpdate = gpu.slice(
+    gpu.indexOf("__device__ static int nl_update_material"),
+    gpu.indexOf("__global__ static void kernel_nonlinear_material_point_history"),
+  );
+
+  assert.ok(cpuUpdate.indexOf("MatUpd_BA_GSL_v2") < cpuUpdate.indexOf("Fs_pr < Tol_sigma"));
+  assert.ok(gpuUpdate.indexOf("nl_update_backbone") < gpuUpdate.indexOf("predictor < 1.0e-3"));
+  assert.match(cpu, /A bounding-surface update is incremental[\s\S]*De\.xx == 0\.0/);
+  assert.match(gpu, /The model is incremental[\s\S]*de\.xx == 0\.0/);
+  assert.match(cpu, /DSdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
+  assert.match(gpu, /dsdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
+  assert.match(cpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+  assert.match(gpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+});
+
+test("ships the BAE virgin-onset regression fixture", () => {
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const fixture = readFileSync(
+    `${benchmarkRoot}vonmises_bae_virgin_onset_synthetic.in`,
+    "utf8",
+  );
+
+  assert.match(suite, /vonmises_bae_virgin_onset_synthetic\.in/);
+  assert.match(fixture, /Step 0 is purely volumetric/);
+  assert.match(fixture, /crosses that floor/);
+  assert.match(fixture, /another purely volumetric update/);
+});
+
+test("ships the OpenSees BAE characterization fixture and driver", () => {
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  const driver = readFileSync(`${benchmarkRoot}compare_opensees_bae.py`, "utf8");
+  const fixture = readFileSync(
+    `${benchmarkRoot}vonmises_bae_opensees_synthetic.in`,
+    "utf8",
+  );
+  const standalone = readFileSync(
+    `${benchmarkRoot}opensees_bae_synthetic.tcl`,
+    "utf8",
+  );
+  const readme = readFileSync(`${benchmarkRoot}README.md`, "utf8");
+
+  assert.match(driver, /gamma_xy = 2\.0 \* strain\[3\]/);
+  assert.match(driver, /hardening_scale = fixture\.psi0 \* fixture\.shear/);
+  assert.match(driver, /element stdBrick/);
+  assert.match(driver, /OPEN_STRESS_FIELDS[\s\S]*sigma_xy[\s\S]*sigma_yz[\s\S]*sigma_xz/);
+  assert.match(driver, /--opensees-csv/);
+  assert.match(fixture, /material_point_steps = 20/);
+  assert.match(fixture, /repeated zero-strain point/);
+  assert.match(standalone, /nDMaterial MultiaxialCyclicPlasticity/);
+  assert.match(standalone, /element stdBrick/);
+  assert.match(standalone, /set gammaHistory/);
+  assert.match(standalone, /timeSeries Path/);
+  assert.match(standalone, /sp 3 1 1\.0/);
+  assert.match(standalone, /set actualGamma \[nodeDisp 3 1\]/);
+  assert.match(standalone, /driver_version,domain_time/);
+  assert.doesNotMatch(standalone, /integrator LoadControl 0\.0/);
+  assert.doesNotMatch(standalone, /integrator DisplacementControl/);
+  assert.match(standalone, /set stress \[eleResponse 1 material 1 stress\]/);
+  assert.match(readme, /characterization comparison, not an equivalence proof/i);
+});
+
+test("uses sparse CUDA state gathering for nonlinear station output", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const finish = psolve.slice(
+    psolve.indexOf("static void solver_finish_nonlinear_gpu"),
+    psolve.indexOf("static void solver_compute_force_planewaves"),
+  );
+
+  assert.match(finish, /nonlinear_gpu_sync_station_state\(solver\)/);
+  assert.doesNotMatch(finish, /nonlinear_gpu_sync_host_state\(solver\)/);
+  assert.match(gpu, /kernel_nonlinear_gather_station_state/);
+  assert.match(gpu, /g_station\.count\s*\*\s*sizeof\(\*g_station\.host\)/);
+  assert.match(gpu, /record->nonlinear_index/);
+});
+
+test("scopes legacy von Mises constants to Istanbul inputs", () => {
+  const sourcePath = fileURLToPath(new URL("../../quake/forward/nonlinear.cc", import.meta.url));
+  if (!existsSync(sourcePath)) return;
+
+  const source = readFileSync(sourcePath, "utf8");
+  const bae = source.slice(
+    source.indexOf("case VONMISES_BAE:"),
+    source.indexOf("case VONMISES_BAH:"),
+  );
+  const ep = source.slice(
+    source.indexOf("case VONMISES_EP:"),
+    source.indexOf("case DRUCKERPRAGER:"),
+  );
+
+  assert.match(bae, /if \( theIstanbulVelocityModel == YES \)/);
+  assert.match(bae, /else \{\s*ecp->c\s*= get_cohesion\(elementVs\);/);
+  assert.match(bae, /ecp->psi0 = interpolate_property_value\(elementVs, thePsi\);/);
+  assert.match(bae, /ecp->m\s*= interpolate_property_value\(elementVs, theM\);/);
+  assert.match(ep, /if \( theIstanbulVelocityModel == YES \)/);
+  assert.match(ep, /else \{\s*ecp->c = get_cohesion\(elementVs\);/);
 });
 
 test("documents every supported source model and its auxiliary inputs", async () => {

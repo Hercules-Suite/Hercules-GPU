@@ -23,6 +23,11 @@
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_multiroots.h>
 
+/* Below this deviatoric stress scale, the virgin bounding/backbone root is
+ * numerically ill-conditioned and its response approaches the elastic
+ * asymptote. Keep this shared so CPU/GSL and CUDA use the same onset rule. */
+#define NONLINEAR_BACKBONE_STRESS_FLOOR_PA 1.0e-3
+
 /* -------------------------------------------------------------------------- */
 /*                        Structures and definitions                          */
 /* -------------------------------------------------------------------------- */
@@ -273,7 +278,15 @@ void nonlinear_print_stats(int32_t *nonlinElementsCount,
                            int32_t  theGroupSize);
 
 void nonlinear_stats(int32_t myID, int32_t theGroupSize);
-void nonlinear_solver_init(int32_t myID, mesh_t *myMesh, double depth);
+void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
+                           mysolver_t *mySolver, double depth);
+void nonlinear_gpu_prepare_station_output(int32_t myID);
+void nonlinear_gpu_sync_station_state(mysolver_t *mySolver);
+void nonlinear_gpu_sync_host_state(mysolver_t *mySolver);
+
+/* Run the standalone CPU/CUDA constitutive parity test described by the
+ * supplied material-point input file. */
+int nonlinear_material_point_test(const char *input_path, int32_t myID);
 
 /* -------------------------------------------------------------------------- */
 /*                   Auxiliary tensor manipulation methods                    */
@@ -467,11 +480,5 @@ void nonlinear_yield_stats(mesh_t *myMesh, int32_t myID, int32_t theTotalSteps, 
 void check_balance( int32_t myID );
 
 #endif /* Q_NONLINEAR_H */
-
-
-
-
-
-
 
 

@@ -193,6 +193,37 @@ Notes:
 	`auto` typically uses a node-level mapping like `ppr:4:node:PE=35`,
 	while `PHASE_B_MAP_MODE=numa` tries `ppr:2:numa:PE=35` when the local node exposes two NUMA domains.
 
+Nonlinear GPU execution (runtime environment):
+
+- `HERCULES_NONLINEAR_BACKEND`
+	Selects the nonlinear constitutive-update and internal-force backend.
+	`gpu` is the default and uses the CUDA implementation for all current
+	nonlinear material models, with double-precision constitutive state and
+	device-resident force assembly. `cpu` explicitly selects the established
+	CPU/GSL reference implementation. Setting `gpu` explicitly remains useful
+	for reproducible launch environments. This setting changes execution, not
+	the calibrated values in `parameters.in`. The selected nonlinear backend is
+	reported to standard error during solver startup.
+- For a new material calibration, compare CPU and GPU nonlinear station
+	histories, final yield statistics, and force/displacement norms before a
+	production run. Keep geostatic, tolerance, substep, stiffness-damping, and
+	`material_properties_list` values case-specific.
+- Before an element or production run, the standalone material-point mode can
+	drive a prescribed tensor-strain history through both constitutive backends
+	and fail on any state mismatch:
+	`mpirun -np 1 psolve --nonlinear-material-point test.in`. See
+	`benchmark_inputs/nonlinear_material_point/README.md` for the test-only
+	constant layout and synthetic smoke fixture. A one-point result validates
+	correctness, not GPU performance or physical calibration.
+- CUDA-aware force exchange and boundary-only displacement synchronization can
+	be combined with this path by setting `HERCULES_GPU_MPI_BACKEND=cuda_aware`
+	and `HERCULES_DISP_SYNC_MODE=boundary`, subject to the usual run-time safety
+	checks.
+- The `nl_id` nonlinear-element selector is a legacy Istanbul-model
+	classification and is active only with `Istanbul_velocity_model=yes`.
+	Non-Istanbul runs ignore `nl_id` and select eligible elements from the `Vs`
+	range covered by `material_properties_list`.
+
 Mesh mode input flags (input file):
 
 - `output_mesh`

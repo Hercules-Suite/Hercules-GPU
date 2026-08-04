@@ -68,6 +68,7 @@ extern "C" {
 #include "quakesource.h"
 #include "output.h"
 #include "nonlinear.h"
+#include "nonlinear_gpu.h"
 #include "io_planes.h"
 #include "io_checkpoint.h"
 #include "stiffness.h"
@@ -6998,6 +6999,10 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
 
   halfticks = (tick_t)1 << (PIXELLEVEL - leaf->level - 1);
   edata->edgesize = ticksize * halfticks * 2;
+  /* Generated meshes do not carry a legacy nonlinear material ID. The only
+   * generated-mesh path that assigns one is the Istanbul model below. Meshes
+   * imported from etree preserve the nl_id stored in their payload. */
+  edata->nl_id = 0.0;
 
   if (Param.IstanbulVelocityModel == YES && g_hasIstanbulVelModelOrigin == 0) {
     solver_abort(__FUNCTION_NAME, NULL,
@@ -16118,15 +16123,19 @@ static void solver_nonlinear_state(mysolver_t* solver, mesh_t* mesh,
                                    fmatrix_t k1[8][8], fmatrix_t k2[8][8],
                                    int step) {
   if (Param.includeNonlinearAnalysis == YES) {
-    Timer_Start("Compute Non-linear Entities");
-    compute_nonlinear_state(mesh, solver, Param.theNumberOfStations,
-                            Param.myNumberOfStations, Param.myStations,
-                            Param.theDeltaT, step);
-    if (get_geostatic_total_time() > 0) {
-      compute_bottom_reactions(mesh, solver, k1, k2, step, Param.theDeltaT);
+    if (!nonlinear_gpu_active()) {
+      Timer_Start("Compute Non-linear Entities");
+      compute_nonlinear_state(mesh, solver, Param.theNumberOfStations,
+                              Param.myNumberOfStations, Param.myStations,
+                              Param.theDeltaT, step);
+      Timer_Stop("Compute Non-linear Entities");
     }
-    Timer_Stop("Compute Non-linear Entities");
-    if (Param.theNumberOfStations != 0) {
+    if (get_geostatic_total_time() > 0) {
+      Timer_Start("Compute Non-linear Reactions");
+      compute_bottom_reactions(mesh, solver, k1, k2, step, Param.theDeltaT);
+      Timer_Stop("Compute Non-linear Reactions");
+    }
+    if (!nonlinear_gpu_active() && Param.theNumberOfStations != 0) {
       Timer_Start("Print Stations");
       print_nonlinear_stations(mesh, solver, Param.myStations,
                                Param.myNumberOfStations, Param.theDeltaT, step,
@@ -17137,10 +17146,39 @@ static void solver_compute_force_damping(mysolver_t* solver, mesh_t* mesh,
  */
 static void solver_compute_force_nonlinear(mysolver_t* solver, mesh_t* mesh,
                                            double deltaT2) {
-  if (Param.includeNonlinearAnalysis == YES) {
+  if (Param.includeNonlinearAnalysis == YES && !nonlinear_gpu_active()) {
     Timer_Start("Compute addforces Non-linear");
     compute_addforce_nl(mesh, solver, deltaT2);
     Timer_Stop("Compute addforces Non-linear");
+  }
+}
+
+static void solver_compute_force_nonlinear_gpu(mysolver_t* solver, int step,
+                                               double deltaT,
+                                               double deltaT2) {
+  if (Param.includeNonlinearAnalysis == YES && nonlinear_gpu_active()) {
+    Timer_Start("Compute Non-linear GPU");
+    nonlinear_gpu_enqueue(solver, step, deltaT, deltaT2);
+    Timer_Stop("Compute Non-linear GPU");
+  }
+}
+
+static void solver_finish_nonlinear_gpu(mysolver_t* solver, mesh_t* mesh,
+                                        int step) {
+  if (!nonlinear_gpu_active()) {
+    return;
+  }
+  nonlinear_gpu_check_error(Global.myID);
+  if (Param.theNumberOfStations != 0 && Param.theStationsPrintRate > 0 &&
+      (step % Param.theStationsPrintRate) == 0) {
+    Timer_Start("Download Non-linear State");
+    nonlinear_gpu_sync_station_state(solver);
+    Timer_Stop("Download Non-linear State");
+    Timer_Start("Print Stations");
+    print_nonlinear_stations(mesh, solver, Param.myStations,
+                             Param.myNumberOfStations, Param.theDeltaT, step,
+                             Param.theStationsPrintRate);
+    Timer_Stop("Print Stations");
   }
 }
 
@@ -18205,7 +18243,8 @@ static int32_t displacement_boundary_sync_safe(void) {
   if (checkpoint_host_state_required()) {
     return 0;
   }
-  if (Param.drmImplement == YES || Param.includeNonlinearAnalysis == YES ||
+  if (Param.drmImplement == YES ||
+      (Param.includeNonlinearAnalysis == YES && !nonlinear_gpu_active()) ||
       Param.includeIncidentPlaneWaves == YES) {
     return 0;
   }
@@ -18496,7 +18535,7 @@ static int32_t acoustic_pressure_device_sync_enabled(void) {
 }
 
 static int32_t elastic_force_device_sync_enabled(void) {
-  if (Param.includeNonlinearAnalysis == YES ||
+  if ((Param.includeNonlinearAnalysis == YES && !nonlinear_gpu_active()) ||
       Param.includeIncidentPlaneWaves == YES ||
       get_geostatic_total_time() > 0) {
     return 0;
@@ -21400,7 +21439,7 @@ static void solver_unload_forces_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Only copy forces back if Stiffness-Effective or BKT-family damping. */
   if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
       (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled() ||
-      poroelastic_gpu_active()) {
+      poroelastic_gpu_active() || nonlinear_gpu_active()) {
     /* Copy forces back to host */
     cudaMemcpyAsync(solver->force, solver->gpuData->forceDevice,
                     mesh->nharbored * sizeof(fvector_t), cudaMemcpyDeviceToHost,
@@ -21615,7 +21654,7 @@ static void solver_wait_physics_gpu(mysolver_t* solver, mesh_t* mesh) {
   /* Wait for the appropriate physics calculation to complete */
   if (((Param.theTypeOfDamping < BKT) && (Param.theStiffness == EFFECTIVE)) ||
       (Param.theTypeOfDamping >= BKT) || acoustic_pressure_enabled() ||
-      poroelastic_gpu_active()) {
+      poroelastic_gpu_active() || nonlinear_gpu_active()) {
     Timer_Start("Force Stream Sync");
 
     Timer_Start("Force kernel wait only");
@@ -22399,6 +22438,9 @@ static void solver_run() {
     solver_compute_force_damping(Global.mySolver, Global.myMesh, Global.theK1,
                    Global.theK2);
     solver_compute_force_acoustic_pressure(Global.mySolver, Global.myMesh);
+    solver_compute_force_nonlinear_gpu(Global.mySolver, step,
+                                       Param.theDeltaT,
+                                       Param.theDeltaTSquared);
     solver_record_force_kernel_done_event(Global.mySolver);
     Timer_Stop("Physics Force Kernels Enqueue");
 
@@ -22413,6 +22455,7 @@ static void solver_run() {
     Timer_Start("Compute Physics");
     Timer_Start("Physics Force Wait/Post");
     solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
+    solver_finish_nonlinear_gpu(Global.mySolver, Global.myMesh, step);
 
     Timer_Start("Force Post CPU");
     solver_compute_force_gravity(Global.mySolver, Global.myMesh, step);
@@ -28998,16 +29041,18 @@ static void mesh_correct_properties(etree_t* cvm) {
             // the Istanbul Velocity Model as the nonlinear_id is calculated
             // based on the Istanbul Velocity Model.
 
-            // get nonlinear_id at the elment's center
-            double output[4] = {0.0}, x_rel, y_rel;
-            x_rel = 4536400.00 + north_m - IstVelModel_origin.x[0];
-            y_rel = 388500.00 + east_m - IstVelModel_origin.x[1];
+            if (Param.IstanbulVelocityModel == YES) {
+              // get nonlinear_id at the element's center
+              double output[4] = {0.0}, x_rel, y_rel;
+              x_rel = 4536400.00 + north_m - IstVelModel_origin.x[0];
+              y_rel = 388500.00 + east_m - IstVelModel_origin.x[1];
 
-            res = material_property_relative_V10_local(
-                y_rel, x_rel, -depth_m, output, IstVelModel_origin.x[1],
-                IstVelModel_origin.x[0]);
+              res = material_property_relative_V10_local(
+                  y_rel, x_rel, -depth_m, output, IstVelModel_origin.x[1],
+                  IstVelModel_origin.x[0]);
 
-            edata->nl_id = output[3];
+              edata->nl_id = output[3];
+            }
 
             s_0 = edata->edgesize / 2.0 * edata->rho * 9.81;
             for (k = 0; k < nlayers; k++) {
@@ -29522,10 +29567,26 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &Global.myID);
   MPI_Comm_size(MPI_COMM_WORLD, &Global.theGroupSize);
 
+  if (argc == 3 && strcmp(argv[1], "--nonlinear-material-point") == 0) {
+    if (Global.theGroupSize != 1) {
+      if (Global.myID == 0) {
+        fputs("The nonlinear material-point test requires exactly one MPI "
+              "rank.\n", stderr);
+      }
+      MPI_Finalize();
+      return 1;
+    }
+    const int test_result = nonlinear_material_point_test(argv[2],
+                                                          Global.myID);
+    MPI_Finalize();
+    return test_result;
+  }
+
   /* Make sure using correct input arguments */
   if (argc != 2) {
     if (Global.myID == 0) {
-      fputs("Usage: psolve <parameters.in>\n", stderr);
+      fputs("Usage: psolve <parameters.in>\n"
+            "       psolve --nonlinear-material-point <test.in>\n", stderr);
     }
     MPI_Finalize();
     exit(1);
@@ -29873,10 +29934,12 @@ int main(int argc, char** argv) {
   /* Initialize nonlinear solver analysis structures */
   if (Param.includeNonlinearAnalysis == YES) {
     Timer_Start("Pre Setup Nonlinear Init");
-    nonlinear_solver_init(Global.myID, Global.myMesh, Param.theDomainZ);
+    nonlinear_solver_init(Global.myID, Global.myMesh, Global.mySolver,
+                          Param.theDomainZ);
     if (Param.theNumberOfStations != 0) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,
                               Param.myNumberOfStations);
+      nonlinear_gpu_prepare_station_output(Global.myID);
     }
     nonlinear_stats(Global.myID, Global.theGroupSize);
     Timer_Stop("Pre Setup Nonlinear Init");
@@ -30008,8 +30071,10 @@ int main(int argc, char** argv) {
   Timer_Start("Post Solver Finalize");
 
   if (Param.includeNonlinearAnalysis == YES) {
+    nonlinear_gpu_sync_host_state(Global.mySolver);
     nonlinear_yield_stats(Global.myMesh, Global.myID, Param.theTotalSteps,
                           Global.theGroupSize);
+    nonlinear_gpu_finalize();
   }
 
   output_fini();

@@ -285,10 +285,43 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Resident-field strategy",
         bullets: [
           "Elastic displacement history remains on the GPU; only boundary and adjustment nodes move when required.",
+          "Nonlinear-solid stress, plastic strain, hardening/backbone state, and internal-force assembly remain on the GPU by default. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly to select the CPU/GSL reference backend.",
+          "Nonlinear station output gathers compact quadrature-point records only for local station elements; it does not download the full nonlinear state at each output step.",
           "Acoustic pressure histories swap device pointers and patch only schedule or adjustment nodes.",
           "Poroelastic pore pressure uses the same sparse/resident pattern.",
           "Station interpolation runs on the GPU for supported fields and returns compact observations.",
         ],
+      },
+      {
+        id: "nonlinear-backend",
+        title: "Nonlinear solid backend",
+        paragraphs: [
+          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference implementation; setting it to gpu explicitly is supported for reproducible launch environments. The selected backend is reported to standard error at startup.",
+          "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
+          "For production timing, verify both the total element count and the nonlinear count after regenerating any mesh whose velocity profile changed. Reusing an older mesh also reuses its stored Vs payload and can unintentionally select nearly the entire domain.",
+        ],
+        codeLabel: "shell",
+        code: "export HERCULES_NONLINEAR_BACKEND=gpu\nexport HERCULES_GPU_MPI_BACKEND=cuda_aware\nexport HERCULES_DISP_SYNC_MODE=boundary",
+        note: "The GPU backend changes execution only. Nonlinear geostatic, tolerance, damping, substep, and material_properties_list values remain case-specific physical/numerical inputs.",
+      },
+      {
+        id: "nonlinear-material-point",
+        title: "Material-point CPU/GPU regression",
+        paragraphs: [
+          "Before an element or production comparison, run a prescribed tensor-strain history through the CPU and CUDA constitutive routines with the standalone material-point mode. It writes complete CPU and GPU state histories and returns nonzero on a status, finite-value, or tolerance mismatch.",
+          "The nine-fixture suite covers EP, the FA/FAM quartic correctors, BAE and BAH, GQH, MKZ, and Ramberg--Osgood. It compares the CPU GSL-backed polynomial or scalar root solvers with the CUDA implementations and includes cyclic reversal paths plus BAE virgin-onset and volumetric-update coverage.",
+          "BAE, BAH, GQH, MKZ, and Ramberg--Osgood now enter their incremental bounding/backbone update directly. Those models decide loading and reversal from the strain increment and stored stress/history; the generic total-strain elastic predictor remains limited to conventional yield-surface models. A repeated, true zero strain increment preserves the converged stress and history.",
+          "For these pressure-insensitive von Mises backbones, a purely volumetric increment updates only hydrostatic stress and preserves cyclic history instead of entering the scalar kappa solver. At untouched virgin state (kappa=100), deviatoric trial stress below 1.0e-3 Pa follows the incremental elastic asymptote until the backbone root is numerically resolvable. The onset rule is disabled after cyclic history is established, so it does not replace the model's unloading or reversal logic.",
+          "This dispatch boundary follows the OpenSees MultiaxialCyclicPlasticity reference design: the cyclic integrator owns its zero-increment and loading/reversal decisions. The Hercules material-point suite checks that invariant independently on both CPU and CUDA backends.",
+          "For a cross-code characterization, compare_opensees_bae.py maps the BAE constants into an OpenSees one-brick affine simple-shear test, converts tensorial epsilon_xy to engineering gamma_xy, and reports component stress errors plus integrated shear-work differences. The closest algorithmic mapping uses Ho=0, h=psi0 times G, and beta=1; beta=0.5 is available as an integration-sensitivity run.",
+          "The standalone opensees_bae_synthetic.tcl fixture embeds the mapped constants and complete 20-step history. OpenSees can therefore run on a different system, with its CSV passed back through compare_opensees_bae.py using --opensees-csv. The 17-step legacy BAE suite fixture is not interchangeable with this dedicated cross-code history.",
+          "The OpenSees driver uses a Path time series and prescribed top-face displacement, verifies the actual control-node displacement at every recorded step, and marks its CSV as driver version 2. This preserves displacement through the repeated zero point; using zero-increment load control there would instead release displacement control and re-equilibrate the brick. The comparison tool rejects older CSVs, accepts and reports penalty-enforcement shear-path error up to 1e-12, and retains the actual OpenSees strain in its detailed output.",
+          "The OpenSees comparison is intentionally not described as an equivalence test. OpenSees uses coupled Newton iteration and strain splitting and resets trial mapping variables for a committed near-zero deviatoric increment, while Hercules uses a scalar bracketed root and preserves its complete state for a true zero increment. The comparison history includes a dwell and reload to expose that difference.",
+          "The fixture constants and strain path are test inputs, not a substitute for calibrated production properties. Off-diagonal inputs are tensorial shear strains, so epsilon_xy equals one half of engineering gamma_xy. A single point validates correctness only; use a many-element case for performance measurement.",
+        ],
+        codeLabel: "shell",
+        code: "cd benchmark_inputs/nonlinear_material_point\n./run_suite.sh ../../quake/forward/psolve\n\nOpenSees opensees_bae_synthetic.tcl\n\npython3 compare_opensees_bae.py \\\n  --hercules-csv vonmises_bae_opensees_synthetic.cpu.csv \\\n  --opensees-csv opensees_bae_beta_1.csv \\\n  --beta 1.0",
+        note: "The supplied von Mises fixtures are synthetic numerical regression tests. Replace them with constants and histories derived from the calibrated case for scientific validation.",
       },
       {
         id: "transport",
@@ -334,6 +367,8 @@ export const docPages: Record<string, DocPageContent> = {
         paragraphs: [
           "Set include_nonlinear_analysis=yes to activate history-dependent constitutive updates in eligible solid elements. Hercules evaluates stress against the selected yield or backbone relation, evolves plastic strain and internal variables, and can retain permanent deformation after unloading.",
           "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
+          "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and select eligible elements from the Vs range covered by material_properties_list.",
+          "For non-Istanbul vonMises_baE, material_properties_list supplies Su through alpha_cohesion and the exponential hardening parameters through psi and m; non-Istanbul vonMises_ep takes Su from alpha_cohesion. The built-in nl_id constants for these models remain limited to Istanbul_velocity_model=yes.",
         ],
         table: {
           headers: ["Family", "Available material_model values", "Role"],
@@ -347,6 +382,17 @@ export const docPages: Record<string, DocPageContent> = {
         codeLabel: "parameters.in — feature selection (additional nonlinear controls are required)",
         code: "include_nonlinear_analysis = yes\nmaterial_model = vonMises_ep\nmaterial_plasticity_type = rate_independent",
         note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and 16-column material_properties_list values. Use the Nonlinear & plastic analysis parameter page and validate the selected constitutive model against an appropriate reference before a large run.",
+      },
+      {
+        id: "nonlinear-material-properties",
+        title: "Non-Istanbul BAE property table",
+        paragraphs: [
+          "Rows are ordered by increasing Vs_limit. For non-Istanbul models, the first and last limits define the inclusive nonlinear range and Hercules linearly interpolates active properties for intermediate Vs. BAE reads Su from alpha_cohesion and its exponential hardening parameters from psi and m.",
+          "The example brackets a homogeneous Vs=1000 m/s profile. Repeated values make its active BAE properties constant across the selected range; replace them with calibrated strength and modulus-reduction parameters for scientific use.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax example, not a calibration",
+        code: "Istanbul_velocity_model = no\nmaterial_model = vonMises_baE\nmaterial_plasticity_type = rate_independent\nmaterial_properties_count = 2\nmaterial_properties_list =\n# Vs   Su(Pa) phi rate sensitivity hardening dilatancy gamma0 psi m   theta1 theta2 theta3 theta4 theta5 phi_RO\n  900  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0\n 1100  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0",
+        note: "Su, psi, and m are case-specific constitutive inputs and cannot be inferred from Vs alone. Confirm the selected nonlinear-element count in the setup output before timing or production runs.",
       },
       {
         id: "coupling",
@@ -388,6 +434,7 @@ export const docPages: Record<string, DocPageContent> = {
           rows: [
             ["HERCULES_PHASE_MODE", "unified | two-phase", "Select mesh/solver orchestration"],
             ["HERCULES_GPU_MPI_BACKEND", "host | cuda_aware", "Select field-exchange backend"],
+            ["HERCULES_NONLINEAR_BACKEND", "cpu | gpu", "Select nonlinear constitutive and force backend; default: gpu"],
             ["HERCULES_DISP_SYNC_MODE", "auto | full | boundary", "Control elastic host/device synchronization"],
             ["HERCULES_MESH_IO_MODE", "mpiio | sharded | single", "Select Phase A mesh storage"],
             ["HERCULES_PLANE_IO_MODE", "auto | hybrid | mpiio | legacy", "Select plane interpolation and writing"],
