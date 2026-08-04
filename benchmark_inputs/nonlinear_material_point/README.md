@@ -55,7 +55,9 @@ regression cases, not production soil calibrations:
   corrector and its load-reversal recalibration.
 - `vonmises_bae_legacy_id2_synthetic.in` uses the constants currently assigned
   to legacy Istanbul material ID 2. Its CPU history enters the GSL-backed
-  Borja--Amies root solver, while its GPU history uses the CUDA root solver.
+  Borja--Amies root solver, while its GPU history uses the CUDA root solver. It
+  distinguishes unloading through zero total strain from a repeated, true
+  zero strain increment.
 - `vonmises_bah_synthetic.in` exercises the hyperbolic Borja--Amies hardening
   law.
 - `vonmises_gqh_synthetic.in` exercises the dedicated CPU GQH backbone
@@ -63,12 +65,15 @@ regression cases, not production soil calibrations:
 - `vonmises_mkz_synthetic.in` exercises the MKZ backbone inversion.
 - `vonmises_ro_synthetic.in` exercises the Ramberg--Osgood hardening law.
 
-The suite intentionally preserves the current CPU dispatch ordering as its
-compatibility baseline. First establish CPU/CUDA agreement for all fixtures.
-Treat any later change that sends BAE, BAH, GQH, MKZ, or Ramberg--Osgood ahead
-of the generic CPU elastic-predictor return as a separate physics change: save
-the pre-change CSV histories, update both backends consistently, and review
-the changed unloading/reversal histories before accepting a new baseline.
+BAE, BAH, GQH, MKZ, and Ramberg--Osgood are dispatched directly to their
+incremental bounding/backbone update. The model uses the strain increment and
+stored stress/history to identify loading and reversal; it does not use the
+generic total-strain yield predictor applied to conventional yield-surface
+models. A true zero strain increment preserves stress and history. This follows
+the update boundary used by OpenSees
+[`MultiaxialCyclicPlasticity`](https://github.com/OpenSees/OpenSees/blob/master/SRC/material/nD/cyclicSoil/MultiaxialCyclicPlasticity.cpp),
+which owns its zero-increment and loading/reversal decisions inside the cyclic
+integrator.
 
 For scientific validation, replace the constants and strain history with
 values derived from the calibrated case being studied and retain its

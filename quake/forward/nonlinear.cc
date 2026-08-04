@@ -2809,6 +2809,15 @@ void MatUpd_BA_GSL_v2 ( nlconstants_t el_cnt, double   *kappa,
     double   De_vol   = tensor_I1 ( De );
     tensor_t De_dev   = tensor_deviator( De, tensor_octahedral ( De_vol ) );
 
+    /* A bounding-surface update is incremental. With no strain increment,
+     * preserve the converged stress and all history variables instead of
+     * entering the reversal test or scalar root solve. */
+    if ( De.xx == 0.0 && De.yy == 0.0 && De.zz == 0.0 &&
+         De.xy == 0.0 && De.yz == 0.0 && De.xz == 0.0 ) {
+        *ErrMax = 0.0;
+        return;
+    }
+
     Den1 = ddot_tensors(Sdev_n1, subtrac_tensors (Sdev_n1 , *sigma_ref));
     Den2 = kappa_n * ( ddot_tensors(subtrac_tensors (Sdev_n1 , *sigma_ref), subtrac_tensors (Sdev_n1 , *sigma_ref)) );
     Num  = add_tensors ( scaled_tensor( Sdev_n1, (1.0+kappa_n) ), scaled_tensor( (subtrac_tensors (Sdev_n1 , *sigma_ref) ) ,kappa_n*(1.0+kappa_n) ) );
@@ -4090,6 +4099,17 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
      * ep_bar   : Updated equivalent hardening variable
      */
 
+    /* The bounding/backbone families own their incremental loading, reversal,
+     * and zero-increment logic. Dispatch them before the conventional
+     * yield-surface predictor, which is based on total elastic strain and is
+     * not a valid elastic/unloading criterion for cyclic hysteretic models. */
+    if ( theMaterialModel >= VONMISES_BAE &&
+         theMaterialModel <= VONMISES_RO ) {
+        MatUpd_BA_GSL_v2 ( constants, kp, e_n, e_n1, sigma_ref, sigma,
+                           ErrBA, gamma1D, tao1D, GGmax1D );
+        return;
+    }
+
     double c, h, kappa, mu, Sy, beta, alpha, gamma, phi, dil, Fs_pr, Lambda, dLambda=0.0,
            Tol_sigma = 1e-03, cond1, cond2, psi0;
     // double m;
@@ -4224,13 +4244,6 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
         Sy      = sqrt(2.0)*Sy;                      // scale Sy to comply with the formulation for vonMises kinematic
 
         MatUpd_vMFA ( J2_pr,  dev_pr,  psi0,  c,  eta_n,  e_n1, mu,  Lambda,  Sy, epl,  ep,  ep_bar,  ep_barn,  eta,  sigma,  stresses, fs,  psi_n,  loadunl_n,  Tao_n,  Tao_max );
-        return;
-
-    }  else if ( theMaterialModel != MOHR_COULOMB ) {
-
-        //MatUpd_vMGeneralII ( constants, kp, e_n, e_n1,  sigma_ref, sigma,  ErrBA, gamma1D, tao1D, GGmax1D ) ;
-
-        MatUpd_BA_GSL_v2 ( constants, kp, e_n, e_n1,  sigma_ref, sigma,  ErrBA, gamma1D, tao1D, GGmax1D ) ;
         return;
 
     } else { /* Must be MohrCoulomb soil */
@@ -4569,6 +4582,47 @@ static int material_point_result_values(
     return i;
 }
 
+static int material_point_same_strain(tensor_t left, tensor_t right)
+{
+    return left.xx == right.xx && left.yy == right.yy &&
+           left.zz == right.zz && left.xy == right.xy &&
+           left.yz == right.yz && left.xz == right.xz;
+}
+
+static int material_point_validate_zero_increment(
+    const char *backend,
+    const nonlinear_material_point_result_t *previous,
+    const nonlinear_material_point_result_t *current,
+    int32_t step)
+{
+    double previous_values[MATERIAL_POINT_RESULT_VALUE_COUNT];
+    double current_values[MATERIAL_POINT_RESULT_VALUE_COUNT];
+    const int count = material_point_result_values(previous, previous_values);
+    material_point_result_values(current, current_values);
+
+    for (int i = 0; i < count; i++) {
+        /* Root residual is an update diagnostic, not constitutive history. A
+         * no-op update intentionally resets it to zero. */
+        if (i == MATERIAL_POINT_FS_INDEX ||
+            i == MATERIAL_POINT_MODEL_ERROR_INDEX) continue;
+        if (current_values[i] != previous_values[i]) {
+            fprintf(stderr, "%s bounding/backbone state changed on a zero "
+                    "strain increment at step %d field %s: previous=%.17e "
+                    "current=%.17e\n", backend, step,
+                    material_point_result_names[i], previous_values[i],
+                    current_values[i]);
+            return -1;
+        }
+    }
+    if (current->model_error != 0.0) {
+        fprintf(stderr, "%s bounding/backbone zero-increment residual is "
+                "nonzero at step %d: %.17e\n", backend, step,
+                current->model_error);
+        return -1;
+    }
+    return 0;
+}
+
 static int material_point_write_csv(
     const char *path,
     const tensor_t *strain_history,
@@ -4630,6 +4684,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double maximum_relative = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
+    int zero_increment_checks = 0;
 
     if (myID != 0) return 0;
     fp = fopen(input_path, "r");
@@ -4729,6 +4784,18 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     }
 
     for (int32_t step = 0; step < steps; step++) {
+        if (material_model >= VONMISES_BAE &&
+            material_model <= VONMISES_RO && step > 0 &&
+            material_point_same_strain(strain_history[step],
+                                       strain_history[step-1])) {
+            if (material_point_validate_zero_increment(
+                    "CPU", &cpu_results[step-1], &cpu_results[step], step) != 0 ||
+                material_point_validate_zero_increment(
+                    "GPU", &gpu_results[step-1], &gpu_results[step], step) != 0) {
+                goto cleanup;
+            }
+            zero_increment_checks++;
+        }
         if (cpu_results[step].status != gpu_results[step].status) {
             fprintf(stderr, "Material-point status mismatch at step %d: "
                             "CPU=%d GPU=%d\n", step,
@@ -4798,6 +4865,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         printf("Maximum CPU/GPU root residuals: %.6e / %.6e "
                "(tolerance %.6e)\n", maximum_cpu_residual,
                maximum_gpu_residual, error_tolerance);
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
     }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;

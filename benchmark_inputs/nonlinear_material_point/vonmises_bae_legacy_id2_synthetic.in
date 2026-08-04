@@ -3,7 +3,7 @@
 # production material model.
 material_model = vonMises_baE
 material_point_delta_time_sec = 0.001
-material_point_steps = 16
+material_point_steps = 17
 no_substeps = 100
 error_tolerance = 1.0e-8
 backbone_errTol = 1.0e-8
@@ -31,7 +31,9 @@ material_point_constants =
 
 # Cyclic simple shear. This history deliberately begins with a nonzero strain
 # increment because the bounding-surface model initializes from kappa=100.
-# epsilon_xy is tensorial shear.
+# It unloads through zero total strain and then repeats the final zero strain;
+# the first is a nonzero increment, while the second must preserve the complete
+# stress/history state. epsilon_xy is tensorial shear.
 material_point_strain_history =
   0.0 0.0 0.0  1.250000e-04 0.0 0.0
   0.0 0.0 0.0  2.500000e-04 0.0 0.0
@@ -48,4 +50,5 @@ material_point_strain_history =
   0.0 0.0 0.0 -3.750000e-04 0.0 0.0
   0.0 0.0 0.0 -2.500000e-04 0.0 0.0
   0.0 0.0 0.0 -1.250000e-04 0.0 0.0
+  0.0 0.0 0.0  0.000000e+00 0.0 0.0
   0.0 0.0 0.0  0.000000e+00 0.0 0.0

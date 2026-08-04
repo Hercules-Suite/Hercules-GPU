@@ -170,10 +170,33 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /current CPU dispatch ordering/);
+  assert.match(gpu, /incremental bounding\/backbone update directly/);
+  assert.match(gpu, /true zero strain increment preserves/);
+  assert.match(gpu, /OpenSees MultiaxialCyclicPlasticity/);
   assert.match(gpu, /tensorial shear strains/);
   assert.match(gpu, /compact quadrature-point records/);
   assert.match(gpu, /does not download the full nonlinear state/);
+});
+
+test("dispatches cyclic backbone models before the conventional predictor", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const cpuUpdate = cpu.slice(
+    cpu.indexOf("void material_update"),
+    cpu.indexOf("/* computes the derivatives of the flow potential"),
+  );
+  const gpuUpdate = gpu.slice(
+    gpu.indexOf("__device__ static int nl_update_material"),
+    gpu.indexOf("__global__ static void kernel_nonlinear_material_point_history"),
+  );
+
+  assert.ok(cpuUpdate.indexOf("MatUpd_BA_GSL_v2") < cpuUpdate.indexOf("Fs_pr < Tol_sigma"));
+  assert.ok(gpuUpdate.indexOf("nl_update_backbone") < gpuUpdate.indexOf("predictor < 1.0e-3"));
+  assert.match(cpu, /A bounding-surface update is incremental[\s\S]*De\.xx == 0\.0/);
+  assert.match(gpu, /The model is incremental[\s\S]*de\.xx == 0\.0/);
 });
 
 test("uses sparse CUDA state gathering for nonlinear station output", () => {

@@ -652,6 +652,16 @@ __device__ static int nl_update_backbone(const nlconstants_t *c,
     tensor_t de = nl_sub(strain, strain_prev);
     const double de_vol = nl_i1(de);
     tensor_t de_dev = nl_dev(de);
+
+    /* The model is incremental: a true zero increment preserves the previous
+     * stress and every backbone/history variable without a reversal test or
+     * scalar root solve. */
+    if (de.xx == 0.0 && de.yy == 0.0 && de.zz == 0.0 &&
+        de.xy == 0.0 && de.yz == 0.0 && de.xz == 0.0) {
+        *error = 0.0;
+        return 1;
+    }
+
     tensor_t sno = nl_sub(sdev_n, *sref);
     const double den = nl_ddot(sdev_n, sno) + kappa_n * nl_ddot(sno, sno);
     const tensor_t num = nl_add(nl_scale(sdev_n, 1.0 + kappa_n),
@@ -1306,6 +1316,16 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                                           double *model_error)
 {
     const materialmodel_t model = cfg->material_model;
+
+    /* Cyclic bounding/backbone models decide loading and reversal from the
+     * strain increment and their stored stress/history. They must not pass
+     * through the conventional total-strain yield predictor. */
+    if (model >= VONMISES_BAE && model <= VONMISES_RO) {
+        return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
+                                  kappa, gamma1d, tao1d, ggmax, cfg,
+                                  model_error);
+    }
+
     tensor_t elastic_strain = nl_sub(strain, pstrain_prev);
     tensor_t stress_predictor = nl_stress(elastic_strain, c->mu, c->lambda);
     tensor_t relative_dev = nl_sub(nl_dev(stress_predictor), backstress_prev);
@@ -1340,16 +1360,6 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         *epbar = epbar_prev;
         *fs = predictor;
         return 1;
-    }
-
-    /* The CPU reference performs its generic elastic-predictor return before
-     * dispatching the bounding-surface families. Preserve that ordering: at
-     * a strain state inside the predictor tolerance, stress is reconstructed
-     * elastically and kappa/reference/backbone history remains unchanged. */
-    if (model >= VONMISES_BAE) {
-        return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
-                                  kappa, gamma1d, tao1d, ggmax, cfg,
-                                  model_error);
     }
 
     if (model == VONMISES_FA || model == VONMISES_FAM) {
