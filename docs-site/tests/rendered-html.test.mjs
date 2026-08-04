@@ -180,6 +180,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Path time series and prescribed top-face displacement/);
   assert.match(gpu, /marks its CSV as driver version 2/);
   assert.match(gpu, /rejects older CSVs/);
+  assert.match(gpu, /penalty-enforcement shear-path error up to 1e-12/);
+  assert.match(gpu, /retains the actual OpenSees strain/);
   assert.match(gpu, /one-brick affine simple-shear test/);
   assert.match(gpu, /integrated shear-work differences/);
   assert.match(gpu, /Ho=0, h=psi0 times G, and beta=1/);

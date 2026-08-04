@@ -26,6 +26,7 @@ OPEN_STRESS_FIELDS = (
     "sigma_xz",
 )
 ASSIGNMENT = re.compile(r"(?m)^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*")
+PRESCRIBED_GAMMA_ATOL = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -248,11 +249,46 @@ def compare_histories(
             abs_tol=1.0e-12,
         ):
             raise ValueError(f"OpenSees domain time mismatch at step {step}")
+
+    hercules_epsilon_errors = []
+    opensees_epsilon_errors = []
+    opensees_gamma_errors = []
+    for step, (hercules, opensees) in enumerate(zip(hercules_rows, opensees_rows)):
+        expected_epsilon = fixture.strains[step][3]
+        hercules_epsilon_errors.append(hercules["eps_xy"] - expected_epsilon)
+        opensees_epsilon_errors.append(opensees["epsilon_xy"] - expected_epsilon)
+        opensees_gamma_errors.append(opensees["gamma_xy"] - 2.0 * expected_epsilon)
+        if not math.isclose(
+            hercules["eps_xy"], expected_epsilon, rel_tol=0.0, abs_tol=1.0e-15
+        ):
+            raise ValueError(f"Hercules epsilon_xy mismatch at step {step}")
+        if not math.isclose(
+            opensees["epsilon_xy"],
+            expected_epsilon,
+            rel_tol=0.0,
+            abs_tol=PRESCRIBED_GAMMA_ATOL,
+        ):
+            raise ValueError(f"OpenSees epsilon_xy mismatch at step {step}")
+        if not math.isclose(
+            opensees["gamma_xy"],
+            2.0 * expected_epsilon,
+            rel_tol=0.0,
+            abs_tol=PRESCRIBED_GAMMA_ATOL,
+        ):
+            raise ValueError(f"OpenSees gamma_xy mismatch at step {step}")
+
     field_metrics: dict[str, dict[str, float]] = {}
     with comparison_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(
-            ["step", "epsilon_xy", "gamma_xy"]
+            [
+                "step",
+                "target_epsilon_xy",
+                "hercules_epsilon_xy",
+                "opensees_epsilon_xy",
+                "target_gamma_xy",
+                "opensees_gamma_xy",
+            ]
             + [
                 item
                 for field in STRESS_FIELDS
@@ -265,18 +301,14 @@ def compare_histories(
         )
         for step, (hercules, opensees) in enumerate(zip(hercules_rows, opensees_rows)):
             expected_epsilon = fixture.strains[step][3]
-            if not math.isclose(hercules["eps_xy"], expected_epsilon, rel_tol=0.0, abs_tol=1.0e-15):
-                raise ValueError(f"Hercules epsilon_xy mismatch at step {step}")
-            if not math.isclose(opensees["epsilon_xy"], expected_epsilon, rel_tol=0.0, abs_tol=1.0e-15):
-                raise ValueError(f"OpenSees epsilon_xy mismatch at step {step}")
-            if not math.isclose(
-                opensees["gamma_xy"],
+            output = [
+                step,
+                expected_epsilon,
+                hercules["eps_xy"],
+                opensees["epsilon_xy"],
                 2.0 * expected_epsilon,
-                rel_tol=0.0,
-                abs_tol=1.0e-15,
-            ):
-                raise ValueError(f"OpenSees gamma_xy mismatch at step {step}")
-            output = [step, expected_epsilon, 2.0 * expected_epsilon]
+                opensees["gamma_xy"],
+            ]
             for hercules_field, opensees_field in zip(STRESS_FIELDS, OPEN_STRESS_FIELDS):
                 left, right = hercules[hercules_field], opensees[opensees_field]
                 output.extend((left, right, right - left))
@@ -306,6 +338,18 @@ def compare_histories(
     work_scale = max(abs(hercules_work), abs(opensees_work), sys.float_info.min)
     return {
         "steps": fixture.steps,
+        "strain_path": {
+            "maximum_hercules_epsilon_xy_error": max(
+                abs(value) for value in hercules_epsilon_errors
+            ),
+            "maximum_opensees_epsilon_xy_error": max(
+                abs(value) for value in opensees_epsilon_errors
+            ),
+            "maximum_opensees_gamma_xy_error": max(
+                abs(value) for value in opensees_gamma_errors
+            ),
+            "opensees_acceptance_tolerance": PRESCRIBED_GAMMA_ATOL,
+        },
         "stress_metrics": field_metrics,
         "shear_work": {
             "hercules": hercules_work,
@@ -401,8 +445,23 @@ def run_selftest(fixture_path: Path) -> int:
         comparison = compare_histories(
             fixture, hercules_rows, opensees_rows, root / "comparison.csv"
         )
+        assert comparison["strain_path"]["maximum_opensees_gamma_xy_error"] == 0.0
         assert comparison["stress_metrics"]["sig_xy"]["normalized_root_mean_square_difference"] == 0.0
         assert comparison["shear_work"]["relative_difference"] == 0.0
+        perturbed_rows = [dict(row) for row in opensees_rows]
+        perturbed_rows[1]["epsilon_xy"] -= 5.0e-15
+        perturbed_rows[1]["gamma_xy"] -= 1.0e-14
+        perturbed = compare_histories(
+            fixture,
+            hercules_rows,
+            perturbed_rows,
+            root / "penalty-perturbed-comparison.csv",
+        )
+        assert math.isclose(
+            perturbed["strain_path"]["maximum_opensees_gamma_xy_error"],
+            1.0e-14,
+            rel_tol=1.0e-3,
+        )
     print("PASS: OpenSees BAE comparison parser and driver-generation self-test")
     return 0
 
@@ -533,7 +592,13 @@ def main() -> int:
 
     shear = summary["stress_metrics"]["sig_xy"]
     work = summary["shear_work"]
+    path = summary["strain_path"]
     print(f"Hercules/OpenSees steps: {fixture.steps}")
+    print(
+        "Maximum OpenSees |gamma_xy - target|: "
+        f"{path['maximum_opensees_gamma_xy_error']:.6e} "
+        f"(tolerance {path['opensees_acceptance_tolerance']:.6e})"
+    )
     print(f"Maximum |delta sigma_xy|: {shear['maximum_absolute_difference']:.6e} Pa")
     print(f"Normalized sigma_xy RMSE: {shear['normalized_root_mean_square_difference']:.6e}")
     print(f"Relative shear-work difference: {work['relative_difference']:.6e}")

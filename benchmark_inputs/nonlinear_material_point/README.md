@@ -123,7 +123,10 @@ displacement before recording each stress. This is essential at the repeated
 zero point: advancing with `LoadControl 0` would release displacement control
 and re-equilibrate the brick instead of applying a true zero strain increment.
 Version-2 CSVs include `driver_version` and `domain_time`; the comparison tool
-rejects older CSVs, which must be regenerated.
+rejects older CSVs, which must be regenerated. Penalty enforcement can leave
+roundoff-scale differences between requested and actual displacement. The
+comparison accepts absolute shear-path error up to `1e-12`, reports the maximum
+observed error, and retains the actual OpenSees strain in `comparison.csv`.
 
 First generate or reuse the Hercules CPU history, then provide an OpenSees
 executable that includes `MultiaxialCyclicPlasticity`:
