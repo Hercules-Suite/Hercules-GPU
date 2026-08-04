@@ -94,43 +94,46 @@ equalDOF 3 7 1
 equalDOF 3 8 1
 
 element stdBrick 1 1 2 3 4 5 6 7 8 1 0.0 0.0 0.0
-timeSeries Linear 1
+
+# Prescribe the complete top-face displacement history. The leading zero is
+# the unrecorded value at domain time 0; recorded material steps occupy times
+# 1 through 20. A repeated path value advances and commits the material with
+# the displacement still constrained, producing a true zero strain increment.
+set timeHistory {
+     0.0  1.0  2.0  3.0  4.0  5.0  6.0
+     7.0  8.0  9.0 10.0 11.0 12.0 13.0
+    14.0 15.0 16.0 17.0 18.0 19.0 20.0
+}
+set prescribedGammaHistory [linsert $gammaHistory 0 0.0]
+timeSeries Path 1 -time $timeHistory -values $prescribedGammaHistory -useLast
 pattern Plain 1 1 {
-    load 3 1.0 0.0 0.0
+    sp 3 1 1.0
 }
 
-constraints Transformation
+constraints Penalty 1.0e18 1.0e18
 numberer RCM
 system BandGeneral
 test NormDispIncr 1.0e-12 50 0
 algorithm Newton
-integrator LoadControl 0.0
+integrator LoadControl 1.0
 analysis Static
 
-# Prime and commit the material's initial zero-strain state before recording
-# the prescribed history.
-if {[analyze 1] != 0} {
-    puts stderr "OpenSees zero-state initialization failed"
-    exit 41
-}
-
 set output [open $outputPath w]
-puts $output "step,epsilon_xy,gamma_xy,sigma_xx,sigma_yy,sigma_zz,sigma_xy,sigma_yz,sigma_xz"
+puts $output "step,epsilon_xy,gamma_xy,sigma_xx,sigma_yy,sigma_zz,sigma_xy,sigma_yz,sigma_xz,driver_version,domain_time"
 
-set currentGamma 0.0
 set step 0
 foreach gamma $gammaHistory {
-    set increment [expr {$gamma - $currentGamma}]
-    if {$increment == 0.0} {
-        integrator LoadControl 0.0
-    } else {
-        integrator DisplacementControl 3 1 $increment
-    }
-
     if {[analyze 1] != 0} {
         puts stderr "OpenSees analysis failed at material step $step"
         close $output
         exit 42
+    }
+
+    set actualGamma [nodeDisp 3 1]
+    if {abs($actualGamma - $gamma) > 1.0e-12} {
+        puts stderr "OpenSees displacement mismatch at material step $step: target=$gamma actual=$actualGamma"
+        close $output
+        exit 44
     }
 
     set stress [eleResponse 1 material 1 stress]
@@ -139,13 +142,13 @@ foreach gamma $gammaHistory {
         close $output
         exit 43
     }
-    set epsilonXY [expr {0.5 * $gamma}]
-    puts $output [format "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e" \
-        $step $epsilonXY $gamma \
+    set epsilonXY [expr {0.5 * $actualGamma}]
+    puts $output [format "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%d,%.17e" \
+        $step $epsilonXY $actualGamma \
         [lindex $stress 0] [lindex $stress 1] [lindex $stress 2] \
-        [lindex $stress 3] [lindex $stress 4] [lindex $stress 5]]
+        [lindex $stress 3] [lindex $stress 4] [lindex $stress 5] \
+        2 [getTime]]
 
-    set currentGamma $gamma
     incr step
 }
 

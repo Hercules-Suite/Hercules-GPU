@@ -138,33 +138,41 @@ def write_opensees_driver(
         "equalDOF 3 7 1",
         "equalDOF 3 8 1",
         "element stdBrick 1 1 2 3 4 5 6 7 8 1 0.0 0.0 0.0",
-        "timeSeries Linear 1",
-        "pattern Plain 1 1 { load 3 1.0 0.0 0.0 }",
-        "constraints Transformation",
+        (
+            "timeSeries Path 1 -time {"
+            + " ".join(str(step) for step in range(fixture.steps + 1))
+            + "} -values {0.0 "
+            + " ".join(tcl_float(2.0 * strain[3]) for strain in fixture.strains)
+            + "} -useLast"
+        ),
+        "pattern Plain 1 1 { sp 3 1 1.0 }",
+        "constraints Penalty 1.0e18 1.0e18",
         "numberer RCM",
         "system BandGeneral",
         "test NormDispIncr 1.0e-12 50 0",
         "algorithm Newton",
-        "integrator LoadControl 0.0",
+        "integrator LoadControl 1.0",
         "analysis Static",
-        "if {[analyze 1] != 0} { puts stderr \"OpenSees zero-state initialization failed\"; exit 41 }",
         f"set output [open {tcl_path(csv_path)} w]",
-        "puts $output \"step,epsilon_xy,gamma_xy,sigma_xx,sigma_yy,sigma_zz,sigma_xy,sigma_yz,sigma_xz\"",
+        (
+            "puts $output \"step,epsilon_xy,gamma_xy,sigma_xx,sigma_yy,"
+            "sigma_zz,sigma_xy,sigma_yz,sigma_xz,driver_version,domain_time\""
+        ),
     ]
-    current_gamma = 0.0
     for step, strain in enumerate(fixture.strains):
-        epsilon_xy = strain[3]
-        gamma_xy = 2.0 * epsilon_xy
-        increment = gamma_xy - current_gamma
-        if increment == 0.0:
-            lines.append("integrator LoadControl 0.0")
-        else:
-            lines.append(f"integrator DisplacementControl 3 1 {tcl_float(increment)}")
+        gamma_xy = 2.0 * strain[3]
         lines.extend(
             [
                 (
                     f"if {{[analyze 1] != 0}} {{ puts stderr \"OpenSees analysis "
                     f"failed at material step {step}\"; close $output; exit 42 }}"
+                ),
+                "set actualGamma [nodeDisp 3 1]",
+                (
+                    f"if {{abs($actualGamma - {tcl_float(gamma_xy)}) > 1.0e-12}} {{ "
+                    f"puts stderr \"OpenSees displacement mismatch at material step {step}: "
+                    f"target={tcl_float(gamma_xy)} actual=$actualGamma\"; "
+                    "close $output; exit 44 }"
                 ),
                 "set stress [eleResponse 1 material 1 stress]",
                 (
@@ -173,14 +181,14 @@ def write_opensees_driver(
                 ),
                 (
                     "puts $output [format \"%d,%.17e,%.17e,%.17e,%.17e,%.17e,"
-                    "%.17e,%.17e,%.17e\" "
-                    f"{step} {tcl_float(epsilon_xy)} {tcl_float(gamma_xy)} "
+                    "%.17e,%.17e,%.17e,%d,%.17e\" "
+                    f"{step} [expr {{0.5 * $actualGamma}}] $actualGamma "
                     "[lindex $stress 0] [lindex $stress 1] [lindex $stress 2] "
-                    "[lindex $stress 3] [lindex $stress 4] [lindex $stress 5]]"
+                    "[lindex $stress 3] [lindex $stress 4] [lindex $stress 5] "
+                    "2 [getTime]]"
                 ),
             ]
         )
-        current_gamma = gamma_xy
     lines.extend(["close $output", "wipe", "exit 0", ""])
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -227,6 +235,19 @@ def compare_histories(
             f"history length mismatch: fixture={fixture.steps}, "
             f"Hercules={len(hercules_rows)}, OpenSees={len(opensees_rows)}"
         )
+    for step, row in enumerate(opensees_rows):
+        if row.get("driver_version") != 2.0:
+            raise ValueError(
+                "OpenSees CSV was not produced by prescribed-displacement driver "
+                "version 2; rerun opensees_bae_synthetic.tcl"
+            )
+        if not math.isclose(
+            row.get("domain_time", math.nan),
+            float(step + 1),
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError(f"OpenSees domain time mismatch at step {step}")
     field_metrics: dict[str, dict[str, float]] = {}
     with comparison_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
@@ -248,6 +269,13 @@ def compare_histories(
                 raise ValueError(f"Hercules epsilon_xy mismatch at step {step}")
             if not math.isclose(opensees["epsilon_xy"], expected_epsilon, rel_tol=0.0, abs_tol=1.0e-15):
                 raise ValueError(f"OpenSees epsilon_xy mismatch at step {step}")
+            if not math.isclose(
+                opensees["gamma_xy"],
+                2.0 * expected_epsilon,
+                rel_tol=0.0,
+                abs_tol=1.0e-15,
+            ):
+                raise ValueError(f"OpenSees gamma_xy mismatch at step {step}")
             output = [step, expected_epsilon, 2.0 * expected_epsilon]
             for hercules_field, opensees_field in zip(STRESS_FIELDS, OPEN_STRESS_FIELDS):
                 left, right = hercules[hercules_field], opensees[opensees_field]
@@ -312,13 +340,19 @@ def run_selftest(fixture_path: Path) -> int:
         assert math.isclose(float(value_match.group(1)), expected)
     assert "set beta 1.0" in standalone
     assert "sigma_xy,sigma_yz,sigma_xz" in standalone
+    assert "driver_version,domain_time" in standalone
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         driver = root / "driver.tcl"
         write_opensees_driver(fixture, driver, root / "output.csv", 1.0, 0.5)
         generated = driver.read_text(encoding="utf-8")
-        assert "integrator LoadControl 0.0" in generated
-        assert "integrator DisplacementControl 3 1" in generated
+        assert "timeSeries Path 1" in generated
+        assert "pattern Plain 1 1 { sp 3 1 1.0 }" in generated
+        assert "constraints Penalty" in generated
+        assert "integrator LoadControl 1.0" in generated
+        assert "set actualGamma [nodeDisp 3 1]" in generated
+        assert "integrator LoadControl 0.0" not in generated
+        assert "integrator DisplacementControl" not in generated
         assert "element stdBrick" in generated
         assert "7.46480000000000000e+07" in generated
         hercules_rows = []
@@ -349,8 +383,21 @@ def run_selftest(fixture_path: Path) -> int:
                     "sigma_xy": sigma_xy,
                     "sigma_yz": 0.0,
                     "sigma_xz": 0.0,
+                    "driver_version": 2.0,
+                    "domain_time": float(step + 1),
                 }
             )
+        stale_rows = [dict(row) for row in opensees_rows]
+        for row in stale_rows:
+            row.pop("driver_version")
+        try:
+            compare_histories(
+                fixture, hercules_rows, stale_rows, root / "stale-comparison.csv"
+            )
+        except ValueError as error:
+            assert "prescribed-displacement driver version 2" in str(error)
+        else:
+            raise AssertionError("stale OpenSees CSV was not rejected")
         comparison = compare_histories(
             fixture, hercules_rows, opensees_rows, root / "comparison.csv"
         )
@@ -450,12 +497,16 @@ def main() -> int:
             output_dir / "opensees.stdout.log",
             output_dir / "opensees.stderr.log",
         )
-    summary = compare_histories(
-        fixture,
-        read_csv(hercules_csv),
-        read_csv(opensees_csv),
-        output_dir / "comparison.csv",
-    )
+    try:
+        summary = compare_histories(
+            fixture,
+            read_csv(hercules_csv),
+            read_csv(opensees_csv),
+            output_dir / "comparison.csv",
+        )
+    except ValueError as error:
+        print(f"Comparison input error: {error}", file=sys.stderr)
+        return 2
     summary.update(
         {
             "fixture": str(fixture_path),

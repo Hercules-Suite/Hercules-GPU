@@ -177,6 +177,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /opensees_bae_synthetic\.tcl/);
   assert.match(gpu, /--opensees-csv/);
   assert.match(gpu, /17-step legacy BAE suite fixture is not interchangeable/);
+  assert.match(gpu, /Path time series and prescribed top-face displacement/);
+  assert.match(gpu, /marks its CSV as driver version 2/);
+  assert.match(gpu, /rejects older CSVs/);
   assert.match(gpu, /one-brick affine simple-shear test/);
   assert.match(gpu, /integrated shear-work differences/);
   assert.match(gpu, /Ho=0, h=psi0 times G, and beta=1/);
@@ -222,7 +225,7 @@ test("ships the OpenSees BAE characterization fixture and driver", () => {
   );
   const readme = readFileSync(`${benchmarkRoot}README.md`, "utf8");
 
-  assert.match(driver, /gamma_xy = 2\.0 \* epsilon_xy/);
+  assert.match(driver, /gamma_xy = 2\.0 \* strain\[3\]/);
   assert.match(driver, /hardening_scale = fixture\.psi0 \* fixture\.shear/);
   assert.match(driver, /element stdBrick/);
   assert.match(driver, /OPEN_STRESS_FIELDS[\s\S]*sigma_xy[\s\S]*sigma_yz[\s\S]*sigma_xz/);
@@ -232,6 +235,12 @@ test("ships the OpenSees BAE characterization fixture and driver", () => {
   assert.match(standalone, /nDMaterial MultiaxialCyclicPlasticity/);
   assert.match(standalone, /element stdBrick/);
   assert.match(standalone, /set gammaHistory/);
+  assert.match(standalone, /timeSeries Path/);
+  assert.match(standalone, /sp 3 1 1\.0/);
+  assert.match(standalone, /set actualGamma \[nodeDisp 3 1\]/);
+  assert.match(standalone, /driver_version,domain_time/);
+  assert.doesNotMatch(standalone, /integrator LoadControl 0\.0/);
+  assert.doesNotMatch(standalone, /integrator DisplacementControl/);
   assert.match(standalone, /set stress \[eleResponse 1 material 1 stress\]/);
   assert.match(readme, /characterization comparison, not an equivalence proof/i);
 });
