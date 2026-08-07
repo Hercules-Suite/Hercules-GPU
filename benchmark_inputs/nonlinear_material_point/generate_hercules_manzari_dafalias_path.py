@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 STRAIN_FIELDS = ("eps_xx", "eps_yy", "eps_zz", "eps_xy", "eps_yz", "eps_xz")
-KNOWN_TESTS = {"md_drained_triaxial", "md_undrained_cyclic_shear"}
+KNOWN_TESTS = {
+    "md_drained_triaxial": ("2", "monotonic"),
+    "md_undrained_cyclic_shear": ("1", "cyclic"),
+}
 
 
 def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
@@ -25,15 +28,24 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
     test_ids = {row["test_id"] for row in rows}
     if len(test_ids) != 1 or next(iter(test_ids)) not in KNOWN_TESTS:
         raise SystemExit(f"unsupported or inconsistent test_id values: {test_ids}")
-    if any(row["driver_version"] != "1" for row in rows):
-        raise SystemExit("OpenSees CSV was not produced by canonical driver version 1")
+    test_id = next(iter(test_ids))
+    expected_version, required_phase = KNOWN_TESTS[test_id]
+    if any(row["driver_version"] != expected_version for row in rows):
+        raise SystemExit(
+            f"OpenSees CSV was not produced by {test_id} driver version "
+            f"{expected_version}"
+        )
+    if not any(row.get("phase") == required_phase for row in rows):
+        raise SystemExit(
+            f"incomplete OpenSees CSV: no {required_phase!r} states were recorded"
+        )
     for index, row in enumerate(rows):
         if int(row["step"]) != index:
             raise SystemExit(f"nonsequential OpenSees step at row {index}")
         values = [float(row[field]) for field in STRAIN_FIELDS]
         if not all(math.isfinite(value) for value in values):
             raise SystemExit(f"nonfinite strain at OpenSees step {index}")
-    return next(iter(test_ids)), rows
+    return test_id, rows
 
 
 def main() -> int:

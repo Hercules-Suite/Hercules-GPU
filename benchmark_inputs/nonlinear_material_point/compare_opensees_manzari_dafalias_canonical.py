@@ -25,8 +25,8 @@ STATE_PAIRS = tuple(
     + [("void_ratio", "void_ratio")]
 )
 TEST_MODES = {
-    "drained": ("md_drained_triaxial", "monotonic"),
-    "undrained": ("md_undrained_cyclic_shear", "cyclic"),
+    "drained": ("md_drained_triaxial", "monotonic", "2"),
+    "undrained": ("md_undrained_cyclic_shear", "cyclic", "1"),
 }
 
 
@@ -85,7 +85,7 @@ def main() -> int:
     parser.add_argument("--max-ru-difference", type=float)
     args = parser.parse_args()
 
-    test_id, comparison_phase = TEST_MODES[args.mode]
+    test_id, comparison_phase, driver_version = TEST_MODES[args.mode]
     output_dir = args.output_dir or Path(f"opensees_{test_id}_comparison")
     hercules = read_hercules(args.hercules_csv)
     opensees = read_opensees(args.opensees_csv)
@@ -106,9 +106,11 @@ def main() -> int:
     phase_indices: list[int] = []
 
     for index, (hrow, orow) in enumerate(zip(hercules, opensees)):
-        if orow.get("test_id") != test_id or orow.get("driver_version") != "1":
+        if (orow.get("test_id") != test_id
+                or orow.get("driver_version") != driver_version):
             raise SystemExit(
-                f"OpenSees CSV is not {test_id} driver version 1 at row {index}"
+                f"OpenSees CSV is not {test_id} driver version "
+                f"{driver_version} at row {index}"
             )
         if int(orow["step"]) != index or int(hrow["step"]) != index:
             raise SystemExit(f"nonsequential step at row {index}")
