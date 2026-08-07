@@ -459,7 +459,11 @@ NL_HD static nl_md_stage_t md_stage(
         const tensor_t next = md_add(stress, out.dsigma);
         const double pnext = md_trace(next)/3.0+1.0e-2*m->P_atm;
         if (!(pnext > 0.0)) return out;
-        out.dalpha = md_sub(md_scale(md_dev(next), 1.0/pnext), r);
+        /* Alpha, fabric, and plastic strain are plastic history variables.
+         * They must remain fixed during an elastic loading/unloading stage.
+         * Moving alpha with the elastic stress ratio artificially translates
+         * the yield surface and can hide a subsequent yield crossing. */
+        out.dalpha = md_zero();
     } else {
         tensor_t plastic_direction = md_sub(
             md_scale(dep.n, dep.B),

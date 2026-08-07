@@ -427,7 +427,9 @@ Nonlinear GPU execution (runtime environment):
 	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
 	the absolute yield-surface residual after a plastic stress correction. The
 	elastic predictor uses the one-sided admissibility condition
-	`f_trial <= error_tolerance`. Plastic correction is limited to
+	`f_trial <= error_tolerance`. Elastic stages leave alpha, fabric, and plastic
+	strain unchanged; these history variables evolve only under plastic flow.
+	Plastic correction is limited to
 	`min(no_substeps, 50)` iterations; failure to satisfy the absolute criterion
 	is reported as GPU constitutive failure code 3 and aborts the run rather than
 	continuing from the off-surface state.

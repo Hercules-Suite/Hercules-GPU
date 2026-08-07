@@ -83,8 +83,8 @@ Poisson's ratio and density from the element's `Vp`, `Vs`, and `rho`.
 - `manzari_dafalias_modified_euler_synthetic.in` establishes isotropic
   confinement, applies a cyclic tensor-shear path, and checks the same
   allocation-free Modified-Euler implementation on host and CUDA. Its CSV adds
-  alpha, alpha-in, fabric, void ratio, plastic multiplier, yield drift, local
-  integration error, and accepted-substep diagnostics.
+  alpha, alpha-in, fabric, void ratio, plastic multiplier, absolute yield
+  residual, local integration error, and accepted-substep diagnostics.
 
 Manzari--Dafalias reuses the production nonlinear integration controls rather
 than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
@@ -93,7 +93,9 @@ substeps (with rejected trials also bounded), and `error_tolerance` is the
 maximum absolute yield-surface residual in Pa after a plastic stress
 correction. The elastic predictor retains the one-sided admissibility check
 `f_trial <= error_tolerance`, so a genuinely elastic state may remain inside
-the surface. After an accepted plastic substep, the stress-correction loop
+the surface. Elastic stages preserve alpha, fabric, and plastic strain; only
+plastic flow evolves those history variables. After an accepted
+plastic substep, the stress-correction loop
 permits at most `min(no_substeps, 50)` iterations. If it cannot reduce the
 absolute residual to the tolerance, Hercules rejects the constitutive update
 and the production GPU error check aborts with Manzari--Dafalias failure code

@@ -5179,7 +5179,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         }
     } else if (material_model == MANZARI_DAFALIAS) {
         printf("Modified-Euler controls: local error %.6e, maximum "
-               "substeps %d, yield drift %.6e\n",
+               "substeps %d, absolute yield residual %.6e\n",
                backbone_tolerance, no_substeps, error_tolerance);
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "

@@ -337,6 +337,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /cfg->error_tolerance/);
   assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
   assert.match(gpu, /trial_f <= cfg->error_tolerance/);
+  assert.match(gpu, /out\.dalpha = md_zero\(\)/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
