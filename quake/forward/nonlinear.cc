@@ -4938,6 +4938,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     int result = 1;
     int steps = 0;
     int no_substeps = 0;
+    int material_constant_count = MATERIAL_POINT_CONSTANT_COUNT;
     double dt = 0.0;
     double rtol = 1.0e-6;
     double atol = 1.0e-9;
@@ -4984,8 +4985,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
         goto cleanup;
     }
-    const int material_constant_count =
-        (material_model == MANZARI_DAFALIAS)
+    material_constant_count = (material_model == MANZARI_DAFALIAS)
         ? MATERIAL_POINT_MD_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
