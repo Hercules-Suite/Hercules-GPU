@@ -18,6 +18,7 @@ set confinementKPa 100.0
 set consolidationSteps 50
 set axialSteps 300
 set finalAxialStrain -0.15
+set maxSubstepDepth 10
 
 wipe
 model BasicBuilder -ndm 3 -ndf 3
@@ -113,7 +114,7 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,3,%.17e" \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,4,%.17e" \
         $step $phaseName $exx $eyy $ezz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
         [lindex $state 6] [lindex $state 7] [lindex $state 8] \
@@ -141,34 +142,58 @@ for {set i 0} {$i < $consolidationSteps} {incr i} {
 # fixed at the confinement pressure.
 loadConst -time 0.0
 updateMaterialStage -material 1 -stage 1
-# The OpenSees material's own TolR is 1.0e-7.  Requiring the outer equilibrium
-# iteration to reach 1.0e-11 can therefore stall after the constitutive update
-# has already reached its configured accuracy.  The 1.0e-7 displacement norm
-# corresponds to at most 0.02% of the 5.0e-4 axial increment.
-test NormDispIncr 1.0e-7 100 0
+# Match the 1.0e-5 global displacement-increment tolerance used by the
+# published OpenSees Manzari--Dafalias triaxial example.  This is an outer
+# equilibrium tolerance and is independent of the material's TolR.
+test NormDispIncr 1.0e-5 100 0
 algorithm Newton
 pattern Plain 2 Linear {
     load 5 0.0 0.0 -1.0
 }
-integrator DisplacementControl 5 3 [expr {$finalAxialStrain/$axialSteps}]
-for {set i 0} {$i < $axialSteps} {incr i} {
+
+# Retry a failed axial increment as two half increments, following the
+# recursive substepping strategy in the published OpenSees triaxial example.
+# Each successful substep is committed and recorded; their sum remains exactly
+# the requested nominal increment.
+set acceptedAxialSubsteps 0
+proc advanceDrainedIncrement {increment depth} {
+    global maxSubstepDepth acceptedAxialSubsteps
+    integrator DisplacementControl 5 3 $increment
+    test NormDispIncr 1.0e-5 100 0
+    algorithm Newton
     set ok [analyze 1]
-    if {$ok != 0} {
-        puts stderr "OpenSees Newton retry with line search at drained increment $i"
-        algorithm NewtonLineSearch -type InitialInterpolated -tol 0.8 -maxIter 20
-        set ok [analyze 1]
-        algorithm Newton
+    if {$ok == 0} {
+        writeState monotonic
+        incr acceptedAxialSubsteps
+        return 0
     }
+    if {$depth >= $maxSubstepDepth} {
+        puts stderr "OpenSees drained increment failed at maximum substep depth $depth"
+        return -10
+    }
+    set halfIncrement [expr {0.5*$increment}]
+    puts stderr "OpenSees drained increment did not converge; subdividing to $halfIncrement (depth [expr {$depth+1}])"
+    set ok [advanceDrainedIncrement $halfIncrement [expr {$depth+1}]]
+    if {$ok != 0} {
+        return $ok
+    }
+    return [advanceDrainedIncrement $halfIncrement [expr {$depth+1}]]
+}
+
+set nominalIncrement [expr {$finalAxialStrain/$axialSteps}]
+for {set i 0} {$i < $axialSteps} {incr i} {
+    set ok [advanceDrainedIncrement $nominalIncrement 0]
     if {$ok != 0} {
         puts stderr "OpenSees drained triaxial loading failed at increment $i"
         close $output
         exit 44
     }
-    writeState monotonic
 }
+writeState complete
 
 close $output
 puts "OpenSees drained Manzari-Dafalias triaxial history complete: $step states"
+puts "Accepted axial increments (including substeps): $acceptedAxialSubsteps"
 puts "CSV output: $outputPath"
 wipe
 exit 0

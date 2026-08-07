@@ -11,7 +11,7 @@ from pathlib import Path
 
 STRAIN_FIELDS = ("eps_xx", "eps_yy", "eps_zz", "eps_xy", "eps_yz", "eps_xz")
 KNOWN_TESTS = {
-    "md_drained_triaxial": ("3", "monotonic"),
+    "md_drained_triaxial": ("4", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
 }
 
@@ -45,6 +45,19 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
         values = [float(row[field]) for field in STRAIN_FIELDS]
         if not all(math.isfinite(value) for value in values):
             raise SystemExit(f"nonfinite strain at OpenSees step {index}")
+    if test_id == "md_drained_triaxial":
+        consolidated = [row for row in rows if row.get("phase") == "consolidation"]
+        completed = [row for row in rows if row.get("phase") == "complete"]
+        if not consolidated or len(completed) != 1 or rows[-1] is not completed[0]:
+            raise SystemExit("incomplete drained path: missing final completion state")
+        axial_increment = (
+            float(completed[0]["eps_zz"]) - float(consolidated[-1]["eps_zz"])
+        )
+        if not math.isclose(axial_increment, -0.15, rel_tol=0.0, abs_tol=1.0e-8):
+            raise SystemExit(
+                "incomplete drained path: final axial increment is "
+                f"{axial_increment:.17e}, expected -1.5e-1"
+            )
     return test_id, rows
 
 
