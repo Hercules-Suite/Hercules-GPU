@@ -343,6 +343,10 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

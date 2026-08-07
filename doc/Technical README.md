@@ -456,6 +456,16 @@ Nonlinear GPU execution (runtime environment):
 	kPa to preserve its low-pressure regularization scale; the comparator converts
 	stress to Pa and does not treat implementation differences as an automatic
 	pass/fail validation.
+- Two canonical OpenSees characterizations are provided in the same directory.
+	The drained monotonic triaxial driver maintains 100 kPa lateral confinement;
+	Hercules replays the solved strain path, and radial-stress drift measures
+	disagreement in strength and contraction/dilation tendency. The
+	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
+	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
+	reversals. The latter validates constitutive undrained tendency only: it does
+	not exercise Hercules U-P pressure degrees of freedom, storage, Darcy flow,
+	drainage boundaries, or solid-fluid coupling. A separate BrickUP benchmark is
+	required for complete coupled-path validation.
 - For a new material calibration, compare CPU and GPU nonlinear station
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and

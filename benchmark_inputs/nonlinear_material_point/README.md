@@ -122,6 +122,82 @@ The comparison reports differences but does not impose a pass threshold,
 because it is an independent model characterization rather than a host/device
 identity check.
 
+## Canonical Manzari--Dafalias comparisons
+
+Two longer OpenSees drivers characterize the model beyond the short cyclic
+CPU/CUDA fixture:
+
+- `opensees_manzari_dafalias_drained_triaxial.tcl` first consolidates a unit
+  brick isotropically to 100 kPa and then applies 15% monotonic axial
+  compression while keeping both lateral face loads at 100 kPa. It exercises
+  critical-state strength and the contraction-to-dilation response.
+- `opensees_manzari_dafalias_undrained_cyclic_shear.tcl` consolidates
+  isotropically and then applies five constant-volume shear cycles with 0.5%
+  engineering-shear amplitude. It calculates the excess pore pressure needed
+  to enforce undrained conditions as `delta_u = p'_0 - p'` and reports
+  `r_u = delta_u/p'_0`, effective-stress reduction, and stress reversals.
+
+The drained problem is stress-controlled in OpenSees. The conversion tool
+places the lateral strain that OpenSees solved into a Hercules material-point
+input. Hercules therefore sees the identical strain history; departure of its
+radial stress from the prescribed confinement measures disagreement in the
+model's contraction/dilation tendency without mixing in a second outer
+stress-control algorithm.
+
+Run either standalone driver on a machine with OpenSees:
+
+```bash
+OpenSees opensees_manzari_dafalias_drained_triaxial.tcl \
+  opensees_md_drained_triaxial.csv
+OpenSees opensees_manzari_dafalias_undrained_cyclic_shear.tcl \
+  opensees_md_undrained_cyclic_shear.csv
+```
+
+Copy the CSVs to the Hercules machine, generate the matching material-point
+inputs, and run them through `psolve`:
+
+```bash
+python3 generate_hercules_manzari_dafalias_path.py \
+  --opensees-csv opensees_md_drained_triaxial.csv \
+  --output manzari_md_drained_triaxial.in \
+  --output-prefix manzari_md_drained_triaxial
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point manzari_md_drained_triaxial.in
+
+python3 generate_hercules_manzari_dafalias_path.py \
+  --opensees-csv opensees_md_undrained_cyclic_shear.csv \
+  --output manzari_md_undrained_cyclic_shear.in \
+  --output-prefix manzari_md_undrained_cyclic_shear
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point manzari_md_undrained_cyclic_shear.in
+```
+
+Then create invariant, state, confinement, and pore-pressure comparisons:
+
+```bash
+python3 compare_opensees_manzari_dafalias_canonical.py \
+  --mode drained \
+  --hercules-csv manzari_md_drained_triaxial.cpu.csv \
+  --opensees-csv opensees_md_drained_triaxial.csv
+
+python3 compare_opensees_manzari_dafalias_canonical.py \
+  --mode undrained \
+  --hercules-csv manzari_md_undrained_cyclic_shear.cpu.csv \
+  --opensees-csv opensees_md_undrained_cyclic_shear.csv
+```
+
+The comparator is report-only by default. After documenting calibration- and
+path-specific acceptance values, CI or a benchmark script may add
+`--max-stress-nrmse`, `--max-radial-confinement-error-kpa`, or
+`--max-ru-difference`.
+
+The constant-volume test is an undrained *constitutive* characterization. Its
+pore pressure is inferred from effective mean stress under the stated constant
+total-pressure condition. It does not exercise Hercules U-P pressure degrees
+of freedom, storage, permeability/Darcy flow, boundary drainage, or coupling.
+A separate BrickUP production benchmark is required before claiming that the
+complete liquefaction pathway is validated.
+
 BAE, BAH, GQH, MKZ, and Ramberg--Osgood are dispatched directly to their
 incremental bounding/backbone update. The model uses the strain increment and
 stored stress/history to identify loading and reversal; it does not use the
