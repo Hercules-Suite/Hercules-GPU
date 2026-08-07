@@ -127,10 +127,15 @@ identity check.
 Two longer OpenSees drivers characterize the model beyond the short cyclic
 CPU/CUDA fixture:
 
-- `opensees_manzari_dafalias_drained_triaxial.tcl` first consolidates a unit
-  brick isotropically to 100 kPa and then applies 15% monotonic axial
+- `opensees_manzari_dafalias_drained_triaxial.tcl` first consolidates a
+  stabilized single-point unit brick isotropically to 100 kPa and then applies
+  15% monotonic axial
   compression while keeping both lateral face loads at 100 kPa. It exercises
-  critical-state strength and the contraction-to-dilation response.
+  critical-state strength and the contraction-to-dilation response. Failed
+  outer increments use recursive bisection; each attempt is limited to the 20
+  Newton iterations used by the published OpenSees triaxial example. For this
+  uniform affine path, single-point integration avoids evaluating eight
+  identical material states in a full-integration brick.
 - `opensees_manzari_dafalias_undrained_cyclic_shear.tcl` consolidates
   isotropically and then applies five constant-volume shear cycles with 0.5%
   engineering-shear amplitude. It calculates the excess pore pressure needed

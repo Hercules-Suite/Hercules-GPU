@@ -63,7 +63,10 @@ equalDOF 5 6 3
 equalDOF 5 8 3
 equalDOF 5 7 3
 
-element stdBrick 1 1 2 3 4 5 6 7 8 1 0.0 0.0 0.0
+# The imposed affine normal deformation is uniform, so stabilized single-point
+# integration evaluates the same material path as the full-integration brick
+# without repeating it at eight identical Gauss points.
+element SSPbrick 1 1 2 3 4 5 6 7 8 1 0.0 0.0 0.0
 updateMaterialStage -material 1 -stage 0
 
 constraints Transformation
@@ -89,8 +92,8 @@ puts $output "step,phase,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,sigma_xx_kpa,
 set step 0
 proc writeState {phaseName} {
     global output step confinementKPa
-    set stress [eleResponse 1 material 1 stress]
-    set state [eleResponse 1 material 1 state]
+    set stress [eleResponse 1 stress]
+    set state [eleResponse 1 state]
     if {[llength $stress] != 6 || [llength $state] != 26} {
         puts stderr "OpenSees material response has an unexpected size at step $step"
         close $output
@@ -114,7 +117,7 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,4,%.17e" \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,5,%.17e" \
         $step $phaseName $exx $eyy $ezz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
         [lindex $state 6] [lindex $state 7] [lindex $state 8] \
@@ -145,7 +148,7 @@ updateMaterialStage -material 1 -stage 1
 # Match the 1.0e-5 global displacement-increment tolerance used by the
 # published OpenSees Manzari--Dafalias triaxial example.  This is an outer
 # equilibrium tolerance and is independent of the material's TolR.
-test NormDispIncr 1.0e-5 100 0
+test NormDispIncr 1.0e-5 20 0
 algorithm Newton
 pattern Plain 2 Linear {
     load 5 0.0 0.0 -1.0
@@ -159,7 +162,7 @@ set acceptedAxialSubsteps 0
 proc advanceDrainedIncrement {increment depth} {
     global maxSubstepDepth acceptedAxialSubsteps
     integrator DisplacementControl 5 3 $increment
-    test NormDispIncr 1.0e-5 100 0
+    test NormDispIncr 1.0e-5 20 0
     algorithm Newton
     set ok [analyze 1]
     if {$ok == 0} {

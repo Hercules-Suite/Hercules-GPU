@@ -11,7 +11,7 @@ from pathlib import Path
 
 STRAIN_FIELDS = ("eps_xx", "eps_yy", "eps_zz", "eps_xy", "eps_yz", "eps_xz")
 KNOWN_TESTS = {
-    "md_drained_triaxial": ("4", "complete"),
+    "md_drained_triaxial": ("5", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
 }
 
