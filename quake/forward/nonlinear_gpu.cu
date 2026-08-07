@@ -82,6 +82,7 @@ typedef struct nonlinear_gpu_state_t {
     qpvectors_t *sv_max;
     qpvectors_t *kappa;
     qptensors_t *sref;
+    qptensors_t *fabric;
     qpvectors_t *gamma1d;
     qpvectors_t *tao1d;
     qpvectors_t *ggmax;
@@ -241,6 +242,449 @@ __device__ static inline tensor_t nl_elastic_strain(tensor_t stress,
     strain.zz += ev;
     return strain;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Manzari--Dafalias explicit Modified-Euler integration.                      */
+/*                                                                            */
+/* The core is host/device so the material-point command can run the exact     */
+/* same arithmetic on the host and GPU. Production execution remains GPU-only. */
+/* Hercules stores tension-positive stress/strain; the MD equations below use  */
+/* compression-positive tensors, converted only at the integration boundary.   */
+/* -------------------------------------------------------------------------- */
+
+#define NL_HD __host__ __device__
+
+typedef struct nl_md_stage_t {
+    tensor_t dsigma;
+    tensor_t dalpha;
+    tensor_t dfabric;
+    tensor_t dpstrain;
+    double dgamma;
+    int ok;
+} nl_md_stage_t;
+
+typedef struct nl_md_dependent_t {
+    tensor_t n;
+    tensor_t b;
+    tensor_t R;
+    double h;
+    double D;
+    double B;
+    double C;
+    int ok;
+} nl_md_dependent_t;
+
+NL_HD static inline tensor_t md_zero(void)
+{
+    tensor_t a = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    return a;
+}
+
+NL_HD static inline tensor_t md_add(tensor_t a, tensor_t b)
+{
+    tensor_t c = {a.xx+b.xx, a.yy+b.yy, a.zz+b.zz,
+                  a.xy+b.xy, a.yz+b.yz, a.xz+b.xz};
+    return c;
+}
+
+NL_HD static inline tensor_t md_sub(tensor_t a, tensor_t b)
+{
+    tensor_t c = {a.xx-b.xx, a.yy-b.yy, a.zz-b.zz,
+                  a.xy-b.xy, a.yz-b.yz, a.xz-b.xz};
+    return c;
+}
+
+NL_HD static inline tensor_t md_scale(tensor_t a, double s)
+{
+    tensor_t c = {a.xx*s, a.yy*s, a.zz*s, a.xy*s, a.yz*s, a.xz*s};
+    return c;
+}
+
+NL_HD static inline tensor_t md_iso(double s)
+{
+    tensor_t a = {s, s, s, 0.0, 0.0, 0.0};
+    return a;
+}
+
+NL_HD static inline double md_trace(tensor_t a)
+{
+    return a.xx+a.yy+a.zz;
+}
+
+NL_HD static inline tensor_t md_dev(tensor_t a)
+{
+    const double mean = md_trace(a)/3.0;
+    a.xx -= mean; a.yy -= mean; a.zz -= mean;
+    return a;
+}
+
+NL_HD static inline double md_ddot(tensor_t a, tensor_t b)
+{
+    return a.xx*b.xx+a.yy*b.yy+a.zz*b.zz+
+           2.0*(a.xy*b.xy+a.yz*b.yz+a.xz*b.xz);
+}
+
+NL_HD static inline double md_norm(tensor_t a)
+{
+    return sqrt(fmax(md_ddot(a, a), 0.0));
+}
+
+NL_HD static inline int md_finite(tensor_t a)
+{
+    return isfinite(a.xx) && isfinite(a.yy) && isfinite(a.zz) &&
+           isfinite(a.xy) && isfinite(a.yz) && isfinite(a.xz);
+}
+
+NL_HD static inline tensor_t md_square(tensor_t a)
+{
+    tensor_t b;
+    b.xx = a.xx*a.xx+a.xy*a.xy+a.xz*a.xz;
+    b.yy = a.xy*a.xy+a.yy*a.yy+a.yz*a.yz;
+    b.zz = a.xz*a.xz+a.yz*a.yz+a.zz*a.zz;
+    b.xy = a.xx*a.xy+a.xy*a.yy+a.xz*a.yz;
+    b.yz = a.xy*a.xz+a.yy*a.yz+a.yz*a.zz;
+    b.xz = a.xx*a.xz+a.xy*a.yz+a.xz*a.zz;
+    return b;
+}
+
+NL_HD static inline tensor_t md_elastic_increment(tensor_t de,
+                                                   double K, double G)
+{
+    return md_add(md_scale(md_dev(de), 2.0*G),
+                  md_iso(K*md_trace(de)));
+}
+
+NL_HD static inline tensor_t md_elastic_compliance(tensor_t dsigma,
+                                                    double K, double G)
+{
+    return md_add(md_scale(md_dev(dsigma), 1.0/(2.0*G)),
+                  md_iso(md_trace(dsigma)/(9.0*K)));
+}
+
+NL_HD static inline void md_elastic_moduli(
+    const manzari_dafalias_constants_t *m, tensor_t stress,
+    double *K, double *G)
+{
+    const double pmin = 1.0e-4*m->P_atm;
+    const double p = fmax(md_trace(stress)/3.0, pmin);
+    const double void_factor = (2.97-m->e_init)*(2.97-m->e_init)/
+                               (1.0+m->e_init);
+    *G = m->G0*m->P_atm*void_factor*sqrt(p/m->P_atm);
+    *K = (2.0/3.0)*(1.0+m->nu)/(1.0-2.0*m->nu)*(*G);
+}
+
+NL_HD static inline double md_yield(
+    const manzari_dafalias_constants_t *m, tensor_t stress, tensor_t alpha)
+{
+    const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+    return md_norm(md_sub(md_dev(stress), md_scale(alpha, p)))-
+           sqrt(2.0/3.0)*m->m*p;
+}
+
+NL_HD static nl_md_dependent_t md_state_dependent(
+    const manzari_dafalias_constants_t *m, tensor_t stress, tensor_t alpha,
+    tensor_t fabric, double void_ratio, tensor_t alpha_in)
+{
+    nl_md_dependent_t out = {};
+    const double small = 1.0e-14;
+    const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+    if (!(p > 0.0) || !(m->c > 0.0) || !(m->P_atm > 0.0)) return out;
+
+    tensor_t shifted = md_sub(md_dev(stress), md_scale(alpha, p));
+    const double shifted_norm = md_norm(shifted);
+    out.n = (shifted_norm > small) ? md_scale(shifted, 1.0/shifted_norm)
+                                   : md_zero();
+    const tensor_t n2 = md_square(out.n);
+    double cos3theta = sqrt(6.0)*md_ddot(out.n, n2);
+    cos3theta = fmin(1.0, fmax(-1.0, cos3theta));
+    const double gden = (1.0+m->c)-(1.0-m->c)*cos3theta;
+    if (fabs(gden) <= DBL_MIN) return out;
+    const double g = 2.0*m->c/gden;
+    const double psi = void_ratio-
+        (m->e0-m->lambda_c*pow(p/m->P_atm, m->ksi));
+    const double alpha_b = g*m->Mc*exp(-m->nb*psi)-m->m;
+    const double alpha_d = g*m->Mc*exp( m->nd*psi)-m->m;
+    out.b = md_sub(md_scale(out.n, sqrt(2.0/3.0)*alpha_b), alpha);
+    const tensor_t d = md_sub(
+        md_scale(out.n, sqrt(2.0/3.0)*alpha_d), alpha);
+    const double denom_h = md_ddot(md_sub(alpha, alpha_in), out.n);
+    const double b0 = m->G0*m->h0*(1.0-m->ch*void_ratio)/
+                      sqrt(p/m->P_atm);
+    out.h = (fabs(denom_h) < small) ? 1.0e10 : b0/denom_h;
+    const double A = m->A0*(1.0+fmax(md_ddot(fabric, out.n), 0.0));
+    out.D = A*md_ddot(d, out.n);
+    if (p < 0.05*m->P_atm) {
+        /* The published/UW low-pressure regularization was calibrated with
+         * pressure expressed in kPa. Hercules input is SI, so convert here
+         * instead of making the response depend on the user's unit system. */
+        const double p_kpa = p*1.0e-3;
+        out.D /= 1.0+exp(7.6349-7.2713*p_kpa);
+    }
+    out.B = 1.0+1.5*(1.0-m->c)/m->c*g*cos3theta;
+    out.C = 3.0*sqrt(1.5)*(1.0-m->c)/m->c*g;
+    out.R = md_sub(md_scale(out.n, out.B),
+                   md_scale(md_sub(n2, md_iso(1.0/3.0)), out.C));
+    out.R = md_add(out.R, md_iso(out.D/3.0));
+    out.ok = md_finite(out.n) && md_finite(out.b) && md_finite(out.R) &&
+             isfinite(out.h) && isfinite(out.D) && isfinite(out.B) &&
+             isfinite(out.C);
+    return out;
+}
+
+NL_HD static nl_md_stage_t md_stage(
+    const manzari_dafalias_constants_t *m, tensor_t stress, tensor_t alpha,
+    tensor_t fabric, tensor_t alpha_in, double void_ratio, tensor_t de,
+    double K, double G)
+{
+    nl_md_stage_t out = {};
+    const nl_md_dependent_t dep = md_state_dependent(
+        m, stress, alpha, fabric, void_ratio, alpha_in);
+    if (!dep.ok) return out;
+    const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+    const tensor_t r = md_scale(md_dev(stress), 1.0/p);
+    const tensor_t n2 = md_square(dep.n);
+    const double Kp = (2.0/3.0)*p*dep.h*md_ddot(dep.b, dep.n);
+    const double denominator = Kp+
+        2.0*G*(dep.B-dep.C*md_ddot(dep.n, n2))-
+        K*dep.D*md_ddot(dep.n, r);
+    const double dev_work = md_ddot(dep.n, md_dev(de));
+    const double numerator = 2.0*G*dev_work-
+                             K*md_trace(de)*md_ddot(dep.n, r);
+
+    if (fabs(denominator) <= DBL_MIN) return out;
+    out.dgamma = numerator/denominator;
+    if (out.dgamma <= 0.0) {
+        out.dgamma = 0.0;
+        out.dsigma = md_elastic_increment(de, K, G);
+        const tensor_t next = md_add(stress, out.dsigma);
+        const double pnext = md_trace(next)/3.0+1.0e-2*m->P_atm;
+        if (!(pnext > 0.0)) return out;
+        out.dalpha = md_sub(md_scale(md_dev(next), 1.0/pnext), r);
+    } else {
+        tensor_t plastic_direction = md_sub(
+            md_scale(dep.n, dep.B),
+            md_scale(md_sub(n2, md_iso(1.0/3.0)), dep.C));
+        tensor_t correction = md_add(md_scale(plastic_direction, 2.0*G),
+                                     md_iso(K*dep.D));
+        out.dsigma = md_sub(md_elastic_increment(de, K, G),
+                            md_scale(correction, out.dgamma));
+        out.dalpha = md_scale(dep.b, out.dgamma*(2.0/3.0)*dep.h);
+        const double fabric_scale = -out.dgamma*m->cz*fmax(-dep.D, 0.0);
+        out.dfabric = md_scale(
+            md_add(md_scale(dep.n, m->z_max), fabric), fabric_scale);
+        out.dpstrain = md_scale(dep.R, out.dgamma);
+    }
+    out.ok = md_finite(out.dsigma) && md_finite(out.dalpha) &&
+             md_finite(out.dfabric) && md_finite(out.dpstrain) &&
+             isfinite(out.dgamma);
+    return out;
+}
+
+NL_HD static int md_stress_correction(
+    const manzari_dafalias_constants_t *m, tensor_t *stress,
+    tensor_t *alpha, tensor_t fabric, tensor_t alpha_in,
+    double void_ratio, tensor_t *plastic_strain, double K, double G,
+    double tolerance, int maximum_iterations, double *residual)
+{
+    double f = md_yield(m, *stress, *alpha);
+    if (!isfinite(f)) return 0;
+    if (f <= tolerance) {
+        *residual = fmax(f, 0.0);
+        return 1;
+    }
+
+    const int iterations = maximum_iterations < 50 ? maximum_iterations : 50;
+    for (int iteration = 0; iteration < iterations; iteration++) {
+        const double p = md_trace(*stress)/3.0+1.0e-2*m->P_atm;
+        if (!(p > 0.0)) return 0;
+        const nl_md_dependent_t dep = md_state_dependent(
+            m, *stress, *alpha, fabric, void_ratio, alpha_in);
+        if (!dep.ok) return 0;
+        const tensor_t r = md_scale(md_dev(*stress), 1.0/p);
+        const tensor_t dsigma_p = md_add(md_scale(md_dev(dep.R), 2.0*G),
+                                         md_iso(K*md_trace(dep.R)));
+        const tensor_t abar = md_scale(dep.b, (2.0/3.0)*dep.h);
+        tensor_t dfds = md_sub(dep.n,
+            md_iso(md_ddot(dep.n, r)/3.0));
+        const tensor_t dfdalpha = md_scale(dep.n, -p);
+        const double denominator = md_ddot(dfds, dsigma_p)-
+                                   md_ddot(dfdalpha, abar);
+        if (fabs(denominator) <= DBL_MIN) return 0;
+        const double dlambda = f/denominator;
+        const tensor_t old_stress = *stress;
+        tensor_t next_stress = md_sub(old_stress,
+                                      md_scale(dsigma_p, dlambda));
+        tensor_t next_alpha = md_add(*alpha, md_scale(abar, dlambda));
+        double next_f = md_yield(m, next_stress, next_alpha);
+        if (!isfinite(next_f)) return 0;
+        if (fabs(next_f) >= fabs(f)) {
+            const double grad_norm = md_ddot(dfds, dfds);
+            if (grad_norm <= DBL_MIN) return 0;
+            next_stress = md_sub(*stress, md_scale(dfds, f/grad_norm));
+            next_alpha = *alpha;
+            next_f = md_yield(m, next_stress, next_alpha);
+            if (!isfinite(next_f) || fabs(next_f) >= fabs(f)) return 0;
+        }
+        *stress = next_stress;
+        *alpha = next_alpha;
+        /* Total strain is fixed during projection. Therefore the plastic
+         * correction is the elastic-compliance image of the stress removed,
+         * including when the robust yield-gradient fallback was selected. */
+        *plastic_strain = md_add(
+            *plastic_strain,
+            md_elastic_compliance(md_sub(old_stress, next_stress), K, G));
+        f = next_f;
+        if (f <= tolerance) {
+            *residual = fmax(f, 0.0);
+            return 1;
+        }
+    }
+    *residual = fmax(f, 0.0);
+    return f <= tolerance;
+}
+
+NL_HD static int nl_update_manzari_dafalias(
+    const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
+    tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
+    tensor_t *dynamic_stress, tensor_t *plastic_strain, tensor_t *alpha,
+    tensor_t *alpha_in, tensor_t *fabric, double *initialized,
+    double *void_ratio, double *plastic_multiplier, double *yield_error,
+    double *integration_error, int32_t *accepted_substeps)
+{
+    const manzari_dafalias_constants_t *m = &c->md;
+    const tensor_t de_h = md_sub(strain, strain_prev);
+    const tensor_t de = md_scale(de_h, -1.0);
+    tensor_t stress = md_scale(md_add(*dynamic_stress, static_stress), -1.0);
+    tensor_t pstrain = md_scale(*plastic_strain, -1.0);
+    *void_ratio = m->e_init-(1.0+m->e_init)*md_trace(md_scale(strain, -1.0));
+    *plastic_multiplier = 0.0;
+    *yield_error = 0.0;
+    *integration_error = 0.0;
+    *accepted_substeps = 0;
+
+    if (!(*initialized > 0.5)) {
+        const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+        if (!(p > 0.0)) return 0;
+        /* Treat a supplied geostatic tensor as a pre-existing consolidated
+         * state: center the small kinematic yield surface on its stress ratio
+         * so self weight is not mistaken for a new plastic load increment.
+         * For the usual isotropic material-point start this is exactly zero. */
+        *alpha = md_scale(md_dev(stress), 1.0/p);
+        *alpha_in = *alpha;
+        *fabric = md_zero();
+        *initialized = 1.0;
+    }
+    if (md_norm(de) == 0.0) return 1;
+    if (!(*void_ratio > -0.99) || cfg->no_substeps <= 0 ||
+        !(cfg->backbone_error_tolerance > 0.0) ||
+        !(cfg->error_tolerance > 0.0)) return 0;
+
+    double K, G;
+    md_elastic_moduli(m, stress, &K, &G);
+    if (!(K > 0.0) || !(G > 0.0) || !isfinite(K) || !isfinite(G)) return 0;
+    const tensor_t elastic_trial = md_elastic_increment(de, K, G);
+    if (md_ddot(md_sub(*alpha, *alpha_in), elastic_trial) < 0.0)
+        *alpha_in = *alpha;
+
+    const tensor_t trial = md_add(stress, elastic_trial);
+    const double trial_p = md_trace(trial)/3.0+1.0e-2*m->P_atm;
+    const double trial_f = md_yield(m, trial, *alpha);
+    if (trial_p >= 1.0e-2*m->P_atm && trial_f <= cfg->error_tolerance) {
+        stress = trial;
+        *dynamic_stress = md_sub(md_scale(stress, -1.0), static_stress);
+        *yield_error = fmax(trial_f, 0.0);
+        *accepted_substeps = 1;
+        return md_finite(*dynamic_stress);
+    }
+
+    double T = 0.0;
+    double dT = 1.0;
+    /* Match the established explicit MD safeguard while using Hercules'
+     * no_substeps as the cap on accepted work. Rejected error-control trials
+     * are bounded separately so one difficult point cannot spin forever. */
+    const double dT_min = 1.0e-6;
+    int attempts = 0;
+    while (T < 1.0-DBL_EPSILON) {
+        if (++attempts > 4*cfg->no_substeps) return 0;
+        dT = fmin(dT, 1.0-T);
+        const tensor_t de_step = md_scale(de, dT);
+        const tensor_t strain_at_end = md_add(
+            md_scale(strain_prev, -1.0), md_scale(de, T+dT));
+        const double e_step = m->e_init-
+            (1.0+m->e_init)*md_trace(strain_at_end);
+        const nl_md_stage_t first = md_stage(
+            m, stress, *alpha, *fabric, *alpha_in, e_step, de_step, K, G);
+        if (!first.ok) return 0;
+        const tensor_t predictor_stress = md_add(stress, first.dsigma);
+        const double predictor_p = md_trace(predictor_stress)/3.0+
+                                   1.0e-2*m->P_atm;
+        if (predictor_p < 1.0e-2*m->P_atm) {
+            if (dT <= dT_min) return 0;
+            dT = fmax(0.1*dT, dT_min);
+            continue;
+        }
+        const nl_md_stage_t second = md_stage(
+            m, predictor_stress, md_add(*alpha, first.dalpha),
+            md_add(*fabric, first.dfabric), *alpha_in, e_step, de_step,
+            K, G);
+        if (!second.ok) return 0;
+        const double stress_norm = md_norm(stress);
+        const double error_denominator = stress_norm < 0.5
+            ? 1.0 : 2.0*stress_norm;
+        const double step_error =
+            md_norm(md_sub(second.dsigma, first.dsigma))/error_denominator;
+        if (!isfinite(step_error)) return 0;
+        if (step_error > cfg->backbone_error_tolerance) {
+            if (dT <= dT_min) {
+                *integration_error = step_error;
+                return 0;
+            }
+            const double q = fmax(0.8*sqrt(
+                cfg->backbone_error_tolerance/step_error), 0.1);
+            dT = fmax(q*dT, dT_min);
+            continue;
+        }
+
+        stress = md_add(stress, md_scale(
+            md_add(first.dsigma, second.dsigma), 0.5));
+        *alpha = md_add(*alpha, md_scale(
+            md_add(first.dalpha, second.dalpha), 0.5));
+        *fabric = md_add(*fabric, md_scale(
+            md_add(first.dfabric, second.dfabric), 0.5));
+        pstrain = md_add(pstrain, md_scale(
+            md_add(first.dpstrain, second.dpstrain), 0.5));
+        *plastic_multiplier += 0.5*(first.dgamma+second.dgamma);
+        *integration_error = fmax(*integration_error, step_error);
+        (*accepted_substeps)++;
+        if (*accepted_substeps > cfg->no_substeps) return 0;
+
+        double correction_residual = 0.0;
+        if (!md_stress_correction(
+                m, &stress, alpha, *fabric, *alpha_in, e_step, &pstrain,
+                K, G, cfg->error_tolerance, cfg->no_substeps,
+                &correction_residual)) {
+            *yield_error = correction_residual;
+            return 0;
+        }
+        *yield_error = fmax(*yield_error, correction_residual);
+        T += dT;
+        if (T >= 1.0-DBL_EPSILON) break;
+        const double q = (step_error <= DBL_MIN) ? 2.0 : fmax(
+            0.8*sqrt(cfg->backbone_error_tolerance/step_error), 0.5);
+        dT = fmin(fmax(q*dT, dT_min), 1.0-T);
+    }
+
+    *dynamic_stress = md_sub(md_scale(stress, -1.0), static_stress);
+    *plastic_strain = md_scale(pstrain, -1.0);
+    const double final_f = md_yield(m, stress, *alpha);
+    *yield_error = fmax(*yield_error, fmax(final_f, 0.0));
+    return md_finite(*dynamic_stress) && md_finite(*plastic_strain) &&
+           md_finite(*alpha) && md_finite(*alpha_in) && md_finite(*fabric) &&
+           isfinite(*yield_error) &&
+           *yield_error <= cfg->error_tolerance;
+}
+
+#undef NL_HD
 
 __device__ static inline void nl_record_error(nonlinear_gpu_error_t *error,
                                                int32_t code,
@@ -1330,6 +1774,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                                           const nonlinear_gpu_config_t *cfg,
                                           tensor_t strain,
                                           tensor_t strain_prev,
+                                          tensor_t static_stress,
                                           tensor_t pstrain_prev,
                                           tensor_t backstress_prev,
                                           double epbar_prev,
@@ -1347,14 +1792,32 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                                           double *gamma1d,
                                           double *tao1d,
                                           double *ggmax,
-                                          double *model_error)
+                                          double *model_error,
+                                          tensor_t *fabric,
+                                          double *md_initialized,
+                                          double *md_integration_error,
+                                          int32_t *md_substeps)
 {
     const materialmodel_t model = cfg->material_model;
+
+    if (model == MANZARI_DAFALIAS) {
+        *pstrain = pstrain_prev;
+        *backstress = backstress_prev;
+        int32_t accepted = 0;
+        const int ok = nl_update_manzari_dafalias(
+            c, cfg, strain, strain_prev, static_stress, sigma, pstrain,
+            backstress, sref, fabric, md_initialized, epbar, psi_state, fs,
+            md_integration_error, &accepted);
+        *load_unload_state = (double)accepted;
+        *md_substeps = accepted;
+        *model_error = *fs;
+        return ok;
+    }
 
     /* Cyclic bounding/backbone models decide loading and reversal from the
      * strain increment and their stored stress/history. They must not pass
      * through the conventional total-strain yield predictor. */
-    if (model >= VONMISES_BAE && model <= VONMISES_RO) {
+    if (MATERIAL_MODEL_IS_BACKBONE(model)) {
         return nl_update_backbone(c, model, strain, strain_prev, sref, sigma,
                                   kappa, gamma1d, tao1d, ggmax, cfg,
                                   model_error);
@@ -1451,16 +1914,23 @@ __global__ static void kernel_nonlinear_material_point_history(
     tensor_t plastic_strain = nl_zero();
     tensor_t backstress = nl_zero();
     tensor_t stress_reference = nl_zero();
+    tensor_t fabric = nl_zero();
     tensor_t stress = nl_zero();
     double ep_bar = 0.0;
     double psi = 0.0;
     double load_unload = 0.0;
     double tao = 0.0;
     double tao_max = 0.0;
-    double kappa = (config.material_model >= VONMISES_BAE) ? 100.0 : 0.0;
-    double gamma1d = (config.material_model >= VONMISES_BAE) ? 1.0e-10 : 0.0;
+    double kappa = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
+        ? 100.0 : 0.0;
+    double gamma1d = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
+        ? 1.0e-10 : 0.0;
     double tao1d = 0.0;
-    double ggmax = (config.material_model >= VONMISES_BAE) ? 1.0 : 0.0;
+    double ggmax = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
+        ? 1.0 : 0.0;
+    double md_initialized = 0.0;
+    double md_integration_error = 0.0;
+    int32_t md_substeps = 0;
 
     for (int32_t step = 0; step < steps; step++) {
         tensor_t plastic_next = plastic_strain;
@@ -1470,18 +1940,19 @@ __global__ static void kernel_nonlinear_material_point_history(
         double model_error = 0.0;
 
         const int ok = nl_update_material(
-            &constants, &config, strain_history[step], strain_prev,
+            &constants, &config, strain_history[step], strain_prev, nl_zero(),
             plastic_strain, backstress, ep_bar,
             &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
             &psi, &load_unload, &tao, &tao_max, &kappa,
-            &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error);
+            &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error,
+            &fabric, &md_initialized, &md_integration_error, &md_substeps);
 
         nonlinear_material_point_result_t result = {};
         result.stress = stress;
         result.plastic_strain = plastic_next;
         result.backstress = backstress_next;
         result.ep_bar = ep_bar_next;
-        result.fs = (config.material_model >= VONMISES_BAE)
+        result.fs = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
             ? model_error : fs;
         result.psi = psi;
         result.load_unload = load_unload;
@@ -1492,8 +1963,18 @@ __global__ static void kernel_nonlinear_material_point_history(
         result.gamma1d = gamma1d;
         result.tao1d = tao1d;
         result.ggmax = ggmax;
-        result.model_error = (config.material_model >= VONMISES_BAE)
+        result.model_error = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
             ? model_error : 0.0;
+        if (config.material_model == MANZARI_DAFALIAS) {
+            result.fs = fs;
+            result.model_error = model_error;
+            result.fabric = fabric;
+            result.alpha_in = stress_reference;
+            result.void_ratio = ep_bar_next;
+            result.plastic_multiplier = psi;
+            result.integration_error = md_integration_error;
+            result.accepted_substeps = md_substeps;
+        }
         result.status = ok ? 0 : 1;
         results[step] = result;
 
@@ -1586,6 +2067,22 @@ __device__ static inline void nl_atomic_add(solver_float *address,
     atomicAdd(address, value);
 }
 
+__device__ static tensor_t nl_md_static_stress(
+    const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
+    double h, int qp)
+{
+    if (cfg->approximate_geostatic_state != YES || c->sigmaZ_st <= 0.0)
+        return nl_zero();
+    const double lz = c->isTopoNonlin ? 0.0 :
+        ((qp & 4) ? 0.577350269189 : -0.577350269189);
+    const double vertical = nl_max(
+        c->sigmaZ_st+9.8*c->md.density*h*lz*0.5, 0.0);
+    const double k0 = 1.0-sin(c->phi);
+    tensor_t stress = {-k0*vertical, -k0*vertical, -vertical,
+                       0.0, 0.0, 0.0};
+    return stress;
+}
+
 __global__ static void kernel_nonlinear_update_force(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
     gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
@@ -1607,7 +2104,7 @@ __global__ static void kernel_nonlinear_update_force(
         }
     }
 
-    if (step == 0 && cfg.material_model >= VONMISES_BAE) {
+    if (step == 0 && MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
         for (int qp = 0; qp < NL_GPU_QP; qp++) {
             state.kappa[nl_eindex].qv[qp] = 100.0;
             state.gamma1d[nl_eindex].qv[qp] = 1.0e-10;
@@ -1640,8 +2137,12 @@ __global__ static void kernel_nonlinear_update_force(
             }
 
             double model_error = 0.0;
+            int32_t md_substeps = 0;
+            const tensor_t static_stress =
+                (cfg.material_model == MANZARI_DAFALIAS)
+                ? nl_md_static_stress(c, &cfg, element.h, qp) : nl_zero();
             const int ok = nl_update_material(
-                c, &cfg, strain, strain_prev,
+                c, &cfg, strain, strain_prev, static_stress,
                 state.pstrains1[nl_eindex].qp[qp],
                 state.alphastress1[nl_eindex].qp[qp],
                 state.ep1[nl_eindex].qv[qp],
@@ -1657,15 +2158,27 @@ __global__ static void kernel_nonlinear_update_force(
                 &state.sref[nl_eindex].qp[qp],
                 &state.gamma1d[nl_eindex].qv[qp],
                 &state.tao1d[nl_eindex].qv[qp],
-                &state.ggmax[nl_eindex].qv[qp], &model_error);
+                &state.ggmax[nl_eindex].qv[qp], &model_error,
+                (cfg.material_model == MANZARI_DAFALIAS)
+                    ? &state.fabric[nl_eindex].qp[qp] : NULL,
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.kappa[nl_eindex].qv[qp], &md_substeps);
 
-            if (cfg.material_model >= VONMISES_BAE) {
+            if (MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
                 c->fs[qp] = model_error;
                 if (!ok || !isfinite(model_error) ||
                     model_error > cfg.error_tolerance) {
                     nl_record_error(state.error, 2, eindex, qp,
                                     model_error,
                                     state.stresses[nl_eindex].qp[qp].xx);
+                }
+            } else if (cfg.material_model == MANZARI_DAFALIAS) {
+                c->fs[qp] = model_error;
+                if (!ok || !isfinite(model_error) ||
+                    model_error > cfg.error_tolerance) {
+                    nl_record_error(state.error, 3, eindex, qp,
+                                    model_error,
+                                    state.kappa[nl_eindex].qv[qp]);
                 }
             } else if (!ok || !isfinite(c->fs[qp])) {
                 nl_record_error(state.error, 1, eindex, qp, c->fs[qp],
@@ -1816,6 +2329,9 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(sv_max, Sv_max);
     NL_ALLOC_COPY(kappa, kappa);
     NL_ALLOC_COPY(sref, Sref);
+    if (config->material_model == MANZARI_DAFALIAS) {
+        NL_ALLOC_COPY(fabric, fabric);
+    }
     NL_ALLOC_COPY(gamma1d, gamma1d);
     NL_ALLOC_COPY(tao1d, tao1d);
     NL_ALLOC_COPY(ggmax, GGmax);
@@ -1832,6 +2348,17 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         fprintf(stderr,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
+        if (config->material_model == MANZARI_DAFALIAS) {
+            fprintf(stderr,
+                    "Manzari-Dafalias integration: Modified Euler "
+                    "(local_error=%g, max_substeps=%d, yield_drift=%g Pa, "
+                    "geostatic=%s)\n",
+                    config->backbone_error_tolerance, config->no_substeps,
+                    config->error_tolerance,
+                    config->approximate_geostatic_state == YES
+                        ? "approximate K0 effective stress"
+                        : "solver stress history");
+        }
         fflush(stderr);
     }
     return 0;
@@ -1988,6 +2515,8 @@ void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state)
     if (error == cudaSuccess) error = NL_DOWNLOAD(sv_max, Sv_max);
     if (error == cudaSuccess) error = NL_DOWNLOAD(kappa, kappa);
     if (error == cudaSuccess) error = NL_DOWNLOAD(sref, Sref);
+    if (error == cudaSuccess && g_config.material_model == MANZARI_DAFALIAS)
+        error = NL_DOWNLOAD(fabric, fabric);
     if (error == cudaSuccess) error = NL_DOWNLOAD(gamma1d, gamma1d);
     if (error == cudaSuccess) error = NL_DOWNLOAD(tao1d, tao1d);
     if (error == cudaSuccess) error = NL_DOWNLOAD(ggmax, GGmax);
@@ -2072,6 +2601,60 @@ int nonlinear_gpu_material_point_history(
     return 0;
 }
 
+int nonlinear_manzari_dafalias_host_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results)
+{
+    if (constants == NULL || config == NULL || strain_history == NULL ||
+        results == NULL || steps <= 0 ||
+        config->material_model != MANZARI_DAFALIAS) return -1;
+
+    tensor_t strain_prev = md_zero();
+    tensor_t stress = md_zero();
+    tensor_t plastic_strain = md_zero();
+    tensor_t alpha = md_zero();
+    tensor_t alpha_in = md_zero();
+    tensor_t fabric = md_zero();
+    double initialized = 0.0;
+
+    for (int32_t step = 0; step < steps; step++) {
+        double void_ratio = constants->md.e_init;
+        double dgamma = 0.0;
+        double yield_error = 0.0;
+        double integration_error = 0.0;
+        int32_t accepted_substeps = 0;
+        const int ok = nl_update_manzari_dafalias(
+            constants, config, strain_history[step], strain_prev, md_zero(),
+            &stress, &plastic_strain, &alpha, &alpha_in, &fabric,
+            &initialized, &void_ratio, &dgamma, &yield_error,
+            &integration_error, &accepted_substeps);
+
+        nonlinear_material_point_result_t result = {};
+        result.stress = stress;
+        result.plastic_strain = plastic_strain;
+        result.backstress = alpha;
+        result.ep_bar = void_ratio;
+        result.fs = yield_error;
+        result.psi = dgamma;
+        result.load_unload = (double)accepted_substeps;
+        result.stress_reference = alpha_in;
+        result.model_error = yield_error;
+        result.fabric = fabric;
+        result.alpha_in = alpha_in;
+        result.void_ratio = void_ratio;
+        result.plastic_multiplier = dgamma;
+        result.integration_error = integration_error;
+        result.accepted_substeps = accepted_substeps;
+        result.status = ok ? 0 : 1;
+        results[step] = result;
+        strain_prev = strain_history[step];
+    }
+    return 0;
+}
+
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();
@@ -2082,6 +2665,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(alphastress1); NL_FREE(alphastress2);
     NL_FREE(ep1); NL_FREE(ep2); NL_FREE(psi_n); NL_FREE(load_unload_n);
     NL_FREE(sv_n); NL_FREE(sv_max); NL_FREE(kappa); NL_FREE(sref);
+    NL_FREE(fabric);
     NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
 #undef NL_FREE
     memset(&g_nl, 0, sizeof(g_nl));

@@ -36,6 +36,12 @@ typedef struct nonlinear_material_point_result_t {
     double tao1d;
     double ggmax;
     double model_error;
+    tensor_t fabric;
+    tensor_t alpha_in;
+    double void_ratio;
+    double plastic_multiplier;
+    double integration_error;
+    int32_t accepted_substeps;
     int32_t status;
 } nonlinear_material_point_result_t;
 
@@ -72,6 +78,16 @@ void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state);
 void nonlinear_gpu_check_error(int32_t myID);
 
 int nonlinear_gpu_material_point_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+/* Host execution of the same allocation-free Manzari--Dafalias integrator is
+ * used only by the material-point regression path. Production MD updates are
+ * CUDA-only. */
+int nonlinear_manzari_dafalias_host_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
     const tensor_t *strain_history,

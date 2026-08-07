@@ -48,6 +48,17 @@ Stress-like values use Pa; angles use radians. Unused model-specific entries
 must be present and may be zero. The supplied fixtures are synthetic numerical
 regression cases, not production soil calibrations:
 
+For `material_model=ManzariDafalias`, the same key instead contains 17 values:
+
+```text
+G0 nu e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz
+```
+
+This follows the standard Manzari--Dafalias parameter order except that the
+material-point test does not need density. The production 17-column
+`material_properties_list` starts with `Vs_limit`, omits `nu`, and obtains both
+Poisson's ratio and density from the element's `Vp`, `Vs`, and `rho`.
+
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
 - `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
@@ -69,6 +80,38 @@ regression cases, not production soil calibrations:
   inversion and the corresponding CUDA inversion.
 - `vonmises_mkz_synthetic.in` exercises the MKZ backbone inversion.
 - `vonmises_ro_synthetic.in` exercises the Ramberg--Osgood hardening law.
+- `manzari_dafalias_modified_euler_synthetic.in` establishes isotropic
+  confinement, applies a cyclic tensor-shear path, and checks the same
+  allocation-free Modified-Euler implementation on host and CUDA. Its CSV adds
+  alpha, alpha-in, fabric, void ratio, plastic multiplier, yield drift, local
+  integration error, and accepted-substep diagnostics.
+
+Manzari--Dafalias reuses the production nonlinear integration controls rather
+than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
+local Modified-Euler error target, `no_substeps` caps accepted adaptive
+substeps (with rejected trials also bounded), and `error_tolerance` is the
+maximum positive yield-surface drift in Pa after stress correction. The model
+is currently GPU-only in production; the host invocation here is a regression
+driver for the shared constitutive arithmetic, not a second production
+backend. This host/CUDA parity check is not independent physical validation;
+compare the recorded stress and state history with OpenSees or another trusted
+implementation before using a calibration.
+
+The independent OpenSees characterization uses the same 21-step path:
+
+```bash
+OpenSees opensees_manzari_dafalias_synthetic.tcl opensees_md.csv
+python3 compare_opensees_manzari_dafalias.py \
+  --hercules-csv manzari_dafalias_modified_euler_synthetic.cpu.csv \
+  --opensees-csv opensees_md.csv
+```
+
+The OpenSees driver uses kPa, the native calibration scale of its
+low-pressure dilatancy regularization; the comparator converts its stresses to
+Pa before comparing stress, alpha, fabric, alpha-in, and void-ratio histories.
+The comparison reports differences but does not impose a pass threshold,
+because it is an independent model characterization rather than a host/device
+identity check.
 
 BAE, BAH, GQH, MKZ, and Ramberg--Osgood are dispatched directly to their
 incremental bounding/backbone update. The model uses the strain increment and

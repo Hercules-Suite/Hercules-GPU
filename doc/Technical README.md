@@ -420,6 +420,35 @@ Nonlinear GPU execution (runtime environment):
 	for reproducible launch environments. This setting changes execution, not
 	the calibrated values in `parameters.in`. The selected nonlinear backend is
 	reported to standard error during solver startup.
+- `material_model=ManzariDafalias` is a device-first, pressure-dependent
+	effective-stress sand model. Production execution currently requires the GPU
+	backend. It uses adaptive explicit Modified Euler and reuses the established
+	controls: `backbone_errTol` is the dimensionless local stress-increment error
+	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
+	positive yield-surface drift after stress correction.
+- Manzari--Dafalias rows use 17 values in `material_properties_list`:
+	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
+	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
+	All other material families retain the established 16-column layout.
+- With `approximate_geostatic_state=yes`, the model initializes its
+	compression-positive internal effective stress from the approximate K0 state.
+	The small kinematic yield surface is centered on that pre-existing stress
+	ratio so self weight is not interpreted as a new plastic increment.
+	The static stress is subtracted again before dynamic force assembly, so this
+	initialization does not inject an unbalanced gravity force. This remains an
+	approximation and must be checked against the intended effective overburden
+	profile before a production liquefaction analysis.
+- When Manzari--Dafalias overlaps BrickUP poroelastic elements, the skeleton
+	stress is effective stress and the Biot pressure traction remains explicit.
+	The linear undrained fast path (`lambda += alpha^2*M`) is automatically
+	disabled even if requested, because folding storage stiffness into the native
+	linear operator would bypass the nonlinear pressure-dependent skeleton.
+- The synthetic fixture includes a standalone OpenSees Modified-Euler driver
+	and a characterization comparator under
+	`benchmark_inputs/nonlinear_material_point/`. OpenSees runs that reference in
+	kPa to preserve its low-pressure regularization scale; the comparator converts
+	stress to Pa and does not treat implementation differences as an automatic
+	pass/fail validation.
 - For a new material calibration, compare CPU and GPU nonlinear station
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and

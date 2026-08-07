@@ -296,7 +296,7 @@ export const docPages: Record<string, DocPageContent> = {
         id: "nonlinear-backend",
         title: "Nonlinear solid backend",
         paragraphs: [
-          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset. The device path supports the same material_model families as the CPU path and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference implementation; setting it to gpu explicitly is supported for reproducible launch environments. The selected backend is reported to standard error at startup.",
+          "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference models. ManzariDafalias is device-first and currently requires the GPU backend for production runs; its material-point regression executes the same allocation-free core on host and device. The selected backend is reported to standard error at startup.",
           "When abc_type=cpml, solid elements in the absorbing band remain linear elastic and are excluded from both CPU and GPU nonlinear constitutive maps regardless of their Vs. Nonlinearity is confined to the physical interior because the CPML correction assumes a linear time-invariant native operator.",
           "When include_acoustic=yes, acoustic elements are excluded from both CPU and GPU solid constitutive maps regardless of their Vs or legacy nl_id payload. They remain governed only by the selected acoustic formulation and never acquire plastic-strain or nonlinear solid history.",
           "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
@@ -311,7 +311,7 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Material-point CPU/GPU regression",
         paragraphs: [
           "Before an element or production comparison, run a prescribed tensor-strain history through the CPU and CUDA constitutive routines with the standalone material-point mode. It writes complete CPU and GPU state histories and returns nonzero on a status, finite-value, or tolerance mismatch.",
-          "The nine-fixture suite covers EP, the FA/FAM quartic correctors, BAE and BAH, GQH, MKZ, and Ramberg--Osgood. It compares the CPU GSL-backed polynomial or scalar root solvers with the CUDA implementations and includes cyclic reversal paths plus BAE virgin-onset and volumetric-update coverage.",
+          "The ten-fixture suite covers EP, the FA/FAM quartic correctors, BAE and BAH, GQH, MKZ, Ramberg--Osgood, and ManzariDafalias Modified Euler. Existing families compare the CPU GSL-backed polynomial or scalar root solvers with CUDA; the MD fixture executes one allocation-free implementation on host and device and records alpha, alpha_in, fabric, void ratio, plastic multiplier, yield drift, and adaptive-substep diagnostics.",
           "BAE, BAH, GQH, MKZ, and Ramberg--Osgood now enter their incremental bounding/backbone update directly. Those models decide loading and reversal from the strain increment and stored stress/history; the generic total-strain elastic predictor remains limited to conventional yield-surface models. A repeated, true zero strain increment preserves the converged stress and history.",
           "For these pressure-insensitive von Mises backbones, a purely volumetric increment updates only hydrostatic stress and preserves cyclic history instead of entering the scalar kappa solver. At untouched virgin state (kappa=100), deviatoric trial stress below 1.0e-3 Pa follows the incremental elastic asymptote until the backbone root is numerically resolvable. The onset rule is disabled after cyclic history is established, so it does not replace the model's unloading or reversal logic.",
           "This dispatch boundary follows the OpenSees MultiaxialCyclicPlasticity reference design: the cyclic integrator owns its zero-increment and loading/reversal decisions. The Hercules material-point suite checks that invariant independently on both CPU and CUDA backends.",
@@ -371,6 +371,7 @@ export const docPages: Record<string, DocPageContent> = {
           "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
           "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and select eligible elements from the Vs range covered by material_properties_list.",
           "For non-Istanbul vonMises_baE, material_properties_list supplies Su through alpha_cohesion and the exponential hardening parameters through psi and m; non-Istanbul vonMises_ep takes Su from alpha_cohesion. The built-in nl_id constants for these models remain limited to Istanbul_velocity_model=yes.",
+          "ManzariDafalias uses adaptive explicit Modified Euler. backbone_errTol is its local stress-increment error target, no_substeps caps accepted adaptive substeps, and error_tolerance bounds positive yield-surface drift after correction. With approximate_geostatic_state=yes, the approximate K0 stress initializes its effective-stress state and centers the small kinematic yield surface on the pre-existing stress ratio, without adding the static offset to dynamic force assembly.",
         ],
         table: {
           headers: ["Family", "Available material_model values", "Role"],
@@ -379,11 +380,12 @@ export const docPages: Record<string, DocPageContent> = {
             ["von Mises / cyclic plasticity", "vonMises_ep, vonMises_fa, vonMises_faM", "Elastoplastic yielding with the selected hardening formulation"],
             ["Nonlinear backbone models", "vonMises_baE, vonMises_baH, vonMises_GQH, vonMises_MKZ, vonMises_RO", "Nonlinear and hysteretic soil response using the selected backbone law"],
             ["Pressure-dependent plasticity", "MohrCoulomb, DruckerPrager", "Frictional/cohesive yielding with optional tension cutoff"],
+            ["Critical-state sand plasticity", "ManzariDafalias", "Pressure-dependent effective-stress response with dilatancy, fabric evolution, and cyclic mobility state"],
           ],
         },
         codeLabel: "parameters.in — feature selection (additional nonlinear controls are required)",
         code: "include_nonlinear_analysis = yes\nmaterial_model = vonMises_ep\nmaterial_plasticity_type = rate_independent",
-        note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and 16-column material_properties_list values. Use the Nonlinear & plastic analysis parameter page and validate the selected constitutive model against an appropriate reference before a large run.",
+        note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and model-specific material_properties_list values. Most models use 16 columns; ManzariDafalias uses 17. Validate the selected constitutive model against an appropriate reference before a large run.",
       },
       {
         id: "nonlinear-material-properties",
@@ -401,6 +403,7 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Coupled interfaces",
         paragraphs: [
           "Material classification determines which element formulation advances each region. Interface terms transfer the physically appropriate traction, motion, and pressure information between neighboring acoustic, solid, and poroelastic domains; eligible solid elements may use linear or nonlinear/plastic constitutive response.",
+          "For a poroelastic ManzariDafalias region, the constitutive model returns effective skeleton stress and the u-p pressure operator supplies Biot pore-pressure traction separately. Hercules therefore disables the zero-permeability undrained fast path for this model instead of folding alpha²M into a linear bulk stiffness.",
         ],
         note: "Always record the physical assumptions used at coupled interfaces; a numerically stable run can still encode the wrong boundary condition.",
       },

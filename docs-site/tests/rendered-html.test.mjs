@@ -144,6 +144,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /vonMises_ep/);
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
+  assert.match(physics, /ManzariDafalias/);
+  assert.match(physics, /adaptive explicit Modified Euler/);
   assert.match(physics, /legacy Istanbul nl_id classification/);
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
@@ -160,6 +162,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /inclusive nonlinear-element range/);
   assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
+  assert.match(parameters, /ManzariDafalias: N × 17/);
+  assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
+  assert.match(parameters, /maximum positive yield-surface drift/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -172,7 +177,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /nine-fixture suite/);
+  assert.match(gpu, /ten-fixture suite/);
+  assert.match(gpu, /device-first and currently requires the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
   assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
@@ -308,6 +314,32 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   assert.match(gpu, /dsdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
   assert.match(cpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
   assert.match(gpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+});
+
+test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+
+  assert.match(header, /MANZARI_DAFALIAS/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
+  assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
+  assert.match(gpu, /nl_update_manzari_dafalias/);
+  assert.match(gpu, /cfg->backbone_error_tolerance/);
+  assert.match(gpu, /accepted_substeps > cfg->no_substeps/);
+  assert.match(gpu, /cfg->error_tolerance/);
+  assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
+  assert.match(psolve, /Qp traction remains explicit/);
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

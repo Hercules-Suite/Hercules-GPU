@@ -2282,6 +2282,7 @@ static int poroelastic_zero_permeability(void) {
 static int poroelastic_undrained_fast_path_active(void) {
   return poroelastic_enabled() &&
          (Param.thePoroelasticUndrainedFastPath == YES) &&
+         !nonlinear_requires_explicit_pore_pressure() &&
          (Param.theAcousticPoroelasticInterface !=
           ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE) &&
          (Param.thePoroelasticSurfacePressureBC ==
@@ -13628,6 +13629,12 @@ static void solver_init() {
             "Poroelastic undrained fast path: %.1fM elements use native "
             "lambda += alpha^2*M; pore pressure is diagnostic only\n",
             (double)globalPoroelasticUndrainedFastPathElements / 1.0e6);
+      } else if (nonlinear_requires_explicit_pore_pressure() &&
+                 Param.thePoroelasticUndrainedFastPath == YES) {
+        monitor_print(
+            "Poroelastic undrained fast path: disabled for "
+            "ManzariDafalias; Qp traction remains explicit so the nonlinear "
+            "skeleton receives effective stress\n");
       }
       if ((globalPoroelasticElements > 0) &&
           (globalPoroelasticMinHOverVpUndrained < 1.0e31)) {
