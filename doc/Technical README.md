@@ -425,7 +425,12 @@ Nonlinear GPU execution (runtime environment):
 	backend. It uses adaptive explicit Modified Euler and reuses the established
 	controls: `backbone_errTol` is the dimensionless local stress-increment error
 	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
-	positive yield-surface drift after stress correction.
+	the absolute yield-surface residual after a plastic stress correction. The
+	elastic predictor uses the one-sided admissibility condition
+	`f_trial <= error_tolerance`. Plastic correction is limited to
+	`min(no_substeps, 50)` iterations; failure to satisfy the absolute criterion
+	is reported as GPU constitutive failure code 3 and aborts the run rather than
+	continuing from the off-surface state.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.

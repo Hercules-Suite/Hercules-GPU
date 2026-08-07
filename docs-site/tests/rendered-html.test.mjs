@@ -164,7 +164,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /plastic-strain evolution/);
   assert.match(parameters, /ManzariDafalias: N × 17/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
-  assert.match(parameters, /maximum positive yield-surface drift/);
+  assert.match(parameters, /maximum absolute yield-surface residual/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -335,6 +335,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /cfg->backbone_error_tolerance/);
   assert.match(gpu, /accepted_substeps > cfg->no_substeps/);
   assert.match(gpu, /cfg->error_tolerance/);
+  assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
+  assert.match(gpu, /trial_f <= cfg->error_tolerance/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));

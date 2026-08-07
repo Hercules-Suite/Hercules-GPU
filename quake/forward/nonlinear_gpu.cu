@@ -483,13 +483,14 @@ NL_HD static nl_md_stage_t md_stage(
 NL_HD static int md_stress_correction(
     const manzari_dafalias_constants_t *m, tensor_t *stress,
     tensor_t *alpha, tensor_t fabric, tensor_t alpha_in,
-    double void_ratio, tensor_t *plastic_strain, double K, double G,
-    double tolerance, int maximum_iterations, double *residual)
+    double void_ratio, tensor_t direction_hint, tensor_t *plastic_strain,
+    double K, double G, double tolerance, int maximum_iterations,
+    double *residual)
 {
     double f = md_yield(m, *stress, *alpha);
+    *residual = isfinite(f) ? fabs(f) : DBL_MAX;
     if (!isfinite(f)) return 0;
-    if (f <= tolerance) {
-        *residual = fmax(f, 0.0);
+    if (fabs(f) < tolerance) {
         return 1;
     }
 
@@ -509,21 +510,73 @@ NL_HD static int md_stress_correction(
         const tensor_t dfdalpha = md_scale(dep.n, -p);
         const double denominator = md_ddot(dfds, dsigma_p)-
                                    md_ddot(dfdalpha, abar);
-        if (fabs(denominator) <= DBL_MIN) return 0;
+        if (fabs(denominator) <= DBL_MIN) {
+            /* At the exact center of the small kinematic yield surface,
+             * n and the Newton denominator are undefined/zero. If Modified
+             * Euler crossed into that center, recover the loading direction
+             * from the elastic trial and project radially to |f|=0. */
+            const tensor_t hint = md_dev(direction_hint);
+            const double hint_norm = md_norm(hint);
+            if (!(f < -tolerance) || hint_norm <= DBL_MIN) return 0;
+            const tensor_t old_stress = *stress;
+            const double radius = sqrt(2.0/3.0)*m->m*p;
+            const tensor_t target_dev = md_add(
+                md_scale(*alpha, p), md_scale(hint, radius/hint_norm));
+            const tensor_t next_stress = md_add(
+                target_dev, md_iso(md_trace(old_stress)/3.0));
+            const double next_f = md_yield(m, next_stress, *alpha);
+            if (!isfinite(next_f) || fabs(next_f) >= tolerance) return 0;
+            *stress = next_stress;
+            *plastic_strain = md_add(
+                *plastic_strain,
+                md_elastic_compliance(
+                    md_sub(old_stress, next_stress), K, G));
+            *residual = fabs(next_f);
+            return 1;
+        }
         const double dlambda = f/denominator;
         const tensor_t old_stress = *stress;
-        tensor_t next_stress = md_sub(old_stress,
-                                      md_scale(dsigma_p, dlambda));
-        tensor_t next_alpha = md_add(*alpha, md_scale(abar, dlambda));
-        double next_f = md_yield(m, next_stress, next_alpha);
-        if (!isfinite(next_f)) return 0;
-        if (fabs(next_f) >= fabs(f)) {
+        const tensor_t old_alpha = *alpha;
+        tensor_t next_stress = old_stress;
+        tensor_t next_alpha = old_alpha;
+        double next_f = f;
+        int improved = 0;
+
+        /* A full Newton correction can cross the small kinematic yield
+         * surface. Backtrack until |f| actually decreases instead of
+         * accepting a large negative residual or oscillating across f=0. */
+        double line_scale = 1.0;
+        for (int line = 0; line < 20; line++) {
+            next_stress = md_sub(
+                old_stress, md_scale(dsigma_p, line_scale*dlambda));
+            next_alpha = md_add(
+                old_alpha, md_scale(abar, line_scale*dlambda));
+            next_f = md_yield(m, next_stress, next_alpha);
+            if (isfinite(next_f) && fabs(next_f) < fabs(f)) {
+                improved = 1;
+                break;
+            }
+            line_scale *= 0.5;
+        }
+
+        if (!improved) {
             const double grad_norm = md_ddot(dfds, dfds);
             if (grad_norm <= DBL_MIN) return 0;
-            next_stress = md_sub(*stress, md_scale(dfds, f/grad_norm));
-            next_alpha = *alpha;
-            next_f = md_yield(m, next_stress, next_alpha);
-            if (!isfinite(next_f) || fabs(next_f) >= fabs(f)) return 0;
+            const double gradient_step = f/grad_norm;
+            line_scale = 1.0;
+            for (int line = 0; line < 20; line++) {
+                next_stress = md_sub(
+                    old_stress,
+                    md_scale(dfds, line_scale*gradient_step));
+                next_alpha = old_alpha;
+                next_f = md_yield(m, next_stress, next_alpha);
+                if (isfinite(next_f) && fabs(next_f) < fabs(f)) {
+                    improved = 1;
+                    break;
+                }
+                line_scale *= 0.5;
+            }
+            if (!improved) return 0;
         }
         *stress = next_stress;
         *alpha = next_alpha;
@@ -534,13 +587,10 @@ NL_HD static int md_stress_correction(
             *plastic_strain,
             md_elastic_compliance(md_sub(old_stress, next_stress), K, G));
         f = next_f;
-        if (f <= tolerance) {
-            *residual = fmax(f, 0.0);
-            return 1;
-        }
+        *residual = fabs(f);
+        if (fabs(f) < tolerance) return 1;
     }
-    *residual = fmax(f, 0.0);
-    return f <= tolerance;
+    return 0;
 }
 
 NL_HD static int nl_update_manzari_dafalias(
@@ -660,8 +710,9 @@ NL_HD static int nl_update_manzari_dafalias(
 
         double correction_residual = 0.0;
         if (!md_stress_correction(
-                m, &stress, alpha, *fabric, *alpha_in, e_step, &pstrain,
-                K, G, cfg->error_tolerance, cfg->no_substeps,
+                m, &stress, alpha, *fabric, *alpha_in, e_step,
+                elastic_trial, &pstrain, K, G, cfg->error_tolerance,
+                cfg->no_substeps,
                 &correction_residual)) {
             *yield_error = correction_residual;
             return 0;
@@ -677,11 +728,15 @@ NL_HD static int nl_update_manzari_dafalias(
     *dynamic_stress = md_sub(md_scale(stress, -1.0), static_stress);
     *plastic_strain = md_scale(pstrain, -1.0);
     const double final_f = md_yield(m, stress, *alpha);
-    *yield_error = fmax(*yield_error, fmax(final_f, 0.0));
+    if (!isfinite(final_f)) {
+        *yield_error = DBL_MAX;
+        return 0;
+    }
+    *yield_error = fmax(*yield_error, fabs(final_f));
     return md_finite(*dynamic_stress) && md_finite(*plastic_strain) &&
            md_finite(*alpha) && md_finite(*alpha_in) && md_finite(*fabric) &&
            isfinite(*yield_error) &&
-           *yield_error <= cfg->error_tolerance;
+           *yield_error < cfg->error_tolerance;
 }
 
 #undef NL_HD
@@ -2351,7 +2406,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         if (config->material_model == MANZARI_DAFALIAS) {
             fprintf(stderr,
                     "Manzari-Dafalias integration: Modified Euler "
-                    "(local_error=%g, max_substeps=%d, yield_drift=%g Pa, "
+                    "(local_error=%g, max_substeps=%d, "
+                    "yield_residual=%g Pa, "
                     "geostatic=%s)\n",
                     config->backbone_error_tolerance, config->no_substeps,
                     config->error_tolerance,

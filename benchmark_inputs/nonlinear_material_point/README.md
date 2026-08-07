@@ -90,7 +90,14 @@ Manzari--Dafalias reuses the production nonlinear integration controls rather
 than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
 local Modified-Euler error target, `no_substeps` caps accepted adaptive
 substeps (with rejected trials also bounded), and `error_tolerance` is the
-maximum positive yield-surface drift in Pa after stress correction. The model
+maximum absolute yield-surface residual in Pa after a plastic stress
+correction. The elastic predictor retains the one-sided admissibility check
+`f_trial <= error_tolerance`, so a genuinely elastic state may remain inside
+the surface. After an accepted plastic substep, the stress-correction loop
+permits at most `min(no_substeps, 50)` iterations. If it cannot reduce the
+absolute residual to the tolerance, Hercules rejects the constitutive update
+and the production GPU error check aborts with Manzari--Dafalias failure code
+3 rather than continuing from an off-surface state. The model
 is currently GPU-only in production; the host invocation here is a regression
 driver for the shared constitutive arithmetic, not a second production
 backend. This host/CUDA parity check is not independent physical validation;
