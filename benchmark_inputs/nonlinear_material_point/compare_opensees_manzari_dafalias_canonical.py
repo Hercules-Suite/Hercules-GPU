@@ -25,7 +25,7 @@ STATE_PAIRS = tuple(
     + [("void_ratio", "void_ratio")]
 )
 TEST_MODES = {
-    "drained": ("md_drained_triaxial", "monotonic", "2"),
+    "drained": ("md_drained_triaxial", "monotonic", "3"),
     "undrained": ("md_undrained_cyclic_shear", "cyclic", "1"),
 }
 
