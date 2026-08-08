@@ -215,6 +215,19 @@ python3 compare_opensees_manzari_dafalias_canonical.py \
   --opensees-csv opensees_md_undrained_cyclic_shear.csv
 ```
 
+Plot the undrained cyclic stress--strain response, inferred pore-pressure
+ratio, effective mean stress, and effective stress path from the comparator's
+detailed CSV:
+
+```bash
+python3 plot_opensees_manzari_dafalias_undrained.py \
+  --comparison-csv opensees_md_undrained_comparison/comparison.csv \
+  --output-prefix opensees_md_undrained_comparison/hercules_vs_opensees
+```
+
+The plotting script writes both a 300-dpi PNG and a vector PDF and requires
+Matplotlib.
+
 The comparator is report-only by default. After documenting calibration- and
 path-specific acceptance values, CI or a benchmark script may add
 `--max-stress-nrmse`, `--max-radial-confinement-error-kpa`, or
