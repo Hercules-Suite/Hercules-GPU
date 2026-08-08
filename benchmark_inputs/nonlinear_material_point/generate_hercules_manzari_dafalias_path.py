@@ -26,6 +26,45 @@ KNOWN_TESTS = {
 }
 
 
+def normalize_isotropic_seed(
+    initial: dict[str, str],
+) -> tuple[tuple[float, ...], dict[str, tuple[float, ...]]]:
+    """Remove roundoff-only directional state after isotropic consolidation."""
+    stress_kpa = tuple(float(initial[field]) for field in STRESS_FIELDS)
+    mean_normal_kpa = sum(stress_kpa[:3]) / 3.0
+    stress_scale_kpa = max(abs(mean_normal_kpa), 1.0)
+    maximum_stress_departure = max(
+        *(abs(value - mean_normal_kpa) for value in stress_kpa[:3]),
+        *(abs(value) for value in stress_kpa[3:]),
+    )
+    if maximum_stress_departure > 1.0e-10 * stress_scale_kpa:
+        raise SystemExit(
+            "OpenSees stage-boundary stress is not isotropic within the "
+            f"roundoff-cleanup tolerance: {maximum_stress_departure:.3e} kPa"
+        )
+
+    for state_name, fields in STATE_TENSOR_FIELDS.items():
+        maximum_state = max(abs(float(initial[field])) for field in fields)
+        if maximum_state > 1.0e-10:
+            raise SystemExit(
+                f"OpenSees stage-boundary {state_name} is not zero within "
+                f"the roundoff-cleanup tolerance: {maximum_state:.3e}"
+            )
+
+    stress_pa = (
+        1000.0 * mean_normal_kpa,
+        1000.0 * mean_normal_kpa,
+        1000.0 * mean_normal_kpa,
+        0.0,
+        0.0,
+        0.0,
+    )
+    zero_state = (0.0,) * 6
+    return stress_pa, {
+        state_name: zero_state for state_name in STATE_TENSOR_FIELDS
+    }
+
+
 def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
@@ -104,6 +143,7 @@ def main() -> int:
     test_id, source_rows = read_path(args.opensees_csv)
     rows = replay_rows(test_id, source_rows)
     initial = rows[0]
+    initial_stress_pa, initial_state_tensors = normalize_isotropic_seed(initial)
     prefix = args.output_prefix or f"hercules_{test_id}"
     if args.backbone_errtol <= 0.0:
         raise SystemExit("--backbone-errtol must be positive")
@@ -136,17 +176,18 @@ def main() -> int:
         "125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101300.0 0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0",
         "",
         "# Committed OpenSees state at the elastic-to-plastic stage boundary.",
-        "# Stress is tension-positive and expressed in Pa for Hercules.",
+        "# The verified isotropic seed is normalized to remove roundoff-only",
+        "# directional state. Stress is tension-positive and expressed in Pa.",
         "material_point_initial_strain =",
         " ".join(f"{float(initial[field]):.17e}" for field in STRAIN_FIELDS),
         "material_point_initial_stress =",
-        " ".join(f"{1000.0*float(initial[field]):.17e}"
-                 for field in STRESS_FIELDS),
+        " ".join(f"{value:.17e}" for value in initial_stress_pa),
     ]
-    for state_name, fields in STATE_TENSOR_FIELDS.items():
+    for state_name in STATE_TENSOR_FIELDS:
         lines.extend([
             f"material_point_initial_{state_name} =",
-            " ".join(f"{float(initial[field]):.17e}" for field in fields),
+            " ".join(f"{value:.17e}"
+                     for value in initial_state_tensors[state_name]),
         ])
     lines.extend([
         "",
@@ -161,6 +202,8 @@ def main() -> int:
     print(f"OpenSees source states: {len(source_rows)}")
     print(f"Stage-1 replay states: {len(rows)}")
     print(f"Initial OpenSees step: {initial['step']}")
+    print("Seed normalization: verified isotropic stress; zeroed "
+          "roundoff-only directional state")
     print(f"Hercules input: {args.output.resolve()}")
     print(f"Material-point output prefix: {prefix}")
     print(f"Expected output names: {prefix}.cpu.csv and {prefix}.gpu.csv")

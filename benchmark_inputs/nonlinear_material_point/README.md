@@ -165,6 +165,14 @@ elastoplastic stage would create a different initial effective stress and is
 not a valid constitutive comparison. The first generated history row is the
 seeded state itself, so it also verifies zero-increment state preservation.
 
+The consolidation boundary is theoretically isotropic, but an OpenSees finite
+element solve may leave roundoff-scale shear stress or directional internal
+state. The conversion tool verifies that stress isotropy and zero alpha,
+alpha-in, and fabric hold within strict cleanup tolerances, then seeds the
+exact mean normal stress with zero directional state. This prevents
+roundoff-only symmetry breaking from selecting different host/device adaptive
+branches while retaining the recorded post-consolidation strain path.
+
 Run either standalone driver on a machine with OpenSees:
 
 ```bash
