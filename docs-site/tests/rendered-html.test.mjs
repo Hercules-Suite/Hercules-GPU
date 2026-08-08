@@ -352,6 +352,10 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
     `${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`,
     "utf8",
   );
+  const brickupPlot = readFileSync(
+    `${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`,
+    "utf8",
+  );
 
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
@@ -376,6 +380,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
@@ -409,6 +414,11 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(kernel, /kernelPoroelasticPressureForce<<<1, 1>>>/);
   assert.match(kernel, /kernelPoroelasticPressureUpdate<<<1, 8>>>/);
   assert.match(brickupComparator, /maximum_pore_pressure_difference_kpa/);
+  assert.match(brickupComparator, /PASS: all requested SSPbrickUP\/BrickUP acceptance/);
+  assert.match(brickupPlot, /hercules_pore_pressure_pa/);
+  assert.match(brickupPlot, /hercules_total_sig_xx_pa/);
+  assert.match(brickupPlot, /with_suffix\("\.png"\)/);
+  assert.match(brickupPlot, /with_suffix\("\.pdf"\)/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

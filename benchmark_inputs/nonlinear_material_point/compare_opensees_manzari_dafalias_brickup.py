@@ -347,6 +347,16 @@ def main() -> int:
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
+    requested_thresholds = (
+        args.max_effective_stress_nrmse,
+        args.max_pore_pressure_difference_kpa,
+        args.max_total_radial_error_kpa,
+    )
+    if any(value is not None for value in requested_thresholds):
+        print("PASS: all requested SSPbrickUP/BrickUP acceptance "
+              "thresholds satisfied")
+    else:
+        print("Comparison completed: no acceptance thresholds requested")
     return 0
 
 

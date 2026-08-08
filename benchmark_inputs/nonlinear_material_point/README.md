@@ -330,15 +330,34 @@ mpirun -np 1 ../../quake/forward/psolve \
 
 python3 compare_opensees_manzari_dafalias_brickup.py \
   --hercules-csv manzari_md_brickup_undrained_triaxial.cpu.csv \
-  --opensees-csv opensees_md_sspbrickup_undrained_triaxial.csv
+  --opensees-csv opensees_md_sspbrickup_undrained_triaxial.csv \
+  --output-dir opensees_md_sspbrickup_comparison \
+  --max-effective-stress-nrmse 5.0e-5 \
+  --max-pore-pressure-difference-kpa 1.0e-6 \
+  --max-total-radial-error-kpa 2.0e-1
+
+python3 plot_opensees_manzari_dafalias_brickup.py \
+  --comparison-csv opensees_md_sspbrickup_comparison/comparison.csv \
+  --output-prefix opensees_md_sspbrickup_comparison/hercules_vs_opensees
 ```
 
 The comparator reports effective- and total-stress errors, pore-pressure and
 `r_u` differences, radial-confinement error, sealed-storage residual, and
-alpha/fabric/void-ratio differences. Optional acceptance thresholds are
+alpha/fabric/void-ratio differences. The command above applies the validated
+version-4 fixture bounds: effective-stress NRMSE at most `5.0e-5`, maximum
+pore-pressure difference at most `1.0e-6 kPa`, and maximum Hercules total
+radial-confinement error at most `2.0e-1 kPa`. A successful thresholded run
+prints an explicit `PASS`. These bounds characterize this exact 100-kPa
+one-element fixture; they are not constitutive or production-analysis
+tolerances. The acceptance options are
 `--max-effective-stress-nrmse`,
 `--max-pore-pressure-difference-kpa`, and
 `--max-total-radial-error-kpa`.
+
+The plotting command writes PNG and PDF comparisons of deviatoric stress,
+pore-pressure buildup, effective stress path, and total radial-confinement
+drift. Axial strain is shown as positive compression relative to the seeded
+start of the coupled replay.
 
 The OpenSees `-lumped` pressure capacity and Hercules's lumped nodal storage
 use the same row-sum representation. This benchmark validates that sealed

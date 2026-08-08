@@ -505,7 +505,13 @@ Nonlinear GPU execution (runtime environment):
 	so the time-varying displacement constraint supplies the solid velocity that
 	drives the U-P pressure equation. It also avoids the unsupported combination
 	of a prescribed DOF and an `equalDOF` retained node under the Transformation
-	handler.
+	handler. The validated version-4 acceptance bounds are effective-stress
+	NRMSE at most `5.0e-5`, pore-pressure difference at most `1.0e-6 kPa`, and
+	Hercules total radial-confinement error at most `2.0e-1 kPa`; a thresholded
+	comparison prints an explicit `PASS`. These values characterize this exact
+	100-kPa fixture rather than defining production constitutive tolerances. A
+	companion plotting script compares deviatoric response, pore-pressure
+	buildup, effective stress path, and confinement drift in PNG and PDF form.
 	It does not validate nonuniform pressure, Darcy diffusion, drainage/open-pore
 	boundaries, multi-element exchange, or the complete production time-stepping loop. The
 	full commands and input-only controls are documented in
