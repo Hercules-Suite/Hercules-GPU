@@ -125,9 +125,10 @@ def main() -> int:
         f"backbone_errTol = {args.backbone_errtol:.17e}",
         "tension_cutoff = no",
         # Long adaptive histories accumulate small host/device libm differences.
-        # Constitutive convergence is checked separately against error_tolerance.
+        # The absolute floor covers inactive, near-zero tensor components;
+        # constitutive convergence is checked separately against error_tolerance.
         "material_point_compare_rtol = 1.0e-6",
-        "material_point_compare_atol = 1.0e-8",
+        "material_point_compare_atol = 1.0e-6",
         f"material_point_output_prefix = {prefix}",
         "",
         "# G0 nu e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz",

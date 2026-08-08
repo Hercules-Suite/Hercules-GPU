@@ -212,11 +212,12 @@ path-specific acceptance values, CI or a benchmark script may add
 `--max-stress-nrmse`, `--max-radial-confinement-error-kpa`, or
 `--max-ru-difference`.
 
-Generated canonical histories use `material_point_compare_rtol=1e-6` for
-CPU/CUDA state parity over hundreds of adaptive constitutive increments. This
-only accommodates sub-micro-relative host/device floating-point differences;
-the CPU and GPU yield residuals are still checked independently against the
-absolute `error_tolerance`.
+Generated canonical histories use `material_point_compare_rtol=1e-6` and
+`material_point_compare_atol=1e-6` for CPU/CUDA state parity over hundreds of
+adaptive constitutive increments. The absolute floor covers floating-point
+noise in inactive, near-zero tensor components; the relative tolerance governs
+resolved state. CPU and GPU yield residuals are still checked independently
+against the absolute `error_tolerance`.
 
 The constant-volume test is an undrained *constitutive* characterization. Its
 pore pressure is inferred from effective mean stress under the stated constant
