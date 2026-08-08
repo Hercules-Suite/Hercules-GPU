@@ -4992,6 +4992,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double maximum_relative = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
+    double maximum_cpu_integration_error = 0.0;
+    double maximum_gpu_integration_error = 0.0;
+    double maximum_cpu_plastic_multiplier = 0.0;
+    double maximum_gpu_plastic_multiplier = 0.0;
+    int maximum_cpu_accepted_substeps = 0;
+    int maximum_gpu_accepted_substeps = 0;
     int zero_increment_checks = 0;
 
     if (myID != 0) return 0;
@@ -5241,6 +5247,92 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 continue;
             }
 
+            /* Adaptive error estimates and accepted-work counts are solver
+             * diagnostics, not constitutive state. Host and device arithmetic
+             * may choose slightly different valid substep histories, so
+             * validate both independently against the configured limits. */
+            if (material_model == MANZARI_DAFALIAS &&
+                i == MATERIAL_POINT_INTEGRATION_ERROR_INDEX) {
+                const double cpu_error = cpu_values[i];
+                const double gpu_error = gpu_values[i];
+                maximum_cpu_integration_error = MAX(
+                    maximum_cpu_integration_error, cpu_error);
+                maximum_gpu_integration_error = MAX(
+                    maximum_gpu_integration_error, gpu_error);
+                if (cpu_error < 0.0 || gpu_error < 0.0 ||
+                    cpu_error > backbone_tolerance ||
+                    gpu_error > backbone_tolerance) {
+                    fprintf(stderr, "Material-point local integration error "
+                            "exceeds backbone_errTol at step %d: CPU=%.3e "
+                            "GPU=%.3e tolerance=%.3e\n", step, cpu_error,
+                            gpu_error, backbone_tolerance);
+                    goto cleanup;
+                }
+                continue;
+            }
+            if (material_model == MANZARI_DAFALIAS &&
+                (i == MATERIAL_POINT_PSI_INDEX ||
+                 i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX)) {
+                const double cpu_multiplier = cpu_values[i];
+                const double gpu_multiplier = gpu_values[i];
+                if (cpu_multiplier < 0.0 || gpu_multiplier < 0.0) {
+                    fprintf(stderr, "Negative material-point plastic "
+                            "multiplier at step %d field %s: CPU=%.3e "
+                            "GPU=%.3e\n", step,
+                            material_point_result_names[i], cpu_multiplier,
+                            gpu_multiplier);
+                    goto cleanup;
+                }
+                if (i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX) {
+                    maximum_cpu_plastic_multiplier = MAX(
+                        maximum_cpu_plastic_multiplier, cpu_multiplier);
+                    maximum_gpu_plastic_multiplier = MAX(
+                        maximum_gpu_plastic_multiplier, gpu_multiplier);
+                    if (cpu_values[MATERIAL_POINT_PSI_INDEX] !=
+                            cpu_multiplier ||
+                        gpu_values[MATERIAL_POINT_PSI_INDEX] !=
+                            gpu_multiplier) {
+                        fprintf(stderr, "Inconsistent duplicated "
+                                "material-point plastic multiplier at step "
+                                "%d\n", step);
+                        goto cleanup;
+                    }
+                }
+                continue;
+            }
+            if (material_model == MANZARI_DAFALIAS &&
+                (i == MATERIAL_POINT_LOAD_UNLOAD_INDEX ||
+                 i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX)) {
+                const double cpu_substeps = cpu_values[i];
+                const double gpu_substeps = gpu_values[i];
+                if (cpu_substeps < 0.0 || gpu_substeps < 0.0 ||
+                    cpu_substeps > no_substeps ||
+                    gpu_substeps > no_substeps) {
+                    fprintf(stderr, "Material-point accepted substeps exceed "
+                            "the configured limit at step %d field %s: "
+                            "CPU=%.0f GPU=%.0f limit=%d\n", step,
+                            material_point_result_names[i], cpu_substeps,
+                            gpu_substeps, no_substeps);
+                    goto cleanup;
+                }
+                if (i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX) {
+                    if (cpu_values[MATERIAL_POINT_LOAD_UNLOAD_INDEX] !=
+                            cpu_substeps ||
+                        gpu_values[MATERIAL_POINT_LOAD_UNLOAD_INDEX] !=
+                            gpu_substeps) {
+                        fprintf(stderr, "Inconsistent duplicated "
+                                "material-point accepted-substep count at "
+                                "step %d\n", step);
+                        goto cleanup;
+                    }
+                    maximum_cpu_accepted_substeps = MAX(
+                        maximum_cpu_accepted_substeps, (int)cpu_substeps);
+                    maximum_gpu_accepted_substeps = MAX(
+                        maximum_gpu_accepted_substeps, (int)gpu_substeps);
+                }
+                continue;
+            }
+
             const double absolute = fabs(cpu_values[i]-gpu_values[i]);
             /* A component-wise relative error is ill-conditioned for an
              * inactive tensor component near zero. Scale tensor components
@@ -5281,6 +5373,17 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         printf("Modified-Euler controls: local error %.6e, maximum "
                "substeps %d, absolute yield residual %.6e\n",
                backbone_tolerance, no_substeps, error_tolerance);
+        printf("Maximum CPU/GPU yield residuals: %.6e / %.6e\n",
+               maximum_cpu_residual, maximum_gpu_residual);
+        printf("Maximum CPU/GPU local integration errors: %.6e / %.6e\n",
+               maximum_cpu_integration_error,
+               maximum_gpu_integration_error);
+        printf("Maximum CPU/GPU per-step plastic multipliers: %.6e / %.6e\n",
+               maximum_cpu_plastic_multiplier,
+               maximum_gpu_plastic_multiplier);
+        printf("Maximum CPU/GPU accepted substeps: %d / %d\n",
+               maximum_cpu_accepted_substeps,
+               maximum_gpu_accepted_substeps);
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "
                    "transition%s\n", zero_increment_checks,

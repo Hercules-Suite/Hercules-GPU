@@ -218,8 +218,13 @@ adaptive constitutive increments. Each tensor component uses the largest
 resolved component of the same six-component tensor as its relative scale;
 this avoids ill-conditioned relative errors for physically inactive
 components without loosening scalar or dimensionless-state checks. CPU and GPU
-yield residuals are still checked independently against the absolute
-`error_tolerance`.
+yield residuals are checked independently against the absolute
+`error_tolerance`. Modified-Euler local-error estimates and accepted-substep
+counts are likewise checked independently against `backbone_errTol` and
+`no_substeps`; host and device arithmetic need not select identical valid
+adaptive substep histories. Per-step plastic multipliers are nonnegative
+integration diagnostics; the evolved plastic-strain tensor remains part of
+the direct state comparison.
 
 The constant-volume test is an undrained *constitutive* characterization. Its
 pore pressure is inferred from effective mean stress under the stated constant
