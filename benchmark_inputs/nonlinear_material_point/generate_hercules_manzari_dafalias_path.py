@@ -23,7 +23,7 @@ STATE_TENSOR_FIELDS = {
 KNOWN_TESTS = {
     "md_drained_triaxial": ("9", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
-    "md_sspbrickup_undrained_triaxial": ("1", "complete"),
+    "md_sspbrickup_undrained_triaxial": ("2", "complete"),
 }
 
 

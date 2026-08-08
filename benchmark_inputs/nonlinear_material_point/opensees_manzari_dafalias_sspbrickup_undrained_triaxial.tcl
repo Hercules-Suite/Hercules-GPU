@@ -54,9 +54,12 @@ node 6 1.0 0.0 1.0
 node 7 1.0 1.0 1.0
 node 8 0.0 1.0 1.0
 
-# Affine mechanical constraints. During drained consolidation all eight pore-
-# pressure DOFs are fixed to zero; removing those SP constraints seals the
-# element for the coupled undrained stage.
+# Symmetry constraints for a conventional triaxial specimen. During drained
+# consolidation all eight pore-pressure DOFs are fixed to zero; removing those
+# SP constraints seals the element for the coupled undrained stage. Distributed
+# face tractions and identical top-face axial displacements produce the affine
+# one-element mode without mixing an SP constraint with an equalDOF retained
+# node (a combination unsupported by OpenSees' Transformation handler).
 fix 1 1 1 1 1
 fix 2 0 1 1 1
 fix 3 0 0 1 1
@@ -65,13 +68,6 @@ fix 5 1 1 0 1
 fix 6 0 1 0 1
 fix 7 0 0 0 1
 fix 8 1 0 0 1
-
-equalDOF 7 2 1
-equalDOF 7 3 1 2
-equalDOF 7 4 2
-equalDOF 7 5 3
-equalDOF 7 6 1 3
-equalDOF 7 8 2 3
 
 # Zero permeability gives a sealed element after the pressure SP constraints
 # are removed. -lumped row-sums the SSP pressure capacity to match Hercules'
@@ -85,15 +81,20 @@ updateMaterialStage -material 1 -stage 0
 constraints Transformation
 numberer RCM
 system BandGeneral
-test NormUnbalance 1.0e-6 100 0
+test NormUnbalance 1.0e-8 100 0
 algorithm Newton
-integrator Newmark 0.5 0.25
-analysis Transient
+integrator LoadControl [expr {1.0/$consolidationSteps}]
+analysis Static
 
+set pNode [expr {-$confinementKPa/4.0}]
 pattern Plain 1 Linear {
-    load 7 [expr {-$confinementKPa}] \
-           [expr {-$confinementKPa}] \
-           [expr {-$confinementKPa}] 0.0
+    load 2 $pNode 0.0 0.0 0.0
+    load 3 $pNode $pNode 0.0 0.0
+    load 4 0.0 $pNode 0.0 0.0
+    load 5 0.0 0.0 $pNode 0.0
+    load 6 $pNode 0.0 $pNode 0.0
+    load 7 $pNode $pNode $pNode 0.0
+    load 8 0.0 $pNode $pNode 0.0
 }
 
 set output [open $outputPath w]
@@ -127,10 +128,19 @@ proc writeState {phaseName} {
     set exy [expr {0.5*[lindex $strain 3]}]
     set eyz [expr {0.5*[lindex $strain 4]}]
     set exz [expr {0.5*[lindex $strain 5]}]
-    set affineError [expr {max(abs($exx-[nodeDisp 7 1]),
-                               abs($eyy-[nodeDisp 7 2]),
-                               abs($ezz-[nodeDisp 7 3]),
-                               abs($exy), abs($eyz), abs($exz))}]
+    set affineError [expr {max(abs($exy), abs($eyz), abs($exz))}]
+    foreach node {2 3 6 7} {
+        set affineError [expr {max($affineError,
+                                   abs([nodeDisp $node 1]-$exx))}]
+    }
+    foreach node {3 4 7 8} {
+        set affineError [expr {max($affineError,
+                                   abs([nodeDisp $node 2]-$eyy))}]
+    }
+    foreach node {5 6 7 8} {
+        set affineError [expr {max($affineError,
+                                   abs([nodeDisp $node 3]-$ezz))}]
+    }
     if {$affineError > 1.0e-12} {
         puts stderr "OpenSees SSPbrickUP deformation is not affine at step $step: error=$affineError"
         close $output
@@ -213,15 +223,14 @@ proc writeState {phaseName} {
     foreach value $numeric {
         lappend row [format "%.17e" $value]
     }
-    lappend row md_sspbrickup_undrained_triaxial 1 [format "%.17e" [getTime]]
+    lappend row md_sspbrickup_undrained_triaxial 2 [format "%.17e" [getTime]]
     puts $output [join $row ,]
     incr step
 }
 
 writeState initial
-set consolidationDt [expr {1.0/$consolidationSteps}]
 for {set i 0} {$i < $consolidationSteps} {incr i} {
-    if {[analyze 1 $consolidationDt] != 0} {
+    if {[analyze 1] != 0} {
         puts stderr "OpenSees SSPbrickUP consolidation failed at increment $i"
         close $output
         exit 56
@@ -251,8 +260,23 @@ set finalAxialDisplacement [expr {$initialAxialDisplacement+
 timeSeries Path 2 -time {0.0 1.0} \
     -values [list $initialAxialDisplacement $finalAxialDisplacement] -useLast
 pattern Plain 2 2 {
+    sp 5 3 1.0
+    sp 6 3 1.0
     sp 7 3 1.0
+    sp 8 3 1.0
 }
+
+# Rebuild the analysis after changing the pressure and axial SP constraints.
+# The model, committed material state, constant confinement loads, and newly
+# defined displacement pattern remain in the Domain across wipeAnalysis.
+wipeAnalysis
+constraints Transformation
+numberer RCM
+system BandGeneral
+test NormUnbalance 1.0e-3 100 0
+algorithm Newton
+integrator Newmark 0.5 0.25
+analysis Transient
 
 set acceptedCoupledSubsteps 0
 proc advanceCoupledIncrement {increment depth} {

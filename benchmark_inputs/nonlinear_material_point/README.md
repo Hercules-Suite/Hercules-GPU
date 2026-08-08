@@ -292,6 +292,14 @@ is zero, so the element follows the uniform storage relation
 The `alpha=1.5e-9` value passed to `SSPbrickUP` is its spatial pressure-field
 stabilization coefficient, not the Biot coefficient.
 
+Driver version 2 uses conventional symmetry supports and distributes each
+confining face traction over its four nodes. During the coupled stage it
+prescribes the same absolute axial displacement at all four top nodes and
+rebuilds the transient analysis after changing the pressure and displacement
+SP constraints. This avoids prescribing a DOF on an `equalDOF` retained node,
+which the OpenSees Transformation constraint handler does not follow reliably.
+The driver independently verifies the resulting nodal deformation is affine.
+
 The generator seeds Hercules with the same committed effective stress,
 strain, and Manzari--Dafalias state and emits `material_point_brickup=yes`.
 That standalone mode replays the exact OpenSees strain history through both

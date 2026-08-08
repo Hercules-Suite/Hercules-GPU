@@ -21,7 +21,7 @@ STATE_PAIRS = tuple(
     + [("void_ratio", "void_ratio")]
 )
 TEST_ID = "md_sspbrickup_undrained_triaxial"
-DRIVER_VERSION = "1"
+DRIVER_VERSION = "2"
 
 
 def read_hercules(path: Path) -> list[dict[str, float]]:
