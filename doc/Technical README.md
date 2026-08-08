@@ -466,7 +466,10 @@ Nonlinear GPU execution (runtime environment):
 	seeds the recorded stress, strain, alpha, alpha-in, and fabric at the stage
 	boundary and replays only the common elastoplastic history; it does not
 	incorrectly pass the elastic consolidation strain through Hercules'
-	pressure-dependent plastic stage. The
+	pressure-dependent plastic stage. The drained driver explicitly queries the
+	SSPbrick integration-point material responses; its obsolete version-5 CSVs
+	used element-level responses, are not valid constitutive histories, and are
+	rejected by the current conversion and comparison tools. The
 	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
 	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
 	reversals. The latter validates constitutive undrained tendency only: it does

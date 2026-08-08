@@ -92,8 +92,11 @@ puts $output "step,phase,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,sigma_xx_kpa,
 set step 0
 proc writeState {phaseName} {
     global output step confinementKPa
-    set stress [eleResponse 1 stress]
-    set state [eleResponse 1 state]
+    # SSPbrick's element-level stress/state responses are not the six-component
+    # Manzari--Dafalias material tensors.  Query its single integration-point
+    # material explicitly, as the undrained canonical driver does.
+    set stress [eleResponse 1 material 1 stress]
+    set state [eleResponse 1 material 1 state]
     if {[llength $stress] != 6 || [llength $state] != 26} {
         puts stderr "OpenSees material response has an unexpected size at step $step"
         close $output
@@ -117,7 +120,7 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,5,%.17e" \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,6,%.17e" \
         $step $phaseName $exx $eyy $ezz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
         [lindex $state 6] [lindex $state 7] [lindex $state 8] \

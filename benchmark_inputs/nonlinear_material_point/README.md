@@ -173,6 +173,14 @@ exact mean normal stress with zero directional state. This prevents
 roundoff-only symmetry breaking from selecting different host/device adaptive
 branches while retaining the recorded post-consolidation strain path.
 
+The drained driver queries `material 1 stress` and `material 1 state` at the
+SSPbrick integration point. Its earlier version-5 element-level response
+queries did not return the Manzari--Dafalias material tensors: they could report
+nonzero `q` and directional alpha during nominally isotropic consolidation.
+Version-5 drained CSVs are invalid for constitutive comparison and are rejected
+by both the conversion and comparison tools; regenerate them with driver
+version 6.
+
 Run either standalone driver on a machine with OpenSees:
 
 ```bash

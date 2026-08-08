@@ -71,8 +71,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 213);
-  assert.equal(documented.length, 213, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 218);
+  assert.equal(documented.length, 218, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -335,6 +335,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
     `${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`,
     "utf8",
   );
+  const drainedDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`,
+    "utf8",
+  );
+  const undrainedDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`,
+    "utf8",
+  );
 
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
@@ -359,8 +367,13 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /"alpha_in": tuple/);
+  assert.match(generator, /"md_drained_triaxial": \("6", "complete"\)/);
   assert.match(cpu, /material_point_initial_alpha_in/);
   assert.match(canonicalComparator, /def replay_rows/);
+  assert.match(drainedDriver, /set stress \[eleResponse 1 material 1 stress\]/);
+  assert.match(drainedDriver, /set state \[eleResponse 1 material 1 state\]/);
+  assert.doesNotMatch(drainedDriver, /set stress \[eleResponse 1 stress\]/);
+  assert.match(undrainedDriver, /set stress \[eleResponse 1 material 1 stress\]/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {
