@@ -427,7 +427,9 @@ Nonlinear GPU execution (runtime environment):
 	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
 	the absolute yield-surface residual after a plastic stress correction. The
 	elastic predictor uses the one-sided admissibility condition
-	`f_trial <= error_tolerance`. Elastic stages leave alpha, fabric, and plastic
+	`f_trial <= error_tolerance`. A trial increment that crosses from strictly
+	inside to outside the yield surface is split at its elastic intersection;
+	only the remainder enters Modified Euler. Elastic stages leave alpha, fabric, and plastic
 	strain unchanged; these history variables evolve only under plastic flow.
 	Plastic correction is limited to
 	`min(no_substeps, 50)` iterations; failure to satisfy the absolute criterion

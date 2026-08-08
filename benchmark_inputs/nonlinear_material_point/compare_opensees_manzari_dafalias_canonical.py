@@ -43,10 +43,16 @@ def replay_rows(mode: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def read_hercules(path: Path) -> list[dict[str, float]]:
     with path.open(newline="", encoding="utf-8") as stream:
-        return [
-            {key: float(value) for key, value in row.items() if key != "status"}
-            for row in csv.DictReader(stream)
-        ]
+        rows: list[dict[str, float]] = []
+        for index, row in enumerate(csv.DictReader(stream)):
+            if int(row["status"]) != 0:
+                raise SystemExit(
+                    "Hercules constitutive history is invalid: update failed "
+                    f"at local replay step {index}"
+                )
+            rows.append({key: float(value) for key, value in row.items()
+                         if key != "status"})
+        return rows
 
 
 def read_opensees(path: Path) -> list[dict[str, str]]:

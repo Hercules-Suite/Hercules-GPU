@@ -85,6 +85,10 @@ Poisson's ratio and density from the element's `Vp`, `Vs`, and `rho`.
   allocation-free Modified-Euler implementation on host and CUDA. Its CSV adds
   alpha, alpha-in, fabric, void ratio, plastic multiplier, absolute yield
   residual, local integration error, and accepted-substep diagnostics.
+- `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
+  isotropically consolidated state and crosses first yield in the next strain
+  increment. It verifies the elastic intersection followed by Modified-Euler
+  integration of only the plastic remainder.
 
 Manzari--Dafalias reuses the production nonlinear integration controls rather
 than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
@@ -93,7 +97,10 @@ substeps (with rejected trials also bounded), and `error_tolerance` is the
 maximum absolute yield-surface residual in Pa after a plastic stress
 correction. The elastic predictor retains the one-sided admissibility check
 `f_trial <= error_tolerance`, so a genuinely elastic state may remain inside
-the surface. Elastic stages preserve alpha, fabric, and plastic strain; only
+the surface. An increment that starts strictly inside but ends outside is split
+at its elastic yield intersection before integrating the plastic remainder,
+matching the OpenSees transition. Elastic stages preserve alpha, fabric, and
+plastic strain; only
 plastic flow evolves those history variables. After an accepted
 plastic substep, the stress-correction loop
 permits at most `min(no_substeps, 50)` iterations. If it cannot reduce the

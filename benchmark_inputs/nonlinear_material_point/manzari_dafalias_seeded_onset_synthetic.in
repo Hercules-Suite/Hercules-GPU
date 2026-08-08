@@ -1,0 +1,36 @@
+# Seeded Manzari--Dafalias elastic-to-plastic onset regression.
+# The first deviatoric increment crosses the small kinematic yield surface and
+# must be split into an elastic segment followed by Modified-Euler plasticity.
+material_model = ManzariDafalias
+material_point_delta_time_sec = 1.0
+material_point_steps = 4
+no_substeps = 100
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-4
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-8
+material_point_compare_atol = 1.0e-8
+material_point_output_prefix = manzari_dafalias_seeded_onset_synthetic
+
+# G0 nu e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz
+material_point_constants =
+125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101300.0 0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0
+
+# Committed isotropic state after a separate forced-elastic consolidation.
+material_point_initial_strain =
+-3.0e-3 -3.0e-3 -3.0e-3 0.0 0.0 0.0
+material_point_initial_stress =
+-1.0e5 -1.0e5 -1.0e5 0.0 0.0 0.0
+material_point_initial_alpha =
+0.0 0.0 0.0 0.0 0.0 0.0
+material_point_initial_alpha_in =
+0.0 0.0 0.0 0.0 0.0 0.0
+material_point_initial_fabric =
+0.0 0.0 0.0 0.0 0.0 0.0
+
+# Hercules tensor strain: exx eyy ezz exy eyz exz
+material_point_strain_history =
+-3.0e-3 -3.0e-3 -3.0000e-3 0.0 0.0 0.0
+-3.0e-3 -3.0e-3 -3.0001e-3 0.0 0.0 0.0
+-3.0e-3 -3.0e-3 -3.0002e-3 0.0 0.0 0.0
+-3.0e-3 -3.0e-3 -3.0002e-3 0.0 0.0 0.0

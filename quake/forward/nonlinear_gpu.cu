@@ -381,6 +381,41 @@ NL_HD static inline double md_yield(
            sqrt(2.0/3.0)*m->m*p;
 }
 
+/* Locate the first yield crossing along an elastic stress increment. The
+ * current state must be strictly inside and the full trial state outside.
+ * Bisection is inexpensive here and gives identical host/device behavior. */
+NL_HD static int md_elastic_yield_intersection(
+    const manzari_dafalias_constants_t *m, tensor_t stress,
+    tensor_t elastic_increment, tensor_t alpha, double tolerance,
+    double *ratio)
+{
+    double lower = 0.0;
+    double upper = 1.0;
+    const double flower = md_yield(m, stress, alpha);
+    const double fupper = md_yield(
+        m, md_add(stress, elastic_increment), alpha);
+    if (!(flower < -tolerance) || !(fupper > tolerance) ||
+        !isfinite(flower) || !isfinite(fupper)) return 0;
+
+    for (int iteration = 0; iteration < 80; iteration++) {
+        const double middle = 0.5*(lower+upper);
+        const double fmiddle = md_yield(
+            m, md_add(stress, md_scale(elastic_increment, middle)), alpha);
+        if (!isfinite(fmiddle)) return 0;
+        if (fabs(fmiddle) <= tolerance) {
+            *ratio = middle;
+            return 1;
+        }
+        if (fmiddle > 0.0) {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    *ratio = 0.5*(lower+upper);
+    return isfinite(*ratio) && *ratio >= 0.0 && *ratio <= 1.0;
+}
+
 NL_HD static nl_md_dependent_t md_state_dependent(
     const manzari_dafalias_constants_t *m, tensor_t stress, tensor_t alpha,
     tensor_t fabric, double void_ratio, tensor_t alpha_in)
@@ -653,6 +688,17 @@ NL_HD static int nl_update_manzari_dafalias(
 
     double T = 0.0;
     double dT = 1.0;
+    const double current_f = md_yield(m, stress, *alpha);
+    if (current_f < -cfg->error_tolerance &&
+        trial_f > cfg->error_tolerance) {
+        double elastic_ratio = 0.0;
+        if (!md_elastic_yield_intersection(
+                m, stress, elastic_trial, *alpha, cfg->error_tolerance,
+                &elastic_ratio)) return 0;
+        stress = md_add(stress, md_scale(elastic_trial, elastic_ratio));
+        T = elastic_ratio;
+        dT = 1.0-elastic_ratio;
+    }
     /* Match the established explicit MD safeguard while using Hercules'
      * no_substeps as the cap on accepted work. Rejected error-control trials
      * are bounded separately so one difficult point cannot spin forever. */

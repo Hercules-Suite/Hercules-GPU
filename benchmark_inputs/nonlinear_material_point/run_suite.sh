@@ -36,6 +36,7 @@ fixtures=(
   vonmises_mkz_synthetic.in
   vonmises_ro_synthetic.in
   manzari_dafalias_modified_euler_synthetic.in
+  manzari_dafalias_seeded_onset_synthetic.in
 )
 
 failures=()
