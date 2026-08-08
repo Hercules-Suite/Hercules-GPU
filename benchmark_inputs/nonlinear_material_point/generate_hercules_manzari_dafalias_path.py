@@ -135,9 +135,9 @@ def main() -> int:
     parser.add_argument("--opensees-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--output-prefix")
-    parser.add_argument("--backbone-errtol", type=float, default=1.0e-4)
+    parser.add_argument("--backbone-errtol", type=float, default=1.0e-5)
     parser.add_argument("--yield-tolerance-pa", type=float, default=1.0e-1)
-    parser.add_argument("--maximum-substeps", type=int, default=100)
+    parser.add_argument("--maximum-substeps", type=int, default=400)
     args = parser.parse_args()
 
     test_id, source_rows = read_path(args.opensees_csv)

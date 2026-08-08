@@ -220,6 +220,14 @@ path-specific acceptance values, CI or a benchmark script may add
 `--max-stress-nrmse`, `--max-radial-confinement-error-kpa`, or
 `--max-ru-difference`.
 
+The canonical generator defaults to `backbone_errTol=1e-5` and
+`no_substeps=400`. The tighter local target prevents host/device adaptive-path
+separation at cyclic reversals. The substep value is a ceiling rather than a
+prescribed workload: the five-cycle undrained characterization required a
+maximum of 112 accepted substeps in the validated run. Override either value
+explicitly when studying integration sensitivity or a calibrated production
+case.
+
 Generated canonical histories use `material_point_compare_rtol=1e-6` and
 `material_point_compare_atol=1e-8` for CPU/CUDA state parity over hundreds of
 adaptive constitutive increments. Each tensor component uses the largest
