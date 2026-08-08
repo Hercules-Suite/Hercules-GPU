@@ -1427,6 +1427,202 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
   gpuData->porePressureForceDevice[nindex] = (solver_float)0.0;
 }
 
+int poroelastic_gpu_uniform_element_history(
+    const double* strain_history, const double* initial_strain,
+    int32_t steps, double storage_modulus, double biot_alpha,
+    double initial_pressure, double* pressure_history,
+    double* maximum_nodal_spread)
+{
+  gpu_data_t host_data = {};
+  gpu_data_t* data_device = NULL;
+  fvector_t* tm1_device = NULL;
+  fvector_t* tm2_device = NULL;
+  solver_float* pressure_tm1_device = NULL;
+  solver_float* pressure_tm2_device = NULL;
+  solver_float* pressure_force_device = NULL;
+  solver_float* pressure_mass_device = NULL;
+  int32_t* element_mapper_device = NULL;
+  int32_t* lnid_device = NULL;
+  double* element_h_device = NULL;
+  double* element_detj_device = NULL;
+  double* storage_modulus_device = NULL;
+  double* shape_scale_device = NULL;
+  fvector_t previous_displacement[8] = {};
+  fvector_t current_displacement[8] = {};
+  solver_float nodal_pressure[8] = {};
+  solver_float initial_nodal_pressure[8] = {};
+  solver_float nodal_mass[8] = {};
+  int32_t lnid[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  double shape_scale[8] = {1.0, 1.0, 1.0, 1.0,
+                           1.0, 1.0, 1.0, 1.0};
+  int32_t element_mapper = 0;
+  double element_h = 1.0;
+  double element_detj = 0.125;
+  double previous_strain[6] = {};
+  double maximum_spread = 0.0;
+  cudaError_t error = cudaSuccess;
+
+  if (strain_history == NULL || initial_strain == NULL ||
+      pressure_history == NULL || maximum_nodal_spread == NULL ||
+      steps <= 0 || !isfinite(storage_modulus) || storage_modulus <= 0.0 ||
+      !isfinite(biot_alpha) || biot_alpha <= 0.0 ||
+      !isfinite(initial_pressure)) {
+    return -1;
+  }
+
+  for (int component = 0; component < 6; component++) {
+    previous_strain[component] = initial_strain[component];
+  }
+  for (int node = 0; node < 8; node++) {
+    initial_nodal_pressure[node] = (solver_float)initial_pressure;
+    nodal_mass[node] = (solver_float)0.125;
+  }
+
+#define PORO_TEST_ALLOC(pointer, count) do {                              \
+    error = cudaMalloc((void**)&(pointer), (count) * sizeof(*(pointer))); \
+    if (error != cudaSuccess) goto cleanup;                               \
+  } while (0)
+#define PORO_TEST_COPY_TO_DEVICE(pointer, source, count) do {              \
+    error = cudaMemcpy((pointer), (source),                                \
+                       (count) * sizeof(*(pointer)), cudaMemcpyHostToDevice); \
+    if (error != cudaSuccess) goto cleanup;                                \
+  } while (0)
+
+  PORO_TEST_ALLOC(data_device, 1);
+  PORO_TEST_ALLOC(tm1_device, 8);
+  PORO_TEST_ALLOC(tm2_device, 8);
+  PORO_TEST_ALLOC(pressure_tm1_device, 8);
+  PORO_TEST_ALLOC(pressure_tm2_device, 8);
+  PORO_TEST_ALLOC(pressure_force_device, 8);
+  PORO_TEST_ALLOC(pressure_mass_device, 8);
+  PORO_TEST_ALLOC(element_mapper_device, 1);
+  PORO_TEST_ALLOC(lnid_device, 8);
+  PORO_TEST_ALLOC(element_h_device, 1);
+  PORO_TEST_ALLOC(element_detj_device, 1);
+  PORO_TEST_ALLOC(storage_modulus_device, 1);
+  PORO_TEST_ALLOC(shape_scale_device, 8);
+
+  PORO_TEST_COPY_TO_DEVICE(pressure_tm1_device, initial_nodal_pressure, 8);
+  PORO_TEST_COPY_TO_DEVICE(pressure_tm2_device, initial_nodal_pressure, 8);
+  PORO_TEST_COPY_TO_DEVICE(pressure_mass_device, nodal_mass, 8);
+  PORO_TEST_COPY_TO_DEVICE(element_mapper_device, &element_mapper, 1);
+  PORO_TEST_COPY_TO_DEVICE(lnid_device, lnid, 8);
+  PORO_TEST_COPY_TO_DEVICE(element_h_device, &element_h, 1);
+  PORO_TEST_COPY_TO_DEVICE(element_detj_device, &element_detj, 1);
+  PORO_TEST_COPY_TO_DEVICE(storage_modulus_device, &storage_modulus, 1);
+  PORO_TEST_COPY_TO_DEVICE(shape_scale_device, shape_scale, 8);
+
+  host_data.nharbored = 8;
+  host_data.lenum = 1;
+  host_data.tm1Device = tm1_device;
+  host_data.tm2Device = tm2_device;
+  host_data.porePressureTm1Device = pressure_tm1_device;
+  host_data.porePressureTm2Device = pressure_tm2_device;
+  host_data.porePressureForceDevice = pressure_force_device;
+  host_data.porePressureMassDevice = pressure_mass_device;
+  host_data.poroelasticElemMapperDevice = element_mapper_device;
+  host_data.lnidArrayDevice = lnid_device;
+  host_data.poroelasticElemHDevice = element_h_device;
+  host_data.poroelasticElemDetJDevice = element_detj_device;
+  host_data.poroelasticStorageMDevice = storage_modulus_device;
+  host_data.poroelasticPressureShapeScaleDevice = shape_scale_device;
+  error = cudaMemcpy(data_device, &host_data, sizeof(host_data),
+                     cudaMemcpyHostToDevice);
+  if (error != cudaSuccess) goto cleanup;
+
+  for (int32_t step = 0; step < steps; step++) {
+    const double* current_strain = strain_history + 6 * step;
+
+    for (int node = 0; node < 8; node++) {
+      const double x = (node & 1) ? 1.0 : 0.0;
+      const double y = (node & 2) ? 1.0 : 0.0;
+      const double z = (node & 4) ? 1.0 : 0.0;
+
+      previous_displacement[node].f[0] = (solver_float)(
+          previous_strain[0] * x + previous_strain[3] * y +
+          previous_strain[5] * z);
+      previous_displacement[node].f[1] = (solver_float)(
+          previous_strain[3] * x + previous_strain[1] * y +
+          previous_strain[4] * z);
+      previous_displacement[node].f[2] = (solver_float)(
+          previous_strain[5] * x + previous_strain[4] * y +
+          previous_strain[2] * z);
+      current_displacement[node].f[0] = (solver_float)(
+          current_strain[0] * x + current_strain[3] * y +
+          current_strain[5] * z);
+      current_displacement[node].f[1] = (solver_float)(
+          current_strain[3] * x + current_strain[1] * y +
+          current_strain[4] * z);
+      current_displacement[node].f[2] = (solver_float)(
+          current_strain[5] * x + current_strain[4] * y +
+          current_strain[2] * z);
+    }
+
+    PORO_TEST_COPY_TO_DEVICE(tm1_device, previous_displacement, 8);
+    PORO_TEST_COPY_TO_DEVICE(tm2_device, current_displacement, 8);
+    error = cudaMemset(pressure_force_device, 0,
+                       8 * sizeof(*pressure_force_device));
+    if (error != cudaSuccess) goto cleanup;
+
+    kernelPoroelasticPressureForce<<<1, 1>>>(
+        1, data_device, 1.0, 0.0, 0.0, 0.0, 0, biot_alpha);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) goto cleanup;
+    kernelPoroelasticPressureUpdate<<<1, 8>>>(8, data_device, 0, 0);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) goto cleanup;
+    error = cudaDeviceSynchronize();
+    if (error != cudaSuccess) goto cleanup;
+    error = cudaMemcpy(nodal_pressure, pressure_tm2_device,
+                       sizeof(nodal_pressure), cudaMemcpyDeviceToHost);
+    if (error != cudaSuccess) goto cleanup;
+
+    double pressure_mean = 0.0;
+    for (int node = 0; node < 8; node++) {
+      pressure_mean += (double)nodal_pressure[node] / 8.0;
+    }
+    for (int node = 0; node < 8; node++) {
+      const double spread = fabs((double)nodal_pressure[node] - pressure_mean);
+      if (spread > maximum_spread) maximum_spread = spread;
+    }
+    pressure_history[step] = pressure_mean;
+
+    error = cudaMemcpy(pressure_tm1_device, pressure_tm2_device,
+                       8 * sizeof(*pressure_tm1_device),
+                       cudaMemcpyDeviceToDevice);
+    if (error != cudaSuccess) goto cleanup;
+    for (int component = 0; component < 6; component++) {
+      previous_strain[component] = current_strain[component];
+    }
+  }
+
+  *maximum_nodal_spread = maximum_spread;
+
+cleanup:
+  if (shape_scale_device != NULL) cudaFree(shape_scale_device);
+  if (storage_modulus_device != NULL) cudaFree(storage_modulus_device);
+  if (element_detj_device != NULL) cudaFree(element_detj_device);
+  if (element_h_device != NULL) cudaFree(element_h_device);
+  if (lnid_device != NULL) cudaFree(lnid_device);
+  if (element_mapper_device != NULL) cudaFree(element_mapper_device);
+  if (pressure_mass_device != NULL) cudaFree(pressure_mass_device);
+  if (pressure_force_device != NULL) cudaFree(pressure_force_device);
+  if (pressure_tm2_device != NULL) cudaFree(pressure_tm2_device);
+  if (pressure_tm1_device != NULL) cudaFree(pressure_tm1_device);
+  if (tm2_device != NULL) cudaFree(tm2_device);
+  if (tm1_device != NULL) cudaFree(tm1_device);
+  if (data_device != NULL) cudaFree(data_device);
+#undef PORO_TEST_COPY_TO_DEVICE
+#undef PORO_TEST_ALLOC
+
+  if (error != cudaSuccess) {
+    fprintf(stderr, "BrickUP uniform-element GPU regression failed: %s\n",
+            cudaGetErrorString(error));
+    return -1;
+  }
+  return 0;
+}
+
 
 /* Damping Calc-Conv Kernel
    FLOPs: 63M + 54A + 4T

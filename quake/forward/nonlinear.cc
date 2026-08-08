@@ -4924,7 +4924,9 @@ static int material_point_write_csv(
     const tensor_t *strain_history,
     const nonlinear_material_point_result_t *results,
     int32_t steps,
-    double dt)
+    double dt,
+    const double *pore_pressure,
+    double biot_alpha)
 {
     FILE *fp = fopen(path, "w");
     if (fp == NULL) {
@@ -4941,7 +4943,12 @@ static int material_point_write_csv(
           "fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,"
           "alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,"
           "alpha_in_xz,void_ratio,plastic_multiplier,integration_error,"
-          "accepted_substeps,status\n", fp);
+          "accepted_substeps", fp);
+    if (pore_pressure != NULL) {
+        fputs(",pore_pressure_pa,total_sig_xx,total_sig_yy,total_sig_zz,"
+              "total_sig_xy,total_sig_yz,total_sig_xz", fp);
+    }
+    fputs(",status\n", fp);
     for (int32_t step = 0; step < steps; step++) {
         const tensor_t e = strain_history[step];
         double values[MATERIAL_POINT_RESULT_VALUE_COUNT];
@@ -4949,9 +4956,51 @@ static int material_point_write_csv(
         fprintf(fp, "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e",
                 step, step*dt, e.xx, e.yy, e.zz, e.xy, e.yz, e.xz);
         for (int i = 0; i < count; i++) fprintf(fp, ",%.17e", values[i]);
+        if (pore_pressure != NULL) {
+            const tensor_t effective = results[step].stress;
+            const double pressure = pore_pressure[step];
+            fprintf(fp, ",%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e",
+                    pressure,
+                    effective.xx - biot_alpha*pressure,
+                    effective.yy - biot_alpha*pressure,
+                    effective.zz - biot_alpha*pressure,
+                    effective.xy, effective.yz, effective.xz);
+        }
         fprintf(fp, ",%d\n", results[step].status);
     }
     fclose(fp);
+    return 0;
+}
+
+static int material_point_cpu_brickup_pressure_history(
+    const tensor_t *strain_history,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    int32_t steps,
+    double storage_modulus,
+    double biot_alpha,
+    double initial_pressure,
+    double *pressure_history)
+{
+    tensor_t previous_strain;
+    double pressure = initial_pressure;
+
+    if (strain_history == NULL || initial_state == NULL ||
+        pressure_history == NULL || steps <= 0 ||
+        !(storage_modulus > 0.0) || !(biot_alpha > 0.0) ||
+        !isfinite(initial_pressure)) {
+        return -1;
+    }
+    previous_strain = initial_state->provided
+        ? initial_state->strain : zero_tensor();
+    for (int32_t step = 0; step < steps; step++) {
+        const tensor_t strain = strain_history[step];
+        const double delta_volume =
+            (strain.xx + strain.yy + strain.zz) -
+            (previous_strain.xx + previous_strain.yy + previous_strain.zz);
+        pressure -= storage_modulus*biot_alpha*delta_volume;
+        pressure_history[step] = pressure;
+        previous_strain = strain;
+    }
     return 0;
 }
 
@@ -4960,6 +5009,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     FILE *fp = NULL;
     tensor_t *strain_history = NULL;
     double *strain_values = NULL;
+    double *cpu_pore_pressure = NULL;
+    double *gpu_pore_pressure = NULL;
     nonlinear_material_point_result_t *cpu_results = NULL;
     nonlinear_material_point_result_t *gpu_results = NULL;
     int result = 1;
@@ -4972,6 +5023,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double atol = 1.0e-9;
     double error_tolerance = 1.0e-3;
     double backbone_tolerance = 1.0e-5;
+    double brickup_porosity = 0.0;
+    double brickup_fluid_bulk_modulus = 0.0;
+    double brickup_biot_alpha = 1.0;
+    double initial_pore_pressure = 0.0;
+    double brickup_storage_modulus = 0.0;
     double constants_values[MATERIAL_POINT_CONSTANT_COUNT] = {0.0};
     double initial_strain_values[6] = {0.0};
     double initial_stress_values[6] = {0.0};
@@ -4980,16 +5036,21 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double initial_fabric_values[6] = {0.0};
     char material_name[64] = "";
     char tension_name[64] = "no";
+    char brickup_name[64] = "no";
     char output_prefix[256] = "material-point";
     char cpu_path[320] = "";
     char gpu_path[320] = "";
     materialmodel_t material_model;
     noyesflag_t tension_cutoff = NO;
+    noyesflag_t brickup_enabled = NO;
     nlconstants_t constants;
     nonlinear_gpu_config_t config;
     nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
     double maximum_relative = 0.0;
+    double maximum_pressure_absolute = 0.0;
+    double maximum_pressure_relative = 0.0;
+    double maximum_gpu_pressure_spread = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
     double maximum_cpu_integration_error = 0.0;
@@ -5020,6 +5081,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     parsetext(fp, "material_point_compare_rtol", 'd', &rtol);
     parsetext(fp, "material_point_compare_atol", 'd', &atol);
     parsetext(fp, "material_point_output_prefix", 's', output_prefix);
+    parsetext(fp, "material_point_brickup", 's', brickup_name);
 
     if (material_point_parse_model(material_name, &material_model) != 0) {
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
@@ -5058,6 +5120,40 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     else if (strcasecmp(tension_name, "no") != 0) {
         fprintf(stderr, "tension_cutoff must be yes or no\n");
         goto cleanup;
+    }
+    if (strcasecmp(brickup_name, "yes") == 0) brickup_enabled = YES;
+    else if (strcasecmp(brickup_name, "no") != 0) {
+        fprintf(stderr, "material_point_brickup must be yes or no\n");
+        goto cleanup;
+    }
+    if (brickup_enabled == YES) {
+        if (parsetext(fp, "material_point_brickup_porosity", 'd',
+                      &brickup_porosity) != 0 ||
+            parsetext(fp, "material_point_brickup_fluid_bulk_modulus_pa", 'd',
+                      &brickup_fluid_bulk_modulus) != 0 ||
+            parsetext(fp, "material_point_brickup_biot_alpha", 'd',
+                      &brickup_biot_alpha) != 0 ||
+            parsetext(fp, "material_point_initial_pore_pressure_pa", 'd',
+                      &initial_pore_pressure) != 0) {
+            fprintf(stderr, "Incomplete material-point BrickUP controls\n");
+            goto cleanup;
+        }
+        if (material_model != MANZARI_DAFALIAS) {
+            fprintf(stderr, "The material-point BrickUP comparison currently "
+                            "requires ManzariDafalias\n");
+            goto cleanup;
+        }
+        if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
+            !(brickup_fluid_bulk_modulus > 0.0) ||
+            fabs(brickup_biot_alpha - 1.0) > 1.0e-12 ||
+            !isfinite(initial_pore_pressure)) {
+            fprintf(stderr, "Illegal material-point BrickUP controls; the "
+                            "SSPbrickUP comparison requires 0<n<=1, Kf>0, "
+                            "and alpha=1\n");
+            goto cleanup;
+        }
+        brickup_storage_modulus =
+            brickup_fluid_bulk_modulus/brickup_porosity;
     }
     if (tension_cutoff == YES && material_model != MOHR_COULOMB &&
         material_model != DRUCKERPRAGER) {
@@ -5129,8 +5225,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         (size_t)steps, sizeof(*cpu_results));
     gpu_results = (nonlinear_material_point_result_t *)calloc(
         (size_t)steps, sizeof(*gpu_results));
+    if (brickup_enabled == YES) {
+        cpu_pore_pressure = (double *)calloc(
+            (size_t)steps, sizeof(*cpu_pore_pressure));
+        gpu_pore_pressure = (double *)calloc(
+            (size_t)steps, sizeof(*gpu_pore_pressure));
+    }
     if (strain_history == NULL || strain_values == NULL ||
-        cpu_results == NULL || gpu_results == NULL) {
+        cpu_results == NULL || gpu_results == NULL ||
+        (brickup_enabled == YES &&
+         (cpu_pore_pressure == NULL || gpu_pore_pressure == NULL))) {
         fprintf(stderr, "Out of memory in material-point test\n");
         goto cleanup;
     }
@@ -5169,17 +5273,60 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     if (material_point_cpu_history(&constants, &config, &initial_state,
                                    strain_history, steps, dt,
                                    cpu_results) != 0) goto cleanup;
-    if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
-                                 dt) != 0) {
-        goto cleanup;
-    }
     if (nonlinear_gpu_material_point_history(&constants, &config,
                                              &initial_state, strain_history,
                                              steps, gpu_results) != 0) {
         goto cleanup;
     }
-    if (material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
-                                 dt) != 0) {
+    if (brickup_enabled == YES) {
+        if (material_point_cpu_brickup_pressure_history(
+                strain_history, &initial_state, steps,
+                brickup_storage_modulus, brickup_biot_alpha,
+                initial_pore_pressure, cpu_pore_pressure) != 0 ||
+            poroelastic_gpu_uniform_element_history(
+                strain_values, initial_strain_values, steps,
+                brickup_storage_modulus, brickup_biot_alpha,
+                initial_pore_pressure, gpu_pore_pressure,
+                &maximum_gpu_pressure_spread) != 0) {
+            fprintf(stderr, "Material-point BrickUP pressure history failed\n");
+            goto cleanup;
+        }
+        double pressure_scale = 0.0;
+        for (int32_t step = 0; step < steps; step++) {
+            const double absolute =
+                fabs(cpu_pore_pressure[step] - gpu_pore_pressure[step]);
+            const double scale = MAX(fabs(cpu_pore_pressure[step]),
+                                     fabs(gpu_pore_pressure[step]));
+            const double relative = absolute/MAX(scale, DBL_MIN);
+            maximum_pressure_absolute = MAX(maximum_pressure_absolute,
+                                             absolute);
+            pressure_scale = MAX(pressure_scale, scale);
+            if (absolute > atol) {
+                maximum_pressure_relative = MAX(maximum_pressure_relative,
+                                                 relative);
+            }
+            if (absolute > atol && absolute > rtol*scale) {
+                fprintf(stderr, "Material-point BrickUP pressure mismatch at "
+                                "step %d: CPU=%.17e GPU=%.17e abs=%.3e "
+                                "rel=%.3e\n", step,
+                                cpu_pore_pressure[step],
+                                gpu_pore_pressure[step], absolute, relative);
+                goto cleanup;
+            }
+        }
+        if (maximum_gpu_pressure_spread > atol + rtol*pressure_scale) {
+            fprintf(stderr, "Material-point BrickUP uniform pressure spread "
+                            "%.3e exceeds tolerance %.3e\n",
+                    maximum_gpu_pressure_spread, atol + rtol*pressure_scale);
+            goto cleanup;
+        }
+    }
+    if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
+                                 dt, cpu_pore_pressure,
+                                 brickup_biot_alpha) != 0 ||
+        material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
+                                 dt, gpu_pore_pressure,
+                                 brickup_biot_alpha) != 0) {
         goto cleanup;
     }
 
@@ -5390,6 +5537,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     }
+    if (brickup_enabled == YES) {
+        printf("BrickUP sealed uniform-element controls: M=%.6e Pa, "
+               "alpha=%.6f\n", brickup_storage_modulus,
+               brickup_biot_alpha);
+        printf("Maximum CPU/GPU pore-pressure difference: %.6e Pa "
+               "(relative %.6e)\n", maximum_pressure_absolute,
+               maximum_pressure_relative);
+        printf("Maximum GPU within-element nodal pressure spread: %.6e Pa\n",
+               maximum_gpu_pressure_spread);
+    }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;
 
@@ -5397,6 +5554,8 @@ cleanup:
     if (fp != NULL) fclose(fp);
     free(strain_history);
     free(strain_values);
+    free(cpu_pore_pressure);
+    free(gpu_pore_pressure);
     free(cpu_results);
     free(gpu_results);
     return result;

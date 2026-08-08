@@ -278,8 +278,65 @@ The constant-volume test is an undrained *constitutive* characterization. Its
 pore pressure is inferred from effective mean stress under the stated constant
 total-pressure condition. It does not exercise Hercules U-P pressure degrees
 of freedom, storage, permeability/Darcy flow, boundary drainage, or coupling.
-A separate BrickUP production benchmark is required before claiming that the
-complete liquefaction pathway is validated.
+
+## Coupled SSPbrickUP/BrickUP comparison
+
+`opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl` adds a coupled,
+sealed one-element comparison. OpenSees first consolidates a unit
+`SSPbrickUP -lumped` element elastically to 100 kPa with drained pressure
+degrees of freedom. It then releases those pressure constraints, enables
+Manzari--Dafalias plasticity, prescribes 5% axial compression, and solves the
+lateral strain needed to retain 100 kPa total radial confinement. Permeability
+is zero, so the element follows the uniform storage relation
+`p-p0 = -M*(ev-ev0)`, with `M=Kf/n` and Biot coefficient one.
+The `alpha=1.5e-9` value passed to `SSPbrickUP` is its spatial pressure-field
+stabilization coefficient, not the Biot coefficient.
+
+The generator seeds Hercules with the same committed effective stress,
+strain, and Manzari--Dafalias state and emits `material_point_brickup=yes`.
+That standalone mode replays the exact OpenSees strain history through both
+constitutive implementations. In addition, its GPU side invokes the production
+Hercules `kernelPoroelasticPressureForce` and
+`kernelPoroelasticPressureUpdate` on a regular unit BrickUP element. The CPU
+reference independently evaluates the sealed uniform-storage equation. The
+CSV appends pore pressure and total stress, where
+`sigma_total = sigma_effective - alpha*p*I` in Hercules's tension-positive
+sign convention.
+
+Run the coupled reference and replay with:
+
+```bash
+OpenSees opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl \
+  opensees_md_sspbrickup_undrained_triaxial.csv
+
+python3 generate_hercules_manzari_dafalias_path.py \
+  --opensees-csv opensees_md_sspbrickup_undrained_triaxial.csv \
+  --output manzari_md_brickup_undrained_triaxial.in \
+  --output-prefix manzari_md_brickup_undrained_triaxial
+
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point manzari_md_brickup_undrained_triaxial.in
+
+python3 compare_opensees_manzari_dafalias_brickup.py \
+  --hercules-csv manzari_md_brickup_undrained_triaxial.cpu.csv \
+  --opensees-csv opensees_md_sspbrickup_undrained_triaxial.csv
+```
+
+The comparator reports effective- and total-stress errors, pore-pressure and
+`r_u` differences, radial-confinement error, sealed-storage residual, and
+alpha/fabric/void-ratio differences. Optional acceptance thresholds are
+`--max-effective-stress-nrmse`,
+`--max-pore-pressure-difference-kpa`, and
+`--max-total-radial-error-kpa`.
+
+The OpenSees `-lumped` pressure capacity and Hercules's lumped nodal storage
+use the same row-sum representation. This benchmark validates that sealed
+storage/coupling mode and the actual CUDA BrickUP pressure kernels without
+mixing OpenSees's and Hercules's different global time integrators. It does not
+validate nonuniform pressure modes, permeability/Darcy diffusion, drainage or
+open-pore boundaries,
+multi-element pressure exchange, or the complete production time-stepping
+loop. Those remain separate poroelastic production-validation targets.
 
 BAE, BAH, GQH, MKZ, and Ramberg--Osgood are dispatched directly to their
 incremental bounding/backbone update. The model uses the strain increment and

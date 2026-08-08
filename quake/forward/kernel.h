@@ -181,6 +181,18 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
                                                 int useDrainMass,
                                                 int useOpenPore);
 
+/* Standalone uniform one-element regression hook. It executes the production
+ * BrickUP pressure-force and pressure-update kernels for an affine tensor-
+ * strain history on a regular unit cube with sealed, zero-permeability pore
+ * pressure. strain_history stores xx,yy,zz,xy,yz,xz per state; shear entries
+ * are tensorial. The returned pressure is the eight-node mean and the spread
+ * reports the largest within-element nodal departure from that mean. */
+int poroelastic_gpu_uniform_element_history(
+    const double* strain_history, const double* initial_strain,
+    int32_t steps, double storage_modulus, double biot_alpha,
+    double initial_pressure, double* pressure_history,
+    double* maximum_nodal_spread);
+
 __global__  void kernelAlignTm2Disp(int32_t lenum,
 				    int32_t numcomp,
 				    gpu_data_t *gpuData);

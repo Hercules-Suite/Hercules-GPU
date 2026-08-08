@@ -23,6 +23,7 @@ STATE_TENSOR_FIELDS = {
 KNOWN_TESTS = {
     "md_drained_triaxial": ("9", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
+    "md_sspbrickup_undrained_triaxial": ("1", "complete"),
 }
 
 
@@ -127,12 +128,89 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
                 "incomplete drained path: final axial increment is "
                 f"{axial_increment:.17e}, expected -1.5e-1"
             )
+    elif test_id == "md_sspbrickup_undrained_triaxial":
+        coupled_fields = (
+            "pore_pressure_kpa", "total_sigma_xx_kpa",
+            "total_sigma_yy_kpa", "total_sigma_zz_kpa",
+            "fluid_bulk_modulus_kpa", "porosity", "biot_alpha",
+            "confinement_kpa",
+        )
+        missing = [field for field in coupled_fields if field not in rows[0]]
+        if missing:
+            raise SystemExit(
+                "OpenSees SSPbrickUP CSV is missing fields: "
+                + ", ".join(missing)
+            )
+        consolidated = [row for row in rows
+                        if row.get("phase") == "consolidation"]
+        coupled = [row for row in rows if row.get("phase") == "coupled"]
+        completed = [row for row in rows if row.get("phase") == "complete"]
+        if (not consolidated or not coupled or len(completed) != 1
+                or rows[-1] is not completed[0]):
+            raise SystemExit(
+                "incomplete SSPbrickUP path: missing coupled or completion state"
+            )
+        initial = consolidated[-1]
+        initial_pressure = float(initial["pore_pressure_kpa"])
+        if abs(initial_pressure) > 1.0e-8:
+            raise SystemExit(
+                "SSPbrickUP stage-boundary pore pressure is not zero: "
+                f"{initial_pressure:.6e} kPa"
+            )
+        fluid_bulk = float(initial["fluid_bulk_modulus_kpa"])
+        porosity = float(initial["porosity"])
+        biot_alpha = float(initial["biot_alpha"])
+        if fluid_bulk <= 0.0 or not 0.0 < porosity <= 1.0:
+            raise SystemExit("invalid SSPbrickUP fluid bulk modulus or porosity")
+        if not math.isclose(biot_alpha, 1.0, rel_tol=0.0, abs_tol=1.0e-12):
+            raise SystemExit(
+                "the SSPbrickUP/Hercules benchmark currently requires alpha=1"
+            )
+        storage_modulus = fluid_bulk / porosity
+        initial_ev = sum(float(initial[field]) for field in STRAIN_FIELDS[:3])
+        maximum_storage_error = max(
+            abs(
+                float(row["pore_pressure_kpa"])
+                - initial_pressure
+                + storage_modulus * (
+                    sum(float(row[field]) for field in STRAIN_FIELDS[:3])
+                    - initial_ev
+                )
+            )
+            for row in coupled
+        )
+        if maximum_storage_error > 1.0e-3:
+            raise SystemExit(
+                "invalid SSPbrickUP sealed-storage path: maximum residual is "
+                f"{maximum_storage_error:.6e} kPa"
+            )
+        confinement = float(initial["confinement_kpa"])
+        maximum_confinement_error = max(
+            abs(-float(row[field]) - confinement)
+            for row in coupled
+            for field in ("total_sigma_xx_kpa", "total_sigma_yy_kpa")
+        )
+        if maximum_confinement_error > 1.0e-2:
+            raise SystemExit(
+                "invalid SSPbrickUP total radial confinement path: maximum "
+                f"error is {maximum_confinement_error:.6e} kPa"
+            )
+        axial_increment = (
+            float(completed[0]["eps_zz"]) - float(initial["eps_zz"])
+        )
+        if not math.isclose(axial_increment, -0.05,
+                            rel_tol=0.0, abs_tol=1.0e-8):
+            raise SystemExit(
+                "incomplete SSPbrickUP path: final axial increment is "
+                f"{axial_increment:.17e}, expected -5.0e-2"
+            )
     return test_id, rows
 
 
 def replay_rows(test_id: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Start at the committed state where OpenSees enables plasticity."""
-    if test_id == "md_drained_triaxial":
+    if test_id in ("md_drained_triaxial",
+                    "md_sspbrickup_undrained_triaxial"):
         base = max(index for index, row in enumerate(rows)
                    if row["phase"] == "consolidation")
     else:
@@ -186,6 +264,23 @@ def main() -> int:
         "material_point_compare_rtol = 1.0e-6",
         "material_point_compare_atol = 1.0e-8",
         f"material_point_output_prefix = {prefix}",
+    ]
+    if test_id == "md_sspbrickup_undrained_triaxial":
+        fluid_bulk_pa = 1000.0 * float(initial["fluid_bulk_modulus_kpa"])
+        lines.extend([
+            "",
+            "# Sealed uniform BrickUP coupling; alpha=1 matches SSPbrickUP.",
+            "material_point_brickup = yes",
+            ("material_point_brickup_porosity = "
+             f"{float(initial['porosity']):.17e}"),
+            ("material_point_brickup_fluid_bulk_modulus_pa = "
+             f"{fluid_bulk_pa:.17e}"),
+            ("material_point_brickup_biot_alpha = "
+             f"{float(initial['biot_alpha']):.17e}"),
+            ("material_point_initial_pore_pressure_pa = "
+             f"{1000.0*float(initial['pore_pressure_kpa']):.17e}"),
+        ])
+    lines.extend([
         "",
         "# G0 nu e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz",
         "material_point_constants =",
@@ -198,7 +293,7 @@ def main() -> int:
         " ".join(f"{float(initial[field]):.17e}" for field in STRAIN_FIELDS),
         "material_point_initial_stress =",
         " ".join(f"{value:.17e}" for value in initial_stress_pa),
-    ]
+    ])
     for state_name in STATE_TENSOR_FIELDS:
         lines.extend([
             f"material_point_initial_{state_name} =",
@@ -220,6 +315,9 @@ def main() -> int:
     print(f"Initial OpenSees step: {initial['step']}")
     print("Seed normalization: verified isotropic stress; zeroed "
           "roundoff-only directional state")
+    if test_id == "md_sspbrickup_undrained_triaxial":
+        print("BrickUP replay: sealed zero-permeability pressure update; "
+              "production CUDA pressure kernels enabled")
     print(f"Hercules input: {args.output.resolve()}")
     print(f"Material-point output prefix: {prefix}")
     print(f"Expected output names: {prefix}.cpu.csv and {prefix}.gpu.csv")

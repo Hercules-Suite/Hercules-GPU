@@ -71,8 +71,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 218);
-  assert.equal(documented.length, 218, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 223);
+  assert.equal(documented.length, 223, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -325,6 +325,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
   const generator = readFileSync(
@@ -341,6 +342,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   );
   const undrainedDriver = readFileSync(
     `${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`,
+    "utf8",
+  );
+  const brickupDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl`,
+    "utf8",
+  );
+  const brickupComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`,
     "utf8",
   );
 
@@ -363,11 +372,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
+  assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("1", "complete"\)/);
   assert.match(canonicalComparator, /"drained": \("md_drained_triaxial", "monotonic", "9"\)/);
   assert.match(cpu, /material_point_initial_alpha_in/);
   assert.match(canonicalComparator, /def replay_rows/);
@@ -383,6 +395,16 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(drainedDriver, /OpenSees drained confinement residual exceeds/);
   assert.match(generator, /maximum_confinement_error_kpa > 1\.0e-3/);
   assert.match(undrainedDriver, /set stress \[eleResponse 1 material 1 stress\]/);
+  assert.match(brickupDriver, /element SSPbrickUP[\s\S]*-lumped/);
+  assert.match(brickupDriver, /set pressureStabilization 1\.5e-9/);
+  assert.match(brickupDriver, /\$voidRatio \$pressureStabilization -lumped/);
+  assert.match(brickupDriver, /set pressureValues[\s\S]*nodeVel \$node 4/);
+  assert.match(brickupDriver, /OpenSees SSPbrickUP sealed-storage residual/);
+  assert.match(cpu, /material_point_brickup_fluid_bulk_modulus_pa/);
+  assert.match(kernel, /poroelastic_gpu_uniform_element_history/);
+  assert.match(kernel, /kernelPoroelasticPressureForce<<<1, 1>>>/);
+  assert.match(kernel, /kernelPoroelasticPressureUpdate<<<1, 8>>>/);
+  assert.match(brickupComparator, /maximum_pore_pressure_difference_kpa/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

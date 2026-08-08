@@ -483,8 +483,25 @@ Nonlinear GPU execution (runtime environment):
 	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
 	reversals. The latter validates constitutive undrained tendency only: it does
 	not exercise Hercules U-P pressure degrees of freedom, storage, Darcy flow,
-	drainage boundaries, or solid-fluid coupling. A separate BrickUP benchmark is
-	required for complete coupled-path validation.
+	drainage boundaries, or solid-fluid coupling.
+- A coupled one-element benchmark now compares OpenSees
+	`SSPbrickUP -lumped` with Hercules BrickUP under sealed, zero-permeability
+	undrained triaxial compression. The conversion tool emits
+	`material_point_brickup=yes`; the standalone GPU replay then executes the
+	production BrickUP pressure-force and pressure-update kernels for the exact
+	OpenSees affine strain history. Its independent CPU reference checks
+	`p-p0=-M*(ev-ev0)`, with `M=Kf/n`, while the comparison script reports
+	effective stress, total stress, pore pressure, `r_u`, confinement, storage,
+	and material-state differences. OpenSees's row-summed pressure capacity and
+	Hercules's lumped nodal storage therefore use the same representation. This
+	isolates the common uniform sealed mode
+	without mixing the two programs' global time integrators. The setup keeps
+	SSPbrickUP's small `alpha` input (the pressure-field stabilization
+	coefficient) distinct from the unit Biot coupling assumed by that element.
+	It does not validate nonuniform pressure, Darcy diffusion, drainage/open-pore
+	boundaries, multi-element exchange, or the complete production time-stepping loop. The
+	full commands and input-only controls are documented in
+	`benchmark_inputs/nonlinear_material_point/README.md`.
 - For a new material calibration, compare CPU and GPU nonlinear station
 	histories, final yield statistics, and force/displacement norms before a
 	production run. Keep geostatic, tolerance, substep, stiffness-damping, and
