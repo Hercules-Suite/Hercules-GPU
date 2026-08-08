@@ -21,7 +21,7 @@ STATE_TENSOR_FIELDS = {
                     for component in ("xx", "yy", "zz", "xy", "yz", "xz")),
 }
 KNOWN_TESTS = {
-    "md_drained_triaxial": ("8", "complete"),
+    "md_drained_triaxial": ("9", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
 }
 
@@ -99,10 +99,26 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
         if not all(math.isfinite(value) for value in values):
             raise SystemExit(f"nonfinite strain at OpenSees step {index}")
     if test_id == "md_drained_triaxial":
+        if "confinement_kpa" not in rows[0]:
+            raise SystemExit("drained OpenSees CSV is missing confinement_kpa")
         consolidated = [row for row in rows if row.get("phase") == "consolidation"]
+        monotonic = [row for row in rows if row.get("phase") == "monotonic"]
         completed = [row for row in rows if row.get("phase") == "complete"]
-        if not consolidated or len(completed) != 1 or rows[-1] is not completed[0]:
+        if (not consolidated or not monotonic or len(completed) != 1
+                or rows[-1] is not completed[0]):
             raise SystemExit("incomplete drained path: missing final completion state")
+        confinement_kpa = float(monotonic[0]["confinement_kpa"])
+        maximum_confinement_error_kpa = max(
+            abs(-float(row[field]) - confinement_kpa)
+            for row in monotonic
+            for field in ("sigma_xx_kpa", "sigma_yy_kpa")
+        )
+        if maximum_confinement_error_kpa > 1.0e-3:
+            raise SystemExit(
+                "invalid drained path: OpenSees radial material stress misses "
+                "the confinement target by "
+                f"{maximum_confinement_error_kpa:.6e} kPa"
+            )
         axial_increment = (
             float(completed[0]["eps_zz"]) - float(consolidated[-1]["eps_zz"])
         )

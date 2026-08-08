@@ -472,8 +472,13 @@ Nonlinear GPU execution (runtime environment):
 	multiple-retained-node constraint layout, while version 6 used a response
 	prefix unsupported by SSPbrick. Version 8 also uses OpenSees' default elastic
 	outer tangent because the optional accumulated tangent used by version 7
-	became ill-conditioned during early drained plastic loading. Older versions
-	are rejected by the current conversion and comparison tools. The
+	became ill-conditioned during early drained plastic loading. Version 9 uses
+	a force-residual convergence test for the stress-controlled lateral response
+	and independently rejects any monotonic state whose radial material stress
+	misses the confinement target by more than 1 Pa; version 8 could accept a
+	small displacement correction with about 22 kPa of residual confinement
+	error. Older versions are rejected by the current conversion and comparison
+	tools. The
 	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
 	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
 	reversals. The latter validates constitutive undrained tendency only: it does

@@ -139,10 +139,11 @@ CPU/CUDA fixture:
   15% monotonic axial
   compression while keeping both lateral face loads at 100 kPa. It exercises
   critical-state strength and the contraction-to-dilation response. Failed
-  outer increments use recursive bisection; each attempt is limited to the 20
-  Newton iterations used by the published OpenSees triaxial example. For this
-  uniform affine path, single-point integration avoids evaluating eight
-  identical material states in a full-integration brick.
+  outer increments use recursive bisection. Because lateral confinement is
+  stress-controlled, each attempt uses a force-residual convergence test and
+  the recorded material stress is independently required to match the target
+  within 1 Pa. For this uniform affine path, single-point integration avoids
+  evaluating eight identical material states in a full-integration brick.
 - `opensees_manzari_dafalias_undrained_cyclic_shear.tcl` consolidates
   isotropically and then applies five constant-volume shear cycles with 0.5%
   engineering-shear amplitude. It calculates the excess pore pressure needed
@@ -184,7 +185,12 @@ which SSPbrick does not support. Version 7 uses SSPbrick's direct center-point
 and records the actual tensor strain. Version 8 also restores OpenSees's
 default elastic outer tangent (`TanType=0`); the optional accumulated tangent
 used by version 7 became ill-conditioned at early drained plastic loading.
-Older drained CSVs are rejected by both the conversion and comparison tools.
+Version 9 replaces the displacement-correction convergence test with a force-
+residual test and rejects any recorded monotonic state whose individual radial
+material stress misses the confinement target by more than 1 Pa. Version 8
+could accept a small displacement correction while retaining a material-stress
+error of roughly 22 kPa. Older drained CSVs are rejected by both the conversion
+and comparison tools.
 
 Run either standalone driver on a machine with OpenSees:
 

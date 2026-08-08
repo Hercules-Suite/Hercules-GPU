@@ -25,7 +25,7 @@ STATE_PAIRS = tuple(
     + [("void_ratio", "void_ratio")]
 )
 TEST_MODES = {
-    "drained": ("md_drained_triaxial", "monotonic", "8"),
+    "drained": ("md_drained_triaxial", "monotonic", "9"),
     "undrained": ("md_undrained_cyclic_shear", "cyclic", "1"),
 }
 
@@ -199,9 +199,10 @@ def main() -> int:
         for index in phase_indices:
             hrow = hercules[index]
             orow = opensees[index]
-            hradial.append(-(hrow["sig_xx"] + hrow["sig_yy"]) / 2.0)
-            oradial.append(-500.0 * (
-                float(orow["sigma_xx_kpa"]) + float(orow["sigma_yy_kpa"])
+            hradial.extend((-hrow["sig_xx"], -hrow["sig_yy"]))
+            oradial.extend((
+                -1000.0 * float(orow["sigma_xx_kpa"]),
+                -1000.0 * float(orow["sigma_yy_kpa"]),
             ))
             hp = float(detailed[index]["hercules_p_eff_pa"])
             hq = float(detailed[index]["hercules_q_pa"])
@@ -218,12 +219,24 @@ def main() -> int:
             for index in phase_indices
         ]
         radial_error_kpa = max(abs(value - confinement_pa) for value in hradial) / 1000.0
+        opensees_radial_error_kpa = (
+            max(abs(value - confinement_pa) for value in oradial) / 1000.0
+        )
+        if opensees_radial_error_kpa > 1.0e-3:
+            raise SystemExit(
+                "invalid OpenSees reference: radial material stress misses "
+                "the confinement target by "
+                f"{opensees_radial_error_kpa:.6e} kPa"
+            )
+        radial_difference_kpa = (
+            max(abs(left - right) for left, right in zip(hradial, oradial))
+            / 1000.0
+        )
         summary["drained_metrics"] = {
             "target_radial_confinement_kpa": confinement_pa / 1000.0,
-            "maximum_opensees_radial_confinement_error_kpa": (
-                max(abs(value - confinement_pa) for value in oradial) / 1000.0
-            ),
+            "maximum_opensees_radial_confinement_error_kpa": opensees_radial_error_kpa,
             "maximum_hercules_radial_confinement_error_kpa": radial_error_kpa,
+            "maximum_hercules_opensees_radial_difference_kpa": radial_difference_kpa,
             "peak_q_over_p_hercules": max(heta),
             "peak_q_over_p_opensees": max(oeta),
             "tail_mean_q_over_p_hercules": mean(heta[-tail_count:]),
@@ -232,9 +245,11 @@ def main() -> int:
             "maximum_incremental_volumetric_contraction": max(0.0, -min(delta_ev)),
             "maximum_incremental_volumetric_dilation": max(0.0, max(delta_ev)),
             "interpretation": (
-                "OpenSees solves the constant-confinement lateral strain. "
-                "Hercules replays that strain; its radial-stress drift therefore "
-                "measures disagreement in contraction/dilation tendency."
+                "A valid OpenSees reference first has negligible radial-stress "
+                "error relative to the confinement target. Hercules replays "
+                "the solved lateral strain; the direct Hercules/OpenSees radial-"
+                "stress difference then measures disagreement in contraction/"
+                "dilation tendency."
             ),
         }
     else:
@@ -334,8 +349,11 @@ def main() -> int:
     print(f"Normalized stress RMSE: {stress_nrmse:.6e}")
     if args.mode == "drained":
         metrics = summary["drained_metrics"]
-        print("Hercules maximum radial-confinement error: "
-              f"{metrics['maximum_hercules_radial_confinement_error_kpa']:.6e} kPa")  # type: ignore[index]
+        print("Maximum radial-confinement error (Hercules/OpenSees): "
+              f"{metrics['maximum_hercules_radial_confinement_error_kpa']:.6e} / "  # type: ignore[index]
+              f"{metrics['maximum_opensees_radial_confinement_error_kpa']:.6e} kPa")  # type: ignore[index]
+        print("Maximum Hercules/OpenSees radial-stress difference: "
+              f"{metrics['maximum_hercules_opensees_radial_difference_kpa']:.6e} kPa")  # type: ignore[index]
         print("Tail mean q/p (Hercules/OpenSees): "
               f"{metrics['tail_mean_q_over_p_hercules']:.6e} / "  # type: ignore[index]
               f"{metrics['tail_mean_q_over_p_opensees']:.6e}")  # type: ignore[index]

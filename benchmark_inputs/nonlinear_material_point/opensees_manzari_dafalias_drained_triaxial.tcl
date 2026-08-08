@@ -19,6 +19,7 @@ set consolidationSteps 50
 set axialSteps 300
 set finalAxialStrain -0.15
 set maxSubstepDepth 10
+set confinementToleranceKPa 1.0e-3
 
 wipe
 model BasicBuilder -ndm 3 -ndf 3
@@ -90,7 +91,7 @@ puts $output "step,phase,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,sigma_xx_kpa,
 
 set step 0
 proc writeState {phaseName} {
-    global output step confinementKPa
+    global output step confinementKPa confinementToleranceKPa
     # SSPbrick delegates direct recorder arguments to its one nDMaterial.  The
     # explicit 3D6 names return the actual center-point tensor responses; unlike
     # stdBrick, SSPbrick does not accept the "material 1" prefix.
@@ -129,6 +130,15 @@ proc writeState {phaseName} {
     set sxy [lindex $stress 3]
     set syz [lindex $stress 4]
     set sxz [lindex $stress 5]
+    if {$phaseName eq "monotonic"} {
+        set confinementError [expr {max(abs(-$sxx-$confinementKPa),
+                                        abs(-$syy-$confinementKPa))}]
+        if {$confinementError > $confinementToleranceKPa} {
+            puts stderr "OpenSees drained confinement residual exceeds $confinementToleranceKPa kPa at step $step: error=$confinementError"
+            close $output
+            exit 46
+        }
+    }
     set p [expr {-($sxx+$syy+$szz)/3.0}]
     set dsxx [expr {$sxx+$p}]
     set dsyy [expr {$syy+$p}]
@@ -138,7 +148,7 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,8,%.17e" \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,9,%.17e" \
         $step $phaseName $exx $eyy $ezz $exy $eyz $exz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
         {*}$alpha {*}$fabric {*}$alphaIn \
@@ -161,10 +171,12 @@ for {set i 0} {$i < $consolidationSteps} {incr i} {
 # fixed at the confinement pressure.
 loadConst -time 0.0
 updateMaterialStage -material 1 -stage 1
-# Match the 1.0e-5 global displacement-increment tolerance used by the
-# published OpenSees Manzari--Dafalias triaxial example.  This is an outer
-# equilibrium tolerance and is independent of the material's TolR.
-test NormDispIncr 1.0e-5 20 0
+# This is a stress-controlled characterization, so convergence must be based
+# on the outer force residual. NormDispIncr can accept a small correction even
+# while the lateral material stress remains far from the prescribed pressure.
+# The unit cube expresses force residuals in kN, numerically equal to kPa, so
+# 1.0e-3 kN enforces the 1 Pa material-stress audit below.
+test NormUnbalance 1.0e-3 100 0
 algorithm Newton
 pattern Plain 2 Linear {
     load 7 0.0 0.0 -1.0
@@ -178,7 +190,7 @@ set acceptedAxialSubsteps 0
 proc advanceDrainedIncrement {increment depth} {
     global maxSubstepDepth acceptedAxialSubsteps
     integrator DisplacementControl 7 3 $increment
-    test NormDispIncr 1.0e-5 20 0
+    test NormUnbalance 1.0e-3 100 0
     algorithm Newton
     set ok [analyze 1]
     if {$ok == 0} {
