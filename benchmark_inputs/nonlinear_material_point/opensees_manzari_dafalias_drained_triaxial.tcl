@@ -42,8 +42,10 @@ node 6 1.0 0.0 1.0
 node 7 1.0 1.0 1.0
 node 8 0.0 1.0 1.0
 
-# Symmetry planes remove rigid motion.  The equal-DOF constraints keep each
-# loaded face planar while allowing all three normal strains to evolve.
+# Symmetry planes remove rigid motion.  Node 7 is the one retained control
+# node for all three normal face displacements.  Each other corner appears in
+# exactly one equalDOF command; using several retained nodes for different
+# DOFs of the same constrained corner does not define a valid affine MP map.
 fix 1 1 1 1
 fix 2 0 1 1
 fix 3 0 0 1
@@ -53,15 +55,12 @@ fix 6 0 1 0
 fix 7 0 0 0
 fix 8 1 0 0
 
-equalDOF 2 3 1
-equalDOF 2 6 1
-equalDOF 2 7 1
-equalDOF 4 3 2
-equalDOF 4 8 2
-equalDOF 4 7 2
-equalDOF 5 6 3
-equalDOF 5 8 3
-equalDOF 5 7 3
+equalDOF 7 2 1
+equalDOF 7 3 1 2
+equalDOF 7 4 2
+equalDOF 7 5 3
+equalDOF 7 6 1 3
+equalDOF 7 8 2 3
 
 # The imposed affine normal deformation is uniform, so stabilized single-point
 # integration evaluates the same material path as the full-integration brick
@@ -79,9 +78,9 @@ algorithm Newton
 # A unit cube makes each representative face force numerically equal to the
 # applied normal stress.  Compression is negative in OpenSees.
 pattern Plain 1 Linear {
-    load 2 [expr {-$confinementKPa}] 0.0 0.0
-    load 4 0.0 [expr {-$confinementKPa}] 0.0
-    load 5 0.0 0.0 [expr {-$confinementKPa}]
+    load 7 [expr {-$confinementKPa}] \
+           [expr {-$confinementKPa}] \
+           [expr {-$confinementKPa}]
 }
 integrator LoadControl [expr {1.0/$consolidationSteps}]
 analysis Static
@@ -92,19 +91,38 @@ puts $output "step,phase,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,sigma_xx_kpa,
 set step 0
 proc writeState {phaseName} {
     global output step confinementKPa
-    # SSPbrick's element-level stress/state responses are not the six-component
-    # Manzari--Dafalias material tensors.  Query its single integration-point
-    # material explicitly, as the undrained canonical driver does.
-    set stress [eleResponse 1 material 1 stress]
-    set state [eleResponse 1 material 1 state]
-    if {[llength $stress] != 6 || [llength $state] != 26} {
+    # SSPbrick delegates direct recorder arguments to its one nDMaterial.  The
+    # explicit 3D6 names return the actual center-point tensor responses; unlike
+    # stdBrick, SSPbrick does not accept the "material 1" prefix.
+    set stress [eleResponse 1 stress3D6]
+    set strain [eleResponse 1 strain3D6]
+    set state [eleResponse 1 state]
+    set alpha [eleResponse 1 alpha]
+    set fabric [eleResponse 1 fabric]
+    set alphaIn [eleResponse 1 alpha_in]
+    if {[llength $stress] != 6 || [llength $strain] != 6 ||
+        [llength $state] != 26 || [llength $alpha] != 6 ||
+        [llength $fabric] != 6 || [llength $alphaIn] != 6} {
         puts stderr "OpenSees material response has an unexpected size at step $step"
         close $output
         exit 43
     }
-    set exx [nodeDisp 2 1]
-    set eyy [nodeDisp 4 2]
-    set ezz [nodeDisp 5 3]
+    set exx [lindex $strain 0]
+    set eyy [lindex $strain 1]
+    set ezz [lindex $strain 2]
+    # OpenSees stores engineering shear strain; Hercules stores tensor shear.
+    set exy [expr {0.5*[lindex $strain 3]}]
+    set eyz [expr {0.5*[lindex $strain 4]}]
+    set exz [expr {0.5*[lindex $strain 5]}]
+    set affineError [expr {max(abs($exx-[nodeDisp 7 1]),
+                               abs($eyy-[nodeDisp 7 2]),
+                               abs($ezz-[nodeDisp 7 3]),
+                               abs($exy), abs($eyz), abs($exz))}]
+    if {$affineError > 1.0e-12} {
+        puts stderr "OpenSees drained deformation is not affine at step $step: error=$affineError"
+        close $output
+        exit 45
+    }
     set sxx [lindex $stress 0]
     set syy [lindex $stress 1]
     set szz [lindex $stress 2]
@@ -120,15 +138,10 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,0.0,0.0,0.0,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,6,%.17e" \
-        $step $phaseName $exx $eyy $ezz \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,7,%.17e" \
+        $step $phaseName $exx $eyy $ezz $exy $eyz $exz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
-        [lindex $state 6] [lindex $state 7] [lindex $state 8] \
-        [lindex $state 9] [lindex $state 10] [lindex $state 11] \
-        [lindex $state 12] [lindex $state 13] [lindex $state 14] \
-        [lindex $state 15] [lindex $state 16] [lindex $state 17] \
-        [lindex $state 18] [lindex $state 19] [lindex $state 20] \
-        [lindex $state 21] [lindex $state 22] [lindex $state 23] \
+        {*}$alpha {*}$fabric {*}$alphaIn \
         [lindex $state 24] [lindex $state 25] $confinementKPa [getTime]]
     incr step
 }
@@ -154,7 +167,7 @@ updateMaterialStage -material 1 -stage 1
 test NormDispIncr 1.0e-5 20 0
 algorithm Newton
 pattern Plain 2 Linear {
-    load 5 0.0 0.0 -1.0
+    load 7 0.0 0.0 -1.0
 }
 
 # Retry a failed axial increment as two half increments, following the
@@ -164,7 +177,7 @@ pattern Plain 2 Linear {
 set acceptedAxialSubsteps 0
 proc advanceDrainedIncrement {increment depth} {
     global maxSubstepDepth acceptedAxialSubsteps
-    integrator DisplacementControl 5 3 $increment
+    integrator DisplacementControl 7 3 $increment
     test NormDispIncr 1.0e-5 20 0
     algorithm Newton
     set ok [analyze 1]

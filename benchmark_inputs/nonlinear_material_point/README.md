@@ -173,13 +173,16 @@ exact mean normal stress with zero directional state. This prevents
 roundoff-only symmetry breaking from selecting different host/device adaptive
 branches while retaining the recorded post-consolidation strain path.
 
-The drained driver queries `material 1 stress` and `material 1 state` at the
-SSPbrick integration point. Its earlier version-5 element-level response
-queries did not return the Manzari--Dafalias material tensors: they could report
-nonzero `q` and directional alpha during nominally isotropic consolidation.
-Version-5 drained CSVs are invalid for constitutive comparison and are rejected
-by both the conversion and comparison tools; regenerate them with driver
-version 6.
+The drained driver uses one retained corner for all three affine face motions,
+so every other corner belongs to exactly one `equalDOF` constraint. Version 5
+instead constrained some corners to several different retained nodes and then
+recorded selected nodal normal displacements while assuming zero shear. That
+produced a non-affine consolidation path with hidden shear stress and alpha.
+Version 6 incorrectly tried the stdBrick-style `material 1` response prefix,
+which SSPbrick does not support. Version 7 uses SSPbrick's direct center-point
+`stress3D6`, `strain3D6`, and material-state responses, verifies affine motion,
+and records the actual tensor strain. Older drained CSVs are rejected by both
+the conversion and comparison tools.
 
 Run either standalone driver on a machine with OpenSees:
 
