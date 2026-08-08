@@ -181,8 +181,10 @@ produced a non-affine consolidation path with hidden shear stress and alpha.
 Version 6 incorrectly tried the stdBrick-style `material 1` response prefix,
 which SSPbrick does not support. Version 7 uses SSPbrick's direct center-point
 `stress3D6`, `strain3D6`, and material-state responses, verifies affine motion,
-and records the actual tensor strain. Older drained CSVs are rejected by both
-the conversion and comparison tools.
+and records the actual tensor strain. Version 8 also restores OpenSees's
+default elastic outer tangent (`TanType=0`); the optional accumulated tangent
+used by version 7 became ill-conditioned at early drained plastic loading.
+Older drained CSVs are rejected by both the conversion and comparison tools.
 
 Run either standalone driver on a machine with OpenSees:
 

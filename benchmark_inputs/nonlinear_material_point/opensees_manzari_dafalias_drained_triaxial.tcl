@@ -25,13 +25,13 @@ model BasicBuilder -ndm 3 -ndf 3
 
 # G0 nu e_init Mc c lambda_c e0 ksi P_atm[kPa] m h0 ch nb A0 nd
 # z_max cz density integrationScheme tangentType jacobianType TolF TolR
-# Integration scheme 1 is Modified Euler.  Tangent type 2 returns the
-# accumulated consistent elastoplastic tangent; the elastic tangent (type 0)
-# is inadequate for the lateral stress-control solve after yielding begins.
+# Integration scheme 1 is Modified Euler.  Tangent type 0 is the OpenSees
+# default used by the published triaxial example.  The optional accumulated
+# tangent (type 2) becomes ill-conditioned in this lateral stress-control path.
 nDMaterial ManzariDafalias 1 \
     125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101.3 \
     0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0 0.0 \
-    1 2 1 1.0e-4 1.0e-7
+    1 0 1 1.0e-4 1.0e-7
 
 node 1 0.0 0.0 0.0
 node 2 1.0 0.0 0.0
@@ -138,7 +138,7 @@ proc writeState {phaseName} {
     if {$p > 0.0} {
         set eta [expr {$q/$p}]
     }
-    puts $output [format "%d,%s,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,7,%.17e" \
+    puts $output [format "%d,%s,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,md_drained_triaxial,8,%.17e" \
         $step $phaseName $exx $eyy $ezz $exy $eyz $exz \
         $sxx $syy $szz $sxy $syz $sxz $p $q $eta \
         {*}$alpha {*}$fabric {*}$alphaIn \

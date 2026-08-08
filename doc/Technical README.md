@@ -470,8 +470,10 @@ Nonlinear GPU execution (runtime environment):
 	for all affine face constraints and records SSPbrick's actual center-point
 	strain, stress, and material state. Obsolete version-5 output used an invalid
 	multiple-retained-node constraint layout, while version 6 used a response
-	prefix unsupported by SSPbrick; both are rejected by the current conversion
-	and comparison tools. The
+	prefix unsupported by SSPbrick. Version 8 also uses OpenSees' default elastic
+	outer tangent because the optional accumulated tangent used by version 7
+	became ill-conditioned during early drained plastic loading. Older versions
+	are rejected by the current conversion and comparison tools. The
 	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
 	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
 	reversals. The latter validates constitutive undrained tendency only: it does

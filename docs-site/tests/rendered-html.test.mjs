@@ -367,7 +367,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /"alpha_in": tuple/);
-  assert.match(generator, /"md_drained_triaxial": \("7", "complete"\)/);
+  assert.match(generator, /"md_drained_triaxial": \("8", "complete"\)/);
   assert.match(cpu, /material_point_initial_alpha_in/);
   assert.match(canonicalComparator, /def replay_rows/);
   assert.match(drainedDriver, /equalDOF 7 3 1 2/);
@@ -375,6 +375,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(drainedDriver, /set strain \[eleResponse 1 strain3D6\]/);
   assert.match(drainedDriver, /set state \[eleResponse 1 state\]/);
   assert.doesNotMatch(drainedDriver, /eleResponse 1 material 1/);
+  assert.match(drainedDriver, /1 0 1 1\.0e-4 1\.0e-7/);
   assert.match(drainedDriver, /0\.5\*\[lindex \$strain 3\]/);
   assert.match(drainedDriver, /OpenSees drained deformation is not affine/);
   assert.match(undrainedDriver, /set stress \[eleResponse 1 material 1 stress\]/);

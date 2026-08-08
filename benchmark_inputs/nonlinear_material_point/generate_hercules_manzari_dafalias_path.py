@@ -21,7 +21,7 @@ STATE_TENSOR_FIELDS = {
                     for component in ("xx", "yy", "zz", "xy", "yz", "xz")),
 }
 KNOWN_TESTS = {
-    "md_drained_triaxial": ("7", "complete"),
+    "md_drained_triaxial": ("8", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
 }
 
