@@ -498,11 +498,14 @@ Nonlinear GPU execution (runtime environment):
 	without mixing the two programs' global time integrators. The setup keeps
 	SSPbrickUP's small `alpha` input (the pressure-field stabilization
 	coefficient) distinct from the unit Biot coupling assumed by that element.
-	Driver version 2 uses conventional symmetry supports, distributes each face
+	Driver version 3 uses conventional symmetry supports, distributes each face
 	traction over four nodes, prescribes the same axial displacement on all four
 	top nodes, and rebuilds the transient analysis after opening the pressure
-	DOFs. It therefore avoids the unsupported combination of a prescribed DOF
-	and an `equalDOF` retained node under OpenSees' Transformation handler.
+	DOFs. The coupled stage follows the official OpenSees Penalty/Newmark setup
+	so the time-varying displacement constraint supplies the solid velocity that
+	drives the U-P pressure equation. It also avoids the unsupported combination
+	of a prescribed DOF and an `equalDOF` retained node under the Transformation
+	handler.
 	It does not validate nonuniform pressure, Darcy diffusion, drainage/open-pore
 	boundaries, multi-element exchange, or the complete production time-stepping loop. The
 	full commands and input-only controls are documented in

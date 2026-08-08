@@ -59,7 +59,8 @@ node 8 0.0 1.0 1.0
 # SP constraints seals the element for the coupled undrained stage. Distributed
 # face tractions and identical top-face axial displacements produce the affine
 # one-element mode without mixing an SP constraint with an equalDOF retained
-# node (a combination unsupported by OpenSees' Transformation handler).
+# node. The coupled stage uses the Penalty handler so Newmark derives solid
+# velocity consistently from the time-varying displacement constraints.
 fix 1 1 1 1 1
 fix 2 0 1 1 1
 fix 3 0 0 1 1
@@ -185,7 +186,7 @@ proc writeState {phaseName} {
                                 $initialUndrainedVolumetricStrain)}]
         set storageResidual [expr {abs($pressure-$expectedPressure)}]
         if {$storageResidual > $storageResidualToleranceKPa} {
-            puts stderr "OpenSees SSPbrickUP sealed-storage residual exceeds $storageResidualToleranceKPa kPa at step $step: error=$storageResidual"
+            puts stderr "OpenSees SSPbrickUP sealed-storage residual exceeds $storageResidualToleranceKPa kPa at step $step: error=$storageResidual pressure=$pressure expected=$expectedPressure delta_ev=[expr {$volumetricStrain-$initialUndrainedVolumetricStrain}]"
             close $output
             exit 54
         }
@@ -223,7 +224,7 @@ proc writeState {phaseName} {
     foreach value $numeric {
         lappend row [format "%.17e" $value]
     }
-    lappend row md_sspbrickup_undrained_triaxial 2 [format "%.17e" [getTime]]
+    lappend row md_sspbrickup_undrained_triaxial 3 [format "%.17e" [getTime]]
     puts $output [join $row ,]
     incr step
 }
@@ -270,10 +271,10 @@ pattern Plain 2 2 {
 # The model, committed material state, constant confinement loads, and newly
 # defined displacement pattern remain in the Domain across wipeAnalysis.
 wipeAnalysis
-constraints Transformation
+constraints Penalty 1.0e18 1.0e18
 numberer RCM
 system BandGeneral
-test NormUnbalance 1.0e-3 100 0
+test NormDispIncr 1.0e-10 100 0
 algorithm Newton
 integrator Newmark 0.5 0.25
 analysis Transient
@@ -281,7 +282,7 @@ analysis Transient
 set acceptedCoupledSubsteps 0
 proc advanceCoupledIncrement {increment depth} {
     global maxSubstepDepth acceptedCoupledSubsteps
-    test NormUnbalance 1.0e-3 100 0
+    test NormDispIncr 1.0e-10 100 0
     algorithm Newton
     set ok [analyze 1 $increment]
     if {$ok == 0} {
