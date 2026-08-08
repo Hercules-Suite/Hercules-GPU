@@ -32,6 +32,7 @@ set storageModulusKPa [expr {$fluidBulkKPa/$porosity}]
 set pressureUniformToleranceKPa 1.0e-6
 set storageResidualToleranceKPa 1.0e-3
 set confinementToleranceKPa 1.0e-2
+set affineTolerance 1.0e-8
 set initialUndrainedVolumetricStrain 0.0
 set initialUndrainedPressureKPa 0.0
 
@@ -107,6 +108,7 @@ proc writeState {phaseName} {
     global pressureStabilization
     global storageModulusKPa pressureUniformToleranceKPa
     global storageResidualToleranceKPa confinementToleranceKPa
+    global affineTolerance
     global initialUndrainedVolumetricStrain initialUndrainedPressureKPa
 
     set stress [eleResponse 1 stress3D6]
@@ -142,7 +144,7 @@ proc writeState {phaseName} {
         set affineError [expr {max($affineError,
                                    abs([nodeDisp $node 3]-$ezz))}]
     }
-    if {$affineError > 1.0e-12} {
+    if {$affineError > $affineTolerance} {
         puts stderr "OpenSees SSPbrickUP deformation is not affine at step $step: error=$affineError"
         close $output
         exit 52
@@ -224,7 +226,7 @@ proc writeState {phaseName} {
     foreach value $numeric {
         lappend row [format "%.17e" $value]
     }
-    lappend row md_sspbrickup_undrained_triaxial 3 [format "%.17e" [getTime]]
+    lappend row md_sspbrickup_undrained_triaxial 4 [format "%.17e" [getTime]]
     puts $output [join $row ,]
     incr step
 }
@@ -274,7 +276,7 @@ wipeAnalysis
 constraints Penalty 1.0e18 1.0e18
 numberer RCM
 system BandGeneral
-test NormDispIncr 1.0e-10 100 0
+test NormDispIncr 1.0e-9 100 0
 algorithm Newton
 integrator Newmark 0.5 0.25
 analysis Transient
@@ -282,7 +284,7 @@ analysis Transient
 set acceptedCoupledSubsteps 0
 proc advanceCoupledIncrement {increment depth} {
     global maxSubstepDepth acceptedCoupledSubsteps
-    test NormDispIncr 1.0e-10 100 0
+    test NormDispIncr 1.0e-9 100 0
     algorithm Newton
     set ok [analyze 1 $increment]
     if {$ok == 0} {

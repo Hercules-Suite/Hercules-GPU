@@ -379,7 +379,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
-  assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("3", "complete"\)/);
+  assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("4", "complete"\)/);
   assert.match(canonicalComparator, /"drained": \("md_drained_triaxial", "monotonic", "9"\)/);
   assert.match(cpu, /material_point_initial_alpha_in/);
   assert.match(canonicalComparator, /def replay_rows/);
@@ -399,7 +399,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.doesNotMatch(brickupDriver, /^\s*equalDOF/m);
   assert.match(brickupDriver, /sp 5 3 1\.0[\s\S]*sp 8 3 1\.0/);
   assert.match(brickupDriver, /wipeAnalysis[\s\S]*constraints Penalty 1\.0e18 1\.0e18[\s\S]*integrator Newmark/);
-  assert.match(brickupDriver, /test NormDispIncr 1\.0e-10 100 0/);
+  assert.match(brickupDriver, /test NormDispIncr 1\.0e-9 100 0/);
   assert.match(brickupDriver, /set pressureStabilization 1\.5e-9/);
   assert.match(brickupDriver, /\$voidRatio \$pressureStabilization -lumped/);
   assert.match(brickupDriver, /set pressureValues[\s\S]*nodeVel \$node 4/);

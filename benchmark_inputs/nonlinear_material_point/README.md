@@ -292,7 +292,7 @@ is zero, so the element follows the uniform storage relation
 The `alpha=1.5e-9` value passed to `SSPbrickUP` is its spatial pressure-field
 stabilization coefficient, not the Biot coefficient.
 
-Driver version 3 uses conventional symmetry supports and distributes each
+Driver version 4 uses conventional symmetry supports and distributes each
 confining face traction over its four nodes. During the coupled stage it
 prescribes the same absolute axial displacement at all four top nodes and
 rebuilds the transient analysis after changing the pressure and displacement
