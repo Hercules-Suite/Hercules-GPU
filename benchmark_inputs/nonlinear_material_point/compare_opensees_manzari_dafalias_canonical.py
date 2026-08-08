@@ -30,6 +30,17 @@ TEST_MODES = {
 }
 
 
+def replay_rows(mode: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Select the common elastoplastic history after elastic consolidation."""
+    if mode == "drained":
+        base = max(index for index, row in enumerate(rows)
+                   if row.get("phase") == "consolidation")
+    else:
+        base = next(index for index, row in enumerate(rows)
+                    if row.get("phase") == "cyclic")
+    return rows[base:]
+
+
 def read_hercules(path: Path) -> list[dict[str, float]]:
     with path.open(newline="", encoding="utf-8") as stream:
         return [
@@ -88,7 +99,8 @@ def main() -> int:
     test_id, comparison_phase, driver_version = TEST_MODES[args.mode]
     output_dir = args.output_dir or Path(f"opensees_{test_id}_comparison")
     hercules = read_hercules(args.hercules_csv)
-    opensees = read_opensees(args.opensees_csv)
+    opensees_source = read_opensees(args.opensees_csv)
+    opensees = replay_rows(args.mode, opensees_source)
     if len(hercules) != len(opensees):
         raise SystemExit(
             f"history length mismatch: Hercules={len(hercules)} "
@@ -112,13 +124,14 @@ def main() -> int:
                 f"OpenSees CSV is not {test_id} driver version "
                 f"{driver_version} at row {index}"
             )
-        if int(orow["step"]) != index or int(hrow["step"]) != index:
-            raise SystemExit(f"nonsequential step at row {index}")
+        if int(hrow["step"]) != index:
+            raise SystemExit(f"nonsequential Hercules step at row {index}")
         if orow["phase"] == comparison_phase:
             phase_indices.append(index)
 
         output: dict[str, float | str] = {
             "step": float(index),
+            "opensees_step": float(orow["step"]),
             "phase": orow["phase"],
         }
         for field in STRAIN_FIELDS:
@@ -159,6 +172,8 @@ def main() -> int:
     summary: dict[str, object] = {
         "test_id": test_id,
         "steps": len(hercules),
+        "opensees_source_steps": len(opensees_source),
+        "opensees_initial_replay_step": int(opensees[0]["step"]),
         "comparison_phase": comparison_phase,
         "comparison_phase_steps": len(phase_indices),
         "maximum_strain_difference": max_strain_error,

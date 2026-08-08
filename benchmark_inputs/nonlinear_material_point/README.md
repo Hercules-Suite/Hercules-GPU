@@ -149,6 +149,15 @@ radial stress from the prescribed confinement measures disagreement in the
 model's contraction/dilation tendency without mixing in a second outer
 stress-control algorithm.
 
+Both canonical OpenSees drivers use a forced-elastic consolidation stage and
+then enable the elastoplastic material. The conversion tool seeds Hercules
+with the recorded stress, strain, alpha, alpha-in, and fabric at that stage
+boundary and replays only the common elastoplastic history. Replaying the
+elastic consolidation strains from zero through Hercules' pressure-dependent
+elastoplastic stage would create a different initial effective stress and is
+not a valid constitutive comparison. The first generated history row is the
+seeded state itself, so it also verifies zero-increment state preservation.
+
 Run either standalone driver on a machine with OpenSees:
 
 ```bash

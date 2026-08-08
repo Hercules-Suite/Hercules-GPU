@@ -459,7 +459,12 @@ Nonlinear GPU execution (runtime environment):
 - Two canonical OpenSees characterizations are provided in the same directory.
 	The drained monotonic triaxial driver maintains 100 kPa lateral confinement;
 	Hercules replays the solved strain path, and radial-stress drift measures
-	disagreement in strength and contraction/dilation tendency. The
+	disagreement in strength and contraction/dilation tendency. Both drivers
+	first consolidate with OpenSees' forced-elastic stage. The conversion tool
+	seeds the recorded stress, strain, alpha, alpha-in, and fabric at the stage
+	boundary and replays only the common elastoplastic history; it does not
+	incorrectly pass the elastic consolidation strain through Hercules'
+	pressure-dependent plastic stage. The
 	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
 	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
 	reversals. The latter validates constitutive undrained tendency only: it does

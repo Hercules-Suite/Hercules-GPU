@@ -10,6 +10,16 @@ from pathlib import Path
 
 
 STRAIN_FIELDS = ("eps_xx", "eps_yy", "eps_zz", "eps_xy", "eps_yz", "eps_xz")
+STRESS_FIELDS = tuple(f"sigma_{component}_kpa"
+                      for component in ("xx", "yy", "zz", "xy", "yz", "xz"))
+STATE_TENSOR_FIELDS = {
+    "alpha": tuple(f"alpha_{component}"
+                   for component in ("xx", "yy", "zz", "xy", "yz", "xz")),
+    "alpha_in": tuple(f"alpha_in_{component}"
+                      for component in ("xx", "yy", "zz", "xy", "yz", "xz")),
+    "fabric": tuple(f"fabric_{component}"
+                    for component in ("xx", "yy", "zz", "xy", "yz", "xz")),
+}
 KNOWN_TESTS = {
     "md_drained_triaxial": ("5", "complete"),
     "md_undrained_cyclic_shear": ("1", "cyclic"),
@@ -21,7 +31,11 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
         rows = list(csv.DictReader(stream))
     if not rows:
         raise SystemExit(f"OpenSees path is empty: {path}")
-    missing = [name for name in (*STRAIN_FIELDS, "test_id", "driver_version")
+    required = (*STRAIN_FIELDS, *STRESS_FIELDS,
+                *(field for fields in STATE_TENSOR_FIELDS.values()
+                  for field in fields),
+                "test_id", "driver_version", "phase")
+    missing = [name for name in required
                if name not in rows[0]]
     if missing:
         raise SystemExit("OpenSees CSV is missing fields: " + ", ".join(missing))
@@ -61,6 +75,17 @@ def read_path(path: Path) -> tuple[str, list[dict[str, str]]]:
     return test_id, rows
 
 
+def replay_rows(test_id: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Start at the committed state where OpenSees enables plasticity."""
+    if test_id == "md_drained_triaxial":
+        base = max(index for index, row in enumerate(rows)
+                   if row["phase"] == "consolidation")
+    else:
+        base = next(index for index, row in enumerate(rows)
+                    if row["phase"] == "cyclic")
+    return rows[base:]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -76,7 +101,9 @@ def main() -> int:
     parser.add_argument("--maximum-substeps", type=int, default=100)
     args = parser.parse_args()
 
-    test_id, rows = read_path(args.opensees_csv)
+    test_id, source_rows = read_path(args.opensees_csv)
+    rows = replay_rows(test_id, source_rows)
+    initial = rows[0]
     prefix = args.output_prefix or f"hercules_{test_id}"
     if args.backbone_errtol <= 0.0:
         raise SystemExit("--backbone-errtol must be positive")
@@ -105,15 +132,32 @@ def main() -> int:
         "material_point_constants =",
         "125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101300.0 0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0",
         "",
+        "# Committed OpenSees state at the elastic-to-plastic stage boundary.",
+        "# Stress is tension-positive and expressed in Pa for Hercules.",
+        "material_point_initial_strain =",
+        " ".join(f"{float(initial[field]):.17e}" for field in STRAIN_FIELDS),
+        "material_point_initial_stress =",
+        " ".join(f"{1000.0*float(initial[field]):.17e}"
+                 for field in STRESS_FIELDS),
+    ]
+    for state_name, fields in STATE_TENSOR_FIELDS.items():
+        lines.extend([
+            f"material_point_initial_{state_name} =",
+            " ".join(f"{float(initial[field]):.17e}" for field in fields),
+        ])
+    lines.extend([
+        "",
         "# Hercules tensor strain: exx eyy ezz exy eyz exz",
         "material_point_strain_history =",
-    ]
+    ])
     for row in rows:
         lines.append(" ".join(f"{float(row[field]):.17e}" for field in STRAIN_FIELDS))
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"Canonical test: {test_id}")
-    print(f"Strain states: {len(rows)}")
+    print(f"OpenSees source states: {len(source_rows)}")
+    print(f"Stage-1 replay states: {len(rows)}")
+    print(f"Initial OpenSees step: {initial['step']}")
     print(f"Hercules input: {args.output.resolve()}")
     print(f"Material-point output prefix: {prefix}")
     print(f"Expected output names: {prefix}.cpu.csv and {prefix}.gpu.csv")

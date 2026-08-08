@@ -1963,18 +1963,21 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 __global__ static void kernel_nonlinear_material_point_history(
     nlconstants_t constants,
     nonlinear_gpu_config_t config,
+    nonlinear_material_point_initial_state_t initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
-    tensor_t strain_prev = nl_zero();
-    tensor_t plastic_strain = nl_zero();
-    tensor_t backstress = nl_zero();
-    tensor_t stress_reference = nl_zero();
-    tensor_t fabric = nl_zero();
-    tensor_t stress = nl_zero();
+    const int seeded = config.material_model == MANZARI_DAFALIAS &&
+                       initial_state.provided != 0;
+    tensor_t strain_prev = seeded ? initial_state.strain : nl_zero();
+    tensor_t plastic_strain = seeded ? initial_state.plastic_strain : nl_zero();
+    tensor_t backstress = seeded ? initial_state.alpha : nl_zero();
+    tensor_t stress_reference = seeded ? initial_state.alpha_in : nl_zero();
+    tensor_t fabric = seeded ? initial_state.fabric : nl_zero();
+    tensor_t stress = seeded ? initial_state.stress : nl_zero();
     double ep_bar = 0.0;
     double psi = 0.0;
     double load_unload = 0.0;
@@ -1987,7 +1990,7 @@ __global__ static void kernel_nonlinear_material_point_history(
     double tao1d = 0.0;
     double ggmax = MATERIAL_MODEL_IS_BACKBONE(config.material_model)
         ? 1.0 : 0.0;
-    double md_initialized = 0.0;
+    double md_initialized = seeded ? 1.0 : 0.0;
     double md_integration_error = 0.0;
     int32_t md_substeps = 0;
 
@@ -2615,11 +2618,13 @@ void nonlinear_gpu_check_error(int32_t myID)
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || strain_history == NULL ||
+    if (constants == NULL || config == NULL || initial_state == NULL ||
+        strain_history == NULL ||
         results == NULL || steps <= 0) {
         return -1;
     }
@@ -2639,7 +2644,8 @@ int nonlinear_gpu_material_point_history(
     }
     if (error == cudaSuccess) {
         kernel_nonlinear_material_point_history<<<1, 1>>>(
-            *constants, *config, strain_device, steps, result_device);
+            *constants, *config, *initial_state, strain_device, steps,
+            result_device);
         error = cudaGetLastError();
     }
     if (error == cudaSuccess) {
@@ -2664,21 +2670,24 @@ int nonlinear_gpu_material_point_history(
 int nonlinear_manzari_dafalias_host_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || strain_history == NULL ||
+    if (constants == NULL || config == NULL || initial_state == NULL ||
+        strain_history == NULL ||
         results == NULL || steps <= 0 ||
         config->material_model != MANZARI_DAFALIAS) return -1;
 
-    tensor_t strain_prev = md_zero();
-    tensor_t stress = md_zero();
-    tensor_t plastic_strain = md_zero();
-    tensor_t alpha = md_zero();
-    tensor_t alpha_in = md_zero();
-    tensor_t fabric = md_zero();
-    double initialized = 0.0;
+    const int seeded = initial_state->provided != 0;
+    tensor_t strain_prev = seeded ? initial_state->strain : md_zero();
+    tensor_t stress = seeded ? initial_state->stress : md_zero();
+    tensor_t plastic_strain = seeded ? initial_state->plastic_strain : md_zero();
+    tensor_t alpha = seeded ? initial_state->alpha : md_zero();
+    tensor_t alpha_in = seeded ? initial_state->alpha_in : md_zero();
+    tensor_t fabric = seeded ? initial_state->fabric : md_zero();
+    double initialized = seeded ? 1.0 : 0.0;
 
     for (int32_t step = 0; step < steps; step++) {
         double void_ratio = constants->md.e_init;

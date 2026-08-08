@@ -327,6 +327,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const generator = readFileSync(
+    `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
+    "utf8",
+  );
+  const canonicalComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`,
+    "utf8",
+  );
 
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
@@ -347,6 +355,10 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
+  assert.match(generator, /material_point_initial_stress/);
+  assert.match(generator, /"alpha_in": tuple/);
+  assert.match(cpu, /material_point_initial_alpha_in/);
+  assert.match(canonicalComparator, /def replay_rows/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

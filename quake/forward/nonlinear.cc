@@ -4721,6 +4721,7 @@ static void material_point_load_constants(nlconstants_t *constants,
 static int material_point_cpu_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     double dt,
@@ -4729,7 +4730,7 @@ static int material_point_cpu_history(
     if (config->material_model == MANZARI_DAFALIAS) {
         (void)dt;
         return nonlinear_manzari_dafalias_host_history(
-            constants, config, strain_history, steps, results);
+            constants, config, initial_state, strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
     tensor_t plastic_strain = zero_tensor();
@@ -4938,6 +4939,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     int result = 1;
     int steps = 0;
     int no_substeps = 0;
+    int initial_array_count = 0;
     int material_constant_count = MATERIAL_POINT_CONSTANT_COUNT;
     double dt = 0.0;
     double rtol = 1.0e-6;
@@ -4945,6 +4947,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double error_tolerance = 1.0e-3;
     double backbone_tolerance = 1.0e-5;
     double constants_values[MATERIAL_POINT_CONSTANT_COUNT] = {0.0};
+    double initial_strain_values[6] = {0.0};
+    double initial_stress_values[6] = {0.0};
+    double initial_alpha_values[6] = {0.0};
+    double initial_alpha_in_values[6] = {0.0};
+    double initial_fabric_values[6] = {0.0};
     char material_name[64] = "";
     char tension_name[64] = "no";
     char output_prefix[256] = "material-point";
@@ -4954,6 +4961,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     noyesflag_t tension_cutoff = NO;
     nlconstants_t constants;
     nonlinear_gpu_config_t config;
+    nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
     double maximum_relative = 0.0;
     double maximum_cpu_residual = 0.0;
@@ -4993,6 +5001,27 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 material_constant_count, material_name);
         goto cleanup;
     }
+    initial_array_count =
+        (parsedarray(fp, "material_point_initial_strain", 6,
+                     initial_strain_values) == 0) +
+        (parsedarray(fp, "material_point_initial_stress", 6,
+                     initial_stress_values) == 0) +
+        (parsedarray(fp, "material_point_initial_alpha", 6,
+                     initial_alpha_values) == 0) +
+        (parsedarray(fp, "material_point_initial_alpha_in", 6,
+                     initial_alpha_in_values) == 0) +
+        (parsedarray(fp, "material_point_initial_fabric", 6,
+                     initial_fabric_values) == 0);
+    if (initial_array_count != 0 && initial_array_count != 5) {
+        fprintf(stderr, "A material-point initial state requires strain, "
+                        "stress, alpha, alpha_in, and fabric\n");
+        goto cleanup;
+    }
+    if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS) {
+        fprintf(stderr, "A material-point initial state currently requires "
+                        "ManzariDafalias\n");
+        goto cleanup;
+    }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
     else if (strcasecmp(tension_name, "no") != 0) {
         fprintf(stderr, "tension_cutoff must be yes or no\n");
@@ -5029,6 +5058,38 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             }
         }
     }
+    memset(&initial_state, 0, sizeof(initial_state));
+    if (initial_array_count == 5) {
+        double *initial_arrays[] = {
+            initial_strain_values, initial_stress_values,
+            initial_alpha_values, initial_alpha_in_values,
+            initial_fabric_values
+        };
+        for (int field = 0; field < 5; field++) {
+            for (int component = 0; component < 6; component++) {
+                if (!isfinite(initial_arrays[field][component])) {
+                    fprintf(stderr, "Non-finite material-point initial state "
+                                    "value\n");
+                    goto cleanup;
+                }
+            }
+        }
+#define NL_SET_INITIAL_TENSOR(field, values) do { \
+        initial_state.field.xx = (values)[0]; \
+        initial_state.field.yy = (values)[1]; \
+        initial_state.field.zz = (values)[2]; \
+        initial_state.field.xy = (values)[3]; \
+        initial_state.field.yz = (values)[4]; \
+        initial_state.field.xz = (values)[5]; \
+    } while (0)
+        NL_SET_INITIAL_TENSOR(strain, initial_strain_values);
+        NL_SET_INITIAL_TENSOR(stress, initial_stress_values);
+        NL_SET_INITIAL_TENSOR(alpha, initial_alpha_values);
+        NL_SET_INITIAL_TENSOR(alpha_in, initial_alpha_in_values);
+        NL_SET_INITIAL_TENSOR(fabric, initial_fabric_values);
+#undef NL_SET_INITIAL_TENSOR
+        initial_state.provided = 1;
+    }
 
     strain_history = (tensor_t *)calloc((size_t)steps, sizeof(*strain_history));
     strain_values = (double *)calloc((size_t)steps*6, sizeof(*strain_values));
@@ -5054,6 +5115,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         strain_history[step].yz = strain_values[step*6+4];
         strain_history[step].xz = strain_values[step*6+5];
     }
+    if (initial_state.provided &&
+        !material_point_same_strain(strain_history[0], initial_state.strain)) {
+        fprintf(stderr, "The first material-point strain must equal the "
+                        "supplied initial strain\n");
+        goto cleanup;
+    }
 
     material_point_load_constants(&constants, material_model,
                                   constants_values);
@@ -5067,15 +5134,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
-    if (material_point_cpu_history(&constants, &config, strain_history, steps,
-                                   dt, cpu_results) != 0) goto cleanup;
+    if (material_point_cpu_history(&constants, &config, &initial_state,
+                                   strain_history, steps, dt,
+                                   cpu_results) != 0) goto cleanup;
     if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
                                  dt) != 0) {
         goto cleanup;
     }
     if (nonlinear_gpu_material_point_history(&constants, &config,
-                                             strain_history, steps,
-                                             gpu_results) != 0) {
+                                             &initial_state, strain_history,
+                                             steps, gpu_results) != 0) {
         goto cleanup;
     }
     if (material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
@@ -5127,7 +5195,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
              * residual values inside the same configured convergence bound.
              * Validate those diagnostics independently; compare the actual
              * constitutive state component-by-component below. */
-            if (MATERIAL_MODEL_IS_BACKBONE(material_model) &&
+            if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
+                 material_model == MANZARI_DAFALIAS) &&
                 (i == MATERIAL_POINT_FS_INDEX ||
                  i == MATERIAL_POINT_MODEL_ERROR_INDEX)) {
                 const double cpu_residual = fabs(cpu_values[i]);
@@ -5136,7 +5205,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 maximum_gpu_residual = MAX(maximum_gpu_residual, gpu_residual);
                 if (cpu_residual > error_tolerance ||
                     gpu_residual > error_tolerance) {
-                    fprintf(stderr, "Material-point root residual exceeds "
+                    fprintf(stderr, "Material-point yield/root residual exceeds "
                             "error_tolerance at step %d field %s: CPU=%.3e "
                             "GPU=%.3e tolerance=%.3e\n", step,
                             material_point_result_names[i], cpu_residual,
