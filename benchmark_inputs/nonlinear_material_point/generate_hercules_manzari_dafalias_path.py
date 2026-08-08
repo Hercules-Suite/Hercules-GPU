@@ -124,7 +124,9 @@ def main() -> int:
         f"error_tolerance = {args.yield_tolerance_pa:.17e}",
         f"backbone_errTol = {args.backbone_errtol:.17e}",
         "tension_cutoff = no",
-        "material_point_compare_rtol = 1.0e-8",
+        # Long adaptive histories accumulate small host/device libm differences.
+        # Constitutive convergence is checked separately against error_tolerance.
+        "material_point_compare_rtol = 1.0e-6",
         "material_point_compare_atol = 1.0e-8",
         f"material_point_output_prefix = {prefix}",
         "",
