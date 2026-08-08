@@ -4845,6 +4845,32 @@ static int material_point_result_values(
     return i;
 }
 
+static int material_point_tensor_group_start(int index)
+{
+    if (index >= 0 && index < 18) return index - index % 6;
+    if (index >= 25 && index < 31) return 25;
+    if (index >= 35 && index < 47) return 35 + ((index - 35) / 6) * 6;
+    return -1;
+}
+
+static double material_point_comparison_scale(
+    int index,
+    const double cpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT],
+    const double gpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT])
+{
+    const int group_start = material_point_tensor_group_start(index);
+    if (group_start < 0) {
+        return MAX(fabs(cpu_values[index]), fabs(gpu_values[index]));
+    }
+
+    double scale = 0.0;
+    for (int i = group_start; i < group_start + 6; i++) {
+        scale = MAX(scale, fabs(cpu_values[i]));
+        scale = MAX(scale, fabs(gpu_values[i]));
+    }
+    return scale;
+}
+
 static int material_point_same_strain(tensor_t left, tensor_t right)
 {
     return left.xx == right.xx && left.yy == right.yy &&
@@ -5216,7 +5242,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             }
 
             const double absolute = fabs(cpu_values[i]-gpu_values[i]);
-            const double scale = MAX(fabs(cpu_values[i]), fabs(gpu_values[i]));
+            /* A component-wise relative error is ill-conditioned for an
+             * inactive tensor component near zero. Scale tensor components
+             * by the largest resolved component of the same tensor, while
+             * retaining component-wise scaling for scalar state. */
+            const double scale = material_point_comparison_scale(
+                i, cpu_values, gpu_values);
             const double relative = absolute/MAX(scale, DBL_MIN);
             maximum_absolute = MAX(maximum_absolute, absolute);
             if (absolute > atol) {
