@@ -50,8 +50,19 @@ typedef struct nonlinear_gpu_error_t {
     double residual;
     double value;
     double md_substep_fraction;
+    double md_progress_fraction;
     double md_effective_mean_stress;
     double md_strain_increment_norm;
+    double md_first_dgamma;
+    double md_second_dgamma;
+    double md_first_raw_dgamma;
+    double md_second_raw_dgamma;
+    double md_first_denominator;
+    double md_second_denominator;
+    double md_first_h;
+    double md_second_h;
+    double md_first_hardening_gap;
+    double md_second_hardening_gap;
     tensor_t md_stress;
     tensor_t md_strain_increment;
 } nonlinear_gpu_error_t;
@@ -296,9 +307,20 @@ typedef struct nl_md_diagnostics_t {
     int32_t correction_iterations;
     int32_t projection_fallbacks;
     double substep_fraction;
+    double progress_fraction;
     double effective_mean_stress;
     double local_error;
     double correction_residual;
+    double first_dgamma;
+    double second_dgamma;
+    double first_raw_dgamma;
+    double second_raw_dgamma;
+    double first_denominator;
+    double second_denominator;
+    double first_h;
+    double second_h;
+    double first_hardening_gap;
+    double second_hardening_gap;
 } nl_md_diagnostics_t;
 
 typedef struct nl_md_stage_t {
@@ -307,6 +329,10 @@ typedef struct nl_md_stage_t {
     tensor_t dfabric;
     tensor_t dpstrain;
     double dgamma;
+    double raw_dgamma;
+    double denominator;
+    double h;
+    double hardening_gap;
     int ok;
 } nl_md_stage_t;
 
@@ -318,6 +344,7 @@ typedef struct nl_md_dependent_t {
     double D;
     double B;
     double C;
+    double hardening_gap;
     int ok;
 } nl_md_dependent_t;
 
@@ -490,6 +517,7 @@ NL_HD static nl_md_dependent_t md_state_dependent(
     const tensor_t d = md_sub(
         md_scale(out.n, sqrt(2.0/3.0)*alpha_d), alpha);
     const double denom_h = md_ddot(md_sub(alpha, alpha_in), out.n);
+    out.hardening_gap = denom_h;
     const double b0 = m->G0*m->h0*(1.0-m->ch*void_ratio)/
                       sqrt(p/m->P_atm);
     out.h = (fabs(denom_h) < small) ? 1.0e10 : b0/denom_h;
@@ -532,9 +560,13 @@ NL_HD static nl_md_stage_t md_stage(
     const double dev_work = md_ddot(dep.n, md_dev(de));
     const double numerator = 2.0*G*dev_work-
                              K*md_trace(de)*md_ddot(dep.n, r);
+    out.denominator = denominator;
+    out.h = dep.h;
+    out.hardening_gap = dep.hardening_gap;
 
     if (fabs(denominator) <= DBL_MIN) return out;
-    out.dgamma = numerator/denominator;
+    out.raw_dgamma = numerator/denominator;
+    out.dgamma = out.raw_dgamma;
     if (out.dgamma <= 0.0) {
         out.dgamma = 0.0;
         out.dsigma = md_elastic_increment(de, K, G);
@@ -562,7 +594,9 @@ NL_HD static nl_md_stage_t md_stage(
     }
     out.ok = md_finite(out.dsigma) && md_finite(out.dalpha) &&
              md_finite(out.dfabric) && md_finite(out.dpstrain) &&
-             isfinite(out.dgamma);
+             isfinite(out.dgamma) && isfinite(out.raw_dgamma) &&
+             isfinite(out.denominator) && isfinite(out.h) &&
+             isfinite(out.hardening_gap);
     return out;
 }
 
@@ -868,6 +902,7 @@ NL_HD static int nl_update_manzari_dafalias(
         }
         dT = fmin(dT, 1.0-T);
         diagnostics->substep_fraction = dT;
+        diagnostics->progress_fraction = T;
         diagnostics->effective_mean_stress = md_trace(stress)/3.0;
         const tensor_t de_step = md_scale(de, dT);
         const tensor_t strain_at_end = md_add(
@@ -902,6 +937,16 @@ NL_HD static int nl_update_manzari_dafalias(
             diagnostics->failure_reason = NL_MD_FAILURE_SECOND_STAGE;
             return 0;
         }
+        diagnostics->first_dgamma = first.dgamma;
+        diagnostics->second_dgamma = second.dgamma;
+        diagnostics->first_raw_dgamma = first.raw_dgamma;
+        diagnostics->second_raw_dgamma = second.raw_dgamma;
+        diagnostics->first_denominator = first.denominator;
+        diagnostics->second_denominator = second.denominator;
+        diagnostics->first_h = first.h;
+        diagnostics->second_h = second.h;
+        diagnostics->first_hardening_gap = first.hardening_gap;
+        diagnostics->second_hardening_gap = second.hardening_gap;
         const double stress_norm = md_norm(stress);
         const double error_denominator = stress_norm < 0.5
             ? 1.0 : 2.0*stress_norm;
@@ -1047,9 +1092,20 @@ __device__ static inline void nl_record_md_error(
         error->residual = residual;
         error->value = integration_error;
         error->md_substep_fraction = diagnostics->substep_fraction;
+        error->md_progress_fraction = diagnostics->progress_fraction;
         error->md_effective_mean_stress =
             diagnostics->effective_mean_stress;
         error->md_strain_increment_norm = md_norm(strain_increment);
+        error->md_first_dgamma = diagnostics->first_dgamma;
+        error->md_second_dgamma = diagnostics->second_dgamma;
+        error->md_first_raw_dgamma = diagnostics->first_raw_dgamma;
+        error->md_second_raw_dgamma = diagnostics->second_raw_dgamma;
+        error->md_first_denominator = diagnostics->first_denominator;
+        error->md_second_denominator = diagnostics->second_denominator;
+        error->md_first_h = diagnostics->first_h;
+        error->md_second_h = diagnostics->second_h;
+        error->md_first_hardening_gap = diagnostics->first_hardening_gap;
+        error->md_second_hardening_gap = diagnostics->second_hardening_gap;
         error->md_stress = stress;
         error->md_strain_increment = strain_increment;
     }
@@ -2966,7 +3022,8 @@ void nonlinear_gpu_check_error(int32_t myID)
                     "  attempts=%d accepted_substeps=%d "
                     "correction_retries=%d max_correction_iterations=%d "
                     "segment_projections=%d\n"
-                    "  substep_fraction=%12.8E local_error=%12.8E "
+                    "  progress_fraction=%12.8E substep_fraction=%12.8E "
+                    "local_error=%12.8E "
                     "yield_residual=%12.8E effective_mean_stress=%12.8E Pa "
                     "strain_increment_norm=%12.8E\n",
                     reason, g_error_host.md_reason,
@@ -2975,10 +3032,28 @@ void nonlinear_gpu_check_error(int32_t myID)
                     g_error_host.md_correction_retries,
                     g_error_host.md_correction_iterations,
                     g_error_host.md_projection_fallbacks,
+                    g_error_host.md_progress_fraction,
                     g_error_host.md_substep_fraction, g_error_host.value,
                     g_error_host.residual,
                     g_error_host.md_effective_mean_stress,
                     g_error_host.md_strain_increment_norm);
+            fprintf(stderr,
+                    "  Modified-Euler stages: "
+                    "dgamma=(%12.8E, %12.8E) "
+                    "raw_dgamma=(%12.8E, %12.8E) "
+                    "denominator=(%12.8E, %12.8E)\n"
+                    "  stage h=(%12.8E, %12.8E) "
+                    "hardening_gap=(%12.8E, %12.8E)\n",
+                    g_error_host.md_first_dgamma,
+                    g_error_host.md_second_dgamma,
+                    g_error_host.md_first_raw_dgamma,
+                    g_error_host.md_second_raw_dgamma,
+                    g_error_host.md_first_denominator,
+                    g_error_host.md_second_denominator,
+                    g_error_host.md_first_h,
+                    g_error_host.md_second_h,
+                    g_error_host.md_first_hardening_gap,
+                    g_error_host.md_second_hardening_gap);
             fprintf(stderr,
                     "  pre-step effective stress (compression positive): "
                     "xx=%12.8E yy=%12.8E zz=%12.8E xy=%12.8E "

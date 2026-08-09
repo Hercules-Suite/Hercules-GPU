@@ -457,7 +457,11 @@ Nonlinear GPU execution (runtime environment):
 	integration limit is reached, never by continuing from an off-surface or
 	partially updated state. The failure report includes the limiting reason,
 	retry counts, local error, effective mean stress, element coordinates, and
-	the stress and strain-increment tensors. Unlike the OpenSees minimum-step
+	the stress and strain-increment tensors. A minimum-local-error failure also
+	reports both Modified-Euler raw/accepted plastic multipliers, consistency
+	denominators, hardening moduli/gaps, and integration progress so a
+	loading-switch discontinuity can be
+	distinguished from an ordinary insufficient substep. Unlike the OpenSees minimum-step
 	fallback, Hercules does not accept a state whose embedded Modified-Euler
 	error exceeds `backbone_errTol`. Its normalized local-fraction floor adapts
 	between `1e-9` and `1e-6` from the strain roundoff scale, allowing large

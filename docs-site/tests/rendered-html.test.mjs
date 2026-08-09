@@ -421,6 +421,9 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /strain_roundoff =\s*64\.0\*DBL_EPSILON/);
   assert.match(gpu, /fmax\(1\.0e-9, strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
   assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
+  assert.match(gpu, /Modified-Euler stages:/);
+  assert.match(gpu, /hardening_gap=/);
+  assert.match(gpu, /raw_dgamma=/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
