@@ -87,8 +87,10 @@ production defaults.
 - `manzari_dafalias_modified_euler_synthetic.in` establishes isotropic
   confinement, applies a cyclic tensor-shear path, and checks the same
   allocation-free Modified-Euler implementation on host and CUDA. Its CSV adds
-  alpha, alpha-in, fabric, void ratio, plastic multiplier, absolute yield
-  residual, local integration error, and accepted-substep diagnostics.
+  alpha, alpha-in, fabric, void ratio, plastic multiplier, controlled yield
+  residual, local integration error, and accepted-substep diagnostics. The
+  recorded residual is absolute for plastic stress correction and one-sided
+  for an admissible elastic state inside the yield surface.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler

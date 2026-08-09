@@ -1073,7 +1073,12 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
         return 0;
     }
-    *yield_error = fmax(*yield_error, fabs(final_f));
+    /* error_tolerance is absolute only for a plastic stress correction. The
+     * final state can instead be an elastic unloading state strictly inside
+     * the surface (f < 0), which remains admissible by the same one-sided
+     * criterion used by the elastic predictor. Keep prior absolute plastic
+     * correction residuals, but count only a positive final violation. */
+    *yield_error = fmax(*yield_error, fmax(final_f, 0.0));
     if (!md_finite(dynamic_next) || !md_finite(plastic_next) ||
         !md_finite(alpha_work) || !md_finite(alpha_in_work) ||
         !md_finite(fabric_work) || !isfinite(*yield_error) ||

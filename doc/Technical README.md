@@ -452,6 +452,9 @@ Nonlinear GPU execution (runtime environment):
 	nonpositive and its elastic predictor remains admissible, Hercules accepts
 	the elastic substep without evaluating a discontinuous plastic second stage.
 	This avoids a false embedded-error singularity at an unloading/loading switch.
+	Final validation retains that one-sided elastic condition, so a negative
+	yield function represents a valid state inside the surface; the absolute
+	criterion remains confined to plastic stress correction.
 	Elastic stages leave alpha, fabric, and plastic strain unchanged; these history
 	variables evolve only under plastic flow.
 	Plastic correction is limited to `min(no_substeps, 50)` iterations. Each
