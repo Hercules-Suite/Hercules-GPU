@@ -129,6 +129,9 @@ export const docPages: Record<string, DocPageContent> = {
       {
         id: "build",
         title: "Build and inspect",
+        paragraphs: [
+          "Use a parallel make job count appropriate for the login or build node. The large host-side solver orchestration in psolve.cc is compiled by the MPI C++ compiler while CUDA kernels and launch wrappers in psolve_gpu_launch.cu are compiled independently by nvcc; make -j can run those jobs concurrently. Incremental builds also avoid rerunning nvcc when only host orchestration changes.",
+        ],
         codeLabel: "shell",
         code: "make clean\nmake -j 8\n\n# Expected executables\nls octor/octor quake/forward/psolve",
         bullets: [

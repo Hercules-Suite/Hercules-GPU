@@ -714,7 +714,7 @@ offset/component (see the table below).
 	When active (default `auto` resolves to on for `vt`+`bkt*`, or
 	explicit `yes`), the missing operator is supplied: a faithful CUDA
 	port of the CPU `TetraForcesBKT` (`topoTetraForcesBKT` /
-	`kernelTopoBktForceEffective` in `psolve.cu`, per-tet algebra copied
+	`kernelTopoBktForceEffective` in `psolve_gpu_launch.cu`, per-tet algebra copied
 	verbatim from the CPU source, both `cube_part` variants, all five
 	tets) computes the fill-scaled 5-tet **visco-elastic** force for the
 	`topoBkt` cut cells. Its shear/kappa inputs are the **same**

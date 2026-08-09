@@ -79,6 +79,7 @@ extern "C" {
 #include "meshformatlab.h"
 
 #include "kernel.h"
+#include "psolve_gpu_launch.h"
 
 #include "topography.h"
 #include "drm_planewaves.h"
@@ -106,13 +107,6 @@ static topoconstants_t* g_topoConstantsDevice = NULL;
  * the topoconstants. Default -1/NULL; built only when the gate is YES so
  * every other configuration (incl. all CPML / flat-PML paths) is
  * bit-identical to the validated v2 baseline. */
-typedef struct topo_bkt_const_t {
-  double tetraVol[5];
-  double edgesize;
-  double mu_bkt;
-  double kappa_bkt;
-  int    cube_part;
-} topo_bkt_const_t;
 static int32_t           g_topoBktElemCountGPU = -1;
 static int32_t*          g_topoBktElemMapperDevice = NULL;
 static topo_bkt_const_t* g_topoBktConstDevice = NULL;
@@ -873,834 +867,6 @@ static void solver_prepare_force_upload_ranges(mesh_t* mesh,
 static int interpolate_station_displacements(int32_t step);
 static double interpolate_station_pressure_value(int32_t iStation);
 
-__global__ static void kernelSourceForceScatter(int32_t count,
-                                                const int32_t* lnidList,
-                                                const vector3D_t* srcForces,
-                                                fvector_t* forceDevice,
-                                                double dt2) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  int32_t lnid = lnidList[idx];
-  const vector3D_t src = srcForces[idx];
-  fvector_t out;
-  out.f[0] = src.x[0] * dt2;
-  out.f[1] = src.x[1] * dt2;
-  out.f[2] = src.x[2] * dt2;
-  forceDevice[lnid] = out;
-}
-
-__global__ static void kernelSparseForceScatter(int32_t count,
-                                                const int32_t* lnidList,
-                                                const fvector_t* srcForces,
-                                                fvector_t* forceDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  int32_t lnid = lnidList[idx];
-  forceDevice[lnid] = srcForces[idx];
-}
-
-__global__ static void kernelDispBoundaryGather(int32_t count,
-                                                const int32_t* lnidList,
-                                                const fvector_t* dispDevice,
-                                                fvector_t* bufferDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  bufferDevice[idx] = dispDevice[lnidList[idx]];
-}
-
-__global__ static void kernelDispBoundaryScatter(int32_t count,
-                                                 const int32_t* lnidList,
-                                                 const fvector_t* bufferDevice,
-                                                 fvector_t* dispDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  dispDevice[lnidList[idx]] = bufferDevice[idx];
-}
-
-__global__ static void kernelScalarBoundaryGather(int32_t count,
-                                                  const int32_t* lnidList,
-                                                  const solver_float* srcDevice,
-                                                  solver_float* bufferDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  bufferDevice[idx] = srcDevice[lnidList[idx]];
-}
-
-__global__ static void kernelScalarBoundaryScatter(int32_t count,
-                                                   const int32_t* lnidList,
-                                                   const solver_float* bufferDevice,
-                                                   solver_float* dstDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  dstDevice[lnidList[idx]] = bufferDevice[idx];
-}
-
-__global__ static void kernelScalarBoundaryScatterSerial(
-    int32_t count, const int32_t* lnidList, const solver_float* bufferDevice,
-    solver_float* dstDevice) {
-  if ((blockIdx.x != 0) || (threadIdx.x != 0)) {
-    return;
-  }
-  for (int32_t idx = 0; idx < count; idx++) {
-    dstDevice[lnidList[idx]] = bufferDevice[idx];
-  }
-}
-
-__global__ static void kernelScalarBoundaryAccumulate(
-    int32_t count, const int32_t* lnidList, const solver_float* bufferDevice,
-    solver_float* dstDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  atomicAdd(dstDevice + lnidList[idx], bufferDevice[idx]);
-}
-
-/* The host compute_adjust cache is already grouped by parent for the
- * contribution path. One GPU thread therefore owns each parent update. */
-__global__ static void kernelScalarAdjustDistribution(
-    int32_t runCount, const int32_t* runOffsets, const int32_t* runParentBase3,
-    const int32_t* edgeDn, const int32_t* danglingBase3,
-    const solver_float* invDeps, solver_float* values) {
-  int32_t run = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (run >= runCount) {
-    return;
-  }
-
-  solver_float sum = 0.0;
-  for (int32_t edge = runOffsets[run]; edge < runOffsets[run + 1]; edge++) {
-    const int32_t dnindex = edgeDn[edge];
-    sum += values[danglingBase3[dnindex] / 3] * invDeps[dnindex];
-  }
-  values[runParentBase3[run] / 3] += sum;
-}
-
-__global__ static void kernelScalarAdjustAssignment(
-    int32_t dnCount, const int32_t* dnOrder, const int32_t* parentOffsets,
-    const int32_t* parentBase3, const int32_t* danglingBase3,
-    const solver_float* invDeps, solver_float* values) {
-  int32_t orderIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (orderIndex >= dnCount) {
-    return;
-  }
-
-  const int32_t dnindex = dnOrder[orderIndex];
-  solver_float sum = 0.0;
-  for (int32_t parent = parentOffsets[dnindex];
-       parent < parentOffsets[dnindex + 1]; parent++) {
-    sum += values[parentBase3[parent] / 3];
-  }
-  values[danglingBase3[dnindex] / 3] = sum * invDeps[dnindex];
-}
-
-__global__ static void kernelVectorBoundaryGather(int32_t count,
-                                                  const int32_t* lnidList,
-                                                  const fvector_t* srcDevice,
-                                                  fvector_t* bufferDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx < count) {
-    bufferDevice[idx] = srcDevice[lnidList[idx]];
-  }
-}
-
-__global__ static void kernelVectorBoundaryScatter(int32_t count,
-                                                   const int32_t* lnidList,
-                                                   const fvector_t* bufferDevice,
-                                                   fvector_t* dstDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx < count) {
-    dstDevice[lnidList[idx]] = bufferDevice[idx];
-  }
-}
-
-__global__ static void kernelVectorBoundaryScatterSerial(
-    int32_t count, const int32_t* lnidList, const fvector_t* bufferDevice,
-    fvector_t* dstDevice) {
-  if ((blockIdx.x != 0) || (threadIdx.x != 0)) {
-    return;
-  }
-  for (int32_t idx = 0; idx < count; idx++) {
-    dstDevice[lnidList[idx]] = bufferDevice[idx];
-  }
-}
-
-__global__ static void kernelVectorBoundaryAccumulate(
-    int32_t count, const int32_t* lnidList, const fvector_t* bufferDevice,
-    fvector_t* dstDevice) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= count) {
-    return;
-  }
-
-  const int32_t node = lnidList[idx];
-  atomicAdd(&dstDevice[node].f[0], bufferDevice[idx].f[0]);
-  atomicAdd(&dstDevice[node].f[1], bufferDevice[idx].f[1]);
-  atomicAdd(&dstDevice[node].f[2], bufferDevice[idx].f[2]);
-}
-
-__global__ static void kernelVectorAdjustDistribution(
-    int32_t runCount, const int32_t* runOffsets, const int32_t* runParentBase3,
-    const int32_t* edgeDn, const int32_t* danglingBase3,
-    const solver_float* invDeps, fvector_t* values) {
-  int32_t run = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (run >= runCount) {
-    return;
-  }
-
-  fvector_t sum = {{0.0, 0.0, 0.0}};
-  for (int32_t edge = runOffsets[run]; edge < runOffsets[run + 1]; edge++) {
-    const int32_t dnindex = edgeDn[edge];
-    const fvector_t value = values[danglingBase3[dnindex] / 3];
-    const solver_float weight = invDeps[dnindex];
-    sum.f[0] += value.f[0] * weight;
-    sum.f[1] += value.f[1] * weight;
-    sum.f[2] += value.f[2] * weight;
-  }
-  const int32_t parent = runParentBase3[run] / 3;
-  values[parent].f[0] += sum.f[0];
-  values[parent].f[1] += sum.f[1];
-  values[parent].f[2] += sum.f[2];
-}
-
-__global__ static void kernelVectorAdjustAssignment(
-    int32_t dnCount, const int32_t* dnOrder, const int32_t* parentOffsets,
-    const int32_t* parentBase3, const int32_t* danglingBase3,
-    const solver_float* invDeps, fvector_t* values) {
-  int32_t orderIndex = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (orderIndex >= dnCount) {
-    return;
-  }
-
-  const int32_t dnindex = dnOrder[orderIndex];
-  fvector_t sum = {{0.0, 0.0, 0.0}};
-  for (int32_t parent = parentOffsets[dnindex];
-       parent < parentOffsets[dnindex + 1]; parent++) {
-    const fvector_t value = values[parentBase3[parent] / 3];
-    sum.f[0] += value.f[0];
-    sum.f[1] += value.f[1];
-    sum.f[2] += value.f[2];
-  }
-  const solver_float weight = invDeps[dnindex];
-  fvector_t* dst = &values[danglingBase3[dnindex] / 3];
-  dst->f[0] = sum.f[0] * weight;
-  dst->f[1] = sum.f[1] * weight;
-  dst->f[2] = sum.f[2] * weight;
-}
-
-__device__ __constant__ int kTopoTetNodes[2][5][4] = {
-    {{0, 2, 1, 4}, {3, 1, 2, 7}, {6, 4, 7, 2},
-     {5, 7, 4, 1}, {2, 4, 7, 1}},
-    {{0, 3, 1, 5}, {0, 2, 3, 6}, {4, 5, 6, 0},
-     {6, 5, 7, 3}, {0, 6, 3, 5}}};
-
-__device__ __constant__ double kTopoCubeCoord[8][3] = {
-    {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
-    {1.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0},
-    {0.0, 1.0, 1.0}, {1.0, 1.0, 1.0}};
-
-__device__ static double topo_det3(const double a[3][3]) {
-  return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
-         a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
-         a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-}
-
-__device__ static void topo_inv3(const double a[3][3], double inv[3][3]) {
-  double d = topo_det3(a);
-
-  inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / d;
-  inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / d;
-  inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / d;
-  inv[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / d;
-  inv[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / d;
-  inv[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / d;
-  inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / d;
-  inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / d;
-  inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / d;
-}
-
-__device__ static void topoTetraForcesEffective(const fvector_t* un,
-                                                fvector_t* resVec,
-                                                const topoconstants_t* topo_ec) {
-  const int part = (topo_ec->cube_part == 1) ? 0 : 1;
-  const double h = topo_ec->h;
-
-  for (int k = 0; k < 5; k++) {
-    if (topo_ec->tetraVol[k] == 0.0) {
-      continue;
-    }
-
-    int nodes[4];
-    double x[4][3];
-    double a[3][3];
-    double inv[3][3];
-    double grad[4][3];
-    double gradU[3][3];
-    double sigma[3][3];
-
-    for (int i = 0; i < 4; i++) {
-      nodes[i] = kTopoTetNodes[part][k][i];
-    }
-
-    for (int i = 0; i < 4; i++) {
-      int n = nodes[i];
-      x[i][0] = kTopoCubeCoord[n][0] * h;
-      x[i][1] = kTopoCubeCoord[n][1] * h;
-      x[i][2] = kTopoCubeCoord[n][2] * h;
-    }
-
-    for (int col = 0; col < 3; col++) {
-      for (int row = 0; row < 3; row++) {
-        a[row][col] = x[col + 1][row] - x[0][row];
-      }
-    }
-
-    topo_inv3(a, inv);
-
-    for (int i = 1; i < 4; i++) {
-      grad[i][0] = inv[i - 1][0];
-      grad[i][1] = inv[i - 1][1];
-      grad[i][2] = inv[i - 1][2];
-    }
-    for (int d = 0; d < 3; d++) {
-      grad[0][d] = -(grad[1][d] + grad[2][d] + grad[3][d]);
-    }
-
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        gradU[i][j] = 0.0;
-      }
-    }
-
-    for (int aidx = 0; aidx < 4; aidx++) {
-      int n = nodes[aidx];
-      for (int comp = 0; comp < 3; comp++) {
-        for (int d = 0; d < 3; d++) {
-          gradU[comp][d] += un[n].f[comp] * grad[aidx][d];
-        }
-      }
-    }
-
-    double trace = gradU[0][0] + gradU[1][1] + gradU[2][2];
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        sigma[i][j] = topo_ec->mu * (gradU[i][j] + gradU[j][i]);
-        if (i == j) {
-          sigma[i][j] += topo_ec->lambda * trace;
-        }
-      }
-    }
-
-    double volume = fabs(topo_det3(a)) * topo_ec->tetraVol[k] / 6.0;
-    for (int aidx = 0; aidx < 4; aidx++) {
-      int n = nodes[aidx];
-      for (int comp = 0; comp < 3; comp++) {
-        double value = 0.0;
-        for (int d = 0; d < 3; d++) {
-          value += sigma[comp][d] * grad[aidx][d];
-        }
-        resVec[n].f[comp] += (solver_float)(volume * value);
-      }
-    }
-  }
-}
-
-__global__ static void kernelTopoForceEffective(int32_t lenum,
-                                                gpu_data_t* gpuData,
-                                                int32_t topoElemCount,
-                                                const int32_t* topoElemMapper,
-                                                const topoconstants_t* topoConstants,
-                                                double dt2) {
-  int32_t topoIdx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (topoIdx >= topoElemCount) {
-    return;
-  }
-
-  int32_t eindex = topoElemMapper[topoIdx];
-  topoconstants_t topo_ec = topoConstants[topoIdx];
-  fvector_t localForce[8];
-  fvector_t curDisp[8];
-  double c1 = gpuData->c1ArrayDevice[eindex];
-  double b_over_dt;
-  int do_contrib = 0;
-
-  if (c1 == 0.0) {
-    return;
-  }
-
-  b_over_dt = gpuData->c3ArrayDevice[eindex] / c1;
-
-  for (int i = 0; i < 8; i++) {
-    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
-    const fvector_t* tm1Disp = gpuData->tm1Device + lnid;
-    const fvector_t* tm2Disp = gpuData->tm2Device + lnid;
-
-    localForce[i].f[0] = 0;
-    localForce[i].f[1] = 0;
-    localForce[i].f[2] = 0;
-
-    curDisp[i].f[0] =
-        tm1Disp->f[0] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[0];
-    curDisp[i].f[1] =
-        tm1Disp->f[1] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[1];
-    curDisp[i].f[2] =
-        tm1Disp->f[2] * (1.0 + b_over_dt) - b_over_dt * tm2Disp->f[2];
-
-    do_contrib =
-        (fabs(curDisp[i].f[0]) > 1e-20) ? 1 : do_contrib;
-    do_contrib =
-        (fabs(curDisp[i].f[1]) > 1e-20) ? 1 : do_contrib;
-    do_contrib =
-        (fabs(curDisp[i].f[2]) > 1e-20) ? 1 : do_contrib;
-  }
-
-  if (!do_contrib) {
-    return;
-  }
-
-  topoTetraForcesEffective(curDisp, localForce, &topo_ec);
-
-  for (int i = 0; i < 8; i++) {
-    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
-    fvector_t* nodalForce = gpuData->forceDevice + lnid;
-
-    atomicAdd((solver_float*)&(nodalForce->f[0]),
-              (solver_float)(-localForce[i].f[0] * dt2));
-    atomicAdd((solver_float*)&(nodalForce->f[1]),
-              (solver_float)(-localForce[i].f[1] * dt2));
-    atomicAdd((solver_float*)&(nodalForce->f[2]),
-              (solver_float)(-localForce[i].f[2] * dt2));
-  }
-}
-
-/* ----------------------------------------------------------------------- *
- *  VT + BKT GPU stabilization: faithful CUDA port of the CPU cut-cell
- *  visco-elastic operator TetraForcesBKT (topography.cc). The body below
- *  is copied VERBATIM from the CPU source (the per-tet topoC1/C2/C3 / prs
- *  / resVec algebra, both cube_part variants, all 5 tetrahedra) so the
- *  GPU result matches the validated CPU reference to ported-kernel float
- *  tolerance. un/un_kappa are the same damping_vector_shear/kappa the BKT
- *  conv kernel already produces; mu/kappa are the CPU rho*Vs^2 /
- *  rho*(Vp^2-4/3 Vs^2) moduli (computed host-side, bit-identical).
- * ----------------------------------------------------------------------- */
-__device__ static void topoTetraForcesBKT(const fvector_t* un,
-                                           const fvector_t* un_kappa,
-                                           fvector_t* resVec,
-                                           double edgesize,
-                                           double mu, double kappa,
-                                           const double* tetraVol,
-                                           int cube_part) {
-  int k;
-  int32_t N0, N1, N2, N3;
-  double prs;
-    double VTetr = edgesize * edgesize * edgesize / 6.0; /* full tetrahedron volume */
-
-    /*  distribution for the first and third quadrants */
-    if ( cube_part == 1 )
-    {
-        for ( k = 0; k < 5; k++ ) { /* for each tetrahedron */
-
-            if ( k == 4 )
-                VTetr = 2.0 * VTetr;
-
-            if ( tetraVol[k] != 0 ) {
-
-                double topoC1 = tetraVol[k] * VTetr * kappa / ( edgesize * edgesize );
-                double topoC2 = tetraVol[k] * VTetr * mu / ( edgesize * edgesize );
-                double topoC3 = tetraVol[k] * VTetr * ( -2. * mu / 3. ) / ( edgesize * edgesize );
-
-                switch ( k ) {
-
-                case ( 0 ):
-                N0 = 0;
-                N1 = 2;
-                N2 = 1;
-                N3 = 4;
-
-                prs = topoC3 * (       un[N0].f[0] +       un[N0].f[1] +       un[N0].f[2] -       un[N1].f[1] -       un[N2].f[0] -       un[N3].f[2] ) +
-                      topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] + un_kappa[N0].f[2] - un_kappa[N1].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] - un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
-                resVec[N0].f[1] +=  prs + topoC2 * ( un[N0].f[0] + 4.  * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2.  * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
-                resVec[N0].f[2] +=  prs + topoC2 * ( un[N0].f[0] + un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
-                resVec[N1].f[1] += -prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
-                resVec[N1].f[2] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
-                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
-                resVec[N2].f[2] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0]  );
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0]  );
-                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] += -prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
-                break;
-
-                case ( 1 ):
-                N0 = 3;
-                N1 = 1;
-                N2 = 2;
-                N3 = 7;
-
-                prs              = topoC3 * (       un[N0].f[0]       + un[N0].f[1]       - un[N0].f[2]       - un[N1].f[1]       - un[N2].f[0]       + un[N3].f[2] ) +
-                                   topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] - un_kappa[N0].f[2] - un_kappa[N1].f[1] - un_kappa[N2].f[0] + un_kappa[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] + un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] - un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
-                resVec[N0].f[1] +=  prs + topoC2 * ( un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
-                resVec[N0].f[2] += -prs + topoC2 * ( -un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] + un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
-                resVec[N1].f[1] += -prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
-                resVec[N1].f[2] +=        topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
-                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N2].f[1] );
-                resVec[N2].f[2] +=        topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
-                /* ================ */
-                resVec[N3].f[0] +=       -topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
-                resVec[N3].f[1] +=       -topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
-                resVec[N3].f[2] +=  prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
-                break;
-
-                case ( 2 ):
-                N0 = 6;
-                N1 = 4;
-                N2 = 7;
-                N3 = 2;
-
-                prs              = topoC3 * (       un[N0].f[0] -       un[N0].f[1] -       un[N0].f[2] +       un[N1].f[1] -       un[N2].f[0] +       un[N3].f[2] ) +
-                                   topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] - un_kappa[N0].f[2] + un_kappa[N1].f[1] - un_kappa[N2].f[0] + un_kappa[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
-
-                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] + un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
-                resVec[N0].f[2] += -prs + topoC2 * ( -un[N0].f[0] + un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] + un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
-                resVec[N1].f[1] +=  prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
-                resVec[N1].f[2] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( -2. * ( un[N0].f[0] - un[N2].f[0] ) );
-                resVec[N2].f[1] +=       -topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
-                resVec[N2].f[2] +=        topoC2 * (  un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
-                /* ================ */
-                resVec[N3].f[0] +=       -topoC2 * ( un[N0].f[0] - un[N0].f[2] + un[N2].f[2] - un[N3].f[0]  );
-                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] - un[N0].f[2] + un[N1].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] +=  prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
-                break;
-
-                case ( 3 ):
-                N0 = 5;
-                N1 = 7;
-                N2 = 4;
-                N3 = 1;
-
-                prs              = topoC3 * (       un[N0].f[0] -       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[1] -       un[N2].f[0] -       un[N3].f[2] ) +
-                                   topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - 2. * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
-                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
-                resVec[N0].f[2] +=  prs + topoC2 * (  un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[2] - un[N2].f[2] - un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
-                resVec[N1].f[1] +=  prs + topoC2 * ( -2. * ( un[N0].f[1] - un[N1].f[1] ) );
-                resVec[N1].f[2] +=        topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs - topoC2 * ( un[N0].f[0] - un[N2].f[0] ) * 2.0;
-                resVec[N2].f[1] +=       -topoC2 * ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N2].f[1] );
-                resVec[N2].f[2] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0] );
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[2] + un[N2].f[2] + un[N3].f[0] );
-                resVec[N3].f[1] +=       -topoC2 * ( un[N0].f[1] - un[N0].f[2] + un[N1].f[2] - un[N3].f[1] );
-                resVec[N3].f[2] += -prs + topoC2 * ( -2. * ( un[N0].f[2] - un[N3].f[2] ) );
-                break;
-
-                case ( 4 ):
-                N0 = 2;
-                N1 = 4;
-                N2 = 7;
-                N3 = 1;
-
-                topoC1 = topoC1 / 4.;
-                topoC2 = topoC2 / 4.;
-                topoC3 = topoC3 / 4.;
-
-                prs              = topoC1 * ( un_kappa[N0].f[0] - un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[0] + un_kappa[N1].f[1] - un_kappa[N1].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] - un_kappa[N2].f[2] - un_kappa[N3].f[0] + un_kappa[N3].f[1] + un_kappa[N3].f[2] ) +
-                                   topoC3 * (       un[N0].f[0] -       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[0] +       un[N1].f[1] -       un[N1].f[2] -       un[N2].f[0] -       un[N2].f[1] -       un[N2].f[2] -       un[N3].f[0] +       un[N3].f[1] +       un[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4. * un[N0].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[1] + un[N1].f[2] - 2. * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - 2. * un[N3].f[0] + un[N3].f[1] - un[N3].f[2] );
-                resVec[N0].f[1] += -prs + topoC2 * ( -un[N0].f[0] + 4. * un[N0].f[1] - un[N0].f[2] + un[N1].f[0] - 2. * un[N1].f[1] + un[N1].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] - 2. * un[N3].f[1] + un[N3].f[2] );
-                resVec[N0].f[2] +=  prs + topoC2 * ( un[N0].f[0] - un[N0].f[1] + 4. * un[N0].f[2] - un[N1].f[0] + un[N1].f[1] - 2. * un[N1].f[2] - un[N2].f[0] + un[N2].f[1] - 2. * un[N2].f[2] + un[N3].f[0] - un[N3].f[1] );
-                /* ================ */
-                resVec[N1].f[0] +=  prs + topoC2 * (  un[N0].f[1] - un[N0].f[2] + 4. * un[N1].f[0] + un[N1].f[1] - un[N1].f[2] - 2. * un[N2].f[0] - un[N2].f[1] + un[N2].f[2] - 2. * un[N3].f[0] - un[N3].f[1] + un[N3].f[2]  );
-                resVec[N1].f[1] +=  prs + topoC2 * ( -un[N0].f[0] - 2. * un[N0].f[1] + un[N0].f[2] + un[N1].f[0] + 4. * un[N1].f[1] - un[N1].f[2] - un[N2].f[0] - 2. * un[N2].f[1] + un[N2].f[2] + un[N3].f[0] - un[N3].f[2]  );
-                resVec[N1].f[2] += -prs + topoC2 * (  un[N0].f[0] + un[N0].f[1] - 2. * un[N0].f[2] - un[N1].f[0] - un[N1].f[1] + 4. * un[N1].f[2] - un[N2].f[0]  - un[N2].f[1] + un[N3].f[0] + un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 *  ( - 2. * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - 2. * un[N1].f[0] - un[N1].f[1] - un[N1].f[2] + 4. * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] + un[N3].f[1] + un[N3].f[2] );
-                resVec[N2].f[1] += -prs + topoC2 *  (  un[N0].f[0] + un[N0].f[2] - un[N1].f[0] - 2. * un[N1].f[1] - un[N1].f[2] + un[N2].f[0] + 4. * un[N2].f[1] + un[N2].f[2] - un[N3].f[0] - 2. * un[N3].f[1] - un[N3].f[2] );
-                resVec[N2].f[2] += -prs + topoC2 *  ( -un[N0].f[0] - un[N0].f[1] - 2. * un[N0].f[2] + un[N1].f[0] + un[N1].f[1] + un[N2].f[0] + un[N2].f[1] + 4. * un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2. * un[N3].f[2] );
-                /* ================ */
-                resVec[N3].f[0] += -prs + topoC2 *  ( - 2. * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - 2. * un[N1].f[0] + un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + 4. * un[N3].f[0] - un[N3].f[1] - un[N3].f[2] );
-                resVec[N3].f[1] +=  prs + topoC2 *  (  un[N0].f[0] - 2. * un[N0].f[1] - un[N0].f[2] - un[N1].f[0] + un[N1].f[2] + un[N2].f[0] - 2. * un[N2].f[1] - un[N2].f[2] - un[N3].f[0] + 4. * un[N3].f[1] + un[N3].f[2] );
-                resVec[N3].f[2] +=  prs + topoC2 *  ( -un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N1].f[1] - 2.0 * un[N1].f[2] + un[N2].f[0] - un[N2].f[1] - 2.0 * un[N2].f[2] - un[N3].f[0] + un[N3].f[1] + 4.0 * un[N3].f[2] );
-                break;
-                }
-            }
-        }
-    }  else  {
-        /*  distribution for the second and fourth quadrants */
-        for ( k = 0; k < 5; k++ ) { /* for each tetrahedron */
-
-            if ( k == 4 )
-                VTetr = 2.0 * VTetr;
-
-            if ( tetraVol[k] != 0 ) {
-
-                double topoC1 = tetraVol[k] * VTetr * kappa / ( edgesize * edgesize );
-                double topoC2 = tetraVol[k] * VTetr * mu / ( edgesize * edgesize );
-                double topoC3 = tetraVol[k] * VTetr * ( -2. * mu / 3. ) / ( edgesize * edgesize );
-
-                switch ( k ) {
-
-                case ( 0 ):
-                N0 = 0;
-                N1 = 3;
-                N2 = 1;
-                N3 = 5;
-
-                prs              = topoC1 * ( un_kappa[N0].f[0] - un_kappa[N1].f[1] - un_kappa[N3].f[2] - un_kappa[N2].f[0] + un_kappa[N2].f[1] + un_kappa[N2].f[2] ) +
-                                   topoC3 * (       un[N0].f[0] -       un[N1].f[1] -       un[N3].f[2] -       un[N2].f[0] +       un[N2].f[1] +       un[N2].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * 2.0 * ( un[N0].f[0] - un[N2].f[0] );
-                resVec[N0].f[1] +=        topoC2 * ( un[N0].f[1] - un[N1].f[0] + un[N2].f[0] - un[N2].f[1] );
-                resVec[N0].f[2] +=        topoC2 * ( un[N0].f[2]  + un[N2].f[0] - un[N2].f[2] - un[N3].f[0] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * ( -un[N0].f[1] + un[N1].f[0] - un[N2].f[0] + un[N2].f[1] );
-                resVec[N1].f[1] += -prs + topoC2 * 2.0 * ( un[N1].f[1] - un[N2].f[1] );
-                resVec[N1].f[2] +=        topoC2 * ( un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( -2.0 * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] - un[N1].f[0] + 4.0 * un[N2].f[0] - un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
-                resVec[N2].f[1] +=  prs + topoC2 * ( -un[N0].f[1] + un[N1].f[0] - 2.0 * un[N1].f[1] - un[N1].f[2] - un[N2].f[0] + 4.0 * un[N2].f[1] + un[N2].f[2] - un[N3].f[1] );
-                resVec[N2].f[2] +=  prs + topoC2 * ( -un[N0].f[2] - un[N1].f[2] - un[N2].f[0] + un[N2].f[1] + 4.0 * un[N2].f[2] + un[N3].f[0] - un[N3].f[1] - 2.0 * un[N3].f[2] );
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[2] - un[N2].f[0] + un[N2].f[2] + un[N3].f[0] );
-                resVec[N3].f[1] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] += -prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N2].f[2] );
-
-                /* ================ */
-                break;
-
-                case ( 1 ):
-                N0 = 0;
-                N1 = 2;
-                N2 = 3;
-                N3 = 6;
-
-                prs              = topoC1 * ( un_kappa[N0].f[1] - un_kappa[N2].f[0] - un_kappa[N3].f[2] + un_kappa[N1].f[0] - un_kappa[N1].f[1] + un_kappa[N1].f[2] ) +
-                                   topoC3 * (       un[N0].f[1] -       un[N2].f[0] -       un[N3].f[2] +       un[N1].f[0] -       un[N1].f[1] +       un[N1].f[2] );
-
-                resVec[N0].f[0] +=        topoC2 * ( un[N0].f[0] - un[N1].f[0] + un[N1].f[1] - un[N2].f[1] );
-                resVec[N0].f[1] +=  prs + topoC2 * 2.0 * ( un[N0].f[1] - un[N1].f[1] );
-                resVec[N0].f[2] +=        topoC2 * ( un[N0].f[2] + un[N1].f[1] - un[N1].f[2] - un[N3].f[1] );
-                /* ================ */
-                resVec[N1].f[0] +=  prs + topoC2 * ( -un[N0].f[0] + 4.0 * un[N1].f[0] - un[N1].f[1] + un[N1].f[2] - 2.0 * un[N2].f[0] + un[N2].f[1] - un[N2].f[2] - un[N3].f[0] );
-                resVec[N1].f[1] += -prs + topoC2 * ( un[N0].f[0] - 2.0 * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] + 4.0 * un[N1].f[1] - un[N1].f[2] - un[N2].f[1] - un[N3].f[1] );
-                resVec[N1].f[2] +=  prs + topoC2 * ( -un[N0].f[2] + un[N1].f[0] - un[N1].f[1] + 4.0 * un[N1].f[2] - un[N2].f[2] - un[N3].f[0] + un[N3].f[1] - 2.0 * un[N3].f[2] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * 2.0 * ( un[N2].f[0] - un[N1].f[0] );
-                resVec[N2].f[1] +=        topoC2 * ( -un[N0].f[0] + un[N1].f[0] - un[N1].f[1] + un[N2].f[1] );
-                resVec[N2].f[2] +=        topoC2 * ( -un[N1].f[0] - un[N1].f[2] + un[N2].f[2] + un[N3].f[0] );
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * ( -un[N1].f[0] - un[N1].f[2] + un[N2].f[2] + un[N3].f[0] );
-                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[2] - un[N1].f[1] + un[N1].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] += -prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N1].f[2] );
-                break;
-
-                case ( 2 ):
-                N0 = 4;
-                N1 = 5;
-                N2 = 6;
-                N3 = 0;
-
-                prs              = topoC1 * ( un_kappa[N3].f[2] - un_kappa[N2].f[1] - un_kappa[N1].f[0] + un_kappa[N0].f[0] + un_kappa[N0].f[1] - un_kappa[N0].f[2] ) +
-                                   topoC3 * (       un[N3].f[2] -       un[N2].f[1] -       un[N1].f[0] +       un[N0].f[0] +       un[N0].f[1] -       un[N0].f[2] );
-
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4.0 * un[N0].f[0] + un[N0].f[1] - un[N0].f[2] - 2.0 * un[N1].f[0] - un[N1].f[1] + un[N1].f[2] - un[N2].f[0] - un[N3].f[0] );
-                resVec[N0].f[1] +=  prs + topoC2 * ( 4.0 * un[N0].f[1] + un[N0].f[0] - un[N0].f[2] - un[N1].f[1] - 2.0 * un[N2].f[1] - un[N2].f[0] + un[N2].f[2] - un[N3].f[1] );
-                resVec[N0].f[2] += -prs + topoC2 * ( 4.0 * un[N0].f[2] - un[N0].f[0] - un[N0].f[1] - un[N1].f[2] - un[N2].f[2] - 2.0 * un[N3].f[2] + un[N3].f[0] + un[N3].f[1] );
-                /* ================ */
-                resVec[N1].f[0] += -prs + topoC2 * 2.0 * ( un[N1].f[0] - un[N0].f[0] );
-                resVec[N1].f[1] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[1] + un[N2].f[0] );
-                resVec[N1].f[2] +=        topoC2 * (  un[N0].f[0] - un[N0].f[2] + un[N1].f[2] - un[N3].f[0] );
-                /* ================ */
-                resVec[N2].f[0] +=        topoC2 * ( -un[N0].f[0] - un[N0].f[1] + un[N1].f[1] + un[N2].f[0] );
-                resVec[N2].f[1] += -prs + topoC2 * 2.0 * ( un[N2].f[1] - un[N0].f[1] );
-                resVec[N2].f[2] +=        topoC2 * (  un[N0].f[1] - un[N0].f[2] + un[N2].f[2] - un[N3].f[1] );
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * ( -un[N0].f[0] + un[N0].f[2] - un[N1].f[2] + un[N3].f[0] );
-                resVec[N3].f[1] +=        topoC2 * ( -un[N0].f[1] + un[N0].f[2] - un[N2].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] +=  prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N0].f[2] );
-                break;
-
-                case ( 3 ):
-                N0 = 6;
-                N1 = 5;
-                N2 = 7;
-                N3 = 3;
-
-                prs              = topoC1 * ( un_kappa[N0].f[0] + un_kappa[N1].f[1] + un_kappa[N3].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] - un_kappa[N2].f[2] ) +
-                                   topoC3 * (       un[N0].f[0] +       un[N1].f[1] +       un[N3].f[2] -       un[N2].f[0] -       un[N2].f[1] -       un[N2].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * 2.0 * ( un[N0].f[0] - un[N2].f[0] );
-                resVec[N0].f[1] +=        topoC2 * (  un[N0].f[1] + un[N1].f[0] - un[N2].f[0] - un[N2].f[1] );
-                resVec[N0].f[2] +=        topoC2 * (  un[N0].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] );
-                /* ================ */
-                resVec[N1].f[0] +=        topoC2 * (  un[N0].f[1] + un[N1].f[0] - un[N2].f[0] - un[N2].f[1] );
-                resVec[N1].f[1] +=  prs + topoC2 * 2.0 * ( un[N1].f[1] - un[N2].f[1] );
-                resVec[N1].f[2] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( -2.0 * un[N0].f[0] - un[N0].f[1] - un[N0].f[2] - un[N1].f[0] + 4.0 * un[N2].f[0] + un[N2].f[1] + un[N2].f[2] - un[N3].f[0] );
-                resVec[N2].f[1] += -prs + topoC2 * ( -un[N0].f[1] - un[N1].f[0] - 2.0 * un[N1].f[1] - un[N1].f[2] + un[N2].f[0] + 4.0 * un[N2].f[1] + un[N2].f[2] - un[N3].f[1] );
-                resVec[N2].f[2] += -prs + topoC2 * ( -un[N0].f[2] - un[N1].f[2] + un[N2].f[0] + un[N2].f[1] + 4.0 * un[N2].f[2] - un[N3].f[0] - un[N3].f[1] - 2.0 * un[N3].f[2] );
-
-                /* ================ */
-                resVec[N3].f[0] +=        topoC2 * (  un[N0].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] );
-                resVec[N3].f[1] +=        topoC2 * (  un[N1].f[2] - un[N2].f[1] - un[N2].f[2] + un[N3].f[1] );
-                resVec[N3].f[2] +=  prs + topoC2 * 2.0 * ( un[N3].f[2] - un[N2].f[2] );
-                break;
-
-                case ( 4 ):
-                N0 = 0;
-                N1 = 6;
-                N2 = 3;
-                N3 = 5;
-
-                topoC1 = topoC1 / 4.0;
-                topoC2 = topoC2 / 4.0;
-                topoC3 = topoC3 / 4.0;
-
-                prs              = topoC1 * ( un_kappa[N0].f[0] + un_kappa[N0].f[1] + un_kappa[N0].f[2] + un_kappa[N1].f[0] - un_kappa[N1].f[1] - un_kappa[N1].f[2] - un_kappa[N2].f[0] - un_kappa[N2].f[1] + un_kappa[N2].f[2] - un_kappa[N3].f[0] + un_kappa[N3].f[1] - un_kappa[N3].f[2] ) +
-                                   topoC3 * (       un[N0].f[0] +       un[N0].f[1] +       un[N0].f[2] +       un[N1].f[0] -       un[N1].f[1] -       un[N1].f[2] -       un[N2].f[0] -       un[N2].f[1] +       un[N2].f[2] -       un[N3].f[0] +       un[N3].f[1] -       un[N3].f[2] );
-
-                resVec[N0].f[0] +=  prs + topoC2 * ( 4.0 * un[N0].f[0] + un[N0].f[1] + un[N0].f[2] + un[N1].f[1] + un[N1].f[2] - un[N2].f[1] - un[N2].f[2] - un[N3].f[1] - un[N3].f[2] - 2.0 * ( un[N2].f[0] + un[N3].f[0] ) );
-                resVec[N0].f[1] +=  prs + topoC2 * (  un[N0].f[0] + 4.0 * un[N0].f[1] + un[N0].f[2] - un[N1].f[0] - un[N1].f[2] - un[N2].f[0] - un[N2].f[2] + un[N3].f[0] + un[N3].f[2] - 2.0 * ( un[N1].f[1] + un[N2].f[1] ) );
-                resVec[N0].f[2] +=  prs + topoC2 * (  un[N0].f[0] + un[N0].f[1] + 4.0 * un[N0].f[2] - un[N1].f[0] - un[N1].f[1] + un[N2].f[0] + un[N2].f[1] - un[N3].f[0] - un[N3].f[1] - 2.0 * ( un[N1].f[2] + un[N3].f[2] ) );
-                /* ================ */
-                resVec[N1].f[0] +=  prs + topoC2 * ( -un[N0].f[1] - un[N0].f[2] + 4.0 * un[N1].f[0] -       un[N1].f[1] -       un[N1].f[2] + un[N2].f[1] + un[N2].f[2] + un[N3].f[1] + un[N3].f[2] - 2.0 * ( un[N3].f[0] + un[N2].f[0] ) );
-                resVec[N1].f[1] += -prs + topoC2 * (  un[N0].f[0] - un[N0].f[2] -       un[N1].f[0] + 4.0 * un[N1].f[1] +       un[N1].f[2] - un[N2].f[0] + un[N2].f[2] + un[N3].f[0] - un[N3].f[2] - 2.0 * ( un[N3].f[1] + un[N0].f[1] ) );
-                resVec[N1].f[2] += -prs + topoC2 * (  un[N0].f[0] - un[N0].f[1] -       un[N1].f[0] +       un[N1].f[1] + 4.0 * un[N1].f[2] +  un[N2].f[0] - un[N2].f[1] - un[N3].f[0] + un[N3].f[1] - 2.0 * ( un[N0].f[2] + un[N2].f[2] ) );
-                /* ================ */
-                resVec[N2].f[0] += -prs + topoC2 * ( 4.0 * un[N2].f[0] - un[N0].f[1] + un[N0].f[2] - un[N1].f[1] + un[N1].f[2] + un[N2].f[1] - un[N2].f[2] + un[N3].f[1] - un[N3].f[2] - 2.0 * ( un[N0].f[0] + un[N1].f[0] ) );
-                resVec[N2].f[1] += -prs + topoC2 * ( 4.0 * un[N2].f[1] - un[N0].f[0] + un[N0].f[2] + un[N1].f[0] - un[N1].f[2] + un[N2].f[0] - un[N2].f[2] - un[N3].f[0] + un[N3].f[2] - 2.0 * ( un[N0].f[1] + un[N3].f[1] ) );
-                resVec[N2].f[2] +=  prs + topoC2 * ( 4.0 * un[N2].f[2] - un[N0].f[0] - un[N0].f[1] + un[N1].f[0] + un[N1].f[1] - un[N2].f[0] - un[N2].f[1] + un[N3].f[0] + un[N3].f[1] - 2.0 * ( un[N3].f[2] + un[N1].f[2] ) );
-                /* ================ */
-                resVec[N3].f[0] += -prs + topoC2 * ( 4.0 * un[N3].f[0] + un[N0].f[1] - un[N0].f[2] + un[N1].f[1] - un[N1].f[2] - un[N2].f[1] + un[N2].f[2] - un[N3].f[1] + un[N3].f[2] - 2.0 * ( un[N0].f[0] + un[N1].f[0] ) );
-                resVec[N3].f[1] +=  prs + topoC2 * ( 4.0 * un[N3].f[1] - un[N0].f[0] - un[N0].f[2] + un[N1].f[0] + un[N1].f[2] + un[N2].f[0] + un[N2].f[2] - un[N3].f[0] - un[N3].f[2] - 2.0 * ( un[N1].f[1] + un[N2].f[1] ) );
-                resVec[N3].f[2] += -prs + topoC2 * ( 4.0 * un[N3].f[2] - un[N0].f[0] + un[N0].f[1] + un[N1].f[0] - un[N1].f[1] - un[N2].f[0] + un[N2].f[1] + un[N3].f[0] - un[N3].f[1] - 2.0 * ( un[N0].f[2] + un[N2].f[2] ) );
-                break;
-
-                }
-            }
-        }
-    }
-}
-
-/* GPU port of the CPU topoBkt branch (damping.cc): for each VT cut cell
- * flagged edata->topoBkt, apply the fill-scaled 5-tet visco-elastic force
- * from the BKT damping vectors. shear/kappa vectors are read with the SAME
- * indexing kernelDampingCalcLocal uses (numcomp = lenum*8), so they are the
- * bit-identical damping_vector_shear/kappa the conv kernel already wrote.
- * Force sign mirrors the CPU: nodalForce -= localForce * dt^2.
- * CPML: defensive PML skip mirrors kernelDampingCalcConvBkt2/Local -- a
- * PML-flagged cell had its shear/kappa vectors skipped by the conv kernel,
- * so it must not get a force here (its attenuation is the elastic CPML
- * path's job). No-op under dashpot (pmlFlagArrayDevice == NULL). The builder
- * additionally excludes cpml_pml_flattened_element cells, so this is
- * belt-and-suspenders. */
-__global__ static void kernelTopoBktForceEffective(
-    int32_t lenum, gpu_data_t* gpuData, int32_t topoBktCount,
-    const int32_t* topoBktMapper, const topo_bkt_const_t* topoBktConst,
-    double dt2) {
-  int32_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx >= topoBktCount) {
-    return;
-  }
-
-  int32_t eindex = topoBktMapper[idx];
-
-  if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0) {
-    return;
-  }
-
-  topo_bkt_const_t tc = topoBktConst[idx];
-  int numcomp = lenum * 8;
-  fvector_t un[8];
-  fvector_t un_kappa[8];
-  fvector_t localForce[8];
-  int do_contrib = 0;
-
-  solver_float* sVec = (solver_float*)gpuData->shearVectorDevice + eindex;
-  solver_float* kVec = (solver_float*)gpuData->kappaVectorDevice + eindex;
-  for (int i = 0; i < 8; i++) {
-    un[i].f[0] = sVec[0];
-    un[i].f[1] = sVec[numcomp];
-    un[i].f[2] = sVec[2 * numcomp];
-    un_kappa[i].f[0] = kVec[0];
-    un_kappa[i].f[1] = kVec[numcomp];
-    un_kappa[i].f[2] = kVec[2 * numcomp];
-    localForce[i].f[0] = 0;
-    localForce[i].f[1] = 0;
-    localForce[i].f[2] = 0;
-    do_contrib = (fabs(un[i].f[0]) > 1e-20) ? 1 : do_contrib;
-    do_contrib = (fabs(un[i].f[1]) > 1e-20) ? 1 : do_contrib;
-    do_contrib = (fabs(un[i].f[2]) > 1e-20) ? 1 : do_contrib;
-    do_contrib = (fabs(un_kappa[i].f[0]) > 1e-20) ? 1 : do_contrib;
-    do_contrib = (fabs(un_kappa[i].f[1]) > 1e-20) ? 1 : do_contrib;
-    do_contrib = (fabs(un_kappa[i].f[2]) > 1e-20) ? 1 : do_contrib;
-    sVec += lenum;
-    kVec += lenum;
-  }
-
-  if (!do_contrib) {
-    return;
-  }
-
-  topoTetraForcesBKT(un, un_kappa, localForce, tc.edgesize, tc.mu_bkt,
-                     tc.kappa_bkt, tc.tetraVol, tc.cube_part);
-
-  for (int i = 0; i < 8; i++) {
-    int32_t lnid = gpuData->lnidArrayDevice[i * lenum + eindex];
-    fvector_t* nodalForce = gpuData->forceDevice + lnid;
-    atomicAdd((solver_float*)&(nodalForce->f[0]),
-              (solver_float)(-localForce[i].f[0] * dt2));
-    atomicAdd((solver_float*)&(nodalForce->f[1]),
-              (solver_float)(-localForce[i].f[1] * dt2));
-    atomicAdd((solver_float*)&(nodalForce->f[2]),
-              (solver_float)(-localForce[i].f[2] * dt2));
-  }
-}
-
 double** malloc2dDouble(int n, int m) {
   /* NOTE: To MPI_Bcast a 2D array, the pre-allocated memory blocks have to be
   continuous. That's why this function should be used to do the pre-allocation.
@@ -1949,7 +1115,7 @@ static struct Param_t {
 
   /* Absorbing boundary configuration. Placed at the end of the struct so the
    * designated initializer below can keep these fields in declaration order
-   * (NVCC compiles psolve.cu as C++, which requires that). */
+   * (psolve.cc is C++, which requires that). */
   abc_type_t theAbcType;
   double theCpmlThicknessM;
   int theCpmlLayers;
@@ -13965,7 +13131,7 @@ static void solver_init() {
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
    * derived self-containedly from the target quality factor Q -- it must
    * NOT depend on theBBase: compute_setab() zeroes theBBase for every
-   * non-RAYLEIGH/MASS run (NONE and all BKT*, psolve.cu:15312), which is
+   * non-RAYLEIGH/MASS run (NONE and all BKT*), which is
    * exactly the no-attenuation lossless benchmark this knob targets, so
    * a theBBase-scaled beta silently no-ops there (observed: Q=500 v22 ==
    * v20 within GPU atomic float noise).
@@ -15184,9 +14350,9 @@ static void solver_init() {
 
   k = &Global.gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE];
   strcpy(k->name, CUDA_KERNEL_NAME_STIFFNESS_FORCE);
-  k->handle = (char*)kernelStiffnessCalcLocal;
-  k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                   (char*)kernelStiffnessCalcLocal, 0);
+  k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_STIFFNESS);
+  k->blocksize = psolve_gpu_kernel_blocksize(
+      Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_STIFFNESS, 0);
   k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
@@ -15208,40 +14374,40 @@ static void solver_init() {
   if (!damping_force_generic() &&
       ((Param.theTypeOfDamping == BKT) || (Param.theTypeOfDamping == BKT2))) {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT2);
-    k->handle = (char*)kernelDampingCalcConvBkt2;
-    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                     (char*)kernelDampingCalcConvBkt2, 0);
+    k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_DAMPING_BKT2);
+    k->blocksize = psolve_gpu_kernel_blocksize(
+        Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_DAMPING_BKT2, 0);
     k->blocksize = imin(k->blocksize, 512);
   } else if (!damping_force_generic() &&
              ((Param.theTypeOfDamping == BKT3) ||
               (Param.theTypeOfDamping == BKT3F))) {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV_BKT3);
-    k->handle = (char*)kernelDampingCalcConvBkt3;
-    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                     (char*)kernelDampingCalcConvBkt3, 0);
+    k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_DAMPING_BKT3);
+    k->blocksize = psolve_gpu_kernel_blocksize(
+        Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_DAMPING_BKT3, 0);
     k->blocksize = imin(k->blocksize, 512);
   } else {
     strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_CONV);
-    k->handle = (char*)kernelDampingCalcConv;
-    k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                     (char*)kernelDampingCalcConv, 0);
+    k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_DAMPING_GENERIC);
+    k->blocksize = psolve_gpu_kernel_blocksize(
+        Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_DAMPING_GENERIC, 0);
   }
   k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DAMPING_FORCE];
   strcpy(k->name, CUDA_KERNEL_NAME_DAMPING_FORCE);
-  k->handle = (char*)kernelDampingCalcLocal;
-  k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                   (char*)kernelDampingCalcLocal, 0);
+  k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_DAMPING_FORCE);
+  k->blocksize = psolve_gpu_kernel_blocksize(
+      Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_DAMPING_FORCE, 0);
   k->gridsize = (Global.myMesh->lenum + k->blocksize - 1) / k->blocksize;
   k->sharedmem = 0;
 
   k = &Global.gpu_kernel[CUDA_KERNEL_DISPLACEMENT];
   strcpy(k->name, CUDA_KERNEL_NAME_DISPLACEMENT);
-  k->handle = (char*)kernelDispCalc;
-  k->blocksize =
-      gpu_get_blocksize(Global.mySolver->gpu_spec, (char*)kernelDispCalc, 0);
+  k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_DISPLACEMENT);
+  k->blocksize = psolve_gpu_kernel_blocksize(
+      Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_DISPLACEMENT, 0);
   k->gridsize = (Global.myMesh->nharbored + k->blocksize - 1) / k->blocksize;
     k->sharedmem = 0;
 
@@ -15250,9 +14416,9 @@ static void solver_init() {
    * the active station count is known. */
   k = &Global.gpu_kernel[CUDA_KERNEL_STATION_VE_STRESS];
   strcpy(k->name, CUDA_KERNEL_NAME_STATION_VE_STRESS);
-  k->handle = (char*)kernelStationVEStressGather;
-  k->blocksize = gpu_get_blocksize(Global.mySolver->gpu_spec,
-                                   (char*)kernelStationVEStressGather, 0);
+  k->handle = psolve_gpu_kernel_handle(PSOLVE_GPU_KERNEL_STATION_TENSOR);
+  k->blocksize = psolve_gpu_kernel_blocksize(
+      Global.mySolver->gpu_spec, PSOLVE_GPU_KERNEL_STATION_TENSOR, 0);
   k->gridsize = 0;     /* set per launch from stationGatherCount */
   k->sharedmem = 0;
 
@@ -16622,8 +15788,8 @@ static void solver_station_tensor_kick(int step)
      * specifically from our launch path. */
     (void)cudaGetLastError();
 
-    kernelStationVEStressGather<<<gridsize, blocksize, 0,
-                                  Global.mySolver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_station_tensor(gridsize, blocksize, 0,
+                                  Global.mySolver->streams[CUDA_STREAM_MAIN],
         N, g_stationTensorStride, g_stationStrainOffset,
         g_stationStressOffset, Global.mySolver->gpuDataDevice);
 
@@ -16893,8 +16059,8 @@ static void solver_compute_force_source_gpu(int32_t step) {
 
   blocksize = 256;
   gridsize = (count + blocksize - 1) / blocksize;
-  kernelSourceForceScatter<<<gridsize, blocksize, 0,
-                             solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_source_force_scatter(gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN],
       count, g_sourceNodeListDevice, g_sourceForcesDevice,
       solver->gpuData->forceDevice, Param.theDeltaTSquared);
 
@@ -16942,8 +16108,8 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
     int gridsize = (pmlN + blocksize - 1) / blocksize;
     int sharedmem = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE].sharedmem;
     cudaGetLastError();
-    kernelStiffnessCalcLocal<<<gridsize, blocksize, sharedmem,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_stiffness(gridsize, blocksize, sharedmem,
+                               solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, solver->gpuDataDevice, pmlN,
         solver->gpuData->pmlElasticElemMapperDevice);
     cudaError_t cerror = cudaGetLastError();
@@ -16963,8 +16129,8 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
     const int blocksize = 128;
     const int gridsize = (pmlN + blocksize - 1) / blocksize;
     cudaGetLastError();
-    kernelPMLElasticStep<<<gridsize, blocksize, 0,
-                           solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_pml_elastic(gridsize, blocksize, 0,
+                           solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, solver->gpuDataDevice, pmlN);
     cudaError_t cerror = cudaGetLastError();
     if (cerror != cudaSuccess) {
@@ -17024,8 +16190,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
                            (Param.theTypeOfDamping == BKT3F));
   cudaGetLastError();
   if (!damping_force_generic() && g_dampingGUniform && dconv_2mech) {
-    kernelDampingCalcConvBkt2<<<gridsize, blocksize, sharedmem,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_damping_bkt2(gridsize, blocksize, sharedmem,
+                                solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
         g_dampingBkt2ShearCoef1, g_dampingBkt2ShearCoef2,
         g_dampingBkt2ShearExpCoef0, g_dampingBkt2ShearCoef3,
@@ -17035,8 +16201,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
         g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
         g_dampingElemCountGPU, g_dampingElemMapperDevice);
   } else if (!damping_force_generic() && g_dampingGUniform && dconv_3mech) {
-    kernelDampingCalcConvBkt3<<<gridsize, blocksize, sharedmem,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_damping_bkt3(gridsize, blocksize, sharedmem,
+                                solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
         g_dampingBkt3ShearCoef1, g_dampingBkt3ShearCoef2,
         g_dampingBkt3ShearExpCoef0, g_dampingBkt3ShearCoef3,
@@ -17049,8 +16215,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
         g_dampingBkt3KappaCoef6, g_dampingBkt3KappaExpCoef2,
         g_dampingElemCountGPU, g_dampingElemMapperDevice);
   } else {
-    kernelDampingCalcConv<<<gridsize, blocksize, sharedmem,
-                            solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_damping_generic(gridsize, blocksize, sharedmem,
+                            solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, mesh->lenum * 8, solver->gpuDataDevice, rmax,
         (int32_t)Param.theTypeOfDamping, g_dampingElemCountGPU,
         g_dampingElemMapperDevice);
@@ -17092,8 +16258,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
   }
 
   cudaGetLastError();
-  kernelDampingCalcLocal<<<gridsize, blocksize, sharedmem,
-                           solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_damping_force(gridsize, blocksize, sharedmem,
+                           solver->streams[CUDA_STREAM_MAIN],
       mesh->lenum, solver->gpuDataDevice, dampingForceCount,
       dampingForceMapper);
 
@@ -17109,8 +16275,8 @@ static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
     int tbBlock = 128;
     int tbGrid = (g_topoBktElemCountGPU + tbBlock - 1) / tbBlock;
     cudaGetLastError();
-    kernelTopoBktForceEffective<<<tbGrid, tbBlock, 0,
-                                  solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_topography_bkt(tbGrid, tbBlock, 0,
+                                  solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, solver->gpuDataDevice, g_topoBktElemCountGPU,
         g_topoBktElemMapperDevice, g_topoBktConstDevice, theDeltaTSquared);
     cerror = cudaGetLastError();
@@ -17585,8 +16751,8 @@ static void solver_compute_force_topography_gpu(mysolver_t* solver, mesh_t* mesh
   gridsize = (g_topoElemCountGPU + blocksize - 1) / blocksize;
 
   cudaGetLastError();
-  kernelTopoForceEffective<<<gridsize, blocksize, 0,
-                             solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_topography_effective(gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN],
       mesh->lenum, solver->gpuDataDevice, g_topoElemCountGPU,
       g_topoElemMapperDevice, g_topoConstantsDevice, deltaT2);
 
@@ -17729,8 +16895,8 @@ static void solver_compute_force_acoustic_pressure(mysolver_t* solver,
 
   blocksize = 256;
   gridsize = (face_count + blocksize - 1) / blocksize;
-  kernelAcousticPressureDisplacementCoupling<<<
-      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_acoustic_displacement_coupling(
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
       face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
       Param.theDeltaT);
 
@@ -17768,8 +16934,8 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   Timer_Stop("Acoustic pressure force reset");
 
   Timer_Start("Acoustic pressure force kernel");
-  kernelAcousticPressureForce<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_acoustic_pressure_force(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       mesh->lenum, solver->gpuDataDevice, Param.theDeltaTSquared);
 
   cerror = cudaGetLastError();
@@ -17788,8 +16954,8 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
     const int pmlBlock = 128;
     const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
     Timer_Start("Acoustic pressure PML kernel");
-    kernelPMLAcousticStep<<<pmlGrid, pmlBlock, 0,
-                            solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_pml_acoustic(pmlGrid, pmlBlock, 0,
+                            solver->streams[CUDA_STREAM_MAIN],
         mesh->lenum, solver->gpuDataDevice, pmlN);
     cerror = cudaGetLastError();
     Timer_Stop("Acoustic pressure PML kernel");
@@ -17805,8 +16971,8 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   if (face_count > 0) {
     gridsize = (face_count + blocksize - 1) / blocksize;
     Timer_Start("Acoustic pressure interface");
-    kernelAcousticPressureInterfaceForce<<<
-        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_acoustic_interface_force(
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
         face_count, solver->gpuDataDevice, Param.theDeltaTSquared,
         Param.theDeltaT);
 
@@ -17872,8 +17038,8 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
   Timer_Start("Acoustic pressure update kernel");
-  kernelAcousticPressureUpdate<<<gridsize, blocksize, 0,
-                                 solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_acoustic_pressure_update(gridsize, blocksize, 0,
+                                 solver->streams[CUDA_STREAM_MAIN],
       mesh->nharbored, solver->gpuDataDevice);
 
   cerror = cudaGetLastError();
@@ -17952,8 +17118,8 @@ static void solver_compute_force_poroelastic_pressure(mysolver_t* solver,
   Timer_Start("Poroelastic pressure traction");
   blocksize = 128;
   gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
-  kernelPoroelasticPressureTraction<<<gridsize, blocksize, 0,
-                                      solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_poroelastic_pressure_traction(gridsize, blocksize, 0,
+                                      solver->streams[CUDA_STREAM_MAIN],
       g_poroelasticLocalElementCount, solver->gpuDataDevice,
       Param.theDeltaTSquared, Param.thePoroelasticBiotAlpha);
   cerror = cudaGetLastError();
@@ -17991,8 +17157,8 @@ static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
     Timer_Start("Acoustic open-pore target kernel");
     blocksize = 256;
     gridsize = (face_count + blocksize - 1) / blocksize;
-    kernelAcousticPoroelasticOpenPoreTarget<<<
-        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_acoustic_open_pore_target(
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
         face_count, solver->gpuDataDevice, Param.theDeltaT);
     cerror = cudaGetLastError();
     if (cerror != cudaSuccess) {
@@ -18105,8 +17271,8 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   if (g_poroelasticLocalElementCount > 0) {
     blocksize = 128;
     gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
-    kernelPoroelasticPressureForce<<<gridsize, blocksize, 0,
-                                     solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_poroelastic_pressure_force(gridsize, blocksize, 0,
+                                     solver->streams[CUDA_STREAM_MAIN],
         g_poroelasticLocalElementCount, solver->gpuDataDevice, dt,
         mobility[0], mobility[1], mobility[2], haveDiffusion,
         Param.thePoroelasticBiotAlpha);
@@ -18178,8 +17344,8 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
   Timer_Start("Poroelastic pressure update");
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-  kernelPoroelasticPressureUpdate<<<gridsize, blocksize, 0,
-                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_poroelastic_pressure_update(gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN],
       mesh->nharbored, solver->gpuDataDevice,
       (Param.thePoroelasticSurfacePressureBC ==
            POROELASTIC_SURFACE_PRESSURE_DRAINED &&
@@ -18871,8 +18037,8 @@ static void solver_sync_displacement_output_field(
     return;
   }
 
-  kernelVectorBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_vector_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_dispOutputNodeCount, g_dispOutputNodesDevice, sourceDevice,
       g_dispOutputBufferDevice);
   solver_pore_pressure_device_check(cudaGetLastError(), label);
@@ -19024,8 +18190,8 @@ static int32_t solver_output_planes_gpu(mysolver_t* solver, int32_t myID) {
         (g_planeGpuPointCount + blocksize - 1) / blocksize;
 
     Timer_Start("Plane GPU Interpolation");
-    kernelPlaneDisplacementInterpolate<<<
-        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_plane_interpolate(
+        gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
         g_planeGpuPointCount, g_planeGpuNodesDevice, g_planeGpuCoordsDevice,
         g_planeGpuModesDevice, solver->gpuData->tm1Device,
         g_planeGpuValuesDevice);
@@ -19225,8 +18391,8 @@ static void solver_download_pressure_force_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
       solver->gpuData->pressureForceDevice, g_pressureSparseBufferDevice);
 
@@ -19280,8 +18446,8 @@ static void solver_upload_pressure_force_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
       g_pressureSparseBufferDevice, solver->gpuData->pressureForceDevice);
 
@@ -19320,8 +18486,8 @@ static void solver_upload_pressure_field_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_pressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       g_pressureSparseNodeCount, g_pressureSparseNodesDevice,
       g_pressureSparseBufferDevice, solver->gpuData->pressureTm2Device);
 
@@ -19521,8 +18687,8 @@ static void solver_download_pore_pressure_sparse_scalar(
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice, device,
       g_porePressureSparseBufferDevice);
 
@@ -19584,8 +18750,8 @@ static void solver_upload_pore_pressure_sparse_scalar(
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
       g_porePressureSparseBufferDevice, device);
 
@@ -19611,8 +18777,8 @@ static void solver_download_pore_pressure_force_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
       solver->gpuData->porePressureForceDevice,
       g_porePressureSparseBufferDevice);
@@ -19669,8 +18835,8 @@ static void solver_upload_pore_pressure_force_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
       g_porePressureSparseBufferDevice,
       solver->gpuData->porePressureForceDevice);
@@ -19696,8 +18862,8 @@ static void solver_download_pore_pressure_field_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
       solver->gpuData->porePressureTm2Device,
       g_porePressureSparseBufferDevice);
@@ -19754,8 +18920,8 @@ static void solver_upload_pore_pressure_field_sparse(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_porePressureSparseNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                solver->streams[CUDA_STREAM_MAIN],
       g_porePressureSparseNodeCount, g_porePressureSparseNodesDevice,
       g_porePressureSparseBufferDevice,
       solver->gpuData->porePressureTm2Device);
@@ -19980,8 +19146,8 @@ static void solver_scalar_device_schedule_senddata(
     const int32_t count = messenger->nodecount;
     if (count > 0) {
       const int32_t gridsize = (count + blocksize - 1) / blocksize;
-      kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, valueDevice,
           messenger->scalar_out_device);
     }
@@ -20011,18 +19177,18 @@ static void solver_scalar_device_schedule_senddata(
     }
     const int32_t gridsize = (count + blocksize - 1) / blocksize;
     if (direction == CONTRIBUTION) {
-      kernelScalarBoundaryAccumulate<<<gridsize, blocksize, 0,
-                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_boundary_accumulate(gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->scalar_in_device,
           valueDevice);
     } else if (messenger->mapping_has_duplicates) {
-      kernelScalarBoundaryScatterSerial<<<1, 1, 0,
-                                          solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_boundary_scatter_serial(1, 1, 0,
+                                          solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->scalar_in_device,
           valueDevice);
     } else {
-      kernelScalarBoundaryScatter<<<gridsize, blocksize, 0,
-                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_boundary_scatter(gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->scalar_in_device,
           valueDevice);
     }
@@ -20048,8 +19214,8 @@ static void solver_scalar_device_adjust(mysolver_t* solver,
     if (g_adjustDistRunCount > 0) {
       const int32_t gridsize =
           (g_adjustDistRunCount + blocksize - 1) / blocksize;
-      kernelScalarAdjustDistribution<<<gridsize, blocksize, 0,
-                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_adjust_distribution(gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN],
           g_adjustDistRunCount, g_porePressureAdjustDistRunOffsetsDevice,
           g_porePressureAdjustDistRunParentBase3Device,
           g_porePressureAdjustDistEdgeDnDevice,
@@ -20059,8 +19225,8 @@ static void solver_scalar_device_adjust(mysolver_t* solver,
   } else {
     if (g_adjustDnCount > 0) {
       const int32_t gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
-      kernelScalarAdjustAssignment<<<gridsize, blocksize, 0,
-                                     solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_scalar_adjust_assignment(gridsize, blocksize, 0,
+                                     solver->streams[CUDA_STREAM_MAIN],
           g_adjustDnCount, g_porePressureAdjustDnOrderDevice,
           g_porePressureAdjustParentOffsetsDevice,
           g_porePressureAdjustParentBase3Device,
@@ -20117,8 +19283,8 @@ static void solver_vector_device_schedule_senddata(
     const int32_t count = messenger->nodecount;
     if (count > 0) {
       const int32_t gridsize = (count + blocksize - 1) / blocksize;
-      kernelVectorBoundaryGather<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_vector_boundary_gather(gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, valueDevice,
           messenger->vector_out_device);
     }
@@ -20148,18 +19314,18 @@ static void solver_vector_device_schedule_senddata(
     }
     const int32_t gridsize = (count + blocksize - 1) / blocksize;
     if (direction == CONTRIBUTION) {
-      kernelVectorBoundaryAccumulate<<<gridsize, blocksize, 0,
-                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_vector_boundary_accumulate(gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->vector_in_device,
           valueDevice);
     } else if (messenger->mapping_has_duplicates) {
-      kernelVectorBoundaryScatterSerial<<<1, 1, 0,
-                                          solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_vector_boundary_scatter_serial(1, 1, 0,
+                                          solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->vector_in_device,
           valueDevice);
     } else {
-      kernelVectorBoundaryScatter<<<gridsize, blocksize, 0,
-                                    solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_vector_boundary_scatter(gridsize, blocksize, 0,
+                                    solver->streams[CUDA_STREAM_MAIN],
           count, messenger->scalar_mapping_device, messenger->vector_in_device,
           valueDevice);
     }
@@ -20184,8 +19350,8 @@ static void solver_vector_device_adjust(mysolver_t* solver,
     if (g_adjustDistRunCount > 0) {
       const int32_t gridsize =
           (g_adjustDistRunCount + blocksize - 1) / blocksize;
-      kernelVectorAdjustDistribution<<<gridsize, blocksize, 0,
-                                       solver->streams[CUDA_STREAM_MAIN]>>>(
+      psolve_launch_vector_adjust_distribution(gridsize, blocksize, 0,
+                                       solver->streams[CUDA_STREAM_MAIN],
           g_adjustDistRunCount, g_porePressureAdjustDistRunOffsetsDevice,
           g_porePressureAdjustDistRunParentBase3Device,
           g_porePressureAdjustDistEdgeDnDevice,
@@ -20194,8 +19360,8 @@ static void solver_vector_device_adjust(mysolver_t* solver,
     }
   } else if (g_adjustDnCount > 0) {
     const int32_t gridsize = (g_adjustDnCount + blocksize - 1) / blocksize;
-    kernelVectorAdjustAssignment<<<gridsize, blocksize, 0,
-                                   solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_vector_adjust_assignment(gridsize, blocksize, 0,
+                                   solver->streams[CUDA_STREAM_MAIN],
         g_adjustDnCount, g_porePressureAdjustDnOrderDevice,
         g_porePressureAdjustParentOffsetsDevice,
         g_porePressureAdjustParentBase3Device,
@@ -20348,8 +19514,8 @@ static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
   const double inverseDt = velocityPotential ? (1.0 / Param.theDeltaT) : 0.0;
 
   Timer_Start("Acoustic Station Gather");
-  kernelAcousticStationInterpolate<<<
-      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_acoustic_station_interpolate(
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
       g_acousticPressureStationCount, g_acousticPressureStationNodesDevice,
       g_acousticPressureStationCoordsDevice,
       g_acousticPressureStationHDevice, solver->gpuData->pressureTm1Device,
@@ -20530,8 +19696,8 @@ static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {
   }
 
   gridsize = (g_acousticPlanePressureNodeCount + blocksize - 1) / blocksize;
-  kernelScalarBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_scalar_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
       g_acousticPlanePressureNodeCount, g_acousticPlanePressureNodesDevice,
       solver->gpuData->pressureTm1Device, g_acousticPlanePressureBufferDevice);
   solver_pore_pressure_device_check(cudaGetLastError(),
@@ -20679,8 +19845,8 @@ static void solver_sync_pore_pressure_station_values(mysolver_t* solver) {
   const int32_t gridsize =
       (g_porePressureStationCount + blocksize - 1) / blocksize;
   Timer_Start("Pore-pressure Station Gather");
-  kernelPorePressureStationInterpolate<<<
-      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_pore_pressure_station_interpolate(
+      gridsize, blocksize, 0, solver->streams[CUDA_STREAM_MAIN],
       g_porePressureStationCount, g_porePressureStationNodesDevice,
       g_porePressureStationCoordsDevice,
       solver->gpuData->porePressureTm1Device,
@@ -21315,8 +20481,8 @@ static void solver_load_forces_sparse_gpu(mysolver_t* solver, mesh_t* mesh) {
   Timer_Start("Sparse force upload scatter");
   blocksize = 256;
   gridsize = (activeCount + blocksize - 1) / blocksize;
-  kernelSparseForceScatter<<<gridsize, blocksize, 0,
-                             solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_sparse_force_scatter(gridsize, blocksize, 0,
+                             solver->streams[CUDA_STREAM_MAIN],
       activeCount, g_sparseNodeListDevice, g_sparseForcesDevice,
       solver->gpuData->forceDevice);
 
@@ -21515,8 +20681,8 @@ static void solver_unload_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 
     blocksize = 256;
     gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
-    kernelDispBoundaryGather<<<gridsize, blocksize, 0,
-                               solver->streams[CUDA_STREAM_MAIN]>>>(
+    psolve_launch_disp_boundary_gather(gridsize, blocksize, 0,
+                               solver->streams[CUDA_STREAM_MAIN],
         g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
         solver->gpuData->tm2Device, g_dispBoundaryBufferDevice);
 
@@ -21598,8 +20764,8 @@ static void solver_upload_disp_boundary_gpu(mysolver_t* solver) {
 
   blocksize = 256;
   gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
-  kernelDispBoundaryScatter<<<gridsize, blocksize, 0,
-                              solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_disp_boundary_scatter(gridsize, blocksize, 0,
+                              solver->streams[CUDA_STREAM_MAIN],
       g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
       g_dispBoundaryBufferDevice, solver->gpuData->tm1Device);
 
@@ -21654,8 +20820,8 @@ static void solver_upload_current_disp_gpu(mysolver_t* solver, mesh_t* mesh) {
 
   blocksize = 256;
   gridsize = (g_dispBoundaryNodeCount + blocksize - 1) / blocksize;
-  kernelDispBoundaryScatter<<<gridsize, blocksize, 0,
-                              solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_disp_boundary_scatter(gridsize, blocksize, 0,
+                              solver->streams[CUDA_STREAM_MAIN],
       g_dispBoundaryNodeCount, g_dispBoundaryNodesDevice,
       g_dispBoundaryBufferDevice, solver->gpuData->tm2Device);
 
@@ -21752,8 +20918,8 @@ static void solver_compute_displacement_gpu(int32_t myID, mysolver_t* solver,
   cudaGetLastError();
 
   Timer_Start("Disp kernel enqueue");
-  kernelDispCalc<<<gridsize, blocksize, sharedmem,
-                   solver->streams[CUDA_STREAM_MAIN]>>>(
+  psolve_launch_displacement(gridsize, blocksize, sharedmem,
+                   solver->streams[CUDA_STREAM_MAIN],
       mesh->nharbored, solver->gpuDataDevice, Param.printStationAccelerations);
 
   cudaError_t cerror = cudaGetLastError();
