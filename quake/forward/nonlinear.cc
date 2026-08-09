@@ -97,6 +97,9 @@ static double               *theTheta3;
 static double               *theTheta4;
 static double               *theTheta5;
 static double               *thePhi_RO;
+#define MANZARI_DAFALIAS_PROPERTY_COUNT 16
+static double               *theManzariDafaliasProperties[
+                                MANZARI_DAFALIAS_PROPERTY_COUNT];
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -130,6 +133,14 @@ double get_geostatic_total_time() {
 
 int assume_groundwatertable() {
     return theSurfaceGroundwaterTable;
+}
+
+int nonlinear_requires_explicit_pore_pressure() {
+    /* The undrained poroelastic fast path folds alpha^2 M into a linear
+     * volumetric stiffness. A pressure-dependent nonlinear skeleton must keep
+     * the Qp traction explicit so its constitutive stress remains effective
+     * stress. */
+    return theNonlinearFlag != 0 && theMaterialModel == MANZARI_DAFALIAS;
 }
 
 /*
@@ -597,6 +608,13 @@ void nonlinear_init( int32_t     myID,
 
     if (myID != 0) {
         theVsLimits         = (double*)malloc(sizeof(double) * thePropertiesCount);
+        if (theMaterialModel == MANZARI_DAFALIAS) {
+            for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
+                 field++) {
+                theManzariDafaliasProperties[field] =
+                    (double*)malloc(sizeof(double) * thePropertiesCount);
+            }
+        } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
         theKayPhis          = (double*)malloc(sizeof(double) * thePropertiesCount);
         theStrainRates      = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -612,10 +630,18 @@ void nonlinear_init( int32_t     myID,
         theTheta4           = (double*)malloc( sizeof(double) * thePropertiesCount);
         theTheta5           = (double*)malloc( sizeof(double) * thePropertiesCount);
         thePhi_RO           = (double*)malloc( sizeof(double) * thePropertiesCount);
+        }
     }
 
     /* Broadcast table of properties */
     MPI_Bcast(theVsLimits,         thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
+    if (theMaterialModel == MANZARI_DAFALIAS) {
+        for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
+             field++) {
+            MPI_Bcast(theManzariDafaliasProperties[field],
+                      thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
+        }
+    } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theKayPhis,          thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theStrainRates,      thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -631,6 +657,7 @@ void nonlinear_init( int32_t     myID,
     MPI_Bcast(theTheta4,           thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theTheta5,           thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(thePhi_RO,           thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
+    }
 }
 
 /*
@@ -740,6 +767,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 geostatic_loading_t, geostatic_cushion_t);
         return -1;
     }
+    if (errorTol <= 0.0 || backbone_errorTol <= 0.0 || no_substeps <= 0) {
+        fprintf(stderr, "Nonlinear error_tolerance and backbone_errTol must "
+                        "be positive, and no_substeps must be at least one\n");
+        return -1;
+    }
 
     if ( strcasecmp(material_model, "linear") == 0 ) {
         materialmodel = LINEAR;
@@ -763,13 +795,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         materialmodel = MOHR_COULOMB;
     } else if ( strcasecmp(material_model, "DruckerPrager") == 0 ) {
         materialmodel = DRUCKERPRAGER;
+    } else if ( strcasecmp(material_model, "ManzariDafalias") == 0 ||
+                strcasecmp(material_model, "Manzari-Dafalias") == 0 ) {
+        materialmodel = MANZARI_DAFALIAS;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias): %s\n", material_model);
         return -1;
     }
 
@@ -865,8 +900,18 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theStiffDamp               = stff_dmp;
     theStiffDampFreq           = stff_dmp_freq;
 
-    auxiliar             = (double*)malloc( sizeof(double) * thePropertiesCount * 16 );
+    const int property_columns =
+        (theMaterialModel == MANZARI_DAFALIAS) ? 17 : 16;
+    auxiliar             = (double*)malloc(
+        sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
+    if (theMaterialModel == MANZARI_DAFALIAS) {
+        for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
+             field++) {
+            theManzariDafaliasProperties[field] = (double*)malloc(
+                sizeof(double) * thePropertiesCount);
+        }
+    } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
     theKayPhis           = (double*)malloc( sizeof(double) * thePropertiesCount );
     theStrainRates       = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -882,15 +927,25 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theTheta4            = (double*)malloc( sizeof(double) * thePropertiesCount );
     theTheta5            = (double*)malloc( sizeof(double) * thePropertiesCount );
     thePhi_RO            = (double*)malloc( sizeof(double) * thePropertiesCount );
+    }
 
 
-    if ( parsedarray( fp, "material_properties_list", thePropertiesCount * 16, auxiliar ) != 0) {
+    if ( parsedarray( fp, "material_properties_list",
+                      thePropertiesCount * property_columns, auxiliar ) != 0) {
         fprintf(stderr, "Error parsing nonlinear material properties list from %s\n", parametersin);
         return -1;
     }
 
     for ( row = 0; row < thePropertiesCount; row++) {
-        theVsLimits[row]          = auxiliar[ row * 16     ];
+        theVsLimits[row] = auxiliar[row * property_columns];
+        if (theMaterialModel == MANZARI_DAFALIAS) {
+            for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
+                 field++) {
+                theManzariDafaliasProperties[field][row] =
+                    auxiliar[row * property_columns + field + 1];
+            }
+            continue;
+        }
         theAlphaCohes[row]        = auxiliar[ row * 16 + 1 ];
         theKayPhis[row]           = auxiliar[ row * 16 + 2 ];
         theStrainRates[row]       = auxiliar[ row * 16 + 3 ];
@@ -907,6 +962,37 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         theTheta5[row]            = auxiliar[ row * 16 + 14 ];
         thePhi_RO [row]           = auxiliar[ row * 16 + 15 ];
 
+    }
+
+    if (theMaterialModel == MANZARI_DAFALIAS) {
+        for (row = 1; row < thePropertiesCount; row++) {
+            if (theVsLimits[row] <= theVsLimits[row-1]) {
+                fprintf(stderr, "ManzariDafalias Vs limits must be strictly "
+                                "increasing\n");
+                return -1;
+            }
+        }
+        for (row = 0; row < thePropertiesCount; row++) {
+            for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
+                 field++) {
+                if (!isfinite(theManzariDafaliasProperties[field][row])) {
+                    fprintf(stderr, "Illegal ManzariDafalias row %d: "
+                                    "all parameters must be finite\n", row);
+                    return -1;
+                }
+            }
+            const double G0 = theManzariDafaliasProperties[0][row];
+            const double e_init = theManzariDafaliasProperties[1][row];
+            const double Mc = theManzariDafaliasProperties[2][row];
+            const double c_lode = theManzariDafaliasProperties[3][row];
+            const double P_atm = theManzariDafaliasProperties[7][row];
+            if (!(G0 > 0.0) || !(e_init > 0.0) || !(Mc > 0.0) ||
+                !(c_lode > 0.0) || !(P_atm > 0.0)) {
+                fprintf(stderr, "Illegal ManzariDafalias row %d: G0, e_init, "
+                                "Mc, c, and P_atm must be positive\n", row);
+                return -1;
+            }
+        }
     }
 
     theNonlinearFlag = 1;
@@ -1154,6 +1240,18 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     int32_t eindex, nl_eindex;
 
+    if (theMaterialModel == MANZARI_DAFALIAS &&
+        !nonlinear_gpu_requested()) {
+        if (myID == 0) {
+            fprintf(stderr,
+                    "ManzariDafalias currently requires the GPU nonlinear "
+                    "backend; HERCULES_NONLINEAR_BACKEND=cpu is not "
+                    "supported for production runs.\n");
+        }
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
     nonlinear_elements_count(myID, myMesh);
     nonlinear_elements_mapping(myID, myMesh);
 
@@ -1206,6 +1304,9 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         (qpvectors_t *)calloc(myNonlinElementsCount, sizeof(qpvectors_t));
     myNonlinSolver->Sref =
         (qptensors_t *)calloc(myNonlinElementsCount, sizeof(qptensors_t));
+    myNonlinSolver->fabric = (theMaterialModel == MANZARI_DAFALIAS)
+        ? (qptensors_t *)calloc(myNonlinElementsCount, sizeof(qptensors_t))
+        : NULL;
     myNonlinSolver->gamma1d =
         (qpvectors_t *)calloc(myNonlinElementsCount, sizeof(qpvectors_t));
     myNonlinSolver->tao1d =
@@ -1230,6 +1331,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
          (myNonlinSolver->psi_n               == NULL) ||
          (myNonlinSolver->kappa               == NULL) ||
          (myNonlinSolver->Sref                == NULL) ||
+         (theMaterialModel == MANZARI_DAFALIAS &&
+          myNonlinSolver->fabric              == NULL) ||
          (myNonlinSolver->gamma1d             == NULL) ||
          (myNonlinSolver->tao1d               == NULL) ||
          (myNonlinSolver->GGmax               == NULL) ) {
@@ -1521,6 +1624,60 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 ecp->Sstrain0  = 0.0;
                 break;
 
+            case MANZARI_DAFALIAS: {
+                manzari_dafalias_constants_t *md = &ecp->md;
+                md->G0       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[0]);
+                md->e_init   = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[1]);
+                md->Mc       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[2]);
+                md->c        = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[3]);
+                md->lambda_c = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[4]);
+                md->e0       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[5]);
+                md->ksi      = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[6]);
+                md->P_atm    = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[7]);
+                md->m        = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[8]);
+                md->h0       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[9]);
+                md->ch       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[10]);
+                md->nb       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[11]);
+                md->A0       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[12]);
+                md->nd       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[13]);
+                md->z_max    = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[14]);
+                md->cz       = interpolate_property_value(
+                    elementVs, theManzariDafaliasProperties[15]);
+                md->nu = lambda / (2.0 * (lambda + mu));
+                md->density = edata->rho;
+                if (!(md->nu > -1.0 && md->nu < 0.5) ||
+                    !(md->density > 0.0)) {
+                    fprintf(stderr,
+                            "Thread %d: ManzariDafalias element %d has "
+                            "invalid derived nu=%g or density=%g\n",
+                            myID, eindex, md->nu, md->density);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+
+                /* Convert the critical-state stress ratio to the friction
+                 * angle used only by the existing K0 geostatic helper. */
+                double sin_phi = 3.0 * md->Mc / (6.0 + md->Mc);
+                sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
+                ecp->phi = asin(sin_phi);
+                break;
+            }
+
             default:
                 fprintf(stderr, "Thread %d: nonlinear_solver_init:\n"
                         "\tUnexpected error with the material model\n", myID);
@@ -1537,10 +1694,15 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
 
 
-        ecp->strainrate  =
-                interpolate_property_value(elementVs, theStrainRates  );
-        ecp->sensitivity =
-                interpolate_property_value(elementVs, theSensitivities );
+        if (theMaterialModel == MANZARI_DAFALIAS) {
+            ecp->strainrate = 0.0;
+            ecp->sensitivity = 0.0;
+        } else {
+            ecp->strainrate  =
+                    interpolate_property_value(elementVs, theStrainRates  );
+            ecp->sensitivity =
+                    interpolate_property_value(elementVs, theSensitivities );
+        }
 
     } /* for all elements */
 
@@ -4464,9 +4626,15 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 /* -------------------------------------------------------------------------- */
 
 #define MATERIAL_POINT_CONSTANT_COUNT 24
-#define MATERIAL_POINT_RESULT_VALUE_COUNT 35
+#define MATERIAL_POINT_MD_CONSTANT_COUNT 17
+#define MATERIAL_POINT_RESULT_VALUE_COUNT 51
 #define MATERIAL_POINT_FS_INDEX 19
+#define MATERIAL_POINT_PSI_INDEX 20
+#define MATERIAL_POINT_LOAD_UNLOAD_INDEX 21
 #define MATERIAL_POINT_MODEL_ERROR_INDEX 34
+#define MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX 48
+#define MATERIAL_POINT_INTEGRATION_ERROR_INDEX 49
+#define MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX 50
 
 static const char *material_point_result_names[
     MATERIAL_POINT_RESULT_VALUE_COUNT] = {
@@ -4475,7 +4643,11 @@ static const char *material_point_result_names[
     "eta_xx", "eta_yy", "eta_zz", "eta_xy", "eta_yz", "eta_xz",
     "ep_bar", "fs", "psi", "load_unload", "tao", "tao_max", "kappa",
     "sref_xx", "sref_yy", "sref_zz", "sref_xy", "sref_yz", "sref_xz",
-    "gamma1d", "tao1d", "ggmax", "model_error"
+    "gamma1d", "tao1d", "ggmax", "model_error",
+    "fabric_xx", "fabric_yy", "fabric_zz", "fabric_xy", "fabric_yz",
+    "fabric_xz", "alpha_in_xx", "alpha_in_yy", "alpha_in_zz",
+    "alpha_in_xy", "alpha_in_yz", "alpha_in_xz", "void_ratio",
+    "plastic_multiplier", "integration_error", "accepted_substeps"
 };
 
 static int material_point_parse_model(const char *name,
@@ -4492,14 +4664,38 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "vonMises_RO") == 0) *model = VONMISES_RO;
     else if (strcasecmp(name, "MohrCoulomb") == 0) *model = MOHR_COULOMB;
     else if (strcasecmp(name, "DruckerPrager") == 0) *model = DRUCKERPRAGER;
+    else if (strcasecmp(name, "ManzariDafalias") == 0 ||
+             strcasecmp(name, "Manzari-Dafalias") == 0)
+        *model = MANZARI_DAFALIAS;
     else return -1;
     return 0;
 }
 
 static void material_point_load_constants(nlconstants_t *constants,
+                                          materialmodel_t model,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
+    if (model == MANZARI_DAFALIAS) {
+        constants->md.G0 = values[0];
+        constants->md.nu = values[1];
+        constants->md.e_init = values[2];
+        constants->md.Mc = values[3];
+        constants->md.c = values[4];
+        constants->md.lambda_c = values[5];
+        constants->md.e0 = values[6];
+        constants->md.ksi = values[7];
+        constants->md.P_atm = values[8];
+        constants->md.m = values[9];
+        constants->md.h0 = values[10];
+        constants->md.ch = values[11];
+        constants->md.nb = values[12];
+        constants->md.A0 = values[13];
+        constants->md.nd = values[14];
+        constants->md.z_max = values[15];
+        constants->md.cz = values[16];
+        return;
+    }
     constants->lambda = values[0];
     constants->mu = values[1];
     constants->alpha = values[2];
@@ -4525,11 +4721,17 @@ static void material_point_load_constants(nlconstants_t *constants,
 static int material_point_cpu_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     double dt,
     nonlinear_material_point_result_t *results)
 {
+    if (config->material_model == MANZARI_DAFALIAS) {
+        (void)dt;
+        return nonlinear_manzari_dafalias_host_history(
+            constants, config, initial_state, strain_history, steps, results);
+    }
     tensor_t strain_prev = zero_tensor();
     tensor_t plastic_strain = zero_tensor();
     tensor_t backstress = zero_tensor();
@@ -4541,10 +4743,13 @@ static int material_point_cpu_history(
     double load_unload = 0.0;
     double tao = 0.0;
     double tao_max = 0.0;
-    double kappa = (config->material_model >= VONMISES_BAE) ? 100.0 : 0.0;
-    double gamma1d = (config->material_model >= VONMISES_BAE) ? 1.0e-10 : 0.0;
+    double kappa = MATERIAL_MODEL_IS_BACKBONE(config->material_model)
+        ? 100.0 : 0.0;
+    double gamma1d = MATERIAL_MODEL_IS_BACKBONE(config->material_model)
+        ? 1.0e-10 : 0.0;
     double tao1d = 0.0;
-    double ggmax = (config->material_model >= VONMISES_BAE) ? 1.0 : 0.0;
+    double ggmax = MATERIAL_MODEL_IS_BACKBONE(config->material_model)
+        ? 1.0 : 0.0;
 
     theMaterialModel = config->material_model;
     thePlasticityModel = RATE_INDEPENDENT;
@@ -4576,7 +4781,7 @@ static int material_point_cpu_history(
         result.plastic_strain = plastic_next;
         result.backstress = backstress_next;
         result.ep_bar = ep_bar_next;
-        result.fs = (config->material_model >= VONMISES_BAE)
+        result.fs = MATERIAL_MODEL_IS_BACKBONE(config->material_model)
             ? model_error : fs;
         result.psi = psi;
         result.load_unload = load_unload;
@@ -4587,7 +4792,7 @@ static int material_point_cpu_history(
         result.gamma1d = gamma1d;
         result.tao1d = tao1d;
         result.ggmax = ggmax;
-        if (config->material_model >= VONMISES_BAE) {
+        if (MATERIAL_MODEL_IS_BACKBONE(config->material_model)) {
             result.model_error = model_error;
         }
         result.status = (isfinite(stress.xx) && isfinite(stress.yy) &&
@@ -4630,8 +4835,40 @@ static int material_point_result_values(
     values[i++] = result->tao1d;
     values[i++] = result->ggmax;
     values[i++] = result->model_error;
+    MP_TENSOR_VALUES(result->fabric);
+    MP_TENSOR_VALUES(result->alpha_in);
+    values[i++] = result->void_ratio;
+    values[i++] = result->plastic_multiplier;
+    values[i++] = result->integration_error;
+    values[i++] = (double)result->accepted_substeps;
 #undef MP_TENSOR_VALUES
     return i;
+}
+
+static int material_point_tensor_group_start(int index)
+{
+    if (index >= 0 && index < 18) return index - index % 6;
+    if (index >= 25 && index < 31) return 25;
+    if (index >= 35 && index < 47) return 35 + ((index - 35) / 6) * 6;
+    return -1;
+}
+
+static double material_point_comparison_scale(
+    int index,
+    const double cpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT],
+    const double gpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT])
+{
+    const int group_start = material_point_tensor_group_start(index);
+    if (group_start < 0) {
+        return MAX(fabs(cpu_values[index]), fabs(gpu_values[index]));
+    }
+
+    double scale = 0.0;
+    for (int i = group_start; i < group_start + 6; i++) {
+        scale = MAX(scale, fabs(cpu_values[i]));
+        scale = MAX(scale, fabs(gpu_values[i]));
+    }
+    return scale;
 }
 
 static int material_point_same_strain(tensor_t left, tensor_t right)
@@ -4643,6 +4880,7 @@ static int material_point_same_strain(tensor_t left, tensor_t right)
 
 static int material_point_validate_zero_increment(
     const char *backend,
+    materialmodel_t model,
     const nonlinear_material_point_result_t *previous,
     const nonlinear_material_point_result_t *current,
     int32_t step)
@@ -4656,7 +4894,13 @@ static int material_point_validate_zero_increment(
         /* Root residual is an update diagnostic, not constitutive history. A
          * no-op update intentionally resets it to zero. */
         if (i == MATERIAL_POINT_FS_INDEX ||
-            i == MATERIAL_POINT_MODEL_ERROR_INDEX) continue;
+            i == MATERIAL_POINT_MODEL_ERROR_INDEX ||
+            (model == MANZARI_DAFALIAS &&
+             (i == MATERIAL_POINT_PSI_INDEX ||
+              i == MATERIAL_POINT_LOAD_UNLOAD_INDEX)) ||
+            i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX ||
+            i == MATERIAL_POINT_INTEGRATION_ERROR_INDEX ||
+            i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX) continue;
         if (current_values[i] != previous_values[i]) {
             fprintf(stderr, "%s bounding/backbone state changed on a zero "
                     "strain increment at step %d field %s: previous=%.17e "
@@ -4680,7 +4924,9 @@ static int material_point_write_csv(
     const tensor_t *strain_history,
     const nonlinear_material_point_result_t *results,
     int32_t steps,
-    double dt)
+    double dt,
+    const double *pore_pressure,
+    double biot_alpha)
 {
     FILE *fp = fopen(path, "w");
     if (fp == NULL) {
@@ -4693,7 +4939,16 @@ static int material_point_write_csv(
           "eta_xx,eta_yy,eta_zz,eta_xy,eta_yz,eta_xz,"
           "ep_bar,fs,psi,load_unload,tao,tao_max,kappa,"
           "sref_xx,sref_yy,sref_zz,sref_xy,sref_yz,sref_xz,"
-          "gamma1d,tao1d,ggmax,model_error,status\n", fp);
+          "gamma1d,tao1d,ggmax,model_error,"
+          "fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,"
+          "alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,"
+          "alpha_in_xz,void_ratio,plastic_multiplier,integration_error,"
+          "accepted_substeps", fp);
+    if (pore_pressure != NULL) {
+        fputs(",pore_pressure_pa,total_sig_xx,total_sig_yy,total_sig_zz,"
+              "total_sig_xy,total_sig_yz,total_sig_xz", fp);
+    }
+    fputs(",status\n", fp);
     for (int32_t step = 0; step < steps; step++) {
         const tensor_t e = strain_history[step];
         double values[MATERIAL_POINT_RESULT_VALUE_COUNT];
@@ -4701,9 +4956,51 @@ static int material_point_write_csv(
         fprintf(fp, "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e",
                 step, step*dt, e.xx, e.yy, e.zz, e.xy, e.yz, e.xz);
         for (int i = 0; i < count; i++) fprintf(fp, ",%.17e", values[i]);
+        if (pore_pressure != NULL) {
+            const tensor_t effective = results[step].stress;
+            const double pressure = pore_pressure[step];
+            fprintf(fp, ",%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e",
+                    pressure,
+                    effective.xx - biot_alpha*pressure,
+                    effective.yy - biot_alpha*pressure,
+                    effective.zz - biot_alpha*pressure,
+                    effective.xy, effective.yz, effective.xz);
+        }
         fprintf(fp, ",%d\n", results[step].status);
     }
     fclose(fp);
+    return 0;
+}
+
+static int material_point_cpu_brickup_pressure_history(
+    const tensor_t *strain_history,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    int32_t steps,
+    double storage_modulus,
+    double biot_alpha,
+    double initial_pressure,
+    double *pressure_history)
+{
+    tensor_t previous_strain;
+    double pressure = initial_pressure;
+
+    if (strain_history == NULL || initial_state == NULL ||
+        pressure_history == NULL || steps <= 0 ||
+        !(storage_modulus > 0.0) || !(biot_alpha > 0.0) ||
+        !isfinite(initial_pressure)) {
+        return -1;
+    }
+    previous_strain = initial_state->provided
+        ? initial_state->strain : zero_tensor();
+    for (int32_t step = 0; step < steps; step++) {
+        const tensor_t strain = strain_history[step];
+        const double delta_volume =
+            (strain.xx + strain.yy + strain.zz) -
+            (previous_strain.xx + previous_strain.yy + previous_strain.zz);
+        pressure -= storage_modulus*biot_alpha*delta_volume;
+        pressure_history[step] = pressure;
+        previous_strain = strain;
+    }
     return 0;
 }
 
@@ -4712,30 +5009,56 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     FILE *fp = NULL;
     tensor_t *strain_history = NULL;
     double *strain_values = NULL;
+    double *cpu_pore_pressure = NULL;
+    double *gpu_pore_pressure = NULL;
     nonlinear_material_point_result_t *cpu_results = NULL;
     nonlinear_material_point_result_t *gpu_results = NULL;
     int result = 1;
     int steps = 0;
     int no_substeps = 0;
+    int initial_array_count = 0;
+    int material_constant_count = MATERIAL_POINT_CONSTANT_COUNT;
     double dt = 0.0;
     double rtol = 1.0e-6;
     double atol = 1.0e-9;
     double error_tolerance = 1.0e-3;
     double backbone_tolerance = 1.0e-5;
-    double constants_values[MATERIAL_POINT_CONSTANT_COUNT];
+    double brickup_porosity = 0.0;
+    double brickup_fluid_bulk_modulus = 0.0;
+    double brickup_biot_alpha = 1.0;
+    double initial_pore_pressure = 0.0;
+    double brickup_storage_modulus = 0.0;
+    double constants_values[MATERIAL_POINT_CONSTANT_COUNT] = {0.0};
+    double initial_strain_values[6] = {0.0};
+    double initial_stress_values[6] = {0.0};
+    double initial_alpha_values[6] = {0.0};
+    double initial_alpha_in_values[6] = {0.0};
+    double initial_fabric_values[6] = {0.0};
     char material_name[64] = "";
     char tension_name[64] = "no";
+    char brickup_name[64] = "no";
     char output_prefix[256] = "material-point";
     char cpu_path[320] = "";
     char gpu_path[320] = "";
     materialmodel_t material_model;
     noyesflag_t tension_cutoff = NO;
+    noyesflag_t brickup_enabled = NO;
     nlconstants_t constants;
     nonlinear_gpu_config_t config;
+    nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
     double maximum_relative = 0.0;
+    double maximum_pressure_absolute = 0.0;
+    double maximum_pressure_relative = 0.0;
+    double maximum_gpu_pressure_spread = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
+    double maximum_cpu_integration_error = 0.0;
+    double maximum_gpu_integration_error = 0.0;
+    double maximum_cpu_plastic_multiplier = 0.0;
+    double maximum_gpu_plastic_multiplier = 0.0;
+    int maximum_cpu_accepted_substeps = 0;
+    int maximum_gpu_accepted_substeps = 0;
     int zero_increment_checks = 0;
 
     if (myID != 0) return 0;
@@ -4750,9 +5073,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         parsetext(fp, "no_substeps", 'i', &no_substeps) != 0 ||
         parsetext(fp, "error_tolerance", 'd', &error_tolerance) != 0 ||
         parsetext(fp, "backbone_errTol", 'd', &backbone_tolerance) != 0 ||
-        parsetext(fp, "tension_cutoff", 's', tension_name) != 0 ||
-        parsedarray(fp, "material_point_constants",
-                    MATERIAL_POINT_CONSTANT_COUNT, constants_values) != 0) {
+        parsetext(fp, "tension_cutoff", 's', tension_name) != 0) {
         fprintf(stderr, "Invalid or incomplete material-point input %s\n",
                 input_path);
         goto cleanup;
@@ -4760,15 +5081,79 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     parsetext(fp, "material_point_compare_rtol", 'd', &rtol);
     parsetext(fp, "material_point_compare_atol", 'd', &atol);
     parsetext(fp, "material_point_output_prefix", 's', output_prefix);
+    parsetext(fp, "material_point_brickup", 's', brickup_name);
 
     if (material_point_parse_model(material_name, &material_model) != 0) {
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
+        goto cleanup;
+    }
+    material_constant_count = (material_model == MANZARI_DAFALIAS)
+        ? MATERIAL_POINT_MD_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
+    if (parsedarray(fp, "material_point_constants", material_constant_count,
+                    constants_values) != 0) {
+        fprintf(stderr, "Cannot read %d material-point constants for %s\n",
+                material_constant_count, material_name);
+        goto cleanup;
+    }
+    initial_array_count =
+        (parsedarray(fp, "material_point_initial_strain", 6,
+                     initial_strain_values) == 0) +
+        (parsedarray(fp, "material_point_initial_stress", 6,
+                     initial_stress_values) == 0) +
+        (parsedarray(fp, "material_point_initial_alpha", 6,
+                     initial_alpha_values) == 0) +
+        (parsedarray(fp, "material_point_initial_alpha_in", 6,
+                     initial_alpha_in_values) == 0) +
+        (parsedarray(fp, "material_point_initial_fabric", 6,
+                     initial_fabric_values) == 0);
+    if (initial_array_count != 0 && initial_array_count != 5) {
+        fprintf(stderr, "A material-point initial state requires strain, "
+                        "stress, alpha, alpha_in, and fabric\n");
+        goto cleanup;
+    }
+    if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS) {
+        fprintf(stderr, "A material-point initial state currently requires "
+                        "ManzariDafalias\n");
         goto cleanup;
     }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
     else if (strcasecmp(tension_name, "no") != 0) {
         fprintf(stderr, "tension_cutoff must be yes or no\n");
         goto cleanup;
+    }
+    if (strcasecmp(brickup_name, "yes") == 0) brickup_enabled = YES;
+    else if (strcasecmp(brickup_name, "no") != 0) {
+        fprintf(stderr, "material_point_brickup must be yes or no\n");
+        goto cleanup;
+    }
+    if (brickup_enabled == YES) {
+        if (parsetext(fp, "material_point_brickup_porosity", 'd',
+                      &brickup_porosity) != 0 ||
+            parsetext(fp, "material_point_brickup_fluid_bulk_modulus_pa", 'd',
+                      &brickup_fluid_bulk_modulus) != 0 ||
+            parsetext(fp, "material_point_brickup_biot_alpha", 'd',
+                      &brickup_biot_alpha) != 0 ||
+            parsetext(fp, "material_point_initial_pore_pressure_pa", 'd',
+                      &initial_pore_pressure) != 0) {
+            fprintf(stderr, "Incomplete material-point BrickUP controls\n");
+            goto cleanup;
+        }
+        if (material_model != MANZARI_DAFALIAS) {
+            fprintf(stderr, "The material-point BrickUP comparison currently "
+                            "requires ManzariDafalias\n");
+            goto cleanup;
+        }
+        if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
+            !(brickup_fluid_bulk_modulus > 0.0) ||
+            fabs(brickup_biot_alpha - 1.0) > 1.0e-12 ||
+            !isfinite(initial_pore_pressure)) {
+            fprintf(stderr, "Illegal material-point BrickUP controls; the "
+                            "SSPbrickUP comparison requires 0<n<=1, Kf>0, "
+                            "and alpha=1\n");
+            goto cleanup;
+        }
+        brickup_storage_modulus =
+            brickup_fluid_bulk_modulus/brickup_porosity;
     }
     if (tension_cutoff == YES && material_model != MOHR_COULOMB &&
         material_model != DRUCKERPRAGER) {
@@ -4782,6 +5167,57 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                         "tolerance value\n");
         goto cleanup;
     }
+    if (material_model == MANZARI_DAFALIAS &&
+        (!(constants_values[0] > 0.0) ||
+         !(constants_values[1] > -1.0 && constants_values[1] < 0.5) ||
+         !(constants_values[2] > 0.0) || !(constants_values[3] > 0.0) ||
+         !(constants_values[4] > 0.0) || !(constants_values[8] > 0.0))) {
+        fprintf(stderr, "Illegal ManzariDafalias material-point constants: "
+                        "require G0>0, -1<nu<0.5, e_init>0, Mc>0, c>0, "
+                        "and P_atm>0\n");
+        goto cleanup;
+    }
+    if (material_model == MANZARI_DAFALIAS) {
+        for (int i = 0; i < MATERIAL_POINT_MD_CONSTANT_COUNT; i++) {
+            if (!isfinite(constants_values[i])) {
+                fprintf(stderr, "Illegal ManzariDafalias material-point "
+                                "constants: all values must be finite\n");
+                goto cleanup;
+            }
+        }
+    }
+    memset(&initial_state, 0, sizeof(initial_state));
+    if (initial_array_count == 5) {
+        double *initial_arrays[] = {
+            initial_strain_values, initial_stress_values,
+            initial_alpha_values, initial_alpha_in_values,
+            initial_fabric_values
+        };
+        for (int field = 0; field < 5; field++) {
+            for (int component = 0; component < 6; component++) {
+                if (!isfinite(initial_arrays[field][component])) {
+                    fprintf(stderr, "Non-finite material-point initial state "
+                                    "value\n");
+                    goto cleanup;
+                }
+            }
+        }
+#define NL_SET_INITIAL_TENSOR(field, values) do { \
+        initial_state.field.xx = (values)[0]; \
+        initial_state.field.yy = (values)[1]; \
+        initial_state.field.zz = (values)[2]; \
+        initial_state.field.xy = (values)[3]; \
+        initial_state.field.yz = (values)[4]; \
+        initial_state.field.xz = (values)[5]; \
+    } while (0)
+        NL_SET_INITIAL_TENSOR(strain, initial_strain_values);
+        NL_SET_INITIAL_TENSOR(stress, initial_stress_values);
+        NL_SET_INITIAL_TENSOR(alpha, initial_alpha_values);
+        NL_SET_INITIAL_TENSOR(alpha_in, initial_alpha_in_values);
+        NL_SET_INITIAL_TENSOR(fabric, initial_fabric_values);
+#undef NL_SET_INITIAL_TENSOR
+        initial_state.provided = 1;
+    }
 
     strain_history = (tensor_t *)calloc((size_t)steps, sizeof(*strain_history));
     strain_values = (double *)calloc((size_t)steps*6, sizeof(*strain_values));
@@ -4789,8 +5225,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         (size_t)steps, sizeof(*cpu_results));
     gpu_results = (nonlinear_material_point_result_t *)calloc(
         (size_t)steps, sizeof(*gpu_results));
+    if (brickup_enabled == YES) {
+        cpu_pore_pressure = (double *)calloc(
+            (size_t)steps, sizeof(*cpu_pore_pressure));
+        gpu_pore_pressure = (double *)calloc(
+            (size_t)steps, sizeof(*gpu_pore_pressure));
+    }
     if (strain_history == NULL || strain_values == NULL ||
-        cpu_results == NULL || gpu_results == NULL) {
+        cpu_results == NULL || gpu_results == NULL ||
+        (brickup_enabled == YES &&
+         (cpu_pore_pressure == NULL || gpu_pore_pressure == NULL))) {
         fprintf(stderr, "Out of memory in material-point test\n");
         goto cleanup;
     }
@@ -4807,8 +5251,15 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         strain_history[step].yz = strain_values[step*6+4];
         strain_history[step].xz = strain_values[step*6+5];
     }
+    if (initial_state.provided &&
+        !material_point_same_strain(strain_history[0], initial_state.strain)) {
+        fprintf(stderr, "The first material-point strain must equal the "
+                        "supplied initial strain\n");
+        goto cleanup;
+    }
 
-    material_point_load_constants(&constants, constants_values);
+    material_point_load_constants(&constants, material_model,
+                                  constants_values);
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;
@@ -4819,31 +5270,77 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
-    material_point_cpu_history(&constants, &config, strain_history, steps, dt,
-                               cpu_results);
-    if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
-                                 dt) != 0) {
-        goto cleanup;
-    }
+    if (material_point_cpu_history(&constants, &config, &initial_state,
+                                   strain_history, steps, dt,
+                                   cpu_results) != 0) goto cleanup;
     if (nonlinear_gpu_material_point_history(&constants, &config,
-                                             strain_history, steps,
-                                             gpu_results) != 0) {
+                                             &initial_state, strain_history,
+                                             steps, gpu_results) != 0) {
         goto cleanup;
     }
-    if (material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
-                                 dt) != 0) {
+    if (brickup_enabled == YES) {
+        if (material_point_cpu_brickup_pressure_history(
+                strain_history, &initial_state, steps,
+                brickup_storage_modulus, brickup_biot_alpha,
+                initial_pore_pressure, cpu_pore_pressure) != 0 ||
+            poroelastic_gpu_uniform_element_history(
+                strain_values, initial_strain_values, steps,
+                brickup_storage_modulus, brickup_biot_alpha,
+                initial_pore_pressure, gpu_pore_pressure,
+                &maximum_gpu_pressure_spread) != 0) {
+            fprintf(stderr, "Material-point BrickUP pressure history failed\n");
+            goto cleanup;
+        }
+        double pressure_scale = 0.0;
+        for (int32_t step = 0; step < steps; step++) {
+            const double absolute =
+                fabs(cpu_pore_pressure[step] - gpu_pore_pressure[step]);
+            const double scale = MAX(fabs(cpu_pore_pressure[step]),
+                                     fabs(gpu_pore_pressure[step]));
+            const double relative = absolute/MAX(scale, DBL_MIN);
+            maximum_pressure_absolute = MAX(maximum_pressure_absolute,
+                                             absolute);
+            pressure_scale = MAX(pressure_scale, scale);
+            if (absolute > atol) {
+                maximum_pressure_relative = MAX(maximum_pressure_relative,
+                                                 relative);
+            }
+            if (absolute > atol && absolute > rtol*scale) {
+                fprintf(stderr, "Material-point BrickUP pressure mismatch at "
+                                "step %d: CPU=%.17e GPU=%.17e abs=%.3e "
+                                "rel=%.3e\n", step,
+                                cpu_pore_pressure[step],
+                                gpu_pore_pressure[step], absolute, relative);
+                goto cleanup;
+            }
+        }
+        if (maximum_gpu_pressure_spread > atol + rtol*pressure_scale) {
+            fprintf(stderr, "Material-point BrickUP uniform pressure spread "
+                            "%.3e exceeds tolerance %.3e\n",
+                    maximum_gpu_pressure_spread, atol + rtol*pressure_scale);
+            goto cleanup;
+        }
+    }
+    if (material_point_write_csv(cpu_path, strain_history, cpu_results, steps,
+                                 dt, cpu_pore_pressure,
+                                 brickup_biot_alpha) != 0 ||
+        material_point_write_csv(gpu_path, strain_history, gpu_results, steps,
+                                 dt, gpu_pore_pressure,
+                                 brickup_biot_alpha) != 0) {
         goto cleanup;
     }
 
     for (int32_t step = 0; step < steps; step++) {
-        if (material_model >= VONMISES_BAE &&
-            material_model <= VONMISES_RO && step > 0 &&
+        if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
+             material_model == MANZARI_DAFALIAS) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
-                    "CPU", &cpu_results[step-1], &cpu_results[step], step) != 0 ||
+                    "CPU", material_model, &cpu_results[step-1],
+                    &cpu_results[step], step) != 0 ||
                 material_point_validate_zero_increment(
-                    "GPU", &gpu_results[step-1], &gpu_results[step], step) != 0) {
+                    "GPU", material_model, &gpu_results[step-1],
+                    &gpu_results[step], step) != 0) {
                 goto cleanup;
             }
             zero_increment_checks++;
@@ -4852,6 +5349,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             fprintf(stderr, "Material-point status mismatch at step %d: "
                             "CPU=%d GPU=%d\n", step,
                     cpu_results[step].status, gpu_results[step].status);
+            goto cleanup;
+        }
+        if (cpu_results[step].status != 0) {
+            fprintf(stderr, "Material-point constitutive update failed at "
+                            "step %d on both CPU and GPU\n", step);
             goto cleanup;
         }
         double cpu_values[MATERIAL_POINT_RESULT_VALUE_COUNT];
@@ -4872,7 +5374,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
              * residual values inside the same configured convergence bound.
              * Validate those diagnostics independently; compare the actual
              * constitutive state component-by-component below. */
-            if (material_model >= VONMISES_BAE &&
+            if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
+                 material_model == MANZARI_DAFALIAS) &&
                 (i == MATERIAL_POINT_FS_INDEX ||
                  i == MATERIAL_POINT_MODEL_ERROR_INDEX)) {
                 const double cpu_residual = fabs(cpu_values[i]);
@@ -4881,7 +5384,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 maximum_gpu_residual = MAX(maximum_gpu_residual, gpu_residual);
                 if (cpu_residual > error_tolerance ||
                     gpu_residual > error_tolerance) {
-                    fprintf(stderr, "Material-point root residual exceeds "
+                    fprintf(stderr, "Material-point yield/root residual exceeds "
                             "error_tolerance at step %d field %s: CPU=%.3e "
                             "GPU=%.3e tolerance=%.3e\n", step,
                             material_point_result_names[i], cpu_residual,
@@ -4891,8 +5394,99 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 continue;
             }
 
+            /* Adaptive error estimates and accepted-work counts are solver
+             * diagnostics, not constitutive state. Host and device arithmetic
+             * may choose slightly different valid substep histories, so
+             * validate both independently against the configured limits. */
+            if (material_model == MANZARI_DAFALIAS &&
+                i == MATERIAL_POINT_INTEGRATION_ERROR_INDEX) {
+                const double cpu_error = cpu_values[i];
+                const double gpu_error = gpu_values[i];
+                maximum_cpu_integration_error = MAX(
+                    maximum_cpu_integration_error, cpu_error);
+                maximum_gpu_integration_error = MAX(
+                    maximum_gpu_integration_error, gpu_error);
+                if (cpu_error < 0.0 || gpu_error < 0.0 ||
+                    cpu_error > backbone_tolerance ||
+                    gpu_error > backbone_tolerance) {
+                    fprintf(stderr, "Material-point local integration error "
+                            "exceeds backbone_errTol at step %d: CPU=%.3e "
+                            "GPU=%.3e tolerance=%.3e\n", step, cpu_error,
+                            gpu_error, backbone_tolerance);
+                    goto cleanup;
+                }
+                continue;
+            }
+            if (material_model == MANZARI_DAFALIAS &&
+                (i == MATERIAL_POINT_PSI_INDEX ||
+                 i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX)) {
+                const double cpu_multiplier = cpu_values[i];
+                const double gpu_multiplier = gpu_values[i];
+                if (cpu_multiplier < 0.0 || gpu_multiplier < 0.0) {
+                    fprintf(stderr, "Negative material-point plastic "
+                            "multiplier at step %d field %s: CPU=%.3e "
+                            "GPU=%.3e\n", step,
+                            material_point_result_names[i], cpu_multiplier,
+                            gpu_multiplier);
+                    goto cleanup;
+                }
+                if (i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX) {
+                    maximum_cpu_plastic_multiplier = MAX(
+                        maximum_cpu_plastic_multiplier, cpu_multiplier);
+                    maximum_gpu_plastic_multiplier = MAX(
+                        maximum_gpu_plastic_multiplier, gpu_multiplier);
+                    if (cpu_values[MATERIAL_POINT_PSI_INDEX] !=
+                            cpu_multiplier ||
+                        gpu_values[MATERIAL_POINT_PSI_INDEX] !=
+                            gpu_multiplier) {
+                        fprintf(stderr, "Inconsistent duplicated "
+                                "material-point plastic multiplier at step "
+                                "%d\n", step);
+                        goto cleanup;
+                    }
+                }
+                continue;
+            }
+            if (material_model == MANZARI_DAFALIAS &&
+                (i == MATERIAL_POINT_LOAD_UNLOAD_INDEX ||
+                 i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX)) {
+                const double cpu_substeps = cpu_values[i];
+                const double gpu_substeps = gpu_values[i];
+                if (cpu_substeps < 0.0 || gpu_substeps < 0.0 ||
+                    cpu_substeps > no_substeps ||
+                    gpu_substeps > no_substeps) {
+                    fprintf(stderr, "Material-point accepted substeps exceed "
+                            "the configured limit at step %d field %s: "
+                            "CPU=%.0f GPU=%.0f limit=%d\n", step,
+                            material_point_result_names[i], cpu_substeps,
+                            gpu_substeps, no_substeps);
+                    goto cleanup;
+                }
+                if (i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX) {
+                    if (cpu_values[MATERIAL_POINT_LOAD_UNLOAD_INDEX] !=
+                            cpu_substeps ||
+                        gpu_values[MATERIAL_POINT_LOAD_UNLOAD_INDEX] !=
+                            gpu_substeps) {
+                        fprintf(stderr, "Inconsistent duplicated "
+                                "material-point accepted-substep count at "
+                                "step %d\n", step);
+                        goto cleanup;
+                    }
+                    maximum_cpu_accepted_substeps = MAX(
+                        maximum_cpu_accepted_substeps, (int)cpu_substeps);
+                    maximum_gpu_accepted_substeps = MAX(
+                        maximum_gpu_accepted_substeps, (int)gpu_substeps);
+                }
+                continue;
+            }
+
             const double absolute = fabs(cpu_values[i]-gpu_values[i]);
-            const double scale = MAX(fabs(cpu_values[i]), fabs(gpu_values[i]));
+            /* A component-wise relative error is ill-conditioned for an
+             * inactive tensor component near zero. Scale tensor components
+             * by the largest resolved component of the same tensor, while
+             * retaining component-wise scaling for scalar state. */
+            const double scale = material_point_comparison_scale(
+                i, cpu_values, gpu_values);
             const double relative = absolute/MAX(scale, DBL_MIN);
             maximum_absolute = MAX(maximum_absolute, absolute);
             if (absolute > atol) {
@@ -4913,7 +5507,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     printf("Maximum state absolute difference: %.6e\n", maximum_absolute);
     printf("Maximum state relative difference above atol: %.6e\n",
            maximum_relative);
-    if (material_model >= VONMISES_BAE) {
+    if (MATERIAL_MODEL_IS_BACKBONE(material_model)) {
         printf("Maximum CPU/GPU root residuals: %.6e / %.6e "
                "(tolerance %.6e)\n", maximum_cpu_residual,
                maximum_gpu_residual, error_tolerance);
@@ -4922,6 +5516,36 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
+    } else if (material_model == MANZARI_DAFALIAS) {
+        printf("Modified-Euler controls: local error %.6e, maximum "
+               "substeps %d, absolute yield residual %.6e\n",
+               backbone_tolerance, no_substeps, error_tolerance);
+        printf("Maximum CPU/GPU yield residuals: %.6e / %.6e\n",
+               maximum_cpu_residual, maximum_gpu_residual);
+        printf("Maximum CPU/GPU local integration errors: %.6e / %.6e\n",
+               maximum_cpu_integration_error,
+               maximum_gpu_integration_error);
+        printf("Maximum CPU/GPU per-step plastic multipliers: %.6e / %.6e\n",
+               maximum_cpu_plastic_multiplier,
+               maximum_gpu_plastic_multiplier);
+        printf("Maximum CPU/GPU accepted substeps: %d / %d\n",
+               maximum_cpu_accepted_substeps,
+               maximum_gpu_accepted_substeps);
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
+    }
+    if (brickup_enabled == YES) {
+        printf("BrickUP sealed uniform-element controls: M=%.6e Pa, "
+               "alpha=%.6f\n", brickup_storage_modulus,
+               brickup_biot_alpha);
+        printf("Maximum CPU/GPU pore-pressure difference: %.6e Pa "
+               "(relative %.6e)\n", maximum_pressure_absolute,
+               maximum_pressure_relative);
+        printf("Maximum GPU within-element nodal pressure spread: %.6e Pa\n",
+               maximum_gpu_pressure_spread);
     }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;
@@ -4930,15 +5554,23 @@ cleanup:
     if (fp != NULL) fclose(fp);
     free(strain_history);
     free(strain_values);
+    free(cpu_pore_pressure);
+    free(gpu_pore_pressure);
     free(cpu_results);
     free(gpu_results);
     return result;
 }
 
 #undef MATERIAL_POINT_CONSTANT_COUNT
+#undef MATERIAL_POINT_MD_CONSTANT_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
+#undef MATERIAL_POINT_PSI_INDEX
+#undef MATERIAL_POINT_LOAD_UNLOAD_INDEX
 #undef MATERIAL_POINT_MODEL_ERROR_INDEX
+#undef MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX
+#undef MATERIAL_POINT_INTEGRATION_ERROR_INDEX
+#undef MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX
 
 /* computes the derivatives of the flow potential for a Drucker-Prager material */
 tensor_t compute_dfds (tensor_t dev, double J2, double beta) {
@@ -6803,7 +7435,7 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
                                   &lounlo_n->qv[i], &Sv_n->qv[i], &Sv_max->qv[i], &kappa->qv[i], &Sref->qp[i], &flagTolSubSteps, &flagNoSubSteps, &ErrBA,
                                   &gamma1D->qv[i], &tao1D->qv[i], &GGmax1D->qv[i] );
 
-                if ( ( theMaterialModel >= VONMISES_BAE ) ) {
+                if ( MATERIAL_MODEL_IS_BACKBONE(theMaterialModel) ) {
                     enlcons->fs[i] = ErrBA;
                     if ( isnan(ErrBA) || ErrBA > theErrorTol ){
                         fprintf(stderr,"found nan at gp=%d, element=%d, time=%f, step= %d, Su=%f, GGmax=%f, xo=%f, yo=%f, zo=%f, TopoNonlin=%d, Error=%12.8E  \n", i, eindex, step*theDeltaT, step, enlcons->c,

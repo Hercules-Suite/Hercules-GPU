@@ -46,9 +46,14 @@ typedef enum {
      * allows one to initially evaluate the levels of deformation and serves
      * for comparisons with the corresponding elastoplastic runs.
      */
-    LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER, MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH, VONMISES_MKZ, VONMISES_RO
+    LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER,
+    MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
+    VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS
 
 } materialmodel_t;
+
+#define MATERIAL_MODEL_IS_BACKBONE(model) \
+    ((model) >= VONMISES_BAE && (model) <= VONMISES_RO)
 
 typedef struct vect1_t {
 	double x;
@@ -91,6 +96,31 @@ typedef struct qptensors_t {
     tensor_t qp[8];
 
 } qptensors_t;
+
+/* Manzari--Dafalias parameters use the notation of the original model and
+ * the OpenSees UW implementation. Density and Poisson's ratio are supplied by
+ * the Hercules element, so the production material table contains the other
+ * sixteen calibrated constants. */
+typedef struct manzari_dafalias_constants_t {
+    double G0;
+    double nu;
+    double e_init;
+    double Mc;
+    double c;
+    double lambda_c;
+    double e0;
+    double ksi;
+    double P_atm;
+    double m;
+    double h0;
+    double ch;
+    double nb;
+    double A0;
+    double nd;
+    double z_max;
+    double cz;
+    double density;
+} manzari_dafalias_constants_t;
 
 
 
@@ -136,6 +166,8 @@ typedef struct nlconstants_t {
 
     double sigmaZ_st;    /* static vertical stress */
 
+    manzari_dafalias_constants_t md;
+
     double maxFs;
     double avgFs;
 
@@ -169,6 +201,7 @@ typedef struct nlsolver_t {
 	qpvectors_t   *kappa;         /* to define the hardening functions : Exponential. H = psi0*mu*kappa^m
                                                                          Hyperbolic.  H = 3mu * kappa^2 / (1+2*kappa)   */
 	qptensors_t   *Sref;          /* Reference stress */
+	qptensors_t   *fabric;        /* Manzari--Dafalias fabric tensor */
 
 	qpvectors_t   *gamma1d;    /* One dimensional shear strain  */
 	qpvectors_t   *tao1d;      /* One dimensional shear stress  */
@@ -219,6 +252,7 @@ nlconstants_t nl_const;
 
 double get_geostatic_total_time();
 int    assume_groundwatertable();
+int    nonlinear_requires_explicit_pore_pressure();
 
 
 int isThisElementNonLinear(mesh_t *myMesh, int32_t eindex);
@@ -480,5 +514,4 @@ void nonlinear_yield_stats(mesh_t *myMesh, int32_t myID, int32_t theTotalSteps, 
 void check_balance( int32_t myID );
 
 #endif /* Q_NONLINEAR_H */
-
 

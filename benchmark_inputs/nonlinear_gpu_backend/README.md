@@ -8,6 +8,13 @@ GPU is the production runtime default when `HERCULES_NONLINEAR_BACKEND` is
 unset. The commands below set both backends explicitly so acceptance results
 remain reproducible if defaults change.
 
+This production CPU/GPU timing recipe applies only to material models that
+support both production backends. `ManzariDafalias` production updates are
+GPU-only. For that model, use the host/CUDA material-point suite and the
+independent OpenSees comparisons in `../nonlinear_material_point/` for
+constitutive validation, followed by a GPU production run; do not interpret an
+unsupported CPU production launch as a performance reference.
+
 CUDA nonlinear-station output gathers only the quadrature-point fields used by
 each local station. It does not download the complete nonlinear history arrays
 at every `output_stations_print_rate` step. Keep at least one nonlinear station

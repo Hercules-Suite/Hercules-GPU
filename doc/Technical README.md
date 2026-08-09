@@ -420,9 +420,111 @@ Nonlinear GPU execution (runtime environment):
 	for reproducible launch environments. This setting changes execution, not
 	the calibrated values in `parameters.in`. The selected nonlinear backend is
 	reported to standard error during solver startup.
-- For a new material calibration, compare CPU and GPU nonlinear station
-	histories, final yield statistics, and force/displacement norms before a
-	production run. Keep geostatic, tolerance, substep, stiffness-damping, and
+- `material_model=ManzariDafalias` is a device-first, pressure-dependent
+	effective-stress sand model. Production execution currently requires the GPU
+	backend. It uses adaptive explicit Modified Euler and reuses the established
+	controls: `backbone_errTol` is the dimensionless local stress-increment error
+	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
+	the absolute yield-surface residual after a plastic stress correction. The
+	elastic predictor uses the one-sided admissibility condition
+	`f_trial <= error_tolerance`. A trial increment that crosses from strictly
+	inside to outside the yield surface is split at its elastic intersection;
+	only the remainder enters Modified Euler. Elastic stages leave alpha, fabric, and plastic
+	strain unchanged; these history variables evolve only under plastic flow.
+	Plastic correction is limited to
+	`min(no_substeps, 50)` iterations; failure to satisfy the absolute criterion
+	is reported as GPU constitutive failure code 3 and aborts the run rather than
+	continuing from the off-surface state.
+- Manzari--Dafalias rows use 17 values in `material_properties_list`:
+	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
+	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
+	All other material families retain the established 16-column layout.
+	There are no implicit calibrated Manzari--Dafalias constants: every row must
+	provide all 17 values. The constants in the material-point and OpenSees
+	fixtures are characterization inputs, not production defaults.
+- With `approximate_geostatic_state=yes`, the model initializes its
+	compression-positive internal effective stress from the approximate K0 state.
+	The small kinematic yield surface is centered on that pre-existing stress
+	ratio so self weight is not interpreted as a new plastic increment.
+	The static stress is subtracted again before dynamic force assembly, so this
+	initialization does not inject an unbalanced gravity force. This remains an
+	approximation and must be checked against the intended effective overburden
+	profile before a production liquefaction analysis.
+- When Manzari--Dafalias overlaps BrickUP poroelastic elements, the skeleton
+	stress is effective stress and the Biot pressure traction remains explicit.
+	The linear undrained fast path (`lambda += alpha^2*M`) is automatically
+	disabled even if requested, because folding storage stiffness into the native
+	linear operator would bypass the nonlinear pressure-dependent skeleton.
+- The synthetic fixture includes a standalone OpenSees Modified-Euler driver
+	and a characterization comparator under
+	`benchmark_inputs/nonlinear_material_point/`. OpenSees runs that reference in
+	kPa to preserve its low-pressure regularization scale; the comparator converts
+	stress to Pa and does not treat implementation differences as an automatic
+	pass/fail validation.
+- Two canonical OpenSees characterizations are provided in the same directory.
+	The drained monotonic triaxial driver maintains 100 kPa lateral confinement;
+	Hercules replays the solved strain path, and radial-stress drift measures
+	disagreement in strength and contraction/dilation tendency. Both drivers
+	first consolidate with OpenSees' forced-elastic stage. The conversion tool
+	seeds the recorded stress, strain, alpha, alpha-in, and fabric at the stage
+	boundary and replays only the common elastoplastic history; it does not
+	incorrectly pass the elastic consolidation strain through Hercules'
+	pressure-dependent plastic stage. The drained driver uses one retained corner
+	for all affine face constraints and records SSPbrick's actual center-point
+	strain, stress, and material state. Obsolete version-5 output used an invalid
+	multiple-retained-node constraint layout, while version 6 used a response
+	prefix unsupported by SSPbrick. Version 8 also uses OpenSees' default elastic
+	outer tangent because the optional accumulated tangent used by version 7
+	became ill-conditioned during early drained plastic loading. Version 9 uses
+	a force-residual convergence test for the stress-controlled lateral response
+	and independently rejects any monotonic state whose radial material stress
+	misses the confinement target by more than 1 Pa; version 8 could accept a
+	small displacement correction with about 22 kPa of residual confinement
+	error. Older versions are rejected by the current conversion and comparison
+	tools. The
+	constant-volume cyclic-simple-shear driver reports effective-stress reduction,
+	the inferred excess pore pressure `delta_u=p'_0-p'`, `r_u`, and cyclic stress
+	reversals. The latter validates constitutive undrained tendency only: it does
+	not exercise Hercules U-P pressure degrees of freedom, storage, Darcy flow,
+	drainage boundaries, or solid-fluid coupling.
+- A coupled one-element benchmark now compares OpenSees
+	`SSPbrickUP -lumped` with Hercules BrickUP under sealed, zero-permeability
+	undrained triaxial compression. The conversion tool emits
+	`material_point_brickup=yes`; the standalone GPU replay then executes the
+	production BrickUP pressure-force and pressure-update kernels for the exact
+	OpenSees affine strain history. Its independent CPU reference checks
+	`p-p0=-M*(ev-ev0)`, with `M=Kf/n`, while the comparison script reports
+	effective stress, total stress, pore pressure, `r_u`, confinement, storage,
+	and material-state differences. OpenSees's row-summed pressure capacity and
+	Hercules's lumped nodal storage therefore use the same representation. This
+	isolates the common uniform sealed mode
+	without mixing the two programs' global time integrators. The setup keeps
+	SSPbrickUP's small `alpha` input (the pressure-field stabilization
+	coefficient) distinct from the unit Biot coupling assumed by that element.
+	Driver version 4 uses conventional symmetry supports, distributes each face
+	traction over four nodes, prescribes the same axial displacement on all four
+	top nodes, and rebuilds the transient analysis after opening the pressure
+	DOFs. The coupled stage follows the official OpenSees Penalty/Newmark setup
+	so the time-varying displacement constraint supplies the solid velocity that
+	drives the U-P pressure equation. It also avoids the unsupported combination
+	of a prescribed DOF and an `equalDOF` retained node under the Transformation
+	handler. The validated version-4 acceptance bounds are effective-stress
+	NRMSE at most `5.0e-5`, pore-pressure difference at most `1.0e-6 kPa`, and
+	Hercules total radial-confinement error at most `2.0e-1 kPa`; a thresholded
+	comparison prints an explicit `PASS`. These values characterize this exact
+	100-kPa fixture rather than defining production constitutive tolerances. A
+	companion plotting script compares deviatoric response, pore-pressure
+	buildup, effective stress path, and confinement drift in PNG and PDF form.
+	It does not validate nonuniform pressure, Darcy diffusion, drainage/open-pore
+	boundaries, multi-element exchange, or the complete production time-stepping loop. The
+	full commands and input-only controls are documented in
+	`benchmark_inputs/nonlinear_material_point/README.md`.
+- For a new calibration of a model supported by both production backends,
+	compare CPU and GPU nonlinear station histories, final yield statistics, and
+	force/displacement norms before a production run. Manzari--Dafalias is
+	production-GPU-only; validate it with the shared host/CUDA material-point
+	suite and the independent OpenSees characterizations, then run a GPU
+	production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
 - With `abc_type=cpml`, solid elements in the absorbing band are always
 	linear elastic and are excluded from the CPU and GPU nonlinear constitutive

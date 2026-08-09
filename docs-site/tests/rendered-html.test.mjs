@@ -71,8 +71,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 213);
-  assert.equal(documented.length, 213, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 223);
+  assert.equal(documented.length, 223, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -144,11 +144,13 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /vonMises_ep/);
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
+  assert.match(physics, /ManzariDafalias/);
+  assert.match(physics, /adaptive explicit Modified Euler/);
   assert.match(physics, /legacy Istanbul nl_id classification/);
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
   assert.match(physics, /built-in nl_id constants/);
-  assert.match(physics, /Non-Istanbul BAE property table/);
+  assert.match(physics, /Non-Istanbul nonlinear property tables/);
   assert.match(physics, /synthetic syntax example, not a calibration/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
@@ -160,6 +162,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /inclusive nonlinear-element range/);
   assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
+  assert.match(parameters, /ManzariDafalias: N × 17/);
+  assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
+  assert.match(parameters, /maximum absolute yield-surface residual/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -172,7 +177,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /nine-fixture suite/);
+  assert.match(gpu, /eleven-fixture suite/);
+  assert.match(gpu, /device-first and currently requires the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
   assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
@@ -308,6 +314,111 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   assert.match(gpu, /dsdev_measure <= 64\.0 \* DBL_EPSILON \* stress_scale/);
   assert.match(cpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
   assert.match(gpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
+});
+
+test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const generator = readFileSync(
+    `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
+    "utf8",
+  );
+  const canonicalComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`,
+    "utf8",
+  );
+  const drainedDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`,
+    "utf8",
+  );
+  const undrainedDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`,
+    "utf8",
+  );
+  const brickupDriver = readFileSync(
+    `${benchmarkRoot}opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl`,
+    "utf8",
+  );
+  const brickupComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`,
+    "utf8",
+  );
+  const brickupPlot = readFileSync(
+    `${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`,
+    "utf8",
+  );
+
+  assert.match(header, /MANZARI_DAFALIAS/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
+  assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
+  assert.match(gpu, /nl_update_manzari_dafalias/);
+  assert.match(gpu, /cfg->backbone_error_tolerance/);
+  assert.match(gpu, /accepted_substeps > cfg->no_substeps/);
+  assert.match(gpu, /cfg->error_tolerance/);
+  assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
+  assert.match(gpu, /trial_f <= cfg->error_tolerance/);
+  assert.match(gpu, /out\.dalpha = md_zero\(\)/);
+  assert.match(gpu, /md_elastic_yield_intersection/);
+  assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
+  assert.match(psolve, /Qp traction remains explicit/);
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_undrained_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_sspbrickup_undrained_triaxial.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
+  assert.match(generator, /material_point_initial_stress/);
+  assert.match(generator, /"alpha_in": tuple/);
+  assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
+  assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("4", "complete"\)/);
+  assert.match(canonicalComparator, /"drained": \("md_drained_triaxial", "monotonic", "9"\)/);
+  assert.match(cpu, /material_point_initial_alpha_in/);
+  assert.match(canonicalComparator, /def replay_rows/);
+  assert.match(drainedDriver, /equalDOF 7 3 1 2/);
+  assert.match(drainedDriver, /set stress \[eleResponse 1 stress3D6\]/);
+  assert.match(drainedDriver, /set strain \[eleResponse 1 strain3D6\]/);
+  assert.match(drainedDriver, /set state \[eleResponse 1 state\]/);
+  assert.doesNotMatch(drainedDriver, /eleResponse 1 material 1/);
+  assert.match(drainedDriver, /1 0 1 1\.0e-4 1\.0e-7/);
+  assert.match(drainedDriver, /0\.5\*\[lindex \$strain 3\]/);
+  assert.match(drainedDriver, /OpenSees drained deformation is not affine/);
+  assert.match(drainedDriver, /test NormUnbalance 1\.0e-3 100 0/);
+  assert.match(drainedDriver, /OpenSees drained confinement residual exceeds/);
+  assert.match(generator, /maximum_confinement_error_kpa > 1\.0e-3/);
+  assert.match(undrainedDriver, /set stress \[eleResponse 1 material 1 stress\]/);
+  assert.match(brickupDriver, /element SSPbrickUP[\s\S]*-lumped/);
+  assert.doesNotMatch(brickupDriver, /^\s*equalDOF/m);
+  assert.match(brickupDriver, /sp 5 3 1\.0[\s\S]*sp 8 3 1\.0/);
+  assert.match(brickupDriver, /wipeAnalysis[\s\S]*constraints Penalty 1\.0e18 1\.0e18[\s\S]*integrator Newmark/);
+  assert.match(brickupDriver, /test NormDispIncr 1\.0e-9 100 0/);
+  assert.match(brickupDriver, /set pressureStabilization 1\.5e-9/);
+  assert.match(brickupDriver, /\$voidRatio \$pressureStabilization -lumped/);
+  assert.match(brickupDriver, /set pressureValues[\s\S]*nodeVel \$node 4/);
+  assert.match(brickupDriver, /OpenSees SSPbrickUP sealed-storage residual/);
+  assert.match(cpu, /material_point_brickup_fluid_bulk_modulus_pa/);
+  assert.match(kernel, /poroelastic_gpu_uniform_element_history/);
+  assert.match(kernel, /kernelPoroelasticPressureForce<<<1, 1>>>/);
+  assert.match(kernel, /kernelPoroelasticPressureUpdate<<<1, 8>>>/);
+  assert.match(brickupComparator, /maximum_pore_pressure_difference_kpa/);
+  assert.match(brickupComparator, /PASS: all requested SSPbrickUP\/BrickUP acceptance/);
+  assert.match(brickupPlot, /hercules_pore_pressure_pa/);
+  assert.match(brickupPlot, /hercules_total_sig_xx_pa/);
+  assert.match(brickupPlot, /with_suffix\("\.png"\)/);
+  assert.match(brickupPlot, /with_suffix\("\.pdf"\)/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {
