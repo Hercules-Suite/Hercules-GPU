@@ -88,6 +88,8 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
     /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
   );
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  assert.match(gpu, /#ifdef NL_GPU_PRODUCTION_ONLY\s+#define NL_MD_UPDATE_NOINLINE __noinline__/);
+  assert.match(gpu, /NL_HD NL_MD_UPDATE_NOINLINE static int nl_update_manzari_dafalias/);
   assert.match(
     gpu,
     /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_record_error[\s\S]*?__device__ static tensor_t nl_tetra_strain[\s\S]*?#endif\s+__device__ static inline double nl_gqh_value/,
@@ -106,6 +108,7 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   assert.match(html, /make -j 8/);
   assert.match(html, /nonlinear_gpu_material_point\.o/);
   assert.match(html, /PTX assembly/);
+  assert.match(html, /out of the production element kernel.*inline body/);
 });
 
 test("documents every parameters.in key parsed by the current source tree", () => {

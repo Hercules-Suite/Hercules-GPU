@@ -259,6 +259,11 @@ __device__ static inline tensor_t nl_elastic_strain(tensor_t stress,
 /* -------------------------------------------------------------------------- */
 
 #define NL_HD __host__ __device__
+#ifdef NL_GPU_PRODUCTION_ONLY
+#define NL_MD_UPDATE_NOINLINE __noinline__
+#else
+#define NL_MD_UPDATE_NOINLINE
+#endif
 
 typedef struct nl_md_stage_t {
     tensor_t dsigma;
@@ -638,7 +643,7 @@ NL_HD static int md_stress_correction(
     return 0;
 }
 
-NL_HD static int nl_update_manzari_dafalias(
+NL_HD NL_MD_UPDATE_NOINLINE static int nl_update_manzari_dafalias(
     const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
     tensor_t *dynamic_stress, tensor_t *plastic_strain, tensor_t *alpha,
@@ -795,6 +800,7 @@ NL_HD static int nl_update_manzari_dafalias(
            *yield_error < cfg->error_tolerance;
 }
 
+#undef NL_MD_UPDATE_NOINLINE
 #undef NL_HD
 
 #ifndef NL_GPU_MATERIAL_POINT_ONLY

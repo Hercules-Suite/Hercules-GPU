@@ -30,6 +30,14 @@ assembly jobs concurrently without relocatable device code. Prefer an explicit
 outer job count such as `-j 8` over bare `-j`, which gives GNU Make no
 concurrency limit.
 
+For the production object, the large adaptive Manzari--Dafalias update is kept
+out of the element kernel's inline body with CUDA's `__noinline__` qualifier.
+This bounds the optimization scope seen by `ptxas` while preserving the same
+translation unit, equations, and state layout. It adds one internal device call
+per active Manzari--Dafalias quadrature-point update; changes to this boundary
+must therefore retain both the nonlinear material-point suite and a production
+performance comparison.
+
 Runtime performance toggles (no source edits needed):
 
 Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected inside the solver/octor code when the corresponding envs are unset.
