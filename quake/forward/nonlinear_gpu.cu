@@ -330,6 +330,7 @@ typedef struct nl_md_stage_t {
     tensor_t dpstrain;
     double dgamma;
     double raw_dgamma;
+    double loading_numerator;
     double denominator;
     double h;
     double hardening_gap;
@@ -560,6 +561,7 @@ NL_HD static nl_md_stage_t md_stage(
     const double dev_work = md_ddot(dep.n, md_dev(de));
     const double numerator = 2.0*G*dev_work-
                              K*md_trace(de)*md_ddot(dep.n, r);
+    out.loading_numerator = numerator;
     out.denominator = denominator;
     out.h = dep.h;
     out.hardening_gap = dep.hardening_gap;
@@ -595,6 +597,7 @@ NL_HD static nl_md_stage_t md_stage(
     out.ok = md_finite(out.dsigma) && md_finite(out.dalpha) &&
              md_finite(out.dfabric) && md_finite(out.dpstrain) &&
              isfinite(out.dgamma) && isfinite(out.raw_dgamma) &&
+             isfinite(out.loading_numerator) &&
              isfinite(out.denominator) && isfinite(out.h) &&
              isfinite(out.hardening_gap);
     return out;
@@ -905,16 +908,46 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->progress_fraction = T;
         diagnostics->effective_mean_stress = md_trace(stress)/3.0;
         const tensor_t de_step = md_scale(de, dT);
+        const tensor_t elastic_step = md_elastic_increment(de_step, K, G);
+        /* alpha_in is the backstress ratio at the most recent reversal.
+         * The global predictor applies the OpenSees reversal test once before
+         * integration, but alpha evolves during accepted Modified-Euler
+         * substeps. Reapply the same test to the current accepted state so a
+         * multiaxial loading-direction switch inside the global increment
+         * cannot leave (alpha-alpha_in):n negative during outward loading.
+         * Re-anchoring before the stage restores the limiting h -> infinity
+         * response at reversal and avoids a false consistency-denominator
+         * pole; rejected candidates still cannot commit this local state. */
+        if (md_ddot(md_sub(alpha_work, alpha_in_work), elastic_step) < 0.0)
+            alpha_in_work = alpha_work;
         const tensor_t strain_at_end = md_add(
             md_scale(strain_prev, -1.0), md_scale(de, T+dT));
         const double e_step = m->e_init-
             (1.0+m->e_init)*md_trace(strain_at_end);
-        const nl_md_stage_t first = md_stage(
+        nl_md_stage_t first = md_stage(
             m, stress, alpha_work, fabric_work, alpha_in_work,
             e_step, de_step, K, G);
         if (!first.ok) {
             diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
             return 0;
+        }
+        /* A positive consistency numerator is outward loading. Its
+         * loading-side hardening gap must not be negative: that combination
+         * means the evolving multiaxial direction has passed the stored
+         * reversal anchor even if the broader trial-direction dot product is
+         * numerically inconclusive. Re-anchor and recompute the stage instead
+         * of letting a negative h create a denominator pole and a spurious
+         * negative plastic multiplier. */
+        if (first.hardening_gap < 0.0 &&
+            first.loading_numerator > 0.0) {
+            alpha_in_work = alpha_work;
+            first = md_stage(
+                m, stress, alpha_work, fabric_work, alpha_in_work,
+                e_step, de_step, K, G);
+            if (!first.ok) {
+                diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
+                return 0;
+            }
         }
         diagnostics->first_dgamma = first.dgamma;
         diagnostics->first_raw_dgamma = first.raw_dgamma;
@@ -961,6 +994,7 @@ NL_HD static int nl_update_manzari_dafalias(
             predictor_f <= cfg->error_tolerance) {
             stress = predictor_stress;
             diagnostics->local_error = 0.0;
+            diagnostics->correction_residual = 0.0;
             *yield_error = fmax(*yield_error, fmax(predictor_f, 0.0));
             (*accepted_substeps)++;
             T += dT;
@@ -1048,6 +1082,7 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->correction_iterations =
             correction_iterations > diagnostics->correction_iterations
                 ? correction_iterations : diagnostics->correction_iterations;
+        diagnostics->correction_residual = correction_residual;
         diagnostics->projection_fallbacks += projection_used;
 
         stress = candidate_stress;

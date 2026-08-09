@@ -452,6 +452,11 @@ Nonlinear GPU execution (runtime environment):
 	nonpositive and its elastic predictor remains admissible, Hercules accepts
 	the elastic substep without evaluating a discontinuous plastic second stage.
 	This avoids a false embedded-error singularity at an unloading/loading switch.
+	Because alpha evolves within Modified Euler, every adaptive substep also
+	reapplies the reversal-direction test and re-anchors `alpha_in` to the current
+	alpha before evaluating the hardening modulus when a new reversal is found.
+	This preserves the required positive loading-side hardening gap for a
+	multiaxial direction switch inside one global increment.
 	Final validation retains that one-sided elastic condition, so a negative
 	yield function represents a valid state inside the surface; the absolute
 	criterion remains confined to plastic stress correction.

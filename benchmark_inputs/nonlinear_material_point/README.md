@@ -105,8 +105,10 @@ correction. The elastic predictor retains the one-sided admissibility check
 `f_trial <= error_tolerance`, so a genuinely elastic state may remain inside
 the surface. An increment that starts strictly inside but ends outside is split
 at its elastic yield intersection before integrating the plastic remainder,
-matching the OpenSees transition. Elastic stages preserve alpha, fabric, and
-plastic strain; only
+matching the OpenSees transition. The OpenSees reversal-direction criterion is
+also reapplied to the evolving accepted state at each adaptive substep, so a
+multiaxial direction switch re-anchors alpha-in before the hardening modulus is
+evaluated. Elastic stages preserve alpha, fabric, and plastic strain; only
 plastic flow evolves those history variables. After an accepted
 plastic substep, the stress-correction loop permits at most
 `min(no_substeps, 50)` iterations. A corrected candidate is committed only
