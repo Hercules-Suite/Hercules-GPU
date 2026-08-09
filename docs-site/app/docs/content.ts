@@ -130,11 +130,13 @@ export const docPages: Record<string, DocPageContent> = {
         id: "build",
         title: "Build and inspect",
         paragraphs: [
-          "Use a parallel make job count appropriate for the login or build node. The large host-side solver orchestration in psolve.cc is compiled by the MPI C++ compiler while CUDA kernels and launch wrappers in psolve_gpu_launch.cu are compiled independently by nvcc; make -j can run those jobs concurrently. Incremental builds also avoid rerunning nvcc when only host orchestration changes.",
+          "Use an explicit parallel make job count appropriate for the login or build node. The large host-side solver orchestration in psolve.cc is compiled by the MPI C++ compiler while CUDA kernels and launch wrappers in psolve_gpu_launch.cu are compiled independently by nvcc; make -j 8 can run those jobs concurrently. Incremental builds also avoid rerunning nvcc when only host orchestration changes.",
+          "The nonlinear_gpu.cu constitutive implementation is the most expensive CUDA object. When NVCC advertises --split-compile, Hercules gives that object up to eight optimizer threads. Set NONLINEAR_GPU_SPLIT_COMPILE in user.mk or on the make command line to match the build node; 1 disables split compilation. This compiler option parallelizes optimization without enabling relocatable device code or changing the constitutive algorithms.",
         ],
         codeLabel: "shell",
-        code: "make clean\nmake -j 8\n\n# Expected executables\nls octor/octor quake/forward/psolve",
+        code: "make clean\nmake -j 8\n\n# Optional: constrain the expensive nonlinear CUDA compiler job\nmake -j 8 NONLINEAR_GPU_SPLIT_COMPILE=4\n\n# Expected executables\nls octor/octor quake/forward/psolve",
         bullets: [
+          "Use a numeric -j limit. Bare make -j permits unbounded outer build concurrency and can oversubscribe a shared build node.",
           "Treat missing gsl headers as an include-path problem and missing gsl_* symbols as a GSL link-path or link-order problem.",
           "Treat missing PROJ symbols as a link-path problem before changing source.",
           "Ensure the host compiler used by nvcc matches the supported CUDA combination.",
