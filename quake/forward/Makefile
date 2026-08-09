@@ -67,7 +67,8 @@ endif
 #
 # Object modules
 #
-PSOLVE_OBJECTS = psolve.o nrutila.o quakesource.o geometrics.o nonlinear.o nonlinear_gpu.o \
+PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o \
+	nonlinear_gpu.o nonlinear_gpu_material_point.o \
 	commutil.o util.o output.o io_planes.o io_checkpoint.o stiffness.o \
 	damping.o quake_util.o kernel.o timers.o buildings.o meshformatlab.o drm.o \
 	topography.o drm_planewaves.o basin.o
@@ -110,22 +111,30 @@ psolve_novis.o: psolve.o
 single_query: single_query.o q4.o
 
 output.o: output.cc output.h psolve.h
-psolve.o: psolve.cu psolve.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
+psolve.o: psolve.cc psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
           io_checkpoint.h stiffness.h damping.h quake_util.h timers.h \
 		  buildings.h meshformatlab.h drm.h topography.h drm_planewaves.h \
 		  basin.h kernel.h
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h \
+		kernel.h topography.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -diag-suppress=2464 -c $< -o $@
 
 quakesource.o: quakesource.cc quakesource.h psolve.h
 
 nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h
 
-stiffness.o: stiffness.cu stiffness.o
+stiffness.o: stiffness.cu stiffness.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h \
 	util.h quake_util.h
-	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
+	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_PRODUCTION_ONLY -c $< -o $@
+
+nonlinear_gpu_material_point.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h \
+	psolve.h kernel.h util.h quake_util.h
+	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_MATERIAL_POINT_ONLY -c $< -o $@
 
 kernel.o: kernel.cu kernel.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@

@@ -67,6 +67,47 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /data-label="Parameter"/);
 });
 
+test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
+  const launchHeader = readFileSync(`${sourceRoot}psolve_gpu_launch.h`, "utf8");
+  assert.match(makefile, /PSOLVE_OBJECTS\s*=\s*psolve\.o psolve_gpu_launch\.o/);
+  assert.match(makefile, /psolve\.o:\s*psolve\.cc[\s\S]*?\$\(CXX\)[^\n]*-c \$< -o \$@/);
+  assert.match(
+    makefile,
+    /psolve_gpu_launch\.o:\s*psolve_gpu_launch\.cu[\s\S]*?\$\(NVCC\)[^\n]*-c \$< -o \$@/,
+  );
+  assert.match(
+    makefile,
+    /nonlinear_gpu\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_PRODUCTION_ONLY[^\n]*-c \$< -o \$@/,
+  );
+  assert.match(
+    makefile,
+    /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
+  );
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  assert.match(
+    gpu,
+    /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_record_error[\s\S]*?__device__ static tensor_t nl_tetra_strain[\s\S]*?#endif\s+__device__ static inline double nl_gqh_value/,
+  );
+  assert.match(gpu, /#ifndef NL_GPU_PRODUCTION_ONLY\s+__global__ static void kernel_nonlinear_material_point_history/);
+  assert.match(gpu, /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_accumulate_stress_force/);
+  assert.ok(
+    launchHeader.indexOf('#include "quake_util.h"') <
+      launchHeader.indexOf('#include "topography.h"'),
+    "noyesflag_t must be defined before topography and launch declarations",
+  );
+
+  const html = await (await render("/docs/installation")).text();
+  assert.match(html, /psolve\.cc/);
+  assert.match(html, /psolve_gpu_launch\.cu/);
+  assert.match(html, /make -j 8/);
+  assert.match(html, /nonlinear_gpu_material_point\.o/);
+  assert.match(html, /PTX assembly/);
+});
+
 test("documents every parameters.in key parsed by the current source tree", () => {
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
@@ -78,7 +119,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
   if (!existsSync(sourceRoot)) return;
 
   const parserFiles = [
-    "psolve.cu",
+    "psolve.cc",
     "topography.cc",
     "nonlinear.cc",
     "buildings.cc",
@@ -230,7 +271,7 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const classifier = cpu.slice(
     cpu.indexOf("int isThisElementNonLinear"),
     cpu.indexOf("double interpolate_property_value"),
@@ -261,7 +302,7 @@ test("keeps acoustic elements out of nonlinear constitutive maps", async () => {
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const classifier = cpu.slice(
     cpu.indexOf("int isThisElementNonLinear"),
     cpu.indexOf("double interpolate_property_value"),
@@ -327,7 +368,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
-  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const generator = readFileSync(
     `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
     "utf8",
@@ -476,7 +517,7 @@ test("uses sparse CUDA state gathering for nonlinear station output", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
 
-  const psolve = readFileSync(`${sourceRoot}psolve.cu`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
   const finish = psolve.slice(
     psolve.indexOf("static void solver_finish_nonlinear_gpu"),

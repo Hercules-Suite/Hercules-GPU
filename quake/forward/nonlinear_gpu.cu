@@ -27,6 +27,11 @@
 #define NL_GPU_KAPPA_MIN 1.0e-10
 #define NL_GPU_PI 3.141592653589793238462643383279502884
 
+#if defined(NL_GPU_PRODUCTION_ONLY) && defined(NL_GPU_MATERIAL_POINT_ONLY)
+#error "nonlinear GPU compilation modes are mutually exclusive"
+#endif
+
+#ifndef NL_GPU_MATERIAL_POINT_ONLY
 typedef struct nonlinear_gpu_element_t {
     int32_t eindex;
     double h;
@@ -140,6 +145,7 @@ int nonlinear_gpu_active(void)
 {
     return g_active;
 }
+#endif
 
 __device__ static inline double nl_max(double a, double b)
 {
@@ -791,6 +797,7 @@ NL_HD static int nl_update_manzari_dafalias(
 
 #undef NL_HD
 
+#ifndef NL_GPU_MATERIAL_POINT_ONLY
 __device__ static inline void nl_record_error(nonlinear_gpu_error_t *error,
                                                int32_t code,
                                                int32_t eindex, int32_t qp,
@@ -921,6 +928,7 @@ __device__ static tensor_t nl_tetra_strain(const fvector_t u[8], int part,
     }
     return strain;
 }
+#endif
 
 __device__ static inline double nl_gqh_value(const nlconstants_t *c,
                                               double gamma)
@@ -2006,6 +2014,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
     return isfinite(*fs);
 }
 
+#ifndef NL_GPU_PRODUCTION_ONLY
 __global__ static void kernel_nonlinear_material_point_history(
     nlconstants_t constants,
     nonlinear_gpu_config_t config,
@@ -2094,7 +2103,9 @@ __global__ static void kernel_nonlinear_material_point_history(
         ep_bar = ep_bar_next;
     }
 }
+#endif
 
+#ifndef NL_GPU_MATERIAL_POINT_ONLY
 __device__ static inline void nl_accumulate_stress_force(
     fvector_t local_force[8], int node, tensor_t stress,
     double dx, double dy, double dz, double weight)
@@ -2660,7 +2671,9 @@ void nonlinear_gpu_check_error(int32_t myID)
         exit(1);
     }
 }
+#endif
 
+#ifndef NL_GPU_PRODUCTION_ONLY
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
@@ -2769,7 +2782,9 @@ int nonlinear_manzari_dafalias_host_history(
     }
     return 0;
 }
+#endif
 
+#ifndef NL_GPU_MATERIAL_POINT_ONLY
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();
@@ -2786,3 +2801,4 @@ void nonlinear_gpu_finalize(void)
     memset(&g_nl, 0, sizeof(g_nl));
     g_active = 0;
 }
+#endif

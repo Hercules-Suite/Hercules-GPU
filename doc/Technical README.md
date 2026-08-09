@@ -12,6 +12,24 @@ Some general description of the core components in this directory are given as f
 | `systemdef.mk` | generic system-specific compile and linker settings. Tailored by entries in user.mk
 | `common.mk`    | system-independent settings
 
+The forward solver separates host orchestration from CUDA launch code:
+`quake/forward/psolve.cc` is compiled with the configured MPI C++ compiler,
+while `quake/forward/psolve_gpu_launch.cu` is compiled with NVCC. Use a parallel
+build such as `make -j 8` (or the scheduler-provided CPU count) so these objects
+and the remaining solver modules compile concurrently. This also keeps an edit
+limited to host orchestration from triggering the previously expensive NVCC
+compilation of the entire solver source.
+
+The Manzari--Dafalias and legacy nonlinear CUDA implementations make PTX
+assembly the most expensive forward-solver build phase. The Makefile therefore
+compiles the production element-update kernel into `nonlinear_gpu.o` and the
+material-point history kernel into `nonlinear_gpu_material_point.o`. Both
+objects use the same constitutive source and equations, with mutually exclusive
+compile-time wrappers, so `make -j 8` can run their independent NVCC/PTX
+assembly jobs concurrently without relocatable device code. Prefer an explicit
+outer job count such as `-j 8` over bare `-j`, which gives GNU Make no
+concurrency limit.
+
 Runtime performance toggles (no source edits needed):
 
 Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected inside the solver/octor code when the corresponding envs are unset.

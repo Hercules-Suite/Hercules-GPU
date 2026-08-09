@@ -3614,7 +3614,7 @@ __global__ void kernelStationVEStressGather(int32_t stationCount,
 /* Interpolate acoustic pressure and pressure gradient directly from the two
  * device-resident history fields. The shape-function algebra and component
  * ordering mirror interpolate_station_pressure_value and
- * station_pressure_gradient in psolve.cu. */
+ * station_pressure_gradient in psolve.cc. */
 __global__ void kernelAcousticStationInterpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
