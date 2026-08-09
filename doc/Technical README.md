@@ -457,7 +457,12 @@ Nonlinear GPU execution (runtime environment):
 	integration limit is reached, never by continuing from an off-surface or
 	partially updated state. The failure report includes the limiting reason,
 	retry counts, local error, effective mean stress, element coordinates, and
-	the stress and strain-increment tensors.
+	the stress and strain-increment tensors. Unlike the OpenSees minimum-step
+	fallback, Hercules does not accept a state whose embedded Modified-Euler
+	error exceeds `backbone_errTol`. Its normalized local-fraction floor adapts
+	between `1e-9` and `1e-6` from the strain roundoff scale, allowing large
+	global increments to be subdivided further while avoiding numerically
+	unrepresentable work for an already tiny increment.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.

@@ -418,6 +418,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /md_stress_segment_projection/);
   assert.match(gpu, /A failed yield[\s\S]*correction must not modify committed history/);
   assert.match(gpu, /dT = fmax\(0\.5\*dT, dT_min\)/);
+  assert.match(gpu, /strain_roundoff =\s*64\.0\*DBL_EPSILON/);
+  assert.match(gpu, /fmax\(1\.0e-9, strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
   assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);

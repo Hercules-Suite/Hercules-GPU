@@ -114,7 +114,10 @@ it rejects the complete candidate, halves the local constitutive fraction, and
 retries from the last accepted state. The production GPU error check aborts
 with Manzari--Dafalias failure code 3 only when the minimum fraction or another
 integration limit is reached, rather than continuing from an off-surface or
-partially updated state. The model
+partially updated state. Hercules also keeps the embedded-error criterion
+strict at the minimum local fraction: a strain-roundoff-aware floor between
+`1e-9` and `1e-6` replaces the OpenSees behavior that accepts a special
+first-order state at its fixed `1e-6` floor. The model
 is currently GPU-only in production; the host invocation here is a regression
 driver for the shared constitutive arithmetic, not a second production
 backend. This host/CUDA parity check is not independent physical validation;

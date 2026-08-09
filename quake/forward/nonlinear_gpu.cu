@@ -841,10 +841,19 @@ NL_HD static int nl_update_manzari_dafalias(
         T = elastic_ratio;
         dT = 1.0-elastic_ratio;
     }
-    /* Match the established explicit MD safeguard while using Hercules'
-     * no_substeps as the cap on accepted work. Rejected error-control trials
-     * are bounded separately so one difficult point cannot spin forever. */
-    const double dT_min = 1.0e-6;
+    /* OpenSees stops reducing the normalized constitutive fraction at 1e-6
+     * and then accepts a special first-order state even when its embedded
+     * error estimate is too large. Hercules keeps the configured error target
+     * strict. Permit up to three additional decades when the imposed strain
+     * increment is large enough to represent them accurately, while retaining
+     * the 1e-6 floor for already tiny global increments. */
+    const double strain_roundoff =
+        64.0*DBL_EPSILON*(1.0+md_norm(strain_prev));
+    const double dT_min = fmin(
+        1.0e-6,
+        fmax(1.0e-9, strain_roundoff/fmax(md_norm(de), DBL_MIN)));
+    /* no_substeps caps accepted work. Rejected error-control trials are
+     * bounded separately so one difficult point cannot spin forever. */
     int attempts = 0;
     while (T < 1.0-DBL_EPSILON) {
         if (++attempts > 4*cfg->no_substeps) {
