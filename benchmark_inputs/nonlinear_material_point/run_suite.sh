@@ -37,12 +37,43 @@ fixtures=(
   vonmises_ro_synthetic.in
   manzari_dafalias_modified_euler_synthetic.in
   manzari_dafalias_seeded_onset_synthetic.in
+  manzari_dafalias_pressure_floor_synthetic.in
 )
+
+validate_md_pressure_floor() {
+  local csv=manzari_dafalias_pressure_floor_synthetic.cpu.csv
+  awk -F, '
+    function absolute(value) { return value < 0.0 ? -value : value }
+    NR == 1 {
+      for (column = 1; column <= NF; column++) {
+        if ($column == "step") step_column = column
+        if ($column == "sig_xx") xx_column = column
+        if ($column == "sig_yy") yy_column = column
+        if ($column == "sig_zz") zz_column = column
+      }
+      next
+    }
+    $step_column == 1 || $step_column == 2 {
+      # CSV stress follows the Hercules tension-positive convention.
+      pressure = -($xx_column + $yy_column + $zz_column)/3.0
+      if (absolute(pressure - 10.13) > 1.0e-6) exit 1
+      cutoff_states++
+    }
+    END {
+      if (!step_column || !xx_column || !yy_column || !zz_column ||
+          cutoff_states != 2) exit 1
+    }
+  ' "$csv"
+}
 
 failures=()
 for fixture in "${fixtures[@]}"; do
   printf '\n==> %s\n' "$fixture"
   if ! mpirun -np 1 "$psolve_bin" --nonlinear-material-point "$fixture"; then
+    failures+=("$fixture")
+  elif [[ $fixture == manzari_dafalias_pressure_floor_synthetic.in ]] &&
+       ! validate_md_pressure_floor; then
+    echo "Material-point pressure-floor states do not equal 1.0e-4 P_atm" >&2
     failures+=("$fixture")
   fi
 done

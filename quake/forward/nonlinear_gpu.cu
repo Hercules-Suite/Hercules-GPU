@@ -436,6 +436,52 @@ NL_HD static inline tensor_t md_elastic_compliance(tensor_t dsigma,
                   md_iso(md_trace(dsigma)/(9.0*K)));
 }
 
+NL_HD static inline double md_minimum_mean_stress(
+    const manzari_dafalias_constants_t *m)
+{
+    return 1.0e-4*m->P_atm;
+}
+
+/* Complete the unresolved remainder on the low-effective-pressure cutoff.
+ * Sand cannot carry tensile effective mean stress. Collapse the skeleton to
+ * the isotropic OpenSees p_min state and assign the remaining total strain,
+ * less the elastic stress change, to plastic strain. This preserves the
+ * additive strain split instead of returning a partially integrated state. */
+NL_HD static int md_complete_at_pressure_floor(
+    const manzari_dafalias_constants_t *m, tensor_t current_stress,
+    tensor_t remaining_strain, tensor_t *stress, tensor_t *plastic_strain,
+    tensor_t *alpha, tensor_t *alpha_in, double K, double G)
+{
+    const tensor_t floor_stress = md_iso(md_minimum_mean_stress(m));
+    const tensor_t elastic_change = md_elastic_compliance(
+        md_sub(floor_stress, current_stress), K, G);
+    *plastic_strain = md_add(
+        *plastic_strain, md_sub(remaining_strain, elastic_change));
+    *stress = floor_stress;
+    *alpha = md_zero();
+    *alpha_in = md_zero();
+    return md_finite(*stress) && md_finite(*plastic_strain);
+}
+
+/* Replace an already formed candidate by the pressure-floor state while
+ * holding its total strain fixed. */
+NL_HD static int md_project_candidate_to_pressure_floor(
+    const manzari_dafalias_constants_t *m, tensor_t *stress,
+    tensor_t *plastic_strain, tensor_t *alpha, tensor_t *alpha_in,
+    double K, double G)
+{
+    const tensor_t old_stress = *stress;
+    const tensor_t floor_stress = md_iso(md_minimum_mean_stress(m));
+    *plastic_strain = md_add(
+        *plastic_strain,
+        md_elastic_compliance(md_sub(old_stress, floor_stress), K, G));
+    *stress = floor_stress;
+    *alpha = md_zero();
+    *alpha_in = md_zero();
+    return md_finite(*stress) && md_finite(*plastic_strain) &&
+           md_finite(*alpha) && md_finite(*alpha_in);
+}
+
 NL_HD static inline void md_elastic_moduli(
     const manzari_dafalias_constants_t *m, tensor_t stress,
     double *K, double *G)
@@ -651,7 +697,7 @@ NL_HD static int md_stress_segment_projection(
 NL_HD static int md_stress_correction(
     const manzari_dafalias_constants_t *m, tensor_t anchor_stress,
     tensor_t *stress,
-    tensor_t *alpha, tensor_t fabric, tensor_t alpha_in,
+    tensor_t *alpha, tensor_t fabric, tensor_t *alpha_in,
     double void_ratio, tensor_t direction_hint, tensor_t *plastic_strain,
     double K, double G, double tolerance, int maximum_iterations,
     double *residual, int32_t *iterations_used, int32_t *projection_used)
@@ -661,6 +707,12 @@ NL_HD static int md_stress_correction(
     const tensor_t proposed_stress = *stress;
     const tensor_t proposed_alpha = *alpha;
     const tensor_t proposed_plastic_strain = *plastic_strain;
+    if (md_trace(*stress)/3.0 < md_minimum_mean_stress(m)) {
+        if (!md_project_candidate_to_pressure_floor(
+                m, stress, plastic_strain, alpha, alpha_in, K, G)) return 0;
+        *residual = 0.0;
+        return 1;
+    }
     double f = md_yield(m, *stress, *alpha);
     *residual = isfinite(f) ? fabs(f) : DBL_MAX;
     if (!isfinite(f)) return 0;
@@ -674,7 +726,7 @@ NL_HD static int md_stress_correction(
         const double p = md_trace(*stress)/3.0+1.0e-2*m->P_atm;
         if (!(p > 0.0)) return 0;
         const nl_md_dependent_t dep = md_state_dependent(
-            m, *stress, *alpha, fabric, void_ratio, alpha_in);
+            m, *stress, *alpha, fabric, void_ratio, *alpha_in);
         if (!dep.ok) return 0;
         const tensor_t r = md_scale(md_dev(*stress), 1.0/p);
         const tensor_t dsigma_p = md_add(md_scale(md_dev(dep.R), 2.0*G),
@@ -752,6 +804,18 @@ NL_HD static int md_stress_correction(
                 line_scale *= 0.5;
             }
             if (!improved) return 0;
+        }
+        if (md_trace(next_stress)/3.0 < md_minimum_mean_stress(m)) {
+            tensor_t floor_stress = old_stress;
+            tensor_t floor_alpha = old_alpha;
+            if (!md_project_candidate_to_pressure_floor(
+                    m, &floor_stress, plastic_strain, &floor_alpha,
+                    alpha_in, K, G))
+                return 0;
+            *stress = floor_stress;
+            *alpha = floor_alpha;
+            *residual = 0.0;
+            return 1;
         }
         *stress = next_stress;
         *alpha = next_alpha;
@@ -836,14 +900,27 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->failure_reason = NL_MD_FAILURE_ELASTIC_MODULI;
         return 0;
     }
+    const double minimum_mean_stress = md_minimum_mean_stress(m);
+    if (md_trace(stress)/3.0 < minimum_mean_stress) {
+        const tensor_t old_stress = stress;
+        stress = md_add(md_dev(stress), md_iso(minimum_mean_stress));
+        pstrain = md_add(
+            pstrain,
+            md_elastic_compliance(md_sub(old_stress, stress), K, G));
+        if (!md_finite(stress) || !md_finite(pstrain)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_INITIAL_PRESSURE;
+            return 0;
+        }
+    }
     const tensor_t elastic_trial = md_elastic_increment(de, K, G);
     if (md_ddot(md_sub(alpha_work, alpha_in_work), elastic_trial) < 0.0)
         alpha_in_work = alpha_work;
 
     const tensor_t trial = md_add(stress, elastic_trial);
-    const double trial_p = md_trace(trial)/3.0+1.0e-2*m->P_atm;
+    const double trial_mean_stress = md_trace(trial)/3.0;
     const double trial_f = md_yield(m, trial, alpha_work);
-    if (trial_p >= 1.0e-2*m->P_atm && trial_f <= cfg->error_tolerance) {
+    if (trial_mean_stress >= minimum_mean_stress &&
+        trial_f <= cfg->error_tolerance) {
         stress = trial;
         const tensor_t dynamic_next = md_sub(
             md_scale(stress, -1.0), static_stress);
@@ -960,16 +1037,28 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->second_h = 0.0;
         diagnostics->second_hardening_gap = 0.0;
         const tensor_t predictor_stress = md_add(stress, first.dsigma);
-        const double predictor_p = md_trace(predictor_stress)/3.0+
-                                   1.0e-2*m->P_atm;
-        if (predictor_p < 1.0e-2*m->P_atm) {
+        const double predictor_mean_stress = md_trace(predictor_stress)/3.0;
+        if (predictor_mean_stress < minimum_mean_stress) {
             diagnostics->effective_mean_stress =
-                md_trace(predictor_stress)/3.0;
+                predictor_mean_stress;
             if (dT <= dT_min) {
-                diagnostics->failure_reason = NL_MD_FAILURE_TENSILE_PREDICTOR;
-                return 0;
+                if (!md_complete_at_pressure_floor(
+                        m, stress, md_scale(de, 1.0-T), &stress, &pstrain,
+                        &alpha_work, &alpha_in_work, K, G)) {
+                    diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+                    return 0;
+                }
+                diagnostics->correction_residual = 0.0;
+                diagnostics->effective_mean_stress = minimum_mean_stress;
+                (*accepted_substeps)++;
+                T = 1.0;
+                break;
             }
-            dT = fmax(0.1*dT, dT_min);
+            const double current_mean_stress = md_trace(stress)/3.0;
+            const double pressure_ratio =
+                (current_mean_stress-minimum_mean_stress)/
+                fmax(current_mean_stress-predictor_mean_stress, DBL_MIN);
+            dT = fmax(fmax(0.8*pressure_ratio, 0.1)*dT, dT_min);
             continue;
         }
         const double predictor_f = md_yield(
@@ -1015,6 +1104,47 @@ NL_HD static int nl_update_manzari_dafalias(
         diagnostics->second_denominator = second.denominator;
         diagnostics->second_h = second.h;
         diagnostics->second_hardening_gap = second.hardening_gap;
+
+        /* OpenSees checks the averaged Modified-Euler candidate before its
+         * embedded-error test. A candidate below the physical pressure floor
+         * is a cutoff event, not a smooth integration-error event. Reduce the
+         * fraction until the crossing is resolved, then complete the
+         * unresolved strain on the cutoff state at the minimum fraction. */
+        tensor_t candidate_stress = md_add(stress, md_scale(
+            md_add(first.dsigma, second.dsigma), 0.5));
+        tensor_t candidate_alpha = md_add(alpha_work, md_scale(
+            md_add(first.dalpha, second.dalpha), 0.5));
+        tensor_t candidate_alpha_in = alpha_in_work;
+        tensor_t candidate_fabric = md_add(fabric_work, md_scale(
+            md_add(first.dfabric, second.dfabric), 0.5));
+        tensor_t candidate_pstrain = md_add(pstrain, md_scale(
+            md_add(first.dpstrain, second.dpstrain), 0.5));
+        const double candidate_multiplier = *plastic_multiplier+
+            0.5*(first.dgamma+second.dgamma);
+        const double candidate_mean_stress = md_trace(candidate_stress)/3.0;
+        if (candidate_mean_stress < minimum_mean_stress) {
+            diagnostics->effective_mean_stress = candidate_mean_stress;
+            if (dT <= dT_min) {
+                if (!md_complete_at_pressure_floor(
+                        m, stress, md_scale(de, 1.0-T), &stress, &pstrain,
+                        &alpha_work, &alpha_in_work, K, G)) {
+                    diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+                    return 0;
+                }
+                diagnostics->correction_residual = 0.0;
+                diagnostics->effective_mean_stress = minimum_mean_stress;
+                (*accepted_substeps)++;
+                T = 1.0;
+                break;
+            }
+            const double current_mean_stress = md_trace(stress)/3.0;
+            const double pressure_ratio =
+                (current_mean_stress-minimum_mean_stress)/
+                fmax(current_mean_stress-candidate_mean_stress, DBL_MIN);
+            dT = fmax(fmax(0.8*pressure_ratio, 0.1)*dT, dT_min);
+            continue;
+        }
+
         const double stress_norm = md_norm(stress);
         const double error_denominator = stress_norm < 0.5
             ? 1.0 : 2.0*stress_norm;
@@ -1038,26 +1168,15 @@ NL_HD static int nl_update_manzari_dafalias(
             continue;
         }
 
-        /* Build the entire candidate in local temporaries. A failed yield
-         * correction must not modify committed history; reject it, reduce the
-         * constitutive fraction, and retry from the same accepted state. */
-        tensor_t candidate_stress = md_add(stress, md_scale(
-            md_add(first.dsigma, second.dsigma), 0.5));
-        tensor_t candidate_alpha = md_add(alpha_work, md_scale(
-            md_add(first.dalpha, second.dalpha), 0.5));
-        tensor_t candidate_fabric = md_add(fabric_work, md_scale(
-            md_add(first.dfabric, second.dfabric), 0.5));
-        tensor_t candidate_pstrain = md_add(pstrain, md_scale(
-            md_add(first.dpstrain, second.dpstrain), 0.5));
-        const double candidate_multiplier = *plastic_multiplier+
-            0.5*(first.dgamma+second.dgamma);
-
+        /* A failed yield correction must not modify committed history;
+         * reject it, reduce the constitutive fraction, and retry from the
+         * same accepted state. */
         double correction_residual = 0.0;
         int32_t correction_iterations = 0;
         int32_t projection_used = 0;
         if (!md_stress_correction(
                 m, stress, &candidate_stress, &candidate_alpha,
-                candidate_fabric, alpha_in_work, e_step,
+                candidate_fabric, &candidate_alpha_in, e_step,
                 elastic_trial, &candidate_pstrain, K, G,
                 cfg->error_tolerance, cfg->no_substeps,
                 &correction_residual, &correction_iterations,
@@ -1087,6 +1206,7 @@ NL_HD static int nl_update_manzari_dafalias(
 
         stress = candidate_stress;
         alpha_work = candidate_alpha;
+        alpha_in_work = candidate_alpha_in;
         fabric_work = candidate_fabric;
         pstrain = candidate_pstrain;
         *plastic_multiplier = candidate_multiplier;

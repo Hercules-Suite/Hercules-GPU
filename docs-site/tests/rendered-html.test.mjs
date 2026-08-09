@@ -218,7 +218,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /eleven-fixture suite/);
+  assert.match(gpu, /twelve-fixture suite/);
   assert.match(gpu, /device-first and currently requires the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -428,6 +428,9 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /strain_roundoff =\s*64\.0\*DBL_EPSILON/);
   assert.match(gpu, /fmax\(1\.0e-9, strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
   assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
+  assert.match(gpu, /md_minimum_mean_stress/);
+  assert.match(gpu, /md_complete_at_pressure_floor/);
+  assert.match(gpu, /candidate_mean_stress < minimum_mean_stress/);
   assert.match(gpu, /Modified-Euler stages:/);
   assert.match(gpu, /hardening_gap=/);
   assert.match(gpu, /raw_dgamma=/);
@@ -435,6 +438,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(psolve, /Qp traction remains explicit/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`));

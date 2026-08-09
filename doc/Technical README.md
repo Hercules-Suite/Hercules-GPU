@@ -479,7 +479,16 @@ Nonlinear GPU execution (runtime environment):
 	error exceeds `backbone_errTol`. Its normalized local-fraction floor adapts
 	between `1e-9` and `1e-6` from the strain roundoff scale, allowing large
 	global increments to be subdivided further while avoiding numerically
-	unrepresentable work for an already tiny increment.
+	unrepresentable work for an already tiny increment. This error-control floor
+	is distinct from the physical effective-pressure cutoff
+	`p_min=1e-4 P_atm`. Predictor and averaged-candidate crossings are first
+	resolved by adaptive fraction reduction. At the minimum representable
+	fraction, the remaining total strain is completed on an isotropic `p_min`
+	state; plastic strain is updated consistently with the elastic stress change,
+	and alpha/alpha-in are reset. This prevents tensile skeleton stress without
+	returning a partially integrated global increment. The finite
+	`no_substeps`/attempt limits and strict local-error criterion remain active for
+	non-cutoff integration failures.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
