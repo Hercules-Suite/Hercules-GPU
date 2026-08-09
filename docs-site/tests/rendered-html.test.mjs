@@ -88,6 +88,10 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
     /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
   );
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  assert.match(
+    gpu,
+    /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_record_error[\s\S]*?__device__ static tensor_t nl_tetra_strain[\s\S]*?#endif\s+__device__ static inline double nl_gqh_value/,
+  );
   assert.match(gpu, /#ifndef NL_GPU_PRODUCTION_ONLY\s+__global__ static void kernel_nonlinear_material_point_history/);
   assert.match(gpu, /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_accumulate_stress_force/);
   assert.ok(

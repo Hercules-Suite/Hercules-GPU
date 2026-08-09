@@ -797,6 +797,7 @@ NL_HD static int nl_update_manzari_dafalias(
 
 #undef NL_HD
 
+#ifndef NL_GPU_MATERIAL_POINT_ONLY
 __device__ static inline void nl_record_error(nonlinear_gpu_error_t *error,
                                                int32_t code,
                                                int32_t eindex, int32_t qp,
@@ -927,6 +928,7 @@ __device__ static tensor_t nl_tetra_strain(const fvector_t u[8], int part,
     }
     return strain;
 }
+#endif
 
 __device__ static inline double nl_gqh_value(const nlconstants_t *c,
                                               double gamma)
