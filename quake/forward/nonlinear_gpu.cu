@@ -916,6 +916,16 @@ NL_HD static int nl_update_manzari_dafalias(
             diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
             return 0;
         }
+        diagnostics->first_dgamma = first.dgamma;
+        diagnostics->first_raw_dgamma = first.raw_dgamma;
+        diagnostics->first_denominator = first.denominator;
+        diagnostics->first_h = first.h;
+        diagnostics->first_hardening_gap = first.hardening_gap;
+        diagnostics->second_dgamma = 0.0;
+        diagnostics->second_raw_dgamma = 0.0;
+        diagnostics->second_denominator = 0.0;
+        diagnostics->second_h = 0.0;
+        diagnostics->second_hardening_gap = 0.0;
         const tensor_t predictor_stress = md_add(stress, first.dsigma);
         const double predictor_p = md_trace(predictor_stress)/3.0+
                                    1.0e-2*m->P_atm;
@@ -929,6 +939,35 @@ NL_HD static int nl_update_manzari_dafalias(
             dT = fmax(0.1*dT, dT_min);
             continue;
         }
+        const double predictor_f = md_yield(
+            m, predictor_stress, alpha_work);
+        if (!isfinite(predictor_f)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
+            return 0;
+        }
+
+        /* Modified Euler is a hybrid elastic/plastic update. When the first
+         * stage detects unloading (a nonpositive plastic multiplier), its
+         * elastic predictor is already the complete substep solution if that
+         * predictor remains admissible. Do not evaluate a plastic second
+         * stage in that case. Near a loading switch, the consistency
+         * denominator can cross zero over an arbitrarily small elastic
+         * increment; comparing that discontinuous plastic stage with the
+         * elastic first stage creates an O(1) embedded-error estimate that
+         * cannot be cured by reducing dT. The next accepted substep starts
+         * from the other side of the switch and dispatches plastic flow when
+         * its own first-stage multiplier is positive. */
+        if (first.dgamma == 0.0 &&
+            predictor_f <= cfg->error_tolerance) {
+            stress = predictor_stress;
+            diagnostics->local_error = 0.0;
+            *yield_error = fmax(*yield_error, fmax(predictor_f, 0.0));
+            (*accepted_substeps)++;
+            T += dT;
+            if (T >= 1.0-DBL_EPSILON) break;
+            dT = fmin(fmax(2.0*dT, dT_min), 1.0-T);
+            continue;
+        }
         const nl_md_stage_t second = md_stage(
             m, predictor_stress, md_add(alpha_work, first.dalpha),
             md_add(fabric_work, first.dfabric), alpha_in_work,
@@ -937,15 +976,10 @@ NL_HD static int nl_update_manzari_dafalias(
             diagnostics->failure_reason = NL_MD_FAILURE_SECOND_STAGE;
             return 0;
         }
-        diagnostics->first_dgamma = first.dgamma;
         diagnostics->second_dgamma = second.dgamma;
-        diagnostics->first_raw_dgamma = first.raw_dgamma;
         diagnostics->second_raw_dgamma = second.raw_dgamma;
-        diagnostics->first_denominator = first.denominator;
         diagnostics->second_denominator = second.denominator;
-        diagnostics->first_h = first.h;
         diagnostics->second_h = second.h;
-        diagnostics->first_hardening_gap = first.hardening_gap;
         diagnostics->second_hardening_gap = second.hardening_gap;
         const double stress_norm = md_norm(stress);
         const double error_denominator = stress_norm < 0.5

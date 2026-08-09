@@ -413,6 +413,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /cfg->error_tolerance/);
   assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
   assert.match(gpu, /trial_f <= cfg->error_tolerance/);
+  assert.match(gpu, /first\.dgamma == 0\.0 &&[\s\S]*predictor_f <= cfg->error_tolerance/);
+  assert.match(gpu, /Do not evaluate a plastic second[\s\S]*loading switch/);
   assert.match(gpu, /out\.dalpha = md_zero\(\)/);
   assert.match(gpu, /md_elastic_yield_intersection/);
   assert.match(gpu, /md_stress_segment_projection/);

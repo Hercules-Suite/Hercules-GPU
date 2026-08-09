@@ -447,8 +447,13 @@ Nonlinear GPU execution (runtime environment):
 	elastic predictor uses the one-sided admissibility condition
 	`f_trial <= error_tolerance`. A trial increment that crosses from strictly
 	inside to outside the yield surface is split at its elastic intersection;
-	only the remainder enters Modified Euler. Elastic stages leave alpha, fabric, and plastic
-	strain unchanged; these history variables evolve only under plastic flow.
+	only the remainder enters Modified Euler. The same admissibility dispatch is
+	applied to every adaptive substep: when its first-stage plastic multiplier is
+	nonpositive and its elastic predictor remains admissible, Hercules accepts
+	the elastic substep without evaluating a discontinuous plastic second stage.
+	This avoids a false embedded-error singularity at an unloading/loading switch.
+	Elastic stages leave alpha, fabric, and plastic strain unchanged; these history
+	variables evolve only under plastic flow.
 	Plastic correction is limited to `min(no_substeps, 50)` iterations. Each
 	corrected state is transactional: Hercules first tries a genuinely bracketed
 	segment projection, then rejects the candidate and halves the constitutive
