@@ -20,6 +20,13 @@ Each case is self-contained (`parameters.in`, `sourcefiles/`, an `elastic_twin/`
 `elastic/` reference run, a `post/*.py` analysis script, and a `README.md`).
 `homogeneous_column_base_force/` is the original smoke-test column the cases are built from.
 
+The nonlinear coupled one-element benchmark lives separately under
+`../nonlinear_material_point/`. It compares an OpenSees Manzari--Dafalias
+`SSPbrickUP -lumped` element with Hercules BrickUP for the common uniform,
+sealed, zero-permeability mode and executes the production CUDA pressure
+kernels. That comparison does not replace the multi-element permeability,
+drainage, or wave-propagation checks in this suite.
+
 ## Cross-cutting conventions (every case)
 - `poroelastic_permeability_* = 0`, `poroelastic_biot_alpha = 1`,
   `poroelastic_surface_pressure_bc = undrained`, and

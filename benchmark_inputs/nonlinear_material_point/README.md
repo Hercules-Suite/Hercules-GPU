@@ -58,6 +58,10 @@ This follows the standard Manzari--Dafalias parameter order except that the
 material-point test does not need density. The production 17-column
 `material_properties_list` starts with `Vs_limit`, omits `nu`, and obtains both
 Poisson's ratio and density from the element's `Vp`, `Vs`, and `rho`.
+Hercules supplies no implicit calibrated Manzari--Dafalias constants: every
+production row must provide all 17 values. Constants embedded in these
+fixtures and OpenSees drivers are reference-characterization inputs, not
+production defaults.
 
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.

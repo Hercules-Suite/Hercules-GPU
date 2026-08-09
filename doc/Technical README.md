@@ -439,6 +439,9 @@ Nonlinear GPU execution (runtime environment):
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
 	All other material families retain the established 16-column layout.
+	There are no implicit calibrated Manzari--Dafalias constants: every row must
+	provide all 17 values. The constants in the material-point and OpenSees
+	fixtures are characterization inputs, not production defaults.
 - With `approximate_geostatic_state=yes`, the model initializes its
 	compression-positive internal effective stress from the approximate K0 state.
 	The small kinematic yield surface is centered on that pre-existing stress
@@ -516,9 +519,12 @@ Nonlinear GPU execution (runtime environment):
 	boundaries, multi-element exchange, or the complete production time-stepping loop. The
 	full commands and input-only controls are documented in
 	`benchmark_inputs/nonlinear_material_point/README.md`.
-- For a new material calibration, compare CPU and GPU nonlinear station
-	histories, final yield statistics, and force/displacement norms before a
-	production run. Keep geostatic, tolerance, substep, stiffness-damping, and
+- For a new calibration of a model supported by both production backends,
+	compare CPU and GPU nonlinear station histories, final yield statistics, and
+	force/displacement norms before a production run. Manzari--Dafalias is
+	production-GPU-only; validate it with the shared host/CUDA material-point
+	suite and the independent OpenSees characterizations, then run a GPU
+	production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
 - With `abc_type=cpml`, solid elements in the absorbing band are always
 	linear elastic and are excluded from the CPU and GPU nonlinear constitutive

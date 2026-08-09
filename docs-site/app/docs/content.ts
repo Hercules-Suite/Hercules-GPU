@@ -299,7 +299,7 @@ export const docPages: Record<string, DocPageContent> = {
           "The CUDA nonlinear constitutive and force path is the default when HERCULES_NONLINEAR_BACKEND is unset and keeps constitutive calculations in double precision. Set HERCULES_NONLINEAR_BACKEND=cpu explicitly for the established CPU/GSL reference models. ManzariDafalias is device-first and currently requires the GPU backend for production runs; its material-point regression executes the same allocation-free core on host and device. The selected backend is reported to standard error at startup.",
           "When abc_type=cpml, solid elements in the absorbing band remain linear elastic and are excluded from both CPU and GPU nonlinear constitutive maps regardless of their Vs. Nonlinearity is confined to the physical interior because the CPML correction assumes a linear time-invariant native operator.",
           "When include_acoustic=yes, acoustic elements are excluded from both CPU and GPU solid constitutive maps regardless of their Vs or legacy nl_id payload. They remain governed only by the selected acoustic formulation and never acquire plastic-strain or nonlinear solid history.",
-          "Treat the GPU path as a separately validated execution backend: compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new material calibration in production.",
+          "Treat the GPU path as a separately validated execution backend. For models supported by both production backends, compare nonlinear station histories, final yield statistics, and force or displacement norms against a CPU run before using a new calibration. ManzariDafalias production is GPU-only, so use its shared host/CUDA material-point regressions and independent OpenSees characterizations before a GPU production run.",
           "For production timing, verify both the total element count and the nonlinear count after regenerating any mesh whose velocity profile changed. Reusing an older mesh also reuses its stored Vs payload and can unintentionally select nearly the entire domain.",
         ],
         codeLabel: "shell",
@@ -394,9 +394,9 @@ export const docPages: Record<string, DocPageContent> = {
       },
       {
         id: "nonlinear-material-properties",
-        title: "Non-Istanbul BAE property table",
+        title: "Non-Istanbul nonlinear property tables",
         paragraphs: [
-          "Rows are ordered by increasing Vs_limit. For non-Istanbul models, the first and last limits define the inclusive nonlinear range and Hercules linearly interpolates active properties for intermediate Vs. BAE reads Su from alpha_cohesion and its exponential hardening parameters from psi and m.",
+          "Rows are ordered by increasing Vs_limit. For non-Istanbul models, the first and last limits define the inclusive nonlinear range and Hercules linearly interpolates active properties for intermediate Vs. BAE reads Su from alpha_cohesion and its exponential hardening parameters from psi and m. ManzariDafalias has no implicit calibrated constants: each production row must provide its complete 17-value layout; fixture values are characterization inputs rather than production defaults.",
           "The example brackets a homogeneous Vs=1000 m/s profile. Repeated values make its active BAE properties constant across the selected range; replace them with calibrated strength and modulus-reduction parameters for scientific use.",
         ],
         codeLabel: "parameters.in — synthetic syntax example, not a calibration",

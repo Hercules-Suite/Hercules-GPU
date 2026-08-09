@@ -150,7 +150,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
   assert.match(physics, /built-in nl_id constants/);
-  assert.match(physics, /Non-Istanbul BAE property table/);
+  assert.match(physics, /Non-Istanbul nonlinear property tables/);
   assert.match(physics, /synthetic syntax example, not a calibration/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
