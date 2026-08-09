@@ -11011,7 +11011,7 @@ static void solver_init() {
        * (if a checkpoint or replay needs it later) reflect what was used. */
       Param.theCpmlThicknessM = g_cpmlBuild.thickness_m;
       if (Global.myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
                 "(%s max element edgesize)\n",
                 g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
@@ -11787,7 +11787,7 @@ static void solver_init() {
     MPI_Reduce(local_counts, global_counts, 2, MPI_LONG_LONG, MPI_SUM, 0,
                comm_solver);
     if (Global.myID == 0) {
-      fprintf(stdout,
+      fprintf(stderr,
               "CPML: %lld elastic + %lld acoustic PML elements globally "
               "(thickness %.3f m, alpha_max = %.3g rad/s, "
               "reference Vp = %.3f m/s)\n",
@@ -12283,7 +12283,7 @@ static void solver_init() {
       MPI_Reduce(&local_clamped, &global_clamped, 1, MPI_LONG_LONG, MPI_SUM,
                  0, comm_solver);
       if (Global.myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "CPML: cpml_clamp_outer=yes; %lld outer-face nodes clamped "
                 "to u=0 globally\n",
                 (long long)global_clamped);

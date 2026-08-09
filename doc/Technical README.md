@@ -449,10 +449,15 @@ Nonlinear GPU execution (runtime environment):
 	inside to outside the yield surface is split at its elastic intersection;
 	only the remainder enters Modified Euler. Elastic stages leave alpha, fabric, and plastic
 	strain unchanged; these history variables evolve only under plastic flow.
-	Plastic correction is limited to
-	`min(no_substeps, 50)` iterations; failure to satisfy the absolute criterion
-	is reported as GPU constitutive failure code 3 and aborts the run rather than
-	continuing from the off-surface state.
+	Plastic correction is limited to `min(no_substeps, 50)` iterations. Each
+	corrected state is transactional: Hercules first tries a genuinely bracketed
+	segment projection, then rejects the candidate and halves the constitutive
+	substep if the absolute criterion remains unsatisfied. It aborts with GPU
+	constitutive failure code 3 only after the minimum local fraction or another
+	integration limit is reached, never by continuing from an off-surface or
+	partially updated state. The failure report includes the limiting reason,
+	retry counts, local error, effective mean stress, element coordinates, and
+	the stress and strain-increment tensors.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
@@ -903,7 +908,9 @@ every offset/component (see the summary below).
 - `cpml_thickness_m`
 	Target PML thickness in metres. When `> 0`, used directly. When `0`
 	or unset (default), the solver uses `cpml_layers ×` the element size
-	at the absorbing boundary and logs the realized thickness at startup.
+	at the absorbing boundary and logs the realized thickness to standard error
+	at startup. The PML element counts and optional outer-clamp count use the
+	same startup stream.
 - `cpml_layers`
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is
 	`0` — "this many element layers deep" at the boundary, without needing

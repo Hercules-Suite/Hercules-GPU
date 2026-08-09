@@ -41,8 +41,19 @@ typedef struct nonlinear_gpu_error_t {
     int32_t code;
     int32_t eindex;
     int32_t qp;
+    int32_t md_reason;
+    int32_t md_attempts;
+    int32_t md_accepted_substeps;
+    int32_t md_correction_retries;
+    int32_t md_correction_iterations;
+    int32_t md_projection_fallbacks;
     double residual;
     double value;
+    double md_substep_fraction;
+    double md_effective_mean_stress;
+    double md_strain_increment_norm;
+    tensor_t md_stress;
+    tensor_t md_strain_increment;
 } nonlinear_gpu_error_t;
 
 /* Only these quadrature-point values are consumed by
@@ -98,6 +109,7 @@ static nonlinear_gpu_state_t g_nl = {};
 static nonlinear_gpu_station_buffers_t g_station = {};
 static nonlinear_gpu_config_t g_config = {};
 static nonlinear_gpu_error_t g_error_host = {};
+static mesh_t *g_mesh_host = NULL;
 static int g_backend_request = -1;
 static int g_active = 0;
 
@@ -259,6 +271,35 @@ __device__ static inline tensor_t nl_elastic_strain(tensor_t stress,
 /* -------------------------------------------------------------------------- */
 
 #define NL_HD __host__ __device__
+
+typedef enum nl_md_failure_reason_t {
+    NL_MD_FAILURE_NONE = 0,
+    NL_MD_FAILURE_INITIAL_PRESSURE = 1,
+    NL_MD_FAILURE_INVALID_CONTROLS = 2,
+    NL_MD_FAILURE_ELASTIC_MODULI = 3,
+    NL_MD_FAILURE_YIELD_INTERSECTION = 4,
+    NL_MD_FAILURE_ATTEMPT_LIMIT = 5,
+    NL_MD_FAILURE_FIRST_STAGE = 6,
+    NL_MD_FAILURE_TENSILE_PREDICTOR = 7,
+    NL_MD_FAILURE_SECOND_STAGE = 8,
+    NL_MD_FAILURE_NONFINITE_LOCAL_ERROR = 9,
+    NL_MD_FAILURE_LOCAL_ERROR_MIN_STEP = 10,
+    NL_MD_FAILURE_SUBSTEP_LIMIT = 11,
+    NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP = 12,
+    NL_MD_FAILURE_FINAL_STATE = 13
+} nl_md_failure_reason_t;
+
+typedef struct nl_md_diagnostics_t {
+    int32_t failure_reason;
+    int32_t attempts;
+    int32_t correction_retries;
+    int32_t correction_iterations;
+    int32_t projection_fallbacks;
+    double substep_fraction;
+    double effective_mean_stress;
+    double local_error;
+    double correction_residual;
+} nl_md_diagnostics_t;
 
 typedef struct nl_md_stage_t {
     tensor_t dsigma;
@@ -525,13 +566,64 @@ NL_HD static nl_md_stage_t md_stage(
     return out;
 }
 
+/* OpenSees falls back to a segment search when its local Newton correction
+ * exhausts 50 iterations. Keep the same admissible-state idea, but require a
+ * genuine yield-function bracket and preserve total strain by mapping the
+ * removed stress through the elastic compliance. */
+NL_HD static int md_stress_segment_projection(
+    const manzari_dafalias_constants_t *m, tensor_t anchor_stress,
+    tensor_t proposed_stress, tensor_t alpha,
+    tensor_t proposed_plastic_strain, tensor_t *stress,
+    tensor_t *plastic_strain,
+    double K, double G, double tolerance, double *residual)
+{
+    const tensor_t stress_delta = md_sub(proposed_stress, anchor_stress);
+    double lower = 0.0;
+    double upper = 1.0;
+    double flower = md_yield(m, anchor_stress, alpha);
+    double fupper = md_yield(m, proposed_stress, alpha);
+    if (!isfinite(flower) || !isfinite(fupper) ||
+        flower*fupper > 0.0) return 0;
+
+    tensor_t projected = proposed_stress;
+    double fprojected = fupper;
+    for (int iteration = 0; iteration < 80; iteration++) {
+        const double middle = 0.5*(lower+upper);
+        projected = md_add(anchor_stress, md_scale(stress_delta, middle));
+        fprojected = md_yield(m, projected, alpha);
+        if (!isfinite(fprojected)) return 0;
+        if (fabs(fprojected) < tolerance) break;
+        if ((flower <= 0.0 && fprojected <= 0.0) ||
+            (flower >= 0.0 && fprojected >= 0.0)) {
+            lower = middle;
+            flower = fprojected;
+        } else {
+            upper = middle;
+        }
+    }
+    if (!(fabs(fprojected) < tolerance)) return 0;
+
+    *stress = projected;
+    *plastic_strain = md_add(
+        proposed_plastic_strain,
+        md_elastic_compliance(md_sub(proposed_stress, projected), K, G));
+    *residual = fabs(fprojected);
+    return 1;
+}
+
 NL_HD static int md_stress_correction(
-    const manzari_dafalias_constants_t *m, tensor_t *stress,
+    const manzari_dafalias_constants_t *m, tensor_t anchor_stress,
+    tensor_t *stress,
     tensor_t *alpha, tensor_t fabric, tensor_t alpha_in,
     double void_ratio, tensor_t direction_hint, tensor_t *plastic_strain,
     double K, double G, double tolerance, int maximum_iterations,
-    double *residual)
+    double *residual, int32_t *iterations_used, int32_t *projection_used)
 {
+    *iterations_used = 0;
+    *projection_used = 0;
+    const tensor_t proposed_stress = *stress;
+    const tensor_t proposed_alpha = *alpha;
+    const tensor_t proposed_plastic_strain = *plastic_strain;
     double f = md_yield(m, *stress, *alpha);
     *residual = isfinite(f) ? fabs(f) : DBL_MAX;
     if (!isfinite(f)) return 0;
@@ -541,6 +633,7 @@ NL_HD static int md_stress_correction(
 
     const int iterations = maximum_iterations < 50 ? maximum_iterations : 50;
     for (int iteration = 0; iteration < iterations; iteration++) {
+        *iterations_used = iteration+1;
         const double p = md_trace(*stress)/3.0+1.0e-2*m->P_atm;
         if (!(p > 0.0)) return 0;
         const nl_md_dependent_t dep = md_state_dependent(
@@ -635,7 +728,13 @@ NL_HD static int md_stress_correction(
         *residual = fabs(f);
         if (fabs(f) < tolerance) return 1;
     }
-    return 0;
+    if (!md_stress_segment_projection(
+            m, anchor_stress, proposed_stress, proposed_alpha,
+            proposed_plastic_strain, stress, plastic_strain,
+            K, G, tolerance, residual)) return 0;
+    *alpha = proposed_alpha;
+    *projection_used = 1;
+    return 1;
 }
 
 NL_HD static int nl_update_manzari_dafalias(
@@ -644,63 +743,100 @@ NL_HD static int nl_update_manzari_dafalias(
     tensor_t *dynamic_stress, tensor_t *plastic_strain, tensor_t *alpha,
     tensor_t *alpha_in, tensor_t *fabric, double *initialized,
     double *void_ratio, double *plastic_multiplier, double *yield_error,
-    double *integration_error, int32_t *accepted_substeps)
+    double *integration_error, int32_t *accepted_substeps,
+    nl_md_diagnostics_t *diagnostics)
 {
     const manzari_dafalias_constants_t *m = &c->md;
     const tensor_t de_h = md_sub(strain, strain_prev);
     const tensor_t de = md_scale(de_h, -1.0);
     tensor_t stress = md_scale(md_add(*dynamic_stress, static_stress), -1.0);
     tensor_t pstrain = md_scale(*plastic_strain, -1.0);
+    tensor_t alpha_work = *alpha;
+    tensor_t alpha_in_work = *alpha_in;
+    tensor_t fabric_work = *fabric;
+    double initialized_work = *initialized;
+    nl_md_diagnostics_t empty_diagnostics = {};
+    *diagnostics = empty_diagnostics;
+    diagnostics->effective_mean_stress = md_trace(stress)/3.0;
     *void_ratio = m->e_init-(1.0+m->e_init)*md_trace(md_scale(strain, -1.0));
     *plastic_multiplier = 0.0;
     *yield_error = 0.0;
     *integration_error = 0.0;
     *accepted_substeps = 0;
 
-    if (!(*initialized > 0.5)) {
+    if (!(initialized_work > 0.5)) {
         const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
-        if (!(p > 0.0)) return 0;
+        if (!(p > 0.0)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_INITIAL_PRESSURE;
+            return 0;
+        }
         /* Treat a supplied geostatic tensor as a pre-existing consolidated
          * state: center the small kinematic yield surface on its stress ratio
          * so self weight is not mistaken for a new plastic load increment.
          * For the usual isotropic material-point start this is exactly zero. */
-        *alpha = md_scale(md_dev(stress), 1.0/p);
-        *alpha_in = *alpha;
-        *fabric = md_zero();
-        *initialized = 1.0;
+        alpha_work = md_scale(md_dev(stress), 1.0/p);
+        alpha_in_work = alpha_work;
+        fabric_work = md_zero();
+        initialized_work = 1.0;
     }
-    if (md_norm(de) == 0.0) return 1;
+    if (md_norm(de) == 0.0) {
+        *alpha = alpha_work;
+        *alpha_in = alpha_in_work;
+        *fabric = fabric_work;
+        *initialized = initialized_work;
+        return 1;
+    }
     if (!(*void_ratio > -0.99) || cfg->no_substeps <= 0 ||
         !(cfg->backbone_error_tolerance > 0.0) ||
-        !(cfg->error_tolerance > 0.0)) return 0;
+        !(cfg->error_tolerance > 0.0)) {
+        diagnostics->failure_reason = NL_MD_FAILURE_INVALID_CONTROLS;
+        return 0;
+    }
 
     double K, G;
     md_elastic_moduli(m, stress, &K, &G);
-    if (!(K > 0.0) || !(G > 0.0) || !isfinite(K) || !isfinite(G)) return 0;
+    if (!(K > 0.0) || !(G > 0.0) || !isfinite(K) || !isfinite(G)) {
+        diagnostics->failure_reason = NL_MD_FAILURE_ELASTIC_MODULI;
+        return 0;
+    }
     const tensor_t elastic_trial = md_elastic_increment(de, K, G);
-    if (md_ddot(md_sub(*alpha, *alpha_in), elastic_trial) < 0.0)
-        *alpha_in = *alpha;
+    if (md_ddot(md_sub(alpha_work, alpha_in_work), elastic_trial) < 0.0)
+        alpha_in_work = alpha_work;
 
     const tensor_t trial = md_add(stress, elastic_trial);
     const double trial_p = md_trace(trial)/3.0+1.0e-2*m->P_atm;
-    const double trial_f = md_yield(m, trial, *alpha);
+    const double trial_f = md_yield(m, trial, alpha_work);
     if (trial_p >= 1.0e-2*m->P_atm && trial_f <= cfg->error_tolerance) {
         stress = trial;
-        *dynamic_stress = md_sub(md_scale(stress, -1.0), static_stress);
+        const tensor_t dynamic_next = md_sub(
+            md_scale(stress, -1.0), static_stress);
+        if (!md_finite(dynamic_next)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+            return 0;
+        }
+        *dynamic_stress = dynamic_next;
+        *alpha = alpha_work;
+        *alpha_in = alpha_in_work;
+        *fabric = fabric_work;
+        *initialized = initialized_work;
         *yield_error = fmax(trial_f, 0.0);
         *accepted_substeps = 1;
-        return md_finite(*dynamic_stress);
+        diagnostics->effective_mean_stress = md_trace(stress)/3.0;
+        return 1;
     }
 
     double T = 0.0;
     double dT = 1.0;
-    const double current_f = md_yield(m, stress, *alpha);
+    const double current_f = md_yield(m, stress, alpha_work);
     if (current_f < -cfg->error_tolerance &&
         trial_f > cfg->error_tolerance) {
         double elastic_ratio = 0.0;
         if (!md_elastic_yield_intersection(
-                m, stress, elastic_trial, *alpha, cfg->error_tolerance,
-                &elastic_ratio)) return 0;
+                m, stress, elastic_trial, alpha_work, cfg->error_tolerance,
+                &elastic_ratio)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_YIELD_INTERSECTION;
+            return 0;
+        }
         stress = md_add(stress, md_scale(elastic_trial, elastic_ratio));
         T = elastic_ratio;
         dT = 1.0-elastic_ratio;
@@ -711,38 +847,67 @@ NL_HD static int nl_update_manzari_dafalias(
     const double dT_min = 1.0e-6;
     int attempts = 0;
     while (T < 1.0-DBL_EPSILON) {
-        if (++attempts > 4*cfg->no_substeps) return 0;
+        if (++attempts > 4*cfg->no_substeps) {
+            diagnostics->failure_reason = NL_MD_FAILURE_ATTEMPT_LIMIT;
+            diagnostics->attempts = attempts;
+            return 0;
+        }
+        diagnostics->attempts = attempts;
+        if (*accepted_substeps >= cfg->no_substeps) {
+            diagnostics->failure_reason = NL_MD_FAILURE_SUBSTEP_LIMIT;
+            return 0;
+        }
         dT = fmin(dT, 1.0-T);
+        diagnostics->substep_fraction = dT;
+        diagnostics->effective_mean_stress = md_trace(stress)/3.0;
         const tensor_t de_step = md_scale(de, dT);
         const tensor_t strain_at_end = md_add(
             md_scale(strain_prev, -1.0), md_scale(de, T+dT));
         const double e_step = m->e_init-
             (1.0+m->e_init)*md_trace(strain_at_end);
         const nl_md_stage_t first = md_stage(
-            m, stress, *alpha, *fabric, *alpha_in, e_step, de_step, K, G);
-        if (!first.ok) return 0;
+            m, stress, alpha_work, fabric_work, alpha_in_work,
+            e_step, de_step, K, G);
+        if (!first.ok) {
+            diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
+            return 0;
+        }
         const tensor_t predictor_stress = md_add(stress, first.dsigma);
         const double predictor_p = md_trace(predictor_stress)/3.0+
                                    1.0e-2*m->P_atm;
         if (predictor_p < 1.0e-2*m->P_atm) {
-            if (dT <= dT_min) return 0;
+            diagnostics->effective_mean_stress =
+                md_trace(predictor_stress)/3.0;
+            if (dT <= dT_min) {
+                diagnostics->failure_reason = NL_MD_FAILURE_TENSILE_PREDICTOR;
+                return 0;
+            }
             dT = fmax(0.1*dT, dT_min);
             continue;
         }
         const nl_md_stage_t second = md_stage(
-            m, predictor_stress, md_add(*alpha, first.dalpha),
-            md_add(*fabric, first.dfabric), *alpha_in, e_step, de_step,
-            K, G);
-        if (!second.ok) return 0;
+            m, predictor_stress, md_add(alpha_work, first.dalpha),
+            md_add(fabric_work, first.dfabric), alpha_in_work,
+            e_step, de_step, K, G);
+        if (!second.ok) {
+            diagnostics->failure_reason = NL_MD_FAILURE_SECOND_STAGE;
+            return 0;
+        }
         const double stress_norm = md_norm(stress);
         const double error_denominator = stress_norm < 0.5
             ? 1.0 : 2.0*stress_norm;
         const double step_error =
             md_norm(md_sub(second.dsigma, first.dsigma))/error_denominator;
-        if (!isfinite(step_error)) return 0;
+        diagnostics->local_error = step_error;
+        if (!isfinite(step_error)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_NONFINITE_LOCAL_ERROR;
+            return 0;
+        }
         if (step_error > cfg->backbone_error_tolerance) {
             if (dT <= dT_min) {
                 *integration_error = step_error;
+                diagnostics->failure_reason =
+                    NL_MD_FAILURE_LOCAL_ERROR_MIN_STEP;
                 return 0;
             }
             const double q = fmax(0.8*sqrt(
@@ -751,28 +916,59 @@ NL_HD static int nl_update_manzari_dafalias(
             continue;
         }
 
-        stress = md_add(stress, md_scale(
+        /* Build the entire candidate in local temporaries. A failed yield
+         * correction must not modify committed history; reject it, reduce the
+         * constitutive fraction, and retry from the same accepted state. */
+        tensor_t candidate_stress = md_add(stress, md_scale(
             md_add(first.dsigma, second.dsigma), 0.5));
-        *alpha = md_add(*alpha, md_scale(
+        tensor_t candidate_alpha = md_add(alpha_work, md_scale(
             md_add(first.dalpha, second.dalpha), 0.5));
-        *fabric = md_add(*fabric, md_scale(
+        tensor_t candidate_fabric = md_add(fabric_work, md_scale(
             md_add(first.dfabric, second.dfabric), 0.5));
-        pstrain = md_add(pstrain, md_scale(
+        tensor_t candidate_pstrain = md_add(pstrain, md_scale(
             md_add(first.dpstrain, second.dpstrain), 0.5));
-        *plastic_multiplier += 0.5*(first.dgamma+second.dgamma);
-        *integration_error = fmax(*integration_error, step_error);
-        (*accepted_substeps)++;
-        if (*accepted_substeps > cfg->no_substeps) return 0;
+        const double candidate_multiplier = *plastic_multiplier+
+            0.5*(first.dgamma+second.dgamma);
 
         double correction_residual = 0.0;
+        int32_t correction_iterations = 0;
+        int32_t projection_used = 0;
         if (!md_stress_correction(
-                m, &stress, alpha, *fabric, *alpha_in, e_step,
-                elastic_trial, &pstrain, K, G, cfg->error_tolerance,
-                cfg->no_substeps,
-                &correction_residual)) {
-            *yield_error = correction_residual;
-            return 0;
+                m, stress, &candidate_stress, &candidate_alpha,
+                candidate_fabric, alpha_in_work, e_step,
+                elastic_trial, &candidate_pstrain, K, G,
+                cfg->error_tolerance, cfg->no_substeps,
+                &correction_residual, &correction_iterations,
+                &projection_used)) {
+            diagnostics->correction_residual = correction_residual;
+            diagnostics->correction_iterations =
+                correction_iterations > diagnostics->correction_iterations
+                    ? correction_iterations
+                    : diagnostics->correction_iterations;
+            diagnostics->correction_retries++;
+            diagnostics->effective_mean_stress =
+                md_trace(candidate_stress)/3.0;
+            if (dT <= dT_min) {
+                *yield_error = correction_residual;
+                diagnostics->failure_reason =
+                    NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP;
+                return 0;
+            }
+            dT = fmax(0.5*dT, dT_min);
+            continue;
         }
+        diagnostics->correction_iterations =
+            correction_iterations > diagnostics->correction_iterations
+                ? correction_iterations : diagnostics->correction_iterations;
+        diagnostics->projection_fallbacks += projection_used;
+
+        stress = candidate_stress;
+        alpha_work = candidate_alpha;
+        fabric_work = candidate_fabric;
+        pstrain = candidate_pstrain;
+        *plastic_multiplier = candidate_multiplier;
+        *integration_error = fmax(*integration_error, step_error);
+        (*accepted_substeps)++;
         *yield_error = fmax(*yield_error, correction_residual);
         T += dT;
         if (T >= 1.0-DBL_EPSILON) break;
@@ -781,18 +977,30 @@ NL_HD static int nl_update_manzari_dafalias(
         dT = fmin(fmax(q*dT, dT_min), 1.0-T);
     }
 
-    *dynamic_stress = md_sub(md_scale(stress, -1.0), static_stress);
-    *plastic_strain = md_scale(pstrain, -1.0);
-    const double final_f = md_yield(m, stress, *alpha);
+    const tensor_t dynamic_next = md_sub(md_scale(stress, -1.0), static_stress);
+    const tensor_t plastic_next = md_scale(pstrain, -1.0);
+    const double final_f = md_yield(m, stress, alpha_work);
     if (!isfinite(final_f)) {
         *yield_error = DBL_MAX;
+        diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
         return 0;
     }
     *yield_error = fmax(*yield_error, fabs(final_f));
-    return md_finite(*dynamic_stress) && md_finite(*plastic_strain) &&
-           md_finite(*alpha) && md_finite(*alpha_in) && md_finite(*fabric) &&
-           isfinite(*yield_error) &&
-           *yield_error < cfg->error_tolerance;
+    if (!md_finite(dynamic_next) || !md_finite(plastic_next) ||
+        !md_finite(alpha_work) || !md_finite(alpha_in_work) ||
+        !md_finite(fabric_work) || !isfinite(*yield_error) ||
+        !(*yield_error < cfg->error_tolerance)) {
+        diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+        return 0;
+    }
+    *dynamic_stress = dynamic_next;
+    *plastic_strain = plastic_next;
+    *alpha = alpha_work;
+    *alpha_in = alpha_in_work;
+    *fabric = fabric_work;
+    *initialized = initialized_work;
+    diagnostics->effective_mean_stress = md_trace(stress)/3.0;
+    return 1;
 }
 
 #undef NL_HD
@@ -808,6 +1016,33 @@ __device__ static inline void nl_record_error(nonlinear_gpu_error_t *error,
         error->qp = qp;
         error->residual = residual;
         error->value = value;
+    }
+}
+
+__device__ static inline void nl_record_md_error(
+    nonlinear_gpu_error_t *error, int32_t eindex, int32_t qp,
+    double residual, double integration_error,
+    int32_t accepted_substeps, const nl_md_diagnostics_t *diagnostics,
+    tensor_t stress,
+    tensor_t strain_increment)
+{
+    if (atomicCAS(&error->code, 0, 3) == 0) {
+        error->eindex = eindex;
+        error->qp = qp;
+        error->md_reason = diagnostics->failure_reason;
+        error->md_attempts = diagnostics->attempts;
+        error->md_accepted_substeps = accepted_substeps;
+        error->md_correction_retries = diagnostics->correction_retries;
+        error->md_correction_iterations = diagnostics->correction_iterations;
+        error->md_projection_fallbacks = diagnostics->projection_fallbacks;
+        error->residual = residual;
+        error->value = integration_error;
+        error->md_substep_fraction = diagnostics->substep_fraction;
+        error->md_effective_mean_stress =
+            diagnostics->effective_mean_stress;
+        error->md_strain_increment_norm = md_norm(strain_increment);
+        error->md_stress = stress;
+        error->md_strain_increment = strain_increment;
     }
 }
 
@@ -1909,7 +2144,8 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                                           tensor_t *fabric,
                                           double *md_initialized,
                                           double *md_integration_error,
-                                          int32_t *md_substeps)
+                                          int32_t *md_substeps,
+                                          nl_md_diagnostics_t *md_diagnostics)
 {
     const materialmodel_t model = cfg->material_model;
 
@@ -1920,7 +2156,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         const int ok = nl_update_manzari_dafalias(
             c, cfg, strain, strain_prev, static_stress, sigma, pstrain,
             backstress, sref, fabric, md_initialized, epbar, psi_state, fs,
-            md_integration_error, &accepted);
+            md_integration_error, &accepted, md_diagnostics);
         *load_unload_state = (double)accepted;
         *md_substeps = accepted;
         *model_error = *fs;
@@ -2055,6 +2291,7 @@ __global__ static void kernel_nonlinear_material_point_history(
         double ep_bar_next = ep_bar;
         double fs = 0.0;
         double model_error = 0.0;
+        nl_md_diagnostics_t md_diagnostics = {};
 
         const int ok = nl_update_material(
             &constants, &config, strain_history[step], strain_prev, nl_zero(),
@@ -2062,7 +2299,8 @@ __global__ static void kernel_nonlinear_material_point_history(
             &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
             &psi, &load_unload, &tao, &tao_max, &kappa,
             &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error,
-            &fabric, &md_initialized, &md_integration_error, &md_substeps);
+            &fabric, &md_initialized, &md_integration_error, &md_substeps,
+            &md_diagnostics);
 
         nonlinear_material_point_result_t result = {};
         result.stress = stress;
@@ -2257,6 +2495,7 @@ __global__ static void kernel_nonlinear_update_force(
 
             double model_error = 0.0;
             int32_t md_substeps = 0;
+            nl_md_diagnostics_t md_diagnostics = {};
             const tensor_t static_stress =
                 (cfg.material_model == MANZARI_DAFALIAS)
                 ? nl_md_static_stress(c, &cfg, element.h, qp) : nl_zero();
@@ -2281,7 +2520,8 @@ __global__ static void kernel_nonlinear_update_force(
                 (cfg.material_model == MANZARI_DAFALIAS)
                     ? &state.fabric[nl_eindex].qp[qp] : NULL,
                 &state.sv_max[nl_eindex].qv[qp],
-                &state.kappa[nl_eindex].qv[qp], &md_substeps);
+                &state.kappa[nl_eindex].qv[qp], &md_substeps,
+                &md_diagnostics);
 
             if (MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
                 c->fs[qp] = model_error;
@@ -2295,9 +2535,18 @@ __global__ static void kernel_nonlinear_update_force(
                 c->fs[qp] = model_error;
                 if (!ok || !isfinite(model_error) ||
                     model_error > cfg.error_tolerance) {
-                    nl_record_error(state.error, 3, eindex, qp,
-                                    model_error,
-                                    state.kappa[nl_eindex].qv[qp]);
+                    const tensor_t md_stress = md_scale(md_add(
+                        state.stresses[nl_eindex].qp[qp], static_stress),
+                        -1.0);
+                    nl_record_md_error(
+                        state.error, eindex, qp,
+                        fmax(model_error,
+                             md_diagnostics.correction_residual),
+                        fmax(state.kappa[nl_eindex].qv[qp],
+                             md_diagnostics.local_error),
+                        md_substeps,
+                        &md_diagnostics, md_stress,
+                        md_sub(strain, strain_prev));
                 }
             } else if (!ok || !isfinite(c->fs[qp])) {
                 nl_record_error(state.error, 1, eindex, qp, c->fs[qp],
@@ -2462,6 +2711,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             cudaMemset(g_nl.error, 0, sizeof(nonlinear_gpu_error_t)),
             "error buffer initialization") != 0) return -1;
 
+    g_mesh_host = mesh;
     g_active = 1;
     if (myID == 0) {
         fprintf(stderr,
@@ -2667,6 +2917,96 @@ void nonlinear_gpu_check_error(int32_t myID)
                 "(code=%d element=%d qp=%d residual=%12.8E value=%12.8E)\n",
                 myID, g_error_host.code, g_error_host.eindex,
                 g_error_host.qp, g_error_host.residual, g_error_host.value);
+        if (g_error_host.code == 3) {
+            const char *reason = "unknown";
+            switch (g_error_host.md_reason) {
+            case NL_MD_FAILURE_INITIAL_PRESSURE:
+                reason = "non-positive initial effective mean stress"; break;
+            case NL_MD_FAILURE_INVALID_CONTROLS:
+                reason = "invalid integration controls or void ratio"; break;
+            case NL_MD_FAILURE_ELASTIC_MODULI:
+                reason = "invalid pressure-dependent elastic moduli"; break;
+            case NL_MD_FAILURE_YIELD_INTERSECTION:
+                reason = "elastic/yield intersection did not converge"; break;
+            case NL_MD_FAILURE_ATTEMPT_LIMIT:
+                reason = "maximum total constitutive attempts reached"; break;
+            case NL_MD_FAILURE_FIRST_STAGE:
+                reason = "first Modified-Euler stage is invalid"; break;
+            case NL_MD_FAILURE_TENSILE_PREDICTOR:
+                reason = "predictor reached the minimum effective pressure";
+                break;
+            case NL_MD_FAILURE_SECOND_STAGE:
+                reason = "second Modified-Euler stage is invalid"; break;
+            case NL_MD_FAILURE_NONFINITE_LOCAL_ERROR:
+                reason = "non-finite local integration error"; break;
+            case NL_MD_FAILURE_LOCAL_ERROR_MIN_STEP:
+                reason = "local-error target failed at minimum substep";
+                break;
+            case NL_MD_FAILURE_SUBSTEP_LIMIT:
+                reason = "maximum accepted constitutive substeps reached";
+                break;
+            case NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP:
+                reason = "yield correction failed at minimum substep"; break;
+            case NL_MD_FAILURE_FINAL_STATE:
+                reason = "final constitutive state is inadmissible"; break;
+            default:
+                break;
+            }
+            fprintf(stderr,
+                    "  Manzari-Dafalias reason: %s (reason=%d)\n"
+                    "  attempts=%d accepted_substeps=%d "
+                    "correction_retries=%d max_correction_iterations=%d "
+                    "segment_projections=%d\n"
+                    "  substep_fraction=%12.8E local_error=%12.8E "
+                    "yield_residual=%12.8E effective_mean_stress=%12.8E Pa "
+                    "strain_increment_norm=%12.8E\n",
+                    reason, g_error_host.md_reason,
+                    g_error_host.md_attempts,
+                    g_error_host.md_accepted_substeps,
+                    g_error_host.md_correction_retries,
+                    g_error_host.md_correction_iterations,
+                    g_error_host.md_projection_fallbacks,
+                    g_error_host.md_substep_fraction, g_error_host.value,
+                    g_error_host.residual,
+                    g_error_host.md_effective_mean_stress,
+                    g_error_host.md_strain_increment_norm);
+            fprintf(stderr,
+                    "  pre-step effective stress (compression positive): "
+                    "xx=%12.8E yy=%12.8E zz=%12.8E xy=%12.8E "
+                    "yz=%12.8E xz=%12.8E Pa\n"
+                    "  Hercules strain increment: "
+                    "xx=%12.8E yy=%12.8E zz=%12.8E xy=%12.8E "
+                    "yz=%12.8E xz=%12.8E\n",
+                    g_error_host.md_stress.xx,
+                    g_error_host.md_stress.yy,
+                    g_error_host.md_stress.zz,
+                    g_error_host.md_stress.xy,
+                    g_error_host.md_stress.yz,
+                    g_error_host.md_stress.xz,
+                    g_error_host.md_strain_increment.xx,
+                    g_error_host.md_strain_increment.yy,
+                    g_error_host.md_strain_increment.zz,
+                    g_error_host.md_strain_increment.xy,
+                    g_error_host.md_strain_increment.yz,
+                    g_error_host.md_strain_increment.xz);
+            if (g_mesh_host != NULL && g_error_host.eindex >= 0 &&
+                g_error_host.eindex < g_mesh_host->lenum) {
+                const elem_t *element =
+                    &g_mesh_host->elemTable[g_error_host.eindex];
+                const node_t *node =
+                    &g_mesh_host->nodeTable[element->lnid[0]];
+                const edata_t *edata = (const edata_t *)element->data;
+                const double h = edata != NULL ? edata->edgesize : 0.0;
+                const double x = node->x*g_mesh_host->ticksize;
+                const double y = node->y*g_mesh_host->ticksize;
+                const double z = node->z*g_mesh_host->ticksize;
+                fprintf(stderr,
+                        "  element origin=(%.6f, %.6f, %.6f) m "
+                        "center=(%.6f, %.6f, %.6f) m h=%.6f m\n",
+                        x, y, z, x+0.5*h, y+0.5*h, z+0.5*h, h);
+            }
+        }
+        fflush(stderr);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
@@ -2754,11 +3094,12 @@ int nonlinear_manzari_dafalias_host_history(
         double yield_error = 0.0;
         double integration_error = 0.0;
         int32_t accepted_substeps = 0;
+        nl_md_diagnostics_t diagnostics = {};
         const int ok = nl_update_manzari_dafalias(
             constants, config, strain_history[step], strain_prev, md_zero(),
             &stress, &plastic_strain, &alpha, &alpha_in, &fabric,
             &initialized, &void_ratio, &dgamma, &yield_error,
-            &integration_error, &accepted_substeps);
+            &integration_error, &accepted_substeps, &diagnostics);
 
         nonlinear_material_point_result_t result = {};
         result.stress = stress;
@@ -2799,6 +3140,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
 #undef NL_FREE
     memset(&g_nl, 0, sizeof(g_nl));
+    g_mesh_host = NULL;
     g_active = 0;
 }
 #endif

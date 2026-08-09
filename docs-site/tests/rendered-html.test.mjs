@@ -287,6 +287,12 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.match(psolve, /g_cpmlBuild\.face_mask != NULL/);
   assert.match(psolve, /g_cpmlHostElementBits\[bit_index >> 3\]/);
   assert.match(psolve, /CPML membership is unavailable before nonlinear/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
 
   const gpu = await (await render("/docs/gpu-execution")).text();
   assert.match(gpu, /solid elements in the absorbing band remain linear elastic/);
@@ -403,12 +409,16 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
-  assert.match(gpu, /accepted_substeps > cfg->no_substeps/);
+  assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
   assert.match(gpu, /cfg->error_tolerance/);
   assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
   assert.match(gpu, /trial_f <= cfg->error_tolerance/);
   assert.match(gpu, /out\.dalpha = md_zero\(\)/);
   assert.match(gpu, /md_elastic_yield_intersection/);
+  assert.match(gpu, /md_stress_segment_projection/);
+  assert.match(gpu, /A failed yield[\s\S]*correction must not modify committed history/);
+  assert.match(gpu, /dT = fmax\(0\.5\*dT, dT_min\)/);
+  assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));

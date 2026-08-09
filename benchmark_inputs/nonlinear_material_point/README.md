@@ -106,11 +106,15 @@ at its elastic yield intersection before integrating the plastic remainder,
 matching the OpenSees transition. Elastic stages preserve alpha, fabric, and
 plastic strain; only
 plastic flow evolves those history variables. After an accepted
-plastic substep, the stress-correction loop
-permits at most `min(no_substeps, 50)` iterations. If it cannot reduce the
-absolute residual to the tolerance, Hercules rejects the constitutive update
-and the production GPU error check aborts with Manzari--Dafalias failure code
-3 rather than continuing from an off-surface state. The model
+plastic substep, the stress-correction loop permits at most
+`min(no_substeps, 50)` iterations. A corrected candidate is committed only
+after it satisfies the absolute residual. When Newton/backtracking cannot do
+so, Hercules first permits a genuinely bracketed segment projection; otherwise
+it rejects the complete candidate, halves the local constitutive fraction, and
+retries from the last accepted state. The production GPU error check aborts
+with Manzari--Dafalias failure code 3 only when the minimum fraction or another
+integration limit is reached, rather than continuing from an off-surface or
+partially updated state. The model
 is currently GPU-only in production; the host invocation here is a regression
 driver for the shared constitutive arithmetic, not a second production
 backend. This host/CUDA parity check is not independent physical validation;
