@@ -20,15 +20,15 @@ and the remaining solver modules compile concurrently. This also keeps an edit
 limited to host orchestration from triggering the previously expensive NVCC
 compilation of the entire solver source.
 
-The Manzari--Dafalias and legacy nonlinear CUDA implementations still make
-`nonlinear_gpu.cu` the most expensive forward-solver object. When NVCC
-advertises `--split-compile`, the forward Makefile uses up to eight compiler
-threads for that object's device optimization passes. Override
-`NONLINEAR_GPU_SPLIT_COMPILE` in `user.mk` or on the make command line when the
-build node has a different CPU budget; a value of `1` disables the option. For
-example, `make -j 8 NONLINEAR_GPU_SPLIT_COMPILE=4` limits the inner NVCC job to
-four optimizer threads. Prefer an explicit outer job count such as `-j 8` over
-bare `-j`, which gives GNU Make no concurrency limit.
+The Manzari--Dafalias and legacy nonlinear CUDA implementations make PTX
+assembly the most expensive forward-solver build phase. The Makefile therefore
+compiles the production element-update kernel into `nonlinear_gpu.o` and the
+material-point history kernel into `nonlinear_gpu_material_point.o`. Both
+objects use the same constitutive source and equations, with mutually exclusive
+compile-time wrappers, so `make -j 8` can run their independent NVCC/PTX
+assembly jobs concurrently without relocatable device code. Prefer an explicit
+outer job count such as `-j 8` over bare `-j`, which gives GNU Make no
+concurrency limit.
 
 Runtime performance toggles (no source edits needed):
 

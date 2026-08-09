@@ -67,7 +67,7 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /data-label="Parameter"/);
 });
 
-test("parallelizes host, CUDA launch, and nonlinear compiler work", async () => {
+test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
 
@@ -79,12 +79,17 @@ test("parallelizes host, CUDA launch, and nonlinear compiler work", async () => 
     makefile,
     /psolve_gpu_launch\.o:\s*psolve_gpu_launch\.cu[\s\S]*?\$\(NVCC\)[^\n]*-c \$< -o \$@/,
   );
-  assert.match(makefile, /NONLINEAR_GPU_SPLIT_COMPILE\s*\?=\s*8/);
-  assert.match(makefile, /NVCC_HAS_SPLIT_COMPILE[\s\S]*?--split-compile/);
   assert.match(
     makefile,
-    /nonlinear_gpu\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*\$\(NONLINEAR_GPU_NVFLAGS\)[^\n]*-c \$< -o \$@/,
+    /nonlinear_gpu\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_PRODUCTION_ONLY[^\n]*-c \$< -o \$@/,
   );
+  assert.match(
+    makefile,
+    /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
+  );
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  assert.match(gpu, /#ifndef NL_GPU_PRODUCTION_ONLY\s+__global__ static void kernel_nonlinear_material_point_history/);
+  assert.match(gpu, /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_accumulate_stress_force/);
   assert.ok(
     launchHeader.indexOf('#include "quake_util.h"') <
       launchHeader.indexOf('#include "topography.h"'),
@@ -95,8 +100,8 @@ test("parallelizes host, CUDA launch, and nonlinear compiler work", async () => 
   assert.match(html, /psolve\.cc/);
   assert.match(html, /psolve_gpu_launch\.cu/);
   assert.match(html, /make -j 8/);
-  assert.match(html, /NONLINEAR_GPU_SPLIT_COMPILE/);
-  assert.match(html, /--split-compile/);
+  assert.match(html, /nonlinear_gpu_material_point\.o/);
+  assert.match(html, /PTX assembly/);
 });
 
 test("documents every parameters.in key parsed by the current source tree", () => {

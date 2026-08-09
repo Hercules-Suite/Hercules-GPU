@@ -15,19 +15,6 @@ CXXFLAGS += $(CFLAGS)
 NVFLAGS ?= -O3
 NVFLAGS += -Xcompiler "$(CFLAGS)"
 
-# nonlinear_gpu.cu contains the complete device constitutive implementation and
-# is substantially more expensive to optimize than the other CUDA translation
-# units. CUDA toolchains that advertise split compilation can parallelize those
-# optimization passes without enabling relocatable device code or requiring a
-# source-level kernel split. Set this to 1 in user.mk (or on the make command
-# line) to disable split compilation; use a smaller value on constrained nodes.
-NONLINEAR_GPU_SPLIT_COMPILE ?= 8
-NVCC_HAS_SPLIT_COMPILE := $(shell $(NVCC) --help 2>/dev/null | \
-	grep -q -- '--split-compile' && printf yes)
-ifeq ($(NVCC_HAS_SPLIT_COMPILE),yes)
-NONLINEAR_GPU_NVFLAGS = --split-compile=$(NONLINEAR_GPU_SPLIT_COMPILE)
-endif
-
 # Enable OpenMP by default; users can still override with USE_OPENMP=0.
 USE_OPENMP ?= 1
 
@@ -80,7 +67,8 @@ endif
 #
 # Object modules
 #
-PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o nonlinear_gpu.o \
+PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o \
+	nonlinear_gpu.o nonlinear_gpu_material_point.o \
 	commutil.o util.o output.o io_planes.o io_checkpoint.o stiffness.o \
 	damping.o quake_util.o kernel.o timers.o buildings.o meshformatlab.o drm.o \
 	topography.o drm_planewaves.o basin.o
@@ -142,7 +130,11 @@ stiffness.o: stiffness.cu stiffness.h
 
 nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h \
 	util.h quake_util.h
-	$(NVCC) $(CPPFLAGS) $(NVFLAGS) $(NONLINEAR_GPU_NVFLAGS) -c $< -o $@
+	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_PRODUCTION_ONLY -c $< -o $@
+
+nonlinear_gpu_material_point.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h \
+	psolve.h kernel.h util.h quake_util.h
+	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_MATERIAL_POINT_ONLY -c $< -o $@
 
 kernel.o: kernel.cu kernel.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
