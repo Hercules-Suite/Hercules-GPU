@@ -25,6 +25,7 @@
 #include <cuda_runtime.h>
 
 #include "psolve.h"
+#include "quake_util.h"
 #include "topography.h"
 
 /* Device-only launch details live behind this host-callable interface.  This

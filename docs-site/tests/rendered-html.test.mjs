@@ -72,11 +72,17 @@ test("builds host orchestration and CUDA launch code independently", async () =>
   if (!existsSync(sourceRoot)) return;
 
   const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
+  const launchHeader = readFileSync(`${sourceRoot}psolve_gpu_launch.h`, "utf8");
   assert.match(makefile, /PSOLVE_OBJECTS\s*=\s*psolve\.o psolve_gpu_launch\.o/);
   assert.match(makefile, /psolve\.o:\s*psolve\.cc[\s\S]*?\$\(CXX\)[^\n]*-c \$< -o \$@/);
   assert.match(
     makefile,
     /psolve_gpu_launch\.o:\s*psolve_gpu_launch\.cu[\s\S]*?\$\(NVCC\)[^\n]*-c \$< -o \$@/,
+  );
+  assert.ok(
+    launchHeader.indexOf('#include "quake_util.h"') <
+      launchHeader.indexOf('#include "topography.h"'),
+    "noyesflag_t must be defined before topography and launch declarations",
   );
 
   const html = await (await render("/docs/installation")).text();
