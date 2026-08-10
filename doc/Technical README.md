@@ -529,7 +529,9 @@ Nonlinear GPU execution (runtime environment):
 	geostatic preparation, and GPU upload. Large cases classify nonlinear
 	eligibility once in parallel and compact the cached flags in deterministic
 	element order; large FEM cases also prepare independent PDMY03 element
-	constants in parallel with the configured OpenMP threads. FEM
+	constants in parallel with the configured OpenMP threads. Startup statistics
+	are reduced over the active solver communicator, so unified Phase-A-to-Phase-B
+	handoffs do not wait on inactive mesh ranks. FEM
 	setup does not perform the VT topography-element lookup; that lookup is needed
 	only for the tetrahedral VT formulation. At the elastic-to-plastic transition, Hercules
 	matches OpenSees by clamping tensile mean stress to zero and accepting an

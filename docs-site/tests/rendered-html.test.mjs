@@ -562,6 +562,14 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(
+    cpu,
+    /MPI_Reduce\(&myNonlinElementsCount,[\s\S]{0,160}MPI_SUM, 0, comm_solver\)/,
+  );
+  assert.match(
+    cpu,
+    /MPI_Reduce\(local_phase_seconds,[\s\S]{0,160}MPI_MAX, 0, comm_solver\)/,
+  );
   assert.match(cpu, /myNonlinElementClassification\[eindex\] = selected/);
   assert.match(
     cpu,

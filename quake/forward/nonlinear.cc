@@ -1481,9 +1481,9 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             if (row_surfaces > surface_stride) surface_stride = row_surfaces;
         }
         MPI_Reduce(&myNonlinElementsCount, &global_nonlinear_count, 1,
-                   MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+                   MPI_INT, MPI_SUM, 0, comm_solver);
         MPI_Reduce(&myNonlinElementsCount, &max_local_nonlinear_count, 1,
-                   MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+                   MPI_INT, MPI_MAX, 0, comm_solver);
         if (myID == 0) {
             const size_t host_bytes_per_element =
                 sizeof(nlconstants_t) + 8*sizeof(qptensors_t) +
@@ -2081,14 +2081,14 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         int64_t global_geostatic_count = 0;
         int64_t global_poro_geostatic_count = 0;
         MPI_Reduce(&local_geostatic_min, &global_geostatic_min, 1, MPI_DOUBLE,
-                   MPI_MIN, 0, MPI_COMM_WORLD);
+                   MPI_MIN, 0, comm_solver);
         MPI_Reduce(&local_geostatic_max, &global_geostatic_max, 1, MPI_DOUBLE,
-                   MPI_MAX, 0, MPI_COMM_WORLD);
+                   MPI_MAX, 0, comm_solver);
         MPI_Reduce(&local_geostatic_count, &global_geostatic_count, 1,
-                   MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+                   MPI_LONG_LONG, MPI_SUM, 0, comm_solver);
         MPI_Reduce(&local_poro_geostatic_count,
                    &global_poro_geostatic_count, 1, MPI_LONG_LONG, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
+                   comm_solver);
         if (myID == 0 && global_geostatic_count > 0) {
             fprintf(stderr,
                     "Approximate geostatic state: integrated 1-D overburden "
@@ -2144,7 +2144,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         };
         double maximum_phase_seconds[4] = {};
         MPI_Reduce(local_phase_seconds, maximum_phase_seconds, 4, MPI_DOUBLE,
-                   MPI_MAX, 0, MPI_COMM_WORLD);
+                   MPI_MAX, 0, comm_solver);
         if (myID == 0) {
 #ifdef _OPENMP
             const int initialization_threads =
