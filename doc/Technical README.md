@@ -646,8 +646,25 @@ Nonlinear GPU execution (runtime environment):
 	buildup, effective stress path, and confinement drift in PNG and PDF form.
 	It does not validate nonuniform pressure, Darcy diffusion, drainage/open-pore
 	boundaries, multi-element exchange, or the complete production time-stepping loop. The
-	full commands and input-only controls are documented in
-	`benchmark_inputs/nonlinear_material_point/README.md`.
+		full commands and input-only controls are documented in
+		`benchmark_inputs/nonlinear_material_point/README.md`.
+- Two additional coupled one-element workflows use OpenSees
+		`PressureDependMultiYield03` with `SSPbrickUP -lumped`. Both consolidate to
+		100 kPa, close the pressure drainage constraints, enable plastic stage 1,
+		and replay the same affine strain path through Hercules PDMY03 and the
+		production BrickUP CUDA pressure kernels. One follows a reversing undrained
+		triaxial path at constant total radial confinement. The other preserves the
+		consolidated lateral strains, maintains total vertical confinement, and
+		applies four cycles of x-z simple shear; its OpenSees reference reaches
+		`r_u` approximately one. The shared comparator reports effective- and
+		total-stress NRMSE, pore-pressure and `r_u` differences, and the relevant
+		confinement drift. Acceptance thresholds are intentionally not hard-coded
+		until both generated replays are reviewed on the target CUDA/MPI system.
+- The short PDMY03 suite fixtures also exercise the BrickUP storage update.
+		The cyclic fixture uses the `alpha=1` limit `M=Kf/n`; the zero/tension-onset
+		fixture uses `alpha=0.8` and an explicit material-point grain modulus to
+		check `1/M=(alpha-n)/Ks+n/Kf`. These are standalone numerical regressions,
+		not production calibrations.
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
 	force/displacement norms before a production run. Manzari--Dafalias and
@@ -850,12 +867,14 @@ Acoustic-elastic input flags (input file):
 	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
 	sealed for the pore fluid while the existing acoustic pressure traction
 	still acts on the solid skeleton. Set to `open_pore` to add weak
-	mass-projected pressure continuity on detected acoustic-poroelastic
+	compliance-projected pressure continuity on detected acoustic-poroelastic
 	interface fragments, driving pore pressure toward the adjacent acoustic
-	pressure. This requires `include_acoustic=yes`, the acoustic scalar
-	formulation, and `include_poroelastic=yes`.
+	pressure. The interface weight uses the adjacent poroelastic element's
+	`1/M`, matching the heterogeneous interior pressure capacity. This requires
+	`include_acoustic=yes`, the acoustic scalar formulation, and
+	`include_poroelastic=yes`.
 - `acoustic_poroelastic_pressure_penalty_factor`
-	Optional. Default `1.0`. Multiplies the open-pore weak interface mass
+	Optional. Default `1.0`. Multiplies the open-pore weak interface compliance
 	used by `acoustic_poroelastic_interface=open_pore`. The target exchange
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
@@ -894,9 +913,16 @@ Poroelastic U-P input flags (experimental V1):
 	`Vp` unless a future velocity-convention conversion is added; otherwise the
 	fluid stiffness can be counted twice.
 	When the undrained fast path below is inactive, the
-	displacement-pressure coupling uses one shared 2x2x2-Gauss BrickUP
-	coupling operator, applied as `Q p` in the skeleton force path and as
-	`Q^T du` in the pore-pressure source path. The GPU path is matrix-free:
+		displacement-pressure coupling uses one shared 2x2x2-Gauss BrickUP
+		coupling operator, applied as `Q p` in the skeleton force path and as
+		`alpha Q^T du` in the pore-pressure source path. The pressure equation is
+		assembled in compliance form,
+		`C dp = -alpha Q^T du - dt H p`, where each nodal capacity is
+		`C_i = sum_e integral(N_i/M_e dV)` and `H` contains Darcy mobility
+		`k/mu`. Keeping `1/M_e` inside the element capacity supports neighboring
+		elements with different dry/drained moduli and therefore different Biot
+		storage moduli; it also avoids moving one element's `M` onto a shared
+		node. The GPU path is matrix-free:
 	setup precomputes the
 	poroelastic element mapper and topography-aware pressure-test weights,
 	then CUDA kernels apply the coupling operators and pressure update. With a
@@ -921,9 +947,14 @@ Poroelastic U-P input flags (experimental V1):
 	configured value remains `yes`, but the effective runtime path is the
 	explicit `Q p` coupling needed by the constitutive skeleton.
 - `poroelastic_depth_max_m`
-	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
-	within this depth below the local ground surface are eligible for
-	poroelastic classification.
+		Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
+		within this depth below the local ground surface are eligible for
+		poroelastic classification. When nonlinear analysis is enabled, startup
+		prints a `Nonlinear/BrickUP map` summary showing how many nonlinear
+		elements are active BrickUP elements and how many are above groundwater,
+		below this depth limit, in CPML, or otherwise unmapped. A warning is
+		issued when nonlinear elements lie below the limit because they receive no
+		pore-pressure feedback.
 - `surface_groundwatertable`
 	Optional. `no` (default) means the groundwater level is the local
 	ground surface, so eligible shallow soil is saturated from the
@@ -941,16 +972,18 @@ Poroelastic U-P input flags (experimental V1):
 	are always positive depth below the local ground surface, so `100.0`
 	means the water table is 100 m below ground everywhere.
 - `poroelastic_surface_pressure_bc`
-	Optional. `undrained` (default) leaves pore pressure unconstrained at
-	the saturated surface. `drained` applies a weak, mass-projected
-	Dirichlet condition on the groundwater/free-drainage plane: the solver
-	assembles a nodal drained-plane mass from a 2x2 quadrature rule on the
-	water-table cut plane inside the first saturated element, then blends
-	the free pressure update toward zero using that mass. This avoids the
-	old nearest-node hard clamp when the water table cuts through an
-	element.
+		Optional. `undrained` (default) leaves pore pressure unconstrained at
+		the saturated surface. `drained` applies a weak, compliance-projected
+		Dirichlet condition on the groundwater/free-drainage plane: the solver
+		assembles a nodal drained-plane capacity from a 2x2 quadrature rule on the
+		water-table cut plane inside the first saturated element, then blends
+		the free pressure update toward zero using that capacity. The plane term
+		uses the adjacent element's `1/M`, so it has the same units as the
+		interior pressure capacity even when `M` varies spatially. This avoids the
+		old nearest-node hard clamp when the water table cuts through an
+		element.
 - `poroelastic_surface_pressure_penalty_factor`
-	Optional. Default `1.0`. Scales the weak drained-plane mass used by
+		Optional. Default `1.0`. Scales the weak drained-plane capacity used by
 	`poroelastic_surface_pressure_bc = drained`; larger values enforce
 	closer-to-zero pore pressure on the plane, while `0.0` disables the
 	weak projection without changing the classification.
@@ -972,8 +1005,17 @@ Poroelastic U-P input flags (experimental V1):
 	`poroelastic_fluid_viscosity_pa_s` (default `1.0e-3`), and
 	`poroelastic_permeability_x_m2`,
 	`poroelastic_permeability_y_m2`,
-	`poroelastic_permeability_z_m2` (all default `0.0`, i.e. undrained
-	no-diffusion response).
+		`poroelastic_permeability_z_m2` (all default `0.0`, i.e. undrained
+		no-diffusion response).
+
+For nonlinear BrickUP runs, a positive `geostatic_loading_time_sec` with all
+three permeability values exactly zero is rejected during startup. Such a
+gravity ramp is undrained: it can place the applied overburden into the pore
+pressure unknown instead of establishing the intended effective skeleton
+stress. Use `approximate_geostatic_state = yes` with zero loading and cushion
+times, or use a physically calibrated permeability and consolidation interval.
+The approximate-state path initializes the constitutive effective stress and
+keeps the pressure unknown as excess pressure.
 
 CPML policy for poroelasticity: PML elements are kept acoustic or
 elastic only. Any saturated poroelastic candidate inside the CPML zone is

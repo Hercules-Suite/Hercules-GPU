@@ -12,6 +12,15 @@ material_point_compare_rtol = 1.0e-9
 material_point_compare_atol = 1.0e-9
 material_point_output_prefix = pdmy03_zero_tension_onset_synthetic
 
+# Exercise the general Biot storage relation for alpha<1:
+# 1/M=(alpha-n)/Ks+n/Kf.
+material_point_brickup = yes
+material_point_brickup_porosity = 0.4
+material_point_brickup_fluid_bulk_modulus_pa = 2.2e9
+material_point_brickup_biot_alpha = 0.8
+material_point_brickup_solid_bulk_modulus_pa = 1.1e9
+material_point_initial_pore_pressure_pa = 0.0
+
 # Gref Kref phi peak_gamma ref_pressure pressure_exponent PT_angle mType
 # ca cb cc cd ce da db dc surfaces liquefaction1 liquefaction2 Patm cohesion
 material_point_constants =

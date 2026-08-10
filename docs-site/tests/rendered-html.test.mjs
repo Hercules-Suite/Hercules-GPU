@@ -139,8 +139,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 224);
-  assert.equal(documented.length, 224, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 225);
+  assert.equal(documented.length, 225, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -553,7 +553,17 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const core = readFileSync(`${sourceRoot}nonlinear_pdmy03.h`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const pressureKernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const cyclicFixture = readFileSync(
+    `${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`,
+    "utf8",
+  );
+  const onsetFixture = readFileSync(
+    `${benchmarkRoot}pdmy03_zero_tension_onset_synthetic.in`,
+    "utf8",
+  );
 
   assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
@@ -602,6 +612,18 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03.py`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_triaxial.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03_brickup.py`));
+  assert.match(cyclicFixture, /material_point_brickup_biot_alpha = 1\.0/);
+  assert.match(onsetFixture, /material_point_brickup_biot_alpha = 0\.8/);
+  assert.match(onsetFixture, /material_point_brickup_solid_bulk_modulus_pa/);
+  assert.match(psolve, /nodalPoreVolume \/ storageM/);
+  assert.match(cpu, /Nonlinear\/BrickUP map:/);
+  assert.match(psolve, /geostatic_loading_time_sec=%g with zero permeability/);
+  assert.match(pressureKernel, /const double mobility\[3\] = \{mobilityX, mobilityY, mobilityZ\}/);
+  assert.match(pressureKernel, /double rhs = -qtDeltaU\[j\] - deltaT \* diffusionWeak\[j\]/);
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 
