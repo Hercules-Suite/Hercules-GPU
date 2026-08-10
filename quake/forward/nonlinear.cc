@@ -122,6 +122,8 @@ static int32_t              *myNonlinStationsMapping;
 static int32_t               myNumberOfNonlinStations;
 static int32_t               myNonlinElementsCount = 0;
 static int32_t              *myNonlinElementsMapping;
+static uint8_t              *myNonlinElementClassification;
+static int32_t               myNonlinElementClassificationCount;
 static int32_t               myBottomElementsCount = 0;
 static bottomelement_t      *myBottomElements;
 static int32_t               theNonlinearFlag = 0;
@@ -1177,11 +1179,30 @@ void nonlinear_elements_count(int32_t myID, mesh_t *myMesh) {
     int32_t eindex;
     int32_t count = 0;
 
-    for (eindex = 0; eindex < myMesh->lenum; eindex++) {
-
-        if ( isThisElementNonLinear(myMesh, eindex) == YES ) {
-            count++;
+    free(myNonlinElementClassification);
+    myNonlinElementClassification = NULL;
+    myNonlinElementClassificationCount = 0;
+    if (myMesh->lenum > 0) {
+        myNonlinElementClassification = (uint8_t *)malloc(
+            (size_t)myMesh->lenum*sizeof(*myNonlinElementClassification));
+        if (myNonlinElementClassification == NULL) {
+            fprintf(stderr,
+                    "Thread %d: nonlinear element classification is out of "
+                    "memory\n", myID);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
         }
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(myMesh->lenum >= 100000) \
+    reduction(+:count)
+#endif
+    for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+        const uint8_t selected =
+            (isThisElementNonLinear(myMesh, eindex) == YES) ? 1u : 0u;
+        myNonlinElementClassification[eindex] = selected;
+        count += (int32_t)selected;
     }
 
     if ( count > myMesh-> lenum ) {
@@ -1192,6 +1213,7 @@ void nonlinear_elements_count(int32_t myID, mesh_t *myMesh) {
     }
 
     myNonlinElementsCount = count;
+    myNonlinElementClassificationCount = myMesh->lenum;
 
     return;
 }
@@ -1207,13 +1229,28 @@ void nonlinear_elements_mapping(int32_t myID, mesh_t *myMesh) {
 
     XMALLOC_VAR_N(myNonlinElementsMapping, int32_t, myNonlinElementsCount);
 
-    for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+    if (myNonlinElementClassification == NULL ||
+        myNonlinElementClassificationCount != myMesh->lenum) {
+        fprintf(stderr,
+                "Thread %d: nonlinear element classification cache is "
+                "unavailable\n", myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
 
-        if ( isThisElementNonLinear(myMesh, eindex) == YES ) {
+    /* Preserve the historical ascending-eindex ordering. The expensive
+     * eligibility predicate has already run in parallel; this compact byte
+     * scan is memory-bandwidth bound and avoids a second predicate pass. */
+    for (eindex = 0; eindex < myMesh->lenum; eindex++) {
+        if (myNonlinElementClassification[eindex] != 0u) {
             myNonlinElementsMapping[count] = eindex;
             count++;
         }
     }
+
+    free(myNonlinElementClassification);
+    myNonlinElementClassification = NULL;
+    myNonlinElementClassificationCount = 0;
 
     if ( count != myNonlinElementsCount ) {
         fprintf(stderr,"Thread %d: nl_elements_mapping: "
@@ -1415,6 +1452,21 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
+    }
+
+    if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 && myID == 0) {
+#ifdef _OPENMP
+        const int classification_threads =
+            myMesh->lenum >= 100000 ? omp_get_max_threads() : 1;
+#else
+        const int classification_threads = 1;
+#endif
+        fprintf(stderr,
+                "PDMY03 initialization: classifying %d local mesh elements "
+                "on rank 0 with %d host thread%s\n",
+                myMesh->lenum, classification_threads,
+                classification_threads == 1 ? "" : "s");
+        fflush(stderr);
     }
 
     nonlinear_elements_count(myID, myMesh);

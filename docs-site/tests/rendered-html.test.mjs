@@ -562,6 +562,11 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(cpu, /myNonlinElementClassification\[eindex\] = selected/);
+  assert.match(
+    cpu,
+    /#pragma omp parallel for schedule\(static\) if\(myMesh->lenum >= 100000\)/,
+  );
   assert.match(
     cpu,
     /#pragma omp parallel for if\(parallel_pdmy03_initialization\)[\s\S]{0,1000}const int32_t eindex = myNonlinElementsMapping\[nl_eindex\]/,

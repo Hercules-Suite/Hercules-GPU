@@ -526,8 +526,10 @@ Nonlinear GPU execution (runtime environment):
 	count actually present on the local rank. Startup reports the global and
 	maximum per-rank nonlinear counts, estimated host/device constitutive storage,
 	and maximum-rank timings for classification, host allocation, constant and
-	geostatic preparation, and GPU upload. Large FEM cases prepare independent
-	PDMY03 element constants in parallel with the configured OpenMP threads. FEM
+	geostatic preparation, and GPU upload. Large cases classify nonlinear
+	eligibility once in parallel and compact the cached flags in deterministic
+	element order; large FEM cases also prepare independent PDMY03 element
+	constants in parallel with the configured OpenMP threads. FEM
 	setup does not perform the VT topography-element lookup; that lookup is needed
 	only for the tetrahedral VT formulation. At the elastic-to-plastic transition, Hercules
 	matches OpenSees by clamping tensile mean stress to zero and accepting an
