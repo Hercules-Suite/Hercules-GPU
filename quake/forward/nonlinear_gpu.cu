@@ -3739,7 +3739,7 @@ void nonlinear_gpu_check_error(int32_t myID)
             switch (g_error_host.md_reason) {
             case PDMY03_FAILURE_CONSTANTS:
                 reason = "invalid constants or substep control"; break;
-            case PDMY03_FAILURE_INITIAL_PRESSURE:
+            case PDMY03_FAILURE_INITIAL_GEOMETRY:
                 reason = "initial nested-surface geometry is invalid"; break;
             case PDMY03_FAILURE_NONFINITE:
                 reason = "non-finite constitutive state"; break;

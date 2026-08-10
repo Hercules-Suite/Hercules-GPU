@@ -19,7 +19,7 @@
 typedef enum pdmy03_failure_t {
     PDMY03_SUCCESS = 0,
     PDMY03_FAILURE_CONSTANTS = 1,
-    PDMY03_FAILURE_INITIAL_PRESSURE = 2,
+    PDMY03_FAILURE_INITIAL_GEOMETRY = 2,
     PDMY03_FAILURE_NONFINITE = 3,
     PDMY03_FAILURE_SURFACE_GEOMETRY = 4
 } pdmy03_failure_t;
@@ -772,7 +772,7 @@ PDMY03_HD static inline int pdmy03_update(
     }
     if (!state->initialized) {
         if (!pdmy03_initialize_state(c, state, centers, &current)) {
-            diagnostics->reason = PDMY03_FAILURE_INITIAL_PRESSURE;
+            diagnostics->reason = PDMY03_FAILURE_INITIAL_GEOMETRY;
             diagnostics->mean_stress = pdmy03_mean(current);
             return 0;
         }
