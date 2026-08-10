@@ -5,12 +5,20 @@
 #include "nonlinear.h"
 #include "quake_util.h"
 
+typedef enum nl_md_recovery_mode_t {
+    NL_MD_RECOVERY_STRICT = 0,
+    NL_MD_RECOVERY_FORCE_ACCEPT = 1,
+    NL_MD_RECOVERY_UNLIMITED_SUBSTEPS = 2,
+    NL_MD_RECOVERY_OPENSEES = 3
+} nl_md_recovery_mode_t;
+
 typedef struct nonlinear_gpu_config_t {
     materialmodel_t material_model;
     noyesflag_t approximate_geostatic_state;
     noyesflag_t tension_cutoff;
     int32_t geostatic_final_step;
     int32_t no_substeps;
+    nl_md_recovery_mode_t md_recovery_mode;
     double error_tolerance;
     double backbone_error_tolerance;
     double stiff_damp;

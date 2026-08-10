@@ -112,8 +112,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 223);
-  assert.equal(documented.length, 223, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 224);
+  assert.equal(documented.length, 224, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -374,6 +374,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const generator = readFileSync(
     `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
@@ -407,6 +408,9 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
+  assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
+  assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
+  assert.match(gpuHeader, /NL_MD_RECOVERY_STRICT[\s\S]*NL_MD_RECOVERY_OPENSEES/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
   assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
@@ -425,8 +429,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /md_stress_segment_projection/);
   assert.match(gpu, /A failed yield[\s\S]*correction must not modify committed history/);
   assert.match(gpu, /dT = fmax\(0\.5\*dT, dT_min\)/);
+  assert.match(gpu, /fabs\(denominator\) < 1\.0e-10[\s\S]*neutral-loading branch/i);
+  assert.match(gpu, /out\.neutral = 1/);
+  assert.match(gpu, /first\.dgamma == 0\.0 && !first\.neutral/);
+  assert.match(gpu, /md_force_accept_candidate/);
+  assert.match(gpu, /!unlimited_substeps && attempts > 4LL\*cfg->no_substeps/);
+  assert.match(gpu, /cfg->md_recovery_mode == NL_MD_RECOVERY_OPENSEES[\s\S]*1\.0e-6/);
   assert.match(gpu, /strain_roundoff =\s*64\.0\*DBL_EPSILON/);
-  assert.match(gpu, /fmax\(1\.0e-9, strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
+  assert.match(gpu, /fmax\(1\.0e-9,\s*strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
   assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
   assert.match(gpu, /md_minimum_mean_stress/);
   assert.match(gpu, /md_complete_at_pressure_floor/);
@@ -449,6 +459,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`));
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
+  assert.match(generator, /--recovery-mode/);
+  assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
   assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("4", "complete"\)/);

@@ -232,6 +232,12 @@ def main() -> int:
     parser.add_argument("--backbone-errtol", type=float, default=1.0e-5)
     parser.add_argument("--yield-tolerance-pa", type=float, default=1.0e-1)
     parser.add_argument("--maximum-substeps", type=int, default=400)
+    parser.add_argument(
+        "--recovery-mode",
+        choices=("strict", "force_accept", "unlimited_substeps", "opensees"),
+        default="strict",
+        help="Manzari-Dafalias adaptive recovery policy (default: strict)",
+    )
     args = parser.parse_args()
 
     test_id, source_rows = read_path(args.opensees_csv)
@@ -255,6 +261,7 @@ def main() -> int:
         "material_point_delta_time_sec = 1.0",
         f"material_point_steps = {len(rows)}",
         f"no_substeps = {args.maximum_substeps}",
+        f"manzari_dafalias_recovery = {args.recovery_mode}",
         f"error_tolerance = {args.yield_tolerance_pa:.17e}",
         f"backbone_errTol = {args.backbone_errtol:.17e}",
         "tension_cutoff = no",

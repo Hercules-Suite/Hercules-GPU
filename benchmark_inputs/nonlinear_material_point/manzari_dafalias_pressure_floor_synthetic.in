@@ -4,6 +4,7 @@ material_model = ManzariDafalias
 material_point_delta_time_sec = 1.0
 material_point_steps = 5
 no_substeps = 400
+manzari_dafalias_recovery = strict
 error_tolerance = 1.0e-1
 backbone_errTol = 1.0e-4
 tension_cutoff = no

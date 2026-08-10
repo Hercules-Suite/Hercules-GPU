@@ -457,6 +457,11 @@ Nonlinear GPU execution (runtime environment):
 	alpha before evaluating the hardening modulus when a new reversal is found.
 	This preserves the required positive loading-side hardening gap for a
 	multiaxial direction switch inside one global increment.
+	A consistency denominator with magnitude below `1e-10` follows the
+	UW/OpenSees neutral-loading branch: stress and directional history remain
+	unchanged while the local strain is assigned to plastic strain. Any other
+	invalid first or second Modified-Euler stage is rejected and retried with a
+	smaller fraction before Hercules reports failure.
 	Final validation retains that one-sided elastic condition, so a negative
 	yield function represents a valid state inside the surface; the absolute
 	criterion remains confined to plastic stress correction.
@@ -473,22 +478,31 @@ Nonlinear GPU execution (runtime environment):
 	the stress and strain-increment tensors. A minimum-local-error failure also
 	reports both Modified-Euler raw/accepted plastic multipliers, consistency
 	denominators, hardening moduli/gaps, and integration progress so a
-	loading-switch discontinuity can be
-	distinguished from an ordinary insufficient substep. Unlike the OpenSees minimum-step
-	fallback, Hercules does not accept a state whose embedded Modified-Euler
-	error exceeds `backbone_errTol`. Its normalized local-fraction floor adapts
-	between `1e-9` and `1e-6` from the strain roundoff scale, allowing large
-	global increments to be subdivided further while avoiding numerically
-	unrepresentable work for an already tiny increment. This error-control floor
+	loading-switch discontinuity can be distinguished from an ordinary
+	insufficient substep. `manzari_dafalias_recovery` selects the exhaustion
+	policy. `strict` is the default and retains finite accepted/rejected-work
+	limits without accepting a state above `backbone_errTol`. `force_accept`
+	retains those limits but, at the minimum local fraction, commits a finite,
+	stress-ratio-capped admissible state in the style of the OpenSees fallback.
+	The stress cap is mapped through the elastic compliance so the additive
+	strain split is preserved; alpha and alpha-in are recentered on the accepted
+	stress while the finite candidate fabric is retained.
+	`unlimited_substeps` disables the accepted-substep and rejected-attempt caps
+	while retaining the strict error test. `opensees` combines force acceptance,
+	uncapped work, and the fixed OpenSees normalized minimum fraction of `1e-6`.
+	The other modes use a normalized local-fraction floor that adapts between
+	`1e-9` and `1e-6` from the strain roundoff scale. Non-strict modes are
+	opt-in robustness fallbacks: they can increase runtime or accept a state
+	whose embedded error exceeds `backbone_errTol`, so the startup report names
+	the active policy and production results require independent checking. This
+	error-control floor
 	is distinct from the physical effective-pressure cutoff
 	`p_min=1e-4 P_atm`. Predictor and averaged-candidate crossings are first
 	resolved by adaptive fraction reduction. At the minimum representable
 	fraction, the remaining total strain is completed on an isotropic `p_min`
 	state; plastic strain is updated consistently with the elastic stress change,
 	and alpha/alpha-in are reset. This prevents tensile skeleton stress without
-	returning a partially integrated global increment. The finite
-	`no_substeps`/attempt limits and strict local-error criterion remain active for
-	non-cutoff integration failures.
+	returning a partially integrated global increment.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
