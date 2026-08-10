@@ -25,6 +25,10 @@
 #include <gsl/gsl_poly.h>
 #include <stdio.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_multiroots.h>
 #include <gsl/gsl_errno.h>
@@ -1389,6 +1393,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                            mysolver_t *mySolver, double depth) {
 
     int32_t eindex, nl_eindex;
+    const double nonlinear_init_start = MPI_Wtime();
+    double nonlinear_mapping_end;
+    double nonlinear_allocation_end;
+    double nonlinear_constants_end;
     double local_geostatic_min = DBL_MAX;
     double local_geostatic_max = 0.0;
     int64_t local_geostatic_count = 0;
@@ -1410,7 +1418,45 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
     }
 
     nonlinear_elements_count(myID, myMesh);
+
+    if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+        int32_t global_nonlinear_count = 0;
+        int32_t max_local_nonlinear_count = 0;
+        int32_t surface_stride = 0;
+        for (int32_t row = 0; row < thePropertiesCount; row++) {
+            const int32_t row_surfaces =
+                (int32_t)llround(thePdmy03Properties[16][row]);
+            if (row_surfaces > surface_stride) surface_stride = row_surfaces;
+        }
+        MPI_Reduce(&myNonlinElementsCount, &global_nonlinear_count, 1,
+                   MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&myNonlinElementsCount, &max_local_nonlinear_count, 1,
+                   MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+        if (myID == 0) {
+            const size_t host_bytes_per_element =
+                sizeof(nlconstants_t) + 8*sizeof(qptensors_t) +
+                10*sizeof(qpvectors_t);
+            const size_t device_bytes_per_element =
+                host_bytes_per_element + 2*sizeof(double) +
+                8*(sizeof(pdmy03_state_t) +
+                   (size_t)surface_stride*sizeof(tensor_t));
+            fprintf(stderr,
+                    "PDMY03 initialization: %d nonlinear elements globally "
+                    "(maximum %d on one rank), %d surfaces; estimated "
+                    "maximum-rank host/device constitutive storage "
+                    "%.1f/%.1f MiB\n",
+                    global_nonlinear_count, max_local_nonlinear_count,
+                    surface_stride,
+                    (double)((size_t)max_local_nonlinear_count*
+                             host_bytes_per_element)/(1024.0*1024.0),
+                    (double)((size_t)max_local_nonlinear_count*
+                             device_bytes_per_element)/(1024.0*1024.0));
+            fflush(stderr);
+        }
+    }
+
     nonlinear_elements_mapping(myID, myMesh);
+    nonlinear_mapping_end = MPI_Wtime();
 
     if ( theGeostaticLoadingT > 0 ) {
         bottom_elements_count(myID, myMesh, depth);
@@ -1498,17 +1544,49 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         exit(1);
     }
 
+    nonlinear_allocation_end = MPI_Wtime();
+
     /* Initialization of element constants
      * Tensors have been initialized to 0 by calloc
      */
 
+    /* PDMY03 production meshes can contain millions of nonlinear elements.
+     * Their per-element constants and approximate geostatic seeds are
+     * independent, and the FEM/topography queries below are read-only. Keep
+     * the legacy/VT path serial because get_tetraProps() was not designed as
+     * a concurrent setup routine. */
+    const int parallel_pdmy03_initialization =
+        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) &&
+        (get_topo_meth() != VT) && (myNonlinElementsCount >= 1000);
+    if (myID == 0 && theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+#ifdef _OPENMP
+        const int initialization_threads = parallel_pdmy03_initialization
+            ? omp_get_max_threads() : 1;
+#else
+        const int initialization_threads = 1;
+#endif
+        fprintf(stderr,
+                "PDMY03 initialization: preparing element constants and "
+                "geostatic state with %d host thread%s\n",
+                initialization_threads,
+                initialization_threads == 1 ? "" : "s");
+        fflush(stderr);
+    }
+#ifdef _OPENMP
+#pragma omp parallel for if(parallel_pdmy03_initialization) schedule(static) \
+    reduction(min:local_geostatic_min) reduction(max:local_geostatic_max) \
+    reduction(+:local_geostatic_count,local_poro_geostatic_count)
+#else
+    (void)parallel_pdmy03_initialization;
+#endif
     for (nl_eindex = 0; nl_eindex < myNonlinElementsCount; nl_eindex++) {
 
         elem_t     *elemp;
         edata_t    *edata;
         nlconstants_t *ecp;
         double      mu, lambda;
-        double      elementVs, PIn, tau_max, sigma_c, OCR;
+        double      elementVs;
+        double      PIn = 0.0, tau_max = 0.0, OCR = 0.0;
         // double      elementVp;
 
         eindex = myNonlinElementsMapping[nl_eindex];
@@ -1573,24 +1651,26 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
         }
 
-        // Shi & Asimaki (2017) && Darendeli's table 8.7
-        sigma_c = 1000 * 0.1060 * pow( edata->Vs, 1.470 ) ;  // preconsolidation ratio (Pa)
-        OCR     = sigma_c/edata->sigma_0;                    // Overconsolidation ratio
+        /* These Darendeli correlations are used only by BAH and MKZ. They
+         * used to run for every nonlinear family, including PDMY03 and MD,
+         * which added several unnecessary pow() calls per element during
+         * large production initializations. */
+        if (theMaterialModel == VONMISES_BAH ||
+            theMaterialModel == VONMISES_MKZ) {
+            const double sigma_c =
+                1000 * 0.1060 * pow(edata->Vs, 1.470);
+            OCR = sigma_c/edata->sigma_0;
+            if (OCR > 4.0) OCR = 4.0;
 
-        if ( OCR > 4.0 )
-            OCR = 4.0;
+            if (edata->Vs <= 200.0)
+                PIn = 10.0;
+            else if (edata->Vs <= 360.0)
+                PIn = 5.0;
 
-        if ( edata->Vs <= 200.0 )
-            PIn = 10.0;
-        else if ( edata->Vs > 200.0 &&  edata->Vs <= 360.0  )
-            PIn = 5.0;
-        else
-            PIn = 0.0;
-
-        tau_max            = 1.20 * ( 0.28 * pow( OCR , 0.80 ) * edata->sigma_0 ); // tau_max depends on sigma vertical
-
-        if ( tau_max < 50000.0 )
-            tau_max = 50000.0;
+            tau_max = 1.20 *
+                (0.28 * pow(OCR, 0.80) * edata->sigma_0);
+            if (tau_max < 50000.0) tau_max = 50000.0;
+        }
 
 
         /* Calculate the yield function constants */
@@ -1920,7 +2000,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
 
         // check and update topo-database if this is a VT toponolinear element. Do nothing if this is a FEM topoelement
-        if ( get_topo_nonlin_flag() && isTopoElement ( myMesh, eindex, 1) && ( get_topo_meth() == VT ) ) {
+        if (get_topo_nonlin_flag() && (get_topo_meth() == VT) &&
+            isTopoElement(myMesh, eindex, 1)) {
             //if ( get_topo_meth() == VT )
             ecp->isTopoNonlin = 1; // Identify it as nonlinear tetrahedron element
             get_tetraProps( eindex, ecp->tetraVol, &ecp->topoPart ); // get tetrahedral volumes and cube partition
@@ -1939,6 +2020,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
 
     } /* for all elements */
+
+    nonlinear_constants_end = MPI_Wtime();
 
     if (theApproxGeoState == YES) {
         double global_geostatic_min = 0.0;
@@ -1998,6 +2081,36 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 "Nonlinear backend: CPU (explicit "
                 "HERCULES_NONLINEAR_BACKEND override, GSL reference path)\n");
         fflush(stderr);
+    }
+
+    if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+        const double local_phase_seconds[4] = {
+            nonlinear_mapping_end - nonlinear_init_start,
+            nonlinear_allocation_end - nonlinear_mapping_end,
+            nonlinear_constants_end - nonlinear_allocation_end,
+            MPI_Wtime() - nonlinear_constants_end
+        };
+        double maximum_phase_seconds[4] = {};
+        MPI_Reduce(local_phase_seconds, maximum_phase_seconds, 4, MPI_DOUBLE,
+                   MPI_MAX, 0, MPI_COMM_WORLD);
+        if (myID == 0) {
+#ifdef _OPENMP
+            const int initialization_threads =
+                parallel_pdmy03_initialization ? omp_get_max_threads() : 1;
+#else
+            const int initialization_threads = 1;
+#endif
+            fprintf(stderr,
+                    "PDMY03 initialization complete: classify/map=%.2fs, "
+                    "host-allocation=%.2fs, constants/geostatic=%.2fs "
+                    "(%d thread%s), GPU-upload/allocation=%.2fs "
+                    "(maximum rank times)\n",
+                    maximum_phase_seconds[0], maximum_phase_seconds[1],
+                    maximum_phase_seconds[2], initialization_threads,
+                    initialization_threads == 1 ? "" : "s",
+                    maximum_phase_seconds[3]);
+            fflush(stderr);
+        }
     }
 
 }

@@ -561,6 +561,11 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 : 16/);
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
+  assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(
+    cpu,
+    /get_topo_nonlin_flag\(\)[\s\S]{0,100}get_topo_meth\(\) == VT[\s\S]{0,100}isTopoElement/,
+  );
   assert.match(core, /pdmy03_requested_substeps/);
   assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
   assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
