@@ -164,7 +164,8 @@ typedef struct nlconstants_t {
     double strainrate;
     double sensitivity;
 
-    double sigmaZ_st;    /* static vertical stress */
+    double sigmaZ_st;       /* static effective vertical stress at center */
+    double sigmaZ_gradient; /* local effective vertical stress gradient */
 
     manzari_dafalias_constants_t md;
 
@@ -417,7 +418,8 @@ void MatUpd_vMGeneralII ( nlconstants_t el_cnt, double *kappa,
 		                double *gamma1D, double *tao1D, double *GGmax1D  );
 
 
-tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz, double rho);
+tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz,
+                              double vertical_stress_gradient);
 
 
 int get_displacements ( mysolver_t *solver, elem_t *elemp, fvector_t *u );
@@ -514,4 +516,3 @@ void nonlinear_yield_stats(mesh_t *myMesh, int32_t myID, int32_t theTotalSteps, 
 void check_balance( int32_t myID );
 
 #endif /* Q_NONLINEAR_H */
-

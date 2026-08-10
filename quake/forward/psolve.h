@@ -871,6 +871,15 @@ int cpml_pml_element( int32_t eindex );
  * membership bitset, so it remains valid after solver_init(). */
 int cpml_pml_flattened_element( int32_t eindex );
 
+/* Return the Biot-weighted hydrostatic stress alpha*rho_f*g*z_w at the
+ * center of an active BrickUP element. `unit_weight_correction` receives
+ * alpha*rho_f*g for the local through-element K0 gradient. Both are zero for
+ * elements outside the poroelastic map. The production pressure unknown is
+ * excess pore pressure, so this correction belongs in the static effective
+ * stress rather than in pore_pressure_tm1/tm2. */
+double poroelastic_geostatic_stress_correction(
+    mesh_t *mesh, int32_t eindex, double *unit_weight_correction );
+
 
 #ifdef __cplusplus
 }

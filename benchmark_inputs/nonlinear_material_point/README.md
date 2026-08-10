@@ -87,12 +87,18 @@ production defaults.
 - `manzari_dafalias_modified_euler_synthetic.in` establishes isotropic
   confinement, applies a cyclic tensor-shear path, and checks the same
   allocation-free Modified-Euler implementation on host and CUDA. Its CSV adds
-  alpha, alpha-in, fabric, void ratio, plastic multiplier, absolute yield
-  residual, local integration error, and accepted-substep diagnostics.
+  alpha, alpha-in, fabric, void ratio, plastic multiplier, controlled yield
+  residual, local integration error, and accepted-substep diagnostics. The
+  recorded residual is absolute for plastic stress correction and one-sided
+  for an admissible elastic state inside the yield surface.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler
   integration of only the plastic remainder.
+- `manzari_dafalias_pressure_floor_synthetic.in` starts from weak isotropic
+  confinement, dilates through the physical effective-pressure cutoff, dwells,
+  and reloads in compression. It verifies finite host/CUDA state, identical
+  cutoff behavior, and recovery from `p_min=1e-4 P_atm`.
 
 Manzari--Dafalias reuses the production nonlinear integration controls rather
 than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
@@ -103,14 +109,38 @@ correction. The elastic predictor retains the one-sided admissibility check
 `f_trial <= error_tolerance`, so a genuinely elastic state may remain inside
 the surface. An increment that starts strictly inside but ends outside is split
 at its elastic yield intersection before integrating the plastic remainder,
-matching the OpenSees transition. Elastic stages preserve alpha, fabric, and
-plastic strain; only
-plastic flow evolves those history variables. After an accepted
-plastic substep, the stress-correction loop
-permits at most `min(no_substeps, 50)` iterations. If it cannot reduce the
-absolute residual to the tolerance, Hercules rejects the constitutive update
-and the production GPU error check aborts with Manzari--Dafalias failure code
-3 rather than continuing from an off-surface state. The model
+matching the OpenSees transition. The OpenSees reversal-direction criterion is
+also reapplied to the evolving accepted state at each adaptive substep, so a
+multiaxial direction switch re-anchors alpha-in before the hardening modulus is
+evaluated. Elastic stages preserve alpha, fabric, and plastic strain; only
+plastic flow evolves those history variables. A near-zero consistency
+denominator follows the OpenSees neutral-loading branch, while any other
+invalid Modified-Euler stage is first rejected and retried at a smaller local
+fraction. After an accepted
+plastic substep, the stress-correction loop permits at most
+`min(no_substeps, 50)` iterations. A corrected candidate is committed only
+after it satisfies the absolute residual. When Newton/backtracking cannot do
+so, Hercules first permits a genuinely bracketed segment projection; otherwise
+it rejects the complete candidate, halves the local constitutive fraction, and
+retries from the last accepted state. The production GPU error check aborts
+with Manzari--Dafalias failure code 3 only when the minimum fraction or another
+integration limit is reached, rather than continuing from an off-surface or
+partially updated state. `manzari_dafalias_recovery` selects the exhaustion
+policy: `strict` (default) keeps finite work caps and strict local error;
+`force_accept` keeps the caps but permits a finite admissible OpenSees-style
+fallback at the minimum fraction; `unlimited_substeps` disables accepted and
+rejected work caps while retaining strict error control; and `opensees`
+combines force acceptance, uncapped work, and the fixed `1e-6` OpenSees
+fraction floor. The non-OpenSees modes use a strain-roundoff-aware floor
+between `1e-9` and `1e-6`. Non-strict modes can cost substantially more or
+accept a state above `backbone_errTol`; use them explicitly and report the
+selected mode. Effective mean stress has the
+separate physical cutoff `p_min=1e-4 P_atm`. A predictor or averaged candidate
+that crosses it is adaptively reduced before the cutoff is applied. At the
+minimum representable fraction, Hercules completes the unresolved total strain
+on the isotropic cutoff state, updates plastic strain to preserve the additive
+strain split, and resets alpha and alpha-in; it does not return a partially
+integrated global increment. The model
 is currently GPU-only in production; the host invocation here is a regression
 driver for the shared constitutive arithmetic, not a second production
 backend. This host/CUDA parity check is not independent physical validation;
@@ -257,7 +287,9 @@ path-specific acceptance values, CI or a benchmark script may add
 `--max-ru-difference`.
 
 The canonical generator defaults to `backbone_errTol=1e-5` and
-`no_substeps=400`. The tighter local target prevents host/device adaptive-path
+`no_substeps=400` with `manzari_dafalias_recovery=strict`. Pass
+`--recovery-mode` to generate an explicit recovery-policy study. The tighter
+local target prevents host/device adaptive-path
 separation at cyclic reversals. The substep value is a ceiling rather than a
 prescribed workload: the five-cycle undrained characterization required a
 maximum of 112 accepted substeps in the validated run. Override either value

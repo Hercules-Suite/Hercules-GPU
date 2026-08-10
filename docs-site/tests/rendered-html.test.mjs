@@ -112,8 +112,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 223);
-  assert.equal(documented.length, 223, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 224);
+  assert.equal(documented.length, 224, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -187,6 +187,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
   assert.match(physics, /adaptive explicit Modified Euler/);
+  assert.match(physics, /integrates the 1-D density column/);
+  assert.match(physics, /pressure DOF starts at zero as excess pore pressure/);
+  assert.match(physics, /disables the zero-permeability undrained fast path whenever nonlinear analysis is active/);
   assert.match(physics, /legacy Istanbul nl_id classification/);
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
@@ -218,7 +221,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /eleven-fixture suite/);
+  assert.match(gpu, /twelve-fixture suite/);
   assert.match(gpu, /device-first and currently requires the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -287,6 +290,12 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.match(psolve, /g_cpmlBuild\.face_mask != NULL/);
   assert.match(psolve, /g_cpmlHostElementBits\[bit_index >> 3\]/);
   assert.match(psolve, /CPML membership is unavailable before nonlinear/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
 
   const gpu = await (await render("/docs/gpu-execution")).text();
   assert.match(gpu, /solid elements in the absorbing band remain linear elastic/);
@@ -368,6 +377,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const generator = readFileSync(
     `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
@@ -401,18 +411,55 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
+  assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
+  assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
+  assert.match(gpuHeader, /NL_MD_RECOVERY_STRICT[\s\S]*NL_MD_RECOVERY_OPENSEES/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
-  assert.match(gpu, /accepted_substeps > cfg->no_substeps/);
+  assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
   assert.match(gpu, /cfg->error_tolerance/);
   assert.match(gpu, /if \(fabs\(f\) < tolerance\)/);
   assert.match(gpu, /trial_f <= cfg->error_tolerance/);
+  assert.match(gpu, /first\.dgamma == 0\.0 &&[\s\S]*predictor_f <= cfg->error_tolerance/);
+  assert.match(gpu, /Do not evaluate a plastic second[\s\S]*loading switch/);
+  assert.match(gpu, /alpha evolves during accepted Modified-Euler[\s\S]*alpha_in_work = alpha_work/);
+  assert.match(gpu, /first\.hardening_gap < 0\.0 &&[\s\S]*first\.loading_numerator > 0\.0/);
+  assert.match(gpu, /diagnostics->correction_residual = correction_residual/);
+  assert.match(gpu, /fmax\(\*yield_error, fmax\(final_f, 0\.0\)\)/);
+  assert.doesNotMatch(gpu, /fmax\(\*yield_error, fabs\(final_f\)\)/);
   assert.match(gpu, /out\.dalpha = md_zero\(\)/);
   assert.match(gpu, /md_elastic_yield_intersection/);
+  assert.match(gpu, /md_stress_segment_projection/);
+  assert.match(gpu, /A failed yield[\s\S]*correction must not modify committed history/);
+  assert.match(gpu, /dT = fmax\(0\.5\*dT, dT_min\)/);
+  assert.match(gpu, /fabs\(denominator\) < 1\.0e-10[\s\S]*neutral-loading branch/i);
+  assert.match(gpu, /out\.neutral = 1/);
+  assert.match(gpu, /first\.dgamma == 0\.0 && !first\.neutral/);
+  assert.match(gpu, /md_force_accept_candidate/);
+  assert.match(gpu, /!unlimited_substeps && attempts > 4LL\*cfg->no_substeps/);
+  assert.match(gpu, /cfg->md_recovery_mode == NL_MD_RECOVERY_OPENSEES[\s\S]*1\.0e-6/);
+  assert.match(gpu, /strain_roundoff =\s*64\.0\*DBL_EPSILON/);
+  assert.match(gpu, /fmax\(1\.0e-9,\s*strain_roundoff\/fmax\(md_norm\(de\), DBL_MIN\)\)/);
+  assert.match(gpu, /NL_MD_FAILURE_STRESS_CORRECTION_MIN_STEP/);
+  assert.match(gpu, /md_minimum_mean_stress/);
+  assert.match(gpu, /md_complete_at_pressure_floor/);
+  assert.match(gpu, /candidate_mean_stress < minimum_mean_stress/);
+  assert.match(gpu, /Modified-Euler stages:/);
+  assert.match(gpu, /hardening_gap=/);
+  assert.match(gpu, /raw_dgamma=/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
+  assert.match(cpu, /return theNonlinearFlag != 0/);
+  assert.match(cpu, /effective_overburden =\s*\(double\)edata->sigma_0 - pore_stress/);
+  assert.match(cpu, /ecp->sigmaZ_st = effective_overburden/);
+  assert.match(cpu, /pore-pressure unknown stores excess pressure/);
+  assert.match(gpu, /c->sigmaZ_st\+c->sigmaZ_gradient\*h\*lz\*0\.5/);
+  assert.match(gpu, /const tensor_t total_predictor = nl_add\(stress_predictor, static_stress\)/);
+  assert.match(psolve, /poroelastic_geostatic_stress_correction/);
+  assert.match(psolve, /Param\.thePoroelasticBiotAlpha \* Param\.thePoroelasticFluidDensity \* 9\.81/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias.py`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_drained_triaxial.tcl`));
@@ -423,6 +470,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_manzari_dafalias_brickup.py`));
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
+  assert.match(generator, /--recovery-mode/);
+  assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
   assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("4", "complete"\)/);

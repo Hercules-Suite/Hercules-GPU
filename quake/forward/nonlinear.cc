@@ -106,6 +106,7 @@ static double                theBackboneErrorTol     = 1E-05;
 static double                theGeostaticCushionT = 0;
 static int                   theGeostaticFinalStep;
 static int                   theNoSubsteps=1000;
+static nl_md_recovery_mode_t theMdRecoveryMode = NL_MD_RECOVERY_STRICT;
 static double                theStiffDamp   = 0.0;
 static double                theStiffDampFreq = 10.0;
 static int32_t              *myStationsElementIndices;
@@ -137,10 +138,42 @@ int assume_groundwatertable() {
 
 int nonlinear_requires_explicit_pore_pressure() {
     /* The undrained poroelastic fast path folds alpha^2 M into a linear
-     * volumetric stiffness. A pressure-dependent nonlinear skeleton must keep
-     * the Qp traction explicit so its constitutive stress remains effective
-     * stress. */
-    return theNonlinearFlag != 0 && theMaterialModel == MANZARI_DAFALIAS;
+     * volumetric stiffness and bypasses the constitutive volumetric response.
+     * Every nonlinear skeleton must keep Qp explicit; for pressure-dependent
+     * models this is additionally required to keep skeleton stress effective. */
+    return theNonlinearFlag != 0;
+}
+
+static int parse_md_recovery_mode(const char *name,
+                                  nl_md_recovery_mode_t *mode)
+{
+    if (strcasecmp(name, "strict") == 0) {
+        *mode = NL_MD_RECOVERY_STRICT;
+    } else if (strcasecmp(name, "force_accept") == 0) {
+        *mode = NL_MD_RECOVERY_FORCE_ACCEPT;
+    } else if (strcasecmp(name, "unlimited_substeps") == 0) {
+        *mode = NL_MD_RECOVERY_UNLIMITED_SUBSTEPS;
+    } else if (strcasecmp(name, "opensees") == 0) {
+        *mode = NL_MD_RECOVERY_OPENSEES;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+static const char *md_recovery_mode_name(nl_md_recovery_mode_t mode)
+{
+    switch (mode) {
+        case NL_MD_RECOVERY_FORCE_ACCEPT:
+            return "force_accept";
+        case NL_MD_RECOVERY_UNLIMITED_SUBSTEPS:
+            return "unlimited_substeps";
+        case NL_MD_RECOVERY_OPENSEES:
+            return "opensees";
+        case NL_MD_RECOVERY_STRICT:
+        default:
+            return "strict";
+    }
 }
 
 /*
@@ -538,7 +571,7 @@ void nonlinear_init( int32_t     myID,
                      double      theEndT )
 {
     double  double_message[11];
-    int     int_message[12];
+    int     int_message[13];
 
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
@@ -575,9 +608,10 @@ void nonlinear_init( int32_t     myID,
     int_message[9]  = (int)DRMActive;
     int_message[10] = (int)whichDrmPart;
     int_message[11] = (int)theIstanbulVelocityModel;
+    int_message[12] = (int)theMdRecoveryMode;
 
     MPI_Bcast(double_message, 11, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    12, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    13, MPI_INT,    0, comm_solver);
 
     theGeostaticLoadingT  = double_message[0];
     theGeostaticCushionT  = double_message[1];
@@ -603,6 +637,7 @@ void nonlinear_init( int32_t     myID,
     DRMActive                  = (noyesflag_t)int_message[9];
     whichDrmPart               = (drm_part_t)int_message[10];
     theIstanbulVelocityModel   = (noyesflag_t)int_message[11];
+    theMdRecoveryMode          = (nl_md_recovery_mode_t)int_message[12];
 
     /* allocate table of properties for all other PEs */
 
@@ -677,13 +712,15 @@ int32_t nonlinear_initparameters ( const char *parametersin,
              DRMPart[64];
     /* Optional parameters */
     char surf_groundwatertable[64] = "no", // TODO: It seems this parameter does not have any effect anywhere in Hercules.
-        isDRMActive[64] = "no", istanbul_velocity_model[64] = "no";
+        isDRMActive[64] = "no", istanbul_velocity_model[64] = "no",
+        md_recovery_name[64] = "strict";
 
     materialmodel_t      materialmodel;
     plasticitytype_t     plasticitytype;
     noyesflag_t          approxgeostatic = UNSET, surf_groundwater_table = UNSET;
     noyesflag_t          tensioncutoff = UNSET;
     drm_part_t           drmPart = UNSET_DRM_PART;
+    nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
 
     /* Opens numericalin file */
     if ((fp = fopen(parametersin, "r")) == NULL) {
@@ -716,6 +753,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     parsetext(fp, "surface_groundwatertable", 's', &surf_groundwatertable);
     parsetext(fp, "implement_drm", 's', &isDRMActive);
     parsetext(fp, "Istanbul_velocity_model", 's', &istanbul_velocity_model);
+    parsetext(fp, "manzari_dafalias_recovery", 's', &md_recovery_name);
 
     /* Performs sanity checks */
 
@@ -808,6 +846,20 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
 
+    if (parse_md_recovery_mode(md_recovery_name, &md_recovery_mode) != 0) {
+        fprintf(stderr, "Unknown manzari_dafalias_recovery value '%s'; "
+                        "expected strict, force_accept, unlimited_substeps, "
+                        "or opensees\n", md_recovery_name);
+        return -1;
+    }
+    if (materialmodel != MANZARI_DAFALIAS &&
+        md_recovery_mode != NL_MD_RECOVERY_STRICT) {
+        fprintf(stderr, "manzari_dafalias_recovery=%s requires "
+                        "material_model=ManzariDafalias\n",
+                md_recovery_name);
+        return -1;
+    }
+
     if (properties_count < 1) {
         fprintf(stderr, "Illegal material properties count %d\n", properties_count);
         return -1;
@@ -897,6 +949,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theSurfaceGroundwaterTable = surf_groundwater_table;
     theTensionCutoff           = tensioncutoff;
     theNoSubsteps              = no_substeps;
+    theMdRecoveryMode          = md_recovery_mode;
     theStiffDamp               = stff_dmp;
     theStiffDampFreq           = stff_dmp_freq;
 
@@ -1239,6 +1292,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                            mysolver_t *mySolver, double depth) {
 
     int32_t eindex, nl_eindex;
+    double local_geostatic_min = DBL_MAX;
+    double local_geostatic_max = 0.0;
+    int64_t local_geostatic_count = 0;
+    int64_t local_poro_geostatic_count = 0;
 
     if (theMaterialModel == MANZARI_DAFALIAS &&
         !nonlinear_gpu_requested()) {
@@ -1360,17 +1417,6 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         edata = (edata_t *)elemp->data;
         ecp   = myNonlinSolver->constants + nl_eindex;
 
-        int32_t lnid0 = elemp->lnid[0];
-        double  xo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-        double  yo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-        double  zo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-
-        if ( ( get_thebase_topo() != 0.0 ) && ( get_theetree_type() == SQD )  ) {
-                    zo -=  point_elevation ( xo, yo ) ;
-                    if ( zo < 0.0 )
-                        zo = 0.0;
-        }
-
         /* get element Vs */
         elementVs   = (double)edata->Vs;
         // elementVp   = (double)edata->Vp;
@@ -1381,9 +1427,51 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         ecp->lambda = lambda;
         ecp->mu     = mu;
 
-        /* Calculate the vertical stress as a homogeneous half-space */
-        if ( theApproxGeoState == YES )
-            ecp->sigmaZ_st = edata->rho * 9.80 * ( zo + edata->edgesize / 2.0 );
+        /* mesh_correct_properties already integrates the actual 1-D density
+         * column to the element center. Reuse that profile rather than
+         * replacing it with a local-density homogeneous half-space. BrickUP
+         * pressure is an excess-pressure unknown, so initialize the skeleton
+         * with effective overburden and leave the pressure arrays at zero. */
+        if ( theApproxGeoState == YES ) {
+            if (!(edata->sigma_0 > 0.0) || !isfinite(edata->sigma_0)) {
+                fprintf(stderr,
+                        "Thread %d: nonlinear element %d has invalid integrated "
+                        "overburden sigma_0=%g for approximate geostatic state\n",
+                        myID, eindex, (double)edata->sigma_0);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            double pore_unit_weight = 0.0;
+            const double pore_stress = poroelastic_geostatic_stress_correction(
+                myMesh, eindex, &pore_unit_weight);
+            const double effective_overburden =
+                (double)edata->sigma_0 - pore_stress;
+            const double effective_unit_weight =
+                (double)edata->rho * 9.81 - pore_unit_weight;
+            if (!(effective_overburden > 0.0) ||
+                !(effective_unit_weight > 0.0) ||
+                !isfinite(effective_overburden) ||
+                !isfinite(effective_unit_weight)) {
+                fprintf(stderr,
+                        "Thread %d: nonlinear element %d has inadmissible "
+                        "approximate effective overburden=%g Pa or unit "
+                        "weight=%g Pa/m (total=%g Pa, Biot pore correction="
+                        "%g Pa)\n",
+                        myID, eindex, effective_overburden,
+                        effective_unit_weight, (double)edata->sigma_0,
+                        pore_stress);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            ecp->sigmaZ_st = effective_overburden;
+            ecp->sigmaZ_gradient = effective_unit_weight;
+            local_geostatic_min = MIN(local_geostatic_min, ecp->sigmaZ_st);
+            local_geostatic_max = MAX(local_geostatic_max, ecp->sigmaZ_st);
+            local_geostatic_count++;
+            if (pore_unit_weight > 0.0) {
+                local_poro_geostatic_count++;
+            }
+        }
 
         // Shi & Asimaki (2017) && Darendeli's table 8.7
         sigma_c = 1000 * 0.1060 * pow( edata->Vs, 1.470 ) ;  // preconsolidation ratio (Pa)
@@ -1706,6 +1794,36 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     } /* for all elements */
 
+    if (theApproxGeoState == YES) {
+        double global_geostatic_min = 0.0;
+        double global_geostatic_max = 0.0;
+        int64_t global_geostatic_count = 0;
+        int64_t global_poro_geostatic_count = 0;
+        MPI_Reduce(&local_geostatic_min, &global_geostatic_min, 1, MPI_DOUBLE,
+                   MPI_MIN, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_geostatic_max, &global_geostatic_max, 1, MPI_DOUBLE,
+                   MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_geostatic_count, &global_geostatic_count, 1,
+                   MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_poro_geostatic_count,
+                   &global_poro_geostatic_count, 1, MPI_LONG_LONG, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+        if (myID == 0 && global_geostatic_count > 0) {
+            fprintf(stderr,
+                    "Approximate geostatic state: integrated 1-D overburden "
+                    "with K0 effective stress; center sigma_v' range "
+                    "%.6e to %.6e Pa\n",
+                    global_geostatic_min, global_geostatic_max);
+            if (global_poro_geostatic_count > 0) {
+                fprintf(stderr,
+                        "Approximate geostatic/BrickUP coupling: removed "
+                        "alpha*rho_f*g*z_w from %lld nonlinear elements; "
+                        "pore-pressure unknown stores excess pressure\n",
+                        (long long)global_poro_geostatic_count);
+            }
+        }
+    }
+
     if (nonlinear_gpu_requested()) {
         nonlinear_gpu_config_t gpuConfig;
         gpuConfig.material_model = theMaterialModel;
@@ -1713,6 +1831,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         gpuConfig.tension_cutoff = theTensionCutoff;
         gpuConfig.geostatic_final_step = theGeostaticFinalStep;
         gpuConfig.no_substeps = theNoSubsteps;
+        gpuConfig.md_recovery_mode = theMdRecoveryMode;
         gpuConfig.error_tolerance = theErrorTol;
         gpuConfig.backbone_error_tolerance = theBackboneErrorTol;
         gpuConfig.stiff_damp = theStiffDamp;
@@ -2298,10 +2417,11 @@ tensor_t zero_tensor() {
 /*
  * Returns the approximated self-weight tensor.
  */
-tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz, double rho) {
+tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz,
+                              double vertical_stress_gradient) {
 
     double Ko = 1 - sin(phi);
-    double Sigma = -( Szz + 9.8 * rho * h * lz * 0.5);
+    double Sigma = -( Szz + vertical_stress_gradient * h * lz * 0.5);
 
     tensor_t C;
 
@@ -5037,12 +5157,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     char material_name[64] = "";
     char tension_name[64] = "no";
     char brickup_name[64] = "no";
+    char md_recovery_name[64] = "strict";
     char output_prefix[256] = "material-point";
     char cpu_path[320] = "";
     char gpu_path[320] = "";
     materialmodel_t material_model;
     noyesflag_t tension_cutoff = NO;
     noyesflag_t brickup_enabled = NO;
+    nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
     nlconstants_t constants;
     nonlinear_gpu_config_t config;
     nonlinear_material_point_initial_state_t initial_state;
@@ -5082,9 +5204,23 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     parsetext(fp, "material_point_compare_atol", 'd', &atol);
     parsetext(fp, "material_point_output_prefix", 's', output_prefix);
     parsetext(fp, "material_point_brickup", 's', brickup_name);
+    parsetext(fp, "manzari_dafalias_recovery", 's', md_recovery_name);
 
     if (material_point_parse_model(material_name, &material_model) != 0) {
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
+        goto cleanup;
+    }
+    if (parse_md_recovery_mode(md_recovery_name, &md_recovery_mode) != 0) {
+        fprintf(stderr, "Unknown manzari_dafalias_recovery value '%s'; "
+                        "expected strict, force_accept, unlimited_substeps, "
+                        "or opensees\n", md_recovery_name);
+        goto cleanup;
+    }
+    if (material_model != MANZARI_DAFALIAS &&
+        md_recovery_mode != NL_MD_RECOVERY_STRICT) {
+        fprintf(stderr, "manzari_dafalias_recovery=%s requires "
+                        "material_model=ManzariDafalias\n",
+                md_recovery_name);
         goto cleanup;
     }
     material_constant_count = (material_model == MANZARI_DAFALIAS)
@@ -5265,6 +5401,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     config.tension_cutoff = tension_cutoff;
     config.geostatic_final_step = -1;
     config.no_substeps = no_substeps;
+    config.md_recovery_mode = md_recovery_mode;
     config.error_tolerance = error_tolerance;
     config.backbone_error_tolerance = backbone_tolerance;
 
@@ -5407,8 +5544,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 maximum_gpu_integration_error = MAX(
                     maximum_gpu_integration_error, gpu_error);
                 if (cpu_error < 0.0 || gpu_error < 0.0 ||
-                    cpu_error > backbone_tolerance ||
-                    gpu_error > backbone_tolerance) {
+                    (!((md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT) ||
+                       (md_recovery_mode == NL_MD_RECOVERY_OPENSEES)) &&
+                     (cpu_error > backbone_tolerance ||
+                      gpu_error > backbone_tolerance))) {
                     fprintf(stderr, "Material-point local integration error "
                             "exceeds backbone_errTol at step %d: CPU=%.3e "
                             "GPU=%.3e tolerance=%.3e\n", step, cpu_error,
@@ -5453,8 +5592,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 const double cpu_substeps = cpu_values[i];
                 const double gpu_substeps = gpu_values[i];
                 if (cpu_substeps < 0.0 || gpu_substeps < 0.0 ||
-                    cpu_substeps > no_substeps ||
-                    gpu_substeps > no_substeps) {
+                    (!((md_recovery_mode ==
+                           NL_MD_RECOVERY_UNLIMITED_SUBSTEPS) ||
+                       (md_recovery_mode == NL_MD_RECOVERY_OPENSEES)) &&
+                     (cpu_substeps > no_substeps ||
+                      gpu_substeps > no_substeps))) {
                     fprintf(stderr, "Material-point accepted substeps exceed "
                             "the configured limit at step %d field %s: "
                             "CPU=%.0f GPU=%.0f limit=%d\n", step,
@@ -5517,9 +5659,21 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     } else if (material_model == MANZARI_DAFALIAS) {
-        printf("Modified-Euler controls: local error %.6e, maximum "
-               "substeps %d, absolute yield residual %.6e\n",
-               backbone_tolerance, no_substeps, error_tolerance);
+        if (md_recovery_mode == NL_MD_RECOVERY_UNLIMITED_SUBSTEPS ||
+            md_recovery_mode == NL_MD_RECOVERY_OPENSEES) {
+            printf("Modified-Euler controls: local error %.6e, substeps "
+                   "unlimited (no_substeps=%d still caps correction "
+                   "iterations), absolute yield residual %.6e, recovery "
+                   "%s\n", backbone_tolerance, no_substeps,
+                   error_tolerance,
+                   md_recovery_mode_name(md_recovery_mode));
+        } else {
+            printf("Modified-Euler controls: local error %.6e, maximum "
+                   "substeps %d, absolute yield residual %.6e, recovery "
+                   "%s\n", backbone_tolerance, no_substeps,
+                   error_tolerance,
+                   md_recovery_mode_name(md_recovery_mode));
+        }
         printf("Maximum CPU/GPU yield residuals: %.6e / %.6e\n",
                maximum_cpu_residual, maximum_gpu_residual);
         printf("Maximum CPU/GPU local integration errors: %.6e / %.6e\n",
@@ -7386,13 +7540,14 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
         for (i = 0; i < ngp; i++) {
 
             tensor_t  sigma0;
+            double lz = 0.0;
             tstrains1->qp[i]    = copy_tensor ( tstrains->qp[i] ); // get elastic strains at t-1
 
             if ( ngp == 8 ) {
                 /* Quadrature point local coordinates */
                 double lx = xi[0][i] * qc ;
                 double ly = xi[1][i] * qc ;
-                double lz = xi[2][i] * qc ;
+                lz = xi[2][i] * qc ;
 
                 /* Calculate total strains */
                 tstrains->qp[i] = point_strain(u, lx, ly, lz, h);
@@ -7415,12 +7570,12 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
                 continue;
             } else {
 
-               /* if ( theApproxGeoState == YES )
-                    sigma0 = ApproxGravity_tensor(enlcons->sigmaZ_st, enlcons->phi, h, lz, edata->rho);
+                if ( theApproxGeoState == YES )
+                    sigma0 = ApproxGravity_tensor(
+                        enlcons->sigmaZ_st, enlcons->phi, h, lz,
+                        enlcons->sigmaZ_gradient);
                 else
-                    sigma0 = zero_tensor(); */
-
-               sigma0 = zero_tensor(); // Todo: I need to think how to properly include self weight. Doriam
+                    sigma0 = zero_tensor();
 
                 int flagTolSubSteps=0, flagNoSubSteps=0;
                 double ErrBA=0;
@@ -7785,10 +7940,13 @@ void print_nonlinear_stations(mesh_t     *myMesh,
         edata = (edata_t *)elemp->data;
         h     = edata->edgesize;
 
-        /* compute the self-weight stresses at the first Gauss point*/
-        double lz = -0.577350269189;
+        /* Station output stores quadrature point 4, whose local z coordinate
+         * is +1/sqrt(3) in the shared quadrature ordering. */
+        double lz = 0.577350269189;
         if ( theApproxGeoState == YES )
-            sigma0 = ApproxGravity_tensor(enlcons->sigmaZ_st, enlcons->phi, h, lz, edata->rho);
+            sigma0 = ApproxGravity_tensor(
+                enlcons->sigmaZ_st, enlcons->phi, h, lz,
+                enlcons->sigmaZ_gradient);
         else
             sigma0 = zero_tensor();
 

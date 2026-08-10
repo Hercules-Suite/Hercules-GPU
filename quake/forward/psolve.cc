@@ -1720,6 +1720,44 @@ static int poroelastic_element_candidate(mesh_t* mesh, int32_t eindex,
   return 1;
 }
 
+double poroelastic_geostatic_stress_correction(
+    mesh_t* mesh, int32_t eindex, double* unit_weight_correction) {
+  if (unit_weight_correction != NULL) {
+    *unit_weight_correction = 0.0;
+  }
+  if (!poroelastic_enabled() || (mesh == NULL) ||
+      (g_poroelasticElementFlags == NULL) || (eindex < 0) ||
+      (eindex >= mesh->lenum) || (g_poroelasticElementFlags[eindex] == 0u)) {
+    return 0.0;
+  }
+
+  elem_t* elemp = &mesh->elemTable[eindex];
+  edata_t* edata = (edata_t*)elemp->data;
+  if (edata == NULL) {
+    return 0.0;
+  }
+
+  const int32_t lnid0 = elemp->lnid[0];
+  const double h = (double)edata->edgesize;
+  const double north_m = Global.theXForMeshOrigin +
+      (double)mesh->nodeTable[lnid0].x * mesh->ticksize + 0.5 * h;
+  const double east_m = Global.theYForMeshOrigin +
+      (double)mesh->nodeTable[lnid0].y * mesh->ticksize + 0.5 * h;
+  const double raw_depth_m = Global.theZForMeshOrigin +
+      (double)mesh->nodeTable[lnid0].z * mesh->ticksize + 0.5 * h;
+  const double ground_shift = poro_ground_surface_shift(north_m, east_m);
+  const double groundwater_shift =
+      poro_groundwater_shift(north_m, east_m, ground_shift);
+  const double water_depth_m = fmax(raw_depth_m - groundwater_shift, 0.0);
+  const double biot_fluid_unit_weight =
+      Param.thePoroelasticBiotAlpha * Param.thePoroelasticFluidDensity * 9.81;
+
+  if (unit_weight_correction != NULL) {
+    *unit_weight_correction = biot_fluid_unit_weight;
+  }
+  return biot_fluid_unit_weight * water_depth_m;
+}
+
 static void poroelastic_element_nodal_volumes(mesh_t* mesh, int32_t eindex,
                                               double nodalVolumes[8],
                                               double* totalVolume) {
@@ -11011,7 +11049,7 @@ static void solver_init() {
        * (if a checkpoint or replay needs it later) reflect what was used. */
       Param.theCpmlThicknessM = g_cpmlBuild.thickness_m;
       if (Global.myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
                 "(%s max element edgesize)\n",
                 g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
@@ -11787,7 +11825,7 @@ static void solver_init() {
     MPI_Reduce(local_counts, global_counts, 2, MPI_LONG_LONG, MPI_SUM, 0,
                comm_solver);
     if (Global.myID == 0) {
-      fprintf(stdout,
+      fprintf(stderr,
               "CPML: %lld elastic + %lld acoustic PML elements globally "
               "(thickness %.3f m, alpha_max = %.3g rad/s, "
               "reference Vp = %.3f m/s)\n",
@@ -12283,7 +12321,7 @@ static void solver_init() {
       MPI_Reduce(&local_clamped, &global_clamped, 1, MPI_LONG_LONG, MPI_SUM,
                  0, comm_solver);
       if (Global.myID == 0) {
-        fprintf(stdout,
+        fprintf(stderr,
                 "CPML: cpml_clamp_outer=yes; %lld outer-face nodes clamped "
                 "to u=0 globally\n",
                 (long long)global_clamped);
@@ -12799,8 +12837,8 @@ static void solver_init() {
                  Param.thePoroelasticUndrainedFastPath == YES) {
         monitor_print(
             "Poroelastic undrained fast path: disabled for "
-            "ManzariDafalias; Qp traction remains explicit so the nonlinear "
-            "skeleton receives effective stress\n");
+            "nonlinear analysis; Qp traction remains explicit and the "
+            "constitutive skeleton controls volumetric response\n");
       }
       if ((globalPoroelasticElements > 0) &&
           (globalPoroelasticMinHOverVpUndrained < 1.0e31)) {
