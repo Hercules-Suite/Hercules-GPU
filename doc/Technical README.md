@@ -660,6 +660,10 @@ Nonlinear GPU execution (runtime environment):
 		total-stress NRMSE, pore-pressure and `r_u` differences, and the relevant
 		confinement drift. Acceptance thresholds are intentionally not hard-coded
 		until both generated replays are reviewed on the target CUDA/MPI system.
+		Driver version 2 explicitly supplies OpenSees 3.8.0's `mType` argument
+		between the phase-transformation angle and `ca`. Version-1 reference CSVs
+		are rejected because that omitted argument shifted every subsequent PDMY03
+		constant and did not represent the intended material.
 		Material-point CSV headers are generated from the same result-field table as
 		the data rows, including all six PDMY03 surface/substep diagnostics. The
 		PDMY03 BrickUP comparator also repairs the short-lived legacy header that

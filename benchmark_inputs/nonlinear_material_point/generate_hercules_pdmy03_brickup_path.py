@@ -13,7 +13,7 @@ SUPPORTED_TESTS = {
     "pdmy03_sspbrickup_undrained_cyclic_shear":
         "pdmy03_brickup_undrained_cyclic_shear",
 }
-DRIVER_VERSION = "1"
+DRIVER_VERSION = "2"
 STRAIN_FIELDS = ("eps_xx", "eps_yy", "eps_zz", "eps_xy", "eps_yz", "eps_xz")
 STRESS_FIELDS = (
     "sigma_xx_kpa", "sigma_yy_kpa", "sigma_zz_kpa",

@@ -35,13 +35,14 @@ set initialUndrainedPressureKPa 0.0
 wipe
 model BasicBuilder -ndm 3 -ndf 4
 
+# OpenSees 3.8.0 argument order:
 # nd rho Gref Kref phi peakShearStrain refPressure pressureDependence
-# phaseTransform contraction1 contraction3 dilation1 dilation3 liquefaction1
-# liquefaction2 liquefaction4 numberOfSurfaces cohesion pressureDependence2
-# atmosphericPressure density
+# phaseTransform mType ca cb cc cd ce da db dc numberOfSurfaces
+# liquefaction1 liquefaction2 atmosphericPressure cohesion
 nDMaterial PressureDependMultiYield03 1 3 0.0 \
-    9.0e4 2.2e5 32.0 0.10 101.3 0.50 26.0 0.067 0.50 \
-    0.23 1.0 0.0 0.06 3.0 0.27 20 10.0 0.01 101.3 1.73
+    9.0e4 2.2e5 32.0 0.10 101.3 0.50 26.0 0 \
+    0.067 0.50 0.23 1.0 0.0 0.06 3.0 0.27 \
+    20 10.0 0.01 101.3 1.73
 
 node 1 0.0 0.0 0.0
 node 2 1.0 0.0 0.0
@@ -189,7 +190,7 @@ proc writeState {phaseName} {
                         $porosity $biotAlpha $pressureStabilization] {
         lappend row [format "%.17e" $value]
     }
-    lappend row pdmy03_sspbrickup_undrained_triaxial 1 \
+    lappend row pdmy03_sspbrickup_undrained_triaxial 2 \
         [format "%.17e" [getTime]]
     puts $output [join $row ,]
     incr step

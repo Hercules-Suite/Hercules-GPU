@@ -619,6 +619,11 @@ characterization. Both consolidate a unit `SSPbrickUP -lumped` element to
 and generate a Hercules replay that invokes the production CUDA BrickUP
 pressure-force and pressure-update kernels together with PDMY03.
 
+The coupled drivers require the OpenSees 3.8.0 `mType` argument immediately
+after `phaseTransformAngle`. Their version-2 CSV marker records the corrected
+argument order and prevents the generator and comparator from accepting older
+histories whose later PDMY03 constants were shifted by one position.
+
 - `opensees_pdmy03_sspbrickup_undrained_triaxial.tcl` applies a reversing
   axial path at constant total radial confinement.
 - `opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl` preserves the

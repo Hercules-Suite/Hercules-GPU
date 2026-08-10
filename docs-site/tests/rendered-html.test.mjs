@@ -562,6 +562,18 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
     `${benchmarkRoot}compare_opensees_pdmy03_brickup.py`,
     "utf8",
   );
+  const pdmyBrickupGenerator = readFileSync(
+    `${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`,
+    "utf8",
+  );
+  const pdmyBrickupTriaxialDriver = readFileSync(
+    `${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_triaxial.tcl`,
+    "utf8",
+  );
+  const pdmyBrickupCyclicDriver = readFileSync(
+    `${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl`,
+    "utf8",
+  );
   const cyclicFixture = readFileSync(
     `${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`,
     "utf8",
@@ -603,6 +615,14 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /material_point_result_names\[i\]/);
   assert.match(pdmyBrickupComparator, /PDMY03_DIAGNOSTIC_FIELDS/);
   assert.match(pdmyBrickupComparator, /legacy_header/);
+  assert.match(pdmyBrickupComparator, /DRIVER_VERSION = "2"/);
+  assert.match(pdmyBrickupGenerator, /DRIVER_VERSION = "2"/);
+  assert.match(pdmyBrickupTriaxialDriver, /phaseTransform mType ca cb/);
+  assert.match(pdmyBrickupTriaxialDriver, /26\.0 0/);
+  assert.match(pdmyBrickupTriaxialDriver, /undrained_triaxial 2/);
+  assert.match(pdmyBrickupCyclicDriver, /phaseTransform mType ca cb/);
+  assert.match(pdmyBrickupCyclicDriver, /26\.0 0/);
+  assert.match(pdmyBrickupCyclicDriver, /undrained_cyclic_shear 2/);
   assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
   assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
   assert.match(core, /pdmy03_update_ppz/);

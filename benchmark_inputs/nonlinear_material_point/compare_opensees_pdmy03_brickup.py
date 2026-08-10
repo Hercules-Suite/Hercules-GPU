@@ -22,7 +22,7 @@ SUPPORTED_TESTS = {
         "control_field": "engineering_gamma_xz",
     },
 }
-DRIVER_VERSION = "1"
+DRIVER_VERSION = "2"
 COMPONENTS = ("xx", "yy", "zz", "xy", "yz", "xz")
 STRAINS = tuple(f"eps_{component}" for component in COMPONENTS)
 PDMY03_DIAGNOSTIC_FIELDS = (
