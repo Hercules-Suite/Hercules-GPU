@@ -488,6 +488,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /const tensor_t total_predictor = nl_add\(stress_predictor, static_stress\)/);
   assert.match(psolve, /poroelastic_geostatic_stress_correction/);
   assert.match(psolve, /Param\.thePoroelasticBiotAlpha \* Param\.thePoroelasticFluidDensity \* 9\.81/);
+  assert.match(cpu, /below ["\s]*poroelastic_depth_max_m[\s\S]*remain nonlinear ["\s]*single-phase solids/);
+  assert.match(cpu, /constitutive stress is assembled ["\s]*directly as total stress/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));

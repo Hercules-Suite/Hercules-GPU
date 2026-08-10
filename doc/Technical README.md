@@ -956,9 +956,14 @@ Poroelastic U-P input flags (experimental V1):
 		poroelastic classification. When nonlinear analysis is enabled, startup
 		prints a `Nonlinear/BrickUP map` summary showing how many nonlinear
 		elements are active BrickUP elements and how many are above groundwater,
-		below this depth limit, in CPML, or otherwise unmapped. A warning is
-		issued when nonlinear elements lie below the limit because they receive no
-		pore-pressure feedback.
+		below this depth limit, in CPML, or otherwise unmapped. Nonlinear elements
+		below the limit remain single-phase nonlinear solids: their constitutive
+		stress is assembled directly as total stress, with no pore-pressure degree
+		of freedom or Biot feedback, and approximate geostatic initialization uses
+		total overburden. This is an intentional dry/drained or calibrated
+		total-stress fallback, not a coupled liquefaction calculation. Increase the
+		depth limit whenever deeper saturated nonlinear soil is intended to build
+		excess pore pressure.
 - `surface_groundwatertable`
 	Optional. `no` (default) means the groundwater level is the local
 	ground surface, so eligible shallow soil is saturated from the

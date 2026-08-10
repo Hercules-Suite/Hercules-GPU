@@ -1551,10 +1551,13 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             if (below > 0) {
                 fprintf(stderr,
                         "  *** WARNING: %lld nonlinear elements are below "
-                        "poroelastic_depth_max_m and therefore have no pore-"
-                        "pressure feedback. Increase the depth limit if this "
-                        "saturated nonlinear soil is intended to liquefy. "
-                        "***\n",
+                        "poroelastic_depth_max_m. They remain nonlinear "
+                        "single-phase solids: constitutive stress is assembled "
+                        "directly as total stress, with no pore-pressure DOF or "
+                        "Biot feedback. This is appropriate only for an "
+                        "intentional dry/drained or calibrated total-stress "
+                        "region; increase the depth limit if the soil is "
+                        "intended to undergo coupled liquefaction. ***\n",
                         (long long)below);
             }
             if (global_poro_map_counts[
