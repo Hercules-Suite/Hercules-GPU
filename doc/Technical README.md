@@ -20,15 +20,18 @@ and the remaining solver modules compile concurrently. This also keeps an edit
 limited to host orchestration from triggering the previously expensive NVCC
 compilation of the entire solver source.
 
-The Manzari--Dafalias and legacy nonlinear CUDA implementations make PTX
-assembly the most expensive forward-solver build phase. The Makefile therefore
-compiles the production element-update kernel into `nonlinear_gpu.o` and the
-material-point history kernel into `nonlinear_gpu_material_point.o`. Both
-objects use the same constitutive source and equations, with mutually exclusive
-compile-time wrappers, so `make -j 8` can run their independent NVCC/PTX
-assembly jobs concurrently without relocatable device code. Prefer an explicit
-outer job count such as `-j 8` over bare `-j`, which gives GNU Make no
-concurrency limit.
+The nonlinear constitutive kernels make PTX assembly the most expensive
+forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
+instantiate independent production objects for the classic constitutive
+families, Manzari--Dafalias, and PressureDependMultiYield03, plus small runtime
+and material-point objects. The runtime selects one family kernel for the
+globally configured `material_model`. This keeps the equations normally
+inlined, avoids relocatable device code, and lets `make -j 8` compile the three
+independent production kernels concurrently. The split also creates stable
+boundaries for moving model-specific implementation details without returning
+to a single production PTX-assembly job.
+Prefer an explicit outer job count such as `-j 8` over bare `-j`, which gives
+GNU Make no concurrency limit.
 
 Runtime performance toggles (no source edits needed):
 

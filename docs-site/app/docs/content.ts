@@ -131,7 +131,7 @@ export const docPages: Record<string, DocPageContent> = {
         title: "Build and inspect",
         paragraphs: [
           "Use an explicit parallel make job count appropriate for the login or build node. The large host-side solver orchestration in psolve.cc is compiled by the MPI C++ compiler while CUDA kernels and launch wrappers in psolve_gpu_launch.cu are compiled independently by nvcc; make -j 8 can run those jobs concurrently. Incremental builds also avoid rerunning nvcc when only host orchestration changes.",
-          "PTX assembly is the expensive phase for the nonlinear_gpu.cu constitutive implementation. Hercules compiles its production element-update kernel into nonlinear_gpu.o and its material-point history kernel into nonlinear_gpu_material_point.o. The two objects use mutually exclusive wrappers around the same constitutive source, allowing make to run independent NVCC and PTX-assembly jobs concurrently without relocatable device code or changes to the equations.",
+          "PTX assembly is the expensive phase for nonlinear constitutive CUDA. Sources under quake/forward/nonlinear instantiate separate production kernels in nonlinear_gpu_classic.o, nonlinear_gpu_manzari_dafalias.o, and nonlinear_gpu_pdmy03.o, plus small runtime and material-point objects. The runtime launches only the family selected by material_model. Parallel make can therefore run independent NVCC/PTX-assembly jobs concurrently without relocatable device code, noinline annotations, or equation changes.",
         ],
         codeLabel: "shell",
         code: "make clean\nmake -j 8\n\n# Expected executables\nls octor/octor quake/forward/psolve",

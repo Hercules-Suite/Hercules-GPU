@@ -1,10 +1,13 @@
 /* -*- C++ -*- */
 /*
- * Device-resident nonlinear constitutive update and force assembly.
+ * Shared implementation included by the independent nonlinear CUDA build
+ * units.  Each production model family instantiates its own kernel so ptxas
+ * can optimize the constitutive paths independently and Make can compile them
+ * concurrently.
  *
- * The legacy nonlinear.cc implementation remains the CPU/GSL reference.  This
- * translation unit intentionally contains no GSL calls and performs no dynamic
- * allocation from device code.
+ * The legacy nonlinear.cc implementation remains the CPU/GSL reference.
+ * These CUDA build units intentionally contain no GSL calls and perform no
+ * dynamic allocation from device code.
  */
 
 #include <cuda.h>
@@ -28,8 +31,11 @@
 #define NL_GPU_KAPPA_MIN 1.0e-10
 #define NL_GPU_PI 3.141592653589793238462643383279502884
 
-#if defined(NL_GPU_PRODUCTION_ONLY) && defined(NL_GPU_MATERIAL_POINT_ONLY)
-#error "nonlinear GPU compilation modes are mutually exclusive"
+#if (defined(NL_GPU_RUNTIME_ONLY) + defined(NL_GPU_CLASSIC_ONLY) + \
+     defined(NL_GPU_MANZARI_DAFALIAS_ONLY) + \
+     defined(NL_GPU_PDMY03_ONLY) + \
+     defined(NL_GPU_MATERIAL_POINT_ONLY)) != 1
+#error "select exactly one nonlinear CUDA compilation unit"
 #endif
 
 #ifndef NL_GPU_MATERIAL_POINT_ONLY
@@ -121,6 +127,23 @@ typedef struct nonlinear_gpu_state_t {
     nonlinear_gpu_error_t *error;
 } nonlinear_gpu_state_t;
 
+extern "C" void nonlinear_gpu_launch_classic(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+extern "C" void nonlinear_gpu_launch_manzari_dafalias(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+
+#ifdef NL_GPU_RUNTIME_ONLY
 static nonlinear_gpu_state_t g_nl = {};
 static nonlinear_gpu_station_buffers_t g_station = {};
 static nonlinear_gpu_config_t g_config = {};
@@ -173,6 +196,7 @@ int nonlinear_gpu_active(void)
 {
     return g_active;
 }
+#endif
 #endif
 
 __device__ static inline double nl_max(double a, double b)
@@ -2728,6 +2752,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 {
     const materialmodel_t model = cfg->material_model;
 
+#ifndef NL_GPU_CLASSIC_ONLY
     if (model == MANZARI_DAFALIAS) {
         *pstrain = pstrain_prev;
         *backstress = backstress_prev;
@@ -2741,6 +2766,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         *model_error = *fs;
         return ok;
     }
+#endif
 
     /* Cyclic bounding/backbone models decide loading and reversal from the
      * strain increment and their stored stress/history. They must not pass
@@ -2957,7 +2983,8 @@ __global__ static void kernel_nonlinear_material_point_history(
 }
 #endif
 
-#ifndef NL_GPU_MATERIAL_POINT_ONLY
+#if defined(NL_GPU_CLASSIC_ONLY) || \
+    defined(NL_GPU_MANZARI_DAFALIAS_ONLY) || defined(NL_GPU_PDMY03_ONLY)
 __device__ static inline void nl_accumulate_stress_force(
     fvector_t local_force[8], int node, tensor_t stress,
     double dx, double dy, double dz, double weight)
@@ -3075,6 +3102,7 @@ __global__ static void kernel_nonlinear_update_force(
         }
     }
 
+#ifdef NL_GPU_CLASSIC_ONLY
     if (step == 0 && MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
         for (int qp = 0; qp < NL_GPU_QP; qp++) {
             state.kappa[nl_eindex].qv[qp] = 100.0;
@@ -3082,6 +3110,7 @@ __global__ static void kernel_nonlinear_update_force(
             state.ggmax[nl_eindex].qv[qp] = 1.0;
         }
     }
+#endif
 
     if (any_displacement) {
         const int ngp = c->isTopoNonlin ? 5 : 8;
@@ -3108,50 +3137,87 @@ __global__ static void kernel_nonlinear_update_force(
             }
 
             double model_error = 0.0;
-            int32_t md_substeps = 0;
-            nl_md_diagnostics_t md_diagnostics = {};
             const tensor_t static_stress =
                 nl_approx_static_stress(c, &cfg, element.h, qp);
             int ok;
+#ifdef NL_GPU_PDMY03_ONLY
             pdmy03_diagnostics_t pdmy03_diagnostics = {};
-            if (cfg.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
-                const int32_t point = nl_eindex*NL_GPU_QP+qp;
-                tensor_t *centers = state.pdmy03_centers+
-                    (size_t)point*state.pdmy03_surface_stride;
-                ok = pdmy03_update(
-                    &c->pdmy03, cfg.no_substeps, strain, strain_prev,
-                    static_stress, &state.stresses[nl_eindex].qp[qp],
-                    &state.pstrains2[nl_eindex].qp[qp],
-                    state.pdmy03_states+point, centers,
-                    &pdmy03_diagnostics);
-                model_error = pdmy03_diagnostics.yield_residual;
-                c->fs[qp] = model_error;
-            } else {
-                ok = nl_update_material(
-                    c, &cfg, strain, strain_prev, static_stress,
-                    state.pstrains1[nl_eindex].qp[qp],
-                    state.alphastress1[nl_eindex].qp[qp],
-                    state.ep1[nl_eindex].qv[qp],
-                    &state.pstrains2[nl_eindex].qp[qp],
-                    &state.alphastress2[nl_eindex].qp[qp],
-                    &state.stresses[nl_eindex].qp[qp],
-                    &state.ep2[nl_eindex].qv[qp], &c->fs[qp],
-                    &state.psi_n[nl_eindex].qv[qp],
-                    &state.load_unload_n[nl_eindex].qv[qp],
-                    &state.sv_n[nl_eindex].qv[qp],
-                    &state.sv_max[nl_eindex].qv[qp],
-                    &state.kappa[nl_eindex].qv[qp],
-                    &state.sref[nl_eindex].qp[qp],
-                    &state.gamma1d[nl_eindex].qv[qp],
-                    &state.tao1d[nl_eindex].qv[qp],
-                    &state.ggmax[nl_eindex].qv[qp], &model_error,
-                    (cfg.material_model == MANZARI_DAFALIAS)
-                        ? &state.fabric[nl_eindex].qp[qp] : NULL,
-                    &state.sv_max[nl_eindex].qv[qp],
-                    &state.kappa[nl_eindex].qv[qp], &md_substeps,
-                    &md_diagnostics);
+            const int32_t point = nl_eindex*NL_GPU_QP+qp;
+            tensor_t *centers = state.pdmy03_centers+
+                (size_t)point*state.pdmy03_surface_stride;
+            ok = pdmy03_update(
+                &c->pdmy03, cfg.no_substeps, strain, strain_prev,
+                static_stress, &state.stresses[nl_eindex].qp[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                state.pdmy03_states+point, centers,
+                &pdmy03_diagnostics);
+            model_error = pdmy03_diagnostics.yield_residual;
+            c->fs[qp] = model_error;
+            if (!ok || !isfinite(model_error)) {
+                nl_record_pdmy03_error(
+                    state.error, eindex, qp, &pdmy03_diagnostics,
+                    pdmy03_scale(pdmy03_add(
+                        state.stresses[nl_eindex].qp[qp], static_stress),
+                        -1.0),
+                    pdmy03_sub(strain, strain_prev));
             }
-
+#elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+            int32_t md_substeps = 0;
+            nl_md_diagnostics_t md_diagnostics = {};
+            state.pstrains2[nl_eindex].qp[qp] =
+                state.pstrains1[nl_eindex].qp[qp];
+            state.alphastress2[nl_eindex].qp[qp] =
+                state.alphastress1[nl_eindex].qp[qp];
+            ok = nl_update_manzari_dafalias(
+                c, &cfg, strain, strain_prev, static_stress,
+                &state.stresses[nl_eindex].qp[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                &state.alphastress2[nl_eindex].qp[qp],
+                &state.sref[nl_eindex].qp[qp],
+                &state.fabric[nl_eindex].qp[qp],
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.ep2[nl_eindex].qv[qp],
+                &state.psi_n[nl_eindex].qv[qp], &c->fs[qp],
+                &state.kappa[nl_eindex].qv[qp], &md_substeps,
+                &md_diagnostics);
+            state.load_unload_n[nl_eindex].qv[qp] = (double)md_substeps;
+            model_error = c->fs[qp];
+            if (!ok || !isfinite(model_error) ||
+                model_error > cfg.error_tolerance) {
+                const tensor_t md_stress = md_scale(md_add(
+                    state.stresses[nl_eindex].qp[qp], static_stress), -1.0);
+                nl_record_md_error(
+                    state.error, eindex, qp,
+                    fmax(model_error, md_diagnostics.correction_residual),
+                    fmax(state.kappa[nl_eindex].qv[qp],
+                         md_diagnostics.local_error),
+                    md_substeps, &md_diagnostics, md_stress,
+                    md_sub(strain, strain_prev));
+            }
+#else
+            int32_t unused_substeps = 0;
+            nl_md_diagnostics_t unused_diagnostics = {};
+            ok = nl_update_material(
+                c, &cfg, strain, strain_prev, static_stress,
+                state.pstrains1[nl_eindex].qp[qp],
+                state.alphastress1[nl_eindex].qp[qp],
+                state.ep1[nl_eindex].qv[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                &state.alphastress2[nl_eindex].qp[qp],
+                &state.stresses[nl_eindex].qp[qp],
+                &state.ep2[nl_eindex].qv[qp], &c->fs[qp],
+                &state.psi_n[nl_eindex].qv[qp],
+                &state.load_unload_n[nl_eindex].qv[qp],
+                &state.sv_n[nl_eindex].qv[qp],
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.kappa[nl_eindex].qv[qp],
+                &state.sref[nl_eindex].qp[qp],
+                &state.gamma1d[nl_eindex].qv[qp],
+                &state.tao1d[nl_eindex].qv[qp],
+                &state.ggmax[nl_eindex].qv[qp], &model_error, NULL,
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.kappa[nl_eindex].qv[qp], &unused_substeps,
+                &unused_diagnostics);
             if (MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
                 c->fs[qp] = model_error;
                 if (!ok || !isfinite(model_error) ||
@@ -3160,36 +3226,11 @@ __global__ static void kernel_nonlinear_update_force(
                                     model_error,
                                     state.stresses[nl_eindex].qp[qp].xx);
                 }
-            } else if (cfg.material_model == MANZARI_DAFALIAS) {
-                c->fs[qp] = model_error;
-                if (!ok || !isfinite(model_error) ||
-                    model_error > cfg.error_tolerance) {
-                    const tensor_t md_stress = md_scale(md_add(
-                        state.stresses[nl_eindex].qp[qp], static_stress),
-                        -1.0);
-                    nl_record_md_error(
-                        state.error, eindex, qp,
-                        fmax(model_error,
-                             md_diagnostics.correction_residual),
-                        fmax(state.kappa[nl_eindex].qv[qp],
-                             md_diagnostics.local_error),
-                        md_substeps,
-                        &md_diagnostics, md_stress,
-                        md_sub(strain, strain_prev));
-                }
-            } else if (cfg.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
-                if (!ok || !isfinite(model_error)) {
-                    nl_record_pdmy03_error(
-                        state.error, eindex, qp, &pdmy03_diagnostics,
-                        pdmy03_scale(pdmy03_add(
-                            state.stresses[nl_eindex].qp[qp], static_stress),
-                            -1.0),
-                        pdmy03_sub(strain, strain_prev));
-                }
             } else if (!ok || !isfinite(c->fs[qp])) {
                 nl_record_error(state.error, 1, eindex, qp, c->fs[qp],
                                 state.stresses[nl_eindex].qp[qp].xx);
             }
+#endif
         }
     }
 
@@ -3235,6 +3276,40 @@ __global__ static void kernel_nonlinear_update_force(
     }
 }
 
+#if defined(NL_GPU_CLASSIC_ONLY)
+extern "C" void nonlinear_gpu_launch_classic(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+extern "C" void nonlinear_gpu_launch_manzari_dafalias(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#elif defined(NL_GPU_PDMY03_ONLY)
+extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#endif
+#endif
+
+#ifdef NL_GPU_RUNTIME_ONLY
 __global__ static void kernel_nonlinear_gather_station_state(
     nonlinear_gpu_state_t state, int32_t station_count,
     const int32_t *station_indices,
@@ -3453,13 +3528,19 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
     cudaMemsetAsync(g_nl.error, 0, sizeof(nonlinear_gpu_error_t), stream);
     const int block_size = 128;
     const int grid_size = (g_nl.count + block_size - 1)/block_size;
-#ifdef __CUDACC__
-    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
-        g_nl, g_config, solver->gpuDataDevice, step, delta_t,
-        delta_t_squared);
-#else
-    (void)grid_size;
-#endif
+    if (g_config.material_model == MANZARI_DAFALIAS) {
+        nonlinear_gpu_launch_manzari_dafalias(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    } else if (g_config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        nonlinear_gpu_launch_pdmy03(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    } else {
+        nonlinear_gpu_launch_classic(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    }
     const cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
         fprintf(stderr, "Nonlinear GPU kernel launch failed: %s\n",
@@ -3931,7 +4012,7 @@ int nonlinear_pdmy03_host_history(
 }
 #endif
 
-#ifndef NL_GPU_MATERIAL_POINT_ONLY
+#ifdef NL_GPU_RUNTIME_ONLY
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();

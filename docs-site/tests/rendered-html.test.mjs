@@ -81,19 +81,46 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   );
   assert.match(
     makefile,
-    /nonlinear_gpu\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_PRODUCTION_ONLY[^\n]*-c \$< -o \$@/,
+    /NONLINEAR_GPU_OBJECTS\s*=\s*nonlinear\/nonlinear_gpu_runtime\.o[\s\S]*?nonlinear\/nonlinear_gpu_pdmy03\.o/,
   );
   assert.match(
     makefile,
-    /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
+    /nonlinear\/nonlinear_gpu_%\.o:\s*nonlinear\/nonlinear_gpu_%\.cu[\s\S]*?\$\(NVCC\)[^\n]*-c \$< -o \$@/,
   );
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`,
+    "utf8",
+  );
+  const runtime = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_runtime.cu`, "utf8");
+  const classic = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_classic.cu`, "utf8");
+  const md = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_manzari_dafalias.cu`,
+    "utf8",
+  );
+  const pdmy03 = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_pdmy03.cu`, "utf8");
+  const materialPoint = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_material_point.cu`,
+    "utf8",
+  );
   assert.match(
     gpu,
     /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_record_error[\s\S]*?__device__ static tensor_t nl_tetra_strain[\s\S]*?#endif\s+__device__ static inline double nl_gqh_value/,
   );
   assert.match(gpu, /#ifndef NL_GPU_PRODUCTION_ONLY\s+__global__ static void kernel_nonlinear_material_point_history/);
-  assert.match(gpu, /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_accumulate_stress_force/);
+  assert.match(gpu, /#if defined\(NL_GPU_CLASSIC_ONLY\)[\s\S]*?__device__ static inline void nl_accumulate_stress_force/);
+  assert.match(runtime, /#define NL_GPU_RUNTIME_ONLY/);
+  assert.match(classic, /#define NL_GPU_CLASSIC_ONLY/);
+  assert.match(md, /#define NL_GPU_MANZARI_DAFALIAS_ONLY/);
+  assert.match(pdmy03, /#define NL_GPU_PDMY03_ONLY/);
+  assert.match(materialPoint, /#define NL_GPU_MATERIAL_POINT_ONLY/);
+  assert.match(
+    gpu,
+    /NL_GPU_PDMY03_ONLY[\s\S]*?ok = pdmy03_update[\s\S]*?NL_GPU_MANZARI_DAFALIAS_ONLY[\s\S]*?ok = nl_update_manzari_dafalias[\s\S]*?ok = nl_update_material/,
+  );
+  assert.match(
+    gpu,
+    /g_config\.material_model == MANZARI_DAFALIAS[\s\S]*?nonlinear_gpu_launch_manzari_dafalias[\s\S]*?g_config\.material_model == PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*?nonlinear_gpu_launch_pdmy03[\s\S]*?nonlinear_gpu_launch_classic/,
+  );
   assert.ok(
     launchHeader.indexOf('#include "quake_util.h"') <
       launchHeader.indexOf('#include "topography.h"'),
@@ -104,7 +131,7 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   assert.match(html, /psolve\.cc/);
   assert.match(html, /psolve_gpu_launch\.cu/);
   assert.match(html, /make -j 8/);
-  assert.match(html, /nonlinear_gpu_material_point\.o/);
+  assert.match(html, /nonlinear_gpu_pdmy03\.o/);
   assert.match(html, /PTX assembly/);
 });
 
@@ -259,7 +286,7 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const selector = gpu.slice(
     gpu.indexOf("int nonlinear_gpu_requested"),
     gpu.indexOf("int nonlinear_gpu_active"),
@@ -350,7 +377,7 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const cpuUpdate = cpu.slice(
     cpu.indexOf("void material_update"),
     cpu.indexOf("/* computes the derivatives of the flow potential"),
@@ -378,7 +405,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
@@ -523,7 +550,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const core = readFileSync(`${sourceRoot}nonlinear_pdmy03.h`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
@@ -612,7 +639,7 @@ test("uses sparse CUDA state gathering for nonlinear station output", () => {
   if (!existsSync(sourceRoot)) return;
 
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const finish = psolve.slice(
     psolve.indexOf("static void solver_finish_nonlinear_gpu"),
     psolve.indexOf("static void solver_compute_force_planewaves"),
