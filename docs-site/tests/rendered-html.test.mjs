@@ -81,19 +81,46 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   );
   assert.match(
     makefile,
-    /nonlinear_gpu\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_PRODUCTION_ONLY[^\n]*-c \$< -o \$@/,
+    /NONLINEAR_GPU_OBJECTS\s*=\s*nonlinear\/nonlinear_gpu_runtime\.o[\s\S]*?nonlinear\/nonlinear_gpu_pdmy03\.o/,
   );
   assert.match(
     makefile,
-    /nonlinear_gpu_material_point\.o:\s*nonlinear_gpu\.cu[\s\S]*?\$\(NVCC\)[^\n]*-DNL_GPU_MATERIAL_POINT_ONLY[^\n]*-c \$< -o \$@/,
+    /nonlinear\/nonlinear_gpu_%\.o:\s*nonlinear\/nonlinear_gpu_%\.cu[\s\S]*?\$\(NVCC\)[^\n]*-c \$< -o \$@/,
   );
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`,
+    "utf8",
+  );
+  const runtime = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_runtime.cu`, "utf8");
+  const classic = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_classic.cu`, "utf8");
+  const md = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_manzari_dafalias.cu`,
+    "utf8",
+  );
+  const pdmy03 = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_pdmy03.cu`, "utf8");
+  const materialPoint = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_material_point.cu`,
+    "utf8",
+  );
   assert.match(
     gpu,
     /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_record_error[\s\S]*?__device__ static tensor_t nl_tetra_strain[\s\S]*?#endif\s+__device__ static inline double nl_gqh_value/,
   );
   assert.match(gpu, /#ifndef NL_GPU_PRODUCTION_ONLY\s+__global__ static void kernel_nonlinear_material_point_history/);
-  assert.match(gpu, /#ifndef NL_GPU_MATERIAL_POINT_ONLY\s+__device__ static inline void nl_accumulate_stress_force/);
+  assert.match(gpu, /#if defined\(NL_GPU_CLASSIC_ONLY\)[\s\S]*?__device__ static inline void nl_accumulate_stress_force/);
+  assert.match(runtime, /#define NL_GPU_RUNTIME_ONLY/);
+  assert.match(classic, /#define NL_GPU_CLASSIC_ONLY/);
+  assert.match(md, /#define NL_GPU_MANZARI_DAFALIAS_ONLY/);
+  assert.match(pdmy03, /#define NL_GPU_PDMY03_ONLY/);
+  assert.match(materialPoint, /#define NL_GPU_MATERIAL_POINT_ONLY/);
+  assert.match(
+    gpu,
+    /NL_GPU_PDMY03_ONLY[\s\S]*?ok = pdmy03_update[\s\S]*?NL_GPU_MANZARI_DAFALIAS_ONLY[\s\S]*?ok = nl_update_manzari_dafalias[\s\S]*?ok = nl_update_material/,
+  );
+  assert.match(
+    gpu,
+    /g_config\.material_model == MANZARI_DAFALIAS[\s\S]*?nonlinear_gpu_launch_manzari_dafalias[\s\S]*?g_config\.material_model == PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*?nonlinear_gpu_launch_pdmy03[\s\S]*?nonlinear_gpu_launch_classic/,
+  );
   assert.ok(
     launchHeader.indexOf('#include "quake_util.h"') <
       launchHeader.indexOf('#include "topography.h"'),
@@ -104,7 +131,7 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   assert.match(html, /psolve\.cc/);
   assert.match(html, /psolve_gpu_launch\.cu/);
   assert.match(html, /make -j 8/);
-  assert.match(html, /nonlinear_gpu_material_point\.o/);
+  assert.match(html, /nonlinear_gpu_pdmy03\.o/);
   assert.match(html, /PTX assembly/);
 });
 
@@ -186,6 +213,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
+  assert.match(physics, /PressureDependMultiYield03/);
+  assert.match(physics, /standard automatically generated nested yield surfaces/);
   assert.match(physics, /adaptive explicit Modified Euler/);
   assert.match(physics, /integrates the 1-D density column/);
   assert.match(physics, /pressure DOF starts at zero as excess pore pressure/);
@@ -207,6 +236,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
   assert.match(parameters, /ManzariDafalias: N × 17/);
+  assert.match(parameters, /PDMY03: N × 22/);
+  assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
 
@@ -221,8 +252,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /twelve-fixture suite/);
-  assert.match(gpu, /device-first and currently requires the GPU backend/);
+  assert.match(gpu, /fourteen-fixture suite/);
+  assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
   assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
@@ -255,7 +286,7 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const selector = gpu.slice(
     gpu.indexOf("int nonlinear_gpu_requested"),
     gpu.indexOf("int nonlinear_gpu_active"),
@@ -346,7 +377,7 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const cpuUpdate = cpu.slice(
     cpu.indexOf("void material_update"),
     cpu.indexOf("/* computes the derivatives of the flow potential"),
@@ -374,7 +405,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   if (!existsSync(sourceRoot)) return;
 
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
@@ -409,7 +440,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   );
 
   assert.match(header, /MANZARI_DAFALIAS/);
-  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*\? 22 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
   assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
@@ -511,6 +542,69 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(brickupPlot, /with_suffix\("\.pdf"\)/);
 });
 
+test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, and fixture", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const core = readFileSync(`${sourceRoot}nonlinear_pdmy03.h`, "utf8");
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+
+  assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
+  assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
+  assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
+  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 : 16/);
+  assert.match(cpu, /nearest_property_value/);
+  assert.match(cpu, /pdmy03_prepare_constants/);
+  assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(
+    cpu,
+    /MPI_Reduce\(&myNonlinElementsCount,[\s\S]{0,160}MPI_SUM, 0, comm_solver\)/,
+  );
+  assert.match(
+    cpu,
+    /MPI_Reduce\(local_phase_seconds,[\s\S]{0,160}MPI_MAX, 0, comm_solver\)/,
+  );
+  assert.match(cpu, /myNonlinElementClassification\[eindex\] = selected/);
+  assert.match(
+    cpu,
+    /#pragma omp parallel for schedule\(static\) if\(myMesh->lenum >= 100000\)/,
+  );
+  assert.match(
+    cpu,
+    /#pragma omp parallel for if\(parallel_pdmy03_initialization\)[\s\S]{0,1000}const int32_t eindex = myNonlinElementsMapping\[nl_eindex\]/,
+  );
+  assert.match(
+    cpu,
+    /get_topo_nonlin_flag\(\)[\s\S]{0,100}get_topo_meth\(\) == VT[\s\S]{0,100}isTopoElement/,
+  );
+  assert.match(core, /pdmy03_requested_substeps/);
+  assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
+  assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
+  assert.match(core, /pdmy03_update_ppz/);
+  assert.match(core, /pdmy03_update_active_surface/);
+  assert.match(core, /if \(c == 0\.0\) return 0\.0/);
+  assert.match(core, /return low;/);
+  assert.match(core, /pdmy03_mean\(\*stress\) > 0\.0/);
+  assert.match(core, /surface <= active && surface < c->surface_count/);
+  assert.match(core, /trial, current, centers/);
+  assert.match(gpu, /pdmy03_surface_stride/);
+  assert.match(gpu, /PDMY03 history allocation/);
+  assert.match(gpu, /nl_record_pdmy03_error/);
+  assert.match(gpu, /nonlinear_pdmy03_host_history/);
+  assert.ok(existsSync(`${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}pdmy03_zero_tension_onset_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03.py`));
+  assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
+});
+
 test("ships the BAE virgin-onset regression fixture", () => {
   const benchmarkRoot = fileURLToPath(
     new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
@@ -567,7 +661,7 @@ test("uses sparse CUDA state gathering for nonlinear station output", () => {
   if (!existsSync(sourceRoot)) return;
 
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
-  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const finish = psolve.slice(
     psolve.indexOf("static void solver_finish_nonlinear_gpu"),
     psolve.indexOf("static void solver_compute_force_planewaves"),

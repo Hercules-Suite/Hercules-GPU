@@ -1,0 +1,43 @@
+# PressureDependMultiYield03 zero/tensile-onset host/CUDA regression.
+# These values exercise OpenSees-compatible initialization; they are not a
+# soil calibration.
+material_model = PressureDependMultiYield03
+material_point_delta_time_sec = 1.0
+material_point_steps = 7
+no_substeps = 100
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-4
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-9
+material_point_compare_atol = 1.0e-9
+material_point_output_prefix = pdmy03_zero_tension_onset_synthetic
+
+# Gref Kref phi peak_gamma ref_pressure pressure_exponent PT_angle mType
+# ca cb cc cd ce da db dc surfaces liquefaction1 liquefaction2 Patm cohesion
+material_point_constants =
+9.0e7 2.2e8 32.0 0.10 1.01e5 0.50 26.0 0
+0.067 0.50 0.23 1.0 0.0 0.06 3.0 0.27
+20 1.0e4 0.01 1.01e5 1.73e3
+
+# Seed a small isotropic tensile state. The first nonzero strain increment
+# must clamp its mean stress to zero before applying compression.
+material_point_initial_strain =
+0.0 0.0 0.0 0.0 0.0 0.0
+material_point_initial_stress =
+1.0e2 1.0e2 1.0e2 0.0 0.0 0.0
+material_point_initial_alpha =
+0.0 0.0 0.0 0.0 0.0 0.0
+material_point_initial_alpha_in =
+0.0 0.0 0.0 0.0 0.0 0.0
+material_point_initial_fabric =
+0.0 0.0 0.0 0.0 0.0 0.0
+
+# Hercules tensor strain: exx eyy ezz exy eyz exz.
+material_point_strain_history =
+ 0.0e-5  0.0e-5  0.0e-5 0.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 0.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 1.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 2.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 1.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 0.0e-5 0.0 0.0
+-1.0e-5 -1.0e-5 -1.0e-5 0.0e-5 0.0 0.0

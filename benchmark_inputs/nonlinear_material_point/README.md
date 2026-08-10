@@ -63,6 +63,26 @@ production row must provide all 17 values. Constants embedded in these
 fixtures and OpenSees drivers are reference-characterization inputs, not
 production defaults.
 
+For `material_model=PressureDependMultiYield03` (alias `PDMY03`),
+`material_point_constants` contains 21 values:
+
+```text
+Gref Kref friction_angle peak_shear_strain ref_pressure pressure_dependence
+phase_transform_angle loading_type ca cb cc cd ce da db dc surface_count
+liquefaction1 liquefaction2 atmospheric_pressure cohesion
+```
+
+Stress values use Pa and angles use degrees. `loading_type` is 0 for triaxial
+compression, 1 for triaxial extension, or 2 for direct simple shear;
+`surface_count` is an integer from 2 through 40. The production table adds
+`Vs_limit` as the first value, for 22 values per row. At the elastic-to-plastic
+transition, PDMY03 follows OpenSees by clamping tensile mean stress to zero; an
+exactly zero stress is also admissible. This numerical safeguard does not
+replace a physical in-situ effective-stress initialization in a production soil
+model. The current common initial-state parser still requires all five arrays;
+alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
+its translated surface centers from stress.
+
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
 - `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
@@ -99,6 +119,22 @@ production defaults.
   confinement, dilates through the physical effective-pressure cutoff, dwells,
   and reloads in compression. It verifies finite host/CUDA state, identical
   cutoff behavior, and recovery from `p_min=1e-4 P_atm`.
+- `pdmy03_cyclic_shear_synthetic.in` starts from 100 kPa isotropic effective
+  confinement, crosses and translates multiple automatically generated yield
+  surfaces, reverses the tensor-shear path, and repeats its final strain. The
+  CSV adds active surface, requested and accepted subincrements, crossed
+  surfaces, clamping, pressureD, and the combined surface-center norm.
+- `pdmy03_zero_tension_onset_synthetic.in` starts from a small isotropic
+  tensile seed, enters plastic stage under compression, and verifies the
+  OpenSees-compatible mean-stress clamp rather than an initialization abort.
+  Its final repeated strain also checks zero-increment state preservation.
+
+PDMY03 uses deterministic explicit nested-surface subincrements rather than
+the Manzari--Dafalias adaptive error loop. Its request accounts for predicted
+surface crossings and shear/volumetric strain size. `no_substeps` caps the
+request; if clamped, the update continues and records the event. The current
+implementation supports only the standard automatically generated 2--40
+surface curve, not a user-supplied G/Gmax surface table.
 
 Manzari--Dafalias reuses the production nonlinear integration controls rather
 than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
@@ -540,3 +576,33 @@ Run the parser/driver-generation check without either solver:
 ```bash
 python3 compare_opensees_bae.py --selftest
 ```
+
+## PressureDependMultiYield03 OpenSees characterization
+
+After the suite has produced `pdmy03_cyclic_shear_synthetic.cpu.csv`, run the
+matching OpenSees 3.8 affine-brick history and compare it:
+
+```bash
+OpenSees opensees_pdmy03_cyclic_shear.tcl \
+  opensees_pdmy03_cyclic_shear.csv
+
+python3 compare_opensees_pdmy03.py \
+  --hercules-csv pdmy03_cyclic_shear_synthetic.cpu.csv \
+  --opensees-csv opensees_pdmy03_cyclic_shear.csv \
+  --output-dir opensees_pdmy03_comparison
+
+python3 plot_opensees_pdmy03.py \
+  --hercules-csv pdmy03_cyclic_shear_synthetic.cpu.csv \
+  --opensees-csv opensees_pdmy03_cyclic_shear.csv \
+  --output-prefix opensees_pdmy03_comparison/pdmy03_hercules_opensees
+```
+
+The driver establishes 100 kPa isotropic confinement in OpenSees's forced
+elastic stage, switches PDMY03 to plastic stage 1, and applies the fixture's
+cyclic affine shear history. The comparator checks the tensor shear path and
+all six stress components, writes a detailed CSV and JSON summary, and uses a
+default stress NRMSE threshold of `1e-8`. On OpenSees 3.8.0, the reference
+development run produced stress NRMSE about `1.9e-10`; this is a numerical
+characterization of the synthetic constants, not a production calibration.
+The plotter writes PNG and PDF panels for cyclic shear stress, effective mean
+stress, the applied strain history, and cross-code stress differences.

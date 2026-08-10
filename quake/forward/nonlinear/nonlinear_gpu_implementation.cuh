@@ -1,10 +1,13 @@
 /* -*- C++ -*- */
 /*
- * Device-resident nonlinear constitutive update and force assembly.
+ * Shared implementation included by the independent nonlinear CUDA build
+ * units.  Each production model family instantiates its own kernel so ptxas
+ * can optimize the constitutive paths independently and Make can compile them
+ * concurrently.
  *
- * The legacy nonlinear.cc implementation remains the CPU/GSL reference.  This
- * translation unit intentionally contains no GSL calls and performs no dynamic
- * allocation from device code.
+ * The legacy nonlinear.cc implementation remains the CPU/GSL reference.
+ * These CUDA build units intentionally contain no GSL calls and perform no
+ * dynamic allocation from device code.
  */
 
 #include <cuda.h>
@@ -22,13 +25,17 @@
 #include "psolve.h"
 #include "kernel.h"
 #include "nonlinear_gpu.h"
+#include "nonlinear_pdmy03.h"
 
 #define NL_GPU_QP 8
 #define NL_GPU_KAPPA_MIN 1.0e-10
 #define NL_GPU_PI 3.141592653589793238462643383279502884
 
-#if defined(NL_GPU_PRODUCTION_ONLY) && defined(NL_GPU_MATERIAL_POINT_ONLY)
-#error "nonlinear GPU compilation modes are mutually exclusive"
+#if (defined(NL_GPU_RUNTIME_ONLY) + defined(NL_GPU_CLASSIC_ONLY) + \
+     defined(NL_GPU_MANZARI_DAFALIAS_ONLY) + \
+     defined(NL_GPU_PDMY03_ONLY) + \
+     defined(NL_GPU_MATERIAL_POINT_ONLY)) != 1
+#error "select exactly one nonlinear CUDA compilation unit"
 #endif
 
 #ifndef NL_GPU_MATERIAL_POINT_ONLY
@@ -93,6 +100,7 @@ typedef struct nonlinear_gpu_station_buffers_t {
 
 typedef struct nonlinear_gpu_state_t {
     int32_t count;
+    int32_t pdmy03_surface_stride;
     nonlinear_gpu_element_t *elements;
     nlconstants_t *constants;
     qptensors_t *stresses;
@@ -114,9 +122,28 @@ typedef struct nonlinear_gpu_state_t {
     qpvectors_t *gamma1d;
     qpvectors_t *tao1d;
     qpvectors_t *ggmax;
+    pdmy03_state_t *pdmy03_states;
+    tensor_t *pdmy03_centers;
     nonlinear_gpu_error_t *error;
 } nonlinear_gpu_state_t;
 
+extern "C" void nonlinear_gpu_launch_classic(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+extern "C" void nonlinear_gpu_launch_manzari_dafalias(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+
+#ifdef NL_GPU_RUNTIME_ONLY
 static nonlinear_gpu_state_t g_nl = {};
 static nonlinear_gpu_station_buffers_t g_station = {};
 static nonlinear_gpu_config_t g_config = {};
@@ -169,6 +196,7 @@ int nonlinear_gpu_active(void)
 {
     return g_active;
 }
+#endif
 #endif
 
 __device__ static inline double nl_max(double a, double b)
@@ -1595,6 +1623,28 @@ __device__ static inline void nl_record_md_error(
     }
 }
 
+__device__ static inline void nl_record_pdmy03_error(
+    nonlinear_gpu_error_t *error, int32_t eindex, int32_t qp,
+    const pdmy03_diagnostics_t *diagnostics, tensor_t stress,
+    tensor_t strain_increment)
+{
+    if (atomicCAS(&error->code, 0, 4) == 0) {
+        error->eindex = eindex;
+        error->qp = qp;
+        error->md_reason = diagnostics->reason;
+        error->md_attempts = diagnostics->requested_substeps;
+        error->md_accepted_substeps = diagnostics->accepted_substeps;
+        error->md_projection_fallbacks = diagnostics->crossed_surfaces;
+        error->md_force_accepts = diagnostics->substeps_clamped;
+        error->residual = diagnostics->yield_residual;
+        error->value = diagnostics->mean_stress;
+        error->md_effective_mean_stress = -diagnostics->mean_stress;
+        error->md_strain_increment_norm = diagnostics->strain_increment_norm;
+        error->md_stress = stress;
+        error->md_strain_increment = strain_increment;
+    }
+}
+
 __device__ static inline void nl_point_dxi(double *dx, double *dy, double *dz,
                                             double lx, double ly, double lz,
                                             double h, int node)
@@ -2702,6 +2752,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 {
     const materialmodel_t model = cfg->material_model;
 
+#ifndef NL_GPU_CLASSIC_ONLY
     if (model == MANZARI_DAFALIAS) {
         *pstrain = pstrain_prev;
         *backstress = backstress_prev;
@@ -2715,6 +2766,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         *model_error = *fs;
         return ok;
     }
+#endif
 
     /* Cyclic bounding/backbone models decide loading and reversal from the
      * strain increment and their stored stress/history. They must not pass
@@ -2817,7 +2869,8 @@ __global__ static void kernel_nonlinear_material_point_history(
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
-    const int seeded = config.material_model == MANZARI_DAFALIAS &&
+    const int seeded = (config.material_model == MANZARI_DAFALIAS ||
+                        config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) &&
                        initial_state.provided != 0;
     tensor_t strain_prev = seeded ? initial_state.strain : nl_zero();
     tensor_t plastic_strain = seeded ? initial_state.plastic_strain : nl_zero();
@@ -2840,6 +2893,8 @@ __global__ static void kernel_nonlinear_material_point_history(
     double md_initialized = seeded ? 1.0 : 0.0;
     double md_integration_error = 0.0;
     int32_t md_substeps = 0;
+    pdmy03_state_t pdmy03_state = {};
+    tensor_t pdmy03_centers[PDMY03_MAX_SURFACES] = {};
 
     for (int32_t step = 0; step < steps; step++) {
         tensor_t plastic_next = plastic_strain;
@@ -2848,15 +2903,27 @@ __global__ static void kernel_nonlinear_material_point_history(
         double fs = 0.0;
         double model_error = 0.0;
         nl_md_diagnostics_t md_diagnostics = {};
+        pdmy03_diagnostics_t pdmy03_diagnostics = {};
 
-        const int ok = nl_update_material(
-            &constants, &config, strain_history[step], strain_prev, nl_zero(),
-            plastic_strain, backstress, ep_bar,
-            &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
-            &psi, &load_unload, &tao, &tao_max, &kappa,
-            &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error,
-            &fabric, &md_initialized, &md_integration_error, &md_substeps,
-            &md_diagnostics);
+        int ok;
+        if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+            ok = pdmy03_update(
+                &constants.pdmy03, config.no_substeps,
+                strain_history[step], strain_prev, nl_zero(), &stress,
+                &plastic_next, &pdmy03_state, pdmy03_centers,
+                &pdmy03_diagnostics);
+            fs = pdmy03_diagnostics.yield_residual;
+            model_error = fs;
+        } else {
+            ok = nl_update_material(
+                &constants, &config, strain_history[step], strain_prev, nl_zero(),
+                plastic_strain, backstress, ep_bar,
+                &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
+                &psi, &load_unload, &tao, &tao_max, &kappa,
+                &stress_reference, &gamma1d, &tao1d, &ggmax, &model_error,
+                &fabric, &md_initialized, &md_integration_error, &md_substeps,
+                &md_diagnostics);
+        }
 
         nonlinear_material_point_result_t result = {};
         result.stress = stress;
@@ -2885,6 +2952,23 @@ __global__ static void kernel_nonlinear_material_point_history(
             result.plastic_multiplier = psi;
             result.integration_error = md_integration_error;
             result.accepted_substeps = md_substeps;
+        } else if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+            result.fs = pdmy03_diagnostics.yield_residual;
+            result.model_error = pdmy03_diagnostics.yield_residual;
+            result.accepted_substeps = pdmy03_diagnostics.accepted_substeps;
+            result.pdmy03_active_surface = pdmy03_state.active_surface;
+            result.pdmy03_requested_substeps =
+                pdmy03_diagnostics.requested_substeps;
+            result.pdmy03_crossed_surfaces =
+                pdmy03_diagnostics.crossed_surfaces;
+            result.pdmy03_substeps_clamped =
+                pdmy03_diagnostics.substeps_clamped;
+            result.pdmy03_pressure_d = pdmy03_state.pressure_d;
+            double center_norm = 0.0;
+            for (int i = 0; i < constants.pdmy03.surface_count; i++)
+                center_norm += pdmy03_ddot(pdmy03_centers[i],
+                                           pdmy03_centers[i]);
+            result.pdmy03_center_norm = sqrt(center_norm);
         }
         result.status = ok ? 0 : 1;
         results[step] = result;
@@ -2899,7 +2983,8 @@ __global__ static void kernel_nonlinear_material_point_history(
 }
 #endif
 
-#ifndef NL_GPU_MATERIAL_POINT_ONLY
+#if defined(NL_GPU_CLASSIC_ONLY) || \
+    defined(NL_GPU_MANZARI_DAFALIAS_ONLY) || defined(NL_GPU_PDMY03_ONLY)
 __device__ static inline void nl_accumulate_stress_force(
     fvector_t local_force[8], int node, tensor_t stress,
     double dx, double dy, double dz, double weight)
@@ -3017,6 +3102,7 @@ __global__ static void kernel_nonlinear_update_force(
         }
     }
 
+#ifdef NL_GPU_CLASSIC_ONLY
     if (step == 0 && MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
         for (int qp = 0; qp < NL_GPU_QP; qp++) {
             state.kappa[nl_eindex].qv[qp] = 100.0;
@@ -3024,6 +3110,7 @@ __global__ static void kernel_nonlinear_update_force(
             state.ggmax[nl_eindex].qv[qp] = 1.0;
         }
     }
+#endif
 
     if (any_displacement) {
         const int ngp = c->isTopoNonlin ? 5 : 8;
@@ -3050,11 +3137,67 @@ __global__ static void kernel_nonlinear_update_force(
             }
 
             double model_error = 0.0;
-            int32_t md_substeps = 0;
-            nl_md_diagnostics_t md_diagnostics = {};
             const tensor_t static_stress =
                 nl_approx_static_stress(c, &cfg, element.h, qp);
-            const int ok = nl_update_material(
+            int ok;
+#ifdef NL_GPU_PDMY03_ONLY
+            pdmy03_diagnostics_t pdmy03_diagnostics = {};
+            const int32_t point = nl_eindex*NL_GPU_QP+qp;
+            tensor_t *centers = state.pdmy03_centers+
+                (size_t)point*state.pdmy03_surface_stride;
+            ok = pdmy03_update(
+                &c->pdmy03, cfg.no_substeps, strain, strain_prev,
+                static_stress, &state.stresses[nl_eindex].qp[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                state.pdmy03_states+point, centers,
+                &pdmy03_diagnostics);
+            model_error = pdmy03_diagnostics.yield_residual;
+            c->fs[qp] = model_error;
+            if (!ok || !isfinite(model_error)) {
+                nl_record_pdmy03_error(
+                    state.error, eindex, qp, &pdmy03_diagnostics,
+                    pdmy03_scale(pdmy03_add(
+                        state.stresses[nl_eindex].qp[qp], static_stress),
+                        -1.0),
+                    pdmy03_sub(strain, strain_prev));
+            }
+#elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+            int32_t md_substeps = 0;
+            nl_md_diagnostics_t md_diagnostics = {};
+            state.pstrains2[nl_eindex].qp[qp] =
+                state.pstrains1[nl_eindex].qp[qp];
+            state.alphastress2[nl_eindex].qp[qp] =
+                state.alphastress1[nl_eindex].qp[qp];
+            ok = nl_update_manzari_dafalias(
+                c, &cfg, strain, strain_prev, static_stress,
+                &state.stresses[nl_eindex].qp[qp],
+                &state.pstrains2[nl_eindex].qp[qp],
+                &state.alphastress2[nl_eindex].qp[qp],
+                &state.sref[nl_eindex].qp[qp],
+                &state.fabric[nl_eindex].qp[qp],
+                &state.sv_max[nl_eindex].qv[qp],
+                &state.ep2[nl_eindex].qv[qp],
+                &state.psi_n[nl_eindex].qv[qp], &c->fs[qp],
+                &state.kappa[nl_eindex].qv[qp], &md_substeps,
+                &md_diagnostics);
+            state.load_unload_n[nl_eindex].qv[qp] = (double)md_substeps;
+            model_error = c->fs[qp];
+            if (!ok || !isfinite(model_error) ||
+                model_error > cfg.error_tolerance) {
+                const tensor_t md_stress = md_scale(md_add(
+                    state.stresses[nl_eindex].qp[qp], static_stress), -1.0);
+                nl_record_md_error(
+                    state.error, eindex, qp,
+                    fmax(model_error, md_diagnostics.correction_residual),
+                    fmax(state.kappa[nl_eindex].qv[qp],
+                         md_diagnostics.local_error),
+                    md_substeps, &md_diagnostics, md_stress,
+                    md_sub(strain, strain_prev));
+            }
+#else
+            int32_t unused_substeps = 0;
+            nl_md_diagnostics_t unused_diagnostics = {};
+            ok = nl_update_material(
                 c, &cfg, strain, strain_prev, static_stress,
                 state.pstrains1[nl_eindex].qp[qp],
                 state.alphastress1[nl_eindex].qp[qp],
@@ -3071,13 +3214,10 @@ __global__ static void kernel_nonlinear_update_force(
                 &state.sref[nl_eindex].qp[qp],
                 &state.gamma1d[nl_eindex].qv[qp],
                 &state.tao1d[nl_eindex].qv[qp],
-                &state.ggmax[nl_eindex].qv[qp], &model_error,
-                (cfg.material_model == MANZARI_DAFALIAS)
-                    ? &state.fabric[nl_eindex].qp[qp] : NULL,
+                &state.ggmax[nl_eindex].qv[qp], &model_error, NULL,
                 &state.sv_max[nl_eindex].qv[qp],
-                &state.kappa[nl_eindex].qv[qp], &md_substeps,
-                &md_diagnostics);
-
+                &state.kappa[nl_eindex].qv[qp], &unused_substeps,
+                &unused_diagnostics);
             if (MATERIAL_MODEL_IS_BACKBONE(cfg.material_model)) {
                 c->fs[qp] = model_error;
                 if (!ok || !isfinite(model_error) ||
@@ -3086,27 +3226,11 @@ __global__ static void kernel_nonlinear_update_force(
                                     model_error,
                                     state.stresses[nl_eindex].qp[qp].xx);
                 }
-            } else if (cfg.material_model == MANZARI_DAFALIAS) {
-                c->fs[qp] = model_error;
-                if (!ok || !isfinite(model_error) ||
-                    model_error > cfg.error_tolerance) {
-                    const tensor_t md_stress = md_scale(md_add(
-                        state.stresses[nl_eindex].qp[qp], static_stress),
-                        -1.0);
-                    nl_record_md_error(
-                        state.error, eindex, qp,
-                        fmax(model_error,
-                             md_diagnostics.correction_residual),
-                        fmax(state.kappa[nl_eindex].qv[qp],
-                             md_diagnostics.local_error),
-                        md_substeps,
-                        &md_diagnostics, md_stress,
-                        md_sub(strain, strain_prev));
-                }
             } else if (!ok || !isfinite(c->fs[qp])) {
                 nl_record_error(state.error, 1, eindex, qp, c->fs[qp],
                                 state.stresses[nl_eindex].qp[qp].xx);
             }
+#endif
         }
     }
 
@@ -3152,6 +3276,40 @@ __global__ static void kernel_nonlinear_update_force(
     }
 }
 
+#if defined(NL_GPU_CLASSIC_ONLY)
+extern "C" void nonlinear_gpu_launch_classic(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+extern "C" void nonlinear_gpu_launch_manzari_dafalias(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#elif defined(NL_GPU_PDMY03_ONLY)
+extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#endif
+#endif
+
+#ifdef NL_GPU_RUNTIME_ONLY
 __global__ static void kernel_nonlinear_gather_station_state(
     nonlinear_gpu_state_t state, int32_t station_count,
     const int32_t *station_indices,
@@ -3260,6 +3418,32 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(tao1d, tao1d);
     NL_ALLOC_COPY(ggmax, GGmax);
 
+    if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03 && count > 0) {
+        int32_t stride = 0;
+        for (int32_t i = 0; i < count; i++) {
+            if (host_state->constants[i].pdmy03.surface_count > stride)
+                stride = host_state->constants[i].pdmy03.surface_count;
+        }
+        if (stride < 2 || stride > PDMY03_MAX_SURFACES) return -1;
+        g_nl.pdmy03_surface_stride = stride;
+        const size_t point_count = (size_t)count*NL_GPU_QP;
+        cudaError_t pdmy_error = cudaMalloc(
+            (void **)&g_nl.pdmy03_states,
+            point_count*sizeof(*g_nl.pdmy03_states));
+        if (pdmy_error == cudaSuccess)
+            pdmy_error = cudaMemset(g_nl.pdmy03_states, 0,
+                point_count*sizeof(*g_nl.pdmy03_states));
+        if (pdmy_error == cudaSuccess)
+            pdmy_error = cudaMalloc(
+                (void **)&g_nl.pdmy03_centers,
+                point_count*(size_t)stride*sizeof(*g_nl.pdmy03_centers));
+        if (pdmy_error == cudaSuccess)
+            pdmy_error = cudaMemset(g_nl.pdmy03_centers, 0,
+                point_count*(size_t)stride*sizeof(*g_nl.pdmy03_centers));
+        if (nonlinear_cuda_failure(myID, pdmy_error,
+                "PDMY03 history allocation") != 0) return -1;
+    }
+
     if (nonlinear_cuda_failure(myID,
             cudaMalloc((void **)&g_nl.error, sizeof(nonlinear_gpu_error_t)),
             "error buffer allocation") != 0 ||
@@ -3314,6 +3498,20 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         "recovery may force-accept a finite admissible "
                         "state above backbone_errTol\n");
             }
+        } else if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+            const double state_mib = (double)((size_t)count*NL_GPU_QP*
+                (sizeof(pdmy03_state_t)+(size_t)g_nl.pdmy03_surface_stride*
+                 sizeof(tensor_t)))/(1024.0*1024.0);
+            fprintf(stderr,
+                    "PressureDependMultiYield03 integration: standard "
+                    "automatic nested surfaces (max_substeps=%d, "
+                    "surface_stride=%d, local_history=%.1f MiB, "
+                    "geostatic=%s)\n",
+                    config->no_substeps, g_nl.pdmy03_surface_stride,
+                    state_mib,
+                    config->approximate_geostatic_state == YES
+                        ? "approximate K0 effective stress"
+                        : "solver stress history");
         }
         fflush(stderr);
     }
@@ -3330,13 +3528,19 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
     cudaMemsetAsync(g_nl.error, 0, sizeof(nonlinear_gpu_error_t), stream);
     const int block_size = 128;
     const int grid_size = (g_nl.count + block_size - 1)/block_size;
-#ifdef __CUDACC__
-    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
-        g_nl, g_config, solver->gpuDataDevice, step, delta_t,
-        delta_t_squared);
-#else
-    (void)grid_size;
-#endif
+    if (g_config.material_model == MANZARI_DAFALIAS) {
+        nonlinear_gpu_launch_manzari_dafalias(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    } else if (g_config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        nonlinear_gpu_launch_pdmy03(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    } else {
+        nonlinear_gpu_launch_classic(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    }
     const cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
         fprintf(stderr, "Nonlinear GPU kernel launch failed: %s\n",
@@ -3611,6 +3815,33 @@ void nonlinear_gpu_check_error(int32_t myID)
                         "center=(%.6f, %.6f, %.6f) m h=%.6f m\n",
                         x, y, z, x+0.5*h, y+0.5*h, z+0.5*h, h);
             }
+        } else if (g_error_host.code == 4) {
+            const char *reason = "unknown";
+            switch (g_error_host.md_reason) {
+            case PDMY03_FAILURE_CONSTANTS:
+                reason = "invalid constants or substep control"; break;
+            case PDMY03_FAILURE_INITIAL_GEOMETRY:
+                reason = "initial nested-surface geometry is invalid"; break;
+            case PDMY03_FAILURE_NONFINITE:
+                reason = "non-finite constitutive state"; break;
+            case PDMY03_FAILURE_SURFACE_GEOMETRY:
+                reason = "nested-surface geometry update failed"; break;
+            }
+            fprintf(stderr,
+                    "  PDMY03 reason: %s (reason=%d)\n"
+                    "  requested_substeps=%d accepted_substeps=%d "
+                    "crossed_surfaces=%d substeps_clamped=%d\n"
+                    "  normalized_yield_residual=%12.8E "
+                    "effective_mean_stress=%12.8E Pa "
+                    "strain_increment_norm=%12.8E\n",
+                    reason, g_error_host.md_reason,
+                    g_error_host.md_attempts,
+                    g_error_host.md_accepted_substeps,
+                    g_error_host.md_projection_fallbacks,
+                    g_error_host.md_force_accepts,
+                    g_error_host.residual,
+                    g_error_host.md_effective_mean_stress,
+                    g_error_host.md_strain_increment_norm);
         }
         fflush(stderr);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -3729,9 +3960,59 @@ int nonlinear_manzari_dafalias_host_history(
     }
     return 0;
 }
+
+int nonlinear_pdmy03_host_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results)
+{
+    if (constants == NULL || config == NULL || initial_state == NULL ||
+        strain_history == NULL || results == NULL || steps <= 0 ||
+        config->material_model != PRESSURE_DEPEND_MULTIYIELD_03 ||
+        constants->pdmy03.surface_count < 2 ||
+        constants->pdmy03.surface_count > PDMY03_MAX_SURFACES) return -1;
+
+    const int seeded = initial_state->provided != 0;
+    tensor_t strain_previous = seeded ? initial_state->strain : pdmy03_zero();
+    tensor_t stress = seeded ? initial_state->stress : pdmy03_zero();
+    tensor_t plastic_strain = seeded ? initial_state->plastic_strain
+                                     : pdmy03_zero();
+    pdmy03_state_t state = {};
+    tensor_t centers[PDMY03_MAX_SURFACES] = {};
+
+    for (int32_t step = 0; step < steps; step++) {
+        pdmy03_diagnostics_t diagnostics = {};
+        const int ok = pdmy03_update(
+            &constants->pdmy03, config->no_substeps, strain_history[step],
+            strain_previous, pdmy03_zero(), &stress, &plastic_strain,
+            &state, centers, &diagnostics);
+        nonlinear_material_point_result_t result = {};
+        result.stress = stress;
+        result.plastic_strain = plastic_strain;
+        result.fs = diagnostics.yield_residual;
+        result.model_error = diagnostics.yield_residual;
+        result.accepted_substeps = diagnostics.accepted_substeps;
+        result.pdmy03_active_surface = state.active_surface;
+        result.pdmy03_requested_substeps = diagnostics.requested_substeps;
+        result.pdmy03_crossed_surfaces = diagnostics.crossed_surfaces;
+        result.pdmy03_substeps_clamped = diagnostics.substeps_clamped;
+        result.pdmy03_pressure_d = state.pressure_d;
+        double center_norm = 0.0;
+        for (int i = 0; i < constants->pdmy03.surface_count; i++)
+            center_norm += pdmy03_ddot(centers[i], centers[i]);
+        result.pdmy03_center_norm = sqrt(center_norm);
+        result.status = ok ? 0 : 1;
+        results[step] = result;
+        strain_previous = strain_history[step];
+    }
+    return 0;
+}
 #endif
 
-#ifndef NL_GPU_MATERIAL_POINT_ONLY
+#ifdef NL_GPU_RUNTIME_ONLY
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();
@@ -3743,6 +4024,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(ep1); NL_FREE(ep2); NL_FREE(psi_n); NL_FREE(load_unload_n);
     NL_FREE(sv_n); NL_FREE(sv_max); NL_FREE(kappa); NL_FREE(sref);
     NL_FREE(fabric);
+    NL_FREE(pdmy03_states); NL_FREE(pdmy03_centers);
     NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
 #undef NL_FREE
     memset(&g_nl, 0, sizeof(g_nl));

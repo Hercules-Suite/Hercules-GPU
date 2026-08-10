@@ -20,15 +20,18 @@ and the remaining solver modules compile concurrently. This also keeps an edit
 limited to host orchestration from triggering the previously expensive NVCC
 compilation of the entire solver source.
 
-The Manzari--Dafalias and legacy nonlinear CUDA implementations make PTX
-assembly the most expensive forward-solver build phase. The Makefile therefore
-compiles the production element-update kernel into `nonlinear_gpu.o` and the
-material-point history kernel into `nonlinear_gpu_material_point.o`. Both
-objects use the same constitutive source and equations, with mutually exclusive
-compile-time wrappers, so `make -j 8` can run their independent NVCC/PTX
-assembly jobs concurrently without relocatable device code. Prefer an explicit
-outer job count such as `-j 8` over bare `-j`, which gives GNU Make no
-concurrency limit.
+The nonlinear constitutive kernels make PTX assembly the most expensive
+forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
+instantiate independent production objects for the classic constitutive
+families, Manzari--Dafalias, and PressureDependMultiYield03, plus small runtime
+and material-point objects. The runtime selects one family kernel for the
+globally configured `material_model`. This keeps the equations normally
+inlined, avoids relocatable device code, and lets `make -j 8` compile the three
+independent production kernels concurrently. The split also creates stable
+boundaries for moving model-specific implementation details without returning
+to a single production PTX-assembly job.
+Prefer an explicit outer job count such as `-j 8` over bare `-j`, which gives
+GNU Make no concurrency limit.
 
 Runtime performance toggles (no source edits needed):
 
@@ -503,6 +506,40 @@ Nonlinear GPU execution (runtime environment):
 	state; plastic strain is updated consistently with the elastic stress change,
 	and alpha/alpha-in are reset. This prevents tensile skeleton stress without
 	returning a partially integrated global increment.
+- `material_model=PressureDependMultiYield03` (alias `PDMY03`) is a
+	device-first implementation of the standard PDMY03 automatically generated
+	nested-surface formulation. It includes pressure-dependent elastic moduli,
+	translated yield surfaces, phase-transformation contraction/dilation, and
+	post-liquefaction-zone history. The update is explicit and deterministic; it
+	does not use the Manzari--Dafalias Modified-Euler error/recovery loop.
+	Hercules estimates the requested subincrements from the number of yield
+	surfaces crossed and the shear/volumetric strain increment. `no_substeps`
+	caps that request. If the request is larger, Hercules integrates exactly
+	`no_substeps`, records the clamping diagnostic, and continues rather than
+	treating the cap as constitutive nonconvergence. `backbone_errTol`,
+	`error_tolerance`, and `manzari_dafalias_recovery` do not control this PDMY03
+	integrator. The current interface supports the standard automatic curve with
+	2--40 surfaces; custom user-supplied G/Gmax surface coordinates are not yet
+	accepted.
+	PDMY03 production execution currently requires the GPU backend. Its history
+	storage is allocated only when PDMY03 is selected and uses the maximum surface
+	count actually present on the local rank. Startup reports the global and
+	maximum per-rank nonlinear counts, estimated host/device constitutive storage,
+	and maximum-rank timings for classification, host allocation, constant and
+	geostatic preparation, and GPU upload. Large cases classify nonlinear
+	eligibility once in parallel and compact the cached flags in deterministic
+	element order; large FEM cases also prepare independent PDMY03 element
+	constants in parallel with the configured OpenMP threads. Startup statistics
+	are reduced over the active solver communicator, so unified Phase-A-to-Phase-B
+	handoffs do not wait on inactive mesh ranks. FEM
+	setup does not perform the VT topography-element lookup; that lookup is needed
+	only for the tetrahedral VT formulation. At the elastic-to-plastic transition, Hercules
+	matches OpenSees by clamping tensile mean stress to zero and accepting an
+	exactly zero state. This prevents a numerical initialization abort but is not
+	a substitute for the physical in-situ effective stress required by a
+	production soil model. Use `approximate_geostatic_state=yes`, a nonzero ramped
+	geostatic loading stage, or a valid restart; otherwise startup warns that the
+	physical initialization is absent.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
@@ -510,6 +547,24 @@ Nonlinear GPU execution (runtime environment):
 	There are no implicit calibrated Manzari--Dafalias constants: every row must
 	provide all 17 values. The constants in the material-point and OpenSees
 	fixtures are characterization inputs, not production defaults.
+- PressureDependMultiYield03 rows use 22 values in
+	`material_properties_list`:
+
+	`Vs_limit Gref Kref friction_angle peak_shear_strain ref_pressure pressure_dependence phase_transform_angle loading_type ca cb cc cd ce da db dc surface_count liquefaction1 liquefaction2 atmospheric_pressure cohesion`
+
+	Stress-like quantities use Pa and both angles use degrees. `loading_type` is
+	0 for triaxial compression, 1 for triaxial extension, or 2 for direct simple
+	shear. `surface_count` is an integer from 2 through 40. Continuous values are
+	linearly interpolated by element `Vs`; the two categorical fields are selected
+	from the nearest `Vs_limit` row. These inputs are case-specific calibration
+	parameters and have no production defaults.
+	`benchmark_inputs/nonlinear_material_point/opensees_pdmy03_cyclic_shear.tcl`
+	provides an independent OpenSees 3.8 affine-brick characterization of the
+	synthetic fixture. The companion comparator checks the tensor-shear path and
+	all six stresses; the reference development run produced stress NRMSE about
+	`1.9e-10` after 100 kPa elastic consolidation and the cyclic plastic path.
+	`plot_opensees_pdmy03.py` writes PNG and PDF comparisons of shear response,
+	effective mean stress, prescribed strain history, and component error.
 - With `approximate_geostatic_state=yes`, Hercules uses the integrated 1-D
 	density column stored with each mesh element, rather than a homogeneous
 	local-density half-space, and applies `K0 = 1 - sin(phi)`. For an active
@@ -526,7 +581,7 @@ Nonlinear GPU execution (runtime environment):
 	pressure traction remains explicit and the constitutive model owns the
 	skeleton volumetric response. The linear undrained fast path
 	(`lambda += alpha^2*M`) is automatically disabled even if requested. This is
-	particularly important for Manzari--Dafalias, whose skeleton stress is
+	particularly important for Manzari--Dafalias and PDMY03, whose skeleton stress is
 	effective stress, but it also avoids bypassing every other nonlinear
 	constitutive volumetric update.
 - The synthetic fixture includes a standalone OpenSees Modified-Euler driver
@@ -595,10 +650,10 @@ Nonlinear GPU execution (runtime environment):
 	`benchmark_inputs/nonlinear_material_point/README.md`.
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
-	force/displacement norms before a production run. Manzari--Dafalias is
-	production-GPU-only; validate it with the shared host/CUDA material-point
-	suite and the independent OpenSees characterizations, then run a GPU
-	production case. Keep geostatic, tolerance, substep, stiffness-damping, and
+	force/displacement norms before a production run. Manzari--Dafalias and
+	PDMY03 are production-GPU-only; validate each with its shared host/CUDA
+	material-point regression and an appropriate independent characterization,
+	then run a GPU production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
 - With `abc_type=cpml`, solid elements in the absorbing band are always
 	linear elastic and are excluded from the CPU and GPU nonlinear constitutive

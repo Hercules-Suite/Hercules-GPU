@@ -50,6 +50,12 @@ typedef struct nonlinear_material_point_result_t {
     double plastic_multiplier;
     double integration_error;
     int32_t accepted_substeps;
+    int32_t pdmy03_active_surface;
+    int32_t pdmy03_requested_substeps;
+    int32_t pdmy03_crossed_surfaces;
+    int32_t pdmy03_substeps_clamped;
+    double pdmy03_pressure_d;
+    double pdmy03_center_norm;
     int32_t status;
 } nonlinear_material_point_result_t;
 
@@ -110,6 +116,14 @@ int nonlinear_gpu_material_point_history(
  * used only by the material-point regression path. Production MD updates are
  * CUDA-only. */
 int nonlinear_manzari_dafalias_host_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+int nonlinear_pdmy03_host_history(
     const nlconstants_t *constants,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,

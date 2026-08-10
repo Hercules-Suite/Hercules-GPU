@@ -67,8 +67,14 @@ endif
 #
 # Object modules
 #
+NONLINEAR_GPU_OBJECTS = nonlinear/nonlinear_gpu_runtime.o \
+	nonlinear/nonlinear_gpu_classic.o \
+	nonlinear/nonlinear_gpu_manzari_dafalias.o \
+	nonlinear/nonlinear_gpu_pdmy03.o \
+	nonlinear/nonlinear_gpu_material_point.o
+
 PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o \
-	nonlinear_gpu.o nonlinear_gpu_material_point.o \
+	$(NONLINEAR_GPU_OBJECTS) \
 	commutil.o util.o output.o io_planes.o io_checkpoint.o stiffness.o \
 	damping.o quake_util.o kernel.o timers.o buildings.o meshformatlab.o drm.o \
 	topography.o drm_planewaves.o basin.o
@@ -123,18 +129,17 @@ psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h \
 
 quakesource.o: quakesource.cc quakesource.h psolve.h
 
-nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h
+nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h nonlinear_pdmy03.h
 
 stiffness.o: stiffness.cu stiffness.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
-nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h \
+NONLINEAR_GPU_DEPS = nonlinear/nonlinear_gpu_implementation.cuh \
+	nonlinear_gpu.h nonlinear.h nonlinear_pdmy03.h psolve.h kernel.h \
 	util.h quake_util.h
-	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_PRODUCTION_ONLY -c $< -o $@
 
-nonlinear_gpu_material_point.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h \
-	psolve.h kernel.h util.h quake_util.h
-	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_MATERIAL_POINT_ONLY -c $< -o $@
+nonlinear/nonlinear_gpu_%.o: nonlinear/nonlinear_gpu_%.cu $(NONLINEAR_GPU_DEPS)
+	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 kernel.o: kernel.cu kernel.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
