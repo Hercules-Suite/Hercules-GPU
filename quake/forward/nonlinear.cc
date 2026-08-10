@@ -953,9 +953,10 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
                 "PressureDependMultiYield03 warning: no approximate or "
-                "ramped geostatic initialization was selected; the first "
-                "plastic update requires an already compressive effective "
-                "stress (for example from a valid restart).\n");
+                "ramped geostatic initialization was selected. The "
+                "OpenSees-compatible transition clamps tensile mean stress "
+                "to zero, but a production soil model normally requires a "
+                "physical in-situ effective-stress state.\n");
     }
 
     if ( ( strcasecmp(tension_cutoff, "yes") == 0 ) && ( ( materialmodel == DRUCKERPRAGER ) || ( materialmodel == MOHR_COULOMB ) ) ) {

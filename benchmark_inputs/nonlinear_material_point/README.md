@@ -75,11 +75,13 @@ liquefaction1 liquefaction2 atmospheric_pressure cohesion
 Stress values use Pa and angles use degrees. `loading_type` is 0 for triaxial
 compression, 1 for triaxial extension, or 2 for direct simple shear;
 `surface_count` is an integer from 2 through 40. The production table adds
-`Vs_limit` as the first value, for 22 values per row. A PDMY03 material-point
-history must be seeded with compressive effective stress. The current common
-initial-state parser still requires all five arrays; alpha, alpha-in, and fabric
-are zero placeholders because PDMY03 initializes its translated surface centers
-from stress.
+`Vs_limit` as the first value, for 22 values per row. At the elastic-to-plastic
+transition, PDMY03 follows OpenSees by clamping tensile mean stress to zero; an
+exactly zero stress is also admissible. This numerical safeguard does not
+replace a physical in-situ effective-stress initialization in a production soil
+model. The current common initial-state parser still requires all five arrays;
+alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
+its translated surface centers from stress.
 
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
@@ -122,6 +124,10 @@ from stress.
   surfaces, reverses the tensor-shear path, and repeats its final strain. The
   CSV adds active surface, requested and accepted subincrements, crossed
   surfaces, clamping, pressureD, and the combined surface-center norm.
+- `pdmy03_zero_tension_onset_synthetic.in` starts from a small isotropic
+  tensile seed, enters plastic stage under compression, and verifies the
+  OpenSees-compatible mean-stress clamp rather than an initialization abort.
+  Its final repeated strain also checks zero-increment state preservation.
 
 PDMY03 uses deterministic explicit nested-surface subincrements rather than
 the Manzari--Dafalias adaptive error loop. Its request accounts for predicted

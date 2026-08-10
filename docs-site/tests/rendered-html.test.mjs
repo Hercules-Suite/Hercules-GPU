@@ -225,7 +225,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /thirteen-fixture suite/);
+  assert.match(gpu, /fourteen-fixture suite/);
   assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -539,11 +539,17 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
   assert.match(core, /pdmy03_update_ppz/);
   assert.match(core, /pdmy03_update_active_surface/);
+  assert.match(core, /if \(c == 0\.0\) return 0\.0/);
+  assert.match(core, /return low;/);
+  assert.match(core, /pdmy03_mean\(\*stress\) > 0\.0/);
+  assert.match(core, /surface <= active && surface < c->surface_count/);
+  assert.match(core, /trial, current, centers/);
   assert.match(gpu, /pdmy03_surface_stride/);
   assert.match(gpu, /PDMY03 history allocation/);
   assert.match(gpu, /nl_record_pdmy03_error/);
   assert.match(gpu, /nonlinear_pdmy03_host_history/);
   assert.ok(existsSync(`${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}pdmy03_zero_tension_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);

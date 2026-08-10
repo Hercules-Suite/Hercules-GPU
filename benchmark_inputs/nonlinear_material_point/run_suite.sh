@@ -39,6 +39,7 @@ fixtures=(
   manzari_dafalias_seeded_onset_synthetic.in
   manzari_dafalias_pressure_floor_synthetic.in
   pdmy03_cyclic_shear_synthetic.in
+  pdmy03_zero_tension_onset_synthetic.in
 )
 
 validate_md_pressure_floor() {

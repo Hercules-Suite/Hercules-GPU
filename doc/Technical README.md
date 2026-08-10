@@ -521,11 +521,13 @@ Nonlinear GPU execution (runtime environment):
 	PDMY03 production execution currently requires the GPU backend. Its history
 	storage is allocated only when PDMY03 is selected and uses the maximum surface
 	count actually present on the local rank. Startup reports that stride and the
-	local device-memory cost. A compressive effective-stress state must exist
-	before plastic loading, through `approximate_geostatic_state=yes`, a nonzero
-	ramped geostatic loading stage, or a valid restart. With neither approximate
-	nor ramped initialization, startup emits a warning and a zero-pressure first
-	plastic update fails explicitly.
+	local device-memory cost. At the elastic-to-plastic transition, Hercules
+	matches OpenSees by clamping tensile mean stress to zero and accepting an
+	exactly zero state. This prevents a numerical initialization abort but is not
+	a substitute for the physical in-situ effective stress required by a
+	production soil model. Use `approximate_geostatic_state=yes`, a nonzero ramped
+	geostatic loading stage, or a valid restart; otherwise startup warns that the
+	physical initialization is absent.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.

@@ -270,13 +270,15 @@ PDMY03_HD static inline int pdmy03_initialize_state(
     const pdmy03_constants_t *c, pdmy03_state_t *state, tensor_t *centers,
     tensor_t *stress)
 {
-    if (!(pdmy03_mean(*stress) < 0.0)) return 0;
+    /* OpenSees elast2Plast() removes tensile mean stress but retains the
+     * deviator.  An exactly zero state is a valid elastic/plastic-stage
+     * transition and must not become a constitutive failure. */
+    if (pdmy03_mean(*stress) > 0.0)
+        *stress = pdmy03_from_dev_mean(pdmy03_deviator(*stress), 0.0);
     const pdmy03_state_t empty_state = {};
     *state = empty_state;
     state->initialized = 1;
     state->on_ppz = -1;
-    state->initial_stress = *stress;
-    state->maximum_pressure = pdmy03_mean(*stress);
     for (int i = 0; i < c->surface_count; i++) centers[i] = pdmy03_zero();
 
     int active = 0;
@@ -286,6 +288,10 @@ PDMY03_HD static inline int pdmy03_initialize_state(
         pdmy03_yield(c, *stress, centers, active) > 0.0)
         pdmy03_scale_to_surface(c, stress, centers, active);
     state->active_surface = active;
+    /* OpenSees captures stress0 after elast2Plast(), including its tension
+     * clamp and any projection back to the failure surface. */
+    state->initial_stress = *stress;
+    state->maximum_pressure = pdmy03_mean(*stress);
     if (active == 0) return 1;
 
     const double signed_cone = pdmy03_mean(*stress)-c->residual_pressure;
@@ -293,7 +299,10 @@ PDMY03_HD static inline int pdmy03_initialize_state(
     const tensor_t dev = pdmy03_deviator(*stress);
     const double stress_ratio_length = sqrt(1.5*pdmy03_ddot(dev, dev));
     if (!(cone_height > 0.0) || !(stress_ratio_length > PDMY03_SMALL)) return 0;
-    for (int surface = 1; surface <= active; surface++) {
+    /* Translate all active inner surfaces, but never translate the failure
+     * surface away from the hydrostatic axis. */
+    for (int surface = 1;
+         surface <= active && surface < c->surface_count; surface++) {
         const double coefficient = 1.0-
             pdmy03_surface_size(c, surface)*cone_height/stress_ratio_length;
         centers[surface-1] = pdmy03_scale(dev, coefficient/signed_cone);
@@ -346,12 +355,14 @@ PDMY03_HD static inline double pdmy03_deviator_ratio(
 }
 
 PDMY03_HD static inline int pdmy03_is_reversal(
-    const pdmy03_constants_t *c, tensor_t base, tensor_t trial,
+    const pdmy03_constants_t *c, tensor_t normal_stress, tensor_t trial,
+    tensor_t committed_stress,
     const tensor_t *centers, int active)
 {
     if (active == 0) return 0;
-    const tensor_t normal = pdmy03_surface_normal(c, base, centers, active);
-    return pdmy03_ddot(pdmy03_sub(trial, base), normal) < 0.0;
+    const tensor_t normal = pdmy03_surface_normal(
+        c, normal_stress, centers, active);
+    return pdmy03_ddot(pdmy03_sub(trial, committed_stress), normal) < 0.0;
 }
 
 PDMY03_HD static inline void pdmy03_update_inner_surfaces(
@@ -578,8 +589,9 @@ PDMY03_HD static inline double pdmy03_plastic_potential(
 }
 
 PDMY03_HD static inline double pdmy03_positive_quadratic_root(
-    double a, double b, double c, int smaller)
+    double a, double b, double c, int context)
 {
+    if (c == 0.0) return 0.0;
     if (fabs(a) <= PDMY03_SMALL)
         return fabs(b) > PDMY03_SMALL ? -c/b : 0.0;
     const double discriminant = pdmy03_max(b*b-4.0*a*c, 0.0);
@@ -589,7 +601,10 @@ PDMY03_HD static inline double pdmy03_positive_quadratic_root(
     if (root1 >= 0.0) { low = root1; high = root1; }
     if (root2 >= 0.0) { low = pdmy03_min(low, root2); high = pdmy03_max(high, root2); }
     if (high < 0.0) return pdmy03_max(root1, root2);
-    return smaller ? low : high;
+    /* OpenSees secondOrderEqn() always returns the smaller nonnegative root;
+     * its final integer argument selects diagnostics, not the root. */
+    (void)context;
+    return low;
 }
 
 PDMY03_HD static inline int pdmy03_update_active_surface(
@@ -767,7 +782,7 @@ PDMY03_HD static inline int pdmy03_update(
     double factor = 1.0;
     tensor_t trial = pdmy03_elastic_predict(c, current, increment, &factor);
     if (state->active_surface > 0 &&
-        pdmy03_is_reversal(c, current, trial, centers,
+        pdmy03_is_reversal(c, current, trial, current, centers,
                            state->active_surface)) {
         pdmy03_update_inner_surfaces(c, current, centers,
                                      state->active_surface);
@@ -803,9 +818,9 @@ PDMY03_HD static inline int pdmy03_update(
         updated = base;
         trial = pdmy03_elastic_predict(c, base, sub_increment, &factor);
         if (state->active_surface > 0 &&
-            pdmy03_is_reversal(c, base, trial, centers,
+            pdmy03_is_reversal(c, base, trial, current, centers,
                                state->active_surface)) {
-            pdmy03_update_inner_surfaces(c, base, centers,
+            pdmy03_update_inner_surfaces(c, current, centers,
                                          state->active_surface);
             state->active_surface = 0;
         }
