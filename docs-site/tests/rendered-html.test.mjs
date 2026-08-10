@@ -552,6 +552,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.ok(existsSync(`${benchmarkRoot}pdmy03_zero_tension_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03.py`));
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 

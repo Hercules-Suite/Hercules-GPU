@@ -590,6 +590,11 @@ python3 compare_opensees_pdmy03.py \
   --hercules-csv pdmy03_cyclic_shear_synthetic.cpu.csv \
   --opensees-csv opensees_pdmy03_cyclic_shear.csv \
   --output-dir opensees_pdmy03_comparison
+
+python3 plot_opensees_pdmy03.py \
+  --hercules-csv pdmy03_cyclic_shear_synthetic.cpu.csv \
+  --opensees-csv opensees_pdmy03_cyclic_shear.csv \
+  --output-prefix opensees_pdmy03_comparison/pdmy03_hercules_opensees
 ```
 
 The driver establishes 100 kPa isotropic confinement in OpenSees's forced
@@ -599,3 +604,5 @@ all six stress components, writes a detailed CSV and JSON summary, and uses a
 default stress NRMSE threshold of `1e-8`. On OpenSees 3.8.0, the reference
 development run produced stress NRMSE about `1.9e-10`; this is a numerical
 characterization of the synthetic constants, not a production calibration.
+The plotter writes PNG and PDF panels for cyclic shear stress, effective mean
+stress, the applied strain history, and cross-code stress differences.
