@@ -660,6 +660,10 @@ Nonlinear GPU execution (runtime environment):
 		total-stress NRMSE, pore-pressure and `r_u` differences, and the relevant
 		confinement drift. Acceptance thresholds are intentionally not hard-coded
 		until both generated replays are reviewed on the target CUDA/MPI system.
+		Material-point CSV headers are generated from the same result-field table as
+		the data rows, including all six PDMY03 surface/substep diagnostics. The
+		PDMY03 BrickUP comparator also repairs the short-lived legacy header that
+		omitted those names, so an existing successful replay remains usable.
 - The short PDMY03 suite fixtures also exercise the BrickUP storage update.
 		The cyclic fixture uses the `alpha=1` limit `M=Kf/n`; the zero/tension-onset
 		fixture uses `alpha=0.8` and an explicit material-point grain modulus to

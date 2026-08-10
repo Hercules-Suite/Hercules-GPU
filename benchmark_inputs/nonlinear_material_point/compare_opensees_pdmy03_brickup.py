@@ -25,16 +25,55 @@ SUPPORTED_TESTS = {
 DRIVER_VERSION = "1"
 COMPONENTS = ("xx", "yy", "zz", "xy", "yz", "xz")
 STRAINS = tuple(f"eps_{component}" for component in COMPONENTS)
+PDMY03_DIAGNOSTIC_FIELDS = (
+    "pdmy03_active_surface",
+    "pdmy03_requested_substeps",
+    "pdmy03_crossed_surfaces",
+    "pdmy03_substeps_clamped",
+    "pdmy03_pressure_d",
+    "pdmy03_center_norm",
+)
 
 
 def read_hercules(path: Path) -> list[dict[str, float]]:
     with path.open(newline="", encoding="utf-8") as stream:
-        source = list(csv.DictReader(stream))
-    if not source:
+        reader = csv.reader(stream)
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise SystemExit("Hercules PDMY03 BrickUP history is empty")
+        raw_rows = list(reader)
+    if not raw_rows:
         raise SystemExit("Hercules PDMY03 BrickUP history is empty")
+
+    # PDMY03 initially appended six diagnostics to each material-point row
+    # without appending their names to the shared CSV header. Repair those
+    # already-produced histories in memory so users do not need to rebuild and
+    # rerun a valid constitutive test merely to compare it. New Hercules output
+    # contains these names directly and takes the normal path below.
+    legacy_header = not any(field in header
+                            for field in PDMY03_DIAGNOSTIC_FIELDS)
+    if legacy_header and all(
+            len(row) == len(header) + len(PDMY03_DIAGNOSTIC_FIELDS)
+            for row in raw_rows):
+        try:
+            insertion = header.index("accepted_substeps") + 1
+        except ValueError:
+            raise SystemExit(
+                "legacy Hercules CSV has no accepted_substeps column"
+            )
+        header[insertion:insertion] = PDMY03_DIAGNOSTIC_FIELDS
+
+    for index, row in enumerate(raw_rows):
+        if len(row) != len(header):
+            raise SystemExit(
+                f"Hercules CSV column mismatch at row {index}: "
+                f"header={len(header)} data={len(row)}"
+            )
+    source = [dict(zip(header, row)) for row in raw_rows]
     rows: list[dict[str, float]] = []
     for index, row in enumerate(source):
-        if int(row["status"]) != 0:
+        if int(float(row["status"])) != 0:
             raise SystemExit(
                 f"Hercules constitutive update failed at replay step {index}"
             )

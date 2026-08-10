@@ -5469,17 +5469,13 @@ static int material_point_write_csv(
         fprintf(stderr, "Cannot open material-point output %s\n", path);
         return -1;
     }
-    fputs("step,time,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,"
-          "sig_xx,sig_yy,sig_zz,sig_xy,sig_yz,sig_xz,"
-          "ep_xx,ep_yy,ep_zz,ep_xy,ep_yz,ep_xz,"
-          "eta_xx,eta_yy,eta_zz,eta_xy,eta_yz,eta_xz,"
-          "ep_bar,fs,psi,load_unload,tao,tao_max,kappa,"
-          "sref_xx,sref_yy,sref_zz,sref_xy,sref_yz,sref_xz,"
-          "gamma1d,tao1d,ggmax,model_error,"
-          "fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,"
-          "alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,"
-          "alpha_in_xz,void_ratio,plastic_multiplier,integration_error,"
-          "accepted_substeps", fp);
+    fputs("step,time,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz", fp);
+    /* Use the same authoritative field list as material_point_result_values().
+     * Keeping the header and row loops coupled prevents newly appended model
+     * diagnostics from silently shifting every subsequent CSV column. */
+    for (int i = 0; i < MATERIAL_POINT_RESULT_VALUE_COUNT; i++) {
+        fprintf(fp, ",%s", material_point_result_names[i]);
+    }
     if (pore_pressure != NULL) {
         fputs(",pore_pressure_pa,total_sig_xx,total_sig_yy,total_sig_zz,"
               "total_sig_xy,total_sig_yz,total_sig_xz", fp);

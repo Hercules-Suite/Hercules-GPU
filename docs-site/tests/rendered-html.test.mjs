@@ -556,6 +556,10 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const pressureKernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const pdmyBrickupComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_pdmy03_brickup.py`,
+    "utf8",
+  );
   const cyclicFixture = readFileSync(
     `${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`,
     "utf8",
@@ -594,6 +598,9 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
     /get_topo_nonlin_flag\(\)[\s\S]{0,100}get_topo_meth\(\) == VT[\s\S]{0,100}isTopoElement/,
   );
   assert.match(core, /pdmy03_requested_substeps/);
+  assert.match(cpu, /material_point_result_names\[i\]/);
+  assert.match(pdmyBrickupComparator, /PDMY03_DIAGNOSTIC_FIELDS/);
+  assert.match(pdmyBrickupComparator, /legacy_header/);
   assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
   assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
   assert.match(core, /pdmy03_update_ppz/);
