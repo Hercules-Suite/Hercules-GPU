@@ -187,6 +187,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
   assert.match(physics, /adaptive explicit Modified Euler/);
+  assert.match(physics, /integrates the 1-D density column/);
+  assert.match(physics, /pressure DOF starts at zero as excess pore pressure/);
+  assert.match(physics, /disables the zero-permeability undrained fast path whenever nonlinear analysis is active/);
   assert.match(physics, /legacy Istanbul nl_id classification/);
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
@@ -446,6 +449,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /raw_dgamma=/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
+  assert.match(cpu, /return theNonlinearFlag != 0/);
+  assert.match(cpu, /effective_overburden =\s*\(double\)edata->sigma_0 - pore_stress/);
+  assert.match(cpu, /ecp->sigmaZ_st = effective_overburden/);
+  assert.match(cpu, /pore-pressure unknown stores excess pressure/);
+  assert.match(gpu, /c->sigmaZ_st\+c->sigmaZ_gradient\*h\*lz\*0\.5/);
+  assert.match(gpu, /const tensor_t total_predictor = nl_add\(stress_predictor, static_stress\)/);
+  assert.match(psolve, /poroelastic_geostatic_stress_correction/);
+  assert.match(psolve, /Param\.thePoroelasticBiotAlpha \* Param\.thePoroelasticFluidDensity \* 9\.81/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));

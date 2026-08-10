@@ -2600,6 +2600,7 @@ __device__ static int nl_mc_tension_return(double bulk, double g,
 __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
                                               tensor_t strain,
                                               tensor_t sigma_trial,
+                                              tensor_t static_stress,
                                               tensor_t *pstrain,
                                               tensor_t *sigma,
                                               double epbar_prev,
@@ -2620,7 +2621,9 @@ __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
             double corrected[3];
             if (!nl_mc_tension_return(bulk, c->mu, c->phi, c->c,
                                       eig, corrected)) return 0;
-            *sigma = nl_spectral_recompose(corrected, vec);
+            const tensor_t total_stress =
+                nl_spectral_recompose(corrected, vec);
+            *sigma = nl_sub(total_stress, static_stress);
             *pstrain = nl_sub(strain,
                               nl_elastic_strain(*sigma, c->mu, bulk));
             *epbar = 0.0;
@@ -2628,7 +2631,7 @@ __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
             return 1;
         }
         if (shear_tension > 0.0 && eig[0] <= 0.0) {
-            *sigma = sigma_trial;
+            *sigma = nl_sub(sigma_trial, static_stress);
             *epbar = epbar_prev;
             *fs = eig[0];
             return 1;
@@ -2637,7 +2640,7 @@ __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
     double yield = eig[0] - eig[2] + (eig[0] + eig[2])*sin(c->phi) -
                    2.0*(c->c + c->h*epbar_prev)*cos(c->phi);
     if (yield < 0.0) {
-        *sigma = sigma_trial;
+        *sigma = nl_sub(sigma_trial, static_stress);
         *epbar = epbar_prev;
         *fs = yield;
         return 1;
@@ -2659,7 +2662,8 @@ __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
                               corrected, epbar);
         }
     }
-    *sigma = nl_spectral_recompose(corrected, vec);
+    const tensor_t total_stress = nl_spectral_recompose(corrected, vec);
+    *sigma = nl_sub(total_stress, static_stress);
     *pstrain = nl_sub(strain, nl_elastic_strain(*sigma, c->mu, bulk));
     *fs = corrected[0]-corrected[2] +
           (corrected[0]+corrected[2])*sin(c->phi) -
@@ -2723,9 +2727,10 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 
     tensor_t elastic_strain = nl_sub(strain, pstrain_prev);
     tensor_t stress_predictor = nl_stress(elastic_strain, c->mu, c->lambda);
-    tensor_t relative_dev = nl_sub(nl_dev(stress_predictor), backstress_prev);
+    const tensor_t total_predictor = nl_add(stress_predictor, static_stress);
+    tensor_t relative_dev = nl_sub(nl_dev(total_predictor), backstress_prev);
     const double j2 = nl_j2(relative_dev);
-    const double i1 = nl_i1(stress_predictor);
+    const double i1 = nl_i1(total_predictor);
     double hardening;
     if (model == VONMISES_EP) hardening = c->c * 2.0/sqrt(3.0);
     else if (model == DRUCKERPRAGER)
@@ -2733,15 +2738,16 @@ __device__ static int nl_update_material(const nlconstants_t *c,
     else if (model == VONMISES_FA) hardening = c->Sstrain0*c->mu;
     else if (model == MOHR_COULOMB) {
         double eig[3], vec[3][3];
-        nl_jacobi_eigen(stress_predictor, eig, vec);
+        nl_jacobi_eigen(total_predictor, eig, vec);
         hardening = 2.0*(c->c+c->h*epbar_prev)*cos(c->phi);
         const double pred = eig[0]-eig[2]+(eig[0]+eig[2])*sin(c->phi)-hardening;
         if (pred < 1.0e-3) {
             *pstrain = pstrain_prev; *sigma = stress_predictor;
             *epbar = epbar_prev; *fs = pred; return 1;
         }
-        return nl_update_mohr_coulomb(c, strain, stress_predictor, pstrain,
-                                      sigma, epbar_prev, epbar, fs,
+        return nl_update_mohr_coulomb(c, strain, total_predictor,
+                                      static_stress, pstrain, sigma,
+                                      epbar_prev, epbar, fs,
                                       cfg->tension_cutoff);
     } else hardening = 0.0;
 
@@ -2777,9 +2783,10 @@ __device__ static int nl_update_material(const nlconstants_t *c,
     *pstrain = nl_add(pstrain_prev, nl_scale(direction, dl));
     *sigma = nl_stress(nl_sub(strain, *pstrain), c->mu, c->lambda);
     *epbar = epbar_prev + dl*c->gamma;
-    tensor_t updated_dev = nl_dev(*sigma);
+    const tensor_t updated_total = nl_add(*sigma, static_stress);
+    tensor_t updated_dev = nl_dev(updated_total);
     double updated_j2 = nl_j2(updated_dev);
-    *fs = ((model == DRUCKERPRAGER) ? c->alpha*nl_i1(*sigma) : 0.0) +
+    *fs = ((model == DRUCKERPRAGER) ? c->alpha*nl_i1(updated_total) : 0.0) +
           sqrt(nl_max(updated_j2, 0.0));
     if (model == VONMISES_EP) *fs -= c->c*2.0/sqrt(3.0);
     else *fs -= c->gamma*(c->c+c->h*(*epbar));
@@ -2791,7 +2798,7 @@ __device__ static int nl_update_material(const nlconstants_t *c,
                    c->h*c->gamma*c->gamma, DBL_MIN);
         *epbar = epbar_prev+dl_apex*c->gamma;
         const double skk = i1-9.0*bulk*c->beta*dl_apex;
-        *sigma = nl_iso(skk/3.0);
+        *sigma = nl_sub(nl_iso(skk/3.0), static_stress);
         *pstrain = nl_sub(strain, nl_elastic_strain(*sigma, c->mu, bulk));
         *fs = c->alpha*skk-c->gamma*(c->c+c->h*(*epbar));
     }
@@ -2973,7 +2980,7 @@ __device__ static inline void nl_atomic_add(solver_float *address,
     atomicAdd(address, value);
 }
 
-__device__ static tensor_t nl_md_static_stress(
+__device__ static tensor_t nl_approx_static_stress(
     const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
     double h, int qp)
 {
@@ -2982,7 +2989,7 @@ __device__ static tensor_t nl_md_static_stress(
     const double lz = c->isTopoNonlin ? 0.0 :
         ((qp & 4) ? 0.577350269189 : -0.577350269189);
     const double vertical = nl_max(
-        c->sigmaZ_st+9.8*c->md.density*h*lz*0.5, 0.0);
+        c->sigmaZ_st+c->sigmaZ_gradient*h*lz*0.5, 0.0);
     const double k0 = 1.0-sin(c->phi);
     tensor_t stress = {-k0*vertical, -k0*vertical, -vertical,
                        0.0, 0.0, 0.0};
@@ -3046,8 +3053,7 @@ __global__ static void kernel_nonlinear_update_force(
             int32_t md_substeps = 0;
             nl_md_diagnostics_t md_diagnostics = {};
             const tensor_t static_stress =
-                (cfg.material_model == MANZARI_DAFALIAS)
-                ? nl_md_static_stress(c, &cfg, element.h, qp) : nl_zero();
+                nl_approx_static_stress(c, &cfg, element.h, qp);
             const int ok = nl_update_material(
                 c, &cfg, strain, strain_prev, static_stress,
                 state.pstrains1[nl_eindex].qp[qp],

@@ -138,10 +138,10 @@ int assume_groundwatertable() {
 
 int nonlinear_requires_explicit_pore_pressure() {
     /* The undrained poroelastic fast path folds alpha^2 M into a linear
-     * volumetric stiffness. A pressure-dependent nonlinear skeleton must keep
-     * the Qp traction explicit so its constitutive stress remains effective
-     * stress. */
-    return theNonlinearFlag != 0 && theMaterialModel == MANZARI_DAFALIAS;
+     * volumetric stiffness and bypasses the constitutive volumetric response.
+     * Every nonlinear skeleton must keep Qp explicit; for pressure-dependent
+     * models this is additionally required to keep skeleton stress effective. */
+    return theNonlinearFlag != 0;
 }
 
 static int parse_md_recovery_mode(const char *name,
@@ -1292,6 +1292,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                            mysolver_t *mySolver, double depth) {
 
     int32_t eindex, nl_eindex;
+    double local_geostatic_min = DBL_MAX;
+    double local_geostatic_max = 0.0;
+    int64_t local_geostatic_count = 0;
+    int64_t local_poro_geostatic_count = 0;
 
     if (theMaterialModel == MANZARI_DAFALIAS &&
         !nonlinear_gpu_requested()) {
@@ -1413,17 +1417,6 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         edata = (edata_t *)elemp->data;
         ecp   = myNonlinSolver->constants + nl_eindex;
 
-        int32_t lnid0 = elemp->lnid[0];
-        double  xo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-        double  yo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-        double  zo    = myMesh->ticksize * myMesh->nodeTable[lnid0].z;
-
-        if ( ( get_thebase_topo() != 0.0 ) && ( get_theetree_type() == SQD )  ) {
-                    zo -=  point_elevation ( xo, yo ) ;
-                    if ( zo < 0.0 )
-                        zo = 0.0;
-        }
-
         /* get element Vs */
         elementVs   = (double)edata->Vs;
         // elementVp   = (double)edata->Vp;
@@ -1434,9 +1427,51 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         ecp->lambda = lambda;
         ecp->mu     = mu;
 
-        /* Calculate the vertical stress as a homogeneous half-space */
-        if ( theApproxGeoState == YES )
-            ecp->sigmaZ_st = edata->rho * 9.80 * ( zo + edata->edgesize / 2.0 );
+        /* mesh_correct_properties already integrates the actual 1-D density
+         * column to the element center. Reuse that profile rather than
+         * replacing it with a local-density homogeneous half-space. BrickUP
+         * pressure is an excess-pressure unknown, so initialize the skeleton
+         * with effective overburden and leave the pressure arrays at zero. */
+        if ( theApproxGeoState == YES ) {
+            if (!(edata->sigma_0 > 0.0) || !isfinite(edata->sigma_0)) {
+                fprintf(stderr,
+                        "Thread %d: nonlinear element %d has invalid integrated "
+                        "overburden sigma_0=%g for approximate geostatic state\n",
+                        myID, eindex, (double)edata->sigma_0);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            double pore_unit_weight = 0.0;
+            const double pore_stress = poroelastic_geostatic_stress_correction(
+                myMesh, eindex, &pore_unit_weight);
+            const double effective_overburden =
+                (double)edata->sigma_0 - pore_stress;
+            const double effective_unit_weight =
+                (double)edata->rho * 9.81 - pore_unit_weight;
+            if (!(effective_overburden > 0.0) ||
+                !(effective_unit_weight > 0.0) ||
+                !isfinite(effective_overburden) ||
+                !isfinite(effective_unit_weight)) {
+                fprintf(stderr,
+                        "Thread %d: nonlinear element %d has inadmissible "
+                        "approximate effective overburden=%g Pa or unit "
+                        "weight=%g Pa/m (total=%g Pa, Biot pore correction="
+                        "%g Pa)\n",
+                        myID, eindex, effective_overburden,
+                        effective_unit_weight, (double)edata->sigma_0,
+                        pore_stress);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            ecp->sigmaZ_st = effective_overburden;
+            ecp->sigmaZ_gradient = effective_unit_weight;
+            local_geostatic_min = MIN(local_geostatic_min, ecp->sigmaZ_st);
+            local_geostatic_max = MAX(local_geostatic_max, ecp->sigmaZ_st);
+            local_geostatic_count++;
+            if (pore_unit_weight > 0.0) {
+                local_poro_geostatic_count++;
+            }
+        }
 
         // Shi & Asimaki (2017) && Darendeli's table 8.7
         sigma_c = 1000 * 0.1060 * pow( edata->Vs, 1.470 ) ;  // preconsolidation ratio (Pa)
@@ -1758,6 +1793,36 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
 
     } /* for all elements */
+
+    if (theApproxGeoState == YES) {
+        double global_geostatic_min = 0.0;
+        double global_geostatic_max = 0.0;
+        int64_t global_geostatic_count = 0;
+        int64_t global_poro_geostatic_count = 0;
+        MPI_Reduce(&local_geostatic_min, &global_geostatic_min, 1, MPI_DOUBLE,
+                   MPI_MIN, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_geostatic_max, &global_geostatic_max, 1, MPI_DOUBLE,
+                   MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_geostatic_count, &global_geostatic_count, 1,
+                   MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_poro_geostatic_count,
+                   &global_poro_geostatic_count, 1, MPI_LONG_LONG, MPI_SUM, 0,
+                   MPI_COMM_WORLD);
+        if (myID == 0 && global_geostatic_count > 0) {
+            fprintf(stderr,
+                    "Approximate geostatic state: integrated 1-D overburden "
+                    "with K0 effective stress; center sigma_v' range "
+                    "%.6e to %.6e Pa\n",
+                    global_geostatic_min, global_geostatic_max);
+            if (global_poro_geostatic_count > 0) {
+                fprintf(stderr,
+                        "Approximate geostatic/BrickUP coupling: removed "
+                        "alpha*rho_f*g*z_w from %lld nonlinear elements; "
+                        "pore-pressure unknown stores excess pressure\n",
+                        (long long)global_poro_geostatic_count);
+            }
+        }
+    }
 
     if (nonlinear_gpu_requested()) {
         nonlinear_gpu_config_t gpuConfig;
@@ -2352,10 +2417,11 @@ tensor_t zero_tensor() {
 /*
  * Returns the approximated self-weight tensor.
  */
-tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz, double rho) {
+tensor_t ApproxGravity_tensor(double Szz, double phi, double h, double lz,
+                              double vertical_stress_gradient) {
 
     double Ko = 1 - sin(phi);
-    double Sigma = -( Szz + 9.8 * rho * h * lz * 0.5);
+    double Sigma = -( Szz + vertical_stress_gradient * h * lz * 0.5);
 
     tensor_t C;
 
@@ -7474,13 +7540,14 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
         for (i = 0; i < ngp; i++) {
 
             tensor_t  sigma0;
+            double lz = 0.0;
             tstrains1->qp[i]    = copy_tensor ( tstrains->qp[i] ); // get elastic strains at t-1
 
             if ( ngp == 8 ) {
                 /* Quadrature point local coordinates */
                 double lx = xi[0][i] * qc ;
                 double ly = xi[1][i] * qc ;
-                double lz = xi[2][i] * qc ;
+                lz = xi[2][i] * qc ;
 
                 /* Calculate total strains */
                 tstrains->qp[i] = point_strain(u, lx, ly, lz, h);
@@ -7503,12 +7570,12 @@ void compute_nonlinear_state ( mesh_t     *myMesh,
                 continue;
             } else {
 
-               /* if ( theApproxGeoState == YES )
-                    sigma0 = ApproxGravity_tensor(enlcons->sigmaZ_st, enlcons->phi, h, lz, edata->rho);
+                if ( theApproxGeoState == YES )
+                    sigma0 = ApproxGravity_tensor(
+                        enlcons->sigmaZ_st, enlcons->phi, h, lz,
+                        enlcons->sigmaZ_gradient);
                 else
-                    sigma0 = zero_tensor(); */
-
-               sigma0 = zero_tensor(); // Todo: I need to think how to properly include self weight. Doriam
+                    sigma0 = zero_tensor();
 
                 int flagTolSubSteps=0, flagNoSubSteps=0;
                 double ErrBA=0;
@@ -7873,10 +7940,13 @@ void print_nonlinear_stations(mesh_t     *myMesh,
         edata = (edata_t *)elemp->data;
         h     = edata->edgesize;
 
-        /* compute the self-weight stresses at the first Gauss point*/
-        double lz = -0.577350269189;
+        /* Station output stores quadrature point 4, whose local z coordinate
+         * is +1/sqrt(3) in the shared quadrature ordering. */
+        double lz = 0.577350269189;
         if ( theApproxGeoState == YES )
-            sigma0 = ApproxGravity_tensor(enlcons->sigmaZ_st, enlcons->phi, h, lz, edata->rho);
+            sigma0 = ApproxGravity_tensor(
+                enlcons->sigmaZ_st, enlcons->phi, h, lz,
+                enlcons->sigmaZ_gradient);
         else
             sigma0 = zero_tensor();
 

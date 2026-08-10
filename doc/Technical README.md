@@ -510,19 +510,25 @@ Nonlinear GPU execution (runtime environment):
 	There are no implicit calibrated Manzari--Dafalias constants: every row must
 	provide all 17 values. The constants in the material-point and OpenSees
 	fixtures are characterization inputs, not production defaults.
-- With `approximate_geostatic_state=yes`, the model initializes its
-	compression-positive internal effective stress from the approximate K0 state.
+- With `approximate_geostatic_state=yes`, Hercules uses the integrated 1-D
+	density column stored with each mesh element, rather than a homogeneous
+	local-density half-space, and applies `K0 = 1 - sin(phi)`. For an active
+	BrickUP element, `alpha*rho_f*g*z_w` is removed from total overburden so the
+	constitutive skeleton starts from effective stress. The BrickUP pressure
+	unknown remains zero initially because it represents **excess** pore pressure.
 	The small kinematic yield surface is centered on that pre-existing stress
 	ratio so self weight is not interpreted as a new plastic increment.
 	The static stress is subtracted again before dynamic force assembly, so this
 	initialization does not inject an unbalanced gravity force. This remains an
 	approximation and must be checked against the intended effective overburden
 	profile before a production liquefaction analysis.
-- When Manzari--Dafalias overlaps BrickUP poroelastic elements, the skeleton
-	stress is effective stress and the Biot pressure traction remains explicit.
-	The linear undrained fast path (`lambda += alpha^2*M`) is automatically
-	disabled even if requested, because folding storage stiffness into the native
-	linear operator would bypass the nonlinear pressure-dependent skeleton.
+- Whenever nonlinear analysis overlaps BrickUP poroelastic elements, the Biot
+	pressure traction remains explicit and the constitutive model owns the
+	skeleton volumetric response. The linear undrained fast path
+	(`lambda += alpha^2*M`) is automatically disabled even if requested. This is
+	particularly important for Manzari--Dafalias, whose skeleton stress is
+	effective stress, but it also avoids bypassing every other nonlinear
+	constitutive volumetric update.
 - The synthetic fixture includes a standalone OpenSees Modified-Euler driver
 	and a characterization comparator under
 	`benchmark_inputs/nonlinear_material_point/`. OpenSees runs that reference in
@@ -821,8 +827,10 @@ Poroelastic U-P input flags (experimental V1):
 
 - `include_poroelastic`
 	Optional. `no` (default) keeps the existing elastic/acoustic solver
-	behavior. `yes` enables an experimental linear BrickUP-style U-P
-	poroelastic path for saturated shallow solid soil.
+	behavior. `yes` enables the BrickUP-style U-P poroelastic path for saturated
+	shallow solid soil. The skeleton may remain linear or use an eligible
+	nonlinear constitutive model; nonlinear use always selects the explicit
+	pressure-traction path described below.
 - `poroelastic_formulation`
 	Optional. Currently only `brick_up` is supported. The implementation
 	uses the input `Vp`, `Vs`, and density as the **dry/drained skeleton**
@@ -844,7 +852,8 @@ Poroelastic U-P input flags (experimental V1):
 - `poroelastic_undrained_fast_path`
 	Optional. `yes` (default) activates only when
 	`poroelastic_surface_pressure_bc = undrained` and all three permeability
-	values are exactly `0.0`. In that common validation/undrained limit, the
+	values are exactly `0.0`, and nonlinear analysis is inactive. In that common
+	linear validation/undrained limit, the
 	solver folds `alpha^2 M` directly into the native elastic volumetric
 	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
 	pressure-traction feedback. Pore pressure is still updated from `Q^T du`
@@ -853,7 +862,9 @@ Poroelastic U-P input flags (experimental V1):
 	nonzero permeability / `drained` pressure BC for the full split path.
 	`acoustic_poroelastic_interface=open_pore` also disables this fast path so
 	the pressure-continuity pore pressure feeds back mechanically through the
-	split `Q p` term.
+	split `Q p` term. Nonlinear analysis likewise disables it automatically: the
+	configured value remains `yes`, but the effective runtime path is the
+	explicit `Q p` coupling needed by the constitutive skeleton.
 - `poroelastic_depth_max_m`
 	Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
 	within this depth below the local ground surface are eligible for
