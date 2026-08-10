@@ -123,16 +123,16 @@ psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h \
 
 quakesource.o: quakesource.cc quakesource.h psolve.h
 
-nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h
+nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h nonlinear_pdmy03.h
 
 stiffness.o: stiffness.cu stiffness.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
-nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h psolve.h kernel.h \
+nonlinear_gpu.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h nonlinear_pdmy03.h psolve.h kernel.h \
 	util.h quake_util.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_PRODUCTION_ONLY -c $< -o $@
 
-nonlinear_gpu_material_point.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h \
+nonlinear_gpu_material_point.o: nonlinear_gpu.cu nonlinear_gpu.h nonlinear.h nonlinear_pdmy03.h \
 	psolve.h kernel.h util.h quake_util.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -DNL_GPU_MATERIAL_POINT_ONLY -c $< -o $@
 

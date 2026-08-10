@@ -186,6 +186,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /MohrCoulomb/);
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
+  assert.match(physics, /PressureDependMultiYield03/);
+  assert.match(physics, /standard automatically generated nested yield surfaces/);
   assert.match(physics, /adaptive explicit Modified Euler/);
   assert.match(physics, /integrates the 1-D density column/);
   assert.match(physics, /pressure DOF starts at zero as excess pore pressure/);
@@ -207,6 +209,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /alpha_cohesion is Su in Pa/);
   assert.match(parameters, /plastic-strain evolution/);
   assert.match(parameters, /ManzariDafalias: N × 17/);
+  assert.match(parameters, /PDMY03: N × 22/);
+  assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
 
@@ -221,8 +225,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /twelve-fixture suite/);
-  assert.match(gpu, /device-first and currently requires the GPU backend/);
+  assert.match(gpu, /thirteen-fixture suite/);
+  assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
   assert.match(gpu, /purely volumetric increment updates only hydrostatic stress/);
@@ -409,7 +413,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   );
 
   assert.match(header, /MANZARI_DAFALIAS/);
-  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 : 16/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*\? 22 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
   assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
@@ -509,6 +513,40 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(brickupPlot, /hercules_total_sig_xx_pa/);
   assert.match(brickupPlot, /with_suffix\("\.png"\)/);
   assert.match(brickupPlot, /with_suffix\("\.pdf"\)/);
+});
+
+test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, and fixture", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear_gpu.cu`, "utf8");
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const core = readFileSync(`${sourceRoot}nonlinear_pdmy03.h`, "utf8");
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+
+  assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
+  assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
+  assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
+  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 : 16/);
+  assert.match(cpu, /nearest_property_value/);
+  assert.match(cpu, /pdmy03_prepare_constants/);
+  assert.match(core, /pdmy03_requested_substeps/);
+  assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
+  assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
+  assert.match(core, /pdmy03_update_ppz/);
+  assert.match(core, /pdmy03_update_active_surface/);
+  assert.match(gpu, /pdmy03_surface_stride/);
+  assert.match(gpu, /PDMY03 history allocation/);
+  assert.match(gpu, /nl_record_pdmy03_error/);
+  assert.match(gpu, /nonlinear_pdmy03_host_history/);
+  assert.ok(existsSync(`${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
+  assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

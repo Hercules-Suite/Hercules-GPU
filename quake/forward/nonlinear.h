@@ -48,7 +48,8 @@ typedef enum {
      */
     LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER,
     MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
-    VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS
+    VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS,
+    PRESSURE_DEPEND_MULTIYIELD_03
 
 } materialmodel_t;
 
@@ -122,6 +123,56 @@ typedef struct manzari_dafalias_constants_t {
     double density;
 } manzari_dafalias_constants_t;
 
+/* The standard PressureDependMultiYield03 automatic-surface formulation.
+ * Hercules supports a runtime-selected surface count up to this compile-time
+ * bound. Production storage uses the largest count actually present on each
+ * rank, not this upper bound. */
+#define PDMY03_MAX_SURFACES 40
+
+typedef struct pdmy03_constants_t {
+    double ref_shear_modulus;
+    double ref_bulk_modulus;
+    double friction_angle;
+    double peak_shear_strain;
+    double ref_pressure;
+    double pressure_dependence;
+    double phase_transform_angle;
+    int32_t loading_type;
+    double contraction[5];
+    double dilation[3];
+    int32_t surface_count;
+    double liquefaction[2];
+    double atmospheric_pressure;
+    double cohesion;
+
+    /* Derived automatic-surface data, prepared once during initialization. */
+    double residual_pressure;
+    double failure_ratio;
+    double phase_transform_ratio;
+    double phase_transform_strain;
+    double reference_strain;
+    double reference_peak_shear;
+} pdmy03_constants_t;
+
+typedef struct pdmy03_state_t {
+    int32_t initialized;
+    int32_t active_surface;
+    int32_t on_ppz;
+    double pressure_d;
+    double ppz_size;
+    double cumulative_dilation;
+    double maximum_cumulative_dilation;
+    double cumulative_translation;
+    double pre_ppz_strain;
+    double opposite_pre_ppz_strain;
+    double maximum_pressure;
+    double damage;
+    tensor_t ppz_pivot;
+    tensor_t ppz_center;
+    tensor_t pivot_strain_rate;
+    tensor_t initial_stress;
+} pdmy03_state_t;
+
 
 
 typedef struct nlconstants_t {
@@ -168,6 +219,7 @@ typedef struct nlconstants_t {
     double sigmaZ_gradient; /* local effective vertical stress gradient */
 
     manzari_dafalias_constants_t md;
+    pdmy03_constants_t pdmy03;
 
     double maxFs;
     double avgFs;

@@ -35,6 +35,7 @@
 //#include "octor.h"
 #include "geometrics.h"
 #include "nonlinear.h"
+#include "nonlinear_pdmy03.h"
 //#include "psolve.h"
 #include "quake_util.h"
 #include "util.h"
@@ -100,6 +101,8 @@ static double               *thePhi_RO;
 #define MANZARI_DAFALIAS_PROPERTY_COUNT 16
 static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
+#define PDMY03_PROPERTY_COUNT 21
+static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -289,6 +292,22 @@ double interpolate_property_value(double vsRequest, double *propVector)
     double result = prop0 + (vsRequest - vs0)*( (prop1 - prop0)/(vs1 - vs0) );
 
     return result;
+}
+
+/* Categorical material-table fields (PDMY03 loading type and surface count)
+ * are selected from the nearest Vs row instead of being interpolated. */
+static double nearest_property_value(double vsRequest, double *propVector)
+{
+    int nearest = 0;
+    double distance = fabs(vsRequest-theVsLimits[0]);
+    for (int i = 1; i < thePropertiesCount; i++) {
+        const double candidate = fabs(vsRequest-theVsLimits[i]);
+        if (candidate < distance) {
+            distance = candidate;
+            nearest = i;
+        }
+    }
+    return propVector[nearest];
 }
 
 /*
@@ -649,6 +668,11 @@ void nonlinear_init( int32_t     myID,
                 theManzariDafaliasProperties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
+        } else if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+            for (int field = 0; field < PDMY03_PROPERTY_COUNT; field++) {
+                thePdmy03Properties[field] =
+                    (double*)malloc(sizeof(double) * thePropertiesCount);
+            }
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
         theKayPhis          = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -675,6 +699,11 @@ void nonlinear_init( int32_t     myID,
              field++) {
             MPI_Bcast(theManzariDafaliasProperties[field],
                       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
+        }
+    } else if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+        for (int field = 0; field < PDMY03_PROPERTY_COUNT; field++) {
+            MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
+                      MPI_DOUBLE, 0, comm_solver);
         }
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -836,13 +865,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     } else if ( strcasecmp(material_model, "ManzariDafalias") == 0 ||
                 strcasecmp(material_model, "Manzari-Dafalias") == 0 ) {
         materialmodel = MANZARI_DAFALIAS;
+    } else if (strcasecmp(material_model, "PressureDependMultiYield03") == 0 ||
+               strcasecmp(material_model, "PDMY03") == 0) {
+        materialmodel = PRESSURE_DEPEND_MULTIYIELD_03;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03): %s\n", material_model);
         return -1;
     }
 
@@ -917,6 +949,14 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 approx_geostatic_state);
         return -1;
     }
+    if (materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+        approxgeostatic == NO && geostatic_loading_t <= 0.0) {
+        fprintf(stderr,
+                "PressureDependMultiYield03 warning: no approximate or "
+                "ramped geostatic initialization was selected; the first "
+                "plastic update requires an already compressive effective "
+                "stress (for example from a valid restart).\n");
+    }
 
     if ( ( strcasecmp(tension_cutoff, "yes") == 0 ) && ( ( materialmodel == DRUCKERPRAGER ) || ( materialmodel == MOHR_COULOMB ) ) ) {
         tensioncutoff = YES;
@@ -954,7 +994,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theStiffDampFreq           = stff_dmp_freq;
 
     const int property_columns =
-        (theMaterialModel == MANZARI_DAFALIAS) ? 17 : 16;
+        (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
+        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -962,6 +1003,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
              field++) {
             theManzariDafaliasProperties[field] = (double*)malloc(
+                sizeof(double) * thePropertiesCount);
+        }
+    } else if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+        for (int field = 0; field < PDMY03_PROPERTY_COUNT; field++) {
+            thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
     } else {
@@ -995,6 +1041,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             for (int field = 0; field < MANZARI_DAFALIAS_PROPERTY_COUNT;
                  field++) {
                 theManzariDafaliasProperties[field][row] =
+                    auxiliar[row * property_columns + field + 1];
+            }
+            continue;
+        } else if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+            for (int field = 0; field < PDMY03_PROPERTY_COUNT; field++) {
+                thePdmy03Properties[field][row] =
                     auxiliar[row * property_columns + field + 1];
             }
             continue;
@@ -1043,6 +1095,50 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 !(c_lode > 0.0) || !(P_atm > 0.0)) {
                 fprintf(stderr, "Illegal ManzariDafalias row %d: G0, e_init, "
                                 "Mc, c, and P_atm must be positive\n", row);
+                return -1;
+            }
+        }
+    } else if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+        for (row = 1; row < thePropertiesCount; row++) {
+            if (theVsLimits[row] <= theVsLimits[row-1]) {
+                fprintf(stderr, "PDMY03 Vs limits must be strictly increasing\n");
+                return -1;
+            }
+        }
+        for (row = 0; row < thePropertiesCount; row++) {
+            pdmy03_constants_t pdmy = {};
+            for (int field = 0; field < PDMY03_PROPERTY_COUNT; field++) {
+                if (!isfinite(thePdmy03Properties[field][row])) {
+                    fprintf(stderr, "Illegal PDMY03 row %d: all parameters "
+                                    "must be finite\n", row);
+                    return -1;
+                }
+            }
+            pdmy.ref_shear_modulus = thePdmy03Properties[0][row];
+            pdmy.ref_bulk_modulus = thePdmy03Properties[1][row];
+            pdmy.friction_angle = thePdmy03Properties[2][row];
+            pdmy.peak_shear_strain = thePdmy03Properties[3][row];
+            pdmy.ref_pressure = thePdmy03Properties[4][row];
+            pdmy.pressure_dependence = thePdmy03Properties[5][row];
+            pdmy.phase_transform_angle = thePdmy03Properties[6][row];
+            pdmy.loading_type = (int32_t)llround(thePdmy03Properties[7][row]);
+            for (int i = 0; i < 5; i++)
+                pdmy.contraction[i] = thePdmy03Properties[8+i][row];
+            for (int i = 0; i < 3; i++)
+                pdmy.dilation[i] = thePdmy03Properties[13+i][row];
+            pdmy.surface_count = (int32_t)llround(thePdmy03Properties[16][row]);
+            pdmy.liquefaction[0] = thePdmy03Properties[17][row];
+            pdmy.liquefaction[1] = thePdmy03Properties[18][row];
+            pdmy.atmospheric_pressure = thePdmy03Properties[19][row];
+            pdmy.cohesion = thePdmy03Properties[20][row];
+            if (fabs(thePdmy03Properties[7][row]-pdmy.loading_type) > 1.0e-12 ||
+                fabs(thePdmy03Properties[16][row]-pdmy.surface_count) > 1.0e-12 ||
+                !pdmy03_prepare_constants(&pdmy)) {
+                fprintf(stderr, "Illegal PDMY03 row %d: check Gref, Kref, "
+                    "friction/phase-transform angles, peak strain, reference "
+                    "and atmospheric pressures, loading_type (0..2), and "
+                    "integer surface count (2..%d)\n",
+                    row, PDMY03_MAX_SURFACES);
                 return -1;
             }
         }
@@ -1297,13 +1393,16 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
     int64_t local_geostatic_count = 0;
     int64_t local_poro_geostatic_count = 0;
 
-    if (theMaterialModel == MANZARI_DAFALIAS &&
+    if ((theMaterialModel == MANZARI_DAFALIAS ||
+         theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
-                    "ManzariDafalias currently requires the GPU nonlinear "
+                    "%s currently requires the GPU nonlinear "
                     "backend; HERCULES_NONLINEAR_BACKEND=cpu is not "
-                    "supported for production runs.\n");
+                    "supported for production runs.\n",
+                    theMaterialModel == MANZARI_DAFALIAS
+                        ? "ManzariDafalias" : "PressureDependMultiYield03");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1766,6 +1865,51 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
             }
 
+            case PRESSURE_DEPEND_MULTIYIELD_03: {
+                pdmy03_constants_t *pdmy = &ecp->pdmy03;
+                pdmy->ref_shear_modulus = interpolate_property_value(
+                    elementVs, thePdmy03Properties[0]);
+                pdmy->ref_bulk_modulus = interpolate_property_value(
+                    elementVs, thePdmy03Properties[1]);
+                pdmy->friction_angle = interpolate_property_value(
+                    elementVs, thePdmy03Properties[2]);
+                pdmy->peak_shear_strain = interpolate_property_value(
+                    elementVs, thePdmy03Properties[3]);
+                pdmy->ref_pressure = interpolate_property_value(
+                    elementVs, thePdmy03Properties[4]);
+                pdmy->pressure_dependence = interpolate_property_value(
+                    elementVs, thePdmy03Properties[5]);
+                pdmy->phase_transform_angle = interpolate_property_value(
+                    elementVs, thePdmy03Properties[6]);
+                pdmy->loading_type = (int32_t)llround(nearest_property_value(
+                    elementVs, thePdmy03Properties[7]));
+                for (int i = 0; i < 5; i++)
+                    pdmy->contraction[i] = interpolate_property_value(
+                        elementVs, thePdmy03Properties[8+i]);
+                for (int i = 0; i < 3; i++)
+                    pdmy->dilation[i] = interpolate_property_value(
+                        elementVs, thePdmy03Properties[13+i]);
+                pdmy->surface_count = (int32_t)llround(nearest_property_value(
+                    elementVs, thePdmy03Properties[16]));
+                pdmy->liquefaction[0] = interpolate_property_value(
+                    elementVs, thePdmy03Properties[17]);
+                pdmy->liquefaction[1] = interpolate_property_value(
+                    elementVs, thePdmy03Properties[18]);
+                pdmy->atmospheric_pressure = interpolate_property_value(
+                    elementVs, thePdmy03Properties[19]);
+                pdmy->cohesion = interpolate_property_value(
+                    elementVs, thePdmy03Properties[20]);
+                if (!pdmy03_prepare_constants(pdmy)) {
+                    fprintf(stderr,
+                            "Thread %d: PDMY03 element %d has invalid "
+                            "interpolated material constants\n", myID, eindex);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                ecp->phi = pdmy->friction_angle*PI/180.0;
+                break;
+            }
+
             default:
                 fprintf(stderr, "Thread %d: nonlinear_solver_init:\n"
                         "\tUnexpected error with the material model\n", myID);
@@ -1782,7 +1926,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         }
 
 
-        if (theMaterialModel == MANZARI_DAFALIAS) {
+        if (theMaterialModel == MANZARI_DAFALIAS ||
+            theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
@@ -4747,7 +4892,8 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 
 #define MATERIAL_POINT_CONSTANT_COUNT 24
 #define MATERIAL_POINT_MD_CONSTANT_COUNT 17
-#define MATERIAL_POINT_RESULT_VALUE_COUNT 51
+#define MATERIAL_POINT_PDMY03_CONSTANT_COUNT 21
+#define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
 #define MATERIAL_POINT_LOAD_UNLOAD_INDEX 21
@@ -4755,6 +4901,10 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX 48
 #define MATERIAL_POINT_INTEGRATION_ERROR_INDEX 49
 #define MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX 50
+#define MATERIAL_POINT_PDMY03_ACTIVE_SURFACE_INDEX 51
+#define MATERIAL_POINT_PDMY03_REQUESTED_SUBSTEPS_INDEX 52
+#define MATERIAL_POINT_PDMY03_CROSSED_SURFACES_INDEX 53
+#define MATERIAL_POINT_PDMY03_SUBSTEPS_CLAMPED_INDEX 54
 
 static const char *material_point_result_names[
     MATERIAL_POINT_RESULT_VALUE_COUNT] = {
@@ -4767,7 +4917,10 @@ static const char *material_point_result_names[
     "fabric_xx", "fabric_yy", "fabric_zz", "fabric_xy", "fabric_yz",
     "fabric_xz", "alpha_in_xx", "alpha_in_yy", "alpha_in_zz",
     "alpha_in_xy", "alpha_in_yz", "alpha_in_xz", "void_ratio",
-    "plastic_multiplier", "integration_error", "accepted_substeps"
+    "plastic_multiplier", "integration_error", "accepted_substeps",
+    "pdmy03_active_surface", "pdmy03_requested_substeps",
+    "pdmy03_crossed_surfaces", "pdmy03_substeps_clamped",
+    "pdmy03_pressure_d", "pdmy03_center_norm"
 };
 
 static int material_point_parse_model(const char *name,
@@ -4787,6 +4940,9 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "ManzariDafalias") == 0 ||
              strcasecmp(name, "Manzari-Dafalias") == 0)
         *model = MANZARI_DAFALIAS;
+    else if (strcasecmp(name, "PressureDependMultiYield03") == 0 ||
+             strcasecmp(name, "PDMY03") == 0)
+        *model = PRESSURE_DEPEND_MULTIYIELD_03;
     else return -1;
     return 0;
 }
@@ -4814,6 +4970,26 @@ static void material_point_load_constants(nlconstants_t *constants,
         constants->md.nd = values[14];
         constants->md.z_max = values[15];
         constants->md.cz = values[16];
+        return;
+    }
+    if (model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        pdmy03_constants_t *pdmy = &constants->pdmy03;
+        pdmy->ref_shear_modulus = values[0];
+        pdmy->ref_bulk_modulus = values[1];
+        pdmy->friction_angle = values[2];
+        pdmy->peak_shear_strain = values[3];
+        pdmy->ref_pressure = values[4];
+        pdmy->pressure_dependence = values[5];
+        pdmy->phase_transform_angle = values[6];
+        pdmy->loading_type = (int32_t)llround(values[7]);
+        for (int i = 0; i < 5; i++) pdmy->contraction[i] = values[8+i];
+        for (int i = 0; i < 3; i++) pdmy->dilation[i] = values[13+i];
+        pdmy->surface_count = (int32_t)llround(values[16]);
+        pdmy->liquefaction[0] = values[17];
+        pdmy->liquefaction[1] = values[18];
+        pdmy->atmospheric_pressure = values[19];
+        pdmy->cohesion = values[20];
+        (void)pdmy03_prepare_constants(pdmy);
         return;
     }
     constants->lambda = values[0];
@@ -4850,6 +5026,11 @@ static int material_point_cpu_history(
     if (config->material_model == MANZARI_DAFALIAS) {
         (void)dt;
         return nonlinear_manzari_dafalias_host_history(
+            constants, config, initial_state, strain_history, steps, results);
+    }
+    if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        (void)dt;
+        return nonlinear_pdmy03_host_history(
             constants, config, initial_state, strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
@@ -4961,6 +5142,12 @@ static int material_point_result_values(
     values[i++] = result->plastic_multiplier;
     values[i++] = result->integration_error;
     values[i++] = (double)result->accepted_substeps;
+    values[i++] = (double)result->pdmy03_active_surface;
+    values[i++] = (double)result->pdmy03_requested_substeps;
+    values[i++] = (double)result->pdmy03_crossed_surfaces;
+    values[i++] = (double)result->pdmy03_substeps_clamped;
+    values[i++] = result->pdmy03_pressure_d;
+    values[i++] = result->pdmy03_center_norm;
 #undef MP_TENSOR_VALUES
     return i;
 }
@@ -5020,7 +5207,11 @@ static int material_point_validate_zero_increment(
               i == MATERIAL_POINT_LOAD_UNLOAD_INDEX)) ||
             i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX ||
             i == MATERIAL_POINT_INTEGRATION_ERROR_INDEX ||
-            i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX) continue;
+            i == MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX ||
+            (model == PRESSURE_DEPEND_MULTIYIELD_03 &&
+             (i == MATERIAL_POINT_PDMY03_REQUESTED_SUBSTEPS_INDEX ||
+              i == MATERIAL_POINT_PDMY03_CROSSED_SURFACES_INDEX ||
+              i == MATERIAL_POINT_PDMY03_SUBSTEPS_CLAMPED_INDEX))) continue;
         if (current_values[i] != previous_values[i]) {
             fprintf(stderr, "%s bounding/backbone state changed on a zero "
                     "strain increment at step %d field %s: previous=%.17e "
@@ -5224,7 +5415,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
     material_constant_count = (material_model == MANZARI_DAFALIAS)
-        ? MATERIAL_POINT_MD_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
+        ? MATERIAL_POINT_MD_CONSTANT_COUNT :
+        (material_model == PRESSURE_DEPEND_MULTIYIELD_03)
+        ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
         fprintf(stderr, "Cannot read %d material-point constants for %s\n",
@@ -5247,9 +5440,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                         "stress, alpha, alpha_in, and fabric\n");
         goto cleanup;
     }
-    if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS) {
+    if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
+        material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
         fprintf(stderr, "A material-point initial state currently requires "
-                        "ManzariDafalias\n");
+                        "ManzariDafalias or PressureDependMultiYield03\n");
         goto cleanup;
     }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
@@ -5320,6 +5514,37 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                                 "constants: all values must be finite\n");
                 goto cleanup;
             }
+        }
+    }
+    if (material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        pdmy03_constants_t pdmy = {};
+        pdmy.ref_shear_modulus = constants_values[0];
+        pdmy.ref_bulk_modulus = constants_values[1];
+        pdmy.friction_angle = constants_values[2];
+        pdmy.peak_shear_strain = constants_values[3];
+        pdmy.ref_pressure = constants_values[4];
+        pdmy.pressure_dependence = constants_values[5];
+        pdmy.phase_transform_angle = constants_values[6];
+        pdmy.loading_type = (int32_t)llround(constants_values[7]);
+        for (int i = 0; i < 5; i++) pdmy.contraction[i] = constants_values[8+i];
+        for (int i = 0; i < 3; i++) pdmy.dilation[i] = constants_values[13+i];
+        pdmy.surface_count = (int32_t)llround(constants_values[16]);
+        pdmy.liquefaction[0] = constants_values[17];
+        pdmy.liquefaction[1] = constants_values[18];
+        pdmy.atmospheric_pressure = constants_values[19];
+        pdmy.cohesion = constants_values[20];
+        for (int i = 0; i < MATERIAL_POINT_PDMY03_CONSTANT_COUNT; i++) {
+            if (!isfinite(constants_values[i])) {
+                fprintf(stderr, "Illegal PDMY03 material-point constants: "
+                                "all values must be finite\n");
+                goto cleanup;
+            }
+        }
+        if (fabs(constants_values[7]-pdmy.loading_type) > 1.0e-12 ||
+            fabs(constants_values[16]-pdmy.surface_count) > 1.0e-12 ||
+            !pdmy03_prepare_constants(&pdmy)) {
+            fprintf(stderr, "Illegal PDMY03 material-point constants\n");
+            goto cleanup;
         }
     }
     memset(&initial_state, 0, sizeof(initial_state));
@@ -5469,7 +5694,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     for (int32_t step = 0; step < steps; step++) {
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
-             material_model == MANZARI_DAFALIAS) && step > 0 &&
+             material_model == MANZARI_DAFALIAS ||
+             material_model == PRESSURE_DEPEND_MULTIYIELD_03) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -5690,6 +5916,29 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
+    } else if (material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        int maximum_requested = 0;
+        int clamped_steps = 0;
+        for (int32_t step = 0; step < steps; step++) {
+            maximum_cpu_accepted_substeps = MAX(maximum_cpu_accepted_substeps,
+                cpu_results[step].accepted_substeps);
+            maximum_gpu_accepted_substeps = MAX(maximum_gpu_accepted_substeps,
+                gpu_results[step].accepted_substeps);
+            maximum_requested = MAX(maximum_requested,
+                cpu_results[step].pdmy03_requested_substeps);
+            clamped_steps += cpu_results[step].pdmy03_substeps_clamped != 0;
+        }
+        printf("PDMY03 controls: standard automatic surfaces %d, maximum "
+               "substeps %d\n", constants.pdmy03.surface_count, no_substeps);
+        printf("Maximum requested/accepted substeps: %d / %d (CPU), %d "
+               "(GPU); clamped steps: %d\n", maximum_requested,
+               maximum_cpu_accepted_substeps,
+               maximum_gpu_accepted_substeps, clamped_steps);
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
     }
     if (brickup_enabled == YES) {
         printf("BrickUP sealed uniform-element controls: M=%.6e Pa, "
@@ -5717,6 +5966,7 @@ cleanup:
 
 #undef MATERIAL_POINT_CONSTANT_COUNT
 #undef MATERIAL_POINT_MD_CONSTANT_COUNT
+#undef MATERIAL_POINT_PDMY03_CONSTANT_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
 #undef MATERIAL_POINT_PSI_INDEX
@@ -5725,6 +5975,10 @@ cleanup:
 #undef MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX
 #undef MATERIAL_POINT_INTEGRATION_ERROR_INDEX
 #undef MATERIAL_POINT_ACCEPTED_SUBSTEPS_INDEX
+#undef MATERIAL_POINT_PDMY03_ACTIVE_SURFACE_INDEX
+#undef MATERIAL_POINT_PDMY03_REQUESTED_SUBSTEPS_INDEX
+#undef MATERIAL_POINT_PDMY03_CROSSED_SURFACES_INDEX
+#undef MATERIAL_POINT_PDMY03_SUBSTEPS_CLAMPED_INDEX
 
 /* computes the derivatives of the flow potential for a Drucker-Prager material */
 tensor_t compute_dfds (tensor_t dev, double J2, double beta) {
