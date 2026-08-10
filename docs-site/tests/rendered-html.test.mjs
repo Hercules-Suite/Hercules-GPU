@@ -564,6 +564,10 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /PDMY03 initialization complete:/);
   assert.match(
     cpu,
+    /#pragma omp parallel for if\(parallel_pdmy03_initialization\)[\s\S]{0,1000}const int32_t eindex = myNonlinElementsMapping\[nl_eindex\]/,
+  );
+  assert.match(
+    cpu,
     /get_topo_nonlin_flag\(\)[\s\S]{0,100}get_topo_meth\(\) == VT[\s\S]{0,100}isTopoElement/,
   );
   assert.match(core, /pdmy03_requested_substeps/);

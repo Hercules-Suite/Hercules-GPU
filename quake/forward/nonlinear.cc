@@ -1392,7 +1392,7 @@ void nonlinear_stats(int32_t myID, int32_t theGroupSize) {
 void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                            mysolver_t *mySolver, double depth) {
 
-    int32_t eindex, nl_eindex;
+    int32_t nl_eindex;
     const double nonlinear_init_start = MPI_Wtime();
     double nonlinear_mapping_end;
     double nonlinear_allocation_end;
@@ -1589,7 +1589,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         double      PIn = 0.0, tau_max = 0.0, OCR = 0.0;
         // double      elementVp;
 
-        eindex = myNonlinElementsMapping[nl_eindex];
+        const int32_t eindex = myNonlinElementsMapping[nl_eindex];
 
         elemp = &myMesh->elemTable[eindex];
         edata = (edata_t *)elemp->data;
