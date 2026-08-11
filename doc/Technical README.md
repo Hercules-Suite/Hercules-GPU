@@ -552,9 +552,11 @@ Nonlinear GPU execution (runtime environment):
 
 	`Vs_limit Gref Kref friction_angle peak_shear_strain ref_pressure pressure_dependence phase_transform_angle loading_type ca cb cc cd ce da db dc surface_count liquefaction1 liquefaction2 atmospheric_pressure cohesion`
 
-	Stress-like quantities use Pa and both angles use degrees. `loading_type` is
-	0 for triaxial compression, 1 for triaxial extension, or 2 for direct simple
-	shear. `surface_count` is an integer from 2 through 40. Continuous values are
+	Stress-like quantities use Pa and both angles use degrees. `liquefaction1`
+	and `liquefaction2` are dimensionless OpenSees coefficients and must not be
+	rescaled when changing stress units. `loading_type` is 0 for triaxial
+	compression, 1 for triaxial extension, or 2 for direct simple shear.
+	`surface_count` is an integer from 2 through 40. Continuous values are
 	linearly interpolated by element `Vs`; the two categorical fields are selected
 	from the nearest `Vs_limit` row. These inputs are case-specific calibration
 	parameters and have no production defaults.

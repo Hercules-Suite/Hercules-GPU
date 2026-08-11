@@ -96,7 +96,7 @@ def main() -> int:
         "material_point_constants =",
         "9.0e7 2.2e8 32.0 0.10 1.013e5 0.50 26.0 0",
         "0.067 0.50 0.23 1.0 0.0 0.06 3.0 0.27",
-        "20 1.0e4 0.01 1.013e5 1.73e3",
+        "20 10.0 0.01 1.013e5 1.73e3",
         "",
         "material_point_initial_strain =",
         " ".join(f"{float(initial[field]):.17e}" for field in STRAIN_FIELDS),

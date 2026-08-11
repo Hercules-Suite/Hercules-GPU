@@ -72,7 +72,9 @@ phase_transform_angle loading_type ca cb cc cd ce da db dc surface_count
 liquefaction1 liquefaction2 atmospheric_pressure cohesion
 ```
 
-Stress values use Pa and angles use degrees. `loading_type` is 0 for triaxial
+Stress values use Pa and angles use degrees. `liquefaction1` and
+`liquefaction2` are dimensionless OpenSees coefficients and must not be
+rescaled when changing stress units. `loading_type` is 0 for triaxial
 compression, 1 for triaxial extension, or 2 for direct simple shear;
 `surface_count` is an integer from 2 through 40. The production table adds
 `Vs_limit` as the first value, for 22 values per row. At the elastic-to-plastic

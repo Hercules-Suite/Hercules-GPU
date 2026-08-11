@@ -617,6 +617,8 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(pdmyBrickupComparator, /legacy_header/);
   assert.match(pdmyBrickupComparator, /DRIVER_VERSION = "2"/);
   assert.match(pdmyBrickupGenerator, /DRIVER_VERSION = "2"/);
+  assert.match(pdmyBrickupGenerator, /"20 10\.0 0\.01 1\.013e5 1\.73e3"/);
+  assert.doesNotMatch(pdmyBrickupGenerator, /"20 1\.0e4 0\.01/);
   assert.match(pdmyBrickupTriaxialDriver, /phaseTransform mType ca cb/);
   assert.match(pdmyBrickupTriaxialDriver, /26\.0 0/);
   assert.match(pdmyBrickupTriaxialDriver, /undrained_triaxial 2/);
@@ -630,6 +632,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(core, /if \(c == 0\.0\) return 0\.0/);
   assert.match(core, /return low;/);
   assert.match(core, /pdmy03_mean\(\*stress\) > 0\.0/);
+  assert.match(core, /state->maximum_pressure = 0\.0/);
   assert.match(core, /surface <= active && surface < c->surface_count/);
   assert.match(core, /trial, current, centers/);
   assert.match(gpu, /pdmy03_surface_stride/);

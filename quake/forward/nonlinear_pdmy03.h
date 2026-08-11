@@ -291,7 +291,11 @@ PDMY03_HD static inline int pdmy03_initialize_state(
     /* OpenSees captures stress0 after elast2Plast(), including its tension
      * clamp and any projection back to the failure surface. */
     state->initial_stress = *stress;
-    state->maximum_pressure = pdmy03_mean(*stress);
+    /* OpenSees initializes maxPress to zero.  The first committed stage-1
+     * update then records the most compressive mean stress reached during
+     * plastic loading.  Seeding it from the consolidation stress changes the
+     * PPZ damage/translation memory as soon as the path reverses. */
+    state->maximum_pressure = 0.0;
     if (active == 0) return 1;
 
     const double signed_cone = pdmy03_mean(*stress)-c->residual_pressure;
