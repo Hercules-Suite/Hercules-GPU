@@ -433,9 +433,9 @@ typedef struct gpu_data_t {
     solver_float* porePressureTm1Device;     /* GPU pore pressure at t */
     solver_float* porePressureTm2Device;     /* GPU pore pressure at t-dt/new */
     solver_float* porePressureForceDevice;   /* GPU pore-pressure RHS */
-    solver_float* porePressureMassDevice;    /* GPU lumped pore-pressure mass */
-    solver_float* porePressureSurfaceDevice; /* GPU drained-plane mass */
-    solver_float* porePressureOpenPoreMassDevice;   /* GPU acoustic-open pore weak mass */
+    solver_float* porePressureMassDevice;    /* GPU lumped storage int(N/M)dV */
+    solver_float* porePressureSurfaceDevice; /* GPU drained-plane compliance */
+    solver_float* porePressureOpenPoreMassDevice;   /* GPU acoustic-open pore compliance */
     solver_float* porePressureOpenPoreTargetDevice; /* GPU acoustic pressure target */
     int32_t       poroelasticElemCount;      /* local BrickUP elements */
     int32_t*      poroelasticElemMapperDevice;
@@ -728,9 +728,9 @@ struct mysolver_t {
     solver_float* pore_pressure_tm1;   /* Poroelastic pore pressure at t - 1 */
     solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
     solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
-    solver_float* pore_pressure_mass;  /* Poroelastic lumped storage/mass */
-    solver_float* pore_pressure_surface; /* Drained-plane mass; host only */
-    solver_float* pore_pressure_open_pore_mass; /* Acoustic-open pore weak mass */
+    solver_float* pore_pressure_mass;  /* Poroelastic lumped int(N/M)dV */
+    solver_float* pore_pressure_surface; /* Drained-plane compliance; host only */
+    solver_float* pore_pressure_open_pore_mass; /* Acoustic-open pore compliance */
     solver_float* pore_pressure_open_pore_target; /* Acoustic pressure target */
 
     schedule_t* dn_sched;     /* Dangling node communication schedule */
@@ -870,6 +870,24 @@ int cpml_pml_element( int32_t eindex );
  * filter and the toponodes_mass gate. Uses the persistent compact CPML
  * membership bitset, so it remains valid after solver_init(). */
 int cpml_pml_flattened_element( int32_t eindex );
+
+/* Setup-time classification of an element relative to the active BrickUP
+ * pressure map. This is used after solver_init() to report whether nonlinear
+ * soil elements are actually coupled to pore pressure. */
+typedef enum {
+    POROELASTIC_MAP_DISABLED = 0,
+    POROELASTIC_MAP_ACTIVE,
+    POROELASTIC_MAP_ABOVE_GROUNDWATER,
+    POROELASTIC_MAP_BELOW_DEPTH_LIMIT,
+    POROELASTIC_MAP_CPML,
+    POROELASTIC_MAP_INELIGIBLE,
+    POROELASTIC_MAP_ELIGIBLE_UNMAPPED
+} poroelastic_map_status_t;
+
+int poroelastic_analysis_enabled( void );
+poroelastic_map_status_t poroelastic_element_map_status(
+    mesh_t *mesh, int32_t eindex, double *ground_depth,
+    double *groundwater_depth );
 
 /* Return the Biot-weighted hydrostatic stress alpha*rho_f*g*z_w at the
  * center of an active BrickUP element. `unit_weight_correction` receives

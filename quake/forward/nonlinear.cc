@@ -141,6 +141,10 @@ double get_geostatic_total_time() {
     return theGeostaticLoadingT + theGeostaticCushionT;
 }
 
+double get_geostatic_loading_time() {
+    return theGeostaticLoadingT;
+}
+
 int assume_groundwatertable() {
     return theSurfaceGroundwaterTable;
 }
@@ -1438,6 +1442,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
     double local_geostatic_max = 0.0;
     int64_t local_geostatic_count = 0;
     int64_t local_poro_geostatic_count = 0;
+    int64_t local_poro_map_counts[7] = {0};
+    int64_t global_poro_map_counts[7] = {0};
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
          theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) &&
@@ -1509,6 +1515,62 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     nonlinear_elements_mapping(myID, myMesh);
     nonlinear_mapping_end = MPI_Wtime();
+
+    if (poroelastic_analysis_enabled()) {
+        for (nl_eindex = 0; nl_eindex < myNonlinElementsCount; nl_eindex++) {
+            const int32_t eindex = myNonlinElementsMapping[nl_eindex];
+            const poroelastic_map_status_t status =
+                poroelastic_element_map_status(myMesh, eindex, NULL, NULL);
+            if (status >= POROELASTIC_MAP_DISABLED &&
+                status <= POROELASTIC_MAP_ELIGIBLE_UNMAPPED) {
+                local_poro_map_counts[(int)status]++;
+            }
+        }
+        MPI_Allreduce(local_poro_map_counts, global_poro_map_counts, 7,
+                      MPI_INT64_T, MPI_SUM, comm_solver);
+        if (myID == 0) {
+            const int64_t active =
+                global_poro_map_counts[POROELASTIC_MAP_ACTIVE];
+            const int64_t above =
+                global_poro_map_counts[POROELASTIC_MAP_ABOVE_GROUNDWATER];
+            const int64_t below =
+                global_poro_map_counts[POROELASTIC_MAP_BELOW_DEPTH_LIMIT];
+            const int64_t cpml =
+                global_poro_map_counts[POROELASTIC_MAP_CPML];
+            const int64_t other =
+                global_poro_map_counts[POROELASTIC_MAP_INELIGIBLE] +
+                global_poro_map_counts[POROELASTIC_MAP_ELIGIBLE_UNMAPPED];
+            const int64_t total = active + above + below + cpml + other;
+            fprintf(stderr,
+                    "Nonlinear/BrickUP map: %lld of %lld nonlinear elements "
+                    "are pore-pressure coupled; %lld above groundwater, "
+                    "%lld below poroelastic_depth_max_m, %lld CPML, %lld "
+                    "other/unmapped\n",
+                    (long long)active, (long long)total, (long long)above,
+                    (long long)below, (long long)cpml, (long long)other);
+            if (below > 0) {
+                fprintf(stderr,
+                        "  *** WARNING: %lld nonlinear elements are below "
+                        "poroelastic_depth_max_m. They remain nonlinear "
+                        "single-phase solids: constitutive stress is assembled "
+                        "directly as total stress, with no pore-pressure DOF or "
+                        "Biot feedback. This is appropriate only for an "
+                        "intentional dry/drained or calibrated total-stress "
+                        "region; increase the depth limit if the soil is "
+                        "intended to undergo coupled liquefaction. ***\n",
+                        (long long)below);
+            }
+            if (global_poro_map_counts[
+                    POROELASTIC_MAP_ELIGIBLE_UNMAPPED] > 0) {
+                fprintf(stderr,
+                        "  *** WARNING: %lld saturated nonlinear elements "
+                        "were eligible for BrickUP but are absent from its "
+                        "element map. ***\n",
+                        (long long)global_poro_map_counts[
+                            POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
+            }
+        }
+    }
 
     if ( theGeostaticLoadingT > 0 ) {
         bottom_elements_count(myID, myMesh, depth);
@@ -5410,17 +5472,13 @@ static int material_point_write_csv(
         fprintf(stderr, "Cannot open material-point output %s\n", path);
         return -1;
     }
-    fputs("step,time,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz,"
-          "sig_xx,sig_yy,sig_zz,sig_xy,sig_yz,sig_xz,"
-          "ep_xx,ep_yy,ep_zz,ep_xy,ep_yz,ep_xz,"
-          "eta_xx,eta_yy,eta_zz,eta_xy,eta_yz,eta_xz,"
-          "ep_bar,fs,psi,load_unload,tao,tao_max,kappa,"
-          "sref_xx,sref_yy,sref_zz,sref_xy,sref_yz,sref_xz,"
-          "gamma1d,tao1d,ggmax,model_error,"
-          "fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,"
-          "alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,"
-          "alpha_in_xz,void_ratio,plastic_multiplier,integration_error,"
-          "accepted_substeps", fp);
+    fputs("step,time,eps_xx,eps_yy,eps_zz,eps_xy,eps_yz,eps_xz", fp);
+    /* Use the same authoritative field list as material_point_result_values().
+     * Keeping the header and row loops coupled prevents newly appended model
+     * diagnostics from silently shifting every subsequent CSV column. */
+    for (int i = 0; i < MATERIAL_POINT_RESULT_VALUE_COUNT; i++) {
+        fprintf(fp, ",%s", material_point_result_names[i]);
+    }
     if (pore_pressure != NULL) {
         fputs(",pore_pressure_pa,total_sig_xx,total_sig_yy,total_sig_zz,"
               "total_sig_xy,total_sig_yz,total_sig_xz", fp);
@@ -5503,6 +5561,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double brickup_porosity = 0.0;
     double brickup_fluid_bulk_modulus = 0.0;
     double brickup_biot_alpha = 1.0;
+    double brickup_solid_bulk_modulus = 0.0;
     double initial_pore_pressure = 0.0;
     double brickup_storage_modulus = 0.0;
     double constants_values[MATERIAL_POINT_CONSTANT_COUNT] = {0.0};
@@ -5634,22 +5693,52 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             fprintf(stderr, "Incomplete material-point BrickUP controls\n");
             goto cleanup;
         }
-        if (material_model != MANZARI_DAFALIAS) {
+        parsetext(fp, "material_point_brickup_solid_bulk_modulus_pa", 'd',
+                  &brickup_solid_bulk_modulus);
+        if (material_model != MANZARI_DAFALIAS &&
+            material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
-                            "requires ManzariDafalias\n");
+                            "requires ManzariDafalias or "
+                            "PressureDependMultiYield03\n");
             goto cleanup;
         }
         if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
             !(brickup_fluid_bulk_modulus > 0.0) ||
-            fabs(brickup_biot_alpha - 1.0) > 1.0e-12 ||
+            !(brickup_biot_alpha > 0.0 && brickup_biot_alpha <= 1.0) ||
             !isfinite(initial_pore_pressure)) {
             fprintf(stderr, "Illegal material-point BrickUP controls; the "
-                            "SSPbrickUP comparison requires 0<n<=1, Kf>0, "
-                            "and alpha=1\n");
+                            "comparison requires 0<n<=1, Kf>0, and "
+                            "0<alpha<=1\n");
             goto cleanup;
         }
-        brickup_storage_modulus =
-            brickup_fluid_bulk_modulus/brickup_porosity;
+        if (fabs(brickup_biot_alpha - 1.0) <= 1.0e-12) {
+            brickup_storage_modulus =
+                brickup_fluid_bulk_modulus/brickup_porosity;
+        } else {
+            if (!(brickup_solid_bulk_modulus > 0.0) ||
+                !isfinite(brickup_solid_bulk_modulus)) {
+                fprintf(stderr,
+                        "material_point_brickup_biot_alpha=%g requires a "
+                        "positive material_point_brickup_solid_bulk_modulus_pa\n",
+                        brickup_biot_alpha);
+                goto cleanup;
+            }
+            const double inverse_storage =
+                (brickup_biot_alpha - brickup_porosity) /
+                    brickup_solid_bulk_modulus +
+                brickup_porosity / brickup_fluid_bulk_modulus;
+            if (!(inverse_storage > 0.0) || !isfinite(inverse_storage)) {
+                fprintf(stderr,
+                        "Material-point BrickUP controls are physically "
+                        "incompatible: computed 1/M=%g from alpha=%g, n=%g, "
+                        "Ks=%g Pa, Kf=%g Pa\n",
+                        inverse_storage, brickup_biot_alpha,
+                        brickup_porosity, brickup_solid_bulk_modulus,
+                        brickup_fluid_bulk_modulus);
+                goto cleanup;
+            }
+            brickup_storage_modulus = 1.0/inverse_storage;
+        }
     }
     if (tension_cutoff == YES && material_model != MOHR_COULOMB &&
         material_model != DRUCKERPRAGER) {

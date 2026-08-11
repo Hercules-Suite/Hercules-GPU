@@ -1224,9 +1224,7 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
 
   if (haveDiffusion) {
     double diffusionWeak[8];
-    const double diffusivity[3] = {storageM * mobilityX,
-                                   storageM * mobilityY,
-                                   storageM * mobilityZ};
+    const double mobility[3] = {mobilityX, mobilityY, mobilityZ};
 
     for (int j = 0; j < 8; j++) {
       diffusionWeak[j] = 0.0;
@@ -1277,9 +1275,9 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
             const double dNpdx2 = shapeScale * sz * ax * ay / (4.0 * h);
             double weakDiffusion = 0.0;
 
-            weakDiffusion += diffusivity[0] * gradp[0] * dNpdx0;
-            weakDiffusion += diffusivity[1] * gradp[1] * dNpdx1;
-            weakDiffusion += diffusivity[2] * gradp[2] * dNpdx2;
+            weakDiffusion += mobility[0] * gradp[0] * dNpdx0;
+            weakDiffusion += mobility[1] * gradp[1] * dNpdx1;
+            weakDiffusion += mobility[2] * gradp[2] * dNpdx2;
             diffusionWeak[j] += detJ * weakDiffusion;
           }
         }
@@ -1289,7 +1287,7 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
     for (int j = 0; j < 8; j++) {
       const int32_t lnid =
           gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
-      double rhs = -storageM * qtDeltaU[j] - deltaT * diffusionWeak[j];
+      double rhs = -qtDeltaU[j] - deltaT * diffusionWeak[j];
 
       atomicAdd((solver_float*)(gpuData->porePressureForceDevice + lnid),
                 (solver_float)rhs);
@@ -1300,7 +1298,7 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
   for (int j = 0; j < 8; j++) {
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
-    const double rhs = -storageM * qtDeltaU[j];
+    const double rhs = -qtDeltaU[j];
     atomicAdd((solver_float*)(gpuData->porePressureForceDevice + lnid),
               (solver_float)rhs);
   }
@@ -1475,7 +1473,7 @@ int poroelastic_gpu_uniform_element_history(
   }
   for (int node = 0; node < 8; node++) {
     initial_nodal_pressure[node] = (solver_float)initial_pressure;
-    nodal_mass[node] = (solver_float)0.125;
+    nodal_mass[node] = (solver_float)(0.125 / storage_modulus);
   }
 
 #define PORO_TEST_ALLOC(pointer, count) do {                              \

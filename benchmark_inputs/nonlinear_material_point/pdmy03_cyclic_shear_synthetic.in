@@ -11,6 +11,14 @@ material_point_compare_rtol = 1.0e-9
 material_point_compare_atol = 1.0e-9
 material_point_output_prefix = pdmy03_cyclic_shear_synthetic
 
+# Exercise the sealed BrickUP pressure update together with PDMY03. OpenSees
+# SSPbrickUP assumes unit Biot coupling, so this regression uses alpha=1.
+material_point_brickup = yes
+material_point_brickup_porosity = 4.4444444444444444e-1
+material_point_brickup_fluid_bulk_modulus_pa = 2.2e9
+material_point_brickup_biot_alpha = 1.0
+material_point_initial_pore_pressure_pa = 0.0
+
 # Gref Kref phi peak_gamma ref_pressure pressure_exponent PT_angle mType
 # ca cb cc cd ce da db dc surfaces liquefaction1 liquefaction2 Patm cohesion
 material_point_constants =

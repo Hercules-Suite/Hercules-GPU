@@ -139,8 +139,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 224);
-  assert.equal(documented.length, 224, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 225);
+  assert.equal(documented.length, 225, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -488,6 +488,8 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /const tensor_t total_predictor = nl_add\(stress_predictor, static_stress\)/);
   assert.match(psolve, /poroelastic_geostatic_stress_correction/);
   assert.match(psolve, /Param\.thePoroelasticBiotAlpha \* Param\.thePoroelasticFluidDensity \* 9\.81/);
+  assert.match(cpu, /below ["\s]*poroelastic_depth_max_m[\s\S]*remain nonlinear ["\s]*single-phase solids/);
+  assert.match(cpu, /constitutive stress is assembled ["\s]*directly as total stress/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));
@@ -553,7 +555,37 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const core = readFileSync(`${sourceRoot}nonlinear_pdmy03.h`, "utf8");
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const pressureKernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const pdmyBrickupComparator = readFileSync(
+    `${benchmarkRoot}compare_opensees_pdmy03_brickup.py`,
+    "utf8",
+  );
+  const pdmyBrickupPlot = readFileSync(
+    `${benchmarkRoot}plot_opensees_pdmy03_brickup.py`,
+    "utf8",
+  );
+  const pdmyBrickupGenerator = readFileSync(
+    `${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`,
+    "utf8",
+  );
+  const pdmyBrickupTriaxialDriver = readFileSync(
+    `${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_triaxial.tcl`,
+    "utf8",
+  );
+  const pdmyBrickupCyclicDriver = readFileSync(
+    `${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl`,
+    "utf8",
+  );
+  const cyclicFixture = readFileSync(
+    `${benchmarkRoot}pdmy03_cyclic_shear_synthetic.in`,
+    "utf8",
+  );
+  const onsetFixture = readFileSync(
+    `${benchmarkRoot}pdmy03_zero_tension_onset_synthetic.in`,
+    "utf8",
+  );
 
   assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
@@ -584,6 +616,22 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
     /get_topo_nonlin_flag\(\)[\s\S]{0,100}get_topo_meth\(\) == VT[\s\S]{0,100}isTopoElement/,
   );
   assert.match(core, /pdmy03_requested_substeps/);
+  assert.match(cpu, /material_point_result_names\[i\]/);
+  assert.match(pdmyBrickupComparator, /PDMY03_DIAGNOSTIC_FIELDS/);
+  assert.match(pdmyBrickupComparator, /legacy_header/);
+  assert.match(pdmyBrickupPlot, /TRIAXIAL_TEST/);
+  assert.match(pdmyBrickupPlot, /CYCLIC_TEST/);
+  assert.match(pdmyBrickupPlot, /Effective stress path/);
+  assert.match(pdmyBrickupComparator, /DRIVER_VERSION = "2"/);
+  assert.match(pdmyBrickupGenerator, /DRIVER_VERSION = "2"/);
+  assert.match(pdmyBrickupGenerator, /"20 10\.0 0\.01 1\.013e5 1\.73e3"/);
+  assert.doesNotMatch(pdmyBrickupGenerator, /"20 1\.0e4 0\.01/);
+  assert.match(pdmyBrickupTriaxialDriver, /phaseTransform mType ca cb/);
+  assert.match(pdmyBrickupTriaxialDriver, /26\.0 0/);
+  assert.match(pdmyBrickupTriaxialDriver, /undrained_triaxial 2/);
+  assert.match(pdmyBrickupCyclicDriver, /phaseTransform mType ca cb/);
+  assert.match(pdmyBrickupCyclicDriver, /26\.0 0/);
+  assert.match(pdmyBrickupCyclicDriver, /undrained_cyclic_shear 2/);
   assert.match(core, /c->failure_ratio\*cone\/[\s\n ]*\(double\)c->surface_count/);
   assert.match(core, /requested > maximum_substeps \? maximum_substeps : requested/);
   assert.match(core, /pdmy03_update_ppz/);
@@ -591,6 +639,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(core, /if \(c == 0\.0\) return 0\.0/);
   assert.match(core, /return low;/);
   assert.match(core, /pdmy03_mean\(\*stress\) > 0\.0/);
+  assert.match(core, /state->maximum_pressure = 0\.0/);
   assert.match(core, /surface <= active && surface < c->surface_count/);
   assert.match(core, /trial, current, centers/);
   assert.match(gpu, /pdmy03_surface_stride/);
@@ -602,6 +651,19 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03.py`));
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03.py`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_triaxial.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl`));
+  assert.ok(existsSync(`${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`));
+  assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03_brickup.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03_brickup.py`));
+  assert.match(cyclicFixture, /material_point_brickup_biot_alpha = 1\.0/);
+  assert.match(onsetFixture, /material_point_brickup_biot_alpha = 0\.8/);
+  assert.match(onsetFixture, /material_point_brickup_solid_bulk_modulus_pa/);
+  assert.match(psolve, /nodalPoreVolume \/ storageM/);
+  assert.match(cpu, /Nonlinear\/BrickUP map:/);
+  assert.match(psolve, /geostatic_loading_time_sec=%g with zero permeability/);
+  assert.match(pressureKernel, /const double mobility\[3\] = \{mobilityX, mobilityY, mobilityZ\}/);
+  assert.match(pressureKernel, /double rhs = -qtDeltaU\[j\] - deltaT \* diffusionWeak\[j\]/);
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 

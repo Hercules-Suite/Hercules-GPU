@@ -1429,6 +1429,10 @@ static int poroelastic_enabled(void) {
          (Param.thePoroelasticFormulation == POROELASTIC_FORMULATION_BRICK_UP);
 }
 
+int poroelastic_analysis_enabled(void) {
+  return poroelastic_enabled();
+}
+
 static int acoustic_poroelastic_open_pore_enabled(void) {
   return acoustic_pressure_enabled() && poroelastic_enabled() &&
          (Param.theAcousticPoroelasticInterface ==
@@ -1460,16 +1464,13 @@ static double poroelastic_biot_storage_modulus_incompressible_grains(void) {
   return Param.thePoroelasticFluidBulkModulus / Param.thePoroelasticPorosity;
 }
 
-static double poroelastic_drained_bulk_modulus(const edata_t* edata) {
-  const double vp = (double)edata->Vp;
-  const double vs = (double)edata->Vs;
-  const double rho = (double)edata->rho;
-
+static double poroelastic_drained_bulk_modulus_values(double vp, double vs,
+                                                      double rho) {
   return rho * (vp * vp - (4.0 / 3.0) * vs * vs);
 }
 
-static double poroelastic_biot_storage_modulus_for_element(const edata_t* edata,
-                                                          int32_t eindex) {
+static double poroelastic_biot_storage_modulus_from_values(
+    double vp, double vs, double rho, int64_t element_id) {
   const double porosity = Param.thePoroelasticPorosity;
   const double alpha = Param.thePoroelasticBiotAlpha;
   const double fluidBulk = Param.thePoroelasticFluidBulkModulus;
@@ -1481,27 +1482,34 @@ static double poroelastic_biot_storage_modulus_for_element(const edata_t* edata,
     return poroelastic_biot_storage_modulus_incompressible_grains();
   }
 
-  drainedBulk = poroelastic_drained_bulk_modulus(edata);
+  drainedBulk = poroelastic_drained_bulk_modulus_values(vp, vs, rho);
   if (!isfinite(drainedBulk) || (drainedBulk <= 0.0)) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "poroelastic element %d has non-positive dry/drained bulk "
+                 "poroelastic element %lld has non-positive dry/drained bulk "
                  "modulus K_d=%g Pa from Vp=%g Vs=%g rho=%g\n",
-                 eindex, drainedBulk, (double)edata->Vp, (double)edata->Vs,
-                 (double)edata->rho);
+                 (long long)element_id, drainedBulk, vp, vs, rho);
   }
 
   grainBulk = drainedBulk / (1.0 - alpha);
   invStorage = (alpha - porosity) / grainBulk + porosity / fluidBulk;
   if (!isfinite(invStorage) || (invStorage <= 0.0)) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "poroelastic element %d has invalid Biot storage: "
+                 "poroelastic element %lld has invalid Biot storage: "
                  "1/M=%g from alpha=%g porosity=%g K_s=%g Pa K_f=%g Pa. "
                  "Check that alpha is physically compatible with porosity "
                  "and the dry/drained skeleton bulk modulus.\n",
-                 eindex, invStorage, alpha, porosity, grainBulk, fluidBulk);
+                 (long long)element_id, invStorage, alpha, porosity,
+                 grainBulk, fluidBulk);
   }
 
   return 1.0 / invStorage;
+}
+
+static double poroelastic_biot_storage_modulus_for_element(
+    const edata_t* edata, int32_t eindex) {
+  return poroelastic_biot_storage_modulus_from_values(
+      (double)edata->Vp, (double)edata->Vs, (double)edata->rho,
+      (int64_t)eindex);
 }
 
 static double poro_node_sign(int node, int axis) {
@@ -1720,6 +1728,54 @@ static int poroelastic_element_candidate(mesh_t* mesh, int32_t eindex,
   return 1;
 }
 
+poroelastic_map_status_t poroelastic_element_map_status(
+    mesh_t* mesh, int32_t eindex, double* ground_depth_out,
+    double* groundwater_depth_out) {
+  elem_t* elemp;
+  edata_t* edata;
+  double ground_depth = 0.0;
+  double groundwater_depth = 0.0;
+  double h;
+  double eps;
+
+  if (ground_depth_out != NULL) *ground_depth_out = 0.0;
+  if (groundwater_depth_out != NULL) *groundwater_depth_out = 0.0;
+  if (!poroelastic_enabled()) return POROELASTIC_MAP_DISABLED;
+  if ((mesh == NULL) || (eindex < 0) || (eindex >= mesh->lenum)) {
+    return POROELASTIC_MAP_INELIGIBLE;
+  }
+
+  elemp = &mesh->elemTable[eindex];
+  edata = (edata_t*)elemp->data;
+  if ((edata == NULL) || element_is_acoustic(edata) ||
+      !material_values_are_elastic(edata->Vp, edata->Vs, edata->rho)) {
+    return POROELASTIC_MAP_INELIGIBLE;
+  }
+
+  h = (double)edata->edgesize;
+  (void)poroelastic_element_candidate(mesh, eindex, 0, &ground_depth,
+                                      &groundwater_depth);
+  if (ground_depth_out != NULL) *ground_depth_out = ground_depth;
+  if (groundwater_depth_out != NULL) {
+    *groundwater_depth_out = groundwater_depth;
+  }
+  eps = fmax(1.0e-6, 0.01*h);
+
+  if (ground_depth < -eps) return POROELASTIC_MAP_INELIGIBLE;
+  if (ground_depth > Param.thePoroelasticDepthMaxM + eps) {
+    return POROELASTIC_MAP_BELOW_DEPTH_LIMIT;
+  }
+  if (groundwater_depth < -eps) {
+    return POROELASTIC_MAP_ABOVE_GROUNDWATER;
+  }
+  if (cpml_pml_element(eindex)) return POROELASTIC_MAP_CPML;
+  if ((g_poroelasticElementFlags != NULL) &&
+      (g_poroelasticElementFlags[eindex] != 0u)) {
+    return POROELASTIC_MAP_ACTIVE;
+  }
+  return POROELASTIC_MAP_ELIGIBLE_UNMAPPED;
+}
+
 double poroelastic_geostatic_stress_correction(
     mesh_t* mesh, int32_t eindex, double* unit_weight_correction) {
   if (unit_weight_correction != NULL) {
@@ -1793,7 +1849,7 @@ static void poroelastic_element_nodal_volumes(mesh_t* mesh, int32_t eindex,
 static void poroelastic_add_groundwater_drain_mass(
     mesh_t* mesh, int32_t eindex, double plane_zeta,
     const double nodalVolumes[8], double elementVolume,
-    solver_float* drainMass) {
+    double storageModulus, solver_float* drainMass) {
   elem_t* elemp = &mesh->elemTable[eindex];
   edata_t* edata = (edata_t*)elemp->data;
   const double h = (double)edata->edgesize;
@@ -1805,6 +1861,7 @@ static void poroelastic_add_groundwater_drain_mass(
   double planeVolumeJac;
 
   if ((drainMass == NULL) || (h <= 0.0) || (elementVolume <= 0.0) ||
+      !(storageModulus > 0.0) || !isfinite(storageModulus) ||
       (Param.thePoroelasticSurfacePressurePenaltyFactor <= 0.0)) {
     return;
   }
@@ -1822,13 +1879,15 @@ static void poroelastic_add_groundwater_drain_mass(
             : 1.0;
   }
 
-  /* The plane integral has area units. Multiplying by h/2 gives it the
-   * same volume units as pore_pressure_mass. For a regular cube and a
-   * plane on the top face, this gives h^3/8 at each top node, matching
-   * the nodal pressure mass contributed by the adjacent saturated element.
+  /* The plane integral has area units. Multiplying by h/2 and dividing by
+   * the element storage modulus gives the same compliance units as the
+   * lumped pressure capacity integral int(N/M)dV. For a regular cube and a
+   * plane on the top face, it matches the adjacent element's nodal storage
+   * capacity when the penalty factor is one.
    */
   planeVolumeJac =
-      Param.thePoroelasticSurfacePressurePenaltyFactor * elementVolume / 8.0;
+      Param.thePoroelasticSurfacePressurePenaltyFactor * elementVolume /
+      (8.0 * storageModulus);
 
   for (int gx = 0; gx < 2; gx++) {
     const double xi = gcoord[gx];
@@ -4084,7 +4143,7 @@ static int32_t parse_parameters(const char* numericalin) {
       if (Param.theAcousticPoroelasticInterface ==
           ACOUSTIC_POROELASTIC_INTERFACE_OPEN_PORE) {
         monitor_print("Acoustic-poroelastic pressure factor: %.6g "
-                      "(weak mass-projected)\n",
+                      "(weak compliance-projected)\n",
                       Param.theAcousticPoroelasticPressurePenaltyFactor);
       }
     }
@@ -4114,7 +4173,7 @@ static int32_t parse_parameters(const char* numericalin) {
     if (Param.thePoroelasticSurfacePressureBC ==
         POROELASTIC_SURFACE_PRESSURE_DRAINED) {
       monitor_print("Poroelastic pressure drain factor: %.6g "
-                    "(weak mass-projected plane)\n",
+                    "(weak compliance-projected plane)\n",
                     Param.thePoroelasticSurfacePressurePenaltyFactor);
     }
     monitor_print("Poroelastic-elastic interface:      no_flow\n");
@@ -5064,7 +5123,8 @@ static int mesh_probe_face_elastic_info(
     const vector3D_t* basinVelModel_origin,
     const vector3D_t* threeDVelModel_origin, int32_t* neighbor_eindex_out,
     int32_t* neighbor_level_out, int64_t* neighbor_geid_out,
-    int* neighbor_is_poroelastic_out, double h_for_tol) {
+    int* neighbor_is_poroelastic_out, double* neighbor_storage_modulus_out,
+    double h_for_tol) {
   int32_t neighbor_eindex = -1;
   int found_neighbor_octant = 0;
   int found_local_neighbor = 0;
@@ -5086,6 +5146,9 @@ static int mesh_probe_face_elastic_info(
   }
   if (neighbor_is_poroelastic_out != NULL) {
     *neighbor_is_poroelastic_out = 0;
+  }
+  if (neighbor_storage_modulus_out != NULL) {
+    *neighbor_storage_modulus_out = 0.0;
   }
 
   if (domain_point == NULL) {
@@ -5128,6 +5191,13 @@ static int mesh_probe_face_elastic_info(
           poroelastic_element_candidate(Global.myMesh, neighbor_eindex, 0,
                                         NULL, NULL);
     }
+    if ((neighbor_storage_modulus_out != NULL) &&
+        poroelastic_element_candidate(Global.myMesh, neighbor_eindex, 0,
+                                      NULL, NULL)) {
+      *neighbor_storage_modulus_out =
+          poroelastic_biot_storage_modulus_for_element(neighbor_edata,
+                                                       neighbor_eindex);
+    }
     return 1;
   }
 
@@ -5149,6 +5219,14 @@ static int mesh_probe_face_elastic_info(
       *neighbor_is_poroelastic_out =
           poroelastic_enabled() &&
           poroelastic_point_is_saturated(north_m, east_m, depth_m, h_for_tol);
+    }
+    if (remote_neighbor_is_elastic &&
+        (neighbor_storage_modulus_out != NULL) && poroelastic_enabled() &&
+        poroelastic_point_is_saturated(north_m, east_m, depth_m, h_for_tol)) {
+      *neighbor_storage_modulus_out =
+          poroelastic_biot_storage_modulus_from_values(
+              g_props.Vp, g_props.Vs, g_props.rho,
+              (neighbor_geid_out != NULL) ? *neighbor_geid_out : -1);
     }
     return remote_neighbor_is_elastic;
   }
@@ -5819,7 +5897,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
         if (mesh_probe_face_elastic_info(
                 &probe, IstVelModel_origin, basinVelModel_origin,
-                threeDVelModel_origin, NULL, &neighbor_level, NULL, NULL, h) &&
+                threeDVelModel_origin, NULL, &neighbor_level, NULL, NULL,
+                NULL, h) &&
             (neighbor_level > target_level)) {
           target_level = neighbor_level;
           changed = 1;
@@ -5836,6 +5915,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       int32_t adjacent_eindex = -1;
       int64_t adjacent_geid = -1;
       int adjacent_is_poroelastic = 0;
+      double adjacent_storage_modulus = 0.0;
       double center[3] = {0.0, 0.0, 0.0};
       double adjacent_center[3] = {0.0, 0.0, 0.0};
       double halfwidth[3] = {0.0, 0.0, 0.0};
@@ -5860,6 +5940,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
               (poroelastic_fragment_count != NULL)
                   ? &adjacent_is_poroelastic
                   : NULL,
+              &adjacent_storage_modulus,
               h)) {
         continue;
       }
@@ -5914,9 +5995,18 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
         }
 
         if (adjacent_is_poroelastic) {
+          if (!(adjacent_storage_modulus > 0.0) ||
+              !isfinite(adjacent_storage_modulus)) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "acoustic-poroelastic interface neighbor %lld has "
+                         "invalid storage modulus M=%g Pa\n",
+                         (long long)adjacent_geid,
+                         adjacent_storage_modulus);
+          }
           poroelastic_boundary_scale =
               Param.theAcousticPoroelasticPressurePenaltyFactor *
-              fragment_area * adjacent_h_for_scale * 0.5;
+              fragment_area * adjacent_h_for_scale * 0.5 /
+              adjacent_storage_modulus;
         }
 
         mesh_append_acoustic_interface_fragment(
@@ -11694,17 +11784,20 @@ static void solver_init() {
     if (poro_element_active) {
       double nodalPoreVolumes[8];
       double poroElementVolume = 0.0;
+      const double storageM =
+          poroelastic_biot_storage_modulus_for_element(edata, eindex);
       for (j = 0; j < 8; j++) {
         const double nodalPoreVolume = nodesMass[j] / edata->rho;
         nodalPoreVolumes[j] = nodalPoreVolume;
         poroElementVolume += nodalPoreVolume;
         Global.mySolver->pore_pressure_mass[elemp->lnid[j]] +=
-            (solver_float)nodalPoreVolume;
+            (solver_float)(nodalPoreVolume / storageM);
       }
       if (poro_drain_plane) {
         poroelastic_add_groundwater_drain_mass(
             Global.myMesh, eindex, poro_drain_plane_zeta, nodalPoreVolumes,
-            poroElementVolume, Global.mySolver->pore_pressure_surface);
+            poroElementVolume, storageM,
+            Global.mySolver->pore_pressure_surface);
       }
     }
 
@@ -12861,14 +12954,14 @@ static void solver_init() {
           POROELASTIC_SURFACE_PRESSURE_DRAINED) {
         monitor_print(
             "Poroelastic drained pressure plane: %.1fM nodes "
-            "(weak mass-projected, factor %.6g)\n",
+            "(weak compliance-projected, factor %.6g)\n",
             (double)globalPoroelasticDrainNodes / 1.0e6,
             Param.thePoroelasticSurfacePressurePenaltyFactor);
       }
       if (acoustic_poroelastic_open_pore_enabled()) {
         monitor_print(
             "Acoustic-poroelastic open-pore pressure continuity: %.1fM nodes "
-            "from %.3fM fragments (weak mass-projected, factor %.6g; "
+            "from %.3fM fragments (weak compliance-projected, factor %.6g; "
             "undrained fast path disabled)\n",
             (double)globalPoroelasticOpenPoreNodes / 1.0e6,
             (double)globalAcousticPoroelasticFragments / 1.0e6,
@@ -28939,6 +29032,19 @@ int main(int argc, char** argv) {
   if (Param.includeNonlinearAnalysis == YES) {
     nonlinear_init(Global.myID, Param.parameters_input_file, Param.theDeltaT,
                    Param.theEndT);
+    if (poroelastic_enabled() && poroelastic_zero_permeability() &&
+        (get_geostatic_loading_time() > 0.0)) {
+      solver_abort(
+          __FUNCTION_NAME, NULL,
+          "nonlinear poroelastic analysis cannot combine "
+          "geostatic_loading_time_sec=%g with zero permeability. The gravity "
+          "ramp is undrained and can transfer the overburden into pore "
+          "pressure instead of establishing the intended effective stress. "
+          "Use approximate_geostatic_state=yes with zero loading/cushion "
+          "times, or provide a physically calibrated permeability and "
+          "consolidation interval.\n",
+          get_geostatic_loading_time());
+    }
   }
 
   if (Param.includeBuildings == YES) {

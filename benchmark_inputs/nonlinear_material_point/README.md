@@ -72,7 +72,9 @@ phase_transform_angle loading_type ca cb cc cd ce da db dc surface_count
 liquefaction1 liquefaction2 atmospheric_pressure cohesion
 ```
 
-Stress values use Pa and angles use degrees. `loading_type` is 0 for triaxial
+Stress values use Pa and angles use degrees. `liquefaction1` and
+`liquefaction2` are dimensionless OpenSees coefficients and must not be
+rescaled when changing stress units. `loading_type` is 0 for triaxial
 compression, 1 for triaxial extension, or 2 for direct simple shear;
 `surface_count` is an integer from 2 through 40. The production table adds
 `Vs_limit` as the first value, for 22 values per row. At the elastic-to-plastic
@@ -123,11 +125,15 @@ its translated surface centers from stress.
   confinement, crosses and translates multiple automatically generated yield
   surfaces, reverses the tensor-shear path, and repeats its final strain. The
   CSV adds active surface, requested and accepted subincrements, crossed
-  surfaces, clamping, pressureD, and the combined surface-center norm.
+  surfaces, clamping, pressureD, and the combined surface-center norm. It also
+  exercises the sealed production BrickUP pressure kernels with `alpha=1`.
 - `pdmy03_zero_tension_onset_synthetic.in` starts from a small isotropic
   tensile seed, enters plastic stage under compression, and verifies the
   OpenSees-compatible mean-stress clamp rather than an initialization abort.
-  Its final repeated strain also checks zero-increment state preservation.
+  Its final repeated strain also checks zero-increment state preservation. Its
+  BrickUP controls use `alpha=0.8`, so it covers the general storage relation
+  `1/M=(alpha-n)/Ks+n/Kf`; the standalone-only
+  `material_point_brickup_solid_bulk_modulus_pa` supplies `Ks` for this check.
 
 PDMY03 uses deterministic explicit nested-surface subincrements rather than
 the Manzari--Dafalias adaptive error loop. Its request accounts for predicted
@@ -606,3 +612,82 @@ development run produced stress NRMSE about `1.9e-10`; this is a numerical
 characterization of the synthetic constants, not a production calibration.
 The plotter writes PNG and PDF panels for cyclic shear stress, effective mean
 stress, the applied strain history, and cross-code stress differences.
+
+## Coupled PDMY03 SSPbrickUP/BrickUP comparison
+
+Two SSPbrickUP drivers are coupled companions to the constitutive shear
+characterization. Both consolidate a unit `SSPbrickUP -lumped` element to
+100 kPa, close the drainage constraints, switch PDMY03 to plastic stage 1,
+and generate a Hercules replay that invokes the production CUDA BrickUP
+pressure-force and pressure-update kernels together with PDMY03.
+
+The coupled drivers require the OpenSees 3.8.0 `mType` argument immediately
+after `phaseTransformAngle`. Their version-2 CSV marker records the corrected
+argument order and prevents the generator and comparator from accepting older
+histories whose later PDMY03 constants were shifted by one position.
+
+- `opensees_pdmy03_sspbrickup_undrained_triaxial.tcl` applies a reversing
+  axial path at constant total radial confinement.
+- `opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl` preserves the
+  consolidated lateral strains, maintains total vertical confinement, and
+  applies four cycles of affine x-z shear. The free vertical strain and sealed
+  pressure field drive `r_u` toward one, so this is the coupled liquefaction
+  acceptance path rather than only a constitutive stress comparison.
+
+Run it with:
+
+```bash
+OpenSees opensees_pdmy03_sspbrickup_undrained_triaxial.tcl \
+  opensees_pdmy03_sspbrickup_undrained_triaxial.csv
+
+python3 generate_hercules_pdmy03_brickup_path.py \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_triaxial.csv \
+  --output pdmy03_brickup_undrained_triaxial.in \
+  --output-prefix pdmy03_brickup_undrained_triaxial
+
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point pdmy03_brickup_undrained_triaxial.in
+
+python3 compare_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_triaxial.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_triaxial.csv \
+  --output-dir opensees_pdmy03_sspbrickup_comparison
+
+python3 plot_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_triaxial.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_triaxial.csv \
+  --output-prefix opensees_pdmy03_sspbrickup_comparison/hercules_vs_opensees
+
+OpenSees opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl \
+  opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv
+
+python3 generate_hercules_pdmy03_brickup_path.py \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv \
+  --output pdmy03_brickup_undrained_cyclic_shear.in \
+  --output-prefix pdmy03_brickup_undrained_cyclic_shear
+
+mpirun -np 1 ../../quake/forward/psolve \
+  --nonlinear-material-point pdmy03_brickup_undrained_cyclic_shear.in
+
+python3 compare_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_cyclic_shear.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv \
+  --output-dir opensees_pdmy03_sspbrickup_cyclic_comparison
+
+python3 plot_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_cyclic_shear.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv \
+  --output-prefix opensees_pdmy03_sspbrickup_cyclic_comparison/hercules_vs_opensees
+```
+
+The comparator reports effective- and total-stress NRMSE, pore-pressure and
+`r_u` differences, and total radial-confinement drift. Optional acceptance
+limits are `--max-effective-stress-nrmse`,
+`--max-pore-pressure-difference-kpa`, and
+`--max-total-confinement-error-kpa`. Establish fixture bounds from a reviewed
+Horizon run before turning those options into regression thresholds. The
+coupled plotter writes PNG and PDF panels for stress response, pore pressure,
+effective stress path, and total-confinement drift for either driver. This
+uniform, zero-permeability element validates coupled storage and constitutive
+feedback; it does not validate heterogeneous `M`, Darcy diffusion, drainage,
+open-pore boundaries, or multi-element pressure exchange.
