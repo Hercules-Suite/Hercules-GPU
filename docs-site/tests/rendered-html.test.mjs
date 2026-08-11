@@ -562,6 +562,10 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
     `${benchmarkRoot}compare_opensees_pdmy03_brickup.py`,
     "utf8",
   );
+  const pdmyBrickupPlot = readFileSync(
+    `${benchmarkRoot}plot_opensees_pdmy03_brickup.py`,
+    "utf8",
+  );
   const pdmyBrickupGenerator = readFileSync(
     `${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`,
     "utf8",
@@ -615,6 +619,9 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(cpu, /material_point_result_names\[i\]/);
   assert.match(pdmyBrickupComparator, /PDMY03_DIAGNOSTIC_FIELDS/);
   assert.match(pdmyBrickupComparator, /legacy_header/);
+  assert.match(pdmyBrickupPlot, /TRIAXIAL_TEST/);
+  assert.match(pdmyBrickupPlot, /CYCLIC_TEST/);
+  assert.match(pdmyBrickupPlot, /Effective stress path/);
   assert.match(pdmyBrickupComparator, /DRIVER_VERSION = "2"/);
   assert.match(pdmyBrickupGenerator, /DRIVER_VERSION = "2"/);
   assert.match(pdmyBrickupGenerator, /"20 10\.0 0\.01 1\.013e5 1\.73e3"/);
@@ -648,6 +655,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.ok(existsSync(`${benchmarkRoot}opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl`));
   assert.ok(existsSync(`${benchmarkRoot}generate_hercules_pdmy03_brickup_path.py`));
   assert.ok(existsSync(`${benchmarkRoot}compare_opensees_pdmy03_brickup.py`));
+  assert.ok(existsSync(`${benchmarkRoot}plot_opensees_pdmy03_brickup.py`));
   assert.match(cyclicFixture, /material_point_brickup_biot_alpha = 1\.0/);
   assert.match(onsetFixture, /material_point_brickup_biot_alpha = 0\.8/);
   assert.match(onsetFixture, /material_point_brickup_solid_bulk_modulus_pa/);

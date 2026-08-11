@@ -567,6 +567,9 @@ Nonlinear GPU execution (runtime environment):
 	`1.9e-10` after 100 kPa elastic consolidation and the cyclic plastic path.
 	`plot_opensees_pdmy03.py` writes PNG and PDF comparisons of shear response,
 	effective mean stress, prescribed strain history, and component error.
+	For the coupled SSPbrickUP/BrickUP triaxial and cyclic-shear workflows,
+	`plot_opensees_pdmy03_brickup.py` writes stress-response, pore-pressure,
+	effective-stress-path, and total-confinement-drift panels.
 - With `approximate_geostatic_state=yes`, Hercules uses the integrated 1-D
 	density column stored with each mesh element, rather than a homogeneous
 	local-density half-space, and applies `K0 = 1 - sin(phi)`. For an active

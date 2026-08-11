@@ -653,6 +653,11 @@ python3 compare_opensees_pdmy03_brickup.py \
   --opensees-csv opensees_pdmy03_sspbrickup_undrained_triaxial.csv \
   --output-dir opensees_pdmy03_sspbrickup_comparison
 
+python3 plot_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_triaxial.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_triaxial.csv \
+  --output-prefix opensees_pdmy03_sspbrickup_comparison/hercules_vs_opensees
+
 OpenSees opensees_pdmy03_sspbrickup_undrained_cyclic_shear.tcl \
   opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv
 
@@ -668,6 +673,11 @@ python3 compare_opensees_pdmy03_brickup.py \
   --hercules-csv pdmy03_brickup_undrained_cyclic_shear.cpu.csv \
   --opensees-csv opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv \
   --output-dir opensees_pdmy03_sspbrickup_cyclic_comparison
+
+python3 plot_opensees_pdmy03_brickup.py \
+  --hercules-csv pdmy03_brickup_undrained_cyclic_shear.cpu.csv \
+  --opensees-csv opensees_pdmy03_sspbrickup_undrained_cyclic_shear.csv \
+  --output-prefix opensees_pdmy03_sspbrickup_cyclic_comparison/hercules_vs_opensees
 ```
 
 The comparator reports effective- and total-stress NRMSE, pore-pressure and
@@ -675,7 +685,9 @@ The comparator reports effective- and total-stress NRMSE, pore-pressure and
 limits are `--max-effective-stress-nrmse`,
 `--max-pore-pressure-difference-kpa`, and
 `--max-total-confinement-error-kpa`. Establish fixture bounds from a reviewed
-Horizon run before turning those options into regression thresholds. This
+Horizon run before turning those options into regression thresholds. The
+coupled plotter writes PNG and PDF panels for stress response, pore pressure,
+effective stress path, and total-confinement drift for either driver. This
 uniform, zero-permeability element validates coupled storage and constitutive
 feedback; it does not validate heterogeneous `M`, Darcy diffusion, drainage,
 open-pore boundaries, or multi-element pressure exchange.
