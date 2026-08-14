@@ -17,8 +17,8 @@ export async function generateMetadata(): Promise<Metadata> {
     description:
       "Technical documentation for Hercules linear, nonlinear/plastic, and coupled-physics seismic simulations.",
     icons: {
-      icon: "/hercules-mark.png",
-      apple: "/hercules-mark.png",
+      icon: "/hercules-mark.svg",
+      apple: "/hercules-mark.svg",
     },
     metadataBase: base,
     openGraph: {
