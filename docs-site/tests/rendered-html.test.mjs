@@ -30,6 +30,11 @@ test("server-renders the Hercules documentation home", async () => {
   const html = await response.text();
   assert.match(html, /<title>Hercules Documentation<\/title>/i);
   assert.match(html, /parallel, octree-based finite-element code/);
+  assert.match(html, /soil liquefaction/i);
+  assert.match(html, /saturated poroelastic media/i);
+  assert.match(html, /acoustic domains/i);
+  assert.match(html, /acoustic–poroelastic coupled interfaces/i);
+  assert.match(html, /Hercules emblem formed from adaptive octree cells and a seismic waveform/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
   assert.match(html, /hercules-octree-mark\.png/);
