@@ -226,8 +226,51 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Vs range covered by material_properties_list/);
   assert.match(physics, /non-Istanbul vonMises_baE/);
   assert.match(physics, /built-in nl_id constants/);
-  assert.match(physics, /Non-Istanbul nonlinear property tables/);
-  assert.match(physics, /synthetic syntax example, not a calibration/);
+  assert.match(physics, /Nonlinear setup rules/);
+  for (const model of [
+    "linear",
+    "vonMises_ep",
+    "vonMises_fa",
+    "vonMises_faM",
+    "vonMises_baE",
+    "vonMises_baH",
+    "vonMises_GQH",
+    "vonMises_MKZ",
+    "vonMises_RO",
+    "MohrCoulomb",
+    "DruckerPrager",
+    "ManzariDafalias",
+    "PressureDependMultiYield03",
+  ]) {
+    assert.match(physics, new RegExp(`material_model = ${model}`));
+  }
+  for (const pressureDependentModel of [
+    "MohrCoulomb",
+    "DruckerPrager",
+    "ManzariDafalias",
+    "PressureDependMultiYield03",
+  ]) {
+    assert.match(
+      physics,
+      new RegExp(
+        `approximate_geostatic_state = yes[\\s\\S]{0,500}material_model = ${pressureDependentModel}`,
+      ),
+    );
+  }
+  assert.match(physics, /The displayed constants are synthetic regression or syntax values/);
+  assert.match(physics, /Acoustic–elastic example/);
+  assert.match(physics, /acoustic_interface_projection = point/);
+  assert.match(physics, /Poroelastic–elastic example/);
+  assert.match(physics, /Nonlinear PDMY03–BrickUP example/);
+  assert.match(physics, /acoustic_poroelastic_interface = open_pore/);
+  assert.match(physics, /type_of_damping = rayleigh/);
+  assert.match(physics, /type_of_damping = mass/);
+  assert.match(physics, /type_of_damping = bkt2/);
+  assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
+  assert.match(physics, /Baseline CPML example/);
+  assert.match(physics, /cpml_reflection_target = 1\.0e-3/);
+  assert.match(physics, /cpml_pml_material_damping = rayleigh/);
+  assert.match(physics, /benchmark_inputs\/taper_topography\.py/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
   assert.equal(parameterResponse.status, 200);
@@ -243,6 +286,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
+  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, and PDMY03/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
