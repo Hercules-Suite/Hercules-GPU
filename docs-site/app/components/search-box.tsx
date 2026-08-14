@@ -3,6 +3,18 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { allNavItems } from "../docs/navigation";
+import { documentationSearchItems, type DocumentationSearchItem } from "../docs/search-index";
+import { matchesSearchQuery, searchResultScore } from "../docs/search-utils.mjs";
+
+const popularResults: DocumentationSearchItem[] = allNavItems.slice(0, 5).map((item) => ({
+  href: `/docs/${item.slug}`,
+  title: item.title,
+  description: item.description,
+  normalizedTitle: "",
+  normalizedDescription: "",
+  searchText: "",
+  kind: "page",
+}));
 
 export function SearchBox() {
   const [query, setQuery] = useState("");
@@ -11,14 +23,11 @@ export function SearchBox() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const results = query.trim()
-    ? allNavItems
-        .filter((item) =>
-          `${item.title} ${item.description}`
-            .toLowerCase()
-            .includes(query.trim().toLowerCase()),
-        )
-        .slice(0, 6)
-    : allNavItems.slice(0, 5);
+    ? documentationSearchItems
+        .filter((item) => matchesSearchQuery(item.searchText, query))
+        .sort((left, right) => searchResultScore(left, query) - searchResultScore(right, query))
+        .slice(0, 8)
+    : popularResults;
 
   useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
@@ -74,13 +83,13 @@ export function SearchBox() {
           aria-label="Documentation pages"
         >
           <p className="searchResultsLabel">
-            {query ? "Matching pages" : "Popular pages"}
+            {query ? "Matching documentation" : "Popular pages"}
           </p>
           {results.length ? (
             results.map((item) => (
               <Link
-                href={`/docs/${item.slug}`}
-                key={item.slug}
+                href={item.href}
+                key={item.href}
                 onClick={() => {
                   setOpen(false);
                   setQuery("");
@@ -91,7 +100,7 @@ export function SearchBox() {
               </Link>
             ))
           ) : (
-            <p className="searchEmpty">No matching page yet.</p>
+            <p className="searchEmpty">No matching documentation.</p>
           )}
         </div>
       )}

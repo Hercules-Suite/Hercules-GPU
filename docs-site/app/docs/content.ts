@@ -23,6 +23,55 @@ export type DocPageContent = {
   sections: DocSection[];
 };
 
+type NonlinearExampleOptions = {
+  model: string;
+  columns: string;
+  row: string;
+  approximateGeostatic?: boolean;
+  tensionCutoff?: boolean;
+  errorTolerance?: string;
+  backboneTolerance?: string;
+  noSubsteps?: number;
+  extraControls?: string[];
+};
+
+const classicMaterialColumns =
+  "Vs_limit c_or_Su(Pa) phi(deg) strain_rate sensitivity hardening(Pa) dilatancy(deg) gamma0 psi m theta1 theta2 theta3 theta4 theta5 phi_RO";
+
+function nonlinearModelExample({
+  model,
+  columns,
+  row,
+  approximateGeostatic = false,
+  tensionCutoff = false,
+  errorTolerance = "1.0e-8",
+  backboneTolerance = "1.0e-8",
+  noSubsteps = 100,
+  extraControls = [],
+}: NonlinearExampleOptions): string {
+  return [
+    "include_nonlinear_analysis = yes",
+    "Istanbul_velocity_model = no",
+    "geostatic_loading_time_sec = 0.0",
+    "geostatic_cushion_time_sec = 0.0",
+    `approximate_geostatic_state = ${approximateGeostatic ? "yes" : "no"}`,
+    `material_model = ${model}`,
+    "material_plasticity_type = rate_independent",
+    `error_tolerance = ${errorTolerance}`,
+    `backbone_errTol = ${backboneTolerance}`,
+    `no_substeps = ${noSubsteps}`,
+    "stiff_damp = 0.0",
+    "freq_stiff_damp = 1.0",
+    `tension_cutoff = ${tensionCutoff ? "yes" : "no"}`,
+    ...extraControls,
+    "material_properties_count = 2",
+    "material_properties_list =",
+    `# ${columns}`,
+    ` 150 ${row}`,
+    ` 450 ${row}`,
+  ].join("\n");
+}
+
 export const docPages: Record<string, DocPageContent> = {
   "getting-started": {
     eyebrow: "Start here",
@@ -361,7 +410,7 @@ export const docPages: Record<string, DocPageContent> = {
     eyebrow: "Run simulations",
     title: "Physics models",
     summary:
-      "Model linear and nonlinear/plastic solids, acoustic fluids, saturated porous media, attenuation, topography, and absorbing boundaries in one adaptive framework.",
+      "Configure linear and nonlinear/plastic solids, acoustic fluids, saturated porous media, material attenuation, coupled interfaces, and absorbing layers with complete parameters.in examples.",
     sections: [
       {
         id: "models",
@@ -378,66 +427,341 @@ export const docPages: Record<string, DocPageContent> = {
       },
       {
         id: "nonlinear-plasticity",
-        title: "Nonlinear and plastic solid response",
+        title: "Nonlinear setup rules",
         paragraphs: [
-          "Set include_nonlinear_analysis=yes to activate history-dependent constitutive updates in eligible solid elements. Hercules evaluates stress against the selected yield or backbone relation, evolves plastic strain and internal variables, and can retain permanent deformation after unloading.",
-          "The material_model setting selects the constitutive family. material_plasticity_type selects rate-dependent or rate-independent integration, while no_substeps and the nonlinear tolerances control the constitutive update within each global time step.",
-          "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and select eligible elements from the Vs range covered by material_properties_list.",
-          "For non-Istanbul vonMises_baE, material_properties_list supplies Su through alpha_cohesion and the exponential hardening parameters through psi and m; non-Istanbul vonMises_ep takes Su from alpha_cohesion. The built-in nl_id constants for these models remain limited to Istanbul_velocity_model=yes.",
-          "ManzariDafalias uses adaptive explicit Modified Euler. backbone_errTol is its local stress-increment error target, no_substeps caps accepted adaptive substeps, and error_tolerance bounds the absolute yield-surface residual after plastic stress correction. Its elastic predictor retains the one-sided admissibility condition f_trial <= error_tolerance. A trial increment crossing from strictly inside to outside is split at its elastic yield intersection, and only the remainder enters Modified Euler. The same dispatch is applied within the adaptive loop: if the first-stage plastic multiplier is nonpositive and that substep's elastic predictor remains admissible, Hercules accepts the elastic substep without evaluating a discontinuous plastic second stage. Because alpha evolves during integration, each adaptive substep also reapplies the reversal-direction test and re-anchors alpha_in before evaluating the hardening modulus when a multiaxial direction switch occurs. Final validation retains the one-sided elastic condition, so a negative yield function remains admissible inside the surface; the absolute criterion is confined to plastic stress correction. Elastic stages preserve alpha, fabric, and plastic strain; these history variables evolve only under plastic flow. A near-zero consistency denominator uses the UW/OpenSees neutral-loading update, and any other invalid first or second stage is rejected and retried at a smaller local fraction before Hercules reports failure. Plastic correction uses at most min(no_substeps, 50) iterations. The corrected candidate remains transactional: a genuinely bracketed segment projection may recover it; otherwise Hercules rejects the candidate, halves the local constitutive fraction, and retries from the last accepted state. The separate physical cutoff p_min=1e-4 P_atm prevents tensile effective mean stress. Predictor and averaged-candidate crossings are adaptively localized; at the minimum fraction, Hercules completes the unresolved total strain on the isotropic cutoff state, updates plastic strain consistently, and resets alpha and alpha_in rather than returning a partial global increment. manzari_dafalias_recovery selects what happens after ordinary adaptive recovery is exhausted: strict (the default) keeps finite work limits and never accepts an over-tolerance local state; force_accept retains the limits but uses an OpenSees-style finite admissible fallback at the minimum fraction; unlimited_substeps removes the accepted/rejected work caps while keeping strict error control; and opensees combines force acceptance, uncapped work, and OpenSees's fixed 1e-6 minimum fraction. Non-strict modes may be slower or accept a state above backbone_errTol and therefore require explicit reporting and independent production checks. With approximate_geostatic_state=yes, Hercules integrates the 1-D density column and applies K0=1-sin(phi). In active BrickUP elements it subtracts the hydrostatic Biot stress alpha*rho_f*g*z_w, while the pressure DOF starts at zero as excess pore pressure. The static effective-stress offset initializes the constitutive state but is removed from dynamic force assembly.",
-          "PressureDependMultiYield03 (alias PDMY03) uses the standard automatically generated nested yield surfaces, pressure-dependent elastic moduli, contraction/dilation, phase-transformation, and post-liquefaction-zone history. It is explicit and deterministic rather than a local Newton solve. Its requested subincrements follow surface crossings plus shear/volumetric strain size; no_substeps caps that request, and material-point diagnostics report clamping without aborting. The current implementation accepts 2 through 40 surfaces and does not yet accept a user-supplied G/Gmax surface table. At the elastic-to-plastic transition it follows OpenSees by clamping tensile mean stress to zero and accepting an exactly zero state. That numerical behavior does not replace physical in-situ effective stress: production cases should still use approximate_geostatic_state=yes, a nonzero ramped geostatic stage, or a valid restart. Production startup reports PDMY03 element counts, estimated maximum-rank host/device constitutive storage, and phase timings. Large cases classify nonlinear eligibility once in parallel while preserving deterministic element order. Large FEM cases also parallelize independent constant and geostatic preparation with OpenMP and skip the tetrahedral VT topography lookup. Startup statistics use the active solver communicator, including after a unified Phase-A-to-Phase-B rank reduction.",
+          "Set include_nonlinear_analysis=yes and supply every nonlinear key shown in the examples below. With Istanbul_velocity_model=no, the first and last Vs_limit rows define the inclusive nonlinear-element range; elements outside that range remain linear. The two identical rows in these syntax examples therefore select solids with 150 <= Vs <= 450 m/s without introducing Vs-dependent interpolation.",
+          "The legacy Istanbul nl_id classification controls element eligibility only when Istanbul_velocity_model=yes. Other runs ignore nl_id and use the Vs range covered by material_properties_list. For non-Istanbul vonMises_baE and vonMises_ep, c_or_Su supplies strength; the built-in nl_id constants remain limited to the Istanbul path.",
+          "The displayed constants are synthetic regression or syntax values, not production soil calibrations. Replace strengths, angles, backbone coefficients, tolerances, substep limits, damping, and property rows with values justified for the case, then confirm the nonlinear-element count and selected backend in the startup report.",
+          "Pressure-dependent examples—MohrCoulomb, DruckerPrager, ManzariDafalias, and PDMY03—set approximate_geostatic_state=yes. Hercules integrates the 1-D density column to initialize a K0 effective-stress field. In active BrickUP elements it subtracts hydrostatic Biot stress, while the pressure DOF starts at zero as excess pore pressure. Because the parser forbids combining that approximation with a positive geostatic loading or cushion time, those examples set both times to zero. A calibrated ramped geostatic stage or valid restart is an alternative, but then approximate_geostatic_state must be no.",
+          "material_plasticity_type=rate_independent is the established production choice illustrated here. stiff_damp=0 disables the nonlinear stiffness-damping contribution while freq_stiff_damp remains positive. tension_cutoff=yes is accepted only for MohrCoulomb and DruckerPrager.",
         ],
         table: {
-          headers: ["Family", "Available material_model values", "Role"],
+          headers: ["Family", "Available material_model values", "Initialization shown below"],
           rows: [
-            ["Elastic diagnostic", "linear", "Compute nonlinear diagnostic quantities while keeping elements elastic for comparison"],
-            ["von Mises / cyclic plasticity", "vonMises_ep, vonMises_fa, vonMises_faM", "Elastoplastic yielding with the selected hardening formulation"],
-            ["Nonlinear backbone models", "vonMises_baE, vonMises_baH, vonMises_GQH, vonMises_MKZ, vonMises_RO", "Nonlinear and hysteretic soil response using the selected backbone law"],
-            ["Pressure-dependent plasticity", "MohrCoulomb, DruckerPrager", "Frictional/cohesive yielding with optional tension cutoff"],
-            ["Critical-state sand plasticity", "ManzariDafalias", "Pressure-dependent effective-stress response with dilatancy, fabric evolution, and cyclic mobility state"],
-            ["Nested-surface liquefaction plasticity", "PressureDependMultiYield03 (PDMY03)", "Pressure-dependent cyclic mobility with contraction/dilation and translated yield-surface history"],
+            ["Elastic diagnostic", "linear", "No initial stress"],
+            ["von Mises / cyclic plasticity", "vonMises_ep, vonMises_fa, vonMises_faM", "No initial stress in the syntax fixture"],
+            ["Nonlinear backbone", "vonMises_baE, vonMises_baH, vonMises_GQH, vonMises_MKZ, vonMises_RO", "Model-specific; BAH and MKZ examples use approximate overburden"],
+            ["Frictional plasticity", "MohrCoulomb, DruckerPrager", "approximate_geostatic_state=yes"],
+            ["Critical-state sand", "ManzariDafalias", "approximate_geostatic_state=yes"],
+            ["Nested-surface liquefaction", "PressureDependMultiYield03 (PDMY03)", "approximate_geostatic_state=yes"],
           ],
         },
-        codeLabel: "parameters.in — feature selection (additional nonlinear controls are required)",
-        code: "include_nonlinear_analysis = yes\nmaterial_model = vonMises_ep\nmaterial_plasticity_type = rate_independent",
-        note: "A plastic production case also requires calibrated geostatic, tolerance, substep, damping, and model-specific material_properties_list values. Most models use 16 columns; ManzariDafalias uses 17 and PDMY03 uses 22. Validate the selected constitutive model against an appropriate reference before a large run.",
+        note: "Each block is a nonlinear portion of parameters.in. Keep the domain, mesh, source, material-profile, output, and other required controls elsewhere in the same file.",
       },
       {
-        id: "nonlinear-material-properties",
-        title: "Non-Istanbul nonlinear property tables",
+        id: "model-linear",
+        title: "linear diagnostic model",
         paragraphs: [
-          "Rows are ordered by increasing Vs_limit. For non-Istanbul models, the first and last limits define the inclusive nonlinear range and Hercules linearly interpolates active properties for intermediate Vs. BAE reads Su from alpha_cohesion and its exponential hardening parameters from psi and m. ManzariDafalias has no implicit calibrated constants and uses 17 values. PDMY03 uses 22 values per row; its continuous fields are interpolated while categorical loading_type and surface_count are selected from the nearest Vs row. Fixture values are characterization inputs rather than production defaults.",
-          "The example brackets a homogeneous Vs=1000 m/s profile. Repeated values make its active BAE properties constant across the selected range; replace them with calibrated strength and modulus-reduction parameters for scientific use.",
+          "material_model=linear keeps selected elements elastic while producing nonlinear-path diagnostics such as stress, strain, and invariants. Use it as a control run before enabling plastic evolution.",
         ],
-        codeLabel: "parameters.in — synthetic syntax example, not a calibration",
-        code: "Istanbul_velocity_model = no\nmaterial_model = vonMises_baE\nmaterial_plasticity_type = rate_independent\nmaterial_properties_count = 2\nmaterial_properties_list =\n# Vs   Su(Pa) phi rate sensitivity hardening dilatancy gamma0 psi m   theta1 theta2 theta3 theta4 theta5 phi_RO\n  900  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0\n 1100  7.5e4  0   0    0           0         0          0      0.2 1.2 0      0      0      0      0      0\n\n# PDMY03 rows instead contain:\n# Vs Gref Kref phi peak_gamma pref d PT mType ca cb cc cd ce da db dc N liq1 liq2 Patm cohesion",
-        note: "Su, psi, and m are case-specific constitutive inputs and cannot be inferred from Vs alone. Confirm the selected nonlinear-element count in the setup output before timing or production runs.",
+        codeLabel: "parameters.in — synthetic diagnostic example",
+        code: nonlinearModelExample({
+          model: "linear",
+          columns: classicMaterialColumns,
+          row: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        }),
+      },
+      {
+        id: "model-vonmises-ep",
+        title: "vonMises_ep",
+        paragraphs: [
+          "The elastic-perfectly-plastic von Mises model reads its non-Istanbul shear strength from c_or_Su. It uses no isotropic hardening; the example makes the strength constant across the selected Vs range.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_ep",
+          columns: classicMaterialColumns,
+          row: "7.5e4 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        }),
+      },
+      {
+        id: "model-vonmises-fa",
+        title: "vonMises_fa",
+        paragraphs: [
+          "The Frederick–Armstrong model uses c_or_Su for strength, gamma0 for the initial elastic strain scale, and psi for its kinematic hardening control. The remaining classic-table fields are inactive in this fixture.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_fa",
+          columns: classicMaterialColumns,
+          row: "1.0e5 0 0 0 0 0 2.0e-4 0.25 0 0 0 0 0 0 0",
+        }),
+      },
+      {
+        id: "model-vonmises-fam",
+        title: "vonMises_faM",
+        paragraphs: [
+          "The modified Frederick–Armstrong model uses c_or_Su and psi and includes its load-reversal recalibration. gamma0 is not used by this formulation.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_faM",
+          columns: classicMaterialColumns,
+          row: "1.0e5 0 0 0 0 0 0 0.25 0 0 0 0 0 0 0",
+        }),
+      },
+      {
+        id: "model-vonmises-bae",
+        title: "vonMises_baE",
+        paragraphs: [
+          "The Borja–Amies exponential model reads non-Istanbul strength from c_or_Su and its hardening law from psi and m. The sample psi and m come from the repository's synthetic regression fixture and are not general soil defaults.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_baE",
+          columns: classicMaterialColumns,
+          row: "7.5e4 0 0 0 0 0 0 0.9331 1.245 0 0 0 0 0 0",
+        }),
+      },
+      {
+        id: "model-vonmises-bah",
+        title: "vonMises_baH",
+        paragraphs: [
+          "The Borja–Amies hyperbolic path derives its active strength and hardening quantities from Vs and overburden correlations. The classic-table values below are zeros because only the Vs limits select elements. The example initializes approximate overburden so the pressure-dependent correlation is not evaluated from an unstressed state.",
+        ],
+        codeLabel: "parameters.in — eligibility and initialization example",
+        code: nonlinearModelExample({
+          model: "vonMises_baH",
+          columns: classicMaterialColumns,
+          row: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+          approximateGeostatic: true,
+        }),
+        note: "The embedded correlation is part of this model implementation; independently verify that it is appropriate for the site before using it.",
+      },
+      {
+        id: "model-vonmises-gqh",
+        title: "vonMises_GQH",
+        paragraphs: [
+          "The GQH backbone model uses c_or_Su together with theta1 through theta5. The illustrated coefficients exercise the implemented inversion but do not represent a calibrated modulus-reduction curve.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_GQH",
+          columns: classicMaterialColumns,
+          row: "5.0e4 0 0 0 0 0 0 0 0 0 1 1 1 1 0",
+        }),
+      },
+      {
+        id: "model-vonmises-mkz",
+        title: "vonMises_MKZ",
+        paragraphs: [
+          "The current MKZ production path derives its reference strain and limiting strength from Vs and overburden and uses the implementation's beta and exponent. The property rows below therefore select the Vs interval; approximate geostatic initialization supplies the in-situ stress used by the correlation.",
+        ],
+        codeLabel: "parameters.in — eligibility and initialization example",
+        code: nonlinearModelExample({
+          model: "vonMises_MKZ",
+          columns: classicMaterialColumns,
+          row: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+          approximateGeostatic: true,
+        }),
+      },
+      {
+        id: "model-vonmises-ro",
+        title: "vonMises_RO",
+        paragraphs: [
+          "The Ramberg–Osgood model reads c_or_Su, alpha_RO from psi, eta_RO from m, and phi_RO from the final column. The values below are the synthetic material-point fixture values.",
+        ],
+        codeLabel: "parameters.in — synthetic syntax, not a calibration",
+        code: nonlinearModelExample({
+          model: "vonMises_RO",
+          columns: classicMaterialColumns,
+          row: "5.0e4 0 0 0 0 0 0 1.0 2.0 0 0 0 0 0 0.5",
+        }),
+      },
+      {
+        id: "model-mohr-coulomb",
+        title: "MohrCoulomb",
+        paragraphs: [
+          "Mohr–Coulomb reads cohesion in Pa, friction and dilatancy angles in degrees, and the hardening modulus from the classic table. A physically meaningful in-situ stress is essential for frictional yielding, so the example enables approximate geostatic initialization and zeroes the mutually exclusive ramp times.",
+        ],
+        codeLabel: "parameters.in — synthetic frictional-plasticity syntax",
+        code: nonlinearModelExample({
+          model: "MohrCoulomb",
+          columns: classicMaterialColumns,
+          row: "5.0e4 32 0 0 0 5 0 0 0 0 0 0 0 0 0",
+          approximateGeostatic: true,
+          tensionCutoff: true,
+        }),
+      },
+      {
+        id: "model-drucker-prager",
+        title: "DruckerPrager",
+        paragraphs: [
+          "Drucker–Prager uses the same cohesion, friction-angle, hardening, and dilatancy columns as Mohr–Coulomb and converts the angles to its smooth pressure-dependent cone. The example uses approximate geostatic initialization and enables the model's optional tension cutoff.",
+        ],
+        codeLabel: "parameters.in — synthetic frictional-plasticity syntax",
+        code: nonlinearModelExample({
+          model: "DruckerPrager",
+          columns: classicMaterialColumns,
+          row: "5.0e4 32 0 0 0 5 0 0 0 0 0 0 0 0 0",
+          approximateGeostatic: true,
+          tensionCutoff: true,
+        }),
+      },
+      {
+        id: "model-manzari-dafalias",
+        title: "ManzariDafalias",
+        paragraphs: [
+          "Manzari–Dafalias is a pressure-dependent effective-stress critical-state sand model that uses adaptive explicit Modified Euler. Production runs currently require the GPU nonlinear backend. The 17-column table contains Vs_limit plus all sixteen calibrated model constants; Poisson's ratio and density come from each element.",
+          "The example uses strict adaptive Modified Euler, approximate K0 initialization, zero ramp/cushion times, error_tolerance as a yield-residual bound in Pa, and backbone_errTol as the dimensionless local error target.",
+        ],
+        codeLabel: "parameters.in — synthetic Manzari–Dafalias fixture values",
+        code: nonlinearModelExample({
+          model: "ManzariDafalias",
+          columns: "Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm(Pa) m h0 ch nb A0 nd z_max cz",
+          row: "125 0.80 1.25 0.712 0.019 0.934 0.70 101300 0.01 7.05 0.968 1.10 0.704 3.50 4.0 600",
+          approximateGeostatic: true,
+          errorTolerance: "1.0e-1",
+          backboneTolerance: "1.0e-4",
+          extraControls: ["manzari_dafalias_recovery = strict"],
+        }),
+        note: "Hercules supplies no implicit Manzari–Dafalias calibration. Replace every displayed constant and validate drained and cyclic response independently.",
+      },
+      {
+        id: "model-pdmy03",
+        title: "PressureDependMultiYield03 (PDMY03)",
+        paragraphs: [
+          "PDMY03 is the device-first liquefaction model with standard automatically generated nested yield surfaces. Production runs currently require the GPU nonlinear backend. Its 22-column table contains Vs_limit plus 21 model values; stress-like quantities are Pa, angles are degrees, loading_type is 0, 1, or 2, and surface_count is an integer from 2 through 40.",
+          "The example initializes the physical effective-stress field with approximate_geostatic_state=yes. no_substeps caps the deterministic surface- and strain-based subincrement request; backbone_errTol and error_tolerance are still parser-required but do not control the PDMY03 integrator.",
+        ],
+        codeLabel: "parameters.in — synthetic PDMY03 fixture values",
+        code: nonlinearModelExample({
+          model: "PressureDependMultiYield03",
+          columns: "Vs_limit Gref(Pa) Kref(Pa) phi(deg) peak_gamma pref(Pa) d PT(deg) loading_type ca cb cc cd ce da db dc surfaces liq1 liq2 Patm(Pa) cohesion(Pa)",
+          row: "9.0e7 2.2e8 32 0.10 1.01e5 0.50 26 0 0.067 0.50 0.23 1.0 0.0 0.06 3.0 0.27 20 1.0e4 0.01 1.01e5 1.73e3",
+          approximateGeostatic: true,
+          errorTolerance: "1.0e-1",
+          backboneTolerance: "1.0e-4",
+        }),
+        note: "PDMY03 accepts the alias material_model=PDMY03. The shown constants characterize a regression fixture and are not production liquefaction parameters.",
       },
       {
         id: "coupling",
-        title: "Coupled interfaces",
+        title: "Coupled-interface rules",
         paragraphs: [
-          "Material classification determines which element formulation advances each region. Interface terms transfer the physically appropriate traction, motion, and pressure information between neighboring acoustic, solid, and poroelastic domains; eligible solid elements may use linear or nonlinear/plastic constitutive response.",
-          "For every poroelastic nonlinear region, the constitutive model controls skeleton volumetric response and the u-p pressure operator supplies Biot pore-pressure traction separately. Hercules therefore disables the zero-permeability undrained fast path whenever nonlinear analysis is active instead of folding alpha²M into a linear bulk stiffness. This is essential for pressure-dependent models such as ManzariDafalias and PDMY03, whose skeleton stress is effective stress.",
-          "The pressure capacity is assembled element by element as the sum of integral N/M over each adjacent BrickUP element, while the source and Darcy terms retain alpha Q^T du and k/mu. This supports spatially varying storage modulus M and arbitrary physically admissible Biot alpha. Drained-surface and acoustic open-pore projections use the same local compliance units. Startup also reports the nonlinear-to-BrickUP map. Nonlinear elements below poroelastic_depth_max_m stay on the single-phase nonlinear-solid path: their constitutive stress is assembled directly as total stress, without a pressure degree of freedom or Biot feedback. That is an intentional dry/drained or calibrated total-stress fallback, not coupled liquefaction. A nonlinear zero-permeability case cannot use a positive geostatic loading ramp; use the approximate effective-stress state with zero ramp/cushion or a calibrated permeable consolidation stage.",
+          "Material classification determines which formulation advances each element. Acoustic–elastic faces exchange normal traction and normal acceleration. Poroelastic–elastic contact shares solid motion but stops Darcy flux. Acoustic–poroelastic contact can be no-flow or open-pore, with the latter weakly enforcing pressure continuity.",
+          "For nonlinear BrickUP regions, the constitutive model owns the skeleton effective stress and the u-p operator supplies Biot pore-pressure traction. Hercules disables the zero-permeability undrained fast path whenever nonlinear analysis is active so alpha²M is not folded into a linear bulk stiffness. Nonlinear elements below poroelastic_depth_max_m are single-phase nonlinear solids, not coupled liquefaction elements.",
         ],
-        note: "Always record the physical assumptions used at coupled interfaces; a numerically stable run can still encode the wrong boundary condition.",
+        note: "Check the startup classification counts and station_mediums.txt. A syntactically valid case can still encode the wrong hydraulic or mechanical interface assumption.",
+      },
+      {
+        id: "coupling-acoustic-elastic",
+        title: "Acoustic–elastic example",
+        paragraphs: [
+          "With include_acoustic=yes, a material sample with Vp>0, rho>0, and Vs<=1e-6 is acoustic. The following layered profile places lossless water above an elastic solid and enables the recommended velocity-potential coupling path.",
+        ],
+        codeLabel: "parameters.in — water over elastic solid",
+        code: "include_acoustic = yes\nacoustic_formulation = velocity_potential\nacoustic_interface_coupling = yes\nacoustic_interface_projection = point\nacoustic_interface_face_filter = all\nacoustic_interface_max_level = -1\nacoustic_mesh_refinement_factor = 1.0\nacoustic_quality_factor = 0\n\ncvmdb_input_file = profile\nnumber_profile_layers = 2\nprofile_layers =\n# z_top(m) Vp(m/s) Vs(m/s) rho(kg/m3) Qp Qs\n 0.0   1500.0    0.0 1000.0 1.0e6 1.0e6\n 100.0 2600.0 1400.0 2300.0 1.0e6 1.0e6",
+        note: "Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
+      },
+      {
+        id: "coupling-poroelastic",
+        title: "Poroelastic–elastic example",
+        paragraphs: [
+          "This sealed, zero-permeability configuration treats saturated solids down to 50 m as linear BrickUP elements. The underlying solid remains elastic and the hydraulic interface is no-flow. For a drained surface, change poroelastic_surface_pressure_bc to drained and retain a positive penalty factor.",
+        ],
+        codeLabel: "parameters.in — linear undrained BrickUP layer",
+        code: "include_poroelastic = yes\nporoelastic_formulation = brick_up\nporoelastic_depth_max_m = 50.0\nsurface_groundwatertable = no\nporoelastic_surface_pressure_bc = undrained\nporoelastic_surface_pressure_penalty_factor = 1.0\nporoelastic_elastic_interface = no_flow\nporoelastic_undrained_fast_path = yes\nporoelastic_porosity = 0.40\nporoelastic_biot_alpha = 1.0\nporoelastic_fluid_bulk_modulus_pa = 2.2e9\nporoelastic_fluid_density_kgm3 = 1000.0\nporoelastic_fluid_viscosity_pa_s = 1.0e-3\nporoelastic_permeability_x_m2 = 0.0\nporoelastic_permeability_y_m2 = 0.0\nporoelastic_permeability_z_m2 = 0.0\nacoustic_poroelastic_interface = no_flow",
+      },
+      {
+        id: "coupling-nonlinear-poroelastic",
+        title: "Nonlinear PDMY03–BrickUP example",
+        paragraphs: [
+          "The following combines the complete PDMY03 nonlinear fixture with a sealed saturated layer. approximate_geostatic_state=yes supplies the initial skeleton effective stress, the pressure unknown begins at zero excess pressure, and poroelastic_undrained_fast_path=no makes the explicit nonlinear coupling policy visible even though Hercules disables it automatically.",
+        ],
+        codeLabel: "parameters.in — synthetic coupled syntax, not a calibration",
+        code: `${nonlinearModelExample({
+          model: "PressureDependMultiYield03",
+          columns: "Vs_limit Gref Kref phi peak_gamma pref d PT loading_type ca cb cc cd ce da db dc surfaces liq1 liq2 Patm cohesion",
+          row: "9.0e7 2.2e8 32 0.10 1.01e5 0.50 26 0 0.067 0.50 0.23 1.0 0.0 0.06 3.0 0.27 20 1.0e4 0.01 1.01e5 1.73e3",
+          approximateGeostatic: true,
+          errorTolerance: "1.0e-1",
+          backboneTolerance: "1.0e-4",
+        })}\n\ninclude_poroelastic = yes\nporoelastic_formulation = brick_up\nporoelastic_depth_max_m = 50.0\nsurface_groundwatertable = no\nporoelastic_surface_pressure_bc = undrained\nporoelastic_undrained_fast_path = no\nporoelastic_porosity = 0.40\nporoelastic_biot_alpha = 1.0\nporoelastic_fluid_bulk_modulus_pa = 2.2e9\nporoelastic_fluid_density_kgm3 = 1000.0\nporoelastic_fluid_viscosity_pa_s = 1.0e-3\nporoelastic_permeability_x_m2 = 0.0\nporoelastic_permeability_y_m2 = 0.0\nporoelastic_permeability_z_m2 = 0.0`,
+        note: "A zero-permeability nonlinear BrickUP case must not use a positive geostatic loading ramp. Use the approximate state shown here, a calibrated permeable consolidation stage, or a valid restart.",
+      },
+      {
+        id: "coupling-acoustic-poroelastic",
+        title: "Acoustic–poroelastic open-pore example",
+        paragraphs: [
+          "Enable both formulations and select open_pore only when the acoustic and saturated porous regions physically share an open hydraulic contact. The positive penalty factor scales the weak pressure-continuity projection.",
+        ],
+        codeLabel: "parameters.in — open-pore interface controls",
+        code: "include_acoustic = yes\nacoustic_formulation = velocity_potential\nacoustic_interface_coupling = yes\n\ninclude_poroelastic = yes\nporoelastic_formulation = brick_up\nporoelastic_depth_max_m = 50.0\nporoelastic_surface_pressure_bc = undrained\nporoelastic_elastic_interface = no_flow\n\nacoustic_poroelastic_interface = open_pore\nacoustic_poroelastic_pressure_penalty_factor = 1.0",
       },
       {
         id: "attenuation",
-        title: "Attenuation and damping",
-        bullets: [
-          "BKT-family viscoelastic convolution kernels provide frequency-dependent attenuation.",
-          "Rayleigh and mass-proportional damping remain available for compatible analyses.",
-          "A diagnostic override can force the generic damping kernel to build a correctness reference.",
+        title: "Attenuation and damping rules",
+        paragraphs: [
+          "type_of_damping selects none, mass-proportional, Rayleigh, or a BKT-family viscoelastic convolution. Rayleigh and mass coefficients are derived from simulation_wave_max_freq_hz and scaled by each element's damping ratio. BKT-family models use material Qp/Qs or a parametric Qs relation and maintain convolution history.",
+          "the_threshold_damping caps the element damping ratio, and do_damping_statistics=1 prints initialization statistics. Qp and Qs are the final two fields of profile_layers and are also available from the 3-D material-model Q files.",
         ],
       },
       {
-        id: "pml",
-        title: "Perfectly matched layers",
+        id: "damping-none-rayleigh-mass",
+        title: "None, Rayleigh, and mass damping examples",
         paragraphs: [
-          "PML regions attenuate outgoing waves before they reach the truncation boundary. Profile order, target reflection coefficient, layer width, reference frequency, and material wave speeds jointly control the damping profile.",
+          "Copy exactly one of the three type_of_damping selections into a case. The profile excerpt supplies Qp and Qs for the attenuating choices; none ignores them. Rayleigh includes both mass- and stiffness-proportional terms, while mass retains only the mass-proportional term.",
         ],
+        codeLabel: "parameters.in — choose one damping selection",
+        code: "# Lossless material response\ntype_of_damping = none\n\n# OR: Rayleigh material damping\n# type_of_damping = rayleigh\n\n# OR: mass-proportional material damping\n# type_of_damping = mass\n\nthe_threshold_damping = 0.05\ndo_damping_statistics = 1\n\n# z_top Vp Vs rho Qp Qs\ncvmdb_input_file = profile\nnumber_profile_layers = 1\nprofile_layers =\n 0.0 2000.0 1000.0 2000.0 200.0 100.0",
+        note: "Uncomment only one type_of_damping line. Q values and the 0.05 cap are illustrative; use the attenuation model and quality factors supported by measurements for the site.",
+      },
+      {
+        id: "damping-bkt-material-q",
+        title: "BKT-family example with material Q",
+        paragraphs: [
+          "All BKT variants require use_parametric_q_factor and use_infinite_qk. With use_parametric_q_factor=no, profile or 3-D material Qp/Qs values are used. bkt and bkt2 use two relaxation mechanisms; bkt3 and bkt3f use three. Keep the selected variant consistent with the validation used for the project.",
+        ],
+        codeLabel: "parameters.in — BKT2 with explicit Qp and Qs",
+        code: "type_of_damping = bkt2\nsimulation_velocity_profile_freq_hz = 1.0\nuse_parametric_q_factor = no\nuse_infinite_qk = no\nthe_threshold_damping = 0.05\ndo_damping_statistics = 1\n\ncvmdb_input_file = profile\nnumber_profile_layers = 1\nprofile_layers =\n# z_top Vp Vs rho Qp Qs\n 0.0 2000.0 1000.0 2000.0 200.0 100.0",
+        note: "simulation_velocity_profile_freq_hz must not exceed simulation_wave_max_freq_hz. Change bkt2 to bkt, bkt3, or bkt3f only when that formulation has been validated for the case.",
+      },
+      {
+        id: "damping-bkt-parametric-q",
+        title: "BKT-family example with parametric Q",
+        paragraphs: [
+          "With use_parametric_q_factor=yes, Hercules computes Qs=C+alpha×Vs_km_s^beta. Qp still comes from the material payload when a profile or 3-D Q model supplies it; use_infinite_qk=yes instead suppresses bulk attenuation by assigning the implementation's high-Qk limit.",
+        ],
+        codeLabel: "parameters.in — illustrative parametric-Q syntax",
+        code: "type_of_damping = bkt3\nsimulation_velocity_profile_freq_hz = 1.0\nuse_parametric_q_factor = yes\nparametric_q_factor_constant = 20.0\nparametric_q_factor_alpha = 50.0\nparametric_q_factor_beta = 1.0\nuse_infinite_qk = no\nthe_threshold_damping = 0.05\ndo_damping_statistics = 1",
+        note: "The coefficients merely demonstrate the parser and formula. Fit C, alpha, and beta to an appropriate regional attenuation model before production use.",
+      },
+      {
+        id: "pml",
+        title: "Perfectly matched layer rules",
+        paragraphs: [
+          "abc_type=dashpot selects the legacy Lysmer boundary. abc_type=cpml selects the unsplit convolutional PML on x_min, x_max, y_min, y_max, and z_max; z_min remains the free surface. CPML supports elastic and acoustic elements, while poroelastic and nonlinear candidates inside the PML are intentionally left as linear elastic CPML elements.",
+          "Choose either a positive cpml_thickness_m or a positive cpml_layers count. The baseline below uses the validated conservative kappa=1 native-stiffness path. Startup prints the realized thickness, reference wave speed, critical time-step estimate, and element counts; verify them before relying on absorption.",
+        ],
+      },
+      {
+        id: "pml-baseline",
+        title: "Baseline CPML example",
+        codeLabel: "parameters.in — conservative CPML configuration",
+        code: "abc_type = cpml\ncpml_thickness_m = 0.0\ncpml_layers = 10\ncpml_reflection_target = 1.0e-3\ncpml_poly_order = 2\ncpml_kappa_max = 1.0\ncpml_alpha_max_hz = -1.0\ncpml_cfl_safety = 0.9\ncpml_mpml_cross_fraction = 0.1\ncpml_alpha_floor_fraction = 0.1\ncpml_partition_weight = 1.0\ncpml_clamp_outer = no\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_pml_material_damping = none",
+        note: "A smaller reflection target is not automatically better: it increases attenuation strength and can tighten stability. Prefer additional physical thickness before changing kappa from the validated value of 1.",
+      },
+      {
+        id: "pml-material-damping",
+        title: "CPML with Rayleigh or BKT attenuation",
+        paragraphs: [
+          "Rayleigh material damping may continue inside elastic PML elements. BKT memory variables are intentionally not applied inside the PML: use elastic CPML around a BKT-attenuating interior. These policies avoid a damping-operator mismatch while keeping the supported PML implementation explicit.",
+        ],
+        codeLabel: "parameters.in — choose one compatible pair",
+        code: "# Rayleigh interior and Rayleigh-damped elastic CPML\ntype_of_damping = rayleigh\nabc_type = cpml\ncpml_pml_material_damping = rayleigh\n\n# OR: BKT-family interior and elastic CPML\n# type_of_damping = bkt2\n# use_parametric_q_factor = no\n# use_infinite_qk = no\n# abc_type = cpml\n# cpml_pml_material_damping = none",
+        note: "Do not set cpml_pml_material_damping to a BKT value; the accepted values are none and rayleigh. With Rayleigh+CPML, omitting the setting auto-promotes it to rayleigh, but writing it explicitly makes the physical choice reviewable.",
+      },
+      {
+        id: "pml-heterogeneous-topography",
+        title: "CPML with 3-D materials, water, and topography",
+        paragraphs: [
+          "Keep cpml_3d_material_extension=yes when a finite 3-D material grid or water classification should be extended from the nearest interior column through the absorber. This avoids sampling outside the model footprint and creating a false coastline or basin boundary inside CPML corners.",
+          "When topography reaches a lateral PML, taper it to the flat boundary datum before running. benchmark_inputs/taper_topography.py provides the repository workflow. The material extension controls properties, while the taper controls geometry; both are needed for a clean heterogeneous PML interface.",
+        ],
+        codeLabel: "parameters.in — heterogeneous acoustic/elastic CPML additions",
+        code: "3D_velocity_model = yes\ninclude_acoustic = yes\ninclude_topography = yes\n\nabc_type = cpml\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_kappa_max = 1.0\ncpml_clamp_outer = no",
+        note: "Changing cpml_3d_material_extension changes sampled PML material properties. Rebuild or recorrect an imported mesh when switching it; a Phase B import otherwise retains the properties stored in that mesh.",
       },
     ],
   },
@@ -593,10 +917,11 @@ export const docPages: Record<string, DocPageContent> = {
         id: "layout",
         title: "Typical case layout",
         paragraphs: [
-          "Only the inputs enabled by parameters.in are required. Keeping each simulation self-contained makes it easier to move between systems and archive with a publication.",
+          "Only the inputs enabled by parameters.in are required. Keeping each simulation self-contained makes it easier to move between systems and archive with a publication. The qs.in and qp.in quality-factor files are optional, but they must be supplied together when the three-dimensional material model provides Q values.",
         ],
         codeLabel: "directory tree",
-        code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
+        code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   ├── qs.in\n│   ├── qp.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
+        note: "For a 3-D material model, provide qs.in and qp.in as a matched pair with the same number of samples as z.in. If both files are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs.",
       },
       {
         id: "sources",

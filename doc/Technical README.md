@@ -570,6 +570,31 @@ Nonlinear GPU execution (runtime environment):
 	For the coupled SSPbrickUP/BrickUP triaxial and cyclic-shear workflows,
 	`plot_opensees_pdmy03_brickup.py` writes stress-response, pore-pressure,
 	effective-stress-path, and total-confinement-drift panels.
+- The public Physics models guide now contains a complete `parameters.in`
+	nonlinear block for every accepted `material_model`: `linear`,
+	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
+	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
+	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`, and
+	`PressureDependMultiYield03`. The displayed rows are syntax or regression
+	fixtures, never implicit production calibrations. They use two identical
+	property rows to make the nonlinear Vs interval explicit without adding an
+	interpolation gradient.
+- The documented pressure-dependent recipes for Mohr--Coulomb,
+	Drucker--Prager, Manzari--Dafalias, and PDMY03 set
+	`approximate_geostatic_state=yes`,
+	`geostatic_loading_time_sec=0`, and `geostatic_cushion_time_sec=0`. This is
+	the internally consistent approximate-K0 choice when a case has neither a
+	calibrated ramp nor a valid restart. The parser rejects a positive ramp or
+	cushion together with the approximate state. If a calibrated ramp is used,
+	set the approximate flag to `no`; for a sealed, zero-permeability nonlinear
+	BrickUP case, use the approximate effective-stress state, a permeable
+	consolidation stage, or a restart rather than a positive undrained ramp.
+- The same guide includes reviewable configuration blocks for acoustic--elastic,
+	poroelastic--elastic, nonlinear BrickUP, and acoustic--poroelastic open-pore
+	interfaces; lossless, Rayleigh, mass, material-Q BKT, and parametric-Q BKT
+	damping; and baseline, attenuating, heterogeneous, acoustic, and topographic
+	CPML operation. Keep these snippets synchronized with
+	`docs-site/app/docs/content.ts`, the parameter reference, and the parser.
 - With `approximate_geostatic_state=yes`, Hercules uses the integrated 1-D
 	density column stored with each mesh element, rather than a homogeneous
 	local-density half-space, and applies `K0 = 1 - sin(phi)`. For an active
