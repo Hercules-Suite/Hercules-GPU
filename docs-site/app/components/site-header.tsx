@@ -14,7 +14,7 @@ export function SiteHeader() {
       <div className="headerInner">
         <Link className="brand" href="/" aria-label="Hercules documentation home">
           <span className="brandMark" aria-hidden="true">
-            <Image src="/hercules-mark.png" alt="" width={34} height={34} priority />
+            <Image src="/hercules-mark.png" alt="" width={34} height={34} priority unoptimized />
           </span>
           <span className="brandCopy">
             <strong>Hercules Documentation</strong>
