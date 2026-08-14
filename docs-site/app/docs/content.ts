@@ -778,6 +778,134 @@ export const docPages: Record<string, DocPageContent> = {
         ],
       },
       {
+        id: "velocity-model-converter",
+        title: "Convert a CSV model automatically",
+        paragraphs: [
+          "The repository includes benchmark_inputs/convert_3d_velocity_model.py, a complete converter based on the script pattern in the original Hercules documentation. It uses only the Python standard library, so Pandas and NumPy are not required.",
+          "The CSV header must contain x,y,z,vs,vp,rho. It may also contain both qs and qp; providing only one is an error. The converter sorts axis coordinates and profile depths, writes profiles in the required Y-outer/X-inner order, and rejects incomplete rectangular grids, nonuniform horizontal spacing, duplicate depths, non-finite numbers, and invalid material values.",
+        ],
+        codeLabel: "shell — run from the Hercules_GPU repository",
+        code: "python3 benchmark_inputs/convert_3d_velocity_model.py \\\n  hercules-velocity-model.csv \\\n  --output-dir input/materialfiles\n\n# Expected summary for the worked example:\n# wrote 2 x 2 profiles and 15 samples to input/materialfiles",
+        bullets: [
+          "Always writes x.in, y.in, index.in, z.in, vs.in, vp.in, and rho.in.",
+          "Writes qs.in and qp.in only when both optional CSV columns are present.",
+          "Creates the output directory when necessary and replaces files of the same names.",
+          "Run the structural validator in the next section on the generated directory before mesh generation.",
+        ],
+      },
+      {
+        id: "velocity-model-converter-script",
+        title: "CSV converter script",
+        paragraphs: [
+          "The checked-in script is reproduced below so the format and conversion logic remain visible with the example. Save it as convert_3d_velocity_model.py if you are using the documentation independently of the repository.",
+        ],
+        codeLabel: "Python 3 — benchmark_inputs/convert_3d_velocity_model.py",
+        code: String.raw`#!/usr/bin/env python3
+"""Convert a row-wise CSV model to Hercules count-prefixed 3-D model files."""
+
+import argparse
+import csv
+import math
+from collections import defaultdict
+from pathlib import Path
+
+REQUIRED_COLUMNS = ("x", "y", "z", "vs", "vp", "rho")
+QUALITY_COLUMNS = ("qs", "qp")
+
+def require_uniform_axis(values, name):
+    if len(values) < 2:
+        raise ValueError(f"{name}: need at least two unique coordinates")
+    spacing = values[1] - values[0]
+    for left, right in zip(values, values[1:]):
+        if not math.isclose(right-left, spacing, rel_tol=1e-9, abs_tol=1e-8):
+            raise ValueError(f"{name}: coordinates are not uniformly spaced")
+
+def write_counted(path, values):
+    with path.open("w", encoding="utf-8") as output:
+        output.write(f"{len(values)}\n")
+        for value in values:
+            output.write(f"{value if isinstance(value, int) else format(value, '.17g')}\n")
+
+def read_csv_rows(path):
+    with path.open(newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None:
+            raise ValueError("CSV is missing a header row")
+        fieldnames = [name.strip().lower() for name in reader.fieldnames]
+        reader.fieldnames = fieldnames
+        missing = [name for name in REQUIRED_COLUMNS if name not in fieldnames]
+        if missing:
+            raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
+        has_qs, has_qp = "qs" in fieldnames, "qp" in fieldnames
+        if has_qs != has_qp:
+            raise ValueError("CSV must contain both qs and qp, or neither")
+        columns = REQUIRED_COLUMNS + (QUALITY_COLUMNS if has_qs else ())
+        rows = []
+        for line_number, raw in enumerate(reader, start=2):
+            try:
+                row = {name: float(raw[name]) for name in columns}
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"line {line_number}: fields must be numeric") from error
+            if not all(math.isfinite(value) for value in row.values()):
+                raise ValueError(f"line {line_number}: values must be finite")
+            if row["z"] < 0 or row["vs"] < 0 or row["vp"] <= 0 or row["rho"] <= 0:
+                raise ValueError(f"line {line_number}: invalid z, Vs, Vp, or density")
+            if has_qs and (row["qs"] <= 0 or row["qp"] <= 0):
+                raise ValueError(f"line {line_number}: Qs and Qp must be > 0")
+            rows.append(row)
+    if not rows:
+        raise ValueError("CSV contains no model rows")
+    return rows, columns
+
+def convert(csv_path, output_dir):
+    rows, columns = read_csv_rows(csv_path)
+    x_values = sorted({row["x"] for row in rows})
+    y_values = sorted({row["y"] for row in rows})
+    require_uniform_axis(x_values, "x")
+    require_uniform_axis(y_values, "y")
+
+    profiles = defaultdict(list)
+    for row in rows:
+        profiles[(row["y"], row["x"])].append(row)
+    expected = {(y, x) for y in y_values for x in x_values}
+    if expected.difference(profiles):
+        raise ValueError("CSV does not contain a complete rectangular x-y grid")
+
+    starts, ordered_rows = [], []
+    for y_value in y_values:          # Y is the outer loop.
+        for x_value in x_values:      # X is the inner loop.
+            profile = sorted(profiles[(y_value, x_value)], key=lambda row: row["z"])
+            depths = [row["z"] for row in profile]
+            if any(b <= a for a, b in zip(depths, depths[1:])):
+                raise ValueError(f"duplicate depth at x={x_value:g}, y={y_value:g}")
+            starts.append(len(ordered_rows))
+            ordered_rows.extend(profile)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_counted(output_dir / "x.in", x_values)
+    write_counted(output_dir / "y.in", y_values)
+    write_counted(output_dir / "index.in", starts)
+    for name in columns:
+        if name not in ("x", "y"):
+            write_counted(output_dir / f"{name}.in",
+                          [row[name] for row in ordered_rows])
+    print(f"wrote {len(x_values)} x {len(y_values)} profiles and "
+          f"{len(ordered_rows)} samples to {output_dir}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert CSV to Hercules 3-D velocity-model .in files"
+    )
+    parser.add_argument("csv_file", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    convert(args.csv_file, args.output_dir)
+
+if __name__ == "__main__":
+    main()`,
+        note: "The displayed version is intentionally compact; the checked-in script reports the coordinates of missing profiles and performs additional header validation. Both produce the same Hercules file ordering.",
+      },
+      {
         id: "velocity-model-validation",
         title: "Validate 3-D model files with Python",
         paragraphs: [

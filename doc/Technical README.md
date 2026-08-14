@@ -922,6 +922,16 @@ Acoustic-elastic input flags (input file):
 	used above the shallowest listed depth and the last sample below the deepest
 	listed depth. The public input-files guide contains a complete 2-by-2
 	row-table-to-file conversion with unequal profile lengths.
+- `benchmark_inputs/convert_3d_velocity_model.py` converts a row-wise CSV with
+	`x,y,z,vs,vp,rho` columns into the required count-prefixed files. Optional
+	`qs,qp` columns must be provided together. The converter sorts profiles into
+	the required Y-outer/X-inner order and validates the rectangular grid,
+	horizontal spacing, vertical depth uniqueness, and material ranges:
+
+	```bash
+	python3 benchmark_inputs/convert_3d_velocity_model.py model.csv \
+	    --output-dir input/materialfiles
+	```
 
 3D velocity-model quality factors:
 

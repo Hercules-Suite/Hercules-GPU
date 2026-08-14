@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -826,6 +829,11 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /unequal layer counts: 4, 4, 3, and 4/);
   assert.match(html, /piecewise constant with depth/);
   assert.match(html, /bilinearly interpolates Vs, Vp, density/);
+  assert.match(html, /benchmark_inputs\/convert_3d_velocity_model\.py/);
+  assert.match(html, /csv\.DictReader/);
+  assert.match(html, /--output-dir/);
+  assert.match(html, /both qs and qp/);
+  assert.match(html, /complete rectangular x-y grid/);
   assert.match(html, /index\.in does not define one ordered profile/);
   assert.match(html, /topography\.in — 3 × 3 grid/);
   assert.match(html, /flat_index = x_index \* n_east \+ y_index/);
@@ -837,4 +845,53 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /--pml-thickness.*does not configure Hercules/s);
   assert.match(html, /max \|z_boundary - z_ref\| = 0/);
   assert.match(html, /cpml_3d_material_extension/);
+});
+
+test("converts a row-wise CSV into Hercules 3-D model files", () => {
+  const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const script = join(repositoryRoot, "benchmark_inputs", "convert_3d_velocity_model.py");
+  if (!existsSync(script)) return;
+
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "hercules-3d-model-"));
+  try {
+    const csvPath = join(temporaryRoot, "model.csv");
+    const outputDir = join(temporaryRoot, "materialfiles");
+    writeFileSync(
+      csvPath,
+      [
+        "x,y,z,vs,vp,rho",
+        "500,500,1000,900,1800,2.2",
+        "0,0,1000,800,1600,2.1",
+        "500,0,0,550,1100,2.0",
+        "0,500,0,600,1200,2.0",
+        "500,500,0,650,1300,2.0",
+        "0,0,0,500,1000,2.0",
+        "500,0,1000,850,1700,2.1",
+        "0,500,1000,875,1750,2.1",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const conversion = spawnSync(
+      "python3",
+      [script, csvPath, "--output-dir", outputDir],
+      { encoding: "utf8" },
+    );
+    assert.equal(conversion.status, 0, conversion.stderr);
+    assert.match(conversion.stdout, /wrote 2 x 2 profiles and 8 samples/);
+    assert.equal(readFileSync(join(outputDir, "x.in"), "utf8"), "2\n0\n500\n");
+    assert.equal(readFileSync(join(outputDir, "y.in"), "utf8"), "2\n0\n500\n");
+    assert.equal(readFileSync(join(outputDir, "index.in"), "utf8"), "4\n0\n2\n4\n6\n");
+    assert.equal(
+      readFileSync(join(outputDir, "z.in"), "utf8"),
+      "8\n0\n1000\n0\n1000\n0\n1000\n0\n1000\n",
+    );
+    assert.ok(existsSync(join(outputDir, "vs.in")));
+    assert.ok(existsSync(join(outputDir, "vp.in")));
+    assert.ok(existsSync(join(outputDir, "rho.in")));
+    assert.equal(existsSync(join(outputDir, "qs.in")), false);
+    assert.equal(existsSync(join(outputDir, "qp.in")), false);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
