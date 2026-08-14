@@ -10,6 +10,10 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
+  // vinext imports AsyncLocalStorage from node:async_hooks. Enable Cloudflare's
+  // Node.js compatibility layer explicitly so local development works with
+  // plugin/workerd versions that predate the compatibility-date default.
+  compatibility_flags: ["nodejs_compat"],
   r2_buckets: r2
     ? [
         {

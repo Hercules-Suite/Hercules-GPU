@@ -633,8 +633,16 @@ export const docPages: Record<string, DocPageContent> = {
         id: "velocity-model-files",
         title: "3-D model files and ordering",
         paragraphs: [
-          "Every file begins with an integer count followed by exactly that many values. x.in and y.in contain at least two strictly increasing, uniformly spaced coordinates. z.in, vs.in, vp.in, and rho.in contain concatenated vertical profiles; index.in gives the zero-based start of each profile.",
-          "Horizontal profile order is y outer and x inner: (x0,y0), (x1,y0), then the remaining x positions before advancing to y1. Within each profile, z is strictly increasing and positive downward. Different horizontal columns may contain different z levels and layer counts.",
+          "A convenient way to prepare a model is one row per material sample with columns x, y, z, Vs, Vp, and density. That row-wise CSV is only a preparation format: Hercules reads the separate count-prefixed files listed below. The column order in your preparation table is your choice, but the converted filenames and their meanings are fixed.",
+          "Coordinates use the solver convention: x is distance north, y is distance east, and z is depth positive downward, all in metres. x.in and y.in must each contain at least two strictly increasing, uniformly spaced coordinates. The x and y spacings may differ, but the spacing within either axis must remain constant.",
+          "Treat y as the outer loop and x as the inner loop. For zero-based indices i and j, profile_id = j * nx + i, where i is the x index and j is the y index. Therefore write every x profile at y0 before advancing to y1: (x0,y0), (x1,y0), ..., (x0,y1), (x1,y1), ....",
+          "Within one x-y profile, write z from shallow to deep with no duplicate depths. Different profiles may use different z values and different numbers of layers. Append the matching Vs, Vp, density, and optional Q values in exactly the same order as z.in.",
+        ],
+        bullets: [
+          "The first value in every file is a count, not model data. It must equal the number of values that follow.",
+          "x.in has nx coordinates and y.in has ny coordinates; index.in has nx * ny zero-based profile starts.",
+          "z.in, vs.in, vp.in, and rho.in must have the same total sample count. If used, qs.in and qp.in must both exist and have that same count.",
+          "index.in contains starts only—do not append a final end offset. The end of the last profile is the total sample count from z.in.",
         ],
         table: {
           headers: ["File", "Units", "Contents"],
@@ -649,16 +657,253 @@ export const docPages: Record<string, DocPageContent> = {
             ["qs.in and qp.in", "dimensionless", "Optional matched quality factors; provide both or neither, with counts equal to z.in"],
           ],
         },
+        note: "For profile p, use samples [index[p], index[p+1]) in every concatenated array. For the last profile, use [index[last], total_sample_count). These are zero-based, half-open ranges.",
       },
       {
         id: "velocity-model-example",
-        title: "Minimal 2 × 2 velocity-model example",
+        title: "Worked 2 × 2 velocity-model example",
         paragraphs: [
-          "This model has four horizontal columns and two depth levels per column. The separators identify different files and are not part of the numeric file contents.",
+          "Start with the readable table below. It has two x coordinates, two y coordinates, and four vertical profiles. The profiles deliberately have unequal layer counts: 4, 4, 3, and 4 samples. Rows are already sorted with y outermost, x next, and z innermost.",
+          "Hercules does not read this CSV directly. Convert its columns into the files in 3D_velocity_model_directory as shown in the next two steps.",
         ],
-        codeLabel: "input/materialfiles",
-        code: "# x.in\n2\n0.0\n1000.0\n\n# y.in\n2\n0.0\n1000.0\n\n# index.in — profiles: (x0,y0), (x1,y0), (x0,y1), (x1,y1)\n4\n0\n2\n4\n6\n\n# z.in\n8\n0.0\n1000.0\n0.0\n1000.0\n0.0\n1000.0\n0.0\n1000.0\n\n# vs.in (m/s)\n8\n500.0\n800.0\n550.0\n850.0\n600.0\n900.0\n650.0\n950.0\n\n# vp.in (m/s)\n8\n1000.0\n1600.0\n1100.0\n1700.0\n1200.0\n1800.0\n1300.0\n1900.0\n\n# rho.in (tonne/m3)\n8\n2.00\n2.20\n2.02\n2.22\n2.04\n2.24\n2.06\n2.26",
-        note: "If qs.in and qp.in are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs. Regenerate or re-correct a persisted mesh after changing any material or quality-factor file.",
+        codeLabel: "preparation table — hercules-velocity-model.csv",
+        code: [
+          "x,y,z,vs,vp,rho",
+          "0.0,0.0,0,1709.769,4188.062,1.850",
+          "0.0,0.0,1000,1894.495,4640.546,1.898",
+          "0.0,0.0,3000,2430.156,5952.642,2.020",
+          "0.0,0.0,17400,3400.000,8328.265,2.197",
+          "500.0,0.0,0,1743.876,4271.606,1.859",
+          "500.0,0.0,1000,1920.505,4704.257,1.905",
+          "500.0,0.0,5000,2625.958,6432.257,2.060",
+          "500.0,0.0,17400,3400.000,8328.265,2.197",
+          "0.0,500.0,0,1577.978,3865.241,1.814",
+          "0.0,500.0,1000,1840.914,4509.300,1.885",
+          "0.0,500.0,6000,2714.210,6648.430,2.077",
+          "500.0,500.0,0,1609.918,3943.478,1.823",
+          "500.0,500.0,1000,1861.275,4559.174,1.890",
+          "500.0,500.0,5000,2712.018,6643.060,2.076",
+          "500.0,500.0,17400,3400.000,8328.265,2.197",
+        ].join("\n"),
+        note: "Density in this preparation table is in tonne/m3, matching rho.in. Hercules multiplies it by 1000 when constructing material density in kg/m3.",
+      },
+      {
+        id: "velocity-model-example-axes",
+        title: "Step 1: write x.in, y.in, and index.in",
+        paragraphs: [
+          "x.in and y.in contain the unique axis values, not one coordinate per CSV row. Their first lines are therefore both 2.",
+          "The profile order is (0,0), (500,0), (0,500), (500,500). The first profile starts at sample 0. After its 4 samples the next starts at 4; after another 4 it starts at 8; after the 3-sample third profile the last starts at 11. That produces index.in = [0, 4, 8, 11].",
+        ],
+        codeLabel: "input/materialfiles — copy each labeled group to its own file",
+        code: [
+          "# x.in",
+          "2",
+          "0.0",
+          "500.0",
+          "",
+          "# y.in",
+          "2",
+          "0.0",
+          "500.0",
+          "",
+          "# index.in",
+          "4",
+          "0",
+          "4",
+          "8",
+          "11",
+        ].join("\n"),
+        note: "The # filename labels above separate the examples; do not copy those comment lines into the numeric files.",
+      },
+      {
+        id: "velocity-model-example-ranges",
+        title: "How index.in maps profiles to samples",
+        paragraphs: [
+          "Apply each half-open range to z.in, vs.in, vp.in, rho.in, and to qs.in and qp.in when present. The next start closes the current range; the z.in count of 15 closes the final range.",
+        ],
+        table: {
+          headers: ["profile_id", "Coordinates (x,y)", "Start", "Sample range", "Layer count"],
+          rows: [
+            ["0", "(0, 0)", "index[0] = 0", "[0, 4)", "4"],
+            ["1", "(500, 0)", "index[1] = 4", "[4, 8)", "4"],
+            ["2", "(0, 500)", "index[2] = 8", "[8, 11)", "3"],
+            ["3", "(500, 500)", "index[3] = 11", "[11, 15)", "4"],
+          ],
+        },
+      },
+      {
+        id: "velocity-model-example-arrays",
+        title: "Step 2: write the concatenated material arrays",
+        paragraphs: [
+          "There are 15 CSV rows, so each file begins with 15. z.in is the z column in row order, including the restart at zero when a new x-y profile begins. The Vs, Vp, and density arrays must remain aligned sample-for-sample with those depths.",
+        ],
+        codeLabel: "input/materialfiles — copy each labeled group to its own file",
+        code: [
+          "# z.in",
+          "15",
+          "0", "1000", "3000", "17400",
+          "0", "1000", "5000", "17400",
+          "0", "1000", "6000",
+          "0", "1000", "5000", "17400",
+          "",
+          "# vs.in (m/s)",
+          "15",
+          "1709.769", "1894.495", "2430.156", "3400.000",
+          "1743.876", "1920.505", "2625.958", "3400.000",
+          "1577.978", "1840.914", "2714.210",
+          "1609.918", "1861.275", "2712.018", "3400.000",
+          "",
+          "# vp.in (m/s)",
+          "15",
+          "4188.062", "4640.546", "5952.642", "8328.265",
+          "4271.606", "4704.257", "6432.257", "8328.265",
+          "3865.241", "4509.300", "6648.430",
+          "3943.478", "4559.174", "6643.060", "8328.265",
+          "",
+          "# rho.in (tonne/m3)",
+          "15",
+          "1.850", "1.898", "2.020", "2.197",
+          "1.859", "1.905", "2.060", "2.197",
+          "1.814", "1.885", "2.077",
+          "1.823", "1.890", "2.076", "2.197",
+        ].join("\n"),
+        note: "The # filename labels are not file content. This example omits qs.in and qp.in; when both are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs. Regenerate or re-correct a persisted mesh after changing any material or quality-factor file.",
+      },
+      {
+        id: "velocity-model-lookup",
+        title: "How Hercules samples the model",
+        paragraphs: [
+          "At each of the four horizontal grid columns surrounding a query point, Hercules selects the deepest listed z that does not exceed the local depth. Values are therefore piecewise constant with depth within each profile; a listed z acts as the top depth of that material interval. Above the first listed depth, Hercules uses the first sample, and below the last listed depth it uses the last sample.",
+          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. With topography enabled, the lookup adjusts the column depths relative to the local interpolated ground surface before selecting layers.",
+        ],
+      },
+      {
+        id: "velocity-model-converter",
+        title: "Convert a CSV model automatically",
+        paragraphs: [
+          "The repository includes benchmark_inputs/convert_3d_velocity_model.py, a complete converter based on the script pattern in the original Hercules documentation. It uses only the Python standard library, so Pandas and NumPy are not required.",
+          "The CSV header must contain x,y,z,vs,vp,rho. It may also contain both qs and qp; providing only one is an error. The converter sorts axis coordinates and profile depths, writes profiles in the required Y-outer/X-inner order, and rejects incomplete rectangular grids, nonuniform horizontal spacing, duplicate depths, non-finite numbers, and invalid material values.",
+        ],
+        codeLabel: "shell — run from the Hercules_GPU repository",
+        code: "python3 benchmark_inputs/convert_3d_velocity_model.py \\\n  hercules-velocity-model.csv \\\n  --output-dir input/materialfiles\n\n# Expected summary for the worked example:\n# wrote 2 x 2 profiles and 15 samples to input/materialfiles",
+        bullets: [
+          "Always writes x.in, y.in, index.in, z.in, vs.in, vp.in, and rho.in.",
+          "Writes qs.in and qp.in only when both optional CSV columns are present.",
+          "Creates the output directory when necessary and replaces files of the same names.",
+          "Run the structural validator in the next section on the generated directory before mesh generation.",
+        ],
+      },
+      {
+        id: "velocity-model-converter-script",
+        title: "CSV converter script",
+        paragraphs: [
+          "The checked-in script is reproduced below so the format and conversion logic remain visible with the example. Save it as convert_3d_velocity_model.py if you are using the documentation independently of the repository.",
+        ],
+        codeLabel: "Python 3 — benchmark_inputs/convert_3d_velocity_model.py",
+        code: String.raw`#!/usr/bin/env python3
+"""Convert a row-wise CSV model to Hercules count-prefixed 3-D model files."""
+
+import argparse
+import csv
+import math
+from collections import defaultdict
+from pathlib import Path
+
+REQUIRED_COLUMNS = ("x", "y", "z", "vs", "vp", "rho")
+QUALITY_COLUMNS = ("qs", "qp")
+
+def require_uniform_axis(values, name):
+    if len(values) < 2:
+        raise ValueError(f"{name}: need at least two unique coordinates")
+    spacing = values[1] - values[0]
+    for left, right in zip(values, values[1:]):
+        if not math.isclose(right-left, spacing, rel_tol=1e-9, abs_tol=1e-8):
+            raise ValueError(f"{name}: coordinates are not uniformly spaced")
+
+def write_counted(path, values):
+    with path.open("w", encoding="utf-8") as output:
+        output.write(f"{len(values)}\n")
+        for value in values:
+            output.write(f"{value if isinstance(value, int) else format(value, '.17g')}\n")
+
+def read_csv_rows(path):
+    with path.open(newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None:
+            raise ValueError("CSV is missing a header row")
+        fieldnames = [name.strip().lower() for name in reader.fieldnames]
+        reader.fieldnames = fieldnames
+        missing = [name for name in REQUIRED_COLUMNS if name not in fieldnames]
+        if missing:
+            raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
+        has_qs, has_qp = "qs" in fieldnames, "qp" in fieldnames
+        if has_qs != has_qp:
+            raise ValueError("CSV must contain both qs and qp, or neither")
+        columns = REQUIRED_COLUMNS + (QUALITY_COLUMNS if has_qs else ())
+        rows = []
+        for line_number, raw in enumerate(reader, start=2):
+            try:
+                row = {name: float(raw[name]) for name in columns}
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"line {line_number}: fields must be numeric") from error
+            if not all(math.isfinite(value) for value in row.values()):
+                raise ValueError(f"line {line_number}: values must be finite")
+            if row["z"] < 0 or row["vs"] < 0 or row["vp"] <= 0 or row["rho"] <= 0:
+                raise ValueError(f"line {line_number}: invalid z, Vs, Vp, or density")
+            if has_qs and (row["qs"] <= 0 or row["qp"] <= 0):
+                raise ValueError(f"line {line_number}: Qs and Qp must be > 0")
+            rows.append(row)
+    if not rows:
+        raise ValueError("CSV contains no model rows")
+    return rows, columns
+
+def convert(csv_path, output_dir):
+    rows, columns = read_csv_rows(csv_path)
+    x_values = sorted({row["x"] for row in rows})
+    y_values = sorted({row["y"] for row in rows})
+    require_uniform_axis(x_values, "x")
+    require_uniform_axis(y_values, "y")
+
+    profiles = defaultdict(list)
+    for row in rows:
+        profiles[(row["y"], row["x"])].append(row)
+    expected = {(y, x) for y in y_values for x in x_values}
+    if expected.difference(profiles):
+        raise ValueError("CSV does not contain a complete rectangular x-y grid")
+
+    starts, ordered_rows = [], []
+    for y_value in y_values:          # Y is the outer loop.
+        for x_value in x_values:      # X is the inner loop.
+            profile = sorted(profiles[(y_value, x_value)], key=lambda row: row["z"])
+            depths = [row["z"] for row in profile]
+            if any(b <= a for a, b in zip(depths, depths[1:])):
+                raise ValueError(f"duplicate depth at x={x_value:g}, y={y_value:g}")
+            starts.append(len(ordered_rows))
+            ordered_rows.extend(profile)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_counted(output_dir / "x.in", x_values)
+    write_counted(output_dir / "y.in", y_values)
+    write_counted(output_dir / "index.in", starts)
+    for name in columns:
+        if name not in ("x", "y"):
+            write_counted(output_dir / f"{name}.in",
+                          [row[name] for row in ordered_rows])
+    print(f"wrote {len(x_values)} x {len(y_values)} profiles and "
+          f"{len(ordered_rows)} samples to {output_dir}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert CSV to Hercules 3-D velocity-model .in files"
+    )
+    parser.add_argument("csv_file", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    convert(args.csv_file, args.output_dir)
+
+if __name__ == "__main__":
+    main()`,
+        note: "The displayed version is intentionally compact; the checked-in script reports the coordinates of missing profiles and performs additional header validation. Both produce the same Hercules file ordering.",
       },
       {
         id: "velocity-model-validation",

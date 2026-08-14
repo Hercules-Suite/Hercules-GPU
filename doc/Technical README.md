@@ -892,6 +892,47 @@ Acoustic-elastic input flags (input file):
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
 
+3D velocity-model file layout and ordering:
+
+- With `3D_velocity_model=yes`, `3D_velocity_model_directory` must contain
+	`x.in`, `y.in`, `z.in`, `vs.in`, `vp.in`, `rho.in`, and `index.in`.
+	Every file begins with an integer count followed by that many values.
+	`x.in` and `y.in` contain at least two strictly increasing, uniformly
+	spaced coordinates in metres. Solver X is north and solver Y is east; the
+	axis spacings may differ from one another.
+- Let `nx` and `ny` be the counts in `x.in` and `y.in`. Horizontal profiles
+	are stored with Y as the outer loop and X as the inner loop. For zero-based
+	axis indices `i` and `j`, the profile number is
+	`p = j * nx + i`, giving `(x0,y0), (x1,y0), ...` before advancing to
+	`y1`. The count in `index.in` must be `nx * ny`.
+- `index.in` stores the zero-based start of each vertical profile in the
+	concatenated arrays; it does not contain a final end offset. Profile `p`
+	uses `[index[p], index[p+1])`, while the final profile uses
+	`[index[last], number_of_z_samples)`. The first start is zero and all
+	subsequent starts must increase.
+- `z.in`, `vs.in`, `vp.in`, and `rho.in` have identical counts and aligned
+	entries. Within each profile, Z is depth in metres, positive downward,
+	strictly increasing, and unique. Profiles may have different depth values
+	and layer counts. `Vs` and `Vp` are m/s; density is tonne/m3 and is
+	multiplied by 1000 when Hercules constructs kg/m3 material density.
+- The lookup selects the deepest listed Z not exceeding the query depth at
+	each of the four surrounding horizontal columns, so vertical properties are
+	piecewise constant and each Z is a layer-top depth. It then bilinearly
+	interpolates the selected material values horizontally. The first sample is
+	used above the shallowest listed depth and the last sample below the deepest
+	listed depth. The public input-files guide contains a complete 2-by-2
+	row-table-to-file conversion with unequal profile lengths.
+- `benchmark_inputs/convert_3d_velocity_model.py` converts a row-wise CSV with
+	`x,y,z,vs,vp,rho` columns into the required count-prefixed files. Optional
+	`qs,qp` columns must be provided together. The converter sorts profiles into
+	the required Y-outer/X-inner order and validates the rectangular grid,
+	horizontal spacing, vertical depth uniqueness, and material ranges:
+
+	```bash
+	python3 benchmark_inputs/convert_3d_velocity_model.py model.csv \
+	    --output-dir input/materialfiles
+	```
+
 3D velocity-model quality factors:
 
 - With `3D_velocity_model=yes`, the material directory may contain optional
