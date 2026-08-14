@@ -917,10 +917,11 @@ export const docPages: Record<string, DocPageContent> = {
         id: "layout",
         title: "Typical case layout",
         paragraphs: [
-          "Only the inputs enabled by parameters.in are required. Keeping each simulation self-contained makes it easier to move between systems and archive with a publication.",
+          "Only the inputs enabled by parameters.in are required. Keeping each simulation self-contained makes it easier to move between systems and archive with a publication. The qs.in and qp.in quality-factor files are optional, but they must be supplied together when the three-dimensional material model provides Q values.",
         ],
         codeLabel: "directory tree",
-        code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
+        code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   ├── qs.in\n│   ├── qp.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
+        note: "For a 3-D material model, provide qs.in and qp.in as a matched pair with the same number of samples as z.in. If both files are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs.",
       },
       {
         id: "sources",

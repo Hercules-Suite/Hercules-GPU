@@ -32,6 +32,8 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /parallel, octree-based finite-element code/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
+  assert.match(html, /hercules-mark\.png/);
+  assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
@@ -864,6 +866,8 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /3D_velocity_model_directory/);
   assert.match(html, /rho\.in.*multiplies by 1000/s);
   assert.match(html, /qs\.in and qp\.in/);
+  assert.match(html, /rho\.in.*qs\.in.*qp\.in.*index\.in/s);
+  assert.match(html, /provide qs\.in and qp\.in as a matched pair/i);
   assert.match(html, /CSV is only a preparation format|CSV directly/);
   assert.match(html, /profile_id = j \* nx \+ i/);
   assert.match(html, /y as the outer loop and x as the inner loop/i);
