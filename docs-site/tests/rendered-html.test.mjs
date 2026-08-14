@@ -32,10 +32,10 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /parallel, octree-based finite-element code/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
-  assert.match(html, /hercules-mark\.svg/);
-  assert.match(html, /src="\/hercules-mark\.svg"/);
+  assert.match(html, /hercules-mark\.png/);
+  assert.match(html, /src="\/hercules-mark\.png"/);
   assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-mark/);
-  assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-mark.svg")));
+  assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
