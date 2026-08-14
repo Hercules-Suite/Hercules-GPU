@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -47,6 +47,27 @@ test("server-renders a structured documentation page", async () => {
   assert.match(html, /Run your first Hercules simulation/);
   assert.match(html, /Before you begin/);
   assert.match(html, /Current Hercules GPU code path/);
+});
+
+test("searches complete documentation text and parameter names", async () => {
+  const { matchesSearchQuery, normalizeSearchText } = await import(
+    "../app/docs/search-utils.mjs"
+  );
+  const searchable = normalizeSearchText(
+    "Pressure-dependent models require approximate_geostatic_state = yes.",
+  );
+  assert.equal(matchesSearchQuery(searchable, "geostatic pressure"), true);
+  assert.equal(matchesSearchQuery(searchable, "approximate_geostatic_state"), true);
+  assert.equal(matchesSearchQuery(searchable, "unrelated keyword"), false);
+
+  const assetsDirectory = fileURLToPath(new URL("../dist/client/assets/", import.meta.url));
+  const clientJavaScript = readdirSync(assetsDirectory)
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => readFileSync(join(assetsDirectory, name), "utf8"))
+    .join("\n");
+  assert.match(clientJavaScript, /approximate_geostatic_state/);
+  assert.match(clientJavaScript, /taper_topography\.py/);
+  assert.match(clientJavaScript, /PressureDependMultiYield03/);
 });
 
 test("documents the current single parameter-file interface", async () => {
