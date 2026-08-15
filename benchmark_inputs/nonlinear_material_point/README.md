@@ -398,11 +398,12 @@ host/device libm differences accumulate more directly. Override it with
 component uses the largest resolved component of the same six-component tensor
 as its relative scale; this avoids ill-conditioned relative errors for
 physically inactive components without loosening scalar or dimensionless-state
-checks. CPU and GPU yield residuals are checked independently against the
-absolute `error_tolerance`. Modified-Euler local-error estimates and
-accepted-substep counts are likewise checked independently against
-`backbone_errTol` and `no_substeps`; host and device arithmetic need not select
-identical valid adaptive substep histories. Per-step plastic multipliers are
+checks. Modified-Euler CPU and GPU yield residuals are checked independently
+against the absolute `error_tolerance`; Forward Euler reports finite yield
+drift without treating that value as nonconvergence. Modified-Euler local-error
+estimates and accepted-substep counts are likewise checked independently
+against `backbone_errTol` and `no_substeps`; host and device arithmetic need
+not select identical valid adaptive substep histories. Per-step plastic multipliers are
 nonnegative integration diagnostics; the evolved plastic-strain tensor remains
 part of the direct state comparison.
 

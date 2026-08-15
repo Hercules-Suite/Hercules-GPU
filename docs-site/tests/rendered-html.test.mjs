@@ -528,6 +528,7 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpu, /no_substeps divides the plastic remainder/);
   assert.match(gpu, /substep < cfg->no_substeps/);
   assert.match(gpu, /cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER/);
+  assert.match(gpu, /enforce_md_yield_tolerance[\s\S]*NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*model_error > cfg\.error_tolerance/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
   assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
   assert.match(gpu, /cfg->error_tolerance/);

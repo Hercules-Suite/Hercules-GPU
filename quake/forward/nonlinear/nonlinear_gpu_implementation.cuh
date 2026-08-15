@@ -3343,8 +3343,18 @@ __global__ static void kernel_nonlinear_update_force(
                 &md_diagnostics);
             state.load_unload_n[nl_eindex].qv[qp] = (double)md_substeps;
             model_error = c->fs[qp];
+            /* Modified Euler commits only an admissible stress-corrected
+             * state, so its residual remains a production failure criterion.
+             * OpenSees scheme-5 Forward Euler intentionally performs no
+             * stress correction: a finite residual is a reported drift, not
+             * constitutive nonconvergence.  Keep the finite-state/integrator
+             * failure checks for both schemes. */
+            const int enforce_md_yield_tolerance =
+                cfg.md_integration_scheme ==
+                    NL_MD_INTEGRATION_MODIFIED_EULER;
             if (!ok || !isfinite(model_error) ||
-                model_error > cfg.error_tolerance) {
+                (enforce_md_yield_tolerance &&
+                 model_error > cfg.error_tolerance)) {
                 const tensor_t md_stress = md_scale(md_add(
                     state.stresses[nl_eindex].qp[qp], static_stress), -1.0);
                 nl_record_md_error(
