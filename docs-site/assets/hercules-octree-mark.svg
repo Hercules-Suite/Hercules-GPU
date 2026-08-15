@@ -10,11 +10,11 @@
     <rect data-octree-cell="true" x="44" y="148" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="99" y="148" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="44" y="203" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="98" y="203" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="125" y="203" width="23" height="23" rx="3"/>
 
     <rect data-octree-cell="true" x="44" y="260" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="71" y="260" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="98" y="260" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="125" y="260" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="44" y="287" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="71" y="287" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="98" y="287" width="23" height="23" rx="3"/>
@@ -41,12 +41,13 @@
     <rect data-octree-cell="true" x="391" y="175" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="175" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="175" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="364" y="202" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="391" y="202" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="202" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="202" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="229" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="229" width="23" height="23" rx="3"/>
 
-    <rect data-octree-cell="true" x="364" y="260" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="419" y="260" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="364" y="315" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="419" y="315" width="49" height="49" rx="5"/>
@@ -55,7 +56,7 @@
   </g>
 
   <path
-    d="M148 228 L166 228 C180 228 184 221 190 207 L202 177 L222 272 L250 147 L280 312 L306 192 L323 246 C330 266 339 258 347 235 C350 229 356 228 364 228"
+    d="M148 256 L166 256 C180 256 184 249 190 235 L202 205 L222 300 L250 175 L280 340 L306 220 L323 274 C330 294 339 286 347 263 C350 257 356 256 364 256"
     fill="none"
     stroke="#D9A441"
     stroke-linecap="round"
@@ -65,7 +66,7 @@
 
   <!-- These terminals replace octree cells instead of overlaying the meshes. -->
   <g fill="#D9A441">
-    <rect data-octree-cell="true" data-wave-terminal="true" x="99" y="203" width="49" height="49" rx="5"/>
-    <rect data-octree-cell="true" data-wave-terminal="true" x="364" y="203" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" data-wave-terminal="true" x="98" y="231" width="50" height="50" rx="5"/>
+    <rect data-octree-cell="true" data-wave-terminal="true" x="364" y="231" width="50" height="50" rx="5"/>
   </g>
 </svg>

@@ -53,22 +53,28 @@ test("builds the octree emblem from square mesh cells and square waveform termin
     /<rect data-octree-cell="true"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
   )];
 
-  assert.equal(cells.length, 41);
+  assert.equal(cells.length, 42);
   for (const [, width, height] of cells) {
     assert.equal(width, height, `octree cell ${width} × ${height} is not square`);
   }
 
   const terminals = [...logoSource.matchAll(
-    /<rect (?=[^>]*data-wave-terminal="true")[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
+    /<rect (?=[^>]*data-wave-terminal="true")[^>]*y="([0-9.]+)"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
   )];
   assert.equal(terminals.length, 2);
-  for (const [, width, height] of terminals) {
+  for (const [, y, width, height] of terminals) {
     assert.equal(width, height, `waveform terminal ${width} × ${height} is not square`);
+    assert.equal(Number(y) + Number(height) / 2, 256, "waveform terminal is not vertically centered");
   }
   assert.match(
     logoSource,
     /<rect data-octree-cell="true" data-wave-terminal="true"/,
     "waveform terminals must be octree mesh cells",
+  );
+  assert.match(
+    logoSource,
+    /d="M148 256 .* 364 256"/,
+    "waveform baseline must meet both terminal centers at y = 256",
   );
 });
 
