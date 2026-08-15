@@ -115,9 +115,9 @@ its translated surface centers from stress.
   for an admissible elastic state inside the yield surface.
 - `manzari_dafalias_forward_euler_synthetic.in` replays the same confinement
   and cyclic tensor-shear history with the OpenSees integration-scheme-5
-  algorithm. It checks the shared host/CUDA first-order update and records the
-  absolute yield drift. Forward Euler has no embedded local-error estimate,
-  adaptive constitutive substeps, or stress-correction loop.
+  constitutive stage. It checks 100 fixed host/CUDA Forward-Euler substeps per
+  plastic remainder and records the absolute yield drift. Forward Euler has no
+  embedded local-error estimate, adaptive retry, or stress-correction loop.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler
@@ -196,14 +196,16 @@ compare the recorded stress and state history with OpenSees or another trusted
 implementation before using a calibration.
 
 The optional `forward_euler` scheme matches OpenSees integration scheme 5.
-After the same elastic predictor and elastic/yield intersection, it evaluates
-one first-order plastic stage over the remaining increment. There is no second
-stage, embedded-error comparison, adaptive retry, or stress correction;
-`backbone_errTol`, `no_substeps`, and `manzari_dafalias_recovery` are therefore
-inactive. Hercules reports the absolute final yield drift rather than applying
-`error_tolerance` as an acceptance bound on that drift. This scheme is useful
-for OpenSees comparison and cost/increment-sensitivity studies, but Modified
-Euler remains the recommended production default.
+After the same elastic predictor and elastic/yield intersection, Hercules
+divides the remaining plastic fraction into exactly `no_substeps` equal parts
+and applies the first-order stage to each part. There is no second stage,
+embedded-error comparison, adaptive retry, or stress correction;
+`backbone_errTol` and `manzari_dafalias_recovery` are inactive. Hercules
+reports the absolute final yield drift rather than applying `error_tolerance`
+as an acceptance bound on that drift. Set `no_substeps=1` to reproduce the
+original single-update OpenSees scheme-5 path. Larger values reduce the
+Forward-Euler truncation error at directly proportional constitutive cost.
+Modified Euler remains the recommended production default.
 
 The independent OpenSees characterization uses the same 21-step path:
 
@@ -215,6 +217,9 @@ python3 compare_opensees_manzari_dafalias.py \
 ```
 
 For the Forward-Euler comparison:
+
+Set `no_substeps=1` in the Hercules Forward-Euler input when the objective is
+to compare exactly the same one-update integration path used by OpenSees.
 
 ```bash
 OpenSees opensees_manzari_dafalias_synthetic.tcl \

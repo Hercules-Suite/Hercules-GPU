@@ -446,14 +446,16 @@ Nonlinear GPU execution (runtime environment):
 	backend. `manzari_dafalias_integration_scheme=modified_euler` is the default
 	and uses the established adaptive explicit Modified-Euler implementation.
 	`manzari_dafalias_integration_scheme=forward_euler` selects the OpenSees
-	integration-scheme-5 algorithm: after any elastic/yield intersection it takes
-	one first-order constitutive step over the plastic remainder. Forward Euler
-	has no embedded local-error estimate, adaptive substep loop, or stress
-	correction. It therefore ignores `backbone_errTol`, `no_substeps`, and
+	integration-scheme-5 constitutive stage. After any elastic/yield intersection,
+	Hercules divides the plastic remainder into exactly `no_substeps` equal
+	fractions and applies that first-order stage to each fraction; setting
+	`no_substeps=1` recovers OpenSees's original single-update behavior. Forward
+	Euler has no embedded local-error estimate, adaptive retry, or stress
+	correction. It therefore ignores `backbone_errTol` and
 	`manzari_dafalias_recovery`, reports the resulting absolute yield drift, and
-	is more sensitive to the global strain increment. Hercules retains its finite
-	state and minimum-effective-pressure safeguards. Modified Euler remains the
-	production default.
+	is more sensitive to substep size. Hercules retains its finite-state and
+	minimum-effective-pressure safeguards. Modified Euler remains the production
+	default.
 	For Modified Euler, `backbone_errTol` is the dimensionless local stress-increment error
 	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
 	the absolute yield-surface residual after a plastic stress correction. The

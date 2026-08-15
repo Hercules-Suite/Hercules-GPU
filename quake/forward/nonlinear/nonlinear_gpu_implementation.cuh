@@ -792,7 +792,8 @@ NL_HD static nl_md_stage_t md_stage(
 }
 
 /* OpenSees 3.8 integration scheme 5 evaluates one explicit derivative at the
- * beginning of the plastic remainder. Keep this separate from md_stage: the
+ * beginning of its increment. Hercules applies that stage at the beginning
+ * of each fixed Forward-Euler substep. Keep this separate from md_stage: the
  * reference ForwardEuler routine clamps a near-zero denominator instead of
  * taking Modified Euler's neutral-loading branch, applies the Macauley
  * bracket to stress/backstress/fabric evolution, and retains the raw plastic
@@ -1161,53 +1162,72 @@ NL_HD static int nl_update_manzari_dafalias(
     }
 
     if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
-        /* OpenSees integration scheme 5 is a single first-order update of
-         * the plastic remainder after the elastic/yield intersection. It
-         * has neither the Modified-Euler embedded-error estimate nor an
-         * adaptive constitutive substep loop. Keep Hercules' pressure-floor
-         * completion and finite-state checks, but report (rather than
-         * correct) the resulting yield drift so this path retains the
-         * defining OpenSees Forward-Euler behavior. */
-        diagnostics->attempts = 1;
-        diagnostics->substep_fraction = dT;
-        diagnostics->progress_fraction = T;
-        const tensor_t de_step = md_scale(de, dT);
-        const tensor_t elastic_step = md_elastic_increment(de_step, K, G);
-        if (md_ddot(md_sub(alpha_work, alpha_in_work), elastic_step) < 0.0)
-            alpha_in_work = alpha_work;
-        const tensor_t strain_at_end = md_add(
-            md_scale(strain_prev, -1.0), de);
-        const double e_step = m->e_init-
-            (1.0+m->e_init)*md_trace(strain_at_end);
-        const nl_md_stage_t first = md_forward_euler_stage(
-            m, stress, alpha_work, fabric_work, alpha_in_work,
-            e_step, de_step, K, G);
-        diagnostics->first_dgamma = first.dgamma;
-        diagnostics->first_raw_dgamma = first.raw_dgamma;
-        diagnostics->first_denominator = first.denominator;
-        diagnostics->first_h = first.h;
-        diagnostics->first_hardening_gap = first.hardening_gap;
-        if (!first.ok) {
-            diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
-            return 0;
-        }
-
-        const tensor_t candidate_stress = md_add(stress, first.dsigma);
-        if (md_trace(candidate_stress)/3.0 < minimum_mean_stress) {
-            if (!md_complete_at_pressure_floor(
-                    m, stress, de_step, &stress, &pstrain,
-                    &alpha_work, &alpha_in_work, K, G)) {
-                diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+        /* OpenSees integration scheme 5 supplies the first-order update used
+         * by every fixed substep. no_substeps divides the plastic remainder
+         * after the elastic/yield intersection; no_substeps=1 therefore
+         * reproduces the original single-update OpenSees path. There is no
+         * embedded-error estimate, adaptive retry, or yield-surface stress
+         * correction. Hercules retains its pressure-floor and finite-state
+         * safeguards and reports the final yield drift. */
+        const double plastic_fraction = dT;
+        const double fixed_fraction = plastic_fraction/cfg->no_substeps;
+        for (int32_t substep = 0; substep < cfg->no_substeps; substep++) {
+            const double step_fraction = substep == cfg->no_substeps-1
+                ? fmax(1.0-T, 0.0) : fixed_fraction;
+            diagnostics->attempts = substep+1;
+            diagnostics->substep_fraction = step_fraction;
+            diagnostics->progress_fraction = T;
+            diagnostics->effective_mean_stress = md_trace(stress)/3.0;
+            double step_K = 0.0;
+            double step_G = 0.0;
+            md_elastic_moduli(m, stress, &step_K, &step_G);
+            if (!(step_K > 0.0) || !(step_G > 0.0) ||
+                !isfinite(step_K) || !isfinite(step_G)) {
+                diagnostics->failure_reason = NL_MD_FAILURE_ELASTIC_MODULI;
                 return 0;
             }
-        } else {
-            stress = candidate_stress;
-            pstrain = md_add(pstrain, first.dpstrain);
-            alpha_work = md_add(alpha_work, first.dalpha);
-            fabric_work = md_add(fabric_work, first.dfabric);
+            const tensor_t de_step = md_scale(de, step_fraction);
+            const tensor_t elastic_step = md_elastic_increment(
+                de_step, step_K, step_G);
+            if (md_ddot(
+                    md_sub(alpha_work, alpha_in_work), elastic_step) < 0.0)
+                alpha_in_work = alpha_work;
+            const tensor_t strain_at_end = md_add(
+                md_scale(strain_prev, -1.0),
+                md_scale(de, T+step_fraction));
+            const double e_step = m->e_init-
+                (1.0+m->e_init)*md_trace(strain_at_end);
+            const nl_md_stage_t first = md_forward_euler_stage(
+                m, stress, alpha_work, fabric_work, alpha_in_work,
+                e_step, de_step, step_K, step_G);
+            diagnostics->first_dgamma = first.dgamma;
+            diagnostics->first_raw_dgamma = first.raw_dgamma;
+            diagnostics->first_denominator = first.denominator;
+            diagnostics->first_h = first.h;
+            diagnostics->first_hardening_gap = first.hardening_gap;
+            if (!first.ok) {
+                diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
+                return 0;
+            }
+
+            const tensor_t candidate_stress = md_add(stress, first.dsigma);
+            if (md_trace(candidate_stress)/3.0 < minimum_mean_stress) {
+                if (!md_complete_at_pressure_floor(
+                        m, stress, de_step, &stress, &pstrain,
+                        &alpha_work, &alpha_in_work, step_K, step_G)) {
+                    diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+                    return 0;
+                }
+            } else {
+                stress = candidate_stress;
+                pstrain = md_add(pstrain, first.dpstrain);
+                alpha_work = md_add(alpha_work, first.dalpha);
+                fabric_work = md_add(fabric_work, first.dfabric);
+            }
+            *plastic_multiplier += first.dgamma;
+            (*accepted_substeps)++;
+            T += step_fraction;
         }
-        *plastic_multiplier = first.dgamma;
-        *accepted_substeps = 1;
         *integration_error = 0.0;
 
         const double final_f = md_yield(m, stress, alpha_work);
@@ -3607,9 +3627,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     NL_MD_INTEGRATION_FORWARD_EULER) {
                 fprintf(stderr,
                         "Manzari-Dafalias integration: Forward Euler "
-                        "(one first-order constitutive step after the "
-                        "elastic/yield intersection, yield_drift=reported, "
+                        "(fixed_substeps=%d over the plastic remainder, "
+                        "yield_drift=reported, "
                         "geostatic=%s)\n",
+                        config->no_substeps,
                         config->approximate_geostatic_state == YES
                             ? "approximate K0 effective stress"
                             : "solver stress history");

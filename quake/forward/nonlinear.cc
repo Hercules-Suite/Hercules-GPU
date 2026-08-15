@@ -6216,9 +6216,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         }
     } else if (material_model == MANZARI_DAFALIAS) {
         if (md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
-            printf("Forward-Euler controls: one first-order constitutive "
-                   "step after the elastic/yield intersection; "
-                   "backbone_errTol and no_substeps are inactive\n");
+            printf("Forward-Euler controls: %d fixed substeps over the "
+                   "plastic remainder; backbone_errTol is inactive and "
+                   "yield drift is reported without stress correction\n",
+                   no_substeps);
             printf("Maximum CPU/GPU absolute yield drifts: %.6e / %.6e\n",
                    maximum_cpu_residual, maximum_gpu_residual);
         } else if (md_recovery_mode == NL_MD_RECOVERY_UNLIMITED_SUBSTEPS ||

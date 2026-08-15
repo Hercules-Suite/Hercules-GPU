@@ -525,7 +525,8 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpuHeader, /NL_MD_RECOVERY_STRICT[\s\S]*NL_MD_RECOVERY_OPENSEES/);
   assert.match(gpuHeader, /NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
-  assert.match(gpu, /OpenSees integration scheme 5 is a single first-order update/);
+  assert.match(gpu, /no_substeps divides the plastic remainder/);
+  assert.match(gpu, /substep < cfg->no_substeps/);
   assert.match(gpu, /cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
   assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
