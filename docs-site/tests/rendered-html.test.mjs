@@ -44,6 +44,21 @@ test("server-renders the Hercules documentation home", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
+test("builds the octree emblem exclusively from square mesh cells", () => {
+  const logoSource = readFileSync(
+    fileURLToPath(new URL("../assets/hercules-octree-mark.svg", import.meta.url)),
+    "utf8",
+  );
+  const cells = [...logoSource.matchAll(
+    /<rect data-octree-cell="true"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
+  )];
+
+  assert.equal(cells.length, 44);
+  for (const [, width, height] of cells) {
+    assert.equal(width, height, `octree cell ${width} × ${height} is not square`);
+  }
+});
+
 test("server-renders a structured documentation page", async () => {
   const response = await render("/docs/getting-started");
   assert.equal(response.status, 200);

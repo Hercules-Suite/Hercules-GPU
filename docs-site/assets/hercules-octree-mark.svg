@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">Hercules octree emblem</title>
+  <description id="description">An H assembled from square adaptive octree cells, crossed by a seismic waveform.</description>
+
+  <g fill="#327795">
+    <!-- Left column: coarse, level-1, level-2, coarse square cells. -->
+    <rect data-octree-cell="true" x="44" y="36" width="104" height="104" rx="10"/>
+
+    <rect data-octree-cell="true" x="44" y="148" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="99" y="148" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="44" y="203" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="99" y="203" width="49" height="49" rx="5"/>
+
+    <rect data-octree-cell="true" x="44" y="260" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="71" y="260" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="98" y="260" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="125" y="260" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="44" y="287" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="71" y="287" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="98" y="287" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="125" y="287" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="44" y="314" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="71" y="314" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="98" y="314" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="125" y="314" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="44" y="341" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="71" y="341" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="98" y="341" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="125" y="341" width="23" height="23" rx="3"/>
+
+    <rect data-octree-cell="true" x="44" y="372" width="104" height="104" rx="10"/>
+
+    <!-- Right column mirrors the refinement transition. -->
+    <rect data-octree-cell="true" x="364" y="36" width="104" height="104" rx="10"/>
+
+    <rect data-octree-cell="true" x="364" y="148" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="391" y="148" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="418" y="148" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="445" y="148" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="364" y="175" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="391" y="175" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="418" y="175" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="445" y="175" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="364" y="202" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="391" y="202" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="418" y="202" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="445" y="202" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="364" y="229" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="391" y="229" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="418" y="229" width="23" height="23" rx="3"/>
+    <rect data-octree-cell="true" x="445" y="229" width="23" height="23" rx="3"/>
+
+    <rect data-octree-cell="true" x="364" y="260" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="419" y="260" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="364" y="315" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" x="419" y="315" width="49" height="49" rx="5"/>
+
+    <rect data-octree-cell="true" x="364" y="372" width="104" height="104" rx="10"/>
+  </g>
+
+  <path
+    d="M136 256 L166 256 C180 256 184 249 190 235 L202 205 L222 300 L250 175 L280 340 L306 220 L323 274 C330 294 339 286 347 263 C352 250 361 256 376 256"
+    fill="none"
+    stroke="#D97A43"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="30"
+  />
+</svg>
