@@ -98,6 +98,22 @@ typedef struct nonlinear_gpu_station_buffers_t {
     nonlinear_gpu_station_state_t *host;
 } nonlinear_gpu_station_buffers_t;
 
+typedef struct nonlinear_gpu_workload_stats_t {
+    unsigned long long zero_or_inactive_points;
+    unsigned long long one_step_points;
+    unsigned long long multi_step_points;
+    unsigned long long accepted_substeps;
+    unsigned long long maximum_substeps;
+} nonlinear_gpu_workload_stats_t;
+
+typedef struct nonlinear_gpu_workload_buffers_t {
+    int32_t interval;
+    int32_t pending;
+    int32_t step;
+    nonlinear_gpu_workload_stats_t *device;
+    nonlinear_gpu_workload_stats_t host;
+} nonlinear_gpu_workload_buffers_t;
+
 typedef struct nonlinear_gpu_state_t {
     int32_t count;
     int32_t pdmy03_surface_stride;
@@ -146,6 +162,7 @@ extern "C" void nonlinear_gpu_launch_pdmy03(
 #ifdef NL_GPU_RUNTIME_ONLY
 static nonlinear_gpu_state_t g_nl = {};
 static nonlinear_gpu_station_buffers_t g_station = {};
+static nonlinear_gpu_workload_buffers_t g_workload = {};
 static nonlinear_gpu_config_t g_config = {};
 static nonlinear_gpu_error_t g_error_host = {};
 static mesh_t *g_mesh_host = NULL;
@@ -166,6 +183,25 @@ static int parse_boolean_cpu(const char *value)
             strcasecmp(value, "host") == 0 ||
             strcasecmp(value, "no") == 0 ||
             strcasecmp(value, "false") == 0 || strcmp(value, "0") == 0);
+}
+
+static int nonlinear_gpu_workload_interval(int32_t myID)
+{
+    const char *value = getenv("HERCULES_NONLINEAR_STATS_INTERVAL");
+    if (value == NULL || value[0] == '\0' || strcmp(value, "0") == 0)
+        return 0;
+
+    char *end = NULL;
+    const long interval = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || interval < 0 ||
+        interval > INT32_MAX) {
+        fprintf(stderr,
+                "Thread %d: HERCULES_NONLINEAR_STATS_INTERVAL must be "
+                "zero or a positive integer; got '%s'\n",
+                myID, value);
+        return -1;
+    }
+    return (int)interval;
 }
 
 int nonlinear_gpu_requested(void)
@@ -3481,6 +3517,71 @@ extern "C" void nonlinear_gpu_launch_pdmy03(
 #endif
 
 #ifdef NL_GPU_RUNTIME_ONLY
+#define NL_GPU_WORKLOAD_BLOCK_SIZE 256
+
+__global__ static void kernel_nonlinear_workload_stats(
+    const qpvectors_t *substeps, size_t point_count,
+    nonlinear_gpu_workload_stats_t *stats)
+{
+    __shared__ unsigned long long zero_or_inactive[NL_GPU_WORKLOAD_BLOCK_SIZE];
+    __shared__ unsigned long long one_step[NL_GPU_WORKLOAD_BLOCK_SIZE];
+    __shared__ unsigned long long multi_step[NL_GPU_WORKLOAD_BLOCK_SIZE];
+    __shared__ unsigned long long accepted[NL_GPU_WORKLOAD_BLOCK_SIZE];
+    __shared__ unsigned long long maximum[NL_GPU_WORKLOAD_BLOCK_SIZE];
+
+    const int lane = (int)threadIdx.x;
+    const size_t first = (size_t)blockIdx.x*blockDim.x+threadIdx.x;
+    const size_t stride = (size_t)blockDim.x*gridDim.x;
+    const double *values = (const double *)substeps;
+    unsigned long long local_zero = 0;
+    unsigned long long local_one = 0;
+    unsigned long long local_multi = 0;
+    unsigned long long local_accepted = 0;
+    unsigned long long local_maximum = 0;
+
+    for (size_t point = first; point < point_count; point += stride) {
+        const double value = values[point];
+        const unsigned long long count = value > 0.0
+            ? (unsigned long long)value : 0ULL;
+        if (count == 0ULL)
+            local_zero++;
+        else if (count == 1ULL)
+            local_one++;
+        else
+            local_multi++;
+        local_accepted += count;
+        if (count > local_maximum) local_maximum = count;
+    }
+
+    zero_or_inactive[lane] = local_zero;
+    one_step[lane] = local_one;
+    multi_step[lane] = local_multi;
+    accepted[lane] = local_accepted;
+    maximum[lane] = local_maximum;
+    __syncthreads();
+
+    for (int offset = NL_GPU_WORKLOAD_BLOCK_SIZE/2;
+         offset > 0; offset /= 2) {
+        if (lane < offset) {
+            zero_or_inactive[lane] += zero_or_inactive[lane+offset];
+            one_step[lane] += one_step[lane+offset];
+            multi_step[lane] += multi_step[lane+offset];
+            accepted[lane] += accepted[lane+offset];
+            if (maximum[lane+offset] > maximum[lane])
+                maximum[lane] = maximum[lane+offset];
+        }
+        __syncthreads();
+    }
+
+    if (lane == 0) {
+        atomicAdd(&stats->zero_or_inactive_points, zero_or_inactive[0]);
+        atomicAdd(&stats->one_step_points, one_step[0]);
+        atomicAdd(&stats->multi_step_points, multi_step[0]);
+        atomicAdd(&stats->accepted_substeps, accepted[0]);
+        atomicMax(&stats->maximum_substeps, maximum[0]);
+    }
+}
+
 __global__ static void kernel_nonlinear_gather_station_state(
     nonlinear_gpu_state_t state, int32_t station_count,
     const int32_t *station_indices,
@@ -3505,6 +3606,8 @@ __global__ static void kernel_nonlinear_gather_station_state(
     result.phi = state.constants[nl_eindex].phi;
     station_state[station] = result;
 }
+
+#undef NL_GPU_WORKLOAD_BLOCK_SIZE
 
 static int nonlinear_cuda_failure(int32_t myID, cudaError_t error,
                                   const char *operation)
@@ -3547,6 +3650,34 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         (config->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
          config->md_recovery_mode != NL_MD_RECOVERY_STRICT))
         return -1;
+
+    const int local_stats_interval =
+        nonlinear_gpu_workload_interval(myID);
+    int minimum_stats_interval = 0;
+    int maximum_stats_interval = 0;
+    if (MPI_Allreduce(&local_stats_interval, &minimum_stats_interval, 1,
+                      MPI_INT, MPI_MIN, comm_solver) != MPI_SUCCESS ||
+        MPI_Allreduce(&local_stats_interval, &maximum_stats_interval, 1,
+                      MPI_INT, MPI_MAX, comm_solver) != MPI_SUCCESS)
+        return -1;
+    if (minimum_stats_interval < 0) return -1;
+    if (minimum_stats_interval != maximum_stats_interval) {
+        if (myID == 0) {
+            fprintf(stderr,
+                    "HERCULES_NONLINEAR_STATS_INTERVAL must have the same "
+                    "value on every solver rank (range=%d..%d)\n",
+                    minimum_stats_interval, maximum_stats_interval);
+        }
+        return -1;
+    }
+    g_workload.interval = config->material_model == MANZARI_DAFALIAS
+        ? maximum_stats_interval : 0;
+    if (myID == 0 && maximum_stats_interval > 0 &&
+        config->material_model != MANZARI_DAFALIAS) {
+        fprintf(stderr,
+                "HERCULES_NONLINEAR_STATS_INTERVAL is currently available "
+                "only for Manzari-Dafalias; diagnostics are disabled\n");
+    }
 
     nonlinear_gpu_element_t *elements = NULL;
     if (count > 0) {
@@ -3625,6 +3756,17 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         nonlinear_cuda_failure(myID,
             cudaMemset(g_nl.error, 0, sizeof(nonlinear_gpu_error_t)),
             "error buffer initialization") != 0) return -1;
+    if (g_workload.interval > 0 && count > 0) {
+        if (nonlinear_cuda_failure(myID,
+                cudaMalloc((void **)&g_workload.device,
+                           sizeof(*g_workload.device)),
+                "workload-statistics buffer allocation") != 0 ||
+            nonlinear_cuda_failure(myID,
+                cudaMemset(g_workload.device, 0,
+                           sizeof(*g_workload.device)),
+                "workload-statistics buffer initialization") != 0)
+            return -1;
+    }
 
     g_mesh_host = mesh;
     g_active = 1;
@@ -3686,6 +3828,14 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         "state above backbone_errTol\n");
                 }
             }
+            if (g_workload.interval > 0) {
+                fprintf(stderr,
+                        "Manzari-Dafalias GPU workload statistics: every "
+                        "%d time step%s (opt-in device scan and global MPI "
+                        "reduction)\n",
+                        g_workload.interval,
+                        g_workload.interval == 1 ? "" : "s");
+            }
         } else if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 (sizeof(pdmy03_state_t)+(size_t)g_nl.pdmy03_surface_stride*
@@ -3711,9 +3861,35 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
                            double delta_t, double delta_t_squared)
 {
-    if (!g_active || g_nl.count == 0) return;
+    if (!g_active) return;
+    const int sample_workload = g_workload.interval > 0 &&
+        (step % g_workload.interval) == 0;
+    if (sample_workload) {
+        g_workload.pending = 1;
+        g_workload.step = step;
+        memset(&g_workload.host, 0, sizeof(g_workload.host));
+    }
+    if (g_nl.count == 0) return;
+
     cudaStream_t stream = solver->streams[CUDA_STREAM_MAIN];
-    cudaMemsetAsync(g_nl.error, 0, sizeof(nonlinear_gpu_error_t), stream);
+    cudaError_t error = cudaMemsetAsync(
+        g_nl.error, 0, sizeof(nonlinear_gpu_error_t), stream);
+    if (sample_workload && error == cudaSuccess) {
+        error = cudaMemsetAsync(
+            g_nl.load_unload_n, 0,
+            (size_t)g_nl.count*sizeof(*g_nl.load_unload_n), stream);
+    }
+    if (sample_workload && error == cudaSuccess) {
+        error = cudaMemsetAsync(g_workload.device, 0,
+                                sizeof(*g_workload.device), stream);
+    }
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Nonlinear GPU diagnostic setup failed: %s\n",
+                cudaGetErrorString(error));
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
     const int block_size = 128;
     const int grid_size = (g_nl.count + block_size - 1)/block_size;
     if (g_config.material_model == MANZARI_DAFALIAS) {
@@ -3729,12 +3905,31 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
     }
-    const cudaError_t error = cudaGetLastError();
+    error = cudaGetLastError();
     if (error != cudaSuccess) {
         fprintf(stderr, "Nonlinear GPU kernel launch failed: %s\n",
                 cudaGetErrorString(error));
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
+    }
+
+    if (sample_workload) {
+        const size_t point_count = (size_t)g_nl.count*NL_GPU_QP;
+        const int stats_block_size = 256;
+        size_t stats_grid_size =
+            (point_count+(size_t)stats_block_size-1)/stats_block_size;
+        if (stats_grid_size > 1024) stats_grid_size = 1024;
+        kernel_nonlinear_workload_stats<<<
+            (int)stats_grid_size, stats_block_size, 0, stream>>>(
+                g_nl.load_unload_n, point_count, g_workload.device);
+        error = cudaGetLastError();
+        if (error != cudaSuccess) {
+            fprintf(stderr,
+                    "Nonlinear GPU workload-statistics kernel launch "
+                    "failed: %s\n", cudaGetErrorString(error));
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
     }
 }
 
@@ -3878,9 +4073,78 @@ void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state)
 
 #undef NL_DOWNLOAD
 
+static void nonlinear_gpu_report_workload(int32_t myID)
+{
+    if (!g_workload.pending) return;
+
+    if (g_nl.count > 0) {
+        const cudaError_t error = cudaMemcpy(
+            &g_workload.host, g_workload.device,
+            sizeof(g_workload.host), cudaMemcpyDeviceToHost);
+        if (error != cudaSuccess) {
+            fprintf(stderr,
+                    "Thread %d: nonlinear GPU workload-statistics download "
+                    "failed: %s\n", myID, cudaGetErrorString(error));
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+    }
+
+    const unsigned long long local_sums[4] = {
+        g_workload.host.zero_or_inactive_points,
+        g_workload.host.one_step_points,
+        g_workload.host.multi_step_points,
+        g_workload.host.accepted_substeps
+    };
+    unsigned long long global_sums[4] = {};
+    const unsigned long long local_maximum =
+        g_workload.host.maximum_substeps;
+    unsigned long long global_maximum = 0;
+    const int sum_status = MPI_Reduce(
+        local_sums, global_sums, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0,
+        comm_solver);
+    const int max_status = MPI_Reduce(
+        &local_maximum, &global_maximum, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX,
+        0, comm_solver);
+    if (sum_status != MPI_SUCCESS || max_status != MPI_SUCCESS) {
+        fprintf(stderr,
+                "Thread %d: nonlinear GPU workload-statistics MPI "
+                "reduction failed\n", myID);
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+
+    if (myID == 0) {
+        const unsigned long long updated_points =
+            global_sums[1]+global_sums[2];
+        const unsigned long long point_slots =
+            global_sums[0]+updated_points;
+        const double multi_fraction = updated_points > 0
+            ? 100.0*(double)global_sums[2]/(double)updated_points : 0.0;
+        const double mean_substeps = updated_points > 0
+            ? (double)global_sums[3]/(double)updated_points : 0.0;
+        fprintf(stderr,
+                "Nonlinear GPU workload: step=%d point_slots=%llu "
+                "zero_or_inactive=%llu updated=%llu one_step=%llu "
+                "multi_step=%llu multi_step_fraction=%.2f%% "
+                "accepted_substeps=%llu mean_substeps=%.3f "
+                "maximum_substeps=%llu\n",
+                g_workload.step, point_slots, global_sums[0],
+                updated_points, global_sums[1], global_sums[2],
+                multi_fraction, global_sums[3], mean_substeps,
+                global_maximum);
+        fflush(stderr);
+    }
+    g_workload.pending = 0;
+}
+
 void nonlinear_gpu_check_error(int32_t myID)
 {
-    if (!g_active || g_nl.count == 0) return;
+    if (!g_active) return;
+    if (g_nl.count == 0) {
+        nonlinear_gpu_report_workload(myID);
+        return;
+    }
     const cudaError_t error = cudaMemcpy(&g_error_host, g_nl.error,
         sizeof(g_error_host), cudaMemcpyDeviceToHost);
     if (error != cudaSuccess) {
@@ -4045,6 +4309,7 @@ void nonlinear_gpu_check_error(int32_t myID)
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
+    nonlinear_gpu_report_workload(myID);
 }
 #endif
 
@@ -4214,6 +4479,8 @@ int nonlinear_pdmy03_host_history(
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();
+    if (g_workload.device != NULL) cudaFree(g_workload.device);
+    memset(&g_workload, 0, sizeof(g_workload));
 #define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
     NL_FREE(elements); NL_FREE(constants);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);

@@ -322,6 +322,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.equal(gpuResponse.status, 200);
   const gpu = await gpuResponse.text();
   assert.match(gpu, /HERCULES_NONLINEAR_BACKEND/);
+  assert.match(gpu, /HERCULES_NONLINEAR_STATS_INTERVAL/);
+  assert.match(gpu, /one-step[\s\S]*multi-step/);
   assert.match(gpu, /CUDA nonlinear constitutive and force path is the default/);
   assert.match(gpu, /GPU by default/);
   assert.match(gpu, /constitutive calculations in double precision/);
@@ -561,6 +563,10 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpu, /"Forward-Euler" : "Modified-Euler"/);
   assert.match(gpu, /hardening_gap=/);
   assert.match(gpu, /raw_dgamma=/);
+  assert.match(gpu, /HERCULES_NONLINEAR_STATS_INTERVAL/);
+  assert.match(gpu, /kernel_nonlinear_workload_stats/);
+  assert.match(gpu, /zero_or_inactive_points/);
+  assert.match(gpu, /multi_step_fraction/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.match(cpu, /return theNonlinearFlag != 0/);

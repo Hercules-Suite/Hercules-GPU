@@ -441,6 +441,21 @@ Nonlinear GPU execution (runtime environment):
 	for reproducible launch environments. This setting changes execution, not
 	the calibrated values in `parameters.in`. The selected nonlinear backend is
 	reported to standard error during solver startup.
+- `HERCULES_NONLINEAR_STATS_INTERVAL`
+	Enables sampled Manzari-Dafalias GPU workload diagnostics when set to a
+	positive integer `N`; unset or `0` is the default and adds no diagnostic work.
+	Every `N` global time steps, Hercules reports globally reduced integration-
+	point-slot counts classified as `zero_or_inactive`, `one_step`, and
+	`multi_step`, together with total, mean, and maximum accepted constitutive
+	substeps. For fixed Forward Euler with `no_substeps > 1`, `one_step` identifies
+	the elastic-predictor return and `multi_step` identifies points that executed
+	the fixed plastic substeps. For Modified Euler, a one-step point can be either
+	elastic or a plastic update accepted in one substep. Zero/inactive slots also
+	include elements skipped because their displacement increment is zero and the
+	three unused slots of a five-point nonlinear-topography element. The sampled
+	path clears only the existing diagnostic substep-count array, runs an extra
+	device scan, and performs global MPI reductions; use it for diagnosis rather
+	than production timing. All solver ranks must use the same interval.
 - `material_model=ManzariDafalias` is a device-first, pressure-dependent
 	effective-stress sand model. Production execution currently requires the GPU
 	backend. `manzari_dafalias_integration_scheme=modified_euler` is the default
