@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { MathFormula, MathText } from "../../components/math-text";
 import { docPages } from "../content";
 import { allNavItems, navItemForSlug } from "../navigation";
 
@@ -47,10 +48,16 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
         {page.sections.map((section) => (
           <section className="docSection" id={section.id} key={section.id}>
             <h2>{section.title}</h2>
-            {section.paragraphs?.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+            {section.paragraphs?.map((paragraph) => <p key={paragraph}><MathText text={paragraph} /></p>)}
+            {section.equations?.map((equation) => (
+              <MathFormula display expression={equation} key={equation} />
+            ))}
+            {section.afterEquationsParagraphs?.map((paragraph) => (
+              <p key={paragraph}><MathText text={paragraph} /></p>
+            ))}
             {section.bullets && (
               <ul>
-                {section.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}
+                {section.bullets.map((bullet) => <li key={bullet}><MathText text={bullet} /></li>)}
               </ul>
             )}
             {section.table && (
@@ -73,7 +80,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                             data-requirement={cellIndex === 1 ? cell : undefined}
                             key={`${cell}-${cellIndex}`}
                           >
-                            {cell}
+                            <MathText text={cell} />
                           </td>
                         ))}
                       </tr>
@@ -93,7 +100,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
             {section.note && (
               <aside className="docNote">
                 <strong>Note</strong>
-                <p>{section.note}</p>
+                <p><MathText text={section.note} /></p>
               </aside>
             )}
           </section>
