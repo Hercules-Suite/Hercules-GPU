@@ -37,8 +37,8 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /Hercules emblem formed from adaptive octree cells and a seismic waveform/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
-  assert.match(html, /hercules-octree-mesh-mark\.png/);
-  assert.match(html, /src="\/hercules-octree-mesh-mark\.png"/);
+  assert.match(html, /hercules-octree-mesh-mark\.png\?v=centered-256/);
+  assert.match(html, /src="\/hercules-octree-mesh-mark\.png\?v=centered-256"/);
   assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mesh-mark/);
   assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mesh-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
