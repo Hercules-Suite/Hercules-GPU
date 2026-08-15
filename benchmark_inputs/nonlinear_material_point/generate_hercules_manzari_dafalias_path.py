@@ -231,7 +231,22 @@ def main() -> int:
     parser.add_argument("--output-prefix")
     parser.add_argument("--backbone-errtol", type=float, default=1.0e-5)
     parser.add_argument("--yield-tolerance-pa", type=float, default=1.0e-1)
-    parser.add_argument("--maximum-substeps", type=int, default=400)
+    parser.add_argument(
+        "--maximum-substeps", type=int, default=400,
+        help=(
+            "Modified-Euler accepted-substep ceiling or Forward-Euler exact "
+            "fixed-substep count (default: 400)"
+        ),
+    )
+    parser.add_argument(
+        "--integration-scheme",
+        choices=("modified_euler", "forward_euler"),
+        default="modified_euler",
+        help=(
+            "Hercules integration scheme (default: modified_euler). For "
+            "forward_euler, --maximum-substeps is the exact fixed count."
+        ),
+    )
     parser.add_argument(
         "--recovery-mode",
         choices=("strict", "force_accept", "unlimited_substeps", "opensees"),
@@ -251,6 +266,12 @@ def main() -> int:
         raise SystemExit("--yield-tolerance-pa must be positive")
     if args.maximum_substeps <= 0:
         raise SystemExit("--maximum-substeps must be positive")
+    if (args.integration_scheme == "forward_euler"
+            and args.recovery_mode != "strict"):
+        raise SystemExit(
+            "--integration-scheme=forward_euler requires "
+            "--recovery-mode=strict"
+        )
 
     lines = [
         "# Generated from a canonical OpenSees Manzari--Dafalias strain path.",
@@ -261,7 +282,8 @@ def main() -> int:
         "material_point_delta_time_sec = 1.0",
         f"material_point_steps = {len(rows)}",
         f"no_substeps = {args.maximum_substeps}",
-        "manzari_dafalias_integration_scheme = modified_euler",
+        ("manzari_dafalias_integration_scheme = "
+         f"{args.integration_scheme}"),
         f"manzari_dafalias_recovery = {args.recovery_mode}",
         f"error_tolerance = {args.yield_tolerance_pa:.17e}",
         f"backbone_errTol = {args.backbone_errtol:.17e}",
@@ -321,6 +343,10 @@ def main() -> int:
     print(f"OpenSees source states: {len(source_rows)}")
     print(f"Stage-1 replay states: {len(rows)}")
     print(f"Initial OpenSees step: {initial['step']}")
+    print(f"Hercules integration scheme: {args.integration_scheme}")
+    if args.integration_scheme == "forward_euler":
+        print("Forward-Euler fixed substeps per plastic remainder: "
+              f"{args.maximum_substeps}")
     print("Seed normalization: verified isotropic stress; zeroed "
           "roundoff-only directional state")
     if test_id == "md_sspbrickup_undrained_triaxial":

@@ -587,7 +587,9 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /--recovery-mode/);
-  assert.match(generator, /manzari_dafalias_integration_scheme = modified_euler/);
+  assert.match(generator, /--integration-scheme/);
+  assert.match(generator, /f"\{args\.integration_scheme\}"/);
+  assert.match(generator, /forward_euler[\s\S]*--recovery-mode=strict/);
   assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);

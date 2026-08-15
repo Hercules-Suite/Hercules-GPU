@@ -371,6 +371,24 @@ maximum of 112 accepted substeps in the validated run. Override either value
 explicitly when studying integration sensitivity or a calibrated production
 case.
 
+Pass `--integration-scheme forward_euler` to replay the same canonical
+OpenSees strain histories with Hercules fixed-substep Forward Euler. In that
+mode, `--maximum-substeps` is the exact number of equal substeps over every
+plastic remainder, not a ceiling. The existing OpenSees CSV remains the
+Modified-Euler reference, so this comparison deliberately measures both the
+Hercules/OpenSees implementation difference and the change of integration
+scheme while holding the imposed strain history and consolidated seed fixed.
+For example:
+
+```bash
+python3 generate_hercules_manzari_dafalias_path.py \
+  --opensees-csv opensees_md_undrained_cyclic_shear.csv \
+  --output manzari_md_undrained_forward_euler.in \
+  --output-prefix manzari_md_undrained_forward_euler \
+  --integration-scheme forward_euler \
+  --maximum-substeps 100
+```
+
 Generated canonical histories use `material_point_compare_rtol=1e-6` and
 `material_point_compare_atol=1e-8` for CPU/CUDA state parity over hundreds of
 adaptive constitutive increments. Each tensor component uses the largest
