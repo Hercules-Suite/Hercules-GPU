@@ -41,13 +41,14 @@ const parameterPages: ParameterPage[] = [
       {
         id: "domain",
         title: "Domain geometry",
+        introduction: "Let L_north=region_length_north_m, L_east=region_length_east_m, L_depth=region_depth_deep_m-region_depth_shallow_m, and L_max=max(L_north,L_east,L_depth). The octree requires every extent D to be an integer multiple of L_max/2^N for a common level N (equivalently D=m×L_max/2^N). Use exact whole-metre extents with the current Octor path.",
         parameters: [
           p("region_origin_latitude_deg", "Required", "Float (degrees)", "Any valid latitude", "Latitude of the lower-left surface corner of the model domain."),
           p("region_origin_longitude_deg", "Required", "Float (degrees)", "Any valid longitude", "Longitude of the lower-left surface corner of the model domain."),
           p("region_depth_shallow_m", "Required", "Float (m)", "Usually >= 0", "Depth of the shallow domain boundary, positive downward."),
-          p("region_length_east_m", "Required", "Float (m)", "> 0", "Domain length in the local east direction; this becomes the solver Y dimension."),
-          p("region_length_north_m", "Required", "Float (m)", "> 0", "Domain length in the local north direction; this becomes the solver X dimension."),
-          p("region_depth_deep_m", "Required", "Float (m)", "> region_depth_shallow_m", "Depth of the bottom boundary. The solver depth is deep minus shallow depth."),
+          p("region_length_east_m", "Required", "Float (m)", "> 0; octree-compatible", "Domain length in the local east direction; this becomes solver Y. It must be an integer multiple of the common dyadic increment L_max/2^N."),
+          p("region_length_north_m", "Required", "Float (m)", "> 0; octree-compatible", "Domain length in the local north direction; this becomes solver X. It must be an integer multiple of the common dyadic increment L_max/2^N."),
+          p("region_depth_deep_m", "Required", "Float (m)", "> region_depth_shallow_m", "Depth of the bottom boundary. The octree-compatible vertical extent is deep minus shallow depth, not the deep coordinate alone."),
           p("region_azimuth_leftface_deg", "Required", "Float (degrees)", "Angular azimuth", "Azimuth of the domain left face; also establishes the local horizontal frame used by source calculations."),
           p("domain_surface_corners", "Conditional", "Table: 4 rows × 2 floats", "longitude latitude", "Required only when Hercules is built without PROJ. Give the four surface corners clockwise, starting at the origin."),
         ],
@@ -55,7 +56,7 @@ const parameterPages: ParameterPage[] = [
       {
         id: "time-resolution",
         title: "Time integration and spatial resolution",
-        introduction: "For elastic material, the nominal element-size target is h <= Vs / (nodes per wavelength × maximum frequency). Acoustic elements use Vp and may apply an additional refinement factor.",
+        introduction: "For elastic material, define Vs_effective_min=max(Vs_model_min,simulation_shear_velocity_min). The nominal element-size target is h<=Vs_effective_min/(simulation_node_per_wavelength×simulation_wave_max_freq_hz). Acoustic elements use Vp and may apply an additional refinement factor.",
         parameters: [
           p("simulation_start_time_sec", "Optional", "Float (s)", "Default: 0; >= 0", "Simulation start time. It must not exceed simulation_end_time_sec."),
           p("simulation_end_time_sec", "Required", "Float (s)", ">= simulation_start_time_sec", "Simulation end time."),
@@ -305,7 +306,7 @@ const parameterPages: ParameterPage[] = [
         parameters: [
           p("include_topography", "Optional", "Yes/no", "Default: no", "Enable surface topography."),
           p("topography_directory", "Optional", "Directory path", "Default: inputfiles/topography", "Directory containing topography.in."),
-          p("maximum_octant_level", "Conditional", "Integer octree level", "Required with topography; 0 to 30", "Maximum refinement level allowed by the topography mesher."),
+          p("maximum_octant_level", "Conditional", "Integer octree level", "Required with topography; 0 to 30", "Maximum refinement level allowed by the topography mesher. Using L_max=max(north length,east length,deep-shallow thickness) and h_target=max(Vs_model_min,simulation_shear_velocity_min)/(maximum frequency×nodes per wavelength), choose the smallest N satisfying L_max/2^N<=h_target; equivalently N=ceil(log2(L_max/h_target)). Other active physics may require a finer cap."),
           p("computation_method", "Conditional", "String", "Required with topography; vt | fem", "Topographic element treatment: volume tetrahedra (vt) or FEM."),
           p("topographybase_zcoord", "Conditional", "Float (m)", "Required with topography; > 0", "Reference depth coordinate below which the topographic surface is embedded."),
           p("type_of_etree", "Conditional", "String", "Required with topography; sqd | full", "Etree representation used by the topographic mesh path."),

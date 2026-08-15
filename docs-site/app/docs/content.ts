@@ -233,6 +233,18 @@ export const docPages: Record<string, DocPageContent> = {
         ],
         note: "The global domain uses a power-of-two octree dimension. The physical region of interest may occupy only part of that cube.",
       },
+      {
+        id: "octree-domain-dimensions",
+        title: "Octree-compatible domain dimensions",
+        paragraphs: [
+          "Hercules cannot use three arbitrary domain lengths. Define L_north = region_length_north_m, L_east = region_length_east_m, and L_depth = region_depth_deep_m - region_depth_shallow_m. Let L_max be the largest of those three physical extents. At octree level N, the common dyadic increment is delta_N = L_max / 2^N; every domain extent must be an integer multiple of that increment.",
+          "Equivalently, an extent D can be written as D = m × L_max / 2^N, where m is an integer and 0 < D <= L_max. The same rule can be expressed as a binary sum D = sum(a_i × L_max / 2^i), for i = 0,...,N and a_i equal to zero or one. This lets a shorter direction occupy a rectangular subset of the power-of-two root cube without breaking the octree grid.",
+          "For L_max = region_length_east_m = 1,000,000 m, the successive dyadic sizes are 1,000,000, 500,000, 250,000, 125,000, 62,500, and 31,250 m. A north length of 750,000 m is valid because it is 500,000 + 250,000; a depth thickness of 187,500 m is valid because it is 125,000 + 62,500. If region_depth_shallow_m is 10,000 m, set region_depth_deep_m to 197,500 m to obtain that 187,500 m thickness.",
+        ],
+        codeLabel: "parameters.in — octree-compatible 1,000 km × 750 km × 187.5 km domain",
+        code: "region_depth_shallow_m = 10000\nregion_depth_deep_m    = 197500\nregion_length_north_m  = 750000\nregion_length_east_m   = 1000000",
+        note: "Use exact whole-metre extents with the current Octor path: it reduces the physical dimensions using integer metre values. The dyadic rule applies to the depth thickness, not to region_depth_deep_m by itself unless region_depth_shallow_m is zero.",
+      },
     ],
   },
   running: {
@@ -1244,11 +1256,23 @@ if __name__ == "__main__":
         title: "Configure topography",
         paragraphs: [
           "topography_directory contains one required file, topography.in. The topographic spacing must divide both region_length_north_m and region_length_east_m exactly. maximum_octant_level and topographybase_zcoord are scientific mesh choices, not universal defaults.",
-          "The block below is illustrative for a 40 km square domain with relief below 800 m. Recompute the refinement level from the case's minimum element size, and choose a positive base coordinate that safely contains the full elevation range.",
+          "The block below is illustrative for a 40 km square domain with relief below 800 m. Recompute the refinement level from the case's effective minimum shear velocity, maximum frequency, and nodes per wavelength; choose a positive base coordinate that safely contains the full elevation range.",
         ],
         codeLabel: "parameters.in — illustrative values",
         code: "include_topography             = yes\ntopography_directory           = input/topography\ncomputation_method             = vt\nmaximum_octant_level           = 9\ntopographybase_zcoord          = 1250.0\ntype_of_etree                  = full\nmin_enclosed_volume_perc       = 0.1\nconsider_nonlinear_topography  = no\ntopography_bkt_gpu_stabilize   = auto",
         note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
+      },
+      {
+        id: "topography-maximum-level",
+        title: "Choose maximum_octant_level",
+        paragraphs: [
+          "maximum_octant_level is required only when include_topography=yes. First compute L_max as the maximum of region_length_north_m, region_length_east_m, and the depth thickness region_depth_deep_m - region_depth_shallow_m. Let Vs_model_min be the smallest shear-wave velocity in the active solid material model and define Vs_effective_min = max(Vs_model_min, simulation_shear_velocity_min).",
+          "The elastic wavelength target is h_target = Vs_effective_min / (simulation_wave_max_freq_hz × simulation_node_per_wavelength). Choose the smallest integer N for which L_max / 2^N <= h_target; equivalently, N = ceil(log2(L_max / h_target)). Set maximum_octant_level = N, provided N lies in the accepted range 0 through 30. A smaller value prevents the topography mesher from reaching the resolution required by the wavelength rule.",
+          "For L_max = 1,000,000 m, Vs_model_min = 500 m/s, simulation_shear_velocity_min = 400 m/s, simulation_wave_max_freq_hz = 2 Hz, and simulation_node_per_wavelength = 8, Vs_effective_min is 500 m/s and h_target is 31.25 m. Level 14 gives 61.035 m and is too coarse; level 15 gives 30.518 m, so maximum_octant_level = 15 is the smallest acceptable value.",
+        ],
+        codeLabel: "calculation",
+        code: "L_max = max(L_north, L_east, L_depth)\nVs_effective_min = max(Vs_model_min, simulation_shear_velocity_min)\nh_target = Vs_effective_min / (simulation_wave_max_freq_hz * simulation_node_per_wavelength)\nmaximum_octant_level = ceil(log2(L_max / h_target))\n\n# Worked example\n# h_target = 500 / (2 * 8) = 31.25 m\n# L_max / 2^14 = 61.035 m  (too coarse)\n# L_max / 2^15 = 30.518 m  (satisfies the target)\nmaximum_octant_level = 15",
+        note: "This is the shear-wave-controlled baseline. Acoustic refinement and other enabled feature constraints can require a finer mesh; ensure the topography cap does not block the most restrictive active refinement rule.",
       },
       {
         id: "topography-format",

@@ -54,6 +54,30 @@ test("server-renders a structured documentation page", async () => {
   assert.match(html, /Current Hercules GPU code path/);
 });
 
+test("documents octree-compatible domain sizing and refinement level selection", async () => {
+  const architectureResponse = await render("/docs/architecture");
+  assert.equal(architectureResponse.status, 200);
+  const architecture = await architectureResponse.text();
+  assert.match(architecture, /Octree-compatible domain dimensions/);
+  assert.match(architecture, /region_depth_deep_m - region_depth_shallow_m/);
+  assert.match(architecture, /750,000.*500,000 \+ 250,000/s);
+  assert.match(architecture, /187,500.*125,000 \+ 62,500/s);
+
+  const topographyResponse = await render("/docs/input-files");
+  assert.equal(topographyResponse.status, 200);
+  const topography = await topographyResponse.text();
+  assert.match(topography, /Choose maximum_octant_level/);
+  assert.match(topography, /Vs_effective_min = max\(Vs_model_min, simulation_shear_velocity_min\)/);
+  assert.match(topography, /maximum_octant_level = ceil\(log2\(L_max \/ h_target\)\)/);
+  assert.match(topography, /Level 14 gives 61\.035 m.*level 15 gives 30\.518 m/s);
+
+  const parametersResponse = await render("/docs/parameters-domain-time");
+  assert.equal(parametersResponse.status, 200);
+  const parameters = await parametersResponse.text();
+  assert.match(parameters, /common dyadic increment/);
+  assert.match(parameters, /deep minus shallow depth/);
+});
+
 test("searches complete documentation text and parameter names", async () => {
   const { matchesSearchQuery, normalizeSearchText } = await import(
     "../app/docs/search-utils.mjs"
