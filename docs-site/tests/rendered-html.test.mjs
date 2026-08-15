@@ -172,8 +172,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 225);
-  assert.equal(documented.length, 225, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 226);
+  assert.equal(documented.length, 226, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -474,7 +474,7 @@ test("dispatches cyclic backbone models before the conventional predictor", () =
   assert.match(gpu, /kappa_n == 100\.0[\s\S]*NONLINEAR_BACKBONE_STRESS_FLOOR_PA/);
 });
 
-test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p", () => {
+test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and u-p", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   const benchmarkRoot = fileURLToPath(
     new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
@@ -519,10 +519,14 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(header, /MANZARI_DAFALIAS/);
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*\? 22 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
+  assert.match(cpu, /parsetext\(fp, "manzari_dafalias_integration_scheme"/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
   assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
   assert.match(gpuHeader, /NL_MD_RECOVERY_STRICT[\s\S]*NL_MD_RECOVERY_OPENSEES/);
+  assert.match(gpuHeader, /NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
+  assert.match(gpu, /OpenSees integration scheme 5 is a single first-order update/);
+  assert.match(gpu, /cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
   assert.match(gpu, /\*accepted_substeps >= cfg->no_substeps/);
   assert.match(gpu, /cfg->error_tolerance/);
@@ -552,7 +556,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(gpu, /md_minimum_mean_stress/);
   assert.match(gpu, /md_complete_at_pressure_floor/);
   assert.match(gpu, /candidate_mean_stress < minimum_mean_stress/);
-  assert.match(gpu, /Modified-Euler stages:/);
+  assert.match(gpu, /"Forward-Euler" : "Modified-Euler"/);
   assert.match(gpu, /hardening_gap=/);
   assert.match(gpu, /raw_dgamma=/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
@@ -568,6 +572,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.match(cpu, /below ["\s]*poroelastic_depth_max_m[\s\S]*remain nonlinear ["\s]*single-phase solids/);
   assert.match(cpu, /constitutive stress is assembled ["\s]*directly as total stress/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_forward_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
@@ -581,6 +586,7 @@ test("wires Manzari-Dafalias Modified Euler through parser, CUDA state, and u-p"
   assert.ok(existsSync(`${benchmarkRoot}plot_opensees_manzari_dafalias_brickup.py`));
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /--recovery-mode/);
+  assert.match(generator, /manzari_dafalias_integration_scheme = modified_euler/);
   assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);

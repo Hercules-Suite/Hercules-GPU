@@ -400,6 +400,13 @@ NL_HD static inline int md_valid_recovery_mode(nl_md_recovery_mode_t mode)
            mode <= NL_MD_RECOVERY_OPENSEES;
 }
 
+NL_HD static inline int md_valid_integration_scheme(
+    nl_md_integration_scheme_t scheme)
+{
+    return scheme == NL_MD_INTEGRATION_MODIFIED_EULER ||
+           scheme == NL_MD_INTEGRATION_FORWARD_EULER;
+}
+
 NL_HD static inline tensor_t md_zero(void)
 {
     tensor_t a = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -784,6 +791,64 @@ NL_HD static nl_md_stage_t md_stage(
     return out;
 }
 
+/* OpenSees 3.8 integration scheme 5 evaluates one explicit derivative at the
+ * beginning of the plastic remainder. Keep this separate from md_stage: the
+ * reference ForwardEuler routine clamps a near-zero denominator instead of
+ * taking Modified Euler's neutral-loading branch, applies the Macauley
+ * bracket to stress/backstress/fabric evolution, and retains the raw plastic
+ * multiplier for its plastic-strain increment. Its local stress-ratio vector
+ * is zero initialized by the reference routine, so the two consistency terms
+ * involving r vanish; reproducing that detail is required for a meaningful
+ * OpenSees scheme-5 comparison. */
+NL_HD static nl_md_stage_t md_forward_euler_stage(
+    const manzari_dafalias_constants_t *m, tensor_t stress, tensor_t alpha,
+    tensor_t fabric, tensor_t alpha_in, double void_ratio, tensor_t de,
+    double K, double G)
+{
+    nl_md_stage_t out = {};
+    const nl_md_dependent_t dep = md_state_dependent(
+        m, stress, alpha, fabric, void_ratio, alpha_in);
+    if (!dep.ok) return out;
+    const double p = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+    const tensor_t r = md_zero();
+    const tensor_t n2 = md_square(dep.n);
+    const double Kp = (2.0/3.0)*p*dep.h*md_ddot(dep.b, dep.n);
+    double denominator = Kp+
+        2.0*G*(dep.B-dep.C*md_ddot(dep.n, n2))-
+        K*dep.D*md_ddot(dep.n, r);
+    if (fabs(denominator) < 1.0e-10) denominator = 1.0e-10;
+    const double numerator =
+        2.0*G*md_ddot(dep.n, md_dev(de))-
+        K*md_trace(de)*md_ddot(dep.n, r);
+    out.loading_numerator = numerator;
+    out.denominator = denominator;
+    out.h = dep.h;
+    out.hardening_gap = dep.hardening_gap;
+    out.raw_dgamma = numerator/denominator;
+    out.dgamma = fmax(out.raw_dgamma, 0.0);
+
+    tensor_t plastic_direction = md_sub(
+        md_scale(dep.n, dep.B),
+        md_scale(md_sub(n2, md_iso(1.0/3.0)), dep.C));
+    const tensor_t correction = md_add(
+        md_scale(plastic_direction, 2.0*G), md_iso(K*dep.D));
+    out.dsigma = md_sub(
+        md_elastic_increment(de, K, G),
+        md_scale(correction, out.dgamma));
+    out.dalpha = md_scale(dep.b, out.dgamma*(2.0/3.0)*dep.h);
+    const double fabric_scale = -out.dgamma*m->cz*fmax(-dep.D, 0.0);
+    out.dfabric = md_scale(
+        md_add(md_scale(dep.n, m->z_max), fabric), fabric_scale);
+    out.dpstrain = md_scale(dep.R, out.raw_dgamma);
+    out.ok = md_finite(out.dsigma) && md_finite(out.dalpha) &&
+             md_finite(out.dfabric) && md_finite(out.dpstrain) &&
+             isfinite(out.dgamma) && isfinite(out.raw_dgamma) &&
+             isfinite(out.loading_numerator) &&
+             isfinite(out.denominator) && isfinite(out.h) &&
+             isfinite(out.hardening_gap);
+    return out;
+}
+
 /* OpenSees falls back to a segment search when its local Newton correction
  * exhausts 50 iterations. Keep the same admissible-state idea, but require a
  * genuine yield-function bracket and preserve total strain by mapping the
@@ -1023,7 +1088,10 @@ NL_HD static int nl_update_manzari_dafalias(
         return 1;
     }
     if (!(*void_ratio > -0.99) || cfg->no_substeps <= 0 ||
+        !md_valid_integration_scheme(cfg->md_integration_scheme) ||
         !md_valid_recovery_mode(cfg->md_recovery_mode) ||
+        (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
+         cfg->md_recovery_mode != NL_MD_RECOVERY_STRICT) ||
         !(cfg->backbone_error_tolerance > 0.0) ||
         !(cfg->error_tolerance > 0.0)) {
         diagnostics->failure_reason = NL_MD_FAILURE_INVALID_CONTROLS;
@@ -1091,6 +1159,79 @@ NL_HD static int nl_update_manzari_dafalias(
         T = elastic_ratio;
         dT = 1.0-elastic_ratio;
     }
+
+    if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+        /* OpenSees integration scheme 5 is a single first-order update of
+         * the plastic remainder after the elastic/yield intersection. It
+         * has neither the Modified-Euler embedded-error estimate nor an
+         * adaptive constitutive substep loop. Keep Hercules' pressure-floor
+         * completion and finite-state checks, but report (rather than
+         * correct) the resulting yield drift so this path retains the
+         * defining OpenSees Forward-Euler behavior. */
+        diagnostics->attempts = 1;
+        diagnostics->substep_fraction = dT;
+        diagnostics->progress_fraction = T;
+        const tensor_t de_step = md_scale(de, dT);
+        const tensor_t elastic_step = md_elastic_increment(de_step, K, G);
+        if (md_ddot(md_sub(alpha_work, alpha_in_work), elastic_step) < 0.0)
+            alpha_in_work = alpha_work;
+        const tensor_t strain_at_end = md_add(
+            md_scale(strain_prev, -1.0), de);
+        const double e_step = m->e_init-
+            (1.0+m->e_init)*md_trace(strain_at_end);
+        const nl_md_stage_t first = md_forward_euler_stage(
+            m, stress, alpha_work, fabric_work, alpha_in_work,
+            e_step, de_step, K, G);
+        diagnostics->first_dgamma = first.dgamma;
+        diagnostics->first_raw_dgamma = first.raw_dgamma;
+        diagnostics->first_denominator = first.denominator;
+        diagnostics->first_h = first.h;
+        diagnostics->first_hardening_gap = first.hardening_gap;
+        if (!first.ok) {
+            diagnostics->failure_reason = NL_MD_FAILURE_FIRST_STAGE;
+            return 0;
+        }
+
+        const tensor_t candidate_stress = md_add(stress, first.dsigma);
+        if (md_trace(candidate_stress)/3.0 < minimum_mean_stress) {
+            if (!md_complete_at_pressure_floor(
+                    m, stress, de_step, &stress, &pstrain,
+                    &alpha_work, &alpha_in_work, K, G)) {
+                diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+                return 0;
+            }
+        } else {
+            stress = candidate_stress;
+            pstrain = md_add(pstrain, first.dpstrain);
+            alpha_work = md_add(alpha_work, first.dalpha);
+            fabric_work = md_add(fabric_work, first.dfabric);
+        }
+        *plastic_multiplier = first.dgamma;
+        *accepted_substeps = 1;
+        *integration_error = 0.0;
+
+        const double final_f = md_yield(m, stress, alpha_work);
+        const tensor_t dynamic_next = md_sub(
+            md_scale(stress, -1.0), static_stress);
+        const tensor_t plastic_next = md_scale(pstrain, -1.0);
+        *yield_error = isfinite(final_f) ? fabs(final_f) : DBL_MAX;
+        diagnostics->correction_residual = *yield_error;
+        diagnostics->effective_mean_stress = md_trace(stress)/3.0;
+        if (!md_finite(dynamic_next) || !md_finite(plastic_next) ||
+            !md_finite(alpha_work) || !md_finite(alpha_in_work) ||
+            !md_finite(fabric_work) || !isfinite(*yield_error)) {
+            diagnostics->failure_reason = NL_MD_FAILURE_FINAL_STATE;
+            return 0;
+        }
+        *dynamic_stress = dynamic_next;
+        *plastic_strain = plastic_next;
+        *alpha = alpha_work;
+        *alpha_in = alpha_in_work;
+        *fabric = fabric_work;
+        *initialized = initialized_work;
+        return 1;
+    }
+
     /* OpenSees stops reducing the normalized constitutive fraction at 1e-6
      * and then accepts a special first-order state when its embedded error is
      * too large. The opensees policy uses that floor; all other policies allow
@@ -3370,7 +3511,11 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 {
     if (!nonlinear_gpu_requested()) return 0;
     if (mesh == NULL || solver == NULL || host_state == NULL || config == NULL ||
-        count < 0 || !md_valid_recovery_mode(config->md_recovery_mode))
+        count < 0 ||
+        !md_valid_integration_scheme(config->md_integration_scheme) ||
+        !md_valid_recovery_mode(config->md_recovery_mode) ||
+        (config->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
+         config->md_recovery_mode != NL_MD_RECOVERY_STRICT))
         return -1;
 
     nonlinear_gpu_element_t *elements = NULL;
@@ -3458,16 +3603,27 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
         if (config->material_model == MANZARI_DAFALIAS) {
-            const char *recovery = "strict";
-            if (config->md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT)
-                recovery = "force_accept";
-            else if (config->md_recovery_mode ==
-                     NL_MD_RECOVERY_UNLIMITED_SUBSTEPS)
-                recovery = "unlimited_substeps";
-            else if (config->md_recovery_mode == NL_MD_RECOVERY_OPENSEES)
-                recovery = "opensees";
-            if (md_unlimited_substeps_enabled(config->md_recovery_mode)) {
+            if (config->md_integration_scheme ==
+                    NL_MD_INTEGRATION_FORWARD_EULER) {
                 fprintf(stderr,
+                        "Manzari-Dafalias integration: Forward Euler "
+                        "(one first-order constitutive step after the "
+                        "elastic/yield intersection, yield_drift=reported, "
+                        "geostatic=%s)\n",
+                        config->approximate_geostatic_state == YES
+                            ? "approximate K0 effective stress"
+                            : "solver stress history");
+            } else {
+                const char *recovery = "strict";
+                if (config->md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT)
+                    recovery = "force_accept";
+                else if (config->md_recovery_mode ==
+                         NL_MD_RECOVERY_UNLIMITED_SUBSTEPS)
+                    recovery = "unlimited_substeps";
+                else if (config->md_recovery_mode == NL_MD_RECOVERY_OPENSEES)
+                    recovery = "opensees";
+                if (md_unlimited_substeps_enabled(config->md_recovery_mode)) {
+                    fprintf(stderr,
                         "Manzari-Dafalias integration: Modified Euler "
                         "(local_error=%g, substeps=unlimited, "
                         "no_substeps=%d correction cap, "
@@ -3479,8 +3635,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         config->approximate_geostatic_state == YES
                             ? "approximate K0 effective stress"
                             : "solver stress history");
-            } else {
-                fprintf(stderr,
+                } else {
+                    fprintf(stderr,
                         "Manzari-Dafalias integration: Modified Euler "
                         "(local_error=%g, max_substeps=%d, "
                         "yield_residual=%g Pa, recovery=%s, "
@@ -3491,12 +3647,13 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         config->approximate_geostatic_state == YES
                             ? "approximate K0 effective stress"
                             : "solver stress history");
-            }
-            if (md_force_accept_enabled(config->md_recovery_mode)) {
-                fprintf(stderr,
+                }
+                if (md_force_accept_enabled(config->md_recovery_mode)) {
+                    fprintf(stderr,
                         "Manzari-Dafalias warning: exhausted adaptive "
                         "recovery may force-accept a finite admissible "
                         "state above backbone_errTol\n");
+                }
             }
         } else if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
@@ -3721,7 +3878,11 @@ void nonlinear_gpu_check_error(int32_t myID)
             case NL_MD_FAILURE_ATTEMPT_LIMIT:
                 reason = "maximum total constitutive attempts reached"; break;
             case NL_MD_FAILURE_FIRST_STAGE:
-                reason = "first Modified-Euler stage is invalid"; break;
+                reason = g_config.md_integration_scheme ==
+                        NL_MD_INTEGRATION_FORWARD_EULER
+                    ? "Forward-Euler stage is invalid"
+                    : "first Modified-Euler stage is invalid";
+                break;
             case NL_MD_FAILURE_TENSILE_PREDICTOR:
                 reason = "predictor reached the minimum effective pressure";
                 break;
@@ -3764,12 +3925,18 @@ void nonlinear_gpu_check_error(int32_t myID)
                     g_error_host.md_effective_mean_stress,
                     g_error_host.md_strain_increment_norm);
             fprintf(stderr,
-                    "  Modified-Euler stages: "
+                    "  %s stage%s: "
                     "dgamma=(%12.8E, %12.8E) "
                     "raw_dgamma=(%12.8E, %12.8E) "
                     "denominator=(%12.8E, %12.8E)\n"
                     "  stage h=(%12.8E, %12.8E) "
                     "hardening_gap=(%12.8E, %12.8E)\n",
+                    g_config.md_integration_scheme ==
+                            NL_MD_INTEGRATION_FORWARD_EULER
+                        ? "Forward-Euler" : "Modified-Euler",
+                    g_config.md_integration_scheme ==
+                            NL_MD_INTEGRATION_FORWARD_EULER
+                        ? "" : "s",
                     g_error_host.md_first_dgamma,
                     g_error_host.md_second_dgamma,
                     g_error_host.md_first_raw_dgamma,

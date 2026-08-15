@@ -1,6 +1,7 @@
 # Synthetic Manzari--Dafalias host/CUDA Modified-Euler regression.
 # These constants and strains are numerical test inputs, not a soil calibration.
 material_model = ManzariDafalias
+manzari_dafalias_integration_scheme = modified_euler
 material_point_delta_time_sec = 1.0
 material_point_steps = 21
 no_substeps = 100

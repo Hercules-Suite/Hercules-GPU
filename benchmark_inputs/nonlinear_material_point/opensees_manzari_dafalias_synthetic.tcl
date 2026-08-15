@@ -4,6 +4,7 @@
 # Usage:
 #   OpenSees opensees_manzari_dafalias_synthetic.tcl
 #   OpenSees opensees_manzari_dafalias_synthetic.tcl output.csv
+#   OpenSees opensees_manzari_dafalias_synthetic.tcl output.csv forward_euler
 #
 # OpenSees is run in kPa so the UW low-pressure dilatancy regularization keeps
 # its calibrated pressure scale. The companion comparator converts stress to
@@ -13,8 +14,20 @@ set outputPath "opensees_manzari_dafalias_synthetic.csv"
 if {$argc >= 1} {
     set outputPath [lindex $argv 0]
 }
-if {$argc > 1} {
-    puts stderr "usage: OpenSees opensees_manzari_dafalias_synthetic.tcl ?output.csv?"
+set integrationSchemeName "modified_euler"
+if {$argc >= 2} {
+    set integrationSchemeName [string tolower [lindex $argv 1]]
+}
+if {$argc > 2} {
+    puts stderr "usage: OpenSees opensees_manzari_dafalias_synthetic.tcl ?output.csv? ?modified_euler|forward_euler?"
+    exit 2
+}
+if {$integrationSchemeName eq "modified_euler"} {
+    set integrationScheme 1
+} elseif {$integrationSchemeName eq "forward_euler"} {
+    set integrationScheme 5
+} else {
+    puts stderr "unknown Manzari-Dafalias integration scheme: $integrationSchemeName"
     exit 2
 }
 
@@ -51,7 +64,7 @@ model BasicBuilder -ndm 3 -ndf 3
 nDMaterial ManzariDafalias 1 \
     125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101.3 \
     0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0 0.0 \
-    1 0 1 1.0e-4 1.0e-7
+    $integrationScheme 0 1 1.0e-4 1.0e-7
 
 node 1 0.0 0.0 0.0
 node 2 1.0 0.0 0.0
@@ -109,7 +122,7 @@ integrator LoadControl 1.0
 analysis Static
 
 set output [open $outputPath w]
-puts $output "step,eps_xx,eps_yy,eps_zz,eps_xy,sigma_xx_kpa,sigma_yy_kpa,sigma_zz_kpa,sigma_xy_kpa,sigma_yz_kpa,sigma_xz_kpa,alpha_xx,alpha_yy,alpha_zz,alpha_xy,alpha_yz,alpha_xz,fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,alpha_in_xz,void_ratio,plastic_multiplier,driver_version,domain_time"
+puts $output "step,eps_xx,eps_yy,eps_zz,eps_xy,sigma_xx_kpa,sigma_yy_kpa,sigma_zz_kpa,sigma_xy_kpa,sigma_yz_kpa,sigma_xz_kpa,alpha_xx,alpha_yy,alpha_zz,alpha_xy,alpha_yz,alpha_xz,fabric_xx,fabric_yy,fabric_zz,fabric_xy,fabric_yz,fabric_xz,alpha_in_xx,alpha_in_yy,alpha_in_zz,alpha_in_xy,alpha_in_yz,alpha_in_xz,void_ratio,plastic_multiplier,integration_scheme_id,driver_version,domain_time"
 
 set step 0
 foreach e $isotropicStrainHistory gamma $gammaXYHistory {
@@ -135,7 +148,7 @@ foreach e $isotropicStrainHistory gamma $gammaXYHistory {
         close $output
         exit 43
     }
-    puts $output [format "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%d,%.17e" \
+    puts $output [format "%d,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%.17e,%d,%d,%.17e" \
         $step $e $e $e [expr {0.5*$gamma}] \
         [lindex $stress 0] [lindex $stress 1] [lindex $stress 2] \
         [lindex $stress 3] [lindex $stress 4] [lindex $stress 5] \
@@ -145,12 +158,13 @@ foreach e $isotropicStrainHistory gamma $gammaXYHistory {
         [lindex $state 15] [lindex $state 16] [lindex $state 17] \
         [lindex $state 18] [lindex $state 19] [lindex $state 20] \
         [lindex $state 21] [lindex $state 22] [lindex $state 23] \
-        [lindex $state 24] [lindex $state 25] 1 [getTime]]
+        [lindex $state 24] [lindex $state 25] \
+        $integrationScheme 2 [getTime]]
     incr step
 }
 
 close $output
-puts "OpenSees Manzari-Dafalias history complete: $step steps"
+puts "OpenSees Manzari-Dafalias $integrationSchemeName history complete: $step steps"
 puts "CSV output: $outputPath"
 wipe
 exit 0

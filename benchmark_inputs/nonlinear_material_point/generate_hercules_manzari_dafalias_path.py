@@ -261,6 +261,7 @@ def main() -> int:
         "material_point_delta_time_sec = 1.0",
         f"material_point_steps = {len(rows)}",
         f"no_substeps = {args.maximum_substeps}",
+        "manzari_dafalias_integration_scheme = modified_euler",
         f"manzari_dafalias_recovery = {args.recovery_mode}",
         f"error_tolerance = {args.yield_tolerance_pa:.17e}",
         f"backbone_errTol = {args.backbone_errtol:.17e}",

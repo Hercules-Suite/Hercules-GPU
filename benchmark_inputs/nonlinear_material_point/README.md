@@ -113,6 +113,11 @@ its translated surface centers from stress.
   residual, local integration error, and accepted-substep diagnostics. The
   recorded residual is absolute for plastic stress correction and one-sided
   for an admissible elastic state inside the yield surface.
+- `manzari_dafalias_forward_euler_synthetic.in` replays the same confinement
+  and cyclic tensor-shear history with the OpenSees integration-scheme-5
+  algorithm. It checks the shared host/CUDA first-order update and records the
+  absolute yield drift. Forward Euler has no embedded local-error estimate,
+  adaptive constitutive substeps, or stress-correction loop.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler
@@ -142,9 +147,10 @@ request; if clamped, the update continues and records the event. The current
 implementation supports only the standard automatically generated 2--40
 surface curve, not a user-supplied G/Gmax surface table.
 
-Manzari--Dafalias reuses the production nonlinear integration controls rather
-than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
-local Modified-Euler error target, `no_substeps` caps accepted adaptive
+Manzari--Dafalias selects its explicit algorithm with
+`manzari_dafalias_integration_scheme`. The default `modified_euler` scheme
+reuses the production nonlinear integration controls: `backbone_errTol` is the
+dimensionless local error target, `no_substeps` caps accepted adaptive
 substeps (with rejected trials also bounded), and `error_tolerance` is the
 maximum absolute yield-surface residual in Pa after a plastic stress
 correction. The elastic predictor retains the one-sided admissibility check
@@ -189,6 +195,16 @@ backend. This host/CUDA parity check is not independent physical validation;
 compare the recorded stress and state history with OpenSees or another trusted
 implementation before using a calibration.
 
+The optional `forward_euler` scheme matches OpenSees integration scheme 5.
+After the same elastic predictor and elastic/yield intersection, it evaluates
+one first-order plastic stage over the remaining increment. There is no second
+stage, embedded-error comparison, adaptive retry, or stress correction;
+`backbone_errTol`, `no_substeps`, and `manzari_dafalias_recovery` are therefore
+inactive. Hercules reports the absolute final yield drift rather than applying
+`error_tolerance` as an acceptance bound on that drift. This scheme is useful
+for OpenSees comparison and cost/increment-sensitivity studies, but Modified
+Euler remains the recommended production default.
+
 The independent OpenSees characterization uses the same 21-step path:
 
 ```bash
@@ -196,6 +212,18 @@ OpenSees opensees_manzari_dafalias_synthetic.tcl opensees_md.csv
 python3 compare_opensees_manzari_dafalias.py \
   --hercules-csv manzari_dafalias_modified_euler_synthetic.cpu.csv \
   --opensees-csv opensees_md.csv
+```
+
+For the Forward-Euler comparison:
+
+```bash
+OpenSees opensees_manzari_dafalias_synthetic.tcl \
+  opensees_md_forward_euler.csv forward_euler
+python3 compare_opensees_manzari_dafalias.py \
+  --integration-scheme forward_euler \
+  --hercules-csv manzari_dafalias_forward_euler_synthetic.cpu.csv \
+  --opensees-csv opensees_md_forward_euler.csv \
+  --output-dir opensees_md_forward_euler_comparison
 ```
 
 The OpenSees driver uses kPa, the native calibration scale of its
