@@ -44,7 +44,7 @@ test("server-renders the Hercules documentation home", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("builds the octree emblem exclusively from square mesh cells", () => {
+test("builds the octree emblem from square mesh cells and square waveform terminals", () => {
   const logoSource = readFileSync(
     fileURLToPath(new URL("../assets/hercules-octree-mark.svg", import.meta.url)),
     "utf8",
@@ -56,6 +56,14 @@ test("builds the octree emblem exclusively from square mesh cells", () => {
   assert.equal(cells.length, 44);
   for (const [, width, height] of cells) {
     assert.equal(width, height, `octree cell ${width} × ${height} is not square`);
+  }
+
+  const terminals = [...logoSource.matchAll(
+    /<rect data-wave-terminal="true"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
+  )];
+  assert.equal(terminals.length, 2);
+  for (const [, width, height] of terminals) {
+    assert.equal(width, height, `waveform terminal ${width} × ${height} is not square`);
   }
 });
 

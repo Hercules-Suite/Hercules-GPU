@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
   <title id="title">Hercules octree emblem</title>
-  <description id="description">An H assembled from square adaptive octree cells, crossed by a seismic waveform.</description>
+  <description id="description">An H assembled from square adaptive octree cells, joined by a gold seismic waveform with square terminals.</description>
 
   <g fill="#327795">
     <!-- Left column: coarse, level-1, level-2, coarse square cells. -->
@@ -60,11 +60,17 @@
   </g>
 
   <path
-    d="M136 256 L166 256 C180 256 184 249 190 235 L202 205 L222 300 L250 175 L280 340 L306 220 L323 274 C330 294 339 286 347 263 C352 250 361 256 376 256"
+    d="M158 256 L166 256 C180 256 184 249 190 235 L202 205 L222 300 L250 175 L280 340 L306 220 L323 274 C330 294 339 286 347 263 C350 257 352 256 354 256"
     fill="none"
-    stroke="#D97A43"
+    stroke="#D9A441"
     stroke-linecap="round"
     stroke-linejoin="round"
     stroke-width="30"
   />
+
+  <!-- Square terminals visibly join the waveform to the octree columns. -->
+  <g fill="#D9A441">
+    <rect data-wave-terminal="true" x="116" y="229" width="54" height="54" rx="5"/>
+    <rect data-wave-terminal="true" x="342" y="229" width="54" height="54" rx="5"/>
+  </g>
 </svg>
