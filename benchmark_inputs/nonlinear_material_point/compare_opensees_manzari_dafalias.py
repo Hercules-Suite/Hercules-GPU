@@ -48,6 +48,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hercules-csv", type=Path, required=True)
     parser.add_argument("--opensees-csv", type=Path, required=True)
+    parser.add_argument("--integration-scheme",
+                        choices=("modified_euler", "forward_euler"),
+                        default="modified_euler")
     parser.add_argument("--output-dir", type=Path,
                         default=Path("opensees_manzari_dafalias_comparison"))
     args = parser.parse_args()
@@ -69,10 +72,19 @@ def main() -> int:
     state_errors: list[float] = []
     max_strain_error = 0.0
     detailed: list[dict[str, float]] = []
+    expected_scheme_id = 1.0 if args.integration_scheme == "modified_euler" else 5.0
 
     for step, (hrow, orow) in enumerate(zip(hercules, opensees)):
-        if orow.get("driver_version") != 1.0:
+        driver_version = orow.get("driver_version")
+        if driver_version not in (1.0, 2.0):
             raise SystemExit("OpenSees CSV has the wrong driver version")
+        actual_scheme_id = (1.0 if driver_version == 1.0 else
+                            orow.get("integration_scheme_id"))
+        if actual_scheme_id != expected_scheme_id:
+            raise SystemExit(
+                "OpenSees CSV integration scheme does not match "
+                f"--integration-scheme={args.integration_scheme}"
+            )
         expected_time = float(step + 1)
         if not math.isclose(orow.get("domain_time", math.nan), expected_time,
                             rel_tol=0.0, abs_tol=1.0e-12):
@@ -112,9 +124,11 @@ def main() -> int:
         "maximum_dimensionless_state_difference": max(
             abs(value) for value in state_errors
         ),
+        "integration_scheme": args.integration_scheme,
         "note": (
-            "Characterization only: the implementations use related Modified-"
-            "Euler algorithms but are not expected to be bitwise identical."
+            "Characterization only: the Hercules and OpenSees implementations "
+            f"use related {args.integration_scheme.replace('_', ' ').title()} "
+            "algorithms but are not expected to be bitwise identical."
         ),
     }
     summary_path = args.output_dir / "summary.json"

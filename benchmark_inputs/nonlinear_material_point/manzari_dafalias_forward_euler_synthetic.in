@@ -1,0 +1,41 @@
+# Synthetic Manzari--Dafalias host/CUDA Forward-Euler regression.
+# These constants and strains are numerical test inputs, not a soil calibration.
+material_model = ManzariDafalias
+manzari_dafalias_integration_scheme = forward_euler
+material_point_delta_time_sec = 1.0
+material_point_steps = 21
+no_substeps = 100
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-4
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-8
+material_point_compare_atol = 1.0e-8
+material_point_output_prefix = manzari_dafalias_forward_euler_synthetic
+
+# G0 nu e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz
+material_point_constants =
+125.0 0.05 0.80 1.25 0.712 0.019 0.934 0.70 101300.0 0.01 7.05 0.968 1.10 0.704 3.50 4.0 600.0
+
+# Hercules tensor strain: exx eyy ezz exy eyz exz
+material_point_strain_history =
+ 0.0000e+00  0.0000e+00  0.0000e+00  0.0e+00 0.0 0.0
+-2.0000e-04 -2.0000e-04 -2.0000e-04  0.0e+00 0.0 0.0
+-4.0000e-04 -4.0000e-04 -4.0000e-04  0.0e+00 0.0 0.0
+-6.0000e-04 -6.0000e-04 -6.0000e-04  0.0e+00 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  0.0e+00 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  1.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  2.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  4.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  6.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  8.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  6.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  4.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  2.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  0.0e+00 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04 -2.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04 -4.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04 -6.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04 -4.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04 -2.0e-05 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  0.0e+00 0.0 0.0
+-8.0000e-04 -8.0000e-04 -8.0000e-04  0.0e+00 0.0 0.0

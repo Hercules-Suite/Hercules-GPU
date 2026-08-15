@@ -113,6 +113,8 @@ static double                theBackboneErrorTol     = 1E-05;
 static double                theGeostaticCushionT = 0;
 static int                   theGeostaticFinalStep;
 static int                   theNoSubsteps=1000;
+static nl_md_integration_scheme_t theMdIntegrationScheme =
+                                NL_MD_INTEGRATION_MODIFIED_EULER;
 static nl_md_recovery_mode_t theMdRecoveryMode = NL_MD_RECOVERY_STRICT;
 static double                theStiffDamp   = 0.0;
 static double                theStiffDampFreq = 10.0;
@@ -172,6 +174,26 @@ static int parse_md_recovery_mode(const char *name,
         return -1;
     }
     return 0;
+}
+
+static int parse_md_integration_scheme(
+    const char *name, nl_md_integration_scheme_t *scheme)
+{
+    if (strcasecmp(name, "modified_euler") == 0) {
+        *scheme = NL_MD_INTEGRATION_MODIFIED_EULER;
+    } else if (strcasecmp(name, "forward_euler") == 0) {
+        *scheme = NL_MD_INTEGRATION_FORWARD_EULER;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+static const char *md_integration_scheme_name(
+    nl_md_integration_scheme_t scheme)
+{
+    return scheme == NL_MD_INTEGRATION_FORWARD_EULER
+        ? "forward_euler" : "modified_euler";
 }
 
 static const char *md_recovery_mode_name(nl_md_recovery_mode_t mode)
@@ -600,7 +622,7 @@ void nonlinear_init( int32_t     myID,
                      double      theEndT )
 {
     double  double_message[11];
-    int     int_message[13];
+    int     int_message[14];
 
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
@@ -638,9 +660,10 @@ void nonlinear_init( int32_t     myID,
     int_message[10] = (int)whichDrmPart;
     int_message[11] = (int)theIstanbulVelocityModel;
     int_message[12] = (int)theMdRecoveryMode;
+    int_message[13] = (int)theMdIntegrationScheme;
 
     MPI_Bcast(double_message, 11, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    13, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    14, MPI_INT,    0, comm_solver);
 
     theGeostaticLoadingT  = double_message[0];
     theGeostaticCushionT  = double_message[1];
@@ -667,6 +690,8 @@ void nonlinear_init( int32_t     myID,
     whichDrmPart               = (drm_part_t)int_message[10];
     theIstanbulVelocityModel   = (noyesflag_t)int_message[11];
     theMdRecoveryMode          = (nl_md_recovery_mode_t)int_message[12];
+    theMdIntegrationScheme     =
+        (nl_md_integration_scheme_t)int_message[13];
 
     /* allocate table of properties for all other PEs */
 
@@ -752,6 +777,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     /* Optional parameters */
     char surf_groundwatertable[64] = "no", // TODO: It seems this parameter does not have any effect anywhere in Hercules.
         isDRMActive[64] = "no", istanbul_velocity_model[64] = "no",
+        md_integration_name[64] = "modified_euler",
         md_recovery_name[64] = "strict";
 
     materialmodel_t      materialmodel;
@@ -759,6 +785,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     noyesflag_t          approxgeostatic = UNSET, surf_groundwater_table = UNSET;
     noyesflag_t          tensioncutoff = UNSET;
     drm_part_t           drmPart = UNSET_DRM_PART;
+    nl_md_integration_scheme_t md_integration_scheme =
+        NL_MD_INTEGRATION_MODIFIED_EULER;
     nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
 
     /* Opens numericalin file */
@@ -792,6 +820,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     parsetext(fp, "surface_groundwatertable", 's', &surf_groundwatertable);
     parsetext(fp, "implement_drm", 's', &isDRMActive);
     parsetext(fp, "Istanbul_velocity_model", 's', &istanbul_velocity_model);
+    parsetext(fp, "manzari_dafalias_integration_scheme", 's',
+              &md_integration_name);
     parsetext(fp, "manzari_dafalias_recovery", 's', &md_recovery_name);
 
     /* Performs sanity checks */
@@ -888,6 +918,13 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
 
+    if (parse_md_integration_scheme(
+            md_integration_name, &md_integration_scheme) != 0) {
+        fprintf(stderr, "Unknown manzari_dafalias_integration_scheme value "
+                        "'%s'; expected modified_euler or forward_euler\n",
+                md_integration_name);
+        return -1;
+    }
     if (parse_md_recovery_mode(md_recovery_name, &md_recovery_mode) != 0) {
         fprintf(stderr, "Unknown manzari_dafalias_recovery value '%s'; "
                         "expected strict, force_accept, unlimited_substeps, "
@@ -895,10 +932,17 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
     if (materialmodel != MANZARI_DAFALIAS &&
+        (md_integration_scheme != NL_MD_INTEGRATION_MODIFIED_EULER ||
+         md_recovery_mode != NL_MD_RECOVERY_STRICT)) {
+        fprintf(stderr, "Manzari-Dafalias integration controls require "
+                        "material_model=ManzariDafalias\n");
+        return -1;
+    }
+    if (md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
         md_recovery_mode != NL_MD_RECOVERY_STRICT) {
-        fprintf(stderr, "manzari_dafalias_recovery=%s requires "
-                        "material_model=ManzariDafalias\n",
-                md_recovery_name);
+        fprintf(stderr, "manzari_dafalias_recovery=%s is only valid with "
+                        "manzari_dafalias_integration_scheme="
+                        "modified_euler\n", md_recovery_name);
         return -1;
     }
 
@@ -1000,6 +1044,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theSurfaceGroundwaterTable = surf_groundwater_table;
     theTensionCutoff           = tensioncutoff;
     theNoSubsteps              = no_substeps;
+    theMdIntegrationScheme     = md_integration_scheme;
     theMdRecoveryMode          = md_recovery_mode;
     theStiffDamp               = stff_dmp;
     theStiffDampFreq           = stff_dmp_freq;
@@ -2174,6 +2219,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         gpuConfig.tension_cutoff = theTensionCutoff;
         gpuConfig.geostatic_final_step = theGeostaticFinalStep;
         gpuConfig.no_substeps = theNoSubsteps;
+        gpuConfig.md_integration_scheme = theMdIntegrationScheme;
         gpuConfig.md_recovery_mode = theMdRecoveryMode;
         gpuConfig.error_tolerance = theErrorTol;
         gpuConfig.backbone_error_tolerance = theBackboneErrorTol;
@@ -5573,6 +5619,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     char material_name[64] = "";
     char tension_name[64] = "no";
     char brickup_name[64] = "no";
+    char md_integration_name[64] = "modified_euler";
     char md_recovery_name[64] = "strict";
     char output_prefix[256] = "material-point";
     char cpu_path[320] = "";
@@ -5580,6 +5627,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     materialmodel_t material_model;
     noyesflag_t tension_cutoff = NO;
     noyesflag_t brickup_enabled = NO;
+    nl_md_integration_scheme_t md_integration_scheme =
+        NL_MD_INTEGRATION_MODIFIED_EULER;
     nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
     nlconstants_t constants;
     nonlinear_gpu_config_t config;
@@ -5620,10 +5669,19 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     parsetext(fp, "material_point_compare_atol", 'd', &atol);
     parsetext(fp, "material_point_output_prefix", 's', output_prefix);
     parsetext(fp, "material_point_brickup", 's', brickup_name);
+    parsetext(fp, "manzari_dafalias_integration_scheme", 's',
+              md_integration_name);
     parsetext(fp, "manzari_dafalias_recovery", 's', md_recovery_name);
 
     if (material_point_parse_model(material_name, &material_model) != 0) {
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
+        goto cleanup;
+    }
+    if (parse_md_integration_scheme(
+            md_integration_name, &md_integration_scheme) != 0) {
+        fprintf(stderr, "Unknown manzari_dafalias_integration_scheme value "
+                        "'%s'; expected modified_euler or forward_euler\n",
+                md_integration_name);
         goto cleanup;
     }
     if (parse_md_recovery_mode(md_recovery_name, &md_recovery_mode) != 0) {
@@ -5633,10 +5691,17 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
     if (material_model != MANZARI_DAFALIAS &&
+        (md_integration_scheme != NL_MD_INTEGRATION_MODIFIED_EULER ||
+         md_recovery_mode != NL_MD_RECOVERY_STRICT)) {
+        fprintf(stderr, "Manzari-Dafalias integration controls require "
+                        "material_model=ManzariDafalias\n");
+        goto cleanup;
+    }
+    if (md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
         md_recovery_mode != NL_MD_RECOVERY_STRICT) {
-        fprintf(stderr, "manzari_dafalias_recovery=%s requires "
-                        "material_model=ManzariDafalias\n",
-                md_recovery_name);
+        fprintf(stderr, "manzari_dafalias_recovery=%s is only valid with "
+                        "manzari_dafalias_integration_scheme="
+                        "modified_euler\n", md_recovery_name);
         goto cleanup;
     }
     material_constant_count = (material_model == MANZARI_DAFALIAS)
@@ -5881,6 +5946,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     config.tension_cutoff = tension_cutoff;
     config.geostatic_final_step = -1;
     config.no_substeps = no_substeps;
+    config.md_integration_scheme = md_integration_scheme;
     config.md_recovery_mode = md_recovery_mode;
     config.error_tolerance = error_tolerance;
     config.backbone_error_tolerance = backbone_tolerance;
@@ -6000,8 +6066,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 const double gpu_residual = fabs(gpu_values[i]);
                 maximum_cpu_residual = MAX(maximum_cpu_residual, cpu_residual);
                 maximum_gpu_residual = MAX(maximum_gpu_residual, gpu_residual);
-                if (cpu_residual > error_tolerance ||
-                    gpu_residual > error_tolerance) {
+                if ((material_model != MANZARI_DAFALIAS ||
+                     md_integration_scheme ==
+                         NL_MD_INTEGRATION_MODIFIED_EULER) &&
+                    (cpu_residual > error_tolerance ||
+                     gpu_residual > error_tolerance)) {
                     fprintf(stderr, "Material-point yield/root residual exceeds "
                             "error_tolerance at step %d field %s: CPU=%.3e "
                             "GPU=%.3e tolerance=%.3e\n", step,
@@ -6025,7 +6094,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 maximum_gpu_integration_error = MAX(
                     maximum_gpu_integration_error, gpu_error);
                 if (cpu_error < 0.0 || gpu_error < 0.0 ||
-                    (!((md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT) ||
+                    (md_integration_scheme ==
+                         NL_MD_INTEGRATION_MODIFIED_EULER &&
+                     !((md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT) ||
                        (md_recovery_mode == NL_MD_RECOVERY_OPENSEES)) &&
                      (cpu_error > backbone_tolerance ||
                       gpu_error > backbone_tolerance))) {
@@ -6130,6 +6201,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     printf("Maximum state absolute difference: %.6e\n", maximum_absolute);
     printf("Maximum state relative difference above atol: %.6e\n",
            maximum_relative);
+    if (material_model == MANZARI_DAFALIAS) {
+        printf("Manzari-Dafalias integration scheme: %s\n",
+               md_integration_scheme_name(md_integration_scheme));
+    }
     if (MATERIAL_MODEL_IS_BACKBONE(material_model)) {
         printf("Maximum CPU/GPU root residuals: %.6e / %.6e "
                "(tolerance %.6e)\n", maximum_cpu_residual,
@@ -6140,7 +6215,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     } else if (material_model == MANZARI_DAFALIAS) {
-        if (md_recovery_mode == NL_MD_RECOVERY_UNLIMITED_SUBSTEPS ||
+        if (md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+            printf("Forward-Euler controls: %d fixed substeps over the "
+                   "plastic remainder; backbone_errTol is inactive and "
+                   "yield drift is reported without stress correction\n",
+                   no_substeps);
+            printf("Maximum CPU/GPU absolute yield drifts: %.6e / %.6e\n",
+                   maximum_cpu_residual, maximum_gpu_residual);
+        } else if (md_recovery_mode == NL_MD_RECOVERY_UNLIMITED_SUBSTEPS ||
             md_recovery_mode == NL_MD_RECOVERY_OPENSEES) {
             printf("Modified-Euler controls: local error %.6e, substeps "
                    "unlimited (no_substeps=%d still caps correction "
@@ -6155,11 +6237,13 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    error_tolerance,
                    md_recovery_mode_name(md_recovery_mode));
         }
-        printf("Maximum CPU/GPU yield residuals: %.6e / %.6e\n",
-               maximum_cpu_residual, maximum_gpu_residual);
-        printf("Maximum CPU/GPU local integration errors: %.6e / %.6e\n",
-               maximum_cpu_integration_error,
-               maximum_gpu_integration_error);
+        if (md_integration_scheme == NL_MD_INTEGRATION_MODIFIED_EULER) {
+            printf("Maximum CPU/GPU yield residuals: %.6e / %.6e\n",
+                   maximum_cpu_residual, maximum_gpu_residual);
+            printf("Maximum CPU/GPU local integration errors: %.6e / %.6e\n",
+                   maximum_cpu_integration_error,
+                   maximum_gpu_integration_error);
+        }
         printf("Maximum CPU/GPU per-step plastic multipliers: %.6e / %.6e\n",
                maximum_cpu_plastic_multiplier,
                maximum_gpu_plastic_multiplier);

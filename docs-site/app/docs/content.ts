@@ -602,8 +602,8 @@ export const docPages: Record<string, DocPageContent> = {
         id: "model-manzari-dafalias",
         title: "ManzariDafalias",
         paragraphs: [
-          "Manzari–Dafalias is a pressure-dependent effective-stress critical-state sand model that uses adaptive explicit Modified Euler. Production runs currently require the GPU nonlinear backend. The 17-column table contains Vs_limit plus all sixteen calibrated model constants; Poisson's ratio and density come from each element.",
-          "The example uses strict adaptive Modified Euler, approximate K0 initialization, zero ramp/cushion times, error_tolerance as a yield-residual bound in Pa, and backbone_errTol as the dimensionless local error target.",
+          "Manzari–Dafalias is a pressure-dependent effective-stress critical-state sand model. Production runs currently require the GPU nonlinear backend. The default adaptive explicit Modified Euler scheme provides embedded local-error control; a fixed-substep Forward Euler scheme using the OpenSees scheme-5 constitutive stage is also available for controlled comparisons and increment-sensitivity studies. The 17-column table contains Vs_limit plus all sixteen calibrated model constants; Poisson's ratio and density come from each element.",
+          "The example uses strict adaptive Modified Euler, approximate K0 initialization, zero ramp/cushion times, error_tolerance as a yield-residual bound in Pa, and backbone_errTol as the dimensionless local error target. With manzari_dafalias_integration_scheme=forward_euler, no_substeps divides the plastic remainder into that many equal first-order updates; no_substeps=1 reproduces the original OpenSees single-update path. Forward Euler reports yield drift and does not use backbone_errTol or the recovery policy.",
         ],
         codeLabel: "parameters.in — synthetic Manzari–Dafalias fixture values",
         code: nonlinearModelExample({
@@ -613,7 +613,10 @@ export const docPages: Record<string, DocPageContent> = {
           approximateGeostatic: true,
           errorTolerance: "1.0e-1",
           backboneTolerance: "1.0e-4",
-          extraControls: ["manzari_dafalias_recovery = strict"],
+          extraControls: [
+            "manzari_dafalias_integration_scheme = modified_euler",
+            "manzari_dafalias_recovery = strict",
+          ],
         }),
         note: "Hercules supplies no implicit Manzari–Dafalias calibration. Replace every displayed constant and validate drained and cyclic response independently.",
       },

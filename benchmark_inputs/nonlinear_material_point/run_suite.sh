@@ -36,6 +36,7 @@ fixtures=(
   vonmises_mkz_synthetic.in
   vonmises_ro_synthetic.in
   manzari_dafalias_modified_euler_synthetic.in
+  manzari_dafalias_forward_euler_synthetic.in
   manzari_dafalias_seeded_onset_synthetic.in
   manzari_dafalias_pressure_floor_synthetic.in
   pdmy03_cyclic_shear_synthetic.in

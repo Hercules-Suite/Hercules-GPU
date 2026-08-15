@@ -113,6 +113,11 @@ its translated surface centers from stress.
   residual, local integration error, and accepted-substep diagnostics. The
   recorded residual is absolute for plastic stress correction and one-sided
   for an admissible elastic state inside the yield surface.
+- `manzari_dafalias_forward_euler_synthetic.in` replays the same confinement
+  and cyclic tensor-shear history with the OpenSees integration-scheme-5
+  constitutive stage. It checks 100 fixed host/CUDA Forward-Euler substeps per
+  plastic remainder and records the absolute yield drift. Forward Euler has no
+  embedded local-error estimate, adaptive retry, or stress-correction loop.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler
@@ -142,9 +147,10 @@ request; if clamped, the update continues and records the event. The current
 implementation supports only the standard automatically generated 2--40
 surface curve, not a user-supplied G/Gmax surface table.
 
-Manzari--Dafalias reuses the production nonlinear integration controls rather
-than adding scheme-specific input keys: `backbone_errTol` is the dimensionless
-local Modified-Euler error target, `no_substeps` caps accepted adaptive
+Manzari--Dafalias selects its explicit algorithm with
+`manzari_dafalias_integration_scheme`. The default `modified_euler` scheme
+reuses the production nonlinear integration controls: `backbone_errTol` is the
+dimensionless local error target, `no_substeps` caps accepted adaptive
 substeps (with rejected trials also bounded), and `error_tolerance` is the
 maximum absolute yield-surface residual in Pa after a plastic stress
 correction. The elastic predictor retains the one-sided admissibility check
@@ -189,6 +195,18 @@ backend. This host/CUDA parity check is not independent physical validation;
 compare the recorded stress and state history with OpenSees or another trusted
 implementation before using a calibration.
 
+The optional `forward_euler` scheme matches OpenSees integration scheme 5.
+After the same elastic predictor and elastic/yield intersection, Hercules
+divides the remaining plastic fraction into exactly `no_substeps` equal parts
+and applies the first-order stage to each part. There is no second stage,
+embedded-error comparison, adaptive retry, or stress correction;
+`backbone_errTol` and `manzari_dafalias_recovery` are inactive. Hercules
+reports the absolute final yield drift rather than applying `error_tolerance`
+as an acceptance bound on that drift. Set `no_substeps=1` to reproduce the
+original single-update OpenSees scheme-5 path. Larger values reduce the
+Forward-Euler truncation error at directly proportional constitutive cost.
+Modified Euler remains the recommended production default.
+
 The independent OpenSees characterization uses the same 21-step path:
 
 ```bash
@@ -196,6 +214,21 @@ OpenSees opensees_manzari_dafalias_synthetic.tcl opensees_md.csv
 python3 compare_opensees_manzari_dafalias.py \
   --hercules-csv manzari_dafalias_modified_euler_synthetic.cpu.csv \
   --opensees-csv opensees_md.csv
+```
+
+For the Forward-Euler comparison:
+
+Set `no_substeps=1` in the Hercules Forward-Euler input when the objective is
+to compare exactly the same one-update integration path used by OpenSees.
+
+```bash
+OpenSees opensees_manzari_dafalias_synthetic.tcl \
+  opensees_md_forward_euler.csv forward_euler
+python3 compare_opensees_manzari_dafalias.py \
+  --integration-scheme forward_euler \
+  --hercules-csv manzari_dafalias_forward_euler_synthetic.cpu.csv \
+  --opensees-csv opensees_md_forward_euler.csv \
+  --output-dir opensees_md_forward_euler_comparison
 ```
 
 The OpenSees driver uses kPa, the native calibration scale of its
@@ -338,19 +371,40 @@ maximum of 112 accepted substeps in the validated run. Override either value
 explicitly when studying integration sensitivity or a calibrated production
 case.
 
-Generated canonical histories use `material_point_compare_rtol=1e-6` and
-`material_point_compare_atol=1e-8` for CPU/CUDA state parity over hundreds of
-adaptive constitutive increments. Each tensor component uses the largest
-resolved component of the same six-component tensor as its relative scale;
-this avoids ill-conditioned relative errors for physically inactive
-components without loosening scalar or dimensionless-state checks. CPU and GPU
-yield residuals are checked independently against the absolute
-`error_tolerance`. Modified-Euler local-error estimates and accepted-substep
-counts are likewise checked independently against `backbone_errTol` and
-`no_substeps`; host and device arithmetic need not select identical valid
-adaptive substep histories. Per-step plastic multipliers are nonnegative
-integration diagnostics; the evolved plastic-strain tensor remains part of
-the direct state comparison.
+Pass `--integration-scheme forward_euler` to replay the same canonical
+OpenSees strain histories with Hercules fixed-substep Forward Euler. In that
+mode, `--maximum-substeps` is the exact number of equal substeps over every
+plastic remainder, not a ceiling. The existing OpenSees CSV remains the
+Modified-Euler reference, so this comparison deliberately measures both the
+Hercules/OpenSees implementation difference and the change of integration
+scheme while holding the imposed strain history and consolidated seed fixed.
+For example:
+
+```bash
+python3 generate_hercules_manzari_dafalias_path.py \
+  --opensees-csv opensees_md_undrained_cyclic_shear.csv \
+  --output manzari_md_undrained_forward_euler.in \
+  --output-prefix manzari_md_undrained_forward_euler \
+  --integration-scheme forward_euler \
+  --maximum-substeps 100
+```
+
+Generated canonical histories use `material_point_compare_atol=1e-8` and a
+scheme-specific relative CPU/CUDA state-parity tolerance: `1e-6` for adaptive
+Modified Euler and `1e-5` for fixed-substep Forward Euler. The latter performs
+many sequential first-order state updates without stress correction, so small
+host/device libm differences accumulate more directly. Override it with
+`--compare-rtol` when conducting a documented sensitivity study. Each tensor
+component uses the largest resolved component of the same six-component tensor
+as its relative scale; this avoids ill-conditioned relative errors for
+physically inactive components without loosening scalar or dimensionless-state
+checks. CPU and GPU yield residuals are checked independently against the
+absolute `error_tolerance`. Modified-Euler local-error estimates and
+accepted-substep counts are likewise checked independently against
+`backbone_errTol` and `no_substeps`; host and device arithmetic need not select
+identical valid adaptive substep histories. Per-step plastic multipliers are
+nonnegative integration diagnostics; the evolved plastic-strain tensor remains
+part of the direct state comparison.
 
 The constant-volume test is an undrained *constitutive* characterization. Its
 pore pressure is inferred from effective mean stress under the stated constant

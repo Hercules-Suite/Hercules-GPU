@@ -443,8 +443,20 @@ Nonlinear GPU execution (runtime environment):
 	reported to standard error during solver startup.
 - `material_model=ManzariDafalias` is a device-first, pressure-dependent
 	effective-stress sand model. Production execution currently requires the GPU
-	backend. It uses adaptive explicit Modified Euler and reuses the established
-	controls: `backbone_errTol` is the dimensionless local stress-increment error
+	backend. `manzari_dafalias_integration_scheme=modified_euler` is the default
+	and uses the established adaptive explicit Modified-Euler implementation.
+	`manzari_dafalias_integration_scheme=forward_euler` selects the OpenSees
+	integration-scheme-5 constitutive stage. After any elastic/yield intersection,
+	Hercules divides the plastic remainder into exactly `no_substeps` equal
+	fractions and applies that first-order stage to each fraction; setting
+	`no_substeps=1` recovers OpenSees's original single-update behavior. Forward
+	Euler has no embedded local-error estimate, adaptive retry, or stress
+	correction. It therefore ignores `backbone_errTol` and
+	`manzari_dafalias_recovery`, reports the resulting absolute yield drift, and
+	is more sensitive to substep size. Hercules retains its finite-state and
+	minimum-effective-pressure safeguards. Modified Euler remains the production
+	default.
+	For Modified Euler, `backbone_errTol` is the dimensionless local stress-increment error
 	target, `no_substeps` caps accepted adaptive substeps, and `error_tolerance` bounds
 	the absolute yield-surface residual after a plastic stress correction. The
 	elastic predictor uses the one-sided admissibility condition
@@ -614,8 +626,8 @@ Nonlinear GPU execution (runtime environment):
 	particularly important for Manzari--Dafalias and PDMY03, whose skeleton stress is
 	effective stress, but it also avoids bypassing every other nonlinear
 	constitutive volumetric update.
-- The synthetic fixture includes a standalone OpenSees Modified-Euler driver
-	and a characterization comparator under
+- The synthetic fixture includes a standalone OpenSees driver for both
+	Modified Euler and Forward Euler, plus a characterization comparator under
 	`benchmark_inputs/nonlinear_material_point/`. OpenSees runs that reference in
 	kPa to preserve its low-pressure regularization scale; the comparator converts
 	stress to Pa and does not treat implementation differences as an automatic
