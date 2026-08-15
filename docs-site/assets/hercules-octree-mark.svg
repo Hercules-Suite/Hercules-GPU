@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
   <title id="title">Hercules octree emblem</title>
-  <description id="description">An H assembled from square adaptive octree cells, joined by a gold seismic waveform with square terminals.</description>
+  <description id="description">An H assembled from square adaptive octree cells, with two gold mesh cells joined by a seismic waveform.</description>
 
   <g fill="#327795">
     <!-- Left column: coarse, level-1, level-2, coarse square cells. -->
@@ -10,7 +10,6 @@
     <rect data-octree-cell="true" x="44" y="148" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="99" y="148" width="49" height="49" rx="5"/>
     <rect data-octree-cell="true" x="44" y="203" width="49" height="49" rx="5"/>
-    <rect data-octree-cell="true" x="99" y="203" width="49" height="49" rx="5"/>
 
     <rect data-octree-cell="true" x="44" y="260" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="71" y="260" width="23" height="23" rx="3"/>
@@ -42,12 +41,8 @@
     <rect data-octree-cell="true" x="391" y="175" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="175" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="175" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="364" y="202" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="391" y="202" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="202" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="202" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="364" y="229" width="23" height="23" rx="3"/>
-    <rect data-octree-cell="true" x="391" y="229" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="418" y="229" width="23" height="23" rx="3"/>
     <rect data-octree-cell="true" x="445" y="229" width="23" height="23" rx="3"/>
 
@@ -60,7 +55,7 @@
   </g>
 
   <path
-    d="M158 256 L166 256 C180 256 184 249 190 235 L202 205 L222 300 L250 175 L280 340 L306 220 L323 274 C330 294 339 286 347 263 C350 257 352 256 354 256"
+    d="M148 228 L166 228 C180 228 184 221 190 207 L202 177 L222 272 L250 147 L280 312 L306 192 L323 246 C330 266 339 258 347 235 C350 229 356 228 364 228"
     fill="none"
     stroke="#D9A441"
     stroke-linecap="round"
@@ -68,9 +63,9 @@
     stroke-width="30"
   />
 
-  <!-- Square terminals visibly join the waveform to the octree columns. -->
+  <!-- These terminals replace octree cells instead of overlaying the meshes. -->
   <g fill="#D9A441">
-    <rect data-wave-terminal="true" x="116" y="229" width="54" height="54" rx="5"/>
-    <rect data-wave-terminal="true" x="342" y="229" width="54" height="54" rx="5"/>
+    <rect data-octree-cell="true" data-wave-terminal="true" x="99" y="203" width="49" height="49" rx="5"/>
+    <rect data-octree-cell="true" data-wave-terminal="true" x="364" y="203" width="49" height="49" rx="5"/>
   </g>
 </svg>
