@@ -588,6 +588,8 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /--recovery-mode/);
   assert.match(generator, /--integration-scheme/);
+  assert.match(generator, /--compare-rtol/);
+  assert.match(generator, /forward_euler[\s\S]*1\.0e-5/);
   assert.match(generator, /f"\{args\.integration_scheme\}"/);
   assert.match(generator, /forward_euler[\s\S]*--recovery-mode=strict/);
   assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);

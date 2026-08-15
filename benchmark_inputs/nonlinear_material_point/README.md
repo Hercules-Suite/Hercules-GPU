@@ -389,19 +389,22 @@ python3 generate_hercules_manzari_dafalias_path.py \
   --maximum-substeps 100
 ```
 
-Generated canonical histories use `material_point_compare_rtol=1e-6` and
-`material_point_compare_atol=1e-8` for CPU/CUDA state parity over hundreds of
-adaptive constitutive increments. Each tensor component uses the largest
-resolved component of the same six-component tensor as its relative scale;
-this avoids ill-conditioned relative errors for physically inactive
-components without loosening scalar or dimensionless-state checks. CPU and GPU
-yield residuals are checked independently against the absolute
-`error_tolerance`. Modified-Euler local-error estimates and accepted-substep
-counts are likewise checked independently against `backbone_errTol` and
-`no_substeps`; host and device arithmetic need not select identical valid
-adaptive substep histories. Per-step plastic multipliers are nonnegative
-integration diagnostics; the evolved plastic-strain tensor remains part of
-the direct state comparison.
+Generated canonical histories use `material_point_compare_atol=1e-8` and a
+scheme-specific relative CPU/CUDA state-parity tolerance: `1e-6` for adaptive
+Modified Euler and `1e-5` for fixed-substep Forward Euler. The latter performs
+many sequential first-order state updates without stress correction, so small
+host/device libm differences accumulate more directly. Override it with
+`--compare-rtol` when conducting a documented sensitivity study. Each tensor
+component uses the largest resolved component of the same six-component tensor
+as its relative scale; this avoids ill-conditioned relative errors for
+physically inactive components without loosening scalar or dimensionless-state
+checks. CPU and GPU yield residuals are checked independently against the
+absolute `error_tolerance`. Modified-Euler local-error estimates and
+accepted-substep counts are likewise checked independently against
+`backbone_errTol` and `no_substeps`; host and device arithmetic need not select
+identical valid adaptive substep histories. Per-step plastic multipliers are
+nonnegative integration diagnostics; the evolved plastic-strain tensor remains
+part of the direct state comparison.
 
 The constant-volume test is an undrained *constitutive* characterization. Its
 pore pressure is inferred from effective mean stress under the stated constant
