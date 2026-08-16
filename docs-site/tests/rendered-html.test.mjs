@@ -37,11 +37,71 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /Hercules emblem formed from adaptive octree cells and a seismic waveform/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
-  assert.match(html, /hercules-octree-mark\.png/);
-  assert.match(html, /src="\/hercules-octree-mark\.png"/);
-  assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mark/);
-  assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mark.png")));
+  assert.match(html, /hercules-octree-mesh-mark\.png\?v=graded-centered-256/);
+  assert.match(html, /src="\/hercules-octree-mesh-mark\.png\?v=graded-centered-256"/);
+  assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mesh-mark/);
+  assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mesh-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("builds the octree emblem from square mesh cells and square waveform terminals", () => {
+  const logoSource = readFileSync(
+    fileURLToPath(new URL("../assets/hercules-octree-mark.svg", import.meta.url)),
+    "utf8",
+  );
+  const cells = [...logoSource.matchAll(
+    /<rect data-octree-cell="true"[^>]*x="([0-9.]+)" y="([0-9.]+)" width="([0-9.]+)" height="([0-9.]+)"/g,
+  )].map(([, x, y, width, height]) => ({
+    x: Number(x),
+    y: Number(y),
+    width: Number(width),
+    height: Number(height),
+  }));
+
+  assert.equal(cells.length, 54);
+  for (const { width, height } of cells) {
+    assert.equal(width, height, `octree cell ${width} × ${height} is not square`);
+  }
+
+  for (let index = 0; index < cells.length; index += 1) {
+    for (let otherIndex = index + 1; otherIndex < cells.length; otherIndex += 1) {
+      const first = cells[index];
+      const second = cells[otherIndex];
+      const horizontalOverlap = Math.min(first.x + first.width, second.x + second.width)
+        - Math.max(first.x, second.x);
+      const verticalGap = Math.max(
+        first.y - (second.y + second.height),
+        second.y - (first.y + first.height),
+        0,
+      );
+      if (horizontalOverlap > 0 && verticalGap <= 8) {
+        const gradingRatio = Math.max(first.width, second.width) / Math.min(first.width, second.width);
+        assert.ok(gradingRatio <= 2.2, `adjacent octree cells have an abrupt ${gradingRatio}:1 transition`);
+      }
+    }
+  }
+
+  assert.match(logoSource, /x="364" y="287" width="23" height="23"/);
+  assert.match(logoSource, /x="391" y="287" width="23" height="23"/);
+
+  const terminals = [...logoSource.matchAll(
+    /<rect (?=[^>]*data-wave-terminal="true")[^>]*y="([0-9.]+)"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
+  )];
+  assert.equal(terminals.length, 2);
+  for (const [, y, width, height] of terminals) {
+    assert.equal(width, height, `waveform terminal ${width} × ${height} is not square`);
+    assert.equal(Number(y) + Number(height) / 2, 256, "waveform terminal is not vertically centered");
+  }
+  assert.match(
+    logoSource,
+    /<rect data-octree-cell="true" data-wave-terminal="true"/,
+    "waveform terminals must be octree mesh cells",
+  );
+  assert.match(
+    logoSource,
+    /d="M148 256 .* 364 256"/,
+    "waveform baseline must meet both terminal centers at y = 256",
+  );
 });
 
 test("server-renders a structured documentation page", async () => {
@@ -52,6 +112,49 @@ test("server-renders a structured documentation page", async () => {
   assert.match(html, /Run your first Hercules simulation/);
   assert.match(html, /Before you begin/);
   assert.match(html, /Current Hercules GPU code path/);
+});
+
+test("documents octree-compatible domain sizing and refinement level selection", async () => {
+  const architectureResponse = await render("/docs/architecture");
+  assert.equal(architectureResponse.status, 200);
+  const architecture = await architectureResponse.text();
+  assert.match(architecture, /Octree-compatible domain dimensions/);
+  assert.match(architecture, /class="mathExpression mathInline"/);
+  assert.match(architecture, /class="mathExpression mathDisplay"/);
+  assert.match(architecture, /class="katex-display"/);
+  assert.match(architecture, /region_depth_deep_m/);
+  assert.match(architecture, /region_depth_shallow_m/);
+  assert.match(architecture, /region_length_north_m/);
+  assert.match(architecture, /region_length_east_m/);
+
+  const topographyResponse = await render("/docs/input-files");
+  assert.equal(topographyResponse.status, 200);
+  const topography = await topographyResponse.text();
+  assert.match(topography, /Choose maximum_octant_level/);
+  assert.match(topography, /simulation_shear_velocity_min/);
+  assert.match(topography, /simulation_wave_max_freq_hz/);
+  assert.match(topography, /simulation_node_per_wavelength/);
+  assert.match(topography, /maximum_octant_level/);
+  assert.match(topography, /61\.035.*30\.518/s);
+
+  const parametersResponse = await render("/docs/parameters-domain-time");
+  assert.equal(parametersResponse.status, 200);
+  const parameters = await parametersResponse.text();
+  assert.match(parameters, /common dyadic increment/);
+  assert.match(parameters, /deep minus shallow depth/);
+
+  const topographyParametersResponse = await render("/docs/parameters-topography-buildings");
+  assert.equal(topographyParametersResponse.status, 200);
+  const topographyParameters = await topographyParametersResponse.text();
+  assert.match(topographyParameters, /region_length_north_m/);
+  assert.match(topographyParameters, /region_length_east_m/);
+  assert.match(topographyParameters, /region_depth_deep_m/);
+  assert.match(topographyParameters, /region_depth_shallow_m/);
+  assert.match(topographyParameters, /simulation_shear_velocity_min/);
+  assert.match(topographyParameters, /simulation_wave_max_freq_hz/);
+  assert.match(topographyParameters, /simulation_node_per_wavelength/);
+  assert.doesNotMatch(topographyParameters, /north length,east length,deep-shallow thickness/);
+  assert.doesNotMatch(topographyParameters, /maximum frequency×nodes per wavelength/);
 });
 
 test("searches complete documentation text and parameter names", async () => {

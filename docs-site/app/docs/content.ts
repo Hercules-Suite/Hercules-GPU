@@ -9,6 +9,8 @@ export type DocSection = {
   id: string;
   title: string;
   paragraphs?: string[];
+  equations?: string[];
+  afterEquationsParagraphs?: string[];
   bullets?: string[];
   code?: string;
   codeLabel?: string;
@@ -232,6 +234,32 @@ export const docPages: Record<string, DocPageContent> = {
           "The octree concentrates resolution where material properties and modeled wavelengths require it. Neighbor constraints introduce hanging nodes, so Hercules maintains adjustment schedules that preserve a conforming finite-element solution across refinement boundaries and MPI partitions.",
         ],
         note: "The global domain uses a power-of-two octree dimension. The physical region of interest may occupy only part of that cube.",
+      },
+      {
+        id: "octree-domain-dimensions",
+        title: "Octree-compatible domain dimensions",
+        paragraphs: [
+          String.raw`Hercules cannot use three arbitrary domain lengths. The physical north, east, and depth extents—and their maximum, \(L_{\max}\)—are defined from the exact parameters below. At octree level \(N\), the common dyadic increment is \(\Delta_N=L_{\max}/2^N\); every domain extent must be an integer multiple of that increment.`,
+          String.raw`Equivalently, an extent \(D\) uses an integer multiplier \(m\), or a binary sum with coefficients \(a_i\in\{0,1\}\). This lets a shorter direction occupy a rectangular subset of the power-of-two root cube without breaking the octree grid.`,
+        ],
+        equations: [
+          String.raw`\begin{aligned}
+L_{\mathrm{north}} &= \mathtt{region\_length\_north\_m}, \\
+L_{\mathrm{east}}  &= \mathtt{region\_length\_east\_m}, \\
+L_{\mathrm{depth}} &= \mathtt{region\_depth\_deep\_m}-\mathtt{region\_depth\_shallow\_m}, \\
+L_{\max} &= \max\!\left(L_{\mathrm{north}},L_{\mathrm{east}},L_{\mathrm{depth}}\right),
+\end{aligned}`,
+          String.raw`\begin{aligned}
+D &= m\,\frac{L_{\max}}{2^N}, &&m\in\mathbb{Z},\quad 0<D\le L_{\max}, \\
+D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
+\end{aligned}`,
+        ],
+        afterEquationsParagraphs: [
+          String.raw`For \(L_{\max}=\mathtt{region\_length\_east\_m}=1{,}000{,}000\,\mathrm{m}\), the successive dyadic sizes are \(1{,}000{,}000\), \(500{,}000\), \(250{,}000\), \(125{,}000\), \(62{,}500\), and \(31{,}250\,\mathrm{m}\). The choice \(\mathtt{region\_length\_north\_m}=750{,}000\,\mathrm{m}\) is valid because \(750{,}000=500{,}000+250{,}000\). A depth thickness of \(187{,}500\,\mathrm{m}\) is valid because \(187{,}500=125{,}000+62{,}500\). If \(\mathtt{region\_depth\_shallow\_m}=10{,}000\,\mathrm{m}\), set \(\mathtt{region\_depth\_deep\_m}=197{,}500\,\mathrm{m}\) to obtain that thickness.`,
+        ],
+        codeLabel: "parameters.in — octree-compatible 1,000 km × 750 km × 187.5 km domain",
+        code: "region_depth_shallow_m = 10000\nregion_depth_deep_m    = 197500\nregion_length_north_m  = 750000\nregion_length_east_m   = 1000000",
+        note: "Use exact whole-metre extents with the current Octor path: it reduces the physical dimensions using integer metre values. The dyadic rule applies to the depth thickness, not to region_depth_deep_m by itself unless region_depth_shallow_m is zero.",
       },
     ],
   },
@@ -1249,11 +1277,44 @@ if __name__ == "__main__":
         title: "Configure topography",
         paragraphs: [
           "topography_directory contains one required file, topography.in. The topographic spacing must divide both region_length_north_m and region_length_east_m exactly. maximum_octant_level and topographybase_zcoord are scientific mesh choices, not universal defaults.",
-          "The block below is illustrative for a 40 km square domain with relief below 800 m. Recompute the refinement level from the case's minimum element size, and choose a positive base coordinate that safely contains the full elevation range.",
+          "The block below is illustrative for a 40 km square domain with relief below 800 m. Recompute the refinement level from the material-model minimum shear velocity, simulation_shear_velocity_min, simulation_wave_max_freq_hz, and simulation_node_per_wavelength; choose a positive base coordinate that safely contains the full elevation range.",
         ],
         codeLabel: "parameters.in — illustrative values",
         code: "include_topography             = yes\ntopography_directory           = input/topography\ncomputation_method             = vt\nmaximum_octant_level           = 9\ntopographybase_zcoord          = 1250.0\ntype_of_etree                  = full\nmin_enclosed_volume_perc       = 0.1\nconsider_nonlinear_topography  = no\ntopography_bkt_gpu_stabilize   = auto",
         note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
+      },
+      {
+        id: "topography-maximum-level",
+        title: "Choose maximum_octant_level",
+        paragraphs: [
+          String.raw`\(\mathtt{maximum\_octant\_level}\) is required only when \(\mathtt{include\_topography=yes}\). Let \(V_{S,\min}^{\mathrm{model}}\) denote the smallest shear-wave velocity in the active solid material model; this is derived from the selected material inputs, not read from a separate parameters.in key.`,
+          String.raw`Choose the smallest integer \(N\) that satisfies the exact wavelength inequality below, then set \(\mathtt{maximum\_octant\_level}=N\). The accepted range is 0 through 30. A smaller value prevents the topography mesher from reaching the resolution required by \(\mathtt{simulation\_wave\_max\_freq\_hz}\) and \(\mathtt{simulation\_node\_per\_wavelength}\).`,
+        ],
+        equations: [
+          String.raw`\frac{
+\max\!\left(
+\mathtt{region\_length\_north\_m},\,
+\mathtt{region\_length\_east\_m},\,
+\mathtt{region\_depth\_deep\_m}-\mathtt{region\_depth\_shallow\_m}
+\right)
+}{2^N}
+\;\le\;
+\frac{
+\max\!\left(V_{S,\min}^{\mathrm{model}},\mathtt{simulation\_shear\_velocity\_min}\right)
+}{
+\mathtt{simulation\_wave\_max\_freq\_hz}\,
+\mathtt{simulation\_node\_per\_wavelength}
+}`,
+          String.raw`\begin{aligned}
+\frac{\max(500,400)}{2\times 8} &= 31.25\ \mathrm{m}, \\
+\frac{1{,}000{,}000}{2^{14}} &= 61.035\ \mathrm{m} > 31.25\ \mathrm{m}, \\
+\frac{1{,}000{,}000}{2^{15}} &= 30.518\ \mathrm{m} \le 31.25\ \mathrm{m}.
+\end{aligned}`,
+        ],
+        afterEquationsParagraphs: [
+          String.raw`For the worked example, the maximum domain extent is \(1{,}000{,}000\,\mathrm{m}\), \(V_{S,\min}^{\mathrm{model}}=500\,\mathrm{m/s}\), \(\mathtt{simulation\_shear\_velocity\_min}=400\,\mathrm{m/s}\), \(\mathtt{simulation\_wave\_max\_freq\_hz}=2\,\mathrm{Hz}\), and \(\mathtt{simulation\_node\_per\_wavelength}=8\). Level 14 gives \(61.035\,\mathrm{m}\) and is too coarse; level 15 gives \(30.518\,\mathrm{m}\), so \(\mathtt{maximum\_octant\_level}=15\) is the smallest acceptable value.`,
+        ],
+        note: "This is the shear-wave-controlled baseline. Acoustic refinement and other enabled feature constraints can require a finer mesh; ensure the topography cap does not block the most restrictive active refinement rule.",
       },
       {
         id: "topography-format",

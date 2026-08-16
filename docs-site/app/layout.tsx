@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -17,8 +18,8 @@ export async function generateMetadata(): Promise<Metadata> {
     description:
       "Technical documentation for Hercules linear, nonlinear/plastic, and coupled-physics seismic simulations.",
     icons: {
-      icon: "/hercules-octree-mark.png",
-      apple: "/hercules-octree-mark.png",
+      icon: "/hercules-octree-mesh-mark.png?v=graded-centered-256",
+      apple: "/hercules-octree-mesh-mark.png?v=graded-centered-256",
     },
     metadataBase: base,
     openGraph: {

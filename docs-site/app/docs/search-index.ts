@@ -16,6 +16,8 @@ function sectionValues(section: DocSection): string[] {
   return [
     section.title,
     ...(section.paragraphs ?? []),
+    ...(section.equations ?? []),
+    ...(section.afterEquationsParagraphs ?? []),
     ...(section.bullets ?? []),
     section.codeLabel ?? "",
     section.code ?? "",
