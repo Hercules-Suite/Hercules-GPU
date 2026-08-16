@@ -27,7 +27,7 @@ export default function DocsOverview() {
           </div>
           <figure className="overviewHeroMark">
             <Image
-              src="/hercules-octree-mesh-mark.png?v=centered-256"
+              src="/hercules-octree-mesh-mark.png?v=graded-centered-256"
               alt="Hercules emblem formed from adaptive octree cells and a seismic waveform"
               width={512}
               height={512}

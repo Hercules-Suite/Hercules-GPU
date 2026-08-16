@@ -37,8 +37,8 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /Hercules emblem formed from adaptive octree cells and a seismic waveform/);
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
-  assert.match(html, /hercules-octree-mesh-mark\.png\?v=centered-256/);
-  assert.match(html, /src="\/hercules-octree-mesh-mark\.png\?v=centered-256"/);
+  assert.match(html, /hercules-octree-mesh-mark\.png\?v=graded-centered-256/);
+  assert.match(html, /src="\/hercules-octree-mesh-mark\.png\?v=graded-centered-256"/);
   assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mesh-mark/);
   assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mesh-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
@@ -50,13 +50,39 @@ test("builds the octree emblem from square mesh cells and square waveform termin
     "utf8",
   );
   const cells = [...logoSource.matchAll(
-    /<rect data-octree-cell="true"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
-  )];
+    /<rect data-octree-cell="true"[^>]*x="([0-9.]+)" y="([0-9.]+)" width="([0-9.]+)" height="([0-9.]+)"/g,
+  )].map(([, x, y, width, height]) => ({
+    x: Number(x),
+    y: Number(y),
+    width: Number(width),
+    height: Number(height),
+  }));
 
-  assert.equal(cells.length, 42);
-  for (const [, width, height] of cells) {
+  assert.equal(cells.length, 54);
+  for (const { width, height } of cells) {
     assert.equal(width, height, `octree cell ${width} × ${height} is not square`);
   }
+
+  for (let index = 0; index < cells.length; index += 1) {
+    for (let otherIndex = index + 1; otherIndex < cells.length; otherIndex += 1) {
+      const first = cells[index];
+      const second = cells[otherIndex];
+      const horizontalOverlap = Math.min(first.x + first.width, second.x + second.width)
+        - Math.max(first.x, second.x);
+      const verticalGap = Math.max(
+        first.y - (second.y + second.height),
+        second.y - (first.y + first.height),
+        0,
+      );
+      if (horizontalOverlap > 0 && verticalGap <= 8) {
+        const gradingRatio = Math.max(first.width, second.width) / Math.min(first.width, second.width);
+        assert.ok(gradingRatio <= 2.2, `adjacent octree cells have an abrupt ${gradingRatio}:1 transition`);
+      }
+    }
+  }
+
+  assert.match(logoSource, /x="364" y="287" width="23" height="23"/);
+  assert.match(logoSource, /x="391" y="287" width="23" height="23"/);
 
   const terminals = [...logoSource.matchAll(
     /<rect (?=[^>]*data-wave-terminal="true")[^>]*y="([0-9.]+)"[^>]*width="([0-9.]+)" height="([0-9.]+)"/g,
