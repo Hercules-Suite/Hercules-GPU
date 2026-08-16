@@ -427,6 +427,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /HERCULES_NONLINEAR_BACKEND/);
   assert.match(gpu, /HERCULES_NONLINEAR_STATS_INTERVAL/);
   assert.match(gpu, /one-step[\s\S]*multi-step/);
+  assert.match(gpu, /ManzariDafalias production kernel omits the four legacy previous-state shadow arrays/);
+  assert.match(gpu, /1,216 bytes of unused device allocation per nonlinear element/);
+  assert.match(gpu, /ManzariDafalias keeps its larger failure-only diagnostic record in per-thread shared memory/);
+  assert.match(gpu, /PDMY03 retains the legacy shadow allocation and writes/);
   assert.match(gpu, /CUDA nonlinear constitutive and force path is the default/);
   assert.match(gpu, /GPU by default/);
   assert.match(gpu, /constitutive calculations in double precision/);
@@ -670,6 +674,9 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpu, /kernel_nonlinear_workload_stats/);
   assert.match(gpu, /zero_or_inactive_points/);
   assert.match(gpu, /multi_step_fraction/);
+  assert.match(gpu, /md_diagnostics_shared\[NL_GPU_UPDATE_BLOCK_SIZE\]/);
+  assert.match(gpu, /allocate_previous_state_shadows[\s\S]*NL_ALLOC_COPY\(strains1, strains1\)/);
+  assert.match(gpu, /defined\(NL_GPU_CLASSIC_ONLY\) \|\| defined\(NL_GPU_PDMY03_ONLY\)[\s\S]*state\.pstrains1\[nl_eindex\]/);
   assert.match(psolve, /!nonlinear_requires_explicit_pore_pressure\(\)/);
   assert.match(psolve, /Qp traction remains explicit/);
   assert.match(cpu, /return theNonlinearFlag != 0/);

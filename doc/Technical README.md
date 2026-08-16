@@ -532,6 +532,20 @@ Nonlinear GPU execution (runtime environment):
 	path clears only the existing diagnostic substep-count array, runs an extra
 	device scan, and performs global MPI reductions; use it for diagnosis rather
 	than production timing. All solver ranks must use the same interval.
+- The specialized Manzari--Dafalias production kernel keeps only the committed
+	constitutive state it consumes. It does not allocate or write the four legacy
+	previous-state shadow arrays required by the classic yield-surface/backbone
+	kernel. This removes 1,216 bytes of unused device state per nonlinear element
+	and the same amount of device-memory write traffic per updated element and
+	time step. Startup reports the omitted allocation. Its failure-only
+	constitutive diagnostics use a per-thread shared-memory record so detailed
+	failure reports do not enlarge the normal production thread's local stack.
+	PDMY03 instead retains the legacy shadow allocation/writes and its compact
+	thread-local diagnostic record. Those shadows do not enter the PDMY03
+	constitutive equations, but controlled target-system production measurements
+	favored the established generated kernel over their omission despite better
+	static PTXAS spill totals. This model-specific execution choice does not alter
+	the committed stress/history state.
 - `material_model=ManzariDafalias` is a device-first, pressure-dependent
 	effective-stress sand model. Production execution currently requires the GPU
 	backend. `manzari_dafalias_integration_scheme=modified_euler` is the default
