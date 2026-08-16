@@ -3361,14 +3361,14 @@ __global__ static void kernel_nonlinear_update_force(
             if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
 
             const tensor_t strain_prev = state.strains[nl_eindex].qp[qp];
-#ifdef NL_GPU_CLASSIC_ONLY
+#if defined(NL_GPU_CLASSIC_ONLY) || defined(NL_GPU_PDMY03_ONLY)
             state.strains1[nl_eindex].qp[qp] = strain_prev;
 #endif
             const tensor_t strain = c->isTopoNonlin
                 ? nl_tetra_strain(u, c->topoPart, qp, element.h)
                 : nl_hex_strain(u, qp, element.h);
             state.strains[nl_eindex].qp[qp] = strain;
-#ifdef NL_GPU_CLASSIC_ONLY
+#if defined(NL_GPU_CLASSIC_ONLY) || defined(NL_GPU_PDMY03_ONLY)
             state.pstrains1[nl_eindex].qp[qp] =
                 state.pstrains2[nl_eindex].qp[qp];
             state.alphastress1[nl_eindex].qp[qp] =
@@ -3756,18 +3756,17 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(constants, constants);
     NL_ALLOC_COPY(stresses, stresses);
     NL_ALLOC_COPY(strains, strains);
-    const int needs_classic_previous_state =
-        config->material_model != MANZARI_DAFALIAS &&
-        config->material_model != PRESSURE_DEPEND_MULTIYIELD_03;
-    if (needs_classic_previous_state) {
+    const int allocate_previous_state_shadows =
+        config->material_model != MANZARI_DAFALIAS;
+    if (allocate_previous_state_shadows) {
         NL_ALLOC_COPY(strains1, strains1);
         NL_ALLOC_COPY(pstrains1, pstrains1);
     }
     NL_ALLOC_COPY(pstrains2, pstrains2);
-    if (needs_classic_previous_state)
+    if (allocate_previous_state_shadows)
         NL_ALLOC_COPY(alphastress1, alphastress1);
     NL_ALLOC_COPY(alphastress2, alphastress2);
-    if (needs_classic_previous_state)
+    if (allocate_previous_state_shadows)
         NL_ALLOC_COPY(ep1, ep1);
     NL_ALLOC_COPY(ep2, ep2);
     NL_ALLOC_COPY(psi_n, psi_n);
@@ -3833,7 +3832,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         fprintf(stderr,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
-        if (!needs_classic_previous_state) {
+        if (!allocate_previous_state_shadows) {
             const double saved_mib = (double)((size_t)count*
                 (3*sizeof(qptensors_t)+sizeof(qpvectors_t)))/(1024.0*1024.0);
             fprintf(stderr,
