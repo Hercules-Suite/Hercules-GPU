@@ -759,14 +759,14 @@ PDMY03_HD static inline int pdmy03_requested_substeps(
 /* One committed, explicit PDMY03 update. Stress uses the Hercules/OpenSees
  * tension-positive convention; compression therefore has negative mean. */
 PDMY03_HD static inline int pdmy03_update(
-    const pdmy03_constants_t *__restrict__ c, int maximum_substeps,
+    const pdmy03_constants_t *c, int maximum_substeps,
     tensor_t strain, tensor_t previous_strain, tensor_t static_stress,
-    tensor_t *__restrict__ dynamic_stress,
-    tensor_t *__restrict__ plastic_strain,
-    pdmy03_state_t *__restrict__ state, tensor_t *__restrict__ centers,
-    pdmy03_diagnostics_t *__restrict__ diagnostics)
+    tensor_t *dynamic_stress, tensor_t *plastic_strain,
+    pdmy03_state_t *state, tensor_t *centers,
+    pdmy03_diagnostics_t *diagnostics)
 {
-    *diagnostics = pdmy03_diagnostics_t{};
+    const pdmy03_diagnostics_t empty_diagnostics = {};
+    *diagnostics = empty_diagnostics;
     const tensor_t increment = pdmy03_sub(strain, previous_strain);
     diagnostics->strain_increment_norm = pdmy03_norm(increment);
     tensor_t current = pdmy03_add(*dynamic_stress, static_stress);

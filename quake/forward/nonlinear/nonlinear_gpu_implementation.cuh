@@ -3270,6 +3270,23 @@ __device__ static inline void nl_atomic_add(solver_float *address,
 
 __device__ static tensor_t nl_approx_static_stress(
     const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
+    double h, int qp)
+{
+    if (cfg->approximate_geostatic_state != YES || c->sigmaZ_st <= 0.0)
+        return nl_zero();
+    const double lz = c->isTopoNonlin ? 0.0 :
+        ((qp & 4) ? 0.577350269189 : -0.577350269189);
+    const double vertical = nl_max(
+        c->sigmaZ_st+c->sigmaZ_gradient*h*lz*0.5, 0.0);
+    const double k0 = 1.0-sin(c->phi);
+    tensor_t stress = {-k0*vertical, -k0*vertical, -vertical,
+                       0.0, 0.0, 0.0};
+    return stress;
+}
+
+#ifdef NL_GPU_MANZARI_DAFALIAS_ONLY
+__device__ static tensor_t nl_approx_static_stress_k0(
+    const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
     double geostatic_k0, double h, int qp)
 {
     if (cfg->approximate_geostatic_state != YES || c->sigmaZ_st <= 0.0)
@@ -3283,6 +3300,7 @@ __device__ static tensor_t nl_approx_static_stress(
                        0.0, 0.0, 0.0};
     return stress;
 }
+#endif
 
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
 /* Diagnostics are consumed only after a failed constitutive update. Keeping
@@ -3303,9 +3321,6 @@ __global__ static void kernel_nonlinear_update_force(
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
     __shared__ nl_md_shared_diagnostics_t
         md_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
-#elif defined(NL_GPU_PDMY03_ONLY)
-    __shared__ pdmy03_diagnostics_t
-        pdmy03_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
 #endif
     const int32_t nl_eindex = (int32_t)(blockIdx.x*blockDim.x + threadIdx.x);
     if (nl_eindex >= state.count) return;
@@ -3335,10 +3350,12 @@ __global__ static void kernel_nonlinear_update_force(
 #endif
 
     if (any_displacement) {
+#ifdef NL_GPU_MANZARI_DAFALIAS_ONLY
         const double geostatic_k0 =
             step > cfg.geostatic_final_step &&
             cfg.approximate_geostatic_state == YES && c->sigmaZ_st > 0.0
                 ? 1.0-sin(c->phi) : 0.0;
+#endif
         const int ngp = c->isTopoNonlin ? 5 : 8;
         for (int qp = 0; qp < ngp; qp++) {
             if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
@@ -3367,13 +3384,16 @@ __global__ static void kernel_nonlinear_update_force(
             }
 
             double model_error = 0.0;
+#ifdef NL_GPU_MANZARI_DAFALIAS_ONLY
+            const tensor_t static_stress = nl_approx_static_stress_k0(
+                c, &cfg, geostatic_k0, element.h, qp);
+#else
             const tensor_t static_stress =
-                nl_approx_static_stress(
-                    c, &cfg, geostatic_k0, element.h, qp);
+                nl_approx_static_stress(c, &cfg, element.h, qp);
+#endif
             int ok;
 #ifdef NL_GPU_PDMY03_ONLY
-            pdmy03_diagnostics_t *pdmy03_diagnostics =
-                pdmy03_diagnostics_shared+threadIdx.x;
+            pdmy03_diagnostics_t pdmy03_diagnostics = {};
             const int32_t point = nl_eindex*NL_GPU_QP+qp;
             tensor_t *centers = state.pdmy03_centers+
                 (size_t)point*state.pdmy03_surface_stride;
@@ -3382,12 +3402,12 @@ __global__ static void kernel_nonlinear_update_force(
                 static_stress, &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
                 state.pdmy03_states+point, centers,
-                pdmy03_diagnostics);
-            model_error = pdmy03_diagnostics->yield_residual;
+                &pdmy03_diagnostics);
+            model_error = pdmy03_diagnostics.yield_residual;
             c->fs[qp] = model_error;
             if (!ok || !isfinite(model_error)) {
                 nl_record_pdmy03_error(
-                    state.error, eindex, qp, pdmy03_diagnostics,
+                    state.error, eindex, qp, &pdmy03_diagnostics,
                     pdmy03_scale(pdmy03_add(
                         state.stresses[nl_eindex].qp[qp], static_stress),
                         -1.0),

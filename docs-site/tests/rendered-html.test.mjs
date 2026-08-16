@@ -428,7 +428,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /HERCULES_NONLINEAR_STATS_INTERVAL/);
   assert.match(gpu, /one-step[\s\S]*multi-step/);
   assert.match(gpu, /1,216 bytes of unused device allocation per nonlinear element/);
-  assert.match(gpu, /failure-only diagnostic records are kept in per-thread shared memory/);
+  assert.match(gpu, /ManzariDafalias keeps its larger failure-only diagnostic record in per-thread shared memory/);
+  assert.match(gpu, /PDMY03 retains its compact thread-local record/);
   assert.match(gpu, /CUDA nonlinear constitutive and force path is the default/);
   assert.match(gpu, /GPU by default/);
   assert.match(gpu, /constitutive calculations in double precision/);
