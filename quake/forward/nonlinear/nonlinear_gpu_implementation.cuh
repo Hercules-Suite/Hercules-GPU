@@ -3303,9 +3303,6 @@ __global__ static void kernel_nonlinear_update_force(
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
     __shared__ nl_md_shared_diagnostics_t
         md_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
-#elif defined(NL_GPU_PDMY03_ONLY)
-    __shared__ pdmy03_diagnostics_t
-        pdmy03_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
 #endif
     const int32_t nl_eindex = (int32_t)(blockIdx.x*blockDim.x + threadIdx.x);
     if (nl_eindex >= state.count) return;
@@ -3372,8 +3369,7 @@ __global__ static void kernel_nonlinear_update_force(
                     c, &cfg, geostatic_k0, element.h, qp);
             int ok;
 #ifdef NL_GPU_PDMY03_ONLY
-            pdmy03_diagnostics_t *pdmy03_diagnostics =
-                pdmy03_diagnostics_shared+threadIdx.x;
+            pdmy03_diagnostics_t pdmy03_diagnostics = {};
             const int32_t point = nl_eindex*NL_GPU_QP+qp;
             tensor_t *centers = state.pdmy03_centers+
                 (size_t)point*state.pdmy03_surface_stride;
@@ -3382,12 +3378,12 @@ __global__ static void kernel_nonlinear_update_force(
                 static_stress, &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
                 state.pdmy03_states+point, centers,
-                pdmy03_diagnostics);
-            model_error = pdmy03_diagnostics->yield_residual;
+                &pdmy03_diagnostics);
+            model_error = pdmy03_diagnostics.yield_residual;
             c->fs[qp] = model_error;
             if (!ok || !isfinite(model_error)) {
                 nl_record_pdmy03_error(
-                    state.error, eindex, qp, pdmy03_diagnostics,
+                    state.error, eindex, qp, &pdmy03_diagnostics,
                     pdmy03_scale(pdmy03_add(
                         state.stresses[nl_eindex].qp[qp], static_stress),
                         -1.0),
