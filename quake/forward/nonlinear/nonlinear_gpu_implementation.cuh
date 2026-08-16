@@ -28,6 +28,7 @@
 #include "nonlinear_pdmy03.h"
 
 #define NL_GPU_QP 8
+#define NL_GPU_UPDATE_BLOCK_SIZE 128
 #define NL_GPU_KAPPA_MIN 1.0e-10
 #define NL_GPU_PI 3.141592653589793238462643383279502884
 
@@ -1076,13 +1077,19 @@ NL_HD static int md_stress_correction(
 }
 
 NL_HD static int nl_update_manzari_dafalias(
-    const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
+    const nlconstants_t *__restrict__ c,
+    const nonlinear_gpu_config_t *__restrict__ cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
-    tensor_t *dynamic_stress, tensor_t *plastic_strain, tensor_t *alpha,
-    tensor_t *alpha_in, tensor_t *fabric, double *initialized,
-    double *void_ratio, double *plastic_multiplier, double *yield_error,
-    double *integration_error, int32_t *accepted_substeps,
-    nl_md_diagnostics_t *diagnostics)
+    tensor_t *__restrict__ dynamic_stress,
+    tensor_t *__restrict__ plastic_strain,
+    tensor_t *__restrict__ alpha, tensor_t *__restrict__ alpha_in,
+    tensor_t *__restrict__ fabric, double *__restrict__ initialized,
+    double *__restrict__ void_ratio,
+    double *__restrict__ plastic_multiplier,
+    double *__restrict__ yield_error,
+    double *__restrict__ integration_error,
+    int32_t *__restrict__ accepted_substeps,
+    nl_md_diagnostics_t *__restrict__ diagnostics)
 {
     const manzari_dafalias_constants_t *m = &c->md;
     const tensor_t de_h = md_sub(strain, strain_prev);
@@ -1093,8 +1100,7 @@ NL_HD static int nl_update_manzari_dafalias(
     tensor_t alpha_in_work = *alpha_in;
     tensor_t fabric_work = *fabric;
     double initialized_work = *initialized;
-    nl_md_diagnostics_t empty_diagnostics = {};
-    *diagnostics = empty_diagnostics;
+    *diagnostics = nl_md_diagnostics_t{};
     diagnostics->effective_mean_stress = md_trace(stress)/3.0;
     *void_ratio = m->e_init-(1.0+m->e_init)*md_trace(md_scale(strain, -1.0));
     *plastic_multiplier = 0.0;
@@ -3264,7 +3270,7 @@ __device__ static inline void nl_atomic_add(solver_float *address,
 
 __device__ static tensor_t nl_approx_static_stress(
     const nlconstants_t *c, const nonlinear_gpu_config_t *cfg,
-    double h, int qp)
+    double geostatic_k0, double h, int qp)
 {
     if (cfg->approximate_geostatic_state != YES || c->sigmaZ_st <= 0.0)
         return nl_zero();
@@ -3272,16 +3278,35 @@ __device__ static tensor_t nl_approx_static_stress(
         ((qp & 4) ? 0.577350269189 : -0.577350269189);
     const double vertical = nl_max(
         c->sigmaZ_st+c->sigmaZ_gradient*h*lz*0.5, 0.0);
-    const double k0 = 1.0-sin(c->phi);
-    tensor_t stress = {-k0*vertical, -k0*vertical, -vertical,
+    tensor_t stress = {-geostatic_k0*vertical,
+                       -geostatic_k0*vertical, -vertical,
                        0.0, 0.0, 0.0};
     return stress;
 }
+
+#if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+/* Diagnostics are consumed only after a failed constitutive update. Keeping
+ * one record per thread in shared memory prevents that failure-only record
+ * from enlarging every production thread's local stack. The extra double
+ * gives consecutive records a 152-byte stride, avoiding a power-of-two
+ * shared-memory bank stride for warp-wide member stores. */
+typedef struct nl_md_shared_diagnostics_t {
+    nl_md_diagnostics_t value;
+    double bank_padding;
+} nl_md_shared_diagnostics_t;
+#endif
 
 __global__ static void kernel_nonlinear_update_force(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
     gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
 {
+#if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+    __shared__ nl_md_shared_diagnostics_t
+        md_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
+#elif defined(NL_GPU_PDMY03_ONLY)
+    __shared__ pdmy03_diagnostics_t
+        pdmy03_diagnostics_shared[NL_GPU_UPDATE_BLOCK_SIZE];
+#endif
     const int32_t nl_eindex = (int32_t)(blockIdx.x*blockDim.x + threadIdx.x);
     if (nl_eindex >= state.count) return;
 
@@ -3310,21 +3335,29 @@ __global__ static void kernel_nonlinear_update_force(
 #endif
 
     if (any_displacement) {
+        const double geostatic_k0 =
+            step > cfg.geostatic_final_step &&
+            cfg.approximate_geostatic_state == YES && c->sigmaZ_st > 0.0
+                ? 1.0-sin(c->phi) : 0.0;
         const int ngp = c->isTopoNonlin ? 5 : 8;
         for (int qp = 0; qp < ngp; qp++) {
             if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
 
             const tensor_t strain_prev = state.strains[nl_eindex].qp[qp];
+#ifdef NL_GPU_CLASSIC_ONLY
             state.strains1[nl_eindex].qp[qp] = strain_prev;
+#endif
             const tensor_t strain = c->isTopoNonlin
                 ? nl_tetra_strain(u, c->topoPart, qp, element.h)
                 : nl_hex_strain(u, qp, element.h);
             state.strains[nl_eindex].qp[qp] = strain;
+#ifdef NL_GPU_CLASSIC_ONLY
             state.pstrains1[nl_eindex].qp[qp] =
                 state.pstrains2[nl_eindex].qp[qp];
             state.alphastress1[nl_eindex].qp[qp] =
                 state.alphastress2[nl_eindex].qp[qp];
             state.ep1[nl_eindex].qv[qp] = state.ep2[nl_eindex].qv[qp];
+#endif
 
             if (cfg.material_model == LINEAR ||
                 step <= cfg.geostatic_final_step) {
@@ -3335,10 +3368,12 @@ __global__ static void kernel_nonlinear_update_force(
 
             double model_error = 0.0;
             const tensor_t static_stress =
-                nl_approx_static_stress(c, &cfg, element.h, qp);
+                nl_approx_static_stress(
+                    c, &cfg, geostatic_k0, element.h, qp);
             int ok;
 #ifdef NL_GPU_PDMY03_ONLY
-            pdmy03_diagnostics_t pdmy03_diagnostics = {};
+            pdmy03_diagnostics_t *pdmy03_diagnostics =
+                pdmy03_diagnostics_shared+threadIdx.x;
             const int32_t point = nl_eindex*NL_GPU_QP+qp;
             tensor_t *centers = state.pdmy03_centers+
                 (size_t)point*state.pdmy03_surface_stride;
@@ -3347,12 +3382,12 @@ __global__ static void kernel_nonlinear_update_force(
                 static_stress, &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
                 state.pdmy03_states+point, centers,
-                &pdmy03_diagnostics);
-            model_error = pdmy03_diagnostics.yield_residual;
+                pdmy03_diagnostics);
+            model_error = pdmy03_diagnostics->yield_residual;
             c->fs[qp] = model_error;
             if (!ok || !isfinite(model_error)) {
                 nl_record_pdmy03_error(
-                    state.error, eindex, qp, &pdmy03_diagnostics,
+                    state.error, eindex, qp, pdmy03_diagnostics,
                     pdmy03_scale(pdmy03_add(
                         state.stresses[nl_eindex].qp[qp], static_stress),
                         -1.0),
@@ -3360,11 +3395,8 @@ __global__ static void kernel_nonlinear_update_force(
             }
 #elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
             int32_t md_substeps = 0;
-            nl_md_diagnostics_t md_diagnostics = {};
-            state.pstrains2[nl_eindex].qp[qp] =
-                state.pstrains1[nl_eindex].qp[qp];
-            state.alphastress2[nl_eindex].qp[qp] =
-                state.alphastress1[nl_eindex].qp[qp];
+            nl_md_diagnostics_t *md_diagnostics =
+                &md_diagnostics_shared[threadIdx.x].value;
             ok = nl_update_manzari_dafalias(
                 c, &cfg, strain, strain_prev, static_stress,
                 &state.stresses[nl_eindex].qp[qp],
@@ -3376,7 +3408,7 @@ __global__ static void kernel_nonlinear_update_force(
                 &state.ep2[nl_eindex].qv[qp],
                 &state.psi_n[nl_eindex].qv[qp], &c->fs[qp],
                 &state.kappa[nl_eindex].qv[qp], &md_substeps,
-                &md_diagnostics);
+                md_diagnostics);
             state.load_unload_n[nl_eindex].qv[qp] = (double)md_substeps;
             model_error = c->fs[qp];
             /* Modified Euler commits only an admissible stress-corrected
@@ -3395,10 +3427,10 @@ __global__ static void kernel_nonlinear_update_force(
                     state.stresses[nl_eindex].qp[qp], static_stress), -1.0);
                 nl_record_md_error(
                     state.error, eindex, qp,
-                    fmax(model_error, md_diagnostics.correction_residual),
+                    fmax(model_error, md_diagnostics->correction_residual),
                     fmax(state.kappa[nl_eindex].qv[qp],
-                         md_diagnostics.local_error),
-                    md_substeps, &md_diagnostics, md_stress,
+                         md_diagnostics->local_error),
+                    md_substeps, md_diagnostics, md_stress,
                     md_sub(strain, strain_prev));
             }
 #else
@@ -3704,12 +3736,19 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(constants, constants);
     NL_ALLOC_COPY(stresses, stresses);
     NL_ALLOC_COPY(strains, strains);
-    NL_ALLOC_COPY(strains1, strains1);
-    NL_ALLOC_COPY(pstrains1, pstrains1);
+    const int needs_classic_previous_state =
+        config->material_model != MANZARI_DAFALIAS &&
+        config->material_model != PRESSURE_DEPEND_MULTIYIELD_03;
+    if (needs_classic_previous_state) {
+        NL_ALLOC_COPY(strains1, strains1);
+        NL_ALLOC_COPY(pstrains1, pstrains1);
+    }
     NL_ALLOC_COPY(pstrains2, pstrains2);
-    NL_ALLOC_COPY(alphastress1, alphastress1);
+    if (needs_classic_previous_state)
+        NL_ALLOC_COPY(alphastress1, alphastress1);
     NL_ALLOC_COPY(alphastress2, alphastress2);
-    NL_ALLOC_COPY(ep1, ep1);
+    if (needs_classic_previous_state)
+        NL_ALLOC_COPY(ep1, ep1);
     NL_ALLOC_COPY(ep2, ep2);
     NL_ALLOC_COPY(psi_n, psi_n);
     NL_ALLOC_COPY(load_unload_n, LoUnlo_n);
@@ -3774,6 +3813,14 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         fprintf(stderr,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
+        if (!needs_classic_previous_state) {
+            const double saved_mib = (double)((size_t)count*
+                (3*sizeof(qptensors_t)+sizeof(qpvectors_t)))/(1024.0*1024.0);
+            fprintf(stderr,
+                    "Nonlinear GPU specialized state: omitted unused legacy "
+                    "previous-state shadows (%.1f MiB on rank 0)\n",
+                    saved_mib);
+        }
         if (config->material_model == MANZARI_DAFALIAS) {
             if (config->md_integration_scheme ==
                     NL_MD_INTEGRATION_FORWARD_EULER) {
@@ -3890,7 +3937,7 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
         exit(1);
     }
 
-    const int block_size = 128;
+    const int block_size = NL_GPU_UPDATE_BLOCK_SIZE;
     const int grid_size = (g_nl.count + block_size - 1)/block_size;
     if (g_config.material_model == MANZARI_DAFALIAS) {
         nonlinear_gpu_launch_manzari_dafalias(
@@ -4045,12 +4092,16 @@ void nonlinear_gpu_download_state(mysolver_t *solver, nlsolver_t *host_state)
     error = NL_DOWNLOAD(constants, constants);
     if (error == cudaSuccess) error = NL_DOWNLOAD(stresses, stresses);
     if (error == cudaSuccess) error = NL_DOWNLOAD(strains, strains);
-    if (error == cudaSuccess) error = NL_DOWNLOAD(strains1, strains1);
-    if (error == cudaSuccess) error = NL_DOWNLOAD(pstrains1, pstrains1);
+    if (error == cudaSuccess && g_nl.strains1 != NULL)
+        error = NL_DOWNLOAD(strains1, strains1);
+    if (error == cudaSuccess && g_nl.pstrains1 != NULL)
+        error = NL_DOWNLOAD(pstrains1, pstrains1);
     if (error == cudaSuccess) error = NL_DOWNLOAD(pstrains2, pstrains2);
-    if (error == cudaSuccess) error = NL_DOWNLOAD(alphastress1, alphastress1);
+    if (error == cudaSuccess && g_nl.alphastress1 != NULL)
+        error = NL_DOWNLOAD(alphastress1, alphastress1);
     if (error == cudaSuccess) error = NL_DOWNLOAD(alphastress2, alphastress2);
-    if (error == cudaSuccess) error = NL_DOWNLOAD(ep1, ep1);
+    if (error == cudaSuccess && g_nl.ep1 != NULL)
+        error = NL_DOWNLOAD(ep1, ep1);
     if (error == cudaSuccess) error = NL_DOWNLOAD(ep2, ep2);
     if (error == cudaSuccess) error = NL_DOWNLOAD(psi_n, psi_n);
     if (error == cudaSuccess) error = NL_DOWNLOAD(load_unload_n, LoUnlo_n);
