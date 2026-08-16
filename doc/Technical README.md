@@ -538,12 +538,13 @@ Nonlinear GPU execution (runtime environment):
 	yield-surface/backbone kernel. This removes 1,216 bytes of unused device state
 	per nonlinear element and the same amount of device-memory write traffic per
 	updated element and time step. Startup reports the omitted allocation for the
-	selected specialized model. Manzari--Dafalias failure-only constitutive
-	diagnostics use a per-thread shared-memory record so detailed failure reports
-	do not enlarge the normal production thread's local stack. PDMY03 retains its
-	smaller thread-local record because PTXAS generates less local-memory traffic
-	for that layout. These storage changes do not modify the constitutive
-	equations or the committed stress/history state.
+	selected specialized model. Failure-only constitutive diagnostics use a
+	per-thread shared-memory record so detailed failure reports do not enlarge
+	the normal production thread's local stack. Identical-flag PTXAS comparisons
+	retain this layout for both specialized models because it generates less
+	local-memory traffic than their thread-local diagnostic records. These
+	storage changes do not modify the constitutive equations or the committed
+	stress/history state.
 - `material_model=ManzariDafalias` is a device-first, pressure-dependent
 	effective-stress sand model. Production execution currently requires the GPU
 	backend. `manzari_dafalias_integration_scheme=modified_euler` is the default
