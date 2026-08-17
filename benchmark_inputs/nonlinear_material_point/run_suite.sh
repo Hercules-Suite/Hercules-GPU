@@ -37,6 +37,7 @@ fixtures=(
   vonmises_ro_synthetic.in
   manzari_dafalias_modified_euler_synthetic.in
   manzari_dafalias_forward_euler_synthetic.in
+  manzari_dafalias_forward_euler_demand_synthetic.in
   manzari_dafalias_seeded_onset_synthetic.in
   manzari_dafalias_pressure_floor_synthetic.in
   pdmy03_cyclic_shear_synthetic.in
@@ -69,10 +70,51 @@ validate_md_pressure_floor() {
   ' "$csv"
 }
 
+validate_md_forward_euler_substeps() {
+  local mode=$1
+  local prefix=$2
+  local cap=$3
+  local backend
+  for backend in cpu gpu; do
+    local csv="${prefix}.${backend}.csv"
+    if ! awk -F, -v mode="$mode" -v cap="$cap" '
+      NR == 1 {
+        for (column = 1; column <= NF; column++) {
+          if ($column == "plastic_multiplier") multiplier_column = column
+          if ($column == "accepted_substeps") substeps_column = column
+        }
+        next
+      }
+      $multiplier_column > 0.0 {
+        plastic_steps++
+        if ($substeps_column < 1 || $substeps_column > cap) exit 1
+        if (mode == "fixed" && $substeps_column != cap) exit 1
+        if (mode == "demand" && $substeps_column < cap) reductions++
+      }
+      END {
+        if (!multiplier_column || !substeps_column || plastic_steps == 0)
+          exit 1
+        if (mode == "demand" && reductions == 0) exit 1
+      }
+    ' "$csv"; then
+      echo "Forward-Euler ${mode} substep policy failed for ${csv}" >&2
+      return 1
+    fi
+  done
+}
+
 failures=()
 for fixture in "${fixtures[@]}"; do
   printf '\n==> %s\n' "$fixture"
   if ! mpirun -np 1 "$psolve_bin" --nonlinear-material-point "$fixture"; then
+    failures+=("$fixture")
+  elif [[ $fixture == manzari_dafalias_forward_euler_synthetic.in ]] &&
+       ! validate_md_forward_euler_substeps fixed \
+           manzari_dafalias_forward_euler_synthetic 100; then
+    failures+=("$fixture")
+  elif [[ $fixture == manzari_dafalias_forward_euler_demand_synthetic.in ]] &&
+       ! validate_md_forward_euler_substeps demand \
+           manzari_dafalias_forward_euler_demand_synthetic 100; then
     failures+=("$fixture")
   elif [[ $fixture == manzari_dafalias_pressure_floor_synthetic.in ]] &&
        ! validate_md_pressure_floor; then

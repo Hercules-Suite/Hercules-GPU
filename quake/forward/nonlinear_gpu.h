@@ -17,6 +17,11 @@ typedef enum nl_md_integration_scheme_t {
     NL_MD_INTEGRATION_FORWARD_EULER = 1
 } nl_md_integration_scheme_t;
 
+typedef enum nl_md_forward_euler_substeps_t {
+    NL_MD_FORWARD_EULER_SUBSTEPS_FIXED = 0,
+    NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND = 1
+} nl_md_forward_euler_substeps_t;
+
 typedef struct nonlinear_gpu_config_t {
     materialmodel_t material_model;
     noyesflag_t approximate_geostatic_state;
@@ -24,6 +29,7 @@ typedef struct nonlinear_gpu_config_t {
     int32_t geostatic_final_step;
     int32_t no_substeps;
     nl_md_integration_scheme_t md_integration_scheme;
+    nl_md_forward_euler_substeps_t md_forward_euler_substeps;
     nl_md_recovery_mode_t md_recovery_mode;
     double error_tolerance;
     double backbone_error_tolerance;
