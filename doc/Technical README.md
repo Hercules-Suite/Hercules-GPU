@@ -523,9 +523,11 @@ Nonlinear GPU execution (runtime environment):
 	Every `N` global time steps, Hercules reports globally reduced integration-
 	point-slot counts classified as `zero_or_inactive`, `one_step`, and
 	`multi_step`, together with total, mean, and maximum accepted constitutive
-	substeps. For fixed Forward Euler with `no_substeps > 1`, `one_step` identifies
-	the elastic-predictor return and `multi_step` identifies points that executed
-	the fixed plastic substeps. For Modified Euler, a one-step point can be either
+	substeps. For Forward Euler, `one_step` identifies an elastic-predictor return
+	or a one-part plastic update. With the default fixed policy, a plastic point is
+	`multi_step` whenever `no_substeps > 1`; with the opt-in demand policy, the
+	classification reflects the requested count. For Modified Euler, a
+	one-step point can be either
 	elastic or a plastic update accepted in one substep. Zero/inactive slots also
 	include elements skipped because their displacement increment is zero and the
 	three unused slots of a five-point nonlinear-topography element. The sampled
@@ -552,10 +554,39 @@ Nonlinear GPU execution (runtime environment):
 	and uses the established adaptive explicit Modified-Euler implementation.
 	`manzari_dafalias_integration_scheme=forward_euler` selects the OpenSees
 	integration-scheme-5 constitutive stage. After any elastic/yield intersection,
-	Hercules divides the plastic remainder into exactly `no_substeps` equal
-	fractions and applies that first-order stage to each fraction; setting
-	`no_substeps=1` recovers OpenSees's original single-update behavior. Forward
-	Euler has no embedded local-error estimate, adaptive retry, or stress
+	Hercules applies that first-order stage to each fraction. The optional
+	`manzari_dafalias_forward_euler_substeps` control defaults to `fixed`, for
+	which `no_substeps` is the exact count over every plastic remainder. This
+	preserves established inputs and integration-sensitivity studies. The opt-in
+	`demand` policy treats `no_substeps` as a cap and sizes work with an MD-specific
+	stress-ratio/deviatoric-strain heuristic. It is not the PDMY03 subdivision
+	criterion, which also depends on nested-surface spacing, confinement,
+	elastoplastic modulus, and volumetric strain. On one dense-sand cyclic path at
+	30 m depth, changing from a fixed 322 substeps per step to a demanded mean of
+	1.0 moved shear-stress NRMS against the Modified-Euler reference from 0.20% to
+	0.44%; this is a path-specific characterization, not general validation.
+	Setting `no_substeps=1` recovers OpenSees's original single-update behavior
+	under either policy. Forward Euler and its subdivision policies are compiled
+	as separate device entry functions, so ptxas allocates registers for each
+	entry. While the scheme was a runtime branch, a Forward-Euler run inherited
+	Modified Euler's allocation: 255 registers with 6,564 bytes of spill stores
+	and 21,532 bytes of spill loads per thread, against zero spills for PDMY03 on
+	the same build.
+	Specializing the integrator lets each entry carry only its own working set. On
+	the measured demand-policy build, Forward Euler's spill loads fell from 21,532
+	to 2,108 bytes per thread and its spill stores from 6,564 to 508, while
+	Modified Euler was unchanged.
+	In that measured demand-policy build, both the demand Forward-Euler and
+	Modified-Euler entries remained at the 255-register ceiling because ptxas
+	allocates up to the cap and spills only the excess. Occupancy therefore
+	remained 2 blocks of 128 threads (8 of 64 warps) per SM.
+	`NL_MD_FE_MIN_BLOCKS_PER_SM` (default 2) and `NL_MD_ME_MIN_BLOCKS_PER_SM`
+	(default 2) set that bound per scheme and are compile-time overridable, e.g.
+	`-DNL_MD_FE_MIN_BLOCKS_PER_SM=3`. The useful value is empirical: raising it
+	lowers the per-thread register budget to `65536/(block*N)` and trades more
+	spilling for more latency hiding. The neutral value 2 preserves the measured
+	allocation until target-system timing justifies a higher residency.
+	Forward Euler has no embedded local-error estimate, adaptive retry, or stress
 	correction. It therefore ignores `backbone_errTol` and
 	`manzari_dafalias_recovery`, reports the resulting absolute yield drift, and
 	is more sensitive to substep size. Hercules retains its finite-state and

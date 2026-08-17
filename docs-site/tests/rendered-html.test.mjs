@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 206 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 207 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -275,8 +275,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 226);
-  assert.equal(documented.length, 226, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 227);
+  assert.equal(documented.length, 227, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -438,7 +438,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /fourteen-fixture suite/);
+  assert.match(gpu, /sixteen-fixture suite/);
   assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -600,6 +600,18 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
     `${benchmarkRoot}generate_hercules_manzari_dafalias_path.py`,
     "utf8",
   );
+  const fixedForwardEulerFixture = readFileSync(
+    `${benchmarkRoot}manzari_dafalias_forward_euler_synthetic.in`,
+    "utf8",
+  );
+  const demandForwardEulerFixture = readFileSync(
+    `${benchmarkRoot}manzari_dafalias_forward_euler_demand_synthetic.in`,
+    "utf8",
+  );
+  const materialPointSuite = readFileSync(
+    `${benchmarkRoot}run_suite.sh`,
+    "utf8",
+  );
   const canonicalComparator = readFileSync(
     `${benchmarkRoot}compare_opensees_manzari_dafalias_canonical.py`,
     "utf8",
@@ -629,13 +641,32 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*\? 22 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_integration_scheme"/);
+  assert.match(cpu, /parsetext\(fp, "manzari_dafalias_forward_euler_substeps"/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_recovery"/);
   assert.match(cpu, /force_accept[\s\S]*unlimited_substeps[\s\S]*opensees/);
   assert.match(gpuHeader, /NL_MD_RECOVERY_STRICT[\s\S]*NL_MD_RECOVERY_OPENSEES/);
   assert.match(gpuHeader, /NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*NL_MD_INTEGRATION_FORWARD_EULER/);
+  assert.match(gpuHeader, /NL_MD_FORWARD_EULER_SUBSTEPS_FIXED[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
-  assert.match(gpu, /no_substeps divides the plastic remainder/);
-  assert.match(gpu, /substep < cfg->no_substeps/);
+  assert.match(gpu, /Fixed subdivision remains the default/);
+  assert.match(gpu, /not the[\s\S]*PDMY03 surface-spacing criterion/);
+  // The integrator is specialized per scheme and Forward-Euler subdivision
+  // policy so ptxas allocates one path per entry function.
+  assert.match(gpu, /template <nl_md_integration_scheme_t MD_SCHEME,[\s\S]*nl_md_forward_euler_substeps_t MD_FE_SUBSTEPS>/);
+  assert.match(gpu, /nl_update_manzari_dafalias_scheme<MD_SCHEME,[\s\S]*MD_FE_SUBSTEPS>\(/);
+  assert.match(gpu, /if \(MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER\)/);
+  assert.match(gpu, /NL_MD_INTEGRATION_FORWARD_EULER,[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_FIXED/);
+  assert.match(gpu, /NL_MD_INTEGRATION_FORWARD_EULER,[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND/);
+  assert.match(gpu, /NL_MD_INTEGRATION_MODIFIED_EULER,[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_FIXED/);
+  // Per-scheme occupancy target: ptxas fills to the 255-register ceiling
+  // unless a residency bound asks for less.
+  assert.match(gpu, /__launch_bounds__\(NL_GPU_UPDATE_BLOCK_SIZE,/);
+  assert.match(gpu, /NL_MD_FE_MIN_BLOCKS_PER_SM/);
+  assert.match(gpu, /#define NL_MD_FE_MIN_BLOCKS_PER_SM 2/);
+  assert.match(gpu, /NL_MD_ME_MIN_BLOCKS_PER_SM/);
+  assert.match(gpu, /substep < requested/);
+  assert.match(gpu, /md_substep_request\([\s\S]{0,200}?cfg->no_substeps\)/);
+  assert.match(gpu, /NL_MD_FE_RATIO_STEP[\s\S]*NL_MD_FE_STRAIN_STEP/);
   assert.match(gpu, /cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpu, /enforce_md_yield_tolerance[\s\S]*NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*model_error > cfg\.error_tolerance/);
   assert.match(gpu, /cfg->backbone_error_tolerance/);
@@ -691,6 +722,7 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(cpu, /constitutive stress is assembled ["\s]*directly as total stress/);
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_modified_euler_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_forward_euler_synthetic.in`));
+  assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_forward_euler_demand_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_seeded_onset_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}manzari_dafalias_pressure_floor_synthetic.in`));
   assert.ok(existsSync(`${benchmarkRoot}opensees_manzari_dafalias_synthetic.tcl`));
@@ -705,11 +737,19 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(generator, /material_point_initial_stress/);
   assert.match(generator, /--recovery-mode/);
   assert.match(generator, /--integration-scheme/);
+  assert.match(generator, /--forward-euler-substeps/);
   assert.match(generator, /--compare-rtol/);
   assert.match(generator, /forward_euler[\s\S]*1\.0e-5/);
   assert.match(generator, /f"\{args\.integration_scheme\}"/);
   assert.match(generator, /forward_euler[\s\S]*--recovery-mode=strict/);
   assert.match(generator, /manzari_dafalias_recovery = \{args\.recovery_mode\}/);
+  assert.match(generator, /manzari_dafalias_forward_euler_substeps = /);
+  assert.doesNotMatch(fixedForwardEulerFixture, /manzari_dafalias_forward_euler_substeps/);
+  assert.match(demandForwardEulerFixture, /manzari_dafalias_forward_euler_substeps = demand/);
+  assert.match(materialPointSuite, /validate_md_forward_euler_substeps fixed/);
+  assert.match(materialPointSuite, /validate_md_forward_euler_substeps demand/);
+  assert.match(materialPointSuite, /\$substeps_column != cap/);
+  assert.match(materialPointSuite, /\$substeps_column < cap/);
   assert.match(generator, /"alpha_in": tuple/);
   assert.match(generator, /"md_drained_triaxial": \("9", "complete"\)/);
   assert.match(generator, /"md_sspbrickup_undrained_triaxial": \("4", "complete"\)/);

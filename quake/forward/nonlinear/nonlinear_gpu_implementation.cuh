@@ -444,6 +444,13 @@ NL_HD static inline int md_valid_integration_scheme(
            scheme == NL_MD_INTEGRATION_FORWARD_EULER;
 }
 
+NL_HD static inline int md_valid_forward_euler_substeps(
+    nl_md_forward_euler_substeps_t mode)
+{
+    return mode == NL_MD_FORWARD_EULER_SUBSTEPS_FIXED ||
+           mode == NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND;
+}
+
 NL_HD static inline tensor_t md_zero(void)
 {
     tensor_t a = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -535,6 +542,27 @@ NL_HD static inline double md_minimum_mean_stress(
     const manzari_dafalias_constants_t *m)
 {
     return 1.0e-4*m->P_atm;
+}
+
+/* Optional demand-driven Forward-Euler subdivision targets. This is a
+ * Manzari--Dafalias-specific heuristic: it limits stress-ratio excursion and
+ * octahedral engineering deviatoric strain per subincrement. It is not the
+ * PDMY03 surface-spacing criterion. Fixed subdivision remains the default for
+ * backward-compatible and reproducible integration-sensitivity studies. */
+#define NL_MD_FE_RATIO_STEP  0.05
+#define NL_MD_FE_STRAIN_STEP 1.0e-5
+
+/* Convert a real-valued subdivision demand into a substep count. Clamping
+ * before the cast is deliberate: converting a non-finite or out-of-range
+ * double to int32_t is undefined behavior, and on the device it saturates to
+ * INT32_MAX, which is how a diverged point reports a nonsense substep
+ * request instead of a usable diagnostic. */
+NL_HD static inline int32_t md_substep_request(double demand, int32_t cap)
+{
+    if (cap < 1) return 1;
+    if (!(demand > 0.0)) return 1;                /* also catches NaN */
+    if (!(demand < (double)cap)) return cap;      /* also catches +inf */
+    return (int32_t)demand + 1;
 }
 
 /* Complete the unresolved remainder on the low-effective-pressure cutoff.
@@ -1076,7 +1104,16 @@ NL_HD static int md_stress_correction(
     return 1;
 }
 
-NL_HD static int nl_update_manzari_dafalias(
+/* The integration scheme is a compile-time parameter so each production kernel
+ * contains exactly one integrator. Modified Euler holds two nl_md_stage_t
+ * estimates plus the stress-correction working set and allocates all 255
+ * registers with heavy spilling; Forward Euler needs a fraction of that. When
+ * the scheme was a runtime branch, ptxas had to allocate for the worse of the
+ * two, so a Forward-Euler run paid Modified Euler's spill traffic. The host
+ * material-point driver keeps a runtime-dispatching wrapper below. */
+template <nl_md_integration_scheme_t MD_SCHEME,
+          nl_md_forward_euler_substeps_t MD_FE_SUBSTEPS>
+NL_HD static int nl_update_manzari_dafalias_scheme(
     const nlconstants_t *__restrict__ c,
     const nonlinear_gpu_config_t *__restrict__ cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
@@ -1132,8 +1169,15 @@ NL_HD static int nl_update_manzari_dafalias(
     }
     if (!(*void_ratio > -0.99) || cfg->no_substeps <= 0 ||
         !md_valid_integration_scheme(cfg->md_integration_scheme) ||
+        !md_valid_forward_euler_substeps(
+            cfg->md_forward_euler_substeps) ||
         !md_valid_recovery_mode(cfg->md_recovery_mode) ||
-        (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
+        /* Guards a launch that dispatched to the wrong specialization. */
+        cfg->md_integration_scheme != MD_SCHEME ||
+        cfg->md_forward_euler_substeps != MD_FE_SUBSTEPS ||
+        (MD_SCHEME == NL_MD_INTEGRATION_MODIFIED_EULER &&
+         MD_FE_SUBSTEPS != NL_MD_FORWARD_EULER_SUBSTEPS_FIXED) ||
+        (MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER &&
          cfg->md_recovery_mode != NL_MD_RECOVERY_STRICT) ||
         !(cfg->backbone_error_tolerance > 0.0) ||
         !(cfg->error_tolerance > 0.0)) {
@@ -1203,18 +1247,43 @@ NL_HD static int nl_update_manzari_dafalias(
         dT = 1.0-elastic_ratio;
     }
 
-    if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+    if (MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER) {
         /* OpenSees integration scheme 5 supplies the first-order update used
-         * by every fixed substep. no_substeps divides the plastic remainder
-         * after the elastic/yield intersection; no_substeps=1 therefore
-         * reproduces the original single-update OpenSees path. There is no
-         * embedded-error estimate, adaptive retry, or yield-surface stress
-         * correction. Hercules retains its pressure-floor and finite-state
-         * safeguards and reports the final yield drift. */
+         * by every substep. The default fixed policy divides the plastic
+         * remainder after the elastic/yield intersection into exactly
+         * no_substeps equal parts, preserving the historical and canonical
+         * sensitivity-study behavior. The opt-in demand policy instead sizes
+         * the count from an MD-specific stress-ratio/deviatoric-strain
+         * heuristic and treats no_substeps as a cap. There is no embedded-error
+         * estimate, adaptive retry, or yield-surface stress correction. */
         const double plastic_fraction = dT;
-        const double fixed_fraction = plastic_fraction/cfg->no_substeps;
-        for (int32_t substep = 0; substep < cfg->no_substeps; substep++) {
-            const double step_fraction = substep == cfg->no_substeps-1
+        int32_t requested = cfg->no_substeps;
+        if (MD_FE_SUBSTEPS == NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND) {
+            const tensor_t de_plastic = md_scale(de, plastic_fraction);
+            const tensor_t trial_plastic = md_add(
+                stress, md_elastic_increment(de_plastic, K, G));
+            const double p_now = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+            const double p_trial =
+                md_trace(trial_plastic)/3.0+1.0e-2*m->P_atm;
+            requested = 1;
+            if (p_now > 0.0 && p_trial > 0.0) {
+                const tensor_t ratio_change = md_sub(
+                    md_scale(md_dev(trial_plastic), 1.0/p_trial),
+                    md_scale(md_dev(stress), 1.0/p_now));
+                requested = md_substep_request(
+                    sqrt(1.5*md_ddot(ratio_change, ratio_change))/
+                        NL_MD_FE_RATIO_STEP,
+                    cfg->no_substeps);
+            }
+            const double dev_octahedral =
+                2.0*md_norm(md_dev(de_plastic))/sqrt(3.0);
+            const int32_t strain_request = md_substep_request(
+                dev_octahedral/NL_MD_FE_STRAIN_STEP, cfg->no_substeps);
+            if (strain_request > requested) requested = strain_request;
+        }
+        const double fixed_fraction = plastic_fraction/(double)requested;
+        for (int32_t substep = 0; substep < requested; substep++) {
+            const double step_fraction = substep == requested-1
                 ? fmax(1.0-T, 0.0) : fixed_fraction;
             diagnostics->attempts = substep+1;
             diagnostics->substep_fraction = step_fraction;
@@ -1769,6 +1838,53 @@ NL_HD static int nl_update_manzari_dafalias(
     *initialized = initialized_work;
     diagnostics->effective_mean_stress = md_trace(stress)/3.0;
     return 1;
+}
+
+/* Runtime-dispatching wrapper. The production kernels call the specialization
+ * directly so each one carries a single integrator; this entry point exists
+ * for the host material-point driver, which must honor whichever scheme the
+ * fixture selected and is not performance critical. */
+NL_HD static int nl_update_manzari_dafalias(
+    const nlconstants_t *__restrict__ c,
+    const nonlinear_gpu_config_t *__restrict__ cfg,
+    tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
+    tensor_t *__restrict__ dynamic_stress,
+    tensor_t *__restrict__ plastic_strain,
+    tensor_t *__restrict__ alpha, tensor_t *__restrict__ alpha_in,
+    tensor_t *__restrict__ fabric, double *__restrict__ initialized,
+    double *__restrict__ void_ratio,
+    double *__restrict__ plastic_multiplier,
+    double *__restrict__ yield_error,
+    double *__restrict__ integration_error,
+    int32_t *__restrict__ accepted_substeps,
+    nl_md_diagnostics_t *__restrict__ diagnostics)
+{
+    if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+        if (cfg->md_forward_euler_substeps ==
+                NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND) {
+            return nl_update_manzari_dafalias_scheme<
+                NL_MD_INTEGRATION_FORWARD_EULER,
+                NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND>(
+                c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+                plastic_strain, alpha, alpha_in, fabric, initialized,
+                void_ratio, plastic_multiplier, yield_error,
+                integration_error, accepted_substeps, diagnostics);
+        }
+        return nl_update_manzari_dafalias_scheme<
+            NL_MD_INTEGRATION_FORWARD_EULER,
+            NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>(
+            c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+            plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
+            plastic_multiplier, yield_error, integration_error,
+            accepted_substeps, diagnostics);
+    }
+    return nl_update_manzari_dafalias_scheme<
+        NL_MD_INTEGRATION_MODIFIED_EULER,
+        NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>(
+        c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+        plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
+        plastic_multiplier, yield_error, integration_error,
+        accepted_substeps, diagnostics);
 }
 
 #undef NL_HD
@@ -3314,9 +3430,47 @@ typedef struct nl_md_shared_diagnostics_t {
 } nl_md_shared_diagnostics_t;
 #endif
 
+#if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+/* Minimum resident blocks per SM requested from ptxas, per integration scheme.
+ *
+ * Without a bound ptxas allocates up to the 255-register ceiling, which on
+ * sm_100 admits only 65536/255 = 257 threads, i.e. 2 blocks of
+ * NL_GPU_UPDATE_BLOCK_SIZE and 8 of 64 warps. Raising the requested residency
+ * lowers the per-thread budget (65536/(BLOCK*N)) and buys latency hiding at
+ * the cost of more spilling, so the useful setting is empirical: the measured
+ * demand Forward-Euler entry spills only a few hundred bytes at 255 registers
+ * and may have room to trade, while Modified Euler already spills tens of
+ * kilobytes and is left alone. Recheck every entry after changing the bound.
+ *
+ * Override per build to sweep, e.g. -DNL_MD_FE_MIN_BLOCKS_PER_SM=3. The
+ * neutral default of 2 reproduces the previous allocation on the measured
+ * sm_100 build until target-system timing justifies a higher residency. */
+#ifndef NL_MD_FE_MIN_BLOCKS_PER_SM
+#define NL_MD_FE_MIN_BLOCKS_PER_SM 2
+#endif
+#ifndef NL_MD_ME_MIN_BLOCKS_PER_SM
+#define NL_MD_ME_MIN_BLOCKS_PER_SM 2
+#endif
+
+/* One entry function per integration scheme and Forward-Euler subdivision
+ * policy. ptxas allocates registers per entry function, so specializing here
+ * keeps both Forward-Euler paths from inheriting Modified Euler's allocation
+ * and spill traffic. */
+template <nl_md_integration_scheme_t MD_SCHEME,
+          nl_md_forward_euler_substeps_t MD_FE_SUBSTEPS>
+__global__ static void
+__launch_bounds__(NL_GPU_UPDATE_BLOCK_SIZE,
+                  MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER
+                      ? NL_MD_FE_MIN_BLOCKS_PER_SM
+                      : NL_MD_ME_MIN_BLOCKS_PER_SM)
+kernel_nonlinear_update_force(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
+    gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
+#else
 __global__ static void kernel_nonlinear_update_force(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
     gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
+#endif
 {
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
     __shared__ nl_md_shared_diagnostics_t
@@ -3417,7 +3571,8 @@ __global__ static void kernel_nonlinear_update_force(
             int32_t md_substeps = 0;
             nl_md_diagnostics_t *md_diagnostics =
                 &md_diagnostics_shared[threadIdx.x].value;
-            ok = nl_update_manzari_dafalias(
+            ok = nl_update_manzari_dafalias_scheme<MD_SCHEME,
+                                                    MD_FE_SUBSTEPS>(
                 c, &cfg, strain, strain_prev, static_stress,
                 &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
@@ -3438,8 +3593,7 @@ __global__ static void kernel_nonlinear_update_force(
              * constitutive nonconvergence.  Keep the finite-state/integrator
              * failure checks for both schemes. */
             const int enforce_md_yield_tolerance =
-                cfg.md_integration_scheme ==
-                    NL_MD_INTEGRATION_MODIFIED_EULER;
+                MD_SCHEME == NL_MD_INTEGRATION_MODIFIED_EULER;
             if (!ok || !isfinite(model_error) ||
                 (enforce_md_yield_tolerance &&
                  model_error > cfg.error_tolerance)) {
@@ -3552,8 +3706,32 @@ extern "C" void nonlinear_gpu_launch_manzari_dafalias(
     int32_t step, double delta_t, double delta_t_squared,
     cudaStream_t stream)
 {
-    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
-        state, config, gpu, step, delta_t, delta_t_squared);
+    /* Dispatch to the specialization that matches the configured scheme and
+     * Forward-Euler subdivision policy. Each is a separate ptxas entry
+     * function, so neither Forward-Euler path inherits Modified Euler's
+     * register allocation. */
+    if (config.md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+        if (config.md_forward_euler_substeps ==
+                NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND) {
+            kernel_nonlinear_update_force<
+                NL_MD_INTEGRATION_FORWARD_EULER,
+                NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND>
+                <<<grid_size, block_size, 0, stream>>>(
+                    state, config, gpu, step, delta_t, delta_t_squared);
+        } else {
+            kernel_nonlinear_update_force<
+                NL_MD_INTEGRATION_FORWARD_EULER,
+                NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>
+                <<<grid_size, block_size, 0, stream>>>(
+                    state, config, gpu, step, delta_t, delta_t_squared);
+        }
+    } else {
+        kernel_nonlinear_update_force<
+            NL_MD_INTEGRATION_MODIFIED_EULER,
+            NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>
+            <<<grid_size, block_size, 0, stream>>>(
+                state, config, gpu, step, delta_t, delta_t_squared);
+    }
 }
 #elif defined(NL_GPU_PDMY03_ONLY)
 extern "C" void nonlinear_gpu_launch_pdmy03(
@@ -3698,7 +3876,13 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     if (mesh == NULL || solver == NULL || host_state == NULL || config == NULL ||
         count < 0 ||
         !md_valid_integration_scheme(config->md_integration_scheme) ||
+        !md_valid_forward_euler_substeps(
+            config->md_forward_euler_substeps) ||
         !md_valid_recovery_mode(config->md_recovery_mode) ||
+        (config->md_integration_scheme !=
+             NL_MD_INTEGRATION_FORWARD_EULER &&
+         config->md_forward_euler_substeps !=
+             NL_MD_FORWARD_EULER_SUBSTEPS_FIXED) ||
         (config->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
          config->md_recovery_mode != NL_MD_RECOVERY_STRICT))
         return -1;
@@ -3843,15 +4027,27 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         if (config->material_model == MANZARI_DAFALIAS) {
             if (config->md_integration_scheme ==
                     NL_MD_INTEGRATION_FORWARD_EULER) {
-                fprintf(stderr,
-                        "Manzari-Dafalias integration: Forward Euler "
-                        "(fixed_substeps=%d over the plastic remainder, "
-                        "yield_drift=reported, "
-                        "geostatic=%s)\n",
-                        config->no_substeps,
-                        config->approximate_geostatic_state == YES
-                            ? "approximate K0 effective stress"
-                            : "solver stress history");
+                if (config->md_forward_euler_substeps ==
+                        NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND) {
+                    fprintf(stderr,
+                            "Manzari-Dafalias integration: Forward Euler "
+                            "(substeps=demand, max_substeps=%d, "
+                            "yield_drift=reported, geostatic=%s)\n",
+                            config->no_substeps,
+                            config->approximate_geostatic_state == YES
+                                ? "approximate K0 effective stress"
+                                : "solver stress history");
+                } else {
+                    fprintf(stderr,
+                            "Manzari-Dafalias integration: Forward Euler "
+                            "(substeps=fixed, fixed_substeps=%d over the "
+                            "plastic remainder, yield_drift=reported, "
+                            "geostatic=%s)\n",
+                            config->no_substeps,
+                            config->approximate_geostatic_state == YES
+                                ? "approximate K0 effective stress"
+                                : "solver stress history");
+                }
             } else {
                 const char *recovery = "strict";
                 if (config->md_recovery_mode == NL_MD_RECOVERY_FORCE_ACCEPT)

@@ -118,6 +118,10 @@ its translated surface centers from stress.
   constitutive stage. It checks 100 fixed host/CUDA Forward-Euler substeps per
   plastic remainder and records the absolute yield drift. Forward Euler has no
   embedded local-error estimate, adaptive retry, or stress-correction loop.
+- `manzari_dafalias_forward_euler_demand_synthetic.in` repeats that path with
+  `manzari_dafalias_forward_euler_substeps=demand`. The suite requires both the
+  host and CUDA histories to execute at least one plastic increment below the
+  configured cap, while retaining the usual finite-state and parity checks.
 - `manzari_dafalias_seeded_onset_synthetic.in` starts from a committed
   isotropically consolidated state and crosses first yield in the next strain
   increment. It verifies the elastic intersection followed by Modified-Euler
@@ -197,15 +201,30 @@ implementation before using a calibration.
 
 The optional `forward_euler` scheme matches OpenSees integration scheme 5.
 After the same elastic predictor and elastic/yield intersection, Hercules
-divides the remaining plastic fraction into exactly `no_substeps` equal parts
-and applies the first-order stage to each part. There is no second stage,
-embedded-error comparison, adaptive retry, or stress correction;
-`backbone_errTol` and `manzari_dafalias_recovery` are inactive. Hercules
-reports the absolute final yield drift rather than applying `error_tolerance`
-as an acceptance bound on that drift. Set `no_substeps=1` to reproduce the
-original single-update OpenSees scheme-5 path. Larger values reduce the
-Forward-Euler truncation error at directly proportional constitutive cost.
-Modified Euler remains the recommended production default.
+applies the first-order stage to each part. By default,
+`manzari_dafalias_forward_euler_substeps=fixed`, and `no_substeps` is the exact
+number of equal parts over every plastic remainder. This preserves existing
+inputs and controlled integration-sensitivity studies.
+
+The opt-in `demand` policy treats `no_substeps` as a cap. Its MD-specific
+heuristic requests the maximum of the trial stress-ratio excursion divided by
+`0.05` and the octahedral engineering deviatoric strain increment divided by
+`1.0e-5`, clamped to `[1, no_substeps]`. This is not the PDMY03 subdivision
+criterion: PDMY03 additionally uses nested-surface spacing, confinement,
+elastoplastic modulus, and volumetric strain. The demand policy has been
+characterized on a dense-sand cyclic path at 30 m depth, where changing from a
+fixed 322 substeps per step to a demanded mean of 1.0 moved shear-stress NRMS
+against the Modified-Euler reference from 0.20% to 0.44%. That result is
+path- and calibration-specific; compare both policies for the case being
+studied before using `demand` in production.
+
+Neither Forward-Euler policy has a second stage, embedded-error comparison,
+adaptive retry, or stress correction. `backbone_errTol` and
+`manzari_dafalias_recovery` are inactive, and Hercules reports the absolute
+final yield drift rather than applying `error_tolerance` as an acceptance
+bound. `no_substeps=1` reproduces the original single-update OpenSees scheme-5
+path under either policy. Modified Euler remains the recommended production
+default.
 
 The independent OpenSees characterization uses the same 21-step path:
 
@@ -389,9 +408,13 @@ python3 generate_hercules_manzari_dafalias_path.py \
   --maximum-substeps 100
 ```
 
+Pass `--forward-euler-substeps demand` only for an explicit demand-driven
+study. In that case, `--maximum-substeps` becomes the cap, and the generator
+writes `manzari_dafalias_forward_euler_substeps=demand` into the case.
+
 Generated canonical histories use `material_point_compare_atol=1e-8` and a
 scheme-specific relative CPU/CUDA state-parity tolerance: `1e-6` for adaptive
-Modified Euler and `1e-5` for fixed-substep Forward Euler. The latter performs
+Modified Euler and `1e-5` for Forward Euler. Fixed Forward Euler can perform
 many sequential first-order state updates without stress correction, so small
 host/device libm differences accumulate more directly. Override it with
 `--compare-rtol` when conducting a documented sensitivity study. Each tensor

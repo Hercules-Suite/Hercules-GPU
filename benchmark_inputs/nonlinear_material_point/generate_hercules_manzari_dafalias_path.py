@@ -235,14 +235,14 @@ def main() -> int:
         "--compare-rtol", type=float,
         help=(
             "CPU/GPU state-comparison relative tolerance. Defaults to 1e-6 "
-            "for Modified Euler and 1e-5 for fixed-substep Forward Euler."
+            "for Modified Euler and 1e-5 for Forward Euler."
         ),
     )
     parser.add_argument(
         "--maximum-substeps", type=int, default=400,
         help=(
-            "Modified-Euler accepted-substep ceiling or Forward-Euler exact "
-            "fixed-substep count (default: 400)"
+            "Modified-Euler accepted-substep ceiling; for Forward Euler, the "
+            "exact fixed count or demand-driven cap (default: 400)"
         ),
     )
     parser.add_argument(
@@ -251,7 +251,16 @@ def main() -> int:
         default="modified_euler",
         help=(
             "Hercules integration scheme (default: modified_euler). For "
-            "forward_euler, --maximum-substeps is the exact fixed count."
+            "forward_euler, select its subdivision policy separately."
+        ),
+    )
+    parser.add_argument(
+        "--forward-euler-substeps",
+        choices=("fixed", "demand"),
+        default="fixed",
+        help=(
+            "Forward-Euler subdivision policy (default: fixed). fixed uses "
+            "--maximum-substeps exactly; demand treats it as an upper bound."
         ),
     )
     parser.add_argument(
@@ -285,6 +294,12 @@ def main() -> int:
             "--integration-scheme=forward_euler requires "
             "--recovery-mode=strict"
         )
+    if (args.integration_scheme != "forward_euler"
+            and args.forward_euler_substeps != "fixed"):
+        raise SystemExit(
+            "--forward-euler-substeps=demand requires "
+            "--integration-scheme=forward_euler"
+        )
 
     lines = [
         "# Generated from a canonical OpenSees Manzari--Dafalias strain path.",
@@ -297,6 +312,11 @@ def main() -> int:
         f"no_substeps = {args.maximum_substeps}",
         ("manzari_dafalias_integration_scheme = "
          f"{args.integration_scheme}"),
+        *(
+            ["manzari_dafalias_forward_euler_substeps = "
+             f"{args.forward_euler_substeps}"]
+            if args.integration_scheme == "forward_euler" else []
+        ),
         f"manzari_dafalias_recovery = {args.recovery_mode}",
         f"error_tolerance = {args.yield_tolerance_pa:.17e}",
         f"backbone_errTol = {args.backbone_errtol:.17e}",
@@ -358,8 +378,14 @@ def main() -> int:
     print(f"Initial OpenSees step: {initial['step']}")
     print(f"Hercules integration scheme: {args.integration_scheme}")
     if args.integration_scheme == "forward_euler":
-        print("Forward-Euler fixed substeps per plastic remainder: "
-              f"{args.maximum_substeps}")
+        print("Forward-Euler substep policy: "
+              f"{args.forward_euler_substeps}")
+        if args.forward_euler_substeps == "fixed":
+            print("Forward-Euler fixed substeps per plastic remainder: "
+                  f"{args.maximum_substeps}")
+        else:
+            print("Forward-Euler maximum demanded substeps per plastic "
+                  f"remainder: {args.maximum_substeps}")
     print(f"CPU/GPU comparison relative tolerance: {compare_rtol:.6e}")
     print("Seed normalization: verified isotropic stress; zeroed "
           "roundoff-only directional state")
