@@ -523,9 +523,10 @@ Nonlinear GPU execution (runtime environment):
 	Every `N` global time steps, Hercules reports globally reduced integration-
 	point-slot counts classified as `zero_or_inactive`, `one_step`, and
 	`multi_step`, together with total, mean, and maximum accepted constitutive
-	substeps. For fixed Forward Euler with `no_substeps > 1`, `one_step` identifies
-	the elastic-predictor return and `multi_step` identifies points that executed
-	the fixed plastic substeps. For Modified Euler, a one-step point can be either
+	substeps. For Forward Euler, `one_step` identifies both the elastic-predictor
+	return and a plastic update whose demanded subdivision was a single substep,
+	while `multi_step` identifies points that demanded more. For Modified Euler, a
+	one-step point can be either
 	elastic or a plastic update accepted in one substep. Zero/inactive slots also
 	include elements skipped because their displacement increment is zero and the
 	three unused slots of a five-point nonlinear-topography element. The sampled
@@ -552,9 +553,17 @@ Nonlinear GPU execution (runtime environment):
 	and uses the established adaptive explicit Modified-Euler implementation.
 	`manzari_dafalias_integration_scheme=forward_euler` selects the OpenSees
 	integration-scheme-5 constitutive stage. After any elastic/yield intersection,
-	Hercules divides the plastic remainder into exactly `no_substeps` equal
-	fractions and applies that first-order stage to each fraction; setting
-	`no_substeps=1` recovers OpenSees's original single-update behavior. Forward
+	Hercules subdivides the plastic remainder on demand and applies that
+	first-order stage to each fraction. The requested count is sized from the
+	trial stress-ratio excursion and the octahedral deviatoric strain increment,
+	using the same criterion and thresholds as PDMY03, and `no_substeps` is the
+	upper bound rather than the count. Setting `no_substeps=1` therefore still
+	recovers OpenSees's original single-update behavior. Because the dominant
+	Forward-Euler error is the absent stress correction rather than the
+	subdivision, a demand-driven count costs very little accuracy: on a dense-sand
+	cyclic path at 30 m depth, dropping from a fixed 322 substeps per step to a
+	demanded 1.0 moved the shear-stress NRMS against the Modified-Euler reference
+	from 0.20% to 0.44%. Forward
 	Euler has no embedded local-error estimate, adaptive retry, or stress
 	correction. It therefore ignores `backbone_errTol` and
 	`manzari_dafalias_recovery`, reports the resulting absolute yield drift, and

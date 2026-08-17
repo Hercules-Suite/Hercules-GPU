@@ -197,15 +197,25 @@ implementation before using a calibration.
 
 The optional `forward_euler` scheme matches OpenSees integration scheme 5.
 After the same elastic predictor and elastic/yield intersection, Hercules
-divides the remaining plastic fraction into exactly `no_substeps` equal parts
-and applies the first-order stage to each part. There is no second stage,
-embedded-error comparison, adaptive retry, or stress correction;
+subdivides the remaining plastic fraction on demand and applies the first-order
+stage to each part. The requested count is `max` of the trial stress-ratio
+excursion divided by `0.05` and the octahedral engineering deviatoric strain
+increment divided by `1.0e-5` — the same criterion and thresholds
+`pdmy03_requested_substeps` uses — clamped to `[1, no_substeps]`. There is no
+second stage, embedded-error comparison, adaptive retry, or stress correction;
 `backbone_errTol` and `manzari_dafalias_recovery` are inactive. Hercules
 reports the absolute final yield drift rather than applying `error_tolerance`
-as an acceptance bound on that drift. Set `no_substeps=1` to reproduce the
-original single-update OpenSees scheme-5 path. Larger values reduce the
-Forward-Euler truncation error at directly proportional constitutive cost.
-Modified Euler remains the recommended production default.
+as an acceptance bound on that drift.
+
+`no_substeps` is the upper bound, not the count, so `no_substeps=1` still
+reproduces the original single-update OpenSees scheme-5 path. Raising it no
+longer raises cost proportionally: the demanded count is what executes. This
+matters because the dominant Forward-Euler error is the absent stress
+correction, not the subdivision — on a dense-sand cyclic path at 30 m depth,
+a fixed 322 substeps per step and a demanded 1.0 give shear-stress NRMS of
+0.20% and 0.44% respectively against the Modified-Euler reference, so the
+extra 322x of work buys almost nothing. Modified Euler remains the recommended
+production default.
 
 The independent OpenSees characterization uses the same 21-step path:
 

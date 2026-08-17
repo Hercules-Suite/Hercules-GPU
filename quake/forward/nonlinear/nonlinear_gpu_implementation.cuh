@@ -537,6 +537,26 @@ NL_HD static inline double md_minimum_mean_stress(
     return 1.0e-4*m->P_atm;
 }
 
+/* Forward-Euler subdivision targets. These mirror the thresholds PDMY03
+ * already uses in pdmy03_requested_substeps (stress-ratio excursion and
+ * octahedral engineering deviatoric strain per subincrement), so the two
+ * explicit integrators size their work from the same criterion. */
+#define NL_MD_FE_RATIO_STEP  0.05
+#define NL_MD_FE_STRAIN_STEP 1.0e-5
+
+/* Convert a real-valued subdivision demand into a substep count. Clamping
+ * before the cast is deliberate: converting a non-finite or out-of-range
+ * double to int32_t is undefined behavior, and on the device it saturates to
+ * INT32_MAX, which is how a diverged point reports a nonsense substep
+ * request instead of a usable diagnostic. */
+NL_HD static inline int32_t md_substep_request(double demand, int32_t cap)
+{
+    if (cap < 1) return 1;
+    if (!(demand > 0.0)) return 1;                /* also catches NaN */
+    if (!(demand < (double)cap)) return cap;      /* also catches +inf */
+    return (int32_t)demand + 1;
+}
+
 /* Complete the unresolved remainder on the low-effective-pressure cutoff.
  * Sand cannot carry tensile effective mean stress. Collapse the skeleton to
  * the isotropic OpenSees p_min state and assign the remaining total strain,
@@ -1205,16 +1225,41 @@ NL_HD static int nl_update_manzari_dafalias(
 
     if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
         /* OpenSees integration scheme 5 supplies the first-order update used
-         * by every fixed substep. no_substeps divides the plastic remainder
-         * after the elastic/yield intersection; no_substeps=1 therefore
-         * reproduces the original single-update OpenSees path. There is no
-         * embedded-error estimate, adaptive retry, or yield-surface stress
-         * correction. Hercules retains its pressure-floor and finite-state
-         * safeguards and reports the final yield drift. */
+         * by every substep. The plastic remainder after the elastic/yield
+         * intersection is subdivided on demand from the trial stress-ratio
+         * excursion and the deviatoric strain increment, using the same
+         * criterion and thresholds as PDMY03. no_substeps is the CAP, not the
+         * count, so no_substeps=1 still reproduces the original single-update
+         * OpenSees path exactly. There is no embedded-error estimate, adaptive
+         * retry, or yield-surface stress correction. Hercules retains its
+         * pressure-floor and finite-state safeguards and reports the final
+         * yield drift. */
         const double plastic_fraction = dT;
-        const double fixed_fraction = plastic_fraction/cfg->no_substeps;
-        for (int32_t substep = 0; substep < cfg->no_substeps; substep++) {
-            const double step_fraction = substep == cfg->no_substeps-1
+        const tensor_t de_plastic = md_scale(de, plastic_fraction);
+        const tensor_t trial_plastic = md_add(
+            stress, md_elastic_increment(de_plastic, K, G));
+        const double p_now = md_trace(stress)/3.0+1.0e-2*m->P_atm;
+        const double p_trial = md_trace(trial_plastic)/3.0+1.0e-2*m->P_atm;
+        int32_t requested = 1;
+        if (p_now > 0.0 && p_trial > 0.0) {
+            const tensor_t ratio_change = md_sub(
+                md_scale(md_dev(trial_plastic), 1.0/p_trial),
+                md_scale(md_dev(stress), 1.0/p_now));
+            requested = md_substep_request(
+                sqrt(1.5*md_ddot(ratio_change, ratio_change))/
+                    NL_MD_FE_RATIO_STEP,
+                cfg->no_substeps);
+        }
+        {
+            const double dev_octahedral =
+                2.0*md_norm(md_dev(de_plastic))/sqrt(3.0);
+            const int32_t strain_request = md_substep_request(
+                dev_octahedral/NL_MD_FE_STRAIN_STEP, cfg->no_substeps);
+            if (strain_request > requested) requested = strain_request;
+        }
+        const double fixed_fraction = plastic_fraction/(double)requested;
+        for (int32_t substep = 0; substep < requested; substep++) {
+            const double step_fraction = substep == requested-1
                 ? fmax(1.0-T, 0.0) : fixed_fraction;
             diagnostics->attempts = substep+1;
             diagnostics->substep_fraction = step_fraction;
