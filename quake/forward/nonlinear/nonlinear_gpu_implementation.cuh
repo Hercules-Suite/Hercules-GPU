@@ -1096,7 +1096,15 @@ NL_HD static int md_stress_correction(
     return 1;
 }
 
-NL_HD static int nl_update_manzari_dafalias(
+/* The integration scheme is a compile-time parameter so each production kernel
+ * contains exactly one integrator. Modified Euler holds two nl_md_stage_t
+ * estimates plus the stress-correction working set and allocates all 255
+ * registers with heavy spilling; Forward Euler needs a fraction of that. When
+ * the scheme was a runtime branch, ptxas had to allocate for the worse of the
+ * two, so a Forward-Euler run paid Modified Euler's spill traffic. The host
+ * material-point driver keeps a runtime-dispatching wrapper below. */
+template <nl_md_integration_scheme_t MD_SCHEME>
+NL_HD static int nl_update_manzari_dafalias_scheme(
     const nlconstants_t *__restrict__ c,
     const nonlinear_gpu_config_t *__restrict__ cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
@@ -1153,7 +1161,9 @@ NL_HD static int nl_update_manzari_dafalias(
     if (!(*void_ratio > -0.99) || cfg->no_substeps <= 0 ||
         !md_valid_integration_scheme(cfg->md_integration_scheme) ||
         !md_valid_recovery_mode(cfg->md_recovery_mode) ||
-        (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
+        /* Guards a launch that dispatched to the wrong specialization. */
+        cfg->md_integration_scheme != MD_SCHEME ||
+        (MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER &&
          cfg->md_recovery_mode != NL_MD_RECOVERY_STRICT) ||
         !(cfg->backbone_error_tolerance > 0.0) ||
         !(cfg->error_tolerance > 0.0)) {
@@ -1223,7 +1233,7 @@ NL_HD static int nl_update_manzari_dafalias(
         dT = 1.0-elastic_ratio;
     }
 
-    if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+    if (MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER) {
         /* OpenSees integration scheme 5 supplies the first-order update used
          * by every substep. The plastic remainder after the elastic/yield
          * intersection is subdivided on demand from the trial stress-ratio
@@ -1814,6 +1824,41 @@ NL_HD static int nl_update_manzari_dafalias(
     *initialized = initialized_work;
     diagnostics->effective_mean_stress = md_trace(stress)/3.0;
     return 1;
+}
+
+/* Runtime-dispatching wrapper. The production kernels call the specialization
+ * directly so each one carries a single integrator; this entry point exists
+ * for the host material-point driver, which must honor whichever scheme the
+ * fixture selected and is not performance critical. */
+NL_HD static int nl_update_manzari_dafalias(
+    const nlconstants_t *__restrict__ c,
+    const nonlinear_gpu_config_t *__restrict__ cfg,
+    tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
+    tensor_t *__restrict__ dynamic_stress,
+    tensor_t *__restrict__ plastic_strain,
+    tensor_t *__restrict__ alpha, tensor_t *__restrict__ alpha_in,
+    tensor_t *__restrict__ fabric, double *__restrict__ initialized,
+    double *__restrict__ void_ratio,
+    double *__restrict__ plastic_multiplier,
+    double *__restrict__ yield_error,
+    double *__restrict__ integration_error,
+    int32_t *__restrict__ accepted_substeps,
+    nl_md_diagnostics_t *__restrict__ diagnostics)
+{
+    if (cfg->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+        return nl_update_manzari_dafalias_scheme<
+            NL_MD_INTEGRATION_FORWARD_EULER>(
+            c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+            plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
+            plastic_multiplier, yield_error, integration_error,
+            accepted_substeps, diagnostics);
+    }
+    return nl_update_manzari_dafalias_scheme<
+        NL_MD_INTEGRATION_MODIFIED_EULER>(
+        c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+        plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
+        plastic_multiplier, yield_error, integration_error,
+        accepted_substeps, diagnostics);
 }
 
 #undef NL_HD
@@ -3359,6 +3404,12 @@ typedef struct nl_md_shared_diagnostics_t {
 } nl_md_shared_diagnostics_t;
 #endif
 
+#if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+/* One entry function per integration scheme. ptxas allocates registers per
+ * entry function, so specializing here is what actually keeps Forward Euler
+ * from inheriting Modified Euler's allocation and spill traffic. */
+template <nl_md_integration_scheme_t MD_SCHEME>
+#endif
 __global__ static void kernel_nonlinear_update_force(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
     gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
@@ -3462,7 +3513,7 @@ __global__ static void kernel_nonlinear_update_force(
             int32_t md_substeps = 0;
             nl_md_diagnostics_t *md_diagnostics =
                 &md_diagnostics_shared[threadIdx.x].value;
-            ok = nl_update_manzari_dafalias(
+            ok = nl_update_manzari_dafalias_scheme<MD_SCHEME>(
                 c, &cfg, strain, strain_prev, static_stress,
                 &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
@@ -3483,8 +3534,7 @@ __global__ static void kernel_nonlinear_update_force(
              * constitutive nonconvergence.  Keep the finite-state/integrator
              * failure checks for both schemes. */
             const int enforce_md_yield_tolerance =
-                cfg.md_integration_scheme ==
-                    NL_MD_INTEGRATION_MODIFIED_EULER;
+                MD_SCHEME == NL_MD_INTEGRATION_MODIFIED_EULER;
             if (!ok || !isfinite(model_error) ||
                 (enforce_md_yield_tolerance &&
                  model_error > cfg.error_tolerance)) {
@@ -3597,8 +3647,18 @@ extern "C" void nonlinear_gpu_launch_manzari_dafalias(
     int32_t step, double delta_t, double delta_t_squared,
     cudaStream_t stream)
 {
-    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
-        state, config, gpu, step, delta_t, delta_t_squared);
+    /* Dispatch to the specialization that matches the configured scheme. Both
+     * instantiations are separate ptxas entry functions, so a Forward-Euler
+     * run no longer inherits Modified Euler's register allocation. */
+    if (config.md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER) {
+        kernel_nonlinear_update_force<NL_MD_INTEGRATION_FORWARD_EULER>
+            <<<grid_size, block_size, 0, stream>>>(
+                state, config, gpu, step, delta_t, delta_t_squared);
+    } else {
+        kernel_nonlinear_update_force<NL_MD_INTEGRATION_MODIFIED_EULER>
+            <<<grid_size, block_size, 0, stream>>>(
+                state, config, gpu, step, delta_t, delta_t_squared);
+    }
 }
 #elif defined(NL_GPU_PDMY03_ONLY)
 extern "C" void nonlinear_gpu_launch_pdmy03(

@@ -636,6 +636,13 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpu, /nl_update_manzari_dafalias/);
   assert.match(gpu, /is subdivided on demand/);
   assert.match(gpu, /no_substeps is the CAP, not the/);
+  // The integrator is specialized per scheme so ptxas allocates registers for
+  // one integrator per entry function.
+  assert.match(gpu, /template <nl_md_integration_scheme_t MD_SCHEME>/);
+  assert.match(gpu, /nl_update_manzari_dafalias_scheme<MD_SCHEME>\(/);
+  assert.match(gpu, /if \(MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER\)/);
+  assert.match(gpu, /kernel_nonlinear_update_force<NL_MD_INTEGRATION_FORWARD_EULER>/);
+  assert.match(gpu, /kernel_nonlinear_update_force<NL_MD_INTEGRATION_MODIFIED_EULER>/);
   assert.match(gpu, /substep < requested/);
   assert.match(gpu, /md_substep_request\([\s\S]{0,200}?cfg->no_substeps\)/);
   assert.match(gpu, /NL_MD_FE_RATIO_STEP[\s\S]*NL_MD_FE_STRAIN_STEP/);

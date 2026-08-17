@@ -564,6 +564,13 @@ Nonlinear GPU execution (runtime environment):
 	cyclic path at 30 m depth, dropping from a fixed 322 substeps per step to a
 	demanded 1.0 moved the shear-stress NRMS against the Modified-Euler reference
 	from 0.20% to 0.44%. Forward
+	Euler is compiled as its own device entry function rather than selected by a
+	runtime branch. ptxas allocates registers per entry function, so while the
+	scheme was a runtime branch a Forward-Euler run inherited Modified Euler's
+	allocation: 255 registers with 6,564 bytes of spill stores and 21,532 bytes
+	of spill loads per thread, against zero spills for PDMY03 on the same build.
+	Specializing the integrator lets each scheme carry only its own working set.
+	Forward
 	Euler has no embedded local-error estimate, adaptive retry, or stress
 	correction. It therefore ignores `backbone_errTol` and
 	`manzari_dafalias_recovery`, reports the resulting absolute yield drift, and
