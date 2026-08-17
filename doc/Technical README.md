@@ -569,7 +569,18 @@ Nonlinear GPU execution (runtime environment):
 	scheme was a runtime branch a Forward-Euler run inherited Modified Euler's
 	allocation: 255 registers with 6,564 bytes of spill stores and 21,532 bytes
 	of spill loads per thread, against zero spills for PDMY03 on the same build.
-	Specializing the integrator lets each scheme carry only its own working set.
+	Specializing the integrator lets each scheme carry only its own working set:
+	Forward Euler's spill loads fall from 21,532 to 2,108 bytes per thread and
+	its spill stores from 6,564 to 508, while Modified Euler is unchanged.
+	Register count stays at the 255 ceiling for both, because ptxas allocates up
+	to the cap and only spills the excess, so occupancy remains 2 blocks of 128
+	threads (8 of 64 warps) per SM unless a residency bound asks for less.
+	`NL_MD_FE_MIN_BLOCKS_PER_SM` (default 3) and `NL_MD_ME_MIN_BLOCKS_PER_SM`
+	(default 2) set that bound per scheme and are compile-time overridable, e.g.
+	`-DNL_MD_FE_MIN_BLOCKS_PER_SM=4`. The useful value is empirical: raising it
+	lowers the per-thread register budget to `65536/(block*N)` and trades more
+	spilling for more latency hiding. Setting the Forward-Euler value to 2
+	reproduces the unbounded allocation exactly.
 	Forward
 	Euler has no embedded local-error estimate, adaptive retry, or stress
 	correction. It therefore ignores `backbone_errTol` and

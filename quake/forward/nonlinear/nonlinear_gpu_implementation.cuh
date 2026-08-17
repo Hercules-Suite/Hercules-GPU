@@ -3405,14 +3405,42 @@ typedef struct nl_md_shared_diagnostics_t {
 #endif
 
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
+/* Minimum resident blocks per SM requested from ptxas, per integration scheme.
+ *
+ * Without a bound ptxas allocates up to the 255-register ceiling, which on
+ * sm_100 admits only 65536/255 = 257 threads, i.e. 2 blocks of
+ * NL_GPU_UPDATE_BLOCK_SIZE and 8 of 64 warps. Raising the requested residency
+ * lowers the per-thread budget (65536/(BLOCK*N)) and buys latency hiding at
+ * the cost of more spilling, so the useful setting is empirical: Forward Euler
+ * spills only a few hundred bytes at 255 registers and has room to trade,
+ * while Modified Euler already spills tens of kilobytes and is left alone.
+ *
+ * Override per build to sweep, e.g. -DNL_MD_FE_MIN_BLOCKS_PER_SM=4. Setting
+ * the Forward-Euler value to 2 reproduces the unbounded allocation exactly. */
+#ifndef NL_MD_FE_MIN_BLOCKS_PER_SM
+#define NL_MD_FE_MIN_BLOCKS_PER_SM 3
+#endif
+#ifndef NL_MD_ME_MIN_BLOCKS_PER_SM
+#define NL_MD_ME_MIN_BLOCKS_PER_SM 2
+#endif
+
 /* One entry function per integration scheme. ptxas allocates registers per
  * entry function, so specializing here is what actually keeps Forward Euler
  * from inheriting Modified Euler's allocation and spill traffic. */
 template <nl_md_integration_scheme_t MD_SCHEME>
-#endif
+__global__ static void
+__launch_bounds__(NL_GPU_UPDATE_BLOCK_SIZE,
+                  MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER
+                      ? NL_MD_FE_MIN_BLOCKS_PER_SM
+                      : NL_MD_ME_MIN_BLOCKS_PER_SM)
+kernel_nonlinear_update_force(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
+    gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
+#else
 __global__ static void kernel_nonlinear_update_force(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t cfg,
     gpu_data_t *gpu, int32_t step, double delta_t, double delta_t_squared)
+#endif
 {
 #if defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
     __shared__ nl_md_shared_diagnostics_t

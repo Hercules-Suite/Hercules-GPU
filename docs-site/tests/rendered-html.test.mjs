@@ -643,6 +643,11 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpu, /if \(MD_SCHEME == NL_MD_INTEGRATION_FORWARD_EULER\)/);
   assert.match(gpu, /kernel_nonlinear_update_force<NL_MD_INTEGRATION_FORWARD_EULER>/);
   assert.match(gpu, /kernel_nonlinear_update_force<NL_MD_INTEGRATION_MODIFIED_EULER>/);
+  // Per-scheme occupancy target: ptxas fills to the 255-register ceiling
+  // unless a residency bound asks for less.
+  assert.match(gpu, /__launch_bounds__\(NL_GPU_UPDATE_BLOCK_SIZE,/);
+  assert.match(gpu, /NL_MD_FE_MIN_BLOCKS_PER_SM/);
+  assert.match(gpu, /NL_MD_ME_MIN_BLOCKS_PER_SM/);
   assert.match(gpu, /substep < requested/);
   assert.match(gpu, /md_substep_request\([\s\S]{0,200}?cfg->no_substeps\)/);
   assert.match(gpu, /NL_MD_FE_RATIO_STEP[\s\S]*NL_MD_FE_STRAIN_STEP/);
