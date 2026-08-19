@@ -154,6 +154,10 @@ double get_geostatic_loading_time() {
     return theGeostaticLoadingT;
 }
 
+int get_geostatic_final_step() {
+    return theGeostaticFinalStep;
+}
+
 int assume_groundwatertable() {
     return theSurfaceGroundwaterTable;
 }
@@ -2442,6 +2446,43 @@ void nonlinear_gpu_sync_station_state(mysolver_t *mySolver)
     if (nonlinear_gpu_active()) {
         nonlinear_gpu_download_station_state(mySolver, myNonlinSolver);
     }
+}
+
+int nonlinear_refresh_station_initial_effective_stress(
+    station_t *myStations, int32_t myNumberOfStations)
+{
+    int updated = 0;
+
+    /* A positive geostatic interval and approximate_geostatic_state=no are
+     * enforced together during parameter validation. In that case the
+     * stored stress is the committed, numerically equilibrated skeleton
+     * stress (not a relative stress requiring an approximate K0 offset).
+     * Use the same quadrature point as nonlinear station output so Ru and
+     * the reported nonlinear stress history share one constitutive state. */
+    if (get_geostatic_total_time() <= 0.0 ||
+        myStations == NULL || myNumberOfStations <= 0 ||
+        myNonlinSolver == NULL) {
+        return 0;
+    }
+
+    for (int32_t i = 0; i < myNumberOfNonlinStations; i++) {
+        const int32_t nl_eindex = myStationsElementIndices[i];
+        const int32_t mappingIndex = myNonlinStationsMapping[i];
+
+        if (nl_eindex < 0 || nl_eindex >= myNonlinElementsCount ||
+            mappingIndex < 0 || mappingIndex >= myNumberOfStations ||
+            myStations[mappingIndex].pore_pressure_is_defined == 0) {
+            continue;
+        }
+
+        const double sigmaV0 =
+            -myNonlinSolver->stresses[nl_eindex].qp[4].zz;
+        myStations[mappingIndex].initial_vertical_effective_stress =
+            (isfinite(sigmaV0) && sigmaV0 > 0.0) ? sigmaV0 : NAN;
+        updated++;
+    }
+
+    return updated;
 }
 
 /* -------------------------------------------------------------------------- */

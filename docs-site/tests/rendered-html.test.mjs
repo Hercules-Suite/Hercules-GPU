@@ -1124,6 +1124,9 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /Ru\(-\)/);
   assert.match(html, /Δu\/σ′v0/);
   assert.match(html, /sigma_v0_eff_pa/);
+  assert.match(html, /ramped geostatic phase/);
+  assert.match(html, /Ru remains nan during the ramp/);
+  assert.match(html, /committed vertical skeleton stress/);
   assert.match(html, /output_displacement_file/);
 });
 
@@ -1132,14 +1135,19 @@ test("reports the conventional BrickUP station pore-pressure ratio", () => {
   if (!existsSync(sourceRoot)) return;
 
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const nonlinear = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
   const header = readFileSync(`${sourceRoot}psolve.h`, "utf8");
   assert.match(psolve, /parsetext\(fp, "print_station_pore_pressure_ratios"/);
   assert.match(psolve, /print_station_pore_pressure_ratios=yes requires[\s\S]{0,120}include_poroelastic=yes[\s\S]{0,120}include_nonlinear_analysis=yes/);
   assert.match(psolve, /hydrostaticBiotStress = Param\.thePoroelasticBiotAlpha \*[\s\S]{0,120}Param\.thePoroelasticFluidDensity \* 9\.81 \* waterDepth/);
   assert.match(psolve, /effectiveVerticalStress =[\s\S]{0,100}totalVerticalStress - hydrostaticBiotStress/);
+  assert.match(psolve, /get_geostatic_total_time\(\) > 0\.0[\s\S]{0,80}return NAN/);
   assert.match(psolve, /\? pressure \/ sigmaV0[\s\S]{0,80}: NAN/);
   assert.match(psolve, /sigma_v0_eff_pa/);
+  assert.match(psolve, /step == get_geostatic_final_step\(\)/);
+  assert.match(psolve, /station_rewrite_mediums_file_from_current_state\(\)/);
   assert.match(psolve, /return \(Param\.printStationPressures == YES\) \|\|[\s\S]{0,100}\(Param\.printStationPorePressureRatios == YES\)/);
+  assert.match(nonlinear, /-myNonlinSolver->stresses\[nl_eindex\]\.qp\[4\]\.zz/);
   assert.match(header, /initial_vertical_effective_stress/);
 });
 

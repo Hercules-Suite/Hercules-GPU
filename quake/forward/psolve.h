@@ -805,8 +805,9 @@ struct station_t {
     double     lambda;
     /* Positive magnitude of the initial vertical effective stress used to
      * normalize BrickUP excess pore pressure for conventional experimental
-     * r_u output. NAN when the station is not a saturated BrickUP candidate
-     * or the reference state is inadmissible. */
+     * r_u output. A ramped geostatic run refreshes the setup estimate from
+     * committed skeleton stress before dynamics. NAN when the station is not
+     * a saturated BrickUP candidate or the reference state is inadmissible. */
     double     initial_vertical_effective_stress;
     int32_t    owningElementIndex; /* eindex of owning octree element (v3 gather) */
 

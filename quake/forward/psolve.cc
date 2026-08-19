@@ -860,7 +860,9 @@ static void solver_update_acoustic_station_kinematics(int32_t step);
 static int station_pressure_gradient(int32_t iStation, double grad[3]);
 typedef struct station_medium_record_t station_medium_record_t;
 static void station_write_mediums_file(
-    const station_medium_record_t* localRecords);
+    const station_medium_record_t* localRecords,
+    int rampedReferenceFinalized);
+static void station_refresh_ramped_geostatic_reference(int step);
 static void solver_prepare_force_upload_ranges(mesh_t* mesh,
                                                int32_t sourceCount);
 
@@ -16526,11 +16528,20 @@ static void solver_finish_nonlinear_gpu(mysolver_t* solver, mesh_t* mesh,
     return;
   }
   nonlinear_gpu_check_error(Global.myID);
-  if (Param.theNumberOfStations != 0 && Param.theStationsPrintRate > 0 &&
-      (step % Param.theStationsPrintRate) == 0) {
+  const int stationOutputDue =
+      Param.theNumberOfStations != 0 && Param.theStationsPrintRate > 0 &&
+      (step % Param.theStationsPrintRate) == 0;
+  const int geostaticReferenceDue =
+      Param.printStationPorePressureRatios == YES &&
+      get_geostatic_total_time() > 0.0 &&
+      step == get_geostatic_final_step();
+  if (Param.theNumberOfStations != 0 &&
+      (stationOutputDue || geostaticReferenceDue)) {
     Timer_Start("Download Non-linear State");
     nonlinear_gpu_sync_station_state(solver);
     Timer_Stop("Download Non-linear State");
+  }
+  if (stationOutputDue) {
     Timer_Start("Print Stations");
     print_nonlinear_stations(mesh, solver, Param.myStations,
                              Param.myNumberOfStations, Param.theDeltaT, step,
@@ -21813,6 +21824,7 @@ static void solver_run() {
     Timer_Start("Physics Force Wait/Post");
     solver_wait_physics_gpu(Global.mySolver, Global.myMesh);
     solver_finish_nonlinear_gpu(Global.mySolver, Global.myMesh, step);
+    station_refresh_ramped_geostatic_reference(step);
 
     Timer_Start("Force Post CPU");
     solver_compute_force_gravity(Global.mySolver, Global.myMesh, step);
@@ -26734,6 +26746,13 @@ static double station_initial_vertical_effective_stress(
     return NAN;
   }
 
+  /* A ramped geostatic run does not have its numerical reference stress yet.
+   * Keep Ru undefined during the ramp; the last geostatic force evaluation
+   * replaces this value before the first dynamic station row is written. */
+  if (get_geostatic_total_time() > 0.0) {
+    return NAN;
+  }
+
   elem_t* elemp = &mesh->elemTable[eindex];
   edata_t* edata = (edata_t*)elemp->data;
   if ((edata == NULL) || !isfinite((double)edata->sigma_0) ||
@@ -26764,8 +26783,39 @@ static double station_initial_vertical_effective_stress(
              : NAN;
 }
 
+static void station_fill_medium_record(
+    int32_t localStationIndex, station_medium_record_t* record) {
+  const station_t* station = &Param.myStations[localStationIndex];
+  const int32_t eindex = station->owningElementIndex;
+  const elem_t* element = &Global.myMesh->elemTable[eindex];
+  const edata_t* material = (const edata_t*)element->data;
+
+  memset(record, 0, sizeof(*record));
+  record->stationId = station->id;
+  record->ownerRank = Global.myID;
+  record->ownerIsAcoustic = element_is_acoustic(material) ? 1 : 0;
+  record->ownerIsPoroelastic = station->pore_pressure_is_defined;
+  record->pressureDefined =
+      station->pressure_is_defined || station->pore_pressure_is_defined;
+  record->elementLevel = element->level;
+  record->elementId = element->geid;
+  record->x = station->coords.x[0];
+  record->y = station->coords.x[1];
+  record->z = station->coords.x[2];
+  record->csi = station->localcoords.x[0];
+  record->eta = station->localcoords.x[1];
+  record->dzeta = station->localcoords.x[2];
+  record->h = (material != NULL) ? material->edgesize : 0.0;
+  record->Vp = (material != NULL) ? material->Vp : 0.0;
+  record->Vs = (material != NULL) ? material->Vs : 0.0;
+  record->rho = (material != NULL) ? material->rho : 0.0;
+  record->initialVerticalEffectiveStress =
+      station->initial_vertical_effective_stress;
+}
+
 static void station_write_mediums_file(
-    const station_medium_record_t* localRecords) {
+    const station_medium_record_t* localRecords,
+    int rampedReferenceFinalized) {
   const int32_t localCount = Param.myNumberOfStations;
   const int64_t localBytes64 =
       (int64_t)localCount * (int64_t)sizeof(station_medium_record_t);
@@ -26856,10 +26906,17 @@ static void station_write_mediums_file(
     monitor_print("Station medium metadata:           %s\n",
                   Param.theStationMediumsFile);
     if (Param.printStationPorePressureRatios == YES) {
-      monitor_print(
-          "Station pore-pressure ratio references: %d of %d stations have "
-          "positive sigma'_v0; other Ru(-) values are nan\n",
-          validRuReferences, totalRecords);
+      if (get_geostatic_total_time() > 0.0 &&
+          !rampedReferenceFinalized) {
+        monitor_print(
+            "Station pore-pressure ratio references: pending ramped "
+            "geostatic equilibration; Ru(-) is nan until dynamics\n");
+      } else {
+        monitor_print(
+            "Station pore-pressure ratio references: %d of %d stations "
+            "have positive sigma'_v0; other Ru(-) values are nan\n",
+            validRuReferences, totalRecords);
+      }
     }
     if (totalRecords != Param.theNumberOfStations) {
       monitor_print(
@@ -26870,6 +26927,56 @@ static void station_write_mediums_file(
     free(records);
     free(recvCounts);
     free(displs);
+  }
+}
+
+static void station_rewrite_mediums_file_from_current_state(void) {
+  station_medium_record_t* records = NULL;
+
+  if (Param.myNumberOfStations > 0) {
+    records = (station_medium_record_t*)calloc(
+        (size_t)Param.myNumberOfStations, sizeof(*records));
+    if (records == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Error allocating refreshed station medium records");
+    }
+    for (int32_t iStation = 0;
+         iStation < Param.myNumberOfStations; iStation++) {
+      station_fill_medium_record(iStation, &records[iStation]);
+    }
+  }
+
+  station_write_mediums_file(records, 1);
+  free(records);
+}
+
+/* At the last ramped-geostatic force evaluation, the host nonlinear state is
+ * exactly the state from which V8 will initialize on the first dynamic step.
+ * Replace the setup-time 1-D estimate with that committed skeleton stress.
+ * The GPU caller forces its sparse station gather on this step even when it
+ * does not coincide with the normal station print rate. */
+static void station_refresh_ramped_geostatic_reference(int step) {
+  if (Param.printStationPorePressureRatios != YES ||
+      get_geostatic_total_time() <= 0.0 ||
+      step != get_geostatic_final_step()) {
+    return;
+  }
+
+  int localUpdated = nonlinear_refresh_station_initial_effective_stress(
+      Param.myStations, Param.myNumberOfStations);
+  int globalUpdated = 0;
+  MPI_Reduce(&localUpdated, &globalUpdated, 1, MPI_INT, MPI_SUM, 0,
+             comm_solver);
+
+  /* station_mediums.txt is the audit record for the denominator. Rewrite it
+   * collectively after the in-memory references change so it cannot retain
+   * the setup-time theoretical values. */
+  station_rewrite_mediums_file_from_current_state();
+  if (Global.myID == 0) {
+    monitor_print(
+        "Ramped geostatic Ru references: refreshed %d nonlinear station "
+        "denominator%s from committed skeleton stress\n",
+        globalUpdated, (globalUpdated == 1) ? "" : "s");
   }
 }
 
@@ -27018,39 +27125,8 @@ void setup_stations_data() {
         station_initial_vertical_effective_stress(
             Global.myMesh, stationElementIndex, stationCoords,
             Param.myStations[iLCStation].pore_pressure_is_defined);
-
-    stationMediumRecords[iLCStation].stationId = iStation;
-    stationMediumRecords[iLCStation].ownerRank = Global.myID;
-    stationMediumRecords[iLCStation].ownerIsAcoustic =
-        element_is_acoustic(stationMaterial) ? 1 : 0;
-    stationMediumRecords[iLCStation].ownerIsPoroelastic =
-        Param.myStations[iLCStation].pore_pressure_is_defined;
-    stationMediumRecords[iLCStation].pressureDefined =
-        (Param.myStations[iLCStation].pressure_is_defined ||
-         Param.myStations[iLCStation].pore_pressure_is_defined);
-    stationMediumRecords[iLCStation].elementLevel =
-        Global.myMesh->elemTable[stationElementIndex].level;
-    stationMediumRecords[iLCStation].elementId =
-        Global.myMesh->elemTable[stationElementIndex].geid;
-    stationMediumRecords[iLCStation].x = stationCoords.x[0];
-    stationMediumRecords[iLCStation].y = stationCoords.x[1];
-    stationMediumRecords[iLCStation].z = stationCoords.x[2];
-    stationMediumRecords[iLCStation].csi =
-        Param.myStations[iLCStation].localcoords.x[0];
-    stationMediumRecords[iLCStation].eta =
-        Param.myStations[iLCStation].localcoords.x[1];
-    stationMediumRecords[iLCStation].dzeta =
-        Param.myStations[iLCStation].localcoords.x[2];
-    stationMediumRecords[iLCStation].h =
-        (stationMaterial != NULL) ? stationMaterial->edgesize : 0.0;
-    stationMediumRecords[iLCStation].Vp =
-        (stationMaterial != NULL) ? stationMaterial->Vp : 0.0;
-    stationMediumRecords[iLCStation].Vs =
-        (stationMaterial != NULL) ? stationMaterial->Vs : 0.0;
-    stationMediumRecords[iLCStation].rho =
-        (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
-    stationMediumRecords[iLCStation].initialVerticalEffectiveStress =
-        Param.myStations[iLCStation].initial_vertical_effective_stress;
+    station_fill_medium_record(iLCStation,
+                               &stationMediumRecords[iLCStation]);
 
     /*
      * This section now enclosed in a DEBUG def because its information
@@ -27151,7 +27227,7 @@ void setup_stations_data() {
   }
   Timer_Stop("Stations Local Init");
 
-  station_write_mediums_file(stationMediumRecords);
+  station_write_mediums_file(stationMediumRecords, 0);
   free(stationMediumRecords);
 
   free(localStationIds);

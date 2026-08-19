@@ -1052,9 +1052,16 @@ Acoustic-elastic input flags (input file):
 	`r_u(t) = Delta_u(t) / sigma'_v0`. `Delta_u` is the BrickUP excess-pressure
 	unknown (the same value written by the optional `Pressure(Pa)` column), and
 	`sigma'_v0 > 0` is the initial vertical effective-stress magnitude at that
-	station. The denominator is calculated once from Hercules' integrated 1-D
-	total-overburden column, adjusted from the owning element center to the exact
-	station depth, minus `poroelastic_biot_alpha * rho_f * g * z_w`. It is
+	station. With `approximate_geostatic_state=yes`, the denominator comes from
+	Hercules' integrated 1-D total-overburden column, adjusted from the owning
+	element center to the exact station depth, minus
+	`poroelastic_biot_alpha * rho_f * g * z_w`. With a ramped geostatic phase,
+	`Ru(-)` remains `nan` while that numerical reference does not yet exist.
+	The last geostatic force evaluation fixes the denominator from the committed
+	vertical skeleton stress at the owning nonlinear element's station-output
+	quadrature point, before the first dynamic output row. This is the same
+	constitutive state used by the nonlinear stress columns and to initialize
+	V8 before dynamics. The final value is
 	written as `sigma_v0_eff_pa` in `station_mediums.txt` for auditability.
 	The ratio switch also activates the sparse/fused pore-pressure station
 	gather when `print_station_pressures=no`, so enabling only `Ru(-)` does not
@@ -1081,8 +1088,9 @@ Acoustic-elastic input flags (input file):
 	`basin_material_type=acoustic_water`. Defaults are `1500.0 m/s` and
 	`1000.0 kg/m3`.
 - `station_mediums_output_file`
-	Optional station diagnostic output path. The solver writes this one-time
-	metadata file during station setup. It records each station's owning medium
+	Optional station diagnostic output path. The solver writes this metadata
+	file during station setup and rewrites it after a ramped geostatic reference
+	refresh. It records each station's owning medium
 	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`. The metadata

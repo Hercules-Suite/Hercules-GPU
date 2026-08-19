@@ -306,6 +306,7 @@ nlconstants_t nl_const;
 
 double get_geostatic_total_time();
 double get_geostatic_loading_time();
+int    get_geostatic_final_step();
 int    assume_groundwatertable();
 int    nonlinear_requires_explicit_pore_pressure();
 
@@ -372,6 +373,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 void nonlinear_gpu_prepare_station_output(int32_t myID);
 void nonlinear_gpu_sync_station_state(mysolver_t *mySolver);
 void nonlinear_gpu_sync_host_state(mysolver_t *mySolver);
+int nonlinear_refresh_station_initial_effective_stress(
+    station_t *myStations, int32_t myNumberOfStations);
 
 /* Run the standalone CPU/CUDA constitutive parity test described by the
  * supplied material-point input file. */
