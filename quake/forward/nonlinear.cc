@@ -111,7 +111,7 @@ static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
 #define PDMY03_PROPERTY_COUNT 21
 static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
-static double               *thePj8VoidRatio;
+static double               *thePj8RelativeDensity;
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -746,7 +746,7 @@ void nonlinear_init( int32_t     myID,
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
         } else if (theMaterialModel == PJ_LIQ_V8) {
-            thePj8VoidRatio =
+            thePj8RelativeDensity =
                 (double*)malloc(sizeof(double) * thePropertiesCount);
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -781,7 +781,7 @@ void nonlinear_init( int32_t     myID,
                       MPI_DOUBLE, 0, comm_solver);
         }
     } else if (theMaterialModel == PJ_LIQ_V8) {
-        MPI_Bcast(thePj8VoidRatio, thePropertiesCount, MPI_DOUBLE, 0,
+        MPI_Bcast(thePj8RelativeDensity, thePropertiesCount, MPI_DOUBLE, 0,
                   comm_solver);
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -1142,7 +1142,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 sizeof(double) * thePropertiesCount);
         }
     } else if (theMaterialModel == PJ_LIQ_V8) {
-        thePj8VoidRatio =
+        thePj8RelativeDensity =
             (double*)malloc(sizeof(double) * thePropertiesCount);
     } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1185,7 +1185,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             }
             continue;
         } else if (theMaterialModel == PJ_LIQ_V8) {
-            thePj8VoidRatio[row] = auxiliar[row * property_columns + 1];
+            thePj8RelativeDensity[row] =
+                auxiliar[row * property_columns + 1];
             continue;
         }
         theAlphaCohes[row]        = auxiliar[ row * 16 + 1 ];
@@ -1280,7 +1281,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             }
         }
     } else if (theMaterialModel == PJ_LIQ_V8) {
-        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
+        double minimum_relative_density = 1.0;
+        double maximum_relative_density = 0.0;
         for (row = 1; row < thePropertiesCount; row++) {
             if (theVsLimits[row] <= theVsLimits[row-1]) {
                 fprintf(stderr,
@@ -1289,15 +1291,26 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             }
         }
         for (row = 0; row < thePropertiesCount; row++) {
-            const double e = thePj8VoidRatio[row];
-            if (!isfinite(e) || e < frozen.e_min || e > frozen.e_max) {
+            const double relative_density = thePj8RelativeDensity[row];
+            if (!isfinite(relative_density) || relative_density < 0.0 ||
+                relative_density > 1.0) {
                 fprintf(stderr,
-                        "Illegal PJLiqV8 row %d: initial void ratio must be "
-                        "finite and in the frozen V8 range [%g, %g]\n",
-                        row, frozen.e_min, frozen.e_max);
+                        "Illegal PJLiqV8 row %d: relative density must be "
+                        "finite and in the dimensionless range [0, 1]\n",
+                        row);
                 return -1;
             }
+            minimum_relative_density = MIN(minimum_relative_density,
+                                           relative_density);
+            maximum_relative_density = MAX(maximum_relative_density,
+                                           relative_density);
         }
+        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
+        fprintf(stderr,
+                "PJLiqV8 property input: relative density Dr in [%g, %g]; "
+                "internal e0 uses frozen e_max=%g and e_min=%g\n",
+                minimum_relative_density, maximum_relative_density,
+                frozen.e_max, frozen.e_min);
     }
 
     theNonlinearFlag = 1;
@@ -2264,20 +2277,22 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
 
             case PJ_LIQ_V8: {
-                ecp->pj8_void_ratio = interpolate_property_value(
-                    elementVs, thePj8VoidRatio);
                 const pj8_parameters_t frozen =
                     pj8_reference_parameters(1000.0);
-                if (!isfinite(ecp->pj8_void_ratio) ||
-                    ecp->pj8_void_ratio < frozen.e_min ||
-                    ecp->pj8_void_ratio > frozen.e_max) {
+                const double relative_density = interpolate_property_value(
+                    elementVs, thePj8RelativeDensity);
+                if (!isfinite(relative_density) || relative_density < 0.0 ||
+                    relative_density > 1.0) {
                     fprintf(stderr,
                             "Thread %d: PJLiqV8 element %d has invalid "
-                            "interpolated initial void ratio %g\n",
-                            myID, eindex, ecp->pj8_void_ratio);
+                            "interpolated relative density %g\n",
+                            myID, eindex, relative_density);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
+                ecp->pj8_void_ratio =
+                    pj8_void_ratio_from_relative_density(
+                        &frozen, relative_density);
                 double sin_phi = 3.0*frozen.M/(6.0+frozen.M);
                 sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
                 ecp->phi = asin(sin_phi);
@@ -5406,7 +5421,9 @@ static void material_point_load_constants(nlconstants_t *constants,
 {
     memset(constants, 0, sizeof(*constants));
     if (model == PJ_LIQ_V8) {
-        constants->pj8_void_ratio = values[0];
+        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
+        constants->pj8_void_ratio = pj8_void_ratio_from_relative_density(
+            &frozen, values[0]);
         return;
     }
     if (model == MANZARI_DAFALIAS) {
@@ -6106,13 +6123,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         }
     }
     if (material_model == PJ_LIQ_V8) {
-        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
         if (!isfinite(constants_values[0]) ||
-            constants_values[0] < frozen.e_min ||
-            constants_values[0] > frozen.e_max) {
+            constants_values[0] < 0.0 || constants_values[0] > 1.0) {
             fprintf(stderr,
-                    "Illegal PJLiqV8 material-point initial void ratio: "
-                    "expected [%g, %g]\n", frozen.e_min, frozen.e_max);
+                    "Illegal PJLiqV8 material-point relative density: "
+                    "expected a dimensionless value in [0, 1]\n");
             goto cleanup;
         }
         if (initial_array_count != 5) {

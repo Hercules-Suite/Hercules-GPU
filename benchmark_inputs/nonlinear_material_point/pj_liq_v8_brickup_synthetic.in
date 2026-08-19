@@ -10,10 +10,11 @@ material_point_compare_rtol = 1.0e-9
 material_point_compare_atol = 1.0e-8
 material_point_output_prefix = pj_liq_v8_brickup_synthetic
 
-# PJ-Liq V8 exposes only the initial void ratio; its 112 constitutive
-# constants are the frozen calibration identified by PJ8_PARAMETER_SHA256.
+# PJ-Liq V8 exposes only relative density Dr; its frozen e_max=0.78 and
+# e_min=0.51 convert this value to the internal initial void ratio e0=0.601.
+# Its 112 constitutive constants are identified by PJ8_PARAMETER_SHA256.
 material_point_constants =
-  0.601
+  0.66296296296296309
 
 # Equilibrated K0 effective stress, tension-positive, in Pa. The final three
 # arrays are required by the common seeded-state parser but V8 initializes its

@@ -6,8 +6,9 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
 
 ## Completed locally
 
-- [x] Registered `PJLiqV8` and documented its `Vs_limit initial_void_ratio`
-  production table.
+- [x] Registered `PJLiqV8` and documented its `Vs_limit relative_density`
+  production table; the input boundary converts dimensionless `D_r` in
+  `[0,1]` to internal void ratio using frozen `e_max=0.78`, `e_min=0.51`.
 - [x] Mapped `[xx, yy, zz, xy, yz, xz]`, tensor shear, tension-positive stress,
   and the factor-two symmetric double contraction explicitly.
 - [x] Translated all 112 frozen parameters, four host-event controls, and all

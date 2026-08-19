@@ -702,10 +702,14 @@ Nonlinear GPU execution (runtime environment):
 	`backbone_errTol` and `error_tolerance` remain required by the common
 	nonlinear input block but do not control this fixed explicit update.
 - PJ-Liq V8 rows use two values in `material_properties_list`:
-	`Vs_limit initial_void_ratio`. The first and last `Vs_limit` values select
-	the nonlinear interval; void ratio is interpolated by Vs and must remain in
-	the frozen calibration interval `[0.51,0.78]`. The constitutive constants are
-	intentionally not exposed for ad hoc production retuning.
+	`Vs_limit relative_density`. The first and last `Vs_limit` values select
+	the nonlinear interval. Dimensionless relative density is interpolated by Vs
+	and must remain in `[0,1]`. The input boundary then computes the internal
+	initial void ratio as `e0 = e_max - Dr*(e_max-e_min)` using frozen
+	`e_max=0.78` and `e_min=0.51`. Thus `Dr=0` is the loosest calibrated state,
+	`Dr=1` is the densest, and the constitutive constants remain intentionally
+	unavailable for ad hoc production retuning. This replaces the earlier
+	`initial_void_ratio` column; old V8 property rows must be converted.
 - PJ-Liq V8 is compatible with BrickUP through explicit field ownership.
 	V8 is the effective-skeleton law: its compatibility state separates
 	total volumetric strain into elastic confining, irreversible plastic, and

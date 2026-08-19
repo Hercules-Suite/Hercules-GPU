@@ -945,7 +945,9 @@ test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpo
   assert.match(header, /PJ_LIQ_V8/);
   assert.match(cpu, /PJLiqV8[\s\S]*PJ-Liq-V8[\s\S]*PJ_Liq_V8/);
   assert.match(cpu, /PJ_LIQ_V8[\s\S]*\? 2 : 16/);
-  assert.match(cpu, /initial void ratio must be[\s\S]*in the frozen V8 range/);
+  assert.match(cpu, /relative density must be[\s\S]*dimensionless range \[0, 1\]/);
+  assert.match(cpu, /pj8_void_ratio_from_relative_density/);
+  assert.match(core, /return p->e_max-relative_density\*\(p->e_max-p->e_min\)/);
   assert.match(cpu, /PJ-Liq V8\/BrickUP coupling/);
   assert.match(cpu, /V8 evolves effective ["\s]*skeleton stress/);
   assert.match(cpu, /BrickUP independently solves fluid ["\s]*mass balance and applies sigma=sigma'-alpha\*p\*I/);
@@ -963,12 +965,14 @@ test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpo
   assert.match(gpuUnit, /NL_GPU_PJ_LIQ_V8_ONLY/);
   assert.match(makefile, /nonlinear\/nonlinear_gpu_pj_liq_v8\.o/);
   assert.match(fixture, /material_model = PJLiqV8/);
+  assert.match(fixture, /0\.66296296296296309/);
   assert.match(fixture, /material_point_brickup = yes/);
   assert.match(fixture, /material_point_brickup_biot_alpha = 1\.0/);
   assert.match(suite, /pj_liq_v8_brickup_synthetic\.in/);
   assert.match(nativeDriver, /PJ8_STANDALONE/);
   assert.doesNotMatch(nativeDriver, /expected.*stress/i);
   assert.match(nativeStateTest, /state isolation, restart, zero-increment/);
+  assert.match(nativeStateTest, /relative-density conversion failed/);
   assert.match(nativeStateTest, /fluid mass balance before pressure is combined with[\s\S]*the effective skeleton stress exactly once/);
 
   assert.match(checkpoint, /nonlinear_gpu_checkpoint_write/);

@@ -675,14 +675,14 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "PJ-Liq V8",
         paragraphs: [
           "PJLiqV8 is the native binary64 port of the frozen Ottawa F65 pressure-dependent bounding-surface liquefaction calibration. Production updates are CUDA-only. The kernel retains all 112 calibrated parameters, four host-increment reversal controls, and 38 logical history fields; the startup report prints calibration SHA-256 9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83.",
-          "The production table intentionally exposes only Vs_limit and initial_void_ratio. no_substeps is the exact number of fixed Forward-Euler subdivisions per nonzero Hercules increment, while reversal detection occurs once before subdivision. An exact zero increment preserves history without subdivision. Start with one. The shown void ratio lies inside the frozen 0.51 to 0.78 range but remains a syntax example rather than a site calibration.",
+          "The production table intentionally exposes only Vs_limit and dimensionless relative_density in [0,1]. Hercules interpolates relative density by Vs and converts it to the internal initial void ratio with e0=e_max-Dr(e_max-e_min), using frozen e_max=0.78 and e_min=0.51. no_substeps is the exact number of fixed Forward-Euler subdivisions per nonzero Hercules increment, while reversal detection occurs once before subdivision. An exact zero increment preserves history without subdivision. Start with one. The shown relative density corresponds to e0=0.601 but remains a syntax example rather than a site calibration.",
           "With BrickUP, PJLiqV8 owns effective skeleton stress and its constitutive histories. Its volumetric compatibility is the skeleton relation between total volumetric strain, elastic confining strain, and reversible/irreversible plastic strain; it is not a second fluid-pressure degree of freedom. BrickUP separately enforces d(zeta)=alpha*d(eps_v)+d(p_f)/M, owns storage, Darcy flow and drainage, and contributes -alpha*p_f*I once to total stress. Hercules never copies V8's standalone inferred ru or effective-pressure loss into p_f.",
         ],
         codeLabel: "parameters.in — frozen V8 syntax example",
         code: nonlinearModelExample({
           model: "PJLiqV8",
-          columns: "Vs_limit initial_void_ratio",
-          row: "0.601",
+          columns: "Vs_limit relative_density",
+          row: "0.66296296296296309",
           approximateGeostatic: true,
           errorTolerance: "1.0e-1",
           backboneTolerance: "1.0e-5",
@@ -745,8 +745,8 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         codeLabel: "parameters.in — frozen V8 coupled syntax",
         code: `${nonlinearModelExample({
           model: "PJLiqV8",
-          columns: "Vs_limit initial_void_ratio",
-          row: "0.601",
+          columns: "Vs_limit relative_density",
+          row: "0.66296296296296309",
           approximateGeostatic: true,
           errorTolerance: "1.0e-1",
           backboneTolerance: "1.0e-5",

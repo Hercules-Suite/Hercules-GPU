@@ -58,6 +58,17 @@ static bool advance(const pj8_parameters_t &parameters, tensor_t increment,
 int main()
 {
     const pj8_parameters_t parameters = pj8_reference_parameters(1.0);
+    const double relative_density_0601 =
+        (parameters.e_max-0.601)/(parameters.e_max-parameters.e_min);
+    if (pj8_void_ratio_from_relative_density(&parameters, 0.0) !=
+            parameters.e_max ||
+        pj8_void_ratio_from_relative_density(&parameters, 1.0) !=
+            parameters.e_min ||
+        pj8_void_ratio_from_relative_density(
+            &parameters, relative_density_0601) != 0.601) {
+        std::cerr << "PJ-Liq V8 relative-density conversion failed\n";
+        return 1;
+    }
     const std::array<tensor_t, 8> path = {{
         {0, 0, 0,  2.5e-4, 0, 0},
         {0, 0, 0,  2.5e-4, 0, 0},

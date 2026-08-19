@@ -243,6 +243,15 @@ PJ8_HD static inline pj8_parameters_t pj8_reference_parameters(double stress_sca
     return p;
 }
 
+/* PJ-Liq V8 freezes e_max and e_min, so relative density is the clearer
+ * external state descriptor. Keep void ratio as an internal constitutive
+ * variable and perform this affine conversion at the input boundary. */
+PJ8_HD static inline double pj8_void_ratio_from_relative_density(
+    const pj8_parameters_t *p, double relative_density)
+{
+    return p->e_max-relative_density*(p->e_max-p->e_min);
+}
+
 PJ8_HD static inline double pj8_relative_state(
     const pj8_parameters_t *p, double pressure, double void_ratio)
 {

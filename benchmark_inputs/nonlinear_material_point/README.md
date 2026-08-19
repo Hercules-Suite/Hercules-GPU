@@ -88,7 +88,15 @@ its translated surface centers from stress.
 For `material_model=PJLiqV8`, `material_point_constants` contains one value:
 
 ```text
-initial_void_ratio
+relative_density
+```
+
+Relative density is dimensionless and must be in `[0,1]`. The input boundary
+converts it to the internal initial void ratio using the frozen calibration
+values `e_max=0.78` and `e_min=0.51`:
+
+```text
+e0 = e_max - relative_density * (e_max - e_min)
 ```
 
 The 112 constitutive parameters and four host-increment reversal controls are
