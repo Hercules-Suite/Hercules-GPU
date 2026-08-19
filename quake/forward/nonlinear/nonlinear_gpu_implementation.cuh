@@ -3556,7 +3556,39 @@ __global__ static void kernel_nonlinear_update_force(
     }
 #endif
 
-    if (any_displacement) {
+    int update_constitutive_state = any_displacement;
+#ifdef NL_GPU_PJ_LIQ_V8_ONLY
+    /* A cyclic element can return to exactly zero absolute displacement from a
+     * nonzero committed strain.  The old absolute-displacement shortcut would
+     * skip that real unloading increment and assemble the previous V8 stress.
+     * Inspect committed strain only after the point has initialized, retaining
+     * the inexpensive untouched-wavefront path. */
+    if (!update_constitutive_state) {
+        const pj8_state_t *pj8_states =
+            (const pj8_state_t *)state.pj8_states;
+        int history_qp = 0;
+        if (c->isTopoNonlin) {
+            while (history_qp < 5 && c->tetraVol[history_qp] == 0.0)
+                history_qp++;
+        }
+        if (history_qp < (c->isTopoNonlin ? 5 : NL_GPU_QP) &&
+            pj8_states[nl_eindex*NL_GPU_QP+history_qp].initialized) {
+            const int ngp = c->isTopoNonlin ? 5 : NL_GPU_QP;
+            for (int qp = 0; qp < ngp; qp++) {
+                if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
+                const tensor_t previous = state.strains[nl_eindex].qp[qp];
+                if (previous.xx != 0.0 || previous.yy != 0.0 ||
+                    previous.zz != 0.0 || previous.xy != 0.0 ||
+                    previous.yz != 0.0 || previous.xz != 0.0) {
+                    update_constitutive_state = 1;
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
+    if (update_constitutive_state) {
 #ifdef NL_GPU_MANZARI_DAFALIAS_ONLY
         const double geostatic_k0 =
             step > cfg.geostatic_final_step &&
