@@ -99,7 +99,7 @@ compilation of the entire solver source.
 The nonlinear constitutive kernels make PTX assembly the most expensive
 forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
 instantiate independent production objects for the classic constitutive
-families, Manzari--Dafalias, and PressureDependMultiYield03, plus small runtime
+families, Manzari--Dafalias, PressureDependMultiYield03, and PJ-Liq V8, plus small runtime
 and material-point objects. The runtime selects one family kernel for the
 globally configured `material_model`. This keeps the equations normally
 inlined, avoids relocatable device code, and lets `make -j 8` compile the three
@@ -688,6 +688,40 @@ Nonlinear GPU execution (runtime environment):
 	production soil model. Use `approximate_geostatic_state=yes`, a nonzero ramped
 	geostatic loading stage, or a valid restart; otherwise startup warns that the
 	physical initialization is absent.
+- `material_model=PJLiqV8` selects the native binary64 port of the frozen
+	Ottawa F65 PJ-Liq V8 pressure-dependent bounding-surface model. Production
+	execution is CUDA-only. The compiled kernel retains 112 calibrated constants,
+	four host-increment reversal controls, and all 38 logical history fields; the
+	startup report prints parameter SHA-256
+	`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
+	`no_substeps` is the exact number of equal Forward-Euler subdivisions per
+	nonzero Hercules increment; an exact zero increment preserves history
+	without subdivision. Reversal detection executes once before subdivision, so
+	changing this number cannot create extra physical reversal events. Start
+	with one and increase it only after a timestep/substep convergence study.
+	`backbone_errTol` and `error_tolerance` remain required by the common
+	nonlinear input block but do not control this fixed explicit update.
+- PJ-Liq V8 rows use two values in `material_properties_list`:
+	`Vs_limit initial_void_ratio`. The first and last `Vs_limit` values select
+	the nonlinear interval; void ratio is interpolated by Vs and must remain in
+	the frozen calibration interval `[0.51,0.78]`. The constitutive constants are
+	intentionally not exposed for ad hoc production retuning.
+- PJ-Liq V8 is compatible with BrickUP through explicit field ownership.
+	V8 is the effective-skeleton law: its compatibility state separates
+	total volumetric strain into elastic confining, irreversible plastic, and
+	reversible plastic parts, and reconstructs effective mean stress from the
+	elastic confining part. BrickUP independently solves fluid mass balance,
+	`d(zeta) = alpha*d(eps_v) + d(p_f)/M`, together with Darcy flow and the
+	configured drainage boundaries. Equilibrium then uses
+	`stress_total = stress_effective - alpha*p_f*I`. Hercules never copies the
+	standalone diagnostic `1-p'/p'_anchor` or V8 effective-pressure loss into
+	`p_f`, so the same pore-pressure contribution is not generated twice. The
+	nonlinear undrained fast path remains disabled, as for MD and PDMY03.
+- Checkpoints preserve the historical displacement prefix and append a
+	versioned coupled-state section containing both BrickUP pressure time levels
+	and the complete PJ integration-point state, including prior strain/stress.
+	A PJ/BrickUP restart rejects a legacy displacement-only checkpoint instead
+	of silently resetting pore pressure or constitutive history.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
@@ -722,13 +756,13 @@ Nonlinear GPU execution (runtime environment):
 	nonlinear block for every accepted `material_model`: `linear`,
 	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
 	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
-	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`, and
-	`PressureDependMultiYield03`. The displayed rows are syntax or regression
+	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`,
+	`PressureDependMultiYield03`, and `PJLiqV8`. The displayed rows are syntax or regression
 	fixtures, never implicit production calibrations. They use two identical
 	property rows to make the nonlinear Vs interval explicit without adding an
 	interpolation gradient.
 - The documented pressure-dependent recipes for Mohr--Coulomb,
-	Drucker--Prager, Manzari--Dafalias, and PDMY03 set
+	Drucker--Prager, Manzari--Dafalias, PDMY03, and PJ-Liq V8 set
 	`approximate_geostatic_state=yes`,
 	`geostatic_loading_time_sec=0`, and `geostatic_cushion_time_sec=0`. This is
 	the internally consistent approximate-K0 choice when a case has neither a
@@ -759,7 +793,7 @@ Nonlinear GPU execution (runtime environment):
 	pressure traction remains explicit and the constitutive model owns the
 	skeleton volumetric response. The linear undrained fast path
 	(`lambda += alpha^2*M`) is automatically disabled even if requested. This is
-	particularly important for Manzari--Dafalias and PDMY03, whose skeleton stress is
+	particularly important for Manzari--Dafalias, PDMY03, and PJ-Liq V8, whose skeleton stress is
 	effective stress, but it also avoids bypassing every other nonlinear
 	constitutive volumetric update.
 - The synthetic fixture includes a standalone OpenSees driver for both
@@ -853,8 +887,8 @@ Nonlinear GPU execution (runtime environment):
 		not production calibrations.
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
-	force/displacement norms before a production run. Manzari--Dafalias and
-	PDMY03 are production-GPU-only; validate each with its shared host/CUDA
+	force/displacement norms before a production run. Manzari--Dafalias,
+	PDMY03, and PJ-Liq V8 are production-GPU-only; validate each with its shared host/CUDA
 	material-point regression and an appropriate independent characterization,
 	then run a GPU production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.

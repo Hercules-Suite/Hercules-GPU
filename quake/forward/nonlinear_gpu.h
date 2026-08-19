@@ -2,8 +2,12 @@
 #ifndef HERCULES_NONLINEAR_GPU_H
 #define HERCULES_NONLINEAR_GPU_H
 
+#include <sys/types.h>
+
 #include "nonlinear.h"
 #include "quake_util.h"
+
+#define NL_PJ8_STATE_VALUE_COUNT 93
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -68,6 +72,8 @@ typedef struct nonlinear_material_point_result_t {
     int32_t pdmy03_substeps_clamped;
     double pdmy03_pressure_d;
     double pdmy03_center_norm;
+    double pj8_state_values[NL_PJ8_STATE_VALUE_COUNT];
+    int32_t pj8_reversal_registered;
     int32_t status;
 } nonlinear_material_point_result_t;
 
@@ -142,6 +148,26 @@ int nonlinear_pdmy03_host_history(
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results);
+
+int nonlinear_pj8_host_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+/* Append/read the versioned nonlinear/BrickUP extension of a displacement
+ * checkpoint. The legacy displacement prefix is unchanged; extension_offset
+ * is the first byte after its reserved per-rank records. */
+int nonlinear_gpu_checkpoint_write(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver);
+int nonlinear_gpu_checkpoint_read(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver);
 
 void nonlinear_gpu_finalize(void);
 

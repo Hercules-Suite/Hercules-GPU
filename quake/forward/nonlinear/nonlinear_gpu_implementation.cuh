@@ -26,6 +26,12 @@
 #include "kernel.h"
 #include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
+#if defined(NL_GPU_RUNTIME_ONLY) || defined(NL_GPU_PJ_LIQ_V8_ONLY) || \
+    defined(NL_GPU_MATERIAL_POINT_ONLY)
+#include "nonlinear_pj_liq_v8.h"
+static_assert(NL_PJ8_STATE_VALUE_COUNT == PJ8_STATE_VALUE_COUNT,
+              "PJ-Liq V8 material-point state width mismatch");
+#endif
 
 #define NL_GPU_QP 8
 #define NL_GPU_UPDATE_BLOCK_SIZE 128
@@ -35,6 +41,7 @@
 #if (defined(NL_GPU_RUNTIME_ONLY) + defined(NL_GPU_CLASSIC_ONLY) + \
      defined(NL_GPU_MANZARI_DAFALIAS_ONLY) + \
      defined(NL_GPU_PDMY03_ONLY) + \
+     defined(NL_GPU_PJ_LIQ_V8_ONLY) + \
      defined(NL_GPU_MATERIAL_POINT_ONLY)) != 1
 #error "select exactly one nonlinear CUDA compilation unit"
 #endif
@@ -141,6 +148,8 @@ typedef struct nonlinear_gpu_state_t {
     qpvectors_t *ggmax;
     pdmy03_state_t *pdmy03_states;
     tensor_t *pdmy03_centers;
+    void *pj8_parameters;
+    void *pj8_states;
     nonlinear_gpu_error_t *error;
 } nonlinear_gpu_state_t;
 
@@ -155,6 +164,11 @@ extern "C" void nonlinear_gpu_launch_manzari_dafalias(
     int32_t step, double delta_t, double delta_t_squared,
     cudaStream_t stream);
 extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream);
+extern "C" void nonlinear_gpu_launch_pj_liq_v8(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
     gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
     int32_t step, double delta_t, double delta_t_squared,
@@ -3189,7 +3203,8 @@ __global__ static void kernel_nonlinear_material_point_history(
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     const int seeded = (config.material_model == MANZARI_DAFALIAS ||
-                        config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) &&
+                        config.material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
+                        config.material_model == PJ_LIQ_V8) &&
                        initial_state.provided != 0;
     tensor_t strain_prev = seeded ? initial_state.strain : nl_zero();
     tensor_t plastic_strain = seeded ? initial_state.plastic_strain : nl_zero();
@@ -3214,6 +3229,16 @@ __global__ static void kernel_nonlinear_material_point_history(
     int32_t md_substeps = 0;
     pdmy03_state_t pdmy03_state = {};
     tensor_t pdmy03_centers[PDMY03_MAX_SURFACES] = {};
+    pj8_state_t pj8_state = {};
+    pj8_parameters_t pj8_parameters = pj8_reference_parameters(1000.0);
+    if (config.material_model == PJ_LIQ_V8 && seeded) {
+        tensor_t reference = stress;
+        reference.xy = reference.yz = reference.xz = 0.0;
+        if (!pj8_initialize(&pj8_parameters, stress,
+                            constants.pj8_void_ratio, &pj8_state) ||
+            !pj8_begin_dynamic_phase(&pj8_parameters, reference,
+                                     &pj8_state)) return;
+    }
 
     for (int32_t step = 0; step < steps; step++) {
         tensor_t plastic_next = plastic_strain;
@@ -3223,9 +3248,16 @@ __global__ static void kernel_nonlinear_material_point_history(
         double model_error = 0.0;
         nl_md_diagnostics_t md_diagnostics = {};
         pdmy03_diagnostics_t pdmy03_diagnostics = {};
+        pj8_update_info_t pj8_info = {};
 
         int ok;
-        if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+        if (config.material_model == PJ_LIQ_V8) {
+            ok = pj8_update(&pj8_parameters,
+                pj8_sub(strain_history[step], strain_prev),
+                config.no_substeps, &pj8_state, &stress, &pj8_info);
+            fs = fabs(pj8_compatibility_residual(&pj8_state));
+            model_error = fs;
+        } else if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
             ok = pdmy03_update(
                 &constants.pdmy03, config.no_substeps,
                 strain_history[step], strain_prev, nl_zero(), &stress,
@@ -3288,6 +3320,26 @@ __global__ static void kernel_nonlinear_material_point_history(
                 center_norm += pdmy03_ddot(pdmy03_centers[i],
                                            pdmy03_centers[i]);
             result.pdmy03_center_norm = sqrt(center_norm);
+        } else if (config.material_model == PJ_LIQ_V8) {
+            result.fs = fabs(pj8_compatibility_residual(&pj8_state));
+            result.model_error = result.fs;
+            result.backstress = pj8_state.alpha;
+            result.ep_bar = pj8_state.lambda_total;
+            result.psi = pj8_state.D;
+            result.load_unload = (double)pj8_info.accepted_substeps;
+            result.kappa = pj8_pressure(pj8_state.stress);
+            result.stress_reference = pj8_state.alpha01;
+            result.gamma1d = pj8_state.eps_v_irreversible;
+            result.tao1d = pj8_state.eps_v_reversible;
+            result.ggmax = pj8_state.amplitude_factor;
+            result.fabric = pj8_state.fabric;
+            result.alpha_in = pj8_state.alpha0;
+            result.accepted_substeps = pj8_info.accepted_substeps;
+            result.void_ratio = pj8_state.void_ratio;
+            result.plastic_multiplier = pj8_state.lambda_total;
+            pj8_state_values(&pj8_state, result.pj8_state_values);
+            result.pj8_reversal_registered =
+                pj8_info.reversal_registered;
         }
         result.status = ok ? 0 : 1;
         results[step] = result;
@@ -3303,7 +3355,8 @@ __global__ static void kernel_nonlinear_material_point_history(
 #endif
 
 #if defined(NL_GPU_CLASSIC_ONLY) || \
-    defined(NL_GPU_MANZARI_DAFALIAS_ONLY) || defined(NL_GPU_PDMY03_ONLY)
+    defined(NL_GPU_MANZARI_DAFALIAS_ONLY) || defined(NL_GPU_PDMY03_ONLY) || \
+    defined(NL_GPU_PJ_LIQ_V8_ONLY)
 __device__ static inline void nl_accumulate_stress_force(
     fvector_t local_force[8], int node, tensor_t stress,
     double dx, double dy, double dz, double weight)
@@ -3567,6 +3620,44 @@ __global__ static void kernel_nonlinear_update_force(
                         -1.0),
                     pdmy03_sub(strain, strain_prev));
             }
+#elif defined(NL_GPU_PJ_LIQ_V8_ONLY)
+            const int32_t point = nl_eindex*NL_GPU_QP+qp;
+            pj8_state_t *pj8_states = (pj8_state_t *)state.pj8_states;
+            const pj8_parameters_t *pj8_parameters =
+                (const pj8_parameters_t *)state.pj8_parameters;
+            pj8_state_t *pj8_state = pj8_states+point;
+            if (!pj8_state->initialized) {
+                const tensor_t equilibrated = pj8_add(
+                    state.stresses[nl_eindex].qp[qp], static_stress);
+                tensor_t zero_static_shear = equilibrated;
+                zero_static_shear.xy = 0.0;
+                zero_static_shear.yz = 0.0;
+                zero_static_shear.xz = 0.0;
+                ok = pj8_initialize(pj8_parameters, equilibrated,
+                                    c->pj8_void_ratio, pj8_state) &&
+                     pj8_begin_dynamic_phase(pj8_parameters,
+                                             zero_static_shear, pj8_state);
+            } else {
+                ok = 1;
+            }
+            pj8_update_info_t pj8_info = {};
+            tensor_t full_effective_stress = pj8_state->stress;
+            if (ok) {
+                ok = pj8_update(pj8_parameters,
+                    pj8_sub(strain, strain_prev), cfg.no_substeps,
+                    pj8_state, &full_effective_stress, &pj8_info);
+            }
+            state.stresses[nl_eindex].qp[qp] =
+                pj8_sub(full_effective_stress, static_stress);
+            model_error = fabs(pj8_compatibility_residual(pj8_state));
+            c->fs[qp] = model_error;
+            state.load_unload_n[nl_eindex].qv[qp] =
+                (double)pj8_info.accepted_substeps;
+            if (!ok || !isfinite(model_error) ||
+                !pj8_finite_tensor(full_effective_stress)) {
+                nl_record_error(state.error, 5, eindex, qp, model_error,
+                                pj8_pressure(full_effective_stress));
+            }
 #elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
             int32_t md_substeps = 0;
             nl_md_diagnostics_t *md_diagnostics =
@@ -3735,6 +3826,16 @@ extern "C" void nonlinear_gpu_launch_manzari_dafalias(
 }
 #elif defined(NL_GPU_PDMY03_ONLY)
 extern "C" void nonlinear_gpu_launch_pdmy03(
+    nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
+    gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
+    int32_t step, double delta_t, double delta_t_squared,
+    cudaStream_t stream)
+{
+    kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
+        state, config, gpu, step, delta_t, delta_t_squared);
+}
+#elif defined(NL_GPU_PJ_LIQ_V8_ONLY)
+extern "C" void nonlinear_gpu_launch_pj_liq_v8(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
     gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
     int32_t step, double delta_t, double delta_t_squared,
@@ -3941,7 +4042,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(stresses, stresses);
     NL_ALLOC_COPY(strains, strains);
     const int allocate_previous_state_shadows =
-        config->material_model != MANZARI_DAFALIAS;
+        config->material_model != MANZARI_DAFALIAS &&
+        config->material_model != PJ_LIQ_V8;
     if (allocate_previous_state_shadows) {
         NL_ALLOC_COPY(strains1, strains1);
         NL_ALLOC_COPY(pstrains1, pstrains1);
@@ -3990,6 +4092,24 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 point_count*(size_t)stride*sizeof(*g_nl.pdmy03_centers));
         if (nonlinear_cuda_failure(myID, pdmy_error,
                 "PDMY03 history allocation") != 0) return -1;
+    }
+
+    if (config->material_model == PJ_LIQ_V8 && count > 0) {
+        const size_t point_count = (size_t)count*NL_GPU_QP;
+        const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
+        cudaError_t pj8_error = cudaMalloc(
+            &g_nl.pj8_parameters, sizeof(parameters));
+        if (pj8_error == cudaSuccess)
+            pj8_error = cudaMemcpy(g_nl.pj8_parameters, &parameters,
+                sizeof(parameters), cudaMemcpyHostToDevice);
+        if (pj8_error == cudaSuccess)
+            pj8_error = cudaMalloc(&g_nl.pj8_states,
+                point_count*sizeof(pj8_state_t));
+        if (pj8_error == cudaSuccess)
+            pj8_error = cudaMemset(g_nl.pj8_states, 0,
+                point_count*sizeof(pj8_state_t));
+        if (nonlinear_cuda_failure(myID, pj8_error,
+                "PJ-Liq V8 history allocation") != 0) return -1;
     }
 
     if (nonlinear_cuda_failure(myID,
@@ -4112,6 +4232,18 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
+        } else if (config->material_model == PJ_LIQ_V8) {
+            const double state_mib = (double)((size_t)count*NL_GPU_QP*
+                sizeof(pj8_state_t))/(1024.0*1024.0);
+            fprintf(stderr,
+                    "PJ-Liq V8 integration: frozen calibration %s "
+                    "(fixed_substeps=%d, local_history=%.1f MiB, "
+                    "effective-skeleton stress with BrickUP pore pressure "
+                    "and Biot total-stress coupling, geostatic=%s)\n",
+                    PJ8_PARAMETER_SHA256, config->no_substeps, state_mib,
+                    config->approximate_geostatic_state == YES
+                        ? "approximate K0 effective stress"
+                        : "solver stress history");
         }
         fflush(stderr);
     }
@@ -4160,6 +4292,10 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
             step, delta_t, delta_t_squared, stream);
     } else if (g_config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
         nonlinear_gpu_launch_pdmy03(
+            g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
+            step, delta_t, delta_t_squared, stream);
+    } else if (g_config.material_model == PJ_LIQ_V8) {
+        nonlinear_gpu_launch_pj_liq_v8(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
     } else {
@@ -4570,6 +4706,12 @@ void nonlinear_gpu_check_error(int32_t myID)
                     g_error_host.residual,
                     g_error_host.md_effective_mean_stress,
                     g_error_host.md_strain_increment_norm);
+        } else if (g_error_host.code == 5) {
+            fprintf(stderr,
+                    "  PJ-Liq V8 reason: invalid/non-finite explicit state "
+                    "or initialization; compatibility_residual=%12.8E, "
+                    "effective_mean_stress=%12.8E Pa\n",
+                    g_error_host.residual, g_error_host.value);
         }
         fflush(stderr);
         MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -4739,9 +4881,440 @@ int nonlinear_pdmy03_host_history(
     }
     return 0;
 }
+
+int nonlinear_pj8_host_history(
+    const nlconstants_t *constants,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results)
+{
+    if (constants == NULL || config == NULL || initial_state == NULL ||
+        strain_history == NULL || results == NULL || steps <= 0 ||
+        config->material_model != PJ_LIQ_V8 ||
+        !initial_state->provided || config->no_substeps < 1) return -1;
+
+    const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
+    tensor_t strain_previous = initial_state->strain;
+    pj8_state_t state = {};
+    tensor_t reference = initial_state->stress;
+    reference.xy = reference.yz = reference.xz = 0.0;
+    if (!pj8_initialize(&parameters, initial_state->stress,
+                        constants->pj8_void_ratio, &state) ||
+        !pj8_begin_dynamic_phase(&parameters, reference, &state)) return -1;
+
+    for (int32_t step = 0; step < steps; step++) {
+        pj8_update_info_t info = {};
+        tensor_t stress = state.stress;
+        const int ok = pj8_update(&parameters,
+            pj8_sub(strain_history[step], strain_previous),
+            config->no_substeps, &state, &stress, &info);
+        nonlinear_material_point_result_t result = {};
+        result.stress = stress;
+        result.backstress = state.alpha;
+        result.ep_bar = state.lambda_total;
+        result.fs = fabs(pj8_compatibility_residual(&state));
+        result.psi = state.D;
+        result.load_unload = (double)info.accepted_substeps;
+        result.kappa = pj8_pressure(state.stress);
+        result.stress_reference = state.alpha01;
+        result.gamma1d = state.eps_v_irreversible;
+        result.tao1d = state.eps_v_reversible;
+        result.ggmax = state.amplitude_factor;
+        result.model_error = result.fs;
+        result.fabric = state.fabric;
+        result.alpha_in = state.alpha0;
+        result.void_ratio = state.void_ratio;
+        result.plastic_multiplier = state.lambda_total;
+        result.accepted_substeps = info.accepted_substeps;
+        pj8_state_values(&state, result.pj8_state_values);
+        result.pj8_reversal_registered = info.reversal_registered;
+        result.status = ok ? 0 : 1;
+        results[step] = result;
+        strain_previous = strain_history[step];
+    }
+    return 0;
+}
 #endif
 
 #ifdef NL_GPU_RUNTIME_ONLY
+enum {
+    NL_CHECKPOINT_BRICKUP_PRESSURE = 1u,
+    NL_CHECKPOINT_PJ8_STATE = 2u
+};
+
+typedef struct nonlinear_checkpoint_header_t {
+    char magic[8];
+    uint32_t version;
+    uint32_t flags;
+    uint32_t rank_count;
+    uint32_t pj8_state_bytes;
+    uint64_t data_bytes;
+    char pj8_parameter_sha256[65];
+    char reserved[7];
+} nonlinear_checkpoint_header_t;
+
+static const char g_nonlinear_checkpoint_magic[8] = {
+    'H', 'N', 'L', 'V', '8', 'C', 'P', '\0'
+};
+
+static size_t nonlinear_checkpoint_rank_bytes(
+    uint32_t flags, uint64_t nodes, uint64_t points)
+{
+    size_t bytes = 0;
+    if ((flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0)
+        bytes += (size_t)(2*nodes)*sizeof(solver_float);
+    if ((flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+        const uint64_t elements = points/NL_GPU_QP;
+        bytes += (size_t)(2*elements)*sizeof(qptensors_t);
+        bytes += (size_t)points*sizeof(pj8_state_t);
+    }
+    return bytes;
+}
+
+static int nonlinear_checkpoint_write_device(
+    FILE *fp, const void *device, size_t bytes, void *scratch,
+    size_t scratch_bytes)
+{
+    const unsigned char *source = (const unsigned char *)device;
+    while (bytes > 0) {
+        const size_t chunk = bytes < scratch_bytes ? bytes : scratch_bytes;
+        if (cudaMemcpy(scratch, source, chunk, cudaMemcpyDeviceToHost) !=
+                cudaSuccess || fwrite(scratch, 1, chunk, fp) != chunk)
+            return -1;
+        source += chunk;
+        bytes -= chunk;
+    }
+    return 0;
+}
+
+static int nonlinear_checkpoint_read_device(
+    FILE *fp, void *device, size_t bytes, void *scratch,
+    size_t scratch_bytes)
+{
+    unsigned char *target = (unsigned char *)device;
+    while (bytes > 0) {
+        const size_t chunk = bytes < scratch_bytes ? bytes : scratch_bytes;
+        if (fread(scratch, 1, chunk, fp) != chunk ||
+            cudaMemcpy(target, scratch, chunk, cudaMemcpyHostToDevice) !=
+                cudaSuccess)
+            return -1;
+        target += chunk;
+        bytes -= chunk;
+    }
+    return 0;
+}
+
+static uint32_t nonlinear_checkpoint_local_flags(mysolver_t *solver)
+{
+    uint32_t flags = 0;
+    if (solver != NULL && solver->pore_pressure_tm1 != NULL &&
+        solver->pore_pressure_tm2 != NULL && solver->gpuData != NULL &&
+        solver->gpuData->porePressureTm1Device != NULL &&
+        solver->gpuData->porePressureTm2Device != NULL)
+        flags |= NL_CHECKPOINT_BRICKUP_PRESSURE;
+    /* The field schema must agree on ranks that happen to own zero nonlinear
+     * elements; their point count is zero and no device bytes are copied. */
+    if (g_active && g_config.material_model == PJ_LIQ_V8)
+        flags |= NL_CHECKPOINT_PJ8_STATE;
+    return flags;
+}
+
+int nonlinear_gpu_checkpoint_write(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver)
+{
+    const uint32_t local_flags = nonlinear_checkpoint_local_flags(solver);
+    uint32_t minimum_flags = 0, maximum_flags = 0;
+    MPI_Allreduce(&local_flags, &minimum_flags, 1, MPI_UNSIGNED, MPI_MIN,
+                  comm_solver);
+    MPI_Allreduce(&local_flags, &maximum_flags, 1, MPI_UNSIGNED, MPI_MAX,
+                  comm_solver);
+    if (minimum_flags != maximum_flags) {
+        if (myID == 0)
+            fprintf(stderr, "Checkpoint extension fields differ by rank\n");
+        return -1;
+    }
+    if (local_flags == 0) return 0;
+
+    const uint64_t local_nodes =
+        (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
+            ? (uint64_t)node_count : 0;
+    const uint64_t local_points =
+        (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
+            ? (uint64_t)g_nl.count*NL_GPU_QP : 0;
+    uint64_t *counts = (uint64_t *)malloc(
+        (size_t)2*group_size*sizeof(uint64_t));
+    int local_error = counts == NULL;
+    int global_error = 0;
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    if (global_error) {
+        free(counts);
+        return -1;
+    }
+    MPI_Allgather(&local_nodes, 1, MPI_UNSIGNED_LONG_LONG,
+                  counts, 1, MPI_UNSIGNED_LONG_LONG, comm_solver);
+    MPI_Allgather(&local_points, 1, MPI_UNSIGNED_LONG_LONG,
+                  counts+group_size, 1, MPI_UNSIGNED_LONG_LONG,
+                  comm_solver);
+
+    nonlinear_checkpoint_header_t header = {};
+    memcpy(header.magic, g_nonlinear_checkpoint_magic, sizeof(header.magic));
+    header.version = 1;
+    header.flags = local_flags;
+    header.rank_count = (uint32_t)group_size;
+    header.pj8_state_bytes = (uint32_t)sizeof(pj8_state_t);
+    if ((local_flags & NL_CHECKPOINT_PJ8_STATE) != 0)
+        memcpy(header.pj8_parameter_sha256, PJ8_PARAMETER_SHA256,
+               sizeof(PJ8_PARAMETER_SHA256));
+    for (int rank = 0; rank < group_size; rank++)
+        header.data_bytes += nonlinear_checkpoint_rank_bytes(
+            local_flags, counts[rank], counts[group_size+rank]);
+
+    if (myID == 0) {
+        FILE *fp = fopen(filename, "rb+");
+        if (fp == NULL || fseeko(fp, extension_offset, SEEK_SET) != 0 ||
+            fwrite(&header, sizeof(header), 1, fp) != 1 ||
+            fwrite(counts, sizeof(uint64_t), (size_t)2*group_size, fp) !=
+                (size_t)2*group_size) {
+            local_error = 1;
+        }
+        if (fp != NULL) fclose(fp);
+    }
+    MPI_Bcast(&local_error, 1, MPI_INT, 0, comm_solver);
+    if (local_error) {
+        free(counts);
+        return -1;
+    }
+    MPI_Barrier(comm_solver);
+
+    const size_t scratch_bytes = 64u*1024u*1024u;
+    void *scratch = malloc(scratch_bytes);
+    local_error = scratch == NULL;
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    if (global_error) {
+        free(scratch);
+        free(counts);
+        return -1;
+    }
+
+    off_t record_offset = extension_offset+(off_t)sizeof(header)+
+        (off_t)2*group_size*sizeof(uint64_t);
+    for (int rank = 0; rank < myID; rank++)
+        record_offset += (off_t)nonlinear_checkpoint_rank_bytes(
+            local_flags, counts[rank], counts[group_size+rank]);
+    for (int group_start = 0; group_start < group_size;
+         group_start += 512) {
+        if (myID >= group_start && myID < group_start+512) {
+            FILE *fp = fopen(filename, "rb+");
+            if (fp == NULL || fseeko(fp, record_offset, SEEK_SET) != 0) {
+                local_error = 1;
+            } else {
+                if ((local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0 &&
+                    (nonlinear_checkpoint_write_device(
+                         fp, solver->gpuData->porePressureTm1Device,
+                         (size_t)local_nodes*sizeof(solver_float), scratch,
+                         scratch_bytes) != 0 ||
+                     nonlinear_checkpoint_write_device(
+                         fp, solver->gpuData->porePressureTm2Device,
+                         (size_t)local_nodes*sizeof(solver_float), scratch,
+                         scratch_bytes) != 0))
+                    local_error = 1;
+                if (!local_error &&
+                    (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+                    const size_t element_bytes =
+                        (size_t)g_nl.count*sizeof(qptensors_t);
+                    if (nonlinear_checkpoint_write_device(
+                            fp, g_nl.strains, element_bytes, scratch,
+                            scratch_bytes) != 0 ||
+                        nonlinear_checkpoint_write_device(
+                            fp, g_nl.stresses, element_bytes, scratch,
+                            scratch_bytes) != 0 ||
+                        nonlinear_checkpoint_write_device(
+                            fp, g_nl.pj8_states,
+                            (size_t)local_points*sizeof(pj8_state_t), scratch,
+                            scratch_bytes) != 0)
+                        local_error = 1;
+                }
+            }
+            if (fp != NULL) fclose(fp);
+        }
+        MPI_Barrier(comm_solver);
+    }
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    free(scratch);
+    free(counts);
+    if (!global_error && myID == 0) {
+        fprintf(stderr,
+                "Checkpoint extension: saved%s%s state (%llu bytes)\n",
+                (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
+                    ? " BrickUP pressure" : "",
+                (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
+                    ? " PJ-Liq V8" : "",
+                (unsigned long long)header.data_bytes);
+    }
+    return global_error ? -1 : 0;
+}
+
+int nonlinear_gpu_checkpoint_read(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver)
+{
+    const uint32_t local_flags = nonlinear_checkpoint_local_flags(solver);
+    uint32_t minimum_flags = 0, maximum_flags = 0;
+    MPI_Allreduce(&local_flags, &minimum_flags, 1, MPI_UNSIGNED, MPI_MIN,
+                  comm_solver);
+    MPI_Allreduce(&local_flags, &maximum_flags, 1, MPI_UNSIGNED, MPI_MAX,
+                  comm_solver);
+    if (minimum_flags != maximum_flags) return -1;
+    if (local_flags == 0) return 0;
+
+    nonlinear_checkpoint_header_t header = {};
+    int local_error = 0;
+    if (myID == 0) {
+        FILE *fp = fopen(filename, "rb");
+        if (fp == NULL || fseeko(fp, extension_offset, SEEK_SET) != 0 ||
+            fread(&header, sizeof(header), 1, fp) != 1)
+            local_error = 1;
+        if (fp != NULL) fclose(fp);
+    }
+    MPI_Bcast(&local_error, 1, MPI_INT, 0, comm_solver);
+    MPI_Bcast(&header, sizeof(header), MPI_BYTE, 0, comm_solver);
+    if (local_error ||
+        memcmp(header.magic, g_nonlinear_checkpoint_magic,
+               sizeof(header.magic)) != 0 ||
+        header.version != 1 || header.flags != local_flags ||
+        header.rank_count != (uint32_t)group_size ||
+        ((local_flags & NL_CHECKPOINT_PJ8_STATE) != 0 &&
+         (header.pj8_state_bytes != sizeof(pj8_state_t) ||
+          strcmp(header.pj8_parameter_sha256, PJ8_PARAMETER_SHA256) != 0))) {
+        if (myID == 0)
+            fprintf(stderr,
+                    "Checkpoint lacks a compatible BrickUP/PJ-Liq V8 "
+                    "extension; a coupled restart cannot reset pressure or "
+                    "constitutive history\n");
+        return -1;
+    }
+
+    uint64_t *counts = (uint64_t *)malloc(
+        (size_t)2*group_size*sizeof(uint64_t));
+    local_error = counts == NULL;
+    int global_error = 0;
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    if (global_error) {
+        free(counts);
+        return -1;
+    }
+    if (myID == 0) {
+        FILE *fp = fopen(filename, "rb");
+        if (fp == NULL ||
+            fseeko(fp, extension_offset+(off_t)sizeof(header), SEEK_SET) != 0 ||
+            fread(counts, sizeof(uint64_t), (size_t)2*group_size, fp) !=
+                (size_t)2*group_size)
+            local_error = 1;
+        if (fp != NULL) fclose(fp);
+    }
+    MPI_Bcast(&local_error, 1, MPI_INT, 0, comm_solver);
+    MPI_Bcast(counts, 2*group_size, MPI_UNSIGNED_LONG_LONG, 0, comm_solver);
+    const uint64_t local_nodes =
+        (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
+            ? (uint64_t)node_count : 0;
+    const uint64_t local_points =
+        (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
+            ? (uint64_t)g_nl.count*NL_GPU_QP : 0;
+    uint64_t expected_data_bytes = 0;
+    for (int rank = 0; rank < group_size; rank++)
+        expected_data_bytes += nonlinear_checkpoint_rank_bytes(
+            local_flags, counts[rank], counts[group_size+rank]);
+    if (local_error || header.data_bytes != expected_data_bytes ||
+        counts[myID] != local_nodes ||
+        counts[group_size+myID] != local_points) {
+        free(counts);
+        return -1;
+    }
+
+    const size_t scratch_bytes = 64u*1024u*1024u;
+    void *scratch = malloc(scratch_bytes);
+    local_error = scratch == NULL;
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    if (global_error) {
+        free(scratch);
+        free(counts);
+        return -1;
+    }
+    off_t record_offset = extension_offset+(off_t)sizeof(header)+
+        (off_t)2*group_size*sizeof(uint64_t);
+    for (int rank = 0; rank < myID; rank++)
+        record_offset += (off_t)nonlinear_checkpoint_rank_bytes(
+            local_flags, counts[rank], counts[group_size+rank]);
+    for (int group_start = 0; group_start < group_size;
+         group_start += 512) {
+        if (myID >= group_start && myID < group_start+512) {
+            FILE *fp = fopen(filename, "rb");
+            if (fp == NULL || fseeko(fp, record_offset, SEEK_SET) != 0) {
+                local_error = 1;
+            } else {
+                if ((local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0 &&
+                    (nonlinear_checkpoint_read_device(
+                         fp, solver->gpuData->porePressureTm1Device,
+                         (size_t)local_nodes*sizeof(solver_float), scratch,
+                         scratch_bytes) != 0 ||
+                     nonlinear_checkpoint_read_device(
+                         fp, solver->gpuData->porePressureTm2Device,
+                         (size_t)local_nodes*sizeof(solver_float), scratch,
+                         scratch_bytes) != 0))
+                    local_error = 1;
+                if (!local_error &&
+                    (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+                    const size_t element_bytes =
+                        (size_t)g_nl.count*sizeof(qptensors_t);
+                    if (nonlinear_checkpoint_read_device(
+                            fp, g_nl.strains, element_bytes, scratch,
+                            scratch_bytes) != 0 ||
+                        nonlinear_checkpoint_read_device(
+                            fp, g_nl.stresses, element_bytes, scratch,
+                            scratch_bytes) != 0 ||
+                        nonlinear_checkpoint_read_device(
+                            fp, g_nl.pj8_states,
+                            (size_t)local_points*sizeof(pj8_state_t), scratch,
+                            scratch_bytes) != 0)
+                        local_error = 1;
+                }
+            }
+            if (fp != NULL) fclose(fp);
+            if (!local_error &&
+                (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0 &&
+                (cudaMemcpy(solver->pore_pressure_tm1,
+                            solver->gpuData->porePressureTm1Device,
+                            (size_t)local_nodes*sizeof(solver_float),
+                            cudaMemcpyDeviceToHost) != cudaSuccess ||
+                 cudaMemcpy(solver->pore_pressure_tm2,
+                            solver->gpuData->porePressureTm2Device,
+                            (size_t)local_nodes*sizeof(solver_float),
+                            cudaMemcpyDeviceToHost) != cudaSuccess))
+                local_error = 1;
+        }
+        MPI_Barrier(comm_solver);
+    }
+    MPI_Allreduce(&local_error, &global_error, 1, MPI_INT, MPI_MAX,
+                  comm_solver);
+    free(scratch);
+    free(counts);
+    if (!global_error && myID == 0)
+        fprintf(stderr,
+                "Checkpoint extension: restored BrickUP/PJ-Liq V8 "
+                "coupled state\n");
+    return global_error ? -1 : 0;
+}
+
 void nonlinear_gpu_finalize(void)
 {
     nonlinear_gpu_release_station_output();
@@ -4756,6 +5329,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(sv_n); NL_FREE(sv_max); NL_FREE(kappa); NL_FREE(sref);
     NL_FREE(fabric);
     NL_FREE(pdmy03_states); NL_FREE(pdmy03_centers);
+    NL_FREE(pj8_parameters); NL_FREE(pj8_states);
     NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
 #undef NL_FREE
     memset(&g_nl, 0, sizeof(g_nl));

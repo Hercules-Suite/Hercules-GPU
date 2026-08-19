@@ -49,7 +49,7 @@ typedef enum {
     LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER,
     MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
     VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS,
-    PRESSURE_DEPEND_MULTIYIELD_03
+    PRESSURE_DEPEND_MULTIYIELD_03, PJ_LIQ_V8
 
 } materialmodel_t;
 
@@ -220,6 +220,7 @@ typedef struct nlconstants_t {
 
     manzari_dafalias_constants_t md;
     pdmy03_constants_t pdmy03;
+    double pj8_void_ratio;
 
     double maxFs;
     double avgFs;

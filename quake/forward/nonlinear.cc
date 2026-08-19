@@ -39,7 +39,12 @@
 //#include "octor.h"
 #include "geometrics.h"
 #include "nonlinear.h"
+#include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
+#include "nonlinear_pj_liq_v8.h"
+
+static_assert(NL_PJ8_STATE_VALUE_COUNT == PJ8_STATE_VALUE_COUNT,
+              "PJ-Liq V8 material-point state width mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
 #include "util.h"
@@ -48,7 +53,6 @@
 #include "drm.h"
 
 #include  "kernel.h"
-#include  "nonlinear_gpu.h"
 
 #define KAPPA_MIN      1.0E-010
 #define  QC  qc = 0.577350269189 /* sqrt(3.0)/3.0; */
@@ -107,6 +111,7 @@ static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
 #define PDMY03_PROPERTY_COUNT 21
 static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
+static double               *thePj8VoidRatio;
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -732,6 +737,9 @@ void nonlinear_init( int32_t     myID,
                 thePdmy03Properties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
+        } else if (theMaterialModel == PJ_LIQ_V8) {
+            thePj8VoidRatio =
+                (double*)malloc(sizeof(double) * thePropertiesCount);
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
         theKayPhis          = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -764,6 +772,9 @@ void nonlinear_init( int32_t     myID,
             MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
         }
+    } else if (theMaterialModel == PJ_LIQ_V8) {
+        MPI_Bcast(thePj8VoidRatio, thePropertiesCount, MPI_DOUBLE, 0,
+                  comm_solver);
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theKayPhis,          thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -937,13 +948,17 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     } else if (strcasecmp(material_model, "PressureDependMultiYield03") == 0 ||
                strcasecmp(material_model, "PDMY03") == 0) {
         materialmodel = PRESSURE_DEPEND_MULTIYIELD_03;
+    } else if (strcasecmp(material_model, "PJLiqV8") == 0 ||
+               strcasecmp(material_model, "PJ-Liq-V8") == 0 ||
+               strcasecmp(material_model, "PJ_Liq_V8") == 0) {
+        materialmodel = PJ_LIQ_V8;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, PJLiqV8): %s\n", material_model);
         return -1;
     }
 
@@ -1051,14 +1066,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 approx_geostatic_state);
         return -1;
     }
-    if (materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+    if ((materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+         materialmodel == PJ_LIQ_V8) &&
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
-                "PressureDependMultiYield03 warning: no approximate or "
+                "%s warning: no approximate or "
                 "ramped geostatic initialization was selected. The "
-                "OpenSees-compatible transition clamps tensile mean stress "
-                "to zero, but a production soil model normally requires a "
-                "physical in-situ effective-stress state.\n");
+                "constitutive initialization therefore lacks a physical "
+                "in-situ effective-stress state.\n",
+                materialmodel == PJ_LIQ_V8 ? "PJLiqV8" :
+                    "PressureDependMultiYield03");
     }
 
     if ( ( strcasecmp(tension_cutoff, "yes") == 0 ) && ( ( materialmodel == DRUCKERPRAGER ) || ( materialmodel == MOHR_COULOMB ) ) ) {
@@ -1100,7 +1117,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
 
     const int property_columns =
         (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
-        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 : 16;
+        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 :
+        (theMaterialModel == PJ_LIQ_V8) ? 2 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1115,6 +1133,9 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
+    } else if (theMaterialModel == PJ_LIQ_V8) {
+        thePj8VoidRatio =
+            (double*)malloc(sizeof(double) * thePropertiesCount);
     } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
     theKayPhis           = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1154,6 +1175,9 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 thePdmy03Properties[field][row] =
                     auxiliar[row * property_columns + field + 1];
             }
+            continue;
+        } else if (theMaterialModel == PJ_LIQ_V8) {
+            thePj8VoidRatio[row] = auxiliar[row * property_columns + 1];
             continue;
         }
         theAlphaCohes[row]        = auxiliar[ row * 16 + 1 ];
@@ -1244,6 +1268,25 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     "and atmospheric pressures, loading_type (0..2), and "
                     "integer surface count (2..%d)\n",
                     row, PDMY03_MAX_SURFACES);
+                return -1;
+            }
+        }
+    } else if (theMaterialModel == PJ_LIQ_V8) {
+        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
+        for (row = 1; row < thePropertiesCount; row++) {
+            if (theVsLimits[row] <= theVsLimits[row-1]) {
+                fprintf(stderr,
+                        "PJLiqV8 Vs limits must be strictly increasing\n");
+                return -1;
+            }
+        }
+        for (row = 0; row < thePropertiesCount; row++) {
+            const double e = thePj8VoidRatio[row];
+            if (!isfinite(e) || e < frozen.e_min || e > frozen.e_max) {
+                fprintf(stderr,
+                        "Illegal PJLiqV8 row %d: initial void ratio must be "
+                        "finite and in the frozen V8 range [%g, %g]\n",
+                        row, frozen.e_min, frozen.e_max);
                 return -1;
             }
         }
@@ -1540,7 +1583,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
     int64_t global_poro_map_counts[7] = {0};
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
-         theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) &&
+         theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+         theMaterialModel == PJ_LIQ_V8) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
@@ -1548,7 +1592,9 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     "backend; HERCULES_NONLINEAR_BACKEND=cpu is not "
                     "supported for production runs.\n",
                     theMaterialModel == MANZARI_DAFALIAS
-                        ? "ManzariDafalias" : "PressureDependMultiYield03");
+                        ? "ManzariDafalias" :
+                    theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03
+                        ? "PressureDependMultiYield03" : "PJLiqV8");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1662,6 +1708,16 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         "element map. ***\n",
                         (long long)global_poro_map_counts[
                             POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
+            }
+            if (theMaterialModel == PJ_LIQ_V8 && active > 0) {
+                fprintf(stderr,
+                        "PJ-Liq V8/BrickUP coupling: V8 evolves effective "
+                        "skeleton stress (including plastic volumetric "
+                        "compatibility); BrickUP independently solves fluid "
+                        "mass balance and applies sigma=sigma'-alpha*p*I for "
+                        "%lld active nonlinear elements. V8 effective-pressure "
+                        "loss is not copied into the pressure DOF.\n",
+                        (long long)active);
             }
         }
     }
@@ -2199,6 +2255,27 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
             }
 
+            case PJ_LIQ_V8: {
+                ecp->pj8_void_ratio = interpolate_property_value(
+                    elementVs, thePj8VoidRatio);
+                const pj8_parameters_t frozen =
+                    pj8_reference_parameters(1000.0);
+                if (!isfinite(ecp->pj8_void_ratio) ||
+                    ecp->pj8_void_ratio < frozen.e_min ||
+                    ecp->pj8_void_ratio > frozen.e_max) {
+                    fprintf(stderr,
+                            "Thread %d: PJLiqV8 element %d has invalid "
+                            "interpolated initial void ratio %g\n",
+                            myID, eindex, ecp->pj8_void_ratio);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                double sin_phi = 3.0*frozen.M/(6.0+frozen.M);
+                sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
+                ecp->phi = asin(sin_phi);
+                break;
+            }
+
             default:
                 fprintf(stderr, "Thread %d: nonlinear_solver_init:\n"
                         "\tUnexpected error with the material model\n", myID);
@@ -2217,7 +2294,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
 
         if (theMaterialModel == MANZARI_DAFALIAS ||
-            theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+            theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+            theMaterialModel == PJ_LIQ_V8) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
@@ -5217,6 +5295,8 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_CONSTANT_COUNT 24
 #define MATERIAL_POINT_MD_CONSTANT_COUNT 17
 #define MATERIAL_POINT_PDMY03_CONSTANT_COUNT 21
+#define MATERIAL_POINT_PJ8_CONSTANT_COUNT 1
+#define MATERIAL_POINT_PJ8_STATE_VALUE_COUNT 93
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
@@ -5267,6 +5347,10 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "PressureDependMultiYield03") == 0 ||
              strcasecmp(name, "PDMY03") == 0)
         *model = PRESSURE_DEPEND_MULTIYIELD_03;
+    else if (strcasecmp(name, "PJLiqV8") == 0 ||
+             strcasecmp(name, "PJ-Liq-V8") == 0 ||
+             strcasecmp(name, "PJ_Liq_V8") == 0)
+        *model = PJ_LIQ_V8;
     else return -1;
     return 0;
 }
@@ -5276,6 +5360,10 @@ static void material_point_load_constants(nlconstants_t *constants,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
+    if (model == PJ_LIQ_V8) {
+        constants->pj8_void_ratio = values[0];
+        return;
+    }
     if (model == MANZARI_DAFALIAS) {
         constants->md.G0 = values[0];
         constants->md.nu = values[1];
@@ -5355,6 +5443,11 @@ static int material_point_cpu_history(
     if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
         (void)dt;
         return nonlinear_pdmy03_host_history(
+            constants, config, initial_state, strain_history, steps, results);
+    }
+    if (config->material_model == PJ_LIQ_V8) {
+        (void)dt;
+        return nonlinear_pj8_host_history(
             constants, config, initial_state, strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
@@ -5551,6 +5644,26 @@ static int material_point_validate_zero_increment(
                 current->model_error);
         return -1;
     }
+    if (model == PJ_LIQ_V8) {
+        for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
+            if (current->pj8_state_values[i] !=
+                    previous->pj8_state_values[i]) {
+                fprintf(stderr,
+                        "%s PJ-Liq V8 state changed on a zero strain "
+                        "increment at step %d flattened field %d: "
+                        "previous=%.17e current=%.17e\n",
+                        backend, step, i, previous->pj8_state_values[i],
+                        current->pj8_state_values[i]);
+                return -1;
+            }
+        }
+        if (current->pj8_reversal_registered != 0) {
+            fprintf(stderr,
+                    "%s PJ-Liq V8 registered a reversal on a zero strain "
+                    "increment at step %d\n", backend, step);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -5691,6 +5804,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double maximum_pressure_absolute = 0.0;
     double maximum_pressure_relative = 0.0;
     double maximum_gpu_pressure_spread = 0.0;
+    double maximum_gpu_fluid_balance_residual = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
     double maximum_cpu_integration_error = 0.0;
@@ -5781,7 +5895,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     material_constant_count = (material_model == MANZARI_DAFALIAS)
         ? MATERIAL_POINT_MD_CONSTANT_COUNT :
         (material_model == PRESSURE_DEPEND_MULTIYIELD_03)
-        ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
+        ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
+        (material_model == PJ_LIQ_V8)
+        ? MATERIAL_POINT_PJ8_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
         fprintf(stderr, "Cannot read %d material-point constants for %s\n",
@@ -5805,9 +5921,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
     if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
-        material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
+        material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
+        material_model != PJ_LIQ_V8) {
         fprintf(stderr, "A material-point initial state currently requires "
-                        "ManzariDafalias or PressureDependMultiYield03\n");
+                        "ManzariDafalias, PressureDependMultiYield03, or "
+                        "PJLiqV8\n");
         goto cleanup;
     }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
@@ -5835,10 +5953,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         parsetext(fp, "material_point_brickup_solid_bulk_modulus_pa", 'd',
                   &brickup_solid_bulk_modulus);
         if (material_model != MANZARI_DAFALIAS &&
-            material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
+            material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
+            material_model != PJ_LIQ_V8) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
-                            "requires ManzariDafalias or "
-                            "PressureDependMultiYield03\n");
+                            "requires ManzariDafalias, "
+                            "PressureDependMultiYield03, or PJLiqV8\n");
             goto cleanup;
         }
         if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
@@ -5938,6 +6057,24 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             fabs(constants_values[16]-pdmy.surface_count) > 1.0e-12 ||
             !pdmy03_prepare_constants(&pdmy)) {
             fprintf(stderr, "Illegal PDMY03 material-point constants\n");
+            goto cleanup;
+        }
+    }
+    if (material_model == PJ_LIQ_V8) {
+        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
+        if (!isfinite(constants_values[0]) ||
+            constants_values[0] < frozen.e_min ||
+            constants_values[0] > frozen.e_max) {
+            fprintf(stderr,
+                    "Illegal PJLiqV8 material-point initial void ratio: "
+                    "expected [%g, %g]\n", frozen.e_min, frozen.e_max);
+            goto cleanup;
+        }
+        if (initial_array_count != 5) {
+            fprintf(stderr,
+                    "PJLiqV8 material-point input requires equilibrated "
+                    "initial strain and effective stress; alpha, alpha_in, "
+                    "and fabric entries may be zero placeholders\n");
             goto cleanup;
         }
     }
@@ -6050,6 +6187,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
         double pressure_scale = 0.0;
+        double previous_gpu_pressure = initial_pore_pressure;
+        tensor_t previous_brickup_strain = initial_state.strain;
         for (int32_t step = 0; step < steps; step++) {
             const double absolute =
                 fabs(cpu_pore_pressure[step] - gpu_pore_pressure[step]);
@@ -6071,11 +6210,36 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                                 gpu_pore_pressure[step], absolute, relative);
                 goto cleanup;
             }
+            /* The constitutive model supplies effective skeleton stress.
+             * Independently, the sealed BrickUP regression must satisfy
+             * d(zeta)=alpha*d(eps_v)+d(p_f)/M=0. Express the residual in Pa
+             * so it uses the same numerical scale as the pressure check. */
+            const double delta_volume =
+                (strain_history[step].xx+strain_history[step].yy+
+                 strain_history[step].zz)-
+                (previous_brickup_strain.xx+previous_brickup_strain.yy+
+                 previous_brickup_strain.zz);
+            const double fluid_balance_residual = fabs(
+                gpu_pore_pressure[step]-previous_gpu_pressure+
+                brickup_storage_modulus*brickup_biot_alpha*delta_volume);
+            maximum_gpu_fluid_balance_residual = MAX(
+                maximum_gpu_fluid_balance_residual, fluid_balance_residual);
+            previous_gpu_pressure = gpu_pore_pressure[step];
+            previous_brickup_strain = strain_history[step];
         }
         if (maximum_gpu_pressure_spread > atol + rtol*pressure_scale) {
             fprintf(stderr, "Material-point BrickUP uniform pressure spread "
                             "%.3e exceeds tolerance %.3e\n",
                     maximum_gpu_pressure_spread, atol + rtol*pressure_scale);
+            goto cleanup;
+        }
+        if (maximum_gpu_fluid_balance_residual >
+                atol + rtol*pressure_scale) {
+            fprintf(stderr,
+                    "Material-point BrickUP sealed fluid-balance residual "
+                    "%.3e Pa exceeds tolerance %.3e Pa\n",
+                    maximum_gpu_fluid_balance_residual,
+                    atol + rtol*pressure_scale);
             goto cleanup;
         }
     }
@@ -6091,7 +6255,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     for (int32_t step = 0; step < steps; step++) {
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
              material_model == MANZARI_DAFALIAS ||
-             material_model == PRESSURE_DEPEND_MULTIYIELD_03) && step > 0 &&
+             material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
+             material_model == PJ_LIQ_V8) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -6269,6 +6434,29 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 goto cleanup;
             }
         }
+        if (material_model == PJ_LIQ_V8) {
+            for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
+                const double cpu_state =
+                    cpu_results[step].pj8_state_values[i];
+                const double gpu_state =
+                    gpu_results[step].pj8_state_values[i];
+                const double absolute = fabs(cpu_state-gpu_state);
+                const double scale = MAX(fabs(cpu_state), fabs(gpu_state));
+                maximum_absolute = MAX(maximum_absolute, absolute);
+                if (absolute > atol)
+                    maximum_relative = MAX(maximum_relative,
+                        absolute/MAX(scale, DBL_MIN));
+                if (!isfinite(cpu_state) || !isfinite(gpu_state) ||
+                    (absolute > atol && absolute > rtol*scale)) {
+                    fprintf(stderr,
+                            "PJLiqV8 full-state mismatch at step %d "
+                            "flattened field %d: CPU=%.17e GPU=%.17e "
+                            "abs=%.3e\n", step, i, cpu_state,
+                            gpu_state, absolute);
+                    goto cleanup;
+                }
+            }
+        }
     }
 
     printf("Material-point model: %s; steps: %d\n", material_name, steps);
@@ -6366,6 +6554,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
+    } else if (material_model == PJ_LIQ_V8) {
+        printf("PJ-Liq V8 controls: frozen calibration %s, %d fixed "
+               "substep%s per host increment\n",
+               PJ8_PARAMETER_SHA256, no_substeps,
+               no_substeps == 1 ? "" : "s");
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
     }
     if (brickup_enabled == YES) {
         printf("BrickUP sealed uniform-element controls: M=%.6e Pa, "
@@ -6376,6 +6574,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                maximum_pressure_relative);
         printf("Maximum GPU within-element nodal pressure spread: %.6e Pa\n",
                maximum_gpu_pressure_spread);
+        printf("Maximum GPU sealed fluid-balance residual: %.6e Pa\n",
+               maximum_gpu_fluid_balance_residual);
     }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;
@@ -6394,6 +6594,8 @@ cleanup:
 #undef MATERIAL_POINT_CONSTANT_COUNT
 #undef MATERIAL_POINT_MD_CONSTANT_COUNT
 #undef MATERIAL_POINT_PDMY03_CONSTANT_COUNT
+#undef MATERIAL_POINT_PJ8_CONSTANT_COUNT
+#undef MATERIAL_POINT_PJ8_STATE_VALUE_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
 #undef MATERIAL_POINT_PSI_INDEX

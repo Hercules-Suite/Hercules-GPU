@@ -42,6 +42,7 @@ fixtures=(
   manzari_dafalias_pressure_floor_synthetic.in
   pdmy03_cyclic_shear_synthetic.in
   pdmy03_zero_tension_onset_synthetic.in
+  pj_liq_v8_brickup_synthetic.in
 )
 
 validate_md_pressure_floor() {

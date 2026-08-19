@@ -85,6 +85,25 @@ model. The current common initial-state parser still requires all five arrays;
 alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
 its translated surface centers from stress.
 
+For `material_model=PJLiqV8`, `material_point_constants` contains one value:
+
+```text
+initial_void_ratio
+```
+
+The 112 constitutive parameters and four host-increment reversal controls are
+frozen to calibration SHA-256
+`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
+Completed and still-pending port verification gates are tracked in
+`PJ_LIQ_V8_IMPLEMENTATION_CHECKLIST.md`.
+The material-point replay requires all five seeded initial-state arrays so it
+can initialize from equilibrated effective stress and activate dynamics using
+the same normal reference with zero static shear. Alpha, alpha-in, and fabric
+arrays are zero placeholders; PJ-Liq V8 initializes its complete native state.
+`no_substeps` is the exact count of equal fixed Forward-Euler subdivisions for
+a nonzero increment, while reversal detection occurs once per material-point
+history row. An exact zero increment returns without advancing any history.
+
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
 - `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
@@ -143,6 +162,56 @@ its translated surface centers from stress.
   BrickUP controls use `alpha=0.8`, so it covers the general storage relation
   `1/M=(alpha-n)/Ks+n/Kf`; the standalone-only
   `material_point_brickup_solid_bulk_modulus_pa` supplies `Ks` for this check.
+- `pj_liq_v8_brickup_synthetic.in` starts from equilibrated K0 effective
+  stress, applies volumetric and reversing tensor-shear increments, compares
+  all 93 flattened native history components between host and CUDA, and
+  executes the production sealed BrickUP pressure kernels. V8 evolves the
+  effective skeleton stress through elastic/plastic volumetric compatibility;
+  its diagnostic effective-pressure loss is not copied into the fluid field.
+  BrickUP independently enforces the sealed mass balance
+  `d(zeta)=alpha*d(eps_v)+d(p_f)/M=0`, and the CSV combines the two fields
+  exactly once as `sigma_total=sigma_effective-alpha*p_f*I`. The reported
+  fluid-balance residual directly checks that split.
+
+The independent native oracle driver consumes the `deps_*` columns from the
+PJ-Liq V8 port package without reading any expected response after row zero.
+On macOS it can be compiled and checked with:
+
+```bash
+c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \
+  -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 \
+  pj_liq_v8_native_driver.cc -o /tmp/pj_liq_v8_native_driver
+
+mkdir -p /tmp/pj8_actual
+for csv in /path/to/pj_model_v8_port/golden_data/*.csv; do
+  /tmp/pj_liq_v8_native_driver "$csv" "/tmp/pj8_actual/$(basename "$csv")"
+done
+python3 /path/to/pj_model_v8_port/verify_hercules_output.py \
+  /path/to/pj_model_v8_port/golden_data /tmp/pj8_actual \
+  --mode core --rtol 1e-6 --atol 1e-8
+python3 /path/to/pj_model_v8_port/verify_hercules_output.py \
+  /path/to/pj_model_v8_port/golden_data /tmp/pj8_actual \
+  --mode full --rtol 1e-6 --atol 1e-6
+```
+
+Four histories pass the package's default `rtol=1e-8, atol=1e-10`. The
+zero-bias history develops platform-libm sensitivity only during its final
+near-pressure-collapse increments. The native macOS five-case aggregate uses
+`rtol=1e-6, atol=1e-8` for core response and `rtol=1e-6, atol=1e-6` for all 93
+flattened state values; event flags and integer counters remain exact. These
+cross-language oracle tolerances do not replace the tighter host/CUDA
+comparison in the Hercules suite.
+
+The companion host-only contract test checks per-point state isolation,
+byte-restored restart reproduction, exact zero-increment preservation, sealed
+BrickUP fluid mass balance, and effective-to-total stress assembly:
+
+```bash
+c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \
+  -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 \
+  pj_liq_v8_native_state_test.cc -o /tmp/pj_liq_v8_native_state_test
+/tmp/pj_liq_v8_native_state_test
+```
 
 PDMY03 uses deterministic explicit nested-surface subincrements rather than
 the Manzari--Dafalias adaptive error loop. Its request accounts for predicted

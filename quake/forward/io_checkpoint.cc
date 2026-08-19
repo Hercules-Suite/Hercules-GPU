@@ -24,6 +24,7 @@
 #include "timers.h"
 #include "io_checkpoint.h"
 #include "psolve.h"
+#include "nonlinear_gpu.h"
 
 /* Writes header and tm1 and tm2 arrays */
 void checkpoint_write(int step, int myID, mesh_t* myMesh, char* theCheckPointingDirOut,
@@ -120,6 +121,19 @@ void checkpoint_write(int step, int myID, mesh_t* myMesh, char* theCheckPointing
 	}
 
 	MPI_Barrier( comm_solver );	
+    }
+
+    /* Preserve the historical displacement prefix byte-for-byte. Coupled
+     * BrickUP pressure and device-resident nonlinear history are appended in
+     * a versioned extension so old elastic checkpoints remain readable. */
+    offset = (3 * sizeof(int)) +
+             (off_t)2 * theGroupSize * nharboredmax * sizeof(fvector_t);
+    if (nonlinear_gpu_checkpoint_write(
+            filename, offset, myID, theGroupSize, myMesh->nharbored, mySolver,
+            comm_solver) != 0) {
+        fprintf(stderr, "Error writing nonlinear/BrickUP checkpoint extension\n");
+        MPI_Abort(MPI_COMM_WORLD, -1);
+        exit(1);
     }
 
     /* Alternate checkpointing files */
@@ -228,6 +242,16 @@ extern int  checkpoint_read ( int myID, mesh_t* myMesh, char* theCheckPointingDi
 
 	    fclose( fp );
 	}
+    }
+
+    offset = (3 * sizeof(int)) +
+             (off_t)2 * theGroupSize * nharboredmax * sizeof(fvector_t);
+    if (nonlinear_gpu_checkpoint_read(
+            filename, offset, myID, theGroupSize, myMesh->nharbored, mySolver,
+            comm_solver) != 0) {
+        fprintf(stderr, "Error reading nonlinear/BrickUP checkpoint extension\n");
+        MPI_Abort(MPI_COMM_WORLD, -1);
+        exit(1);
     }
 
     MPI_Barrier( comm_solver ); /*Just for Timer's sake*/
