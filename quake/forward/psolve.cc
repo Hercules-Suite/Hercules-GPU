@@ -29229,6 +29229,18 @@ int main(int argc, char** argv) {
   if (Param.includeNonlinearAnalysis == YES) {
     nonlinear_init(Global.myID, Param.parameters_input_file, Param.theDeltaT,
                    Param.theEndT);
+    if (Param.printStationPorePressureRatios == YES &&
+        get_approximate_geostatic_state() != YES &&
+        get_geostatic_total_time() <= 0.0) {
+      solver_abort(
+          __FUNCTION_NAME, NULL,
+          "print_station_pore_pressure_ratios=yes requires an initial "
+          "effective-stress reference. Use approximate_geostatic_state=yes "
+          "with geostatic_loading_time_sec=0 and "
+          "geostatic_cushion_time_sec=0, or use "
+          "approximate_geostatic_state=no with a positive geostatic loading "
+          "or cushion interval.\n");
+    }
     if (poroelastic_enabled() && poroelastic_zero_permeability() &&
         (get_geostatic_loading_time() > 0.0)) {
       solver_abort(

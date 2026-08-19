@@ -158,6 +158,10 @@ int get_geostatic_final_step() {
     return theGeostaticFinalStep;
 }
 
+int get_approximate_geostatic_state() {
+    return (int)theApproxGeoState;
+}
+
 int assume_groundwatertable() {
     return theSurfaceGroundwaterTable;
 }

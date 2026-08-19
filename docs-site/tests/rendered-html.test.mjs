@@ -1139,6 +1139,7 @@ test("reports the conventional BrickUP station pore-pressure ratio", () => {
   const header = readFileSync(`${sourceRoot}psolve.h`, "utf8");
   assert.match(psolve, /parsetext\(fp, "print_station_pore_pressure_ratios"/);
   assert.match(psolve, /print_station_pore_pressure_ratios=yes requires[\s\S]{0,120}include_poroelastic=yes[\s\S]{0,120}include_nonlinear_analysis=yes/);
+  assert.match(psolve, /print_station_pore_pressure_ratios=yes requires an initial[\s\S]{0,240}approximate_geostatic_state=no with a positive geostatic loading/);
   assert.match(psolve, /hydrostaticBiotStress = Param\.thePoroelasticBiotAlpha \*[\s\S]{0,120}Param\.thePoroelasticFluidDensity \* 9\.81 \* waterDepth/);
   assert.match(psolve, /effectiveVerticalStress =[\s\S]{0,100}totalVerticalStress - hydrostaticBiotStress/);
   assert.match(psolve, /get_geostatic_total_time\(\) > 0\.0[\s\S]{0,80}return NAN/);

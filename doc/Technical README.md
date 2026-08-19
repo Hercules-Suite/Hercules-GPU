@@ -1063,6 +1063,12 @@ Acoustic-elastic input flags (input file):
 	constitutive state used by the nonlinear stress columns and to initialize
 	V8 before dynamics. The final value is
 	written as `sigma_v0_eff_pa` in `station_mediums.txt` for auditability.
+	Hercules rejects `print_station_pore_pressure_ratios=yes` when
+	`approximate_geostatic_state=no` and both geostatic times are zero, because
+	that combination supplies no physical initial effective-stress denominator.
+	The valid alternatives are approximate initialization with zero loading and
+	cushion times, or numerical geostatic initialization with a positive loading
+	or cushion interval.
 	The ratio switch also activates the sparse/fused pore-pressure station
 	gather when `print_station_pressures=no`, so enabling only `Ru(-)` does not
 	download the bulk pressure field. Hercules does not clip the ratio: dilation

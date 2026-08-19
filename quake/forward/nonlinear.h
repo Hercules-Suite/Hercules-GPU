@@ -307,6 +307,7 @@ nlconstants_t nl_const;
 double get_geostatic_total_time();
 double get_geostatic_loading_time();
 int    get_geostatic_final_step();
+int    get_approximate_geostatic_state();
 int    assume_groundwatertable();
 int    nonlinear_requires_explicit_pore_pressure();
 
