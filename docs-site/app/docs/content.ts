@@ -1716,18 +1716,19 @@ if __name__ == "__main__":
         title: "Configure station output",
         paragraphs: [
           "output_stations contains latitude, longitude, and depth in that order. Hercules writes one ASCII station.N file for each row. The sampling interval is output_stations_print_rate multiplied by simulation_delta_time_sec.",
-          "Displacement is always present. Velocity is appended when velocity or acceleration output is requested; acceleration, pressure, strain, and stress columns are then appended according to their switches. Strain and stress use XX, YY, ZZ, XY, YZ, XZ order.",
+          "Displacement is always present. Velocity is appended when velocity or acceleration output is requested; acceleration, pressure, pore-pressure ratio, strain, and stress columns are then appended according to their switches. Strain and stress use XX, YY, ZZ, XY, YZ, XZ order.",
+          "For nonlinear BrickUP runs, print_station_pore_pressure_ratios=yes appends the conventional experimental ratio Ru(-) = Δu/σ′v0. Δu is the same excess pore pressure used by the Pressure(Pa) column; σ′v0 is the positive initial vertical effective stress at the exact station depth. Hercules derives it from the integrated total-overburden column minus Biot-weighted hydrostatic pressure, records it as sigma_v0_eff_pa in station_mediums.txt, and writes nan where the ratio is undefined. The ratio is not clipped, so dilation may produce negative values and values may exceed one.",
         ],
         codeLabel: "parameters.in — two stations",
-        code: "number_output_stations       = 2\noutput_stations_print_rate   = 10\noutput_stations_directory    = output/stations\nstation_mediums_output_file  = output/stations/station_mediums.txt\nprint_station_velocities     = yes\nprint_station_accelerations  = yes\nprint_station_pressures      = no\nprint_station_strains        = no\nprint_station_stresses       = no\n\n# latitude_deg longitude_deg depth_m\noutput_stations =\n  34.0000 -118.5000 0.0\n  34.0100 -118.4900 100.0",
-        note: "With topography enabled, station depth is shifted to the local topographic surface. Check station_mediums.txt to confirm the owning medium, MPI rank, element, local coordinates, Vp, Vs, and density.",
+        code: "number_output_stations                 = 2\noutput_stations_print_rate             = 10\noutput_stations_directory              = output/stations\nstation_mediums_output_file            = output/stations/station_mediums.txt\nprint_station_velocities               = yes\nprint_station_accelerations            = yes\nprint_station_pressures                = no\n# Set yes with nonlinear BrickUP to append Ru(-).\nprint_station_pore_pressure_ratios     = no\nprint_station_strains                  = no\nprint_station_stresses                 = no\n\n# latitude_deg longitude_deg depth_m\noutput_stations =\n  34.0000 -118.5000 0.0\n  34.0100 -118.4900 100.0",
+        note: "With topography enabled, station depth is shifted to the local topographic surface. Check station_mediums.txt to confirm the owning medium, MPI rank, element, local coordinates, Vp, Vs, density, and sigma_v0_eff_pa reference. Ru(-) is nan for acoustic, elastic, unsaturated, CPML, surface-zero-stress, or otherwise inadmissible station references.",
       },
       {
         id: "nonlinear-station-output",
         title: "Interpret nonlinear and plastic station output",
         paragraphs: [
           "When include_nonlinear_analysis=yes, Hercules appends nonlinear solid-state columns to station files. These contain paired strain and stress tensor components plus volumetric strain/stress, yield-function state Fs, accumulated inelastic measure Kappa, one-dimensional strain/stress diagnostics Gamma1d and Tao1d, and GGmax.",
-          "Use these histories to identify yield onset, hysteresis, stiffness reduction, and permanent/plastic response. Read the station header instead of assuming fixed column offsets because velocity, acceleration, pressure, linear strain/stress, and nonlinear columns are controlled independently.",
+          "Use these histories to identify yield onset, hysteresis, stiffness reduction, and permanent/plastic response. Read the station header instead of assuming fixed column offsets because velocity, acceleration, pressure, pore-pressure ratio, linear strain/stress, and nonlinear columns are controlled independently.",
         ],
         codeLabel: "nonlinear station columns",
         code: "Epsilon_XX Sigma_XX  Epsilon_YY Sigma_YY  Epsilon_ZZ Sigma_ZZ\nEpsilon_KK Sigma_KK  Epsilon_XY Sigma_XY  Epsilon_YZ Sigma_YZ\nEpsilon_XZ Sigma_XZ  Fs Kappa Gamma1d Tao1d GGmax",

@@ -866,6 +866,8 @@ static void solver_prepare_force_upload_ranges(mesh_t* mesh,
 
 static int interpolate_station_displacements(int32_t step);
 static double interpolate_station_pressure_value(int32_t iStation);
+static int station_pressure_value_requested(void);
+static void station_write_pressure_columns(int32_t iStation);
 
 double** malloc2dDouble(int n, int m) {
   /* NOTE: To MPI_Bcast a 2D array, the pre-allocated memory blocks have to be
@@ -1035,6 +1037,7 @@ static struct Param_t {
   noyesflag_t printK;
   noyesflag_t printStationAccelerations;
   noyesflag_t printStationPressures;
+  noyesflag_t printStationPorePressureRatios;
   /* Linear-analysis strain/stress station output (6 tensor components
    * each, contiguous block XX,YY,ZZ,XY,YZ,XZ; tensor strain). For
    * reciprocity / fault inversion. Elastic stations only; default no
@@ -1199,6 +1202,7 @@ static struct Param_t {
            .theMeshStatFilename = NULL,
            .theTopoStatFilename = NULL,
            .printStationPressures = NO,
+           .printStationPorePressureRatios = NO,
            .printStationStrains = NO,
            .printStationStresses = NO,
            .includeAcoustic = NO,
@@ -1367,6 +1371,7 @@ struct station_medium_record_t {
   double Vp;
   double Vs;
   double rho;
+  double initialVerticalEffectiveStress;
 };
 
 /* ------------------------------End of
@@ -2167,7 +2172,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  61 /* Must adjust this if adding int params */
+  62 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2350,6 +2355,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[58] = Param.thePoroelasticElasticInterface;
   int_message[59] = (int)Param.thePoroelasticUndrainedFastPath;
   int_message[60] = Param.theAcousticPoroelasticInterface;
+  int_message[61] = (int)Param.printStationPorePressureRatios;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2416,6 +2422,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticElasticInterface = int_message[58];
   Param.thePoroelasticUndrainedFastPath = (noyesflag_t)int_message[59];
   Param.theAcousticPoroelasticInterface = int_message[60];
+  Param.printStationPorePressureRatios = (noyesflag_t)int_message[61];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2693,6 +2700,7 @@ static int32_t parse_parameters(const char* numericalin) {
   char print_matrix_k[64] = "no", print_station_velocities[64] = "no",
        print_station_accelerations[64] = "no",
        print_station_pressures[64] = "no",
+       print_station_pore_pressure_ratios[64] = "no",
        print_station_strains[64] = "no", print_station_stresses[64] = "no",
        mesh_coordinates_for_matlab[64] = "no", include_buildings[64] = "no",
        implement_drm[64] = "no", include_topography[64] = "no",
@@ -2733,6 +2741,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t printStationVels = UNSET;
   noyesflag_t printStationAccs = UNSET;
   noyesflag_t printStationPressures = NO;
+  noyesflag_t printStationPorePressureRatios = NO;
   noyesflag_t printStationStrains = NO;
   noyesflag_t printStationStresses = NO;
   noyesflag_t useInfQk = UNSET;
@@ -3101,6 +3110,8 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "print_station_accelerations", 's',
             &print_station_accelerations);
   parsetext(fp, "print_station_pressures", 's', &print_station_pressures);
+  parsetext(fp, "print_station_pore_pressure_ratios", 's',
+            &print_station_pore_pressure_ratios);
   parsetext(fp, "print_station_strains", 's', &print_station_strains);
   parsetext(fp, "print_station_stresses", 's', &print_station_stresses);
   parsetext(fp, "mesh_coordinates_for_matlab", 's',
@@ -3386,6 +3397,17 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for printing"
                  "station pressures (yes or no): %s\n",
                  print_station_pressures);
+  }
+
+  if (strcasecmp(print_station_pore_pressure_ratios, "yes") == 0) {
+    printStationPorePressureRatios = YES;
+  } else if (strcasecmp(print_station_pore_pressure_ratios, "no") == 0) {
+    printStationPorePressureRatios = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for printing station pore-pressure "
+                 "ratios (yes or no): %s\n",
+                 print_station_pore_pressure_ratios);
   }
 
   if (strcasecmp(print_station_strains, "yes") == 0) {
@@ -3765,6 +3787,13 @@ static int32_t parse_parameters(const char* numericalin) {
                  "include_acoustic=yes with acoustic_formulation=pressure or "
                  "velocity_potential, or include_poroelastic=yes\n");
   }
+  if ((printStationPorePressureRatios == YES) &&
+      ((includePoroelastic != YES) || (includeNonlinear != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "print_station_pore_pressure_ratios=yes requires "
+                 "include_poroelastic=yes and "
+                 "include_nonlinear_analysis=yes\n");
+  }
   if ((reconstructAcousticPlaneDisplacements == YES) &&
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
@@ -4005,6 +4034,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.printStationVelocities = printStationVels;
   Param.printStationAccelerations = printStationAccs;
   Param.printStationPressures = printStationPressures;
+  Param.printStationPorePressureRatios = printStationPorePressureRatios;
   Param.printStationStrains = printStationStrains;
   Param.printStationStresses = printStationStresses;
 
@@ -4060,6 +4090,8 @@ static int32_t parse_parameters(const char* numericalin) {
                 print_station_accelerations);
   monitor_print("Printing pressures on stations:     %s\n",
                 print_station_pressures);
+  monitor_print("Printing pore-pressure ratios:      %s\n",
+                print_station_pore_pressure_ratios);
   monitor_print("Mesh Coordinates For Matlab:        %s\n",
                 mesh_coordinates_for_matlab);
   monitor_print("Mesh-Mode Only:                     %s\n",
@@ -18655,7 +18687,7 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
       messenger_countnodes(solver->dn_sched->first_c) + g_adjustDnCount +
       g_adjustParentCount;
   if ((pore_pressure_field_sync_mode() != 0) &&
-      (Param.printStationPressures == YES)) {
+      station_pressure_value_requested()) {
     capacity += 8 * Param.myNumberOfStations;
   }
   if (acoustic_poroelastic_open_pore_enabled() &&
@@ -18702,7 +18734,7 @@ static void solver_init_pore_pressure_sparse_sync(mysolver_t* solver) {
   }
 
   if ((pore_pressure_field_sync_mode() != 0) &&
-      (Param.printStationPressures == YES) && (Param.myStations != NULL)) {
+      station_pressure_value_requested() && (Param.myStations != NULL)) {
     for (int32_t i = 0; i < Param.myNumberOfStations; i++) {
       if (Param.myStations[i].pore_pressure_is_defined == 0) {
         continue;
@@ -19868,7 +19900,7 @@ static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {
     return;
   }
 
-  if ((Param.printStationPressures != YES) ||
+  if (!station_pressure_value_requested() ||
       (Param.myNumberOfStations <= 0) || (Param.myStations == NULL)) {
     g_porePressureStationSyncReady = 1;
     return;
@@ -26686,6 +26718,52 @@ static int station_medium_record_compare(const void* a, const void* b) {
   return 0;
 }
 
+/* Return the positive reference stress used by the conventional
+ * experimental pore-pressure ratio r_u = Delta_u / sigma'_v0. The mesh
+ * property correction stores total vertical overburden at the owning
+ * element center. Move that value to the station depth with the local total
+ * unit weight, then remove the Biot-weighted hydrostatic pressure. BrickUP's
+ * pressure unknown is excess pressure, so the hydrostatic term belongs only
+ * in this time-invariant denominator and must not be subtracted from the
+ * station pressure history. */
+static double station_initial_vertical_effective_stress(
+    mesh_t* mesh, int32_t eindex, vector3D_t stationCoords,
+    int porePressureIsDefined) {
+  if (!porePressureIsDefined || !poroelastic_enabled() || (mesh == NULL) ||
+      (eindex < 0) || (eindex >= mesh->lenum) || cpml_pml_element(eindex)) {
+    return NAN;
+  }
+
+  elem_t* elemp = &mesh->elemTable[eindex];
+  edata_t* edata = (edata_t*)elemp->data;
+  if ((edata == NULL) || !isfinite((double)edata->sigma_0) ||
+      !((double)edata->sigma_0 > 0.0)) {
+    return NAN;
+  }
+
+  const int32_t lnid0 = elemp->lnid[0];
+  const double h = (double)edata->edgesize;
+  const double centerDepth =
+      (double)mesh->nodeTable[lnid0].z * mesh->ticksize + 0.5 * h;
+  const double totalVerticalStress =
+      (double)edata->sigma_0 +
+      (double)edata->rho * 9.81 * (stationCoords.x[2] - centerDepth);
+  const double groundShift =
+      poro_ground_surface_shift(stationCoords.x[0], stationCoords.x[1]);
+  const double groundwaterShift = poro_groundwater_shift(
+      stationCoords.x[0], stationCoords.x[1], groundShift);
+  const double waterDepth = fmax(stationCoords.x[2] - groundwaterShift, 0.0);
+  const double hydrostaticBiotStress = Param.thePoroelasticBiotAlpha *
+      Param.thePoroelasticFluidDensity * 9.81 * waterDepth;
+  const double effectiveVerticalStress =
+      totalVerticalStress - hydrostaticBiotStress;
+
+  return (isfinite(effectiveVerticalStress) &&
+          (effectiveVerticalStress > 0.0))
+             ? effectiveVerticalStress
+             : NAN;
+}
+
 static void station_write_mediums_file(
     const station_medium_record_t* localRecords) {
   const int32_t localCount = Param.myNumberOfStations;
@@ -26753,12 +26831,13 @@ static void station_write_mediums_file(
     fprintf(fp,
             "# station_id owner_medium pressure_defined owner_rank element_id "
             "element_level x_m y_m z_m csi eta dzeta h_m Vp_mps Vs_mps "
-            "rho_kgm3\n");
+            "rho_kgm3 sigma_v0_eff_pa\n");
+    int validRuReferences = 0;
     for (int i = 0; i < totalRecords; i++) {
       const station_medium_record_t* rec = &records[i];
       fprintf(fp,
               "%d %s %s %d %" PRId64 " %d %.9e %.9e %.9e %.9e %.9e %.9e "
-              "%.9e %.9e %.9e %.9e\n",
+              "%.9e %.9e %.9e %.9e %.9e\n",
               rec->stationId,
               rec->ownerIsAcoustic
                   ? "acoustic"
@@ -26766,12 +26845,22 @@ static void station_write_mediums_file(
               rec->pressureDefined ? "yes" : "no", rec->ownerRank,
               rec->elementId, rec->elementLevel, rec->x, rec->y, rec->z,
               rec->csi, rec->eta, rec->dzeta, rec->h, rec->Vp, rec->Vs,
-              rec->rho);
+              rec->rho, rec->initialVerticalEffectiveStress);
+      if (isfinite(rec->initialVerticalEffectiveStress) &&
+          (rec->initialVerticalEffectiveStress > 0.0)) {
+        validRuReferences++;
+      }
     }
     fclose(fp);
 
     monitor_print("Station medium metadata:           %s\n",
                   Param.theStationMediumsFile);
+    if (Param.printStationPorePressureRatios == YES) {
+      monitor_print(
+          "Station pore-pressure ratio references: %d of %d stations have "
+          "positive sigma'_v0; other Ru(-) values are nan\n",
+          validRuReferences, totalRecords);
+    }
     if (totalRecords != Param.theNumberOfStations) {
       monitor_print(
           "WARNING: wrote %d of %d configured station medium records.\n",
@@ -26925,6 +27014,10 @@ void setup_stations_data() {
     compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                           &(Param.myStations[iLCStation].localcoords),
                           Param.myStations[iLCStation].nodestointerpolate);
+    Param.myStations[iLCStation].initial_vertical_effective_stress =
+        station_initial_vertical_effective_stress(
+            Global.myMesh, stationElementIndex, stationCoords,
+            Param.myStations[iLCStation].pore_pressure_is_defined);
 
     stationMediumRecords[iLCStation].stationId = iStation;
     stationMediumRecords[iLCStation].ownerRank = Global.myID;
@@ -26956,6 +27049,8 @@ void setup_stations_data() {
         (stationMaterial != NULL) ? stationMaterial->Vs : 0.0;
     stationMediumRecords[iLCStation].rho =
         (stationMaterial != NULL) ? stationMaterial->rho : 0.0;
+    stationMediumRecords[iLCStation].initialVerticalEffectiveStress =
+        Param.myStations[iLCStation].initial_vertical_effective_stress;
 
     /*
      * This section now enclosed in a DEBUG def because its information
@@ -27003,6 +27098,10 @@ void setup_stations_data() {
 
     if (Param.printStationPressures == YES) {
       fputs("      Pressure(Pa)",
+            Param.myStations[iLCStation].fpoutputfile);
+    }
+    if (Param.printStationPorePressureRatios == YES) {
+      fputs("           Ru(-)",
             Param.myStations[iLCStation].fpoutputfile);
     }
 
@@ -27306,10 +27405,7 @@ static int interpolate_station_displacements(int32_t step) {
                 acc_x, acc_y, acc_z);
       }
 
-      if (Param.printStationPressures == YES) {
-        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
-                interpolate_station_pressure_value(iStation));
-      }
+      station_write_pressure_columns(iStation);
 
       if ((step % (Param.theStationsPrintRate * 10)) == 0) {
         fflush(Param.myStations[iStation].fpoutputfile);
@@ -27332,10 +27428,7 @@ static int interpolate_station_displacements(int32_t step) {
                 acc_x, acc_y, acc_z);
       }
 
-      if (Param.printStationPressures == YES) {
-        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
-                interpolate_station_pressure_value(iStation));
-      }
+      station_write_pressure_columns(iStation);
 
       /*
        * Topography (VT cut-cell) strain/stress -- constant per tet,
@@ -27489,10 +27582,7 @@ static int interpolate_station_displacements(int32_t step) {
                 acc_x, acc_y, acc_z);
       }
 
-      if (Param.printStationPressures == YES) {
-        fprintf(Param.myStations[iStation].fpoutputfile, " % 8e",
-                interpolate_station_pressure_value(iStation));
-      }
+      station_write_pressure_columns(iStation);
 
       /*
        * Linear strain/stress (reciprocity / fault inversion). Elastic
@@ -27573,7 +27663,7 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   vector3D_t localCoords;
   double pressure = 0.0;
 
-  if ((Param.printStationPressures != YES) || (Global.mySolver == NULL)) {
+  if (!station_pressure_value_requested() || (Global.mySolver == NULL)) {
     return 0.0;
   }
 
@@ -27639,6 +27729,37 @@ static double interpolate_station_pressure_value(int32_t iStation) {
   }
 
   return NAN;
+}
+
+static int station_pressure_value_requested(void) {
+  return (Param.printStationPressures == YES) ||
+         (Param.printStationPorePressureRatios == YES);
+}
+
+static void station_write_pressure_columns(int32_t iStation) {
+  if (!station_pressure_value_requested()) {
+    return;
+  }
+
+  const int needPressure =
+      (Param.printStationPressures == YES) ||
+      ((Param.printStationPorePressureRatios == YES) &&
+       (Param.myStations[iStation].pore_pressure_is_defined != 0));
+  const double pressure =
+      needPressure ? interpolate_station_pressure_value(iStation) : NAN;
+  if (Param.printStationPressures == YES) {
+    fprintf(Param.myStations[iStation].fpoutputfile, " % 8e", pressure);
+  }
+  if (Param.printStationPorePressureRatios == YES) {
+    const double sigmaV0 =
+        Param.myStations[iStation].initial_vertical_effective_stress;
+    const double ru =
+        (Param.myStations[iStation].pore_pressure_is_defined != 0 &&
+         isfinite(pressure) && isfinite(sigmaV0) && (sigmaV0 > 0.0))
+            ? pressure / sigmaV0
+            : NAN;
+    fprintf(Param.myStations[iStation].fpoutputfile, " % 8e", ru);
+  }
 }
 
 static int32_t station_output_use_omp(void) {

@@ -1045,6 +1045,23 @@ Acoustic-elastic input flags (input file):
 	pressure. CUDA-aware resident runs report the rank-reduced
 	`Acoustic Station Gather` and `Pore-pressure Station Gather`
 	kernel-plus-copy timings when those paths are active.
+- `print_station_pore_pressure_ratios`
+	Optional; default `no`. With `include_poroelastic=yes` and
+	`include_nonlinear_analysis=yes`, `yes` appends `Ru(-)` to every normal
+	`station.N` row using the conventional experimental definition
+	`r_u(t) = Delta_u(t) / sigma'_v0`. `Delta_u` is the BrickUP excess-pressure
+	unknown (the same value written by the optional `Pressure(Pa)` column), and
+	`sigma'_v0 > 0` is the initial vertical effective-stress magnitude at that
+	station. The denominator is calculated once from Hercules' integrated 1-D
+	total-overburden column, adjusted from the owning element center to the exact
+	station depth, minus `poroelastic_biot_alpha * rho_f * g * z_w`. It is
+	written as `sigma_v0_eff_pa` in `station_mediums.txt` for auditability.
+	The ratio switch also activates the sparse/fused pore-pressure station
+	gather when `print_station_pressures=no`, so enabling only `Ru(-)` does not
+	download the bulk pressure field. Hercules does not clip the ratio: dilation
+	can give negative values and strong buildup can exceed one. Stations outside
+	an active saturated BrickUP element, CPML stations, and zero/nonpositive
+	reference-stress locations write `nan` rather than a misleading ratio.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
@@ -1068,7 +1085,10 @@ Acoustic-elastic input flags (input file):
 	metadata file during station setup. It records each station's owning medium
 	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
-	defaults to `output_stations_directory/station_mediums.txt`.
+	defaults to `output_stations_directory/station_mediums.txt`. The metadata
+	includes `sigma_v0_eff_pa`, the positive station-specific denominator used
+	by optional `Ru(-)` output; it is `nan` where the initial effective-stress
+	reference itself is unavailable or nonpositive.
 - `acoustic_quality_factor`
 	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
 	bit-identical to the validated baseline. A positive quality factor

@@ -275,8 +275,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 227);
-  assert.equal(documented.length, 227, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 228);
+  assert.equal(documented.length, 228, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -1120,7 +1120,27 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);
   assert.match(html, /mesh_coordinates\.0/);
   assert.match(html, /station_mediums\.txt/);
+  assert.match(html, /print_station_pore_pressure_ratios/);
+  assert.match(html, /Ru\(-\)/);
+  assert.match(html, /Δu\/σ′v0/);
+  assert.match(html, /sigma_v0_eff_pa/);
   assert.match(html, /output_displacement_file/);
+});
+
+test("reports the conventional BrickUP station pore-pressure ratio", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const header = readFileSync(`${sourceRoot}psolve.h`, "utf8");
+  assert.match(psolve, /parsetext\(fp, "print_station_pore_pressure_ratios"/);
+  assert.match(psolve, /print_station_pore_pressure_ratios=yes requires[\s\S]{0,120}include_poroelastic=yes[\s\S]{0,120}include_nonlinear_analysis=yes/);
+  assert.match(psolve, /hydrostaticBiotStress = Param\.thePoroelasticBiotAlpha \*[\s\S]{0,120}Param\.thePoroelasticFluidDensity \* 9\.81 \* waterDepth/);
+  assert.match(psolve, /effectiveVerticalStress =[\s\S]{0,100}totalVerticalStress - hydrostaticBiotStress/);
+  assert.match(psolve, /\? pressure \/ sigmaV0[\s\S]{0,80}: NAN/);
+  assert.match(psolve, /sigma_v0_eff_pa/);
+  assert.match(psolve, /return \(Param\.printStationPressures == YES\) \|\|[\s\S]{0,100}\(Param\.printStationPorePressureRatios == YES\)/);
+  assert.match(header, /initial_vertical_effective_stress/);
 });
 
 test("provides complete examples for 3-D material and topography inputs", async () => {
