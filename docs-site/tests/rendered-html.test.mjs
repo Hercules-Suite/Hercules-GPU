@@ -947,9 +947,15 @@ test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints",
   const nativeDriver = readFileSync(`${benchmarkRoot}pj_liq_v8_native_driver.cc`, "utf8");
   const nativeStateTest = readFileSync(`${benchmarkRoot}pj_liq_v8_native_state_test.cc`, "utf8");
   const frozenSha = "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83";
+  const commonConstants = header.match(
+    /typedef struct nlconstants_t \{([\s\S]*?)\} nlconstants_t;/,
+  );
 
   assert.match(header, /PJ_LIQ_V8_CUSTOM/);
   assert.match(header, /pj8_material_parameters_t/);
+  assert.ok(commonConstants);
+  assert.doesNotMatch(commonConstants[1], /pj8_material|pj8_void_ratio/);
+  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*pj8_materials[\s\S]*pj8_void_ratios/);
   assert.match(cpu, /PJLiqV8[\s\S]*PJ-Liq-V8[\s\S]*PJ_Liq_V8/);
   assert.match(cpu, /PJLiqV8Custom[\s\S]*PJ-Liq-V8-Custom[\s\S]*PJ_Liq_V8_Custom/);
   assert.match(cpu, /PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
@@ -971,7 +977,9 @@ test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints",
   assert.match(gpuHeader, /NL_PJ8_STATE_VALUE_COUNT 93/);
   assert.match(gpu, /MATERIAL_MODEL_IS_PJ_LIQ_V8\(g_config\.material_model\)[\s\S]*nonlinear_gpu_launch_pj_liq_v8/);
   assert.match(gpu, /pj8_begin_dynamic_phase/);
-  assert.match(gpu, /pj8_update_material\(pj8_parameters, &c->pj8_material/);
+  assert.match(gpu, /pj8_update_material\(pj8_parameters, pj8_material/);
+  assert.match(gpu, /host_state->pj8_materials[\s\S]*host_state->pj8_void_ratios/);
+  assert.match(gpu, /local_material=%.1f MiB/);
   assert.match(gpu, /full_effective_stress/);
   assert.match(gpuUnit, /NL_GPU_PJ_LIQ_V8_ONLY/);
   assert.match(makefile, /nonlinear\/nonlinear_gpu_pj_liq_v8\.o/);

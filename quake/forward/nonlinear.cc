@@ -1873,7 +1873,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     /* Memory allocation for mother structure */
 
-    myNonlinSolver = (nlsolver_t *)malloc(sizeof(nlsolver_t));
+    myNonlinSolver = (nlsolver_t *)calloc(1, sizeof(nlsolver_t));
 
     if (myNonlinSolver == NULL) {
         fprintf(stderr, "Thread %d: nonlinear_init: out of memory\n", myID);
@@ -1885,6 +1885,24 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     myNonlinSolver->constants =
         (nlconstants_t *)calloc(myNonlinElementsCount, sizeof(nlconstants_t));
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
+        myNonlinElementsCount > 0) {
+        const size_t material_count =
+            theMaterialModel == PJ_LIQ_V8_CUSTOM
+                ? (size_t)myNonlinElementsCount : 1u;
+        myNonlinSolver->pj8_materials =
+            (pj8_material_parameters_t *)calloc(
+                material_count, sizeof(pj8_material_parameters_t));
+        myNonlinSolver->pj8_void_ratios =
+            (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
+        if (theMaterialModel == PJ_LIQ_V8 &&
+            myNonlinSolver->pj8_materials != NULL) {
+            const pj8_parameters_t reference =
+                pj8_reference_parameters(1000.0);
+            myNonlinSolver->pj8_materials[0] =
+                pj8_reference_material_parameters(&reference);
+        }
+    }
     myNonlinSolver->stresses =
         (qptensors_t *)calloc(myNonlinElementsCount, sizeof(qptensors_t));
     myNonlinSolver->strains =
@@ -1927,6 +1945,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
 
     if ( (myNonlinSolver->constants           == NULL) ||
+         (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
+          myNonlinElementsCount > 0 &&
+          (myNonlinSolver->pj8_materials      == NULL ||
+           myNonlinSolver->pj8_void_ratios    == NULL)) ||
          (myNonlinSolver->stresses            == NULL) ||
          (myNonlinSolver->strains             == NULL) ||
          (myNonlinSolver->strains1            == NULL) ||
@@ -2403,6 +2425,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             case PJ_LIQ_V8_CUSTOM: {
                 const pj8_parameters_t reference =
                     pj8_reference_parameters(1000.0);
+                const size_t material_index =
+                    theMaterialModel == PJ_LIQ_V8_CUSTOM
+                        ? (size_t)nl_eindex : 0u;
+                pj8_material_parameters_t *pj8_material =
+                    myNonlinSolver->pj8_materials+material_index;
                 const double relative_density = interpolate_property_value(
                     elementVs, thePj8Properties[PJ8_PROPERTY_DR]);
                 if (!isfinite(relative_density) || relative_density < 0.0 ||
@@ -2417,9 +2444,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
-                ecp->pj8_material = pj8_material_at_vs(elementVs);
+                if (theMaterialModel == PJ_LIQ_V8_CUSTOM)
+                    *pj8_material = pj8_material_at_vs(elementVs);
                 if (!pj8_material_parameters_valid(
-                        &reference, &ecp->pj8_material)) {
+                        &reference, pj8_material)) {
                     fprintf(stderr,
                             "Thread %d: %s element %d has invalid "
                             "interpolated material parameters\n",
@@ -2429,11 +2457,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
-                ecp->pj8_void_ratio =
+                myNonlinSolver->pj8_void_ratios[nl_eindex] =
                     pj8_void_ratio_from_material_relative_density(
-                        &ecp->pj8_material, relative_density);
-                double sin_phi = 3.0*ecp->pj8_material.M/
-                    (6.0+ecp->pj8_material.M);
+                        pj8_material, relative_density);
+                double sin_phi = 3.0*pj8_material->M/
+                    (6.0+pj8_material->M);
                 sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
                 ecp->phi = asin(sin_phi);
                 break;
@@ -5561,29 +5589,33 @@ static int material_point_parse_model(const char *name,
 }
 
 static void material_point_load_constants(nlconstants_t *constants,
+                                          pj8_material_parameters_t *
+                                              pj8_material,
+                                          double *pj8_void_ratio,
                                           materialmodel_t model,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
+    memset(pj8_material, 0, sizeof(*pj8_material));
+    *pj8_void_ratio = 0.0;
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
         const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
-        constants->pj8_material =
-            pj8_reference_material_parameters(&reference);
+        *pj8_material = pj8_reference_material_parameters(&reference);
         if (model == PJ_LIQ_V8_CUSTOM) {
-            constants->pj8_material.M = values[1];
-            constants->pj8_material.kd = values[2];
-            constants->pj8_material.h = values[3];
-            constants->pj8_material.m = values[4];
-            constants->pj8_material.zeta = values[5];
-            constants->pj8_material.e_max = values[6];
-            constants->pj8_material.e_min = values[7];
-            constants->pj8_material.Q = values[8];
-            constants->pj8_material.R = values[9];
-            constants->pj8_material.n_G = values[10];
+            pj8_material->M = values[1];
+            pj8_material->kd = values[2];
+            pj8_material->h = values[3];
+            pj8_material->m = values[4];
+            pj8_material->zeta = values[5];
+            pj8_material->e_max = values[6];
+            pj8_material->e_min = values[7];
+            pj8_material->Q = values[8];
+            pj8_material->R = values[9];
+            pj8_material->n_G = values[10];
         }
-        constants->pj8_void_ratio =
+        *pj8_void_ratio =
             pj8_void_ratio_from_material_relative_density(
-                &constants->pj8_material, values[0]);
+                pj8_material, values[0]);
         return;
     }
     if (model == MANZARI_DAFALIAS) {
@@ -5650,6 +5682,8 @@ static void material_point_load_constants(nlconstants_t *constants,
 
 static int material_point_cpu_history(
     const nlconstants_t *constants,
+    const pj8_material_parameters_t *pj8_material,
+    double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -5670,7 +5704,8 @@ static int material_point_cpu_history(
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
         (void)dt;
         return nonlinear_pj8_host_history(
-            constants, config, initial_state, strain_history, steps, results);
+            constants, pj8_material, pj8_void_ratio, config, initial_state,
+            strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
     tensor_t plastic_strain = zero_tensor();
@@ -6019,6 +6054,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         NL_MD_FORWARD_EULER_SUBSTEPS_FIXED;
     nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
     nlconstants_t constants;
+    pj8_material_parameters_t pj8_material;
+    double pj8_void_ratio = 0.0;
     nonlinear_gpu_config_t config;
     nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
@@ -6296,8 +6333,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             const pj8_parameters_t reference =
                 pj8_reference_parameters(1000.0);
             nlconstants_t candidate = {};
+            pj8_material_parameters_t candidate_material = {};
+            double candidate_void_ratio = 0.0;
             material_point_load_constants(
-                &candidate, material_model, constants_values);
+                &candidate, &candidate_material, &candidate_void_ratio,
+                material_model, constants_values);
             for (int i = 0; i < MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT;
                  i++) {
                 if (!isfinite(constants_values[i])) {
@@ -6308,7 +6348,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 }
             }
             if (!pj8_material_parameters_valid(
-                    &reference, &candidate.pj8_material)) {
+                    &reference, &candidate_material)) {
                 fprintf(stderr,
                         "Illegal PJLiqV8Custom material-point constants\n");
                 goto cleanup;
@@ -6394,8 +6434,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
 
-    material_point_load_constants(&constants, material_model,
-                                  constants_values);
+    material_point_load_constants(&constants, &pj8_material, &pj8_void_ratio,
+                                  material_model, constants_values);
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;
@@ -6409,12 +6449,13 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
-    if (material_point_cpu_history(&constants, &config, &initial_state,
-                                   strain_history, steps, dt,
+    if (material_point_cpu_history(&constants, &pj8_material, pj8_void_ratio,
+                                   &config, &initial_state, strain_history,
+                                   steps, dt,
                                    cpu_results) != 0) goto cleanup;
-    if (nonlinear_gpu_material_point_history(&constants, &config,
-                                             &initial_state, strain_history,
-                                             steps, gpu_results) != 0) {
+    if (nonlinear_gpu_material_point_history(
+            &constants, &pj8_material, pj8_void_ratio, &config,
+            &initial_state, strain_history, steps, gpu_results) != 0) {
         goto cleanup;
     }
     if (brickup_enabled == YES) {

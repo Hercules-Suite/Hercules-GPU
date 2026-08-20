@@ -127,6 +127,8 @@ typedef struct nonlinear_gpu_state_t {
     int32_t pdmy03_surface_stride;
     nonlinear_gpu_element_t *elements;
     nlconstants_t *constants;
+    pj8_material_parameters_t *pj8_materials;
+    double *pj8_void_ratios;
     qptensors_t *stresses;
     qptensors_t *strains;
     qptensors_t *strains1;
@@ -3194,6 +3196,8 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 #ifndef NL_GPU_PRODUCTION_ONLY
 __global__ static void kernel_nonlinear_material_point_history(
     nlconstants_t constants,
+    pj8_material_parameters_t pj8_material,
+    double pj8_void_ratio,
     nonlinear_gpu_config_t config,
     nonlinear_material_point_initial_state_t initial_state,
     const tensor_t *strain_history,
@@ -3235,8 +3239,8 @@ __global__ static void kernel_nonlinear_material_point_history(
         tensor_t reference = stress;
         reference.xy = reference.yz = reference.xz = 0.0;
         if (!pj8_initialize_material(
-                &pj8_parameters, &constants.pj8_material, stress,
-                constants.pj8_void_ratio, &pj8_state) ||
+                &pj8_parameters, &pj8_material, stress,
+                pj8_void_ratio, &pj8_state) ||
             !pj8_begin_dynamic_phase(&pj8_parameters, reference,
                                      &pj8_state)) return;
     }
@@ -3254,7 +3258,7 @@ __global__ static void kernel_nonlinear_material_point_history(
         int ok;
         if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) {
             ok = pj8_update_material(&pj8_parameters,
-                &constants.pj8_material,
+                &pj8_material,
                 pj8_sub(strain_history[step], strain_prev),
                 config.no_substeps, &pj8_state, &stress, &pj8_info);
             fs = fabs(pj8_compatibility_residual(&pj8_state));
@@ -3659,6 +3663,10 @@ __global__ static void kernel_nonlinear_update_force(
             pj8_state_t *pj8_states = (pj8_state_t *)state.pj8_states;
             const pj8_parameters_t *pj8_parameters =
                 (const pj8_parameters_t *)state.pj8_parameters;
+            const int32_t material_index =
+                cfg.material_model == PJ_LIQ_V8_CUSTOM ? nl_eindex : 0;
+            const pj8_material_parameters_t *pj8_material =
+                state.pj8_materials+material_index;
             pj8_state_t *pj8_state = pj8_states+point;
             if (!pj8_state->initialized) {
                 const tensor_t equilibrated = pj8_add(
@@ -3668,8 +3676,8 @@ __global__ static void kernel_nonlinear_update_force(
                 zero_static_shear.yz = 0.0;
                 zero_static_shear.xz = 0.0;
                 ok = pj8_initialize_material(
-                         pj8_parameters, &c->pj8_material, equilibrated,
-                         c->pj8_void_ratio, pj8_state) &&
+                         pj8_parameters, pj8_material, equilibrated,
+                         state.pj8_void_ratios[nl_eindex], pj8_state) &&
                      pj8_begin_dynamic_phase(pj8_parameters,
                                              zero_static_shear, pj8_state);
             } else {
@@ -3678,7 +3686,7 @@ __global__ static void kernel_nonlinear_update_force(
             pj8_update_info_t pj8_info = {};
             tensor_t full_effective_stress = pj8_state->stress;
             if (ok) {
-                ok = pj8_update_material(pj8_parameters, &c->pj8_material,
+                ok = pj8_update_material(pj8_parameters, pj8_material,
                     pj8_sub(strain, strain_prev), cfg.no_substeps,
                     pj8_state, &full_effective_stress, &pj8_info);
             }
@@ -4130,6 +4138,15 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     }
 
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) && count > 0) {
+        const size_t material_count =
+            config->material_model == PJ_LIQ_V8_CUSTOM ? (size_t)count : 1u;
+        if (nonlinear_alloc_copy(myID, &g_nl.pj8_materials,
+                host_state->pj8_materials, material_count,
+                "PJ-Liq V8 material properties") != 0 ||
+            nonlinear_alloc_copy(myID, &g_nl.pj8_void_ratios,
+                host_state->pj8_void_ratios, (size_t)count,
+                "PJ-Liq V8 void ratios") != 0)
+            return -1;
         const size_t point_count = (size_t)count*NL_GPU_QP;
         const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
         cudaError_t pj8_error = cudaMalloc(
@@ -4270,15 +4287,23 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 sizeof(pj8_state_t))/(1024.0*1024.0);
+            const size_t material_count = count == 0 ? 0u :
+                (config->material_model == PJ_LIQ_V8_CUSTOM
+                    ? (size_t)count : 1u);
+            const double material_mib = (double)(
+                material_count*sizeof(pj8_material_parameters_t)+
+                (size_t)count*sizeof(double))/(1024.0*1024.0);
             fprintf(stderr,
                     "PJ-Liq V8 integration: %s, frozen internal controls %s "
-                    "(fixed_substeps=%d, local_history=%.1f MiB, "
+                    "(fixed_substeps=%d, local_material=%.1f MiB, "
+                    "local_history=%.1f MiB, "
                     "effective-skeleton stress with BrickUP pore pressure "
                     "and Biot total-stress coupling, geostatic=%s)\n",
                     config->material_model == PJ_LIQ_V8_CUSTOM ?
                         "custom material properties" :
                         "frozen material properties",
-                    PJ8_PARAMETER_SHA256, config->no_substeps, state_mib,
+                    PJ8_PARAMETER_SHA256, config->no_substeps, material_mib,
+                    state_mib,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
@@ -4762,13 +4787,16 @@ void nonlinear_gpu_check_error(int32_t myID)
 #ifndef NL_GPU_PRODUCTION_ONLY
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
+    const pj8_material_parameters_t *pj8_material,
+    double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || initial_state == NULL ||
+    if (constants == NULL || pj8_material == NULL || config == NULL ||
+        initial_state == NULL ||
         strain_history == NULL ||
         results == NULL || steps <= 0) {
         return -1;
@@ -4789,7 +4817,8 @@ int nonlinear_gpu_material_point_history(
     }
     if (error == cudaSuccess) {
         kernel_nonlinear_material_point_history<<<1, 1>>>(
-            *constants, *config, *initial_state, strain_device, steps,
+            *constants, *pj8_material, pj8_void_ratio, *config, *initial_state,
+            strain_device, steps,
             result_device);
         error = cudaGetLastError();
     }
@@ -4922,13 +4951,16 @@ int nonlinear_pdmy03_host_history(
 
 int nonlinear_pj8_host_history(
     const nlconstants_t *constants,
+    const pj8_material_parameters_t *pj8_material,
+    double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || initial_state == NULL ||
+    if (constants == NULL || pj8_material == NULL || config == NULL ||
+        initial_state == NULL ||
         strain_history == NULL || results == NULL || steps <= 0 ||
         !MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) ||
         !initial_state->provided || config->no_substeps < 1) return -1;
@@ -4939,15 +4971,15 @@ int nonlinear_pj8_host_history(
     tensor_t reference = initial_state->stress;
     reference.xy = reference.yz = reference.xz = 0.0;
     if (!pj8_initialize_material(
-            &parameters, &constants->pj8_material, initial_state->stress,
-            constants->pj8_void_ratio, &state) ||
+            &parameters, pj8_material, initial_state->stress,
+            pj8_void_ratio, &state) ||
         !pj8_begin_dynamic_phase(&parameters, reference, &state)) return -1;
 
     for (int32_t step = 0; step < steps; step++) {
         pj8_update_info_t info = {};
         tensor_t stress = state.stress;
         const int ok = pj8_update_material(
-            &parameters, &constants->pj8_material,
+            &parameters, pj8_material,
             pj8_sub(strain_history[step], strain_previous),
             config->no_substeps, &state, &stress, &info);
         nonlinear_material_point_result_t result = {};
@@ -5362,6 +5394,7 @@ void nonlinear_gpu_finalize(void)
     memset(&g_workload, 0, sizeof(g_workload));
 #define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
     NL_FREE(elements); NL_FREE(constants);
+    NL_FREE(pj8_materials); NL_FREE(pj8_void_ratios);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);
     NL_FREE(pstrains1); NL_FREE(pstrains2);
     NL_FREE(alphastress1); NL_FREE(alphastress2);

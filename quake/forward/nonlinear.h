@@ -89,9 +89,10 @@ typedef struct tensor_t {
 
 } tensor_t;
 
-/* Compact per-element subset exposed by PJLiqV8Custom.  The remaining V8
- * controls stay in the single frozen parameter block shared by all elements,
- * preserving the production kernel's lightweight memory layout. */
+/* Compact material subset exposed by PJLiqV8Custom.  Production stores this
+ * outside nlconstants_t so unrelated nonlinear families do not reserve PJ-Liq
+ * memory.  The frozen interface shares one instance per rank; the custom
+ * interface stores one interpolated instance per nonlinear element. */
 typedef struct pj8_material_parameters_t {
     double h;
     double m;
@@ -239,8 +240,6 @@ typedef struct nlconstants_t {
 
     manzari_dafalias_constants_t md;
     pdmy03_constants_t pdmy03;
-    pj8_material_parameters_t pj8_material;
-    double pj8_void_ratio;
 
     double maxFs;
     double avgFs;
@@ -255,6 +254,8 @@ typedef struct nlconstants_t {
 typedef struct nlsolver_t {
 
 	nlconstants_t *constants;
+	pj8_material_parameters_t *pj8_materials;
+	double        *pj8_void_ratios;
 	qptensors_t   *stresses;
 	qptensors_t   *strains;
 	qptensors_t   *strains1;      // total strains at t-1

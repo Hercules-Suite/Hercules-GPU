@@ -124,6 +124,8 @@ void nonlinear_gpu_check_error(int32_t myID);
 
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
+    const pj8_material_parameters_t *pj8_material,
+    double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -151,6 +153,8 @@ int nonlinear_pdmy03_host_history(
 
 int nonlinear_pj8_host_history(
     const nlconstants_t *constants,
+    const pj8_material_parameters_t *pj8_material,
+    double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,

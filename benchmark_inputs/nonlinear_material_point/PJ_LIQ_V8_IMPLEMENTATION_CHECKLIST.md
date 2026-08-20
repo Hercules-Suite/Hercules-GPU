@@ -9,11 +9,13 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
 - [x] Registered `PJLiqV8` and documented its `Vs_limit relative_density`
   production table; the input boundary converts dimensionless `D_r` in
   `[0,1]` to internal void ratio using frozen `e_max=0.78`, `e_min=0.51`.
-- [x] Registered `PJLiqV8Custom` as the same V8 kernel with compact per-element
-  material storage and the 12-column production table
+- [x] Registered `PJLiqV8Custom` as the same V8 kernel with model-specific,
+  compact per-element material storage and the 12-column production table
   `Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. The original two-column
   `PJLiqV8` interface and frozen response remain unchanged; `h_p0` is not
-  included because it belongs to the separate V8.1 experiment.
+  included because it belongs to the separate V8.1 experiment. Frozen V8
+  shares one material block per rank; unrelated nonlinear families no longer
+  reserve PJ-Liq material or void-ratio fields in `nlconstants_t`.
 - [x] Mapped `[xx, yy, zz, xy, yz, xz]`, tensor shear, tension-positive stress,
   and the factor-two symmetric double contraction explicitly.
 - [x] Translated all 112 frozen parameters, four host-event controls, and all
