@@ -727,12 +727,14 @@ Nonlinear GPU execution (runtime environment):
 	here—including the reversible compatibility, amplitude, bias, and event
 	controls—retain the frozen V8 values and calibration SHA. This interface is
 	still V8; it does not add the V8.1 `h_p0` contraction-rate experiment.
-	PJ-Liq data is stored outside the common nonlinear-element constants: frozen
-	`PJLiqV8` shares one material block per rank and stores only the interpolated
-	void ratio per nonlinear element, while `PJLiqV8Custom` stores one compact
-	interpolated material block plus void ratio per nonlinear element. Other
-	nonlinear families therefore reserve no PJ-Liq material memory. Startup output
-	reports this rank-local material allocation separately from V8 history state.
+	Pressure-dependent model inputs are stored outside the common nonlinear-
+	element constants. Manzari--Dafalias and PDMY03 allocate one interpolated
+	material block per element only when that family is active. Frozen `PJLiqV8`
+	shares one material block per rank and stores only the interpolated void ratio
+	per nonlinear element, while `PJLiqV8Custom` stores one compact interpolated
+	material block plus void ratio per nonlinear element. Other nonlinear families
+	therefore reserve no MD, PDMY03, or PJ-Liq material memory. Startup output
+	reports each active rank-local material allocation separately from history.
 - PJ-Liq V8 is compatible with BrickUP through explicit field ownership.
 	V8 is the effective-skeleton law: its compatibility state separates
 	total volumetric strain into elastic confining, irreversible plastic, and

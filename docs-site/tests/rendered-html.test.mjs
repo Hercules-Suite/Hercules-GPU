@@ -662,6 +662,9 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpuHeader, /NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpuHeader, /NL_MD_FORWARD_EULER_SUBSTEPS_FIXED[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
+  assert.match(header, /manzari_dafalias_constants_t \*md_materials/);
+  assert.match(gpu, /state\.md_materials\+nl_eindex/);
+  assert.match(gpu, /Manzari-Dafalias material properties/);
   assert.match(gpu, /Fixed subdivision remains the default/);
   assert.match(gpu, /not the[\s\S]*PDMY03 surface-spacing criterion/);
   // The integrator is specialized per scheme and Forward-Euler subdivision
@@ -848,11 +851,14 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
 
   assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
+  assert.match(header, /pdmy03_constants_t \*pdmy03_materials/);
   assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
   assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(gpu, /state\.pdmy03_materials\+nl_eindex/);
+  assert.match(gpu, /PDMY03 material properties/);
   assert.match(
     cpu,
     /MPI_Reduce\(&myNonlinElementsCount,[\s\S]{0,160}MPI_SUM, 0, comm_solver\)/,
@@ -954,8 +960,11 @@ test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints",
   assert.match(header, /PJ_LIQ_V8_CUSTOM/);
   assert.match(header, /pj8_material_parameters_t/);
   assert.ok(commonConstants);
-  assert.doesNotMatch(commonConstants[1], /pj8_material|pj8_void_ratio/);
-  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*pj8_materials[\s\S]*pj8_void_ratios/);
+  assert.doesNotMatch(
+    commonConstants[1],
+    /manzari_dafalias_constants_t|pdmy03_constants_t|pj8_material|pj8_void_ratio/,
+  );
+  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*md_materials[\s\S]*pdmy03_materials[\s\S]*pj8_materials[\s\S]*pj8_void_ratios/);
   assert.match(cpu, /PJLiqV8[\s\S]*PJ-Liq-V8[\s\S]*PJ_Liq_V8/);
   assert.match(cpu, /PJLiqV8Custom[\s\S]*PJ-Liq-V8-Custom[\s\S]*PJ_Liq_V8_Custom/);
   assert.match(cpu, /PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);

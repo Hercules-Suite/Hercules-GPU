@@ -121,7 +121,8 @@ typedef struct qptensors_t {
 /* Manzari--Dafalias parameters use the notation of the original model and
  * the OpenSees UW implementation. Density and Poisson's ratio are supplied by
  * the Hercules element, so the production material table contains the other
- * sixteen calibrated constants. */
+ * sixteen calibrated constants. Production stores these outside nlconstants_t
+ * and allocates them only for Manzari--Dafalias elements. */
 typedef struct manzari_dafalias_constants_t {
     double G0;
     double nu;
@@ -145,8 +146,8 @@ typedef struct manzari_dafalias_constants_t {
 
 /* The standard PressureDependMultiYield03 automatic-surface formulation.
  * Hercules supports a runtime-selected surface count up to this compile-time
- * bound. Production storage uses the largest count actually present on each
- * rank, not this upper bound. */
+ * bound. Production stores material constants outside nlconstants_t and uses
+ * the largest surface count actually present on each rank, not this bound. */
 #define PDMY03_MAX_SURFACES 40
 
 typedef struct pdmy03_constants_t {
@@ -238,9 +239,6 @@ typedef struct nlconstants_t {
     double sigmaZ_st;       /* static effective vertical stress at center */
     double sigmaZ_gradient; /* local effective vertical stress gradient */
 
-    manzari_dafalias_constants_t md;
-    pdmy03_constants_t pdmy03;
-
     double maxFs;
     double avgFs;
 
@@ -254,6 +252,8 @@ typedef struct nlconstants_t {
 typedef struct nlsolver_t {
 
 	nlconstants_t *constants;
+	manzari_dafalias_constants_t *md_materials;
+	pdmy03_constants_t *pdmy03_materials;
 	pj8_material_parameters_t *pj8_materials;
 	double        *pj8_void_ratios;
 	qptensors_t   *stresses;

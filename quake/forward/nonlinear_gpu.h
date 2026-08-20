@@ -124,6 +124,8 @@ void nonlinear_gpu_check_error(int32_t myID);
 
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
+    const pdmy03_constants_t *pdmy03_material,
     const pj8_material_parameters_t *pj8_material,
     double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
@@ -136,7 +138,7 @@ int nonlinear_gpu_material_point_history(
  * used only by the material-point regression path. Production MD updates are
  * CUDA-only. */
 int nonlinear_manzari_dafalias_host_history(
-    const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -144,7 +146,7 @@ int nonlinear_manzari_dafalias_host_history(
     nonlinear_material_point_result_t *results);
 
 int nonlinear_pdmy03_host_history(
-    const nlconstants_t *constants,
+    const pdmy03_constants_t *pdmy03_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,

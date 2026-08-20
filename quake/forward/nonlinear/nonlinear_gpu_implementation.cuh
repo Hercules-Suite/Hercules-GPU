@@ -127,6 +127,8 @@ typedef struct nonlinear_gpu_state_t {
     int32_t pdmy03_surface_stride;
     nonlinear_gpu_element_t *elements;
     nlconstants_t *constants;
+    manzari_dafalias_constants_t *md_materials;
+    pdmy03_constants_t *pdmy03_materials;
     pj8_material_parameters_t *pj8_materials;
     double *pj8_void_ratios;
     qptensors_t *stresses;
@@ -1130,7 +1132,7 @@ NL_HD static int md_stress_correction(
 template <nl_md_integration_scheme_t MD_SCHEME,
           nl_md_forward_euler_substeps_t MD_FE_SUBSTEPS>
 NL_HD static int nl_update_manzari_dafalias_scheme(
-    const nlconstants_t *__restrict__ c,
+    const manzari_dafalias_constants_t *__restrict__ m,
     const nonlinear_gpu_config_t *__restrict__ cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
     tensor_t *__restrict__ dynamic_stress,
@@ -1144,7 +1146,6 @@ NL_HD static int nl_update_manzari_dafalias_scheme(
     int32_t *__restrict__ accepted_substeps,
     nl_md_diagnostics_t *__restrict__ diagnostics)
 {
-    const manzari_dafalias_constants_t *m = &c->md;
     const tensor_t de_h = md_sub(strain, strain_prev);
     const tensor_t de = md_scale(de_h, -1.0);
     tensor_t stress = md_scale(md_add(*dynamic_stress, static_stress), -1.0);
@@ -1861,7 +1862,7 @@ NL_HD static int nl_update_manzari_dafalias_scheme(
  * for the host material-point driver, which must honor whichever scheme the
  * fixture selected and is not performance critical. */
 NL_HD static int nl_update_manzari_dafalias(
-    const nlconstants_t *__restrict__ c,
+    const manzari_dafalias_constants_t *__restrict__ m,
     const nonlinear_gpu_config_t *__restrict__ cfg,
     tensor_t strain, tensor_t strain_prev, tensor_t static_stress,
     tensor_t *__restrict__ dynamic_stress,
@@ -1881,7 +1882,7 @@ NL_HD static int nl_update_manzari_dafalias(
             return nl_update_manzari_dafalias_scheme<
                 NL_MD_INTEGRATION_FORWARD_EULER,
                 NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND>(
-                c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+                m, cfg, strain, strain_prev, static_stress, dynamic_stress,
                 plastic_strain, alpha, alpha_in, fabric, initialized,
                 void_ratio, plastic_multiplier, yield_error,
                 integration_error, accepted_substeps, diagnostics);
@@ -1889,7 +1890,7 @@ NL_HD static int nl_update_manzari_dafalias(
         return nl_update_manzari_dafalias_scheme<
             NL_MD_INTEGRATION_FORWARD_EULER,
             NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>(
-            c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+            m, cfg, strain, strain_prev, static_stress, dynamic_stress,
             plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
             plastic_multiplier, yield_error, integration_error,
             accepted_substeps, diagnostics);
@@ -1897,7 +1898,7 @@ NL_HD static int nl_update_manzari_dafalias(
     return nl_update_manzari_dafalias_scheme<
         NL_MD_INTEGRATION_MODIFIED_EULER,
         NL_MD_FORWARD_EULER_SUBSTEPS_FIXED>(
-        c, cfg, strain, strain_prev, static_stress, dynamic_stress,
+        m, cfg, strain, strain_prev, static_stress, dynamic_stress,
         plastic_strain, alpha, alpha_in, fabric, initialized, void_ratio,
         plastic_multiplier, yield_error, integration_error,
         accepted_substeps, diagnostics);
@@ -3056,34 +3057,36 @@ __device__ static int nl_update_mohr_coulomb(const nlconstants_t *c,
     return isfinite(*fs);
 }
 
-__device__ static int nl_update_material(const nlconstants_t *c,
-                                          const nonlinear_gpu_config_t *cfg,
-                                          tensor_t strain,
-                                          tensor_t strain_prev,
-                                          tensor_t static_stress,
-                                          tensor_t pstrain_prev,
-                                          tensor_t backstress_prev,
-                                          double epbar_prev,
-                                          tensor_t *pstrain,
-                                          tensor_t *backstress,
-                                          tensor_t *sigma,
-                                          double *epbar,
-                                          double *fs,
-                                          double *psi_state,
-                                          double *load_unload_state,
-                                          double *tao_state,
-                                          double *tao_max_state,
-                                          double *kappa,
-                                          tensor_t *sref,
-                                          double *gamma1d,
-                                          double *tao1d,
-                                          double *ggmax,
-                                          double *model_error,
-                                          tensor_t *fabric,
-                                          double *md_initialized,
-                                          double *md_integration_error,
-                                          int32_t *md_substeps,
-                                          nl_md_diagnostics_t *md_diagnostics)
+__device__ static int nl_update_material(
+    const nlconstants_t *c,
+    const manzari_dafalias_constants_t *md_material,
+    const nonlinear_gpu_config_t *cfg,
+    tensor_t strain,
+    tensor_t strain_prev,
+    tensor_t static_stress,
+    tensor_t pstrain_prev,
+    tensor_t backstress_prev,
+    double epbar_prev,
+    tensor_t *pstrain,
+    tensor_t *backstress,
+    tensor_t *sigma,
+    double *epbar,
+    double *fs,
+    double *psi_state,
+    double *load_unload_state,
+    double *tao_state,
+    double *tao_max_state,
+    double *kappa,
+    tensor_t *sref,
+    double *gamma1d,
+    double *tao1d,
+    double *ggmax,
+    double *model_error,
+    tensor_t *fabric,
+    double *md_initialized,
+    double *md_integration_error,
+    int32_t *md_substeps,
+    nl_md_diagnostics_t *md_diagnostics)
 {
     const materialmodel_t model = cfg->material_model;
 
@@ -3093,7 +3096,8 @@ __device__ static int nl_update_material(const nlconstants_t *c,
         *backstress = backstress_prev;
         int32_t accepted = 0;
         const int ok = nl_update_manzari_dafalias(
-            c, cfg, strain, strain_prev, static_stress, sigma, pstrain,
+            md_material, cfg, strain, strain_prev, static_stress,
+            sigma, pstrain,
             backstress, sref, fabric, md_initialized, epbar, psi_state, fs,
             md_integration_error, &accepted, md_diagnostics);
         *load_unload_state = (double)accepted;
@@ -3196,6 +3200,8 @@ __device__ static int nl_update_material(const nlconstants_t *c,
 #ifndef NL_GPU_PRODUCTION_ONLY
 __global__ static void kernel_nonlinear_material_point_history(
     nlconstants_t constants,
+    manzari_dafalias_constants_t md_material,
+    pdmy03_constants_t pdmy03_material,
     pj8_material_parameters_t pj8_material,
     double pj8_void_ratio,
     nonlinear_gpu_config_t config,
@@ -3265,7 +3271,7 @@ __global__ static void kernel_nonlinear_material_point_history(
             model_error = fs;
         } else if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
             ok = pdmy03_update(
-                &constants.pdmy03, config.no_substeps,
+                &pdmy03_material, config.no_substeps,
                 strain_history[step], strain_prev, nl_zero(), &stress,
                 &plastic_next, &pdmy03_state, pdmy03_centers,
                 &pdmy03_diagnostics);
@@ -3273,7 +3279,8 @@ __global__ static void kernel_nonlinear_material_point_history(
             model_error = fs;
         } else {
             ok = nl_update_material(
-                &constants, &config, strain_history[step], strain_prev, nl_zero(),
+                &constants, &md_material, &config, strain_history[step],
+                strain_prev, nl_zero(),
                 plastic_strain, backstress, ep_bar,
                 &plastic_next, &backstress_next, &stress, &ep_bar_next, &fs,
                 &psi, &load_unload, &tao, &tao_max, &kappa,
@@ -3322,7 +3329,7 @@ __global__ static void kernel_nonlinear_material_point_history(
                 pdmy03_diagnostics.substeps_clamped;
             result.pdmy03_pressure_d = pdmy03_state.pressure_d;
             double center_norm = 0.0;
-            for (int i = 0; i < constants.pdmy03.surface_count; i++)
+            for (int i = 0; i < pdmy03_material.surface_count; i++)
                 center_norm += pdmy03_ddot(pdmy03_centers[i],
                                            pdmy03_centers[i]);
             result.pdmy03_center_norm = sqrt(center_norm);
@@ -3643,7 +3650,8 @@ __global__ static void kernel_nonlinear_update_force(
             tensor_t *centers = state.pdmy03_centers+
                 (size_t)point*state.pdmy03_surface_stride;
             ok = pdmy03_update(
-                &c->pdmy03, cfg.no_substeps, strain, strain_prev,
+                state.pdmy03_materials+nl_eindex, cfg.no_substeps,
+                strain, strain_prev,
                 static_stress, &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
                 state.pdmy03_states+point, centers,
@@ -3707,7 +3715,8 @@ __global__ static void kernel_nonlinear_update_force(
                 &md_diagnostics_shared[threadIdx.x].value;
             ok = nl_update_manzari_dafalias_scheme<MD_SCHEME,
                                                     MD_FE_SUBSTEPS>(
-                c, &cfg, strain, strain_prev, static_stress,
+                state.md_materials+nl_eindex, &cfg,
+                strain, strain_prev, static_stress,
                 &state.stresses[nl_eindex].qp[qp],
                 &state.pstrains2[nl_eindex].qp[qp],
                 &state.alphastress2[nl_eindex].qp[qp],
@@ -3745,7 +3754,7 @@ __global__ static void kernel_nonlinear_update_force(
             int32_t unused_substeps = 0;
             nl_md_diagnostics_t unused_diagnostics = {};
             ok = nl_update_material(
-                c, &cfg, strain, strain_prev, static_stress,
+                c, NULL, &cfg, strain, strain_prev, static_stress,
                 state.pstrains1[nl_eindex].qp[qp],
                 state.alphastress1[nl_eindex].qp[qp],
                 state.ep1[nl_eindex].qv[qp],
@@ -4082,6 +4091,18 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     free(elements);
 
     NL_ALLOC_COPY(constants, constants);
+    if (config->material_model == MANZARI_DAFALIAS && count > 0) {
+        if (nonlinear_alloc_copy(myID, &g_nl.md_materials,
+                host_state->md_materials, (size_t)count,
+                "Manzari-Dafalias material properties") != 0)
+            return -1;
+    }
+    if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03 && count > 0) {
+        if (nonlinear_alloc_copy(myID, &g_nl.pdmy03_materials,
+                host_state->pdmy03_materials, (size_t)count,
+                "PDMY03 material properties") != 0)
+            return -1;
+    }
     NL_ALLOC_COPY(stresses, stresses);
     NL_ALLOC_COPY(strains, strains);
     const int allocate_previous_state_shadows =
@@ -4114,8 +4135,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03 && count > 0) {
         int32_t stride = 0;
         for (int32_t i = 0; i < count; i++) {
-            if (host_state->constants[i].pdmy03.surface_count > stride)
-                stride = host_state->constants[i].pdmy03.surface_count;
+            if (host_state->pdmy03_materials[i].surface_count > stride)
+                stride = host_state->pdmy03_materials[i].surface_count;
         }
         if (stride < 2 || stride > PDMY03_MAX_SURFACES) return -1;
         g_nl.pdmy03_surface_stride = stride;
@@ -4197,6 +4218,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     saved_mib);
         }
         if (config->material_model == MANZARI_DAFALIAS) {
+            const double material_mib = (double)((size_t)count*
+                sizeof(manzari_dafalias_constants_t))/(1024.0*1024.0);
             if (config->md_integration_scheme ==
                     NL_MD_INTEGRATION_FORWARD_EULER) {
                 if (config->md_forward_euler_substeps ==
@@ -4204,8 +4227,9 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     fprintf(stderr,
                             "Manzari-Dafalias integration: Forward Euler "
                             "(substeps=demand, max_substeps=%d, "
-                            "yield_drift=reported, geostatic=%s)\n",
-                            config->no_substeps,
+                            "yield_drift=reported, local_material=%.1f MiB, "
+                            "geostatic=%s)\n",
+                            config->no_substeps, material_mib,
                             config->approximate_geostatic_state == YES
                                 ? "approximate K0 effective stress"
                                 : "solver stress history");
@@ -4214,8 +4238,8 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                             "Manzari-Dafalias integration: Forward Euler "
                             "(substeps=fixed, fixed_substeps=%d over the "
                             "plastic remainder, yield_drift=reported, "
-                            "geostatic=%s)\n",
-                            config->no_substeps,
+                            "local_material=%.1f MiB, geostatic=%s)\n",
+                            config->no_substeps, material_mib,
                             config->approximate_geostatic_state == YES
                                 ? "approximate K0 effective stress"
                                 : "solver stress history");
@@ -4235,10 +4259,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         "(local_error=%g, substeps=unlimited, "
                         "no_substeps=%d correction cap, "
                         "yield_residual=%g Pa, recovery=%s, "
-                        "geostatic=%s)\n",
+                        "local_material=%.1f MiB, geostatic=%s)\n",
                         config->backbone_error_tolerance,
                         config->no_substeps, config->error_tolerance,
-                        recovery,
+                        recovery, material_mib,
                         config->approximate_geostatic_state == YES
                             ? "approximate K0 effective stress"
                             : "solver stress history");
@@ -4247,10 +4271,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         "Manzari-Dafalias integration: Modified Euler "
                         "(local_error=%g, max_substeps=%d, "
                         "yield_residual=%g Pa, recovery=%s, "
-                        "geostatic=%s)\n",
+                        "local_material=%.1f MiB, geostatic=%s)\n",
                         config->backbone_error_tolerance,
                         config->no_substeps, config->error_tolerance,
-                        recovery,
+                        recovery, material_mib,
                         config->approximate_geostatic_state == YES
                             ? "approximate K0 effective stress"
                             : "solver stress history");
@@ -4271,16 +4295,19 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         g_workload.interval == 1 ? "" : "s");
             }
         } else if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
+            const double material_mib = (double)((size_t)count*
+                sizeof(pdmy03_constants_t))/(1024.0*1024.0);
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 (sizeof(pdmy03_state_t)+(size_t)g_nl.pdmy03_surface_stride*
                  sizeof(tensor_t)))/(1024.0*1024.0);
             fprintf(stderr,
                     "PressureDependMultiYield03 integration: standard "
                     "automatic nested surfaces (max_substeps=%d, "
-                    "surface_stride=%d, local_history=%.1f MiB, "
+                    "surface_stride=%d, local_material=%.1f MiB, "
+                    "local_history=%.1f MiB, "
                     "geostatic=%s)\n",
                     config->no_substeps, g_nl.pdmy03_surface_stride,
-                    state_mib,
+                    material_mib, state_mib,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
@@ -4787,6 +4814,8 @@ void nonlinear_gpu_check_error(int32_t myID)
 #ifndef NL_GPU_PRODUCTION_ONLY
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
+    const pdmy03_constants_t *pdmy03_material,
     const pj8_material_parameters_t *pj8_material,
     double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
@@ -4795,7 +4824,8 @@ int nonlinear_gpu_material_point_history(
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || pj8_material == NULL || config == NULL ||
+    if (constants == NULL || md_material == NULL ||
+        pdmy03_material == NULL || pj8_material == NULL || config == NULL ||
         initial_state == NULL ||
         strain_history == NULL ||
         results == NULL || steps <= 0) {
@@ -4817,8 +4847,8 @@ int nonlinear_gpu_material_point_history(
     }
     if (error == cudaSuccess) {
         kernel_nonlinear_material_point_history<<<1, 1>>>(
-            *constants, *pj8_material, pj8_void_ratio, *config, *initial_state,
-            strain_device, steps,
+            *constants, *md_material, *pdmy03_material, *pj8_material,
+            pj8_void_ratio, *config, *initial_state, strain_device, steps,
             result_device);
         error = cudaGetLastError();
     }
@@ -4842,14 +4872,14 @@ int nonlinear_gpu_material_point_history(
 }
 
 int nonlinear_manzari_dafalias_host_history(
-    const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || initial_state == NULL ||
+    if (md_material == NULL || config == NULL || initial_state == NULL ||
         strain_history == NULL ||
         results == NULL || steps <= 0 ||
         config->material_model != MANZARI_DAFALIAS) return -1;
@@ -4864,14 +4894,14 @@ int nonlinear_manzari_dafalias_host_history(
     double initialized = seeded ? 1.0 : 0.0;
 
     for (int32_t step = 0; step < steps; step++) {
-        double void_ratio = constants->md.e_init;
+        double void_ratio = md_material->e_init;
         double dgamma = 0.0;
         double yield_error = 0.0;
         double integration_error = 0.0;
         int32_t accepted_substeps = 0;
         nl_md_diagnostics_t diagnostics = {};
         const int ok = nl_update_manzari_dafalias(
-            constants, config, strain_history[step], strain_prev, md_zero(),
+            md_material, config, strain_history[step], strain_prev, md_zero(),
             &stress, &plastic_strain, &alpha, &alpha_in, &fabric,
             &initialized, &void_ratio, &dgamma, &yield_error,
             &integration_error, &accepted_substeps, &diagnostics);
@@ -4900,18 +4930,18 @@ int nonlinear_manzari_dafalias_host_history(
 }
 
 int nonlinear_pdmy03_host_history(
-    const nlconstants_t *constants,
+    const pdmy03_constants_t *pdmy03_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || config == NULL || initial_state == NULL ||
+    if (pdmy03_material == NULL || config == NULL || initial_state == NULL ||
         strain_history == NULL || results == NULL || steps <= 0 ||
         config->material_model != PRESSURE_DEPEND_MULTIYIELD_03 ||
-        constants->pdmy03.surface_count < 2 ||
-        constants->pdmy03.surface_count > PDMY03_MAX_SURFACES) return -1;
+        pdmy03_material->surface_count < 2 ||
+        pdmy03_material->surface_count > PDMY03_MAX_SURFACES) return -1;
 
     const int seeded = initial_state->provided != 0;
     tensor_t strain_previous = seeded ? initial_state->strain : pdmy03_zero();
@@ -4924,7 +4954,7 @@ int nonlinear_pdmy03_host_history(
     for (int32_t step = 0; step < steps; step++) {
         pdmy03_diagnostics_t diagnostics = {};
         const int ok = pdmy03_update(
-            &constants->pdmy03, config->no_substeps, strain_history[step],
+            pdmy03_material, config->no_substeps, strain_history[step],
             strain_previous, pdmy03_zero(), &stress, &plastic_strain,
             &state, centers, &diagnostics);
         nonlinear_material_point_result_t result = {};
@@ -4939,7 +4969,7 @@ int nonlinear_pdmy03_host_history(
         result.pdmy03_substeps_clamped = diagnostics.substeps_clamped;
         result.pdmy03_pressure_d = state.pressure_d;
         double center_norm = 0.0;
-        for (int i = 0; i < constants->pdmy03.surface_count; i++)
+        for (int i = 0; i < pdmy03_material->surface_count; i++)
             center_norm += pdmy03_ddot(centers[i], centers[i]);
         result.pdmy03_center_norm = sqrt(center_norm);
         result.status = ok ? 0 : 1;
@@ -5394,6 +5424,7 @@ void nonlinear_gpu_finalize(void)
     memset(&g_workload, 0, sizeof(g_workload));
 #define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
     NL_FREE(elements); NL_FREE(constants);
+    NL_FREE(md_materials); NL_FREE(pdmy03_materials);
     NL_FREE(pj8_materials); NL_FREE(pj8_void_ratios);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);
     NL_FREE(pstrains1); NL_FREE(pstrains2);

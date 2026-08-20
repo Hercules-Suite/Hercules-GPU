@@ -1774,7 +1774,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                    MPI_INT, MPI_MAX, 0, comm_solver);
         if (myID == 0) {
             const size_t host_bytes_per_element =
-                sizeof(nlconstants_t) + 8*sizeof(qptensors_t) +
+                sizeof(nlconstants_t) + sizeof(pdmy03_constants_t) +
+                8*sizeof(qptensors_t) +
                 10*sizeof(qpvectors_t);
             const size_t device_bytes_per_element =
                 host_bytes_per_element + 2*sizeof(double) +
@@ -1885,6 +1886,20 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     myNonlinSolver->constants =
         (nlconstants_t *)calloc(myNonlinElementsCount, sizeof(nlconstants_t));
+    if (theMaterialModel == MANZARI_DAFALIAS &&
+        myNonlinElementsCount > 0) {
+        myNonlinSolver->md_materials =
+            (manzari_dafalias_constants_t *)calloc(
+                (size_t)myNonlinElementsCount,
+                sizeof(manzari_dafalias_constants_t));
+    }
+    if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+        myNonlinElementsCount > 0) {
+        myNonlinSolver->pdmy03_materials =
+            (pdmy03_constants_t *)calloc(
+                (size_t)myNonlinElementsCount,
+                sizeof(pdmy03_constants_t));
+    }
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
         myNonlinElementsCount > 0) {
         const size_t material_count =
@@ -1945,6 +1960,12 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
 
     if ( (myNonlinSolver->constants           == NULL) ||
+         (theMaterialModel == MANZARI_DAFALIAS &&
+          myNonlinElementsCount > 0 &&
+          myNonlinSolver->md_materials        == NULL) ||
+         (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+          myNonlinElementsCount > 0 &&
+          myNonlinSolver->pdmy03_materials    == NULL) ||
          (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
           myNonlinElementsCount > 0 &&
           (myNonlinSolver->pj8_materials      == NULL ||
@@ -2323,7 +2344,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
 
             case MANZARI_DAFALIAS: {
-                manzari_dafalias_constants_t *md = &ecp->md;
+                manzari_dafalias_constants_t *md =
+                    myNonlinSolver->md_materials+nl_eindex;
                 md->G0       = interpolate_property_value(
                     elementVs, theManzariDafaliasProperties[0]);
                 md->e_init   = interpolate_property_value(
@@ -2377,7 +2399,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
 
             case PRESSURE_DEPEND_MULTIYIELD_03: {
-                pdmy03_constants_t *pdmy = &ecp->pdmy03;
+                pdmy03_constants_t *pdmy =
+                    myNonlinSolver->pdmy03_materials+nl_eindex;
                 pdmy->ref_shear_modulus = interpolate_property_value(
                     elementVs, thePdmy03Properties[0]);
                 pdmy->ref_bulk_modulus = interpolate_property_value(
@@ -5589,6 +5612,10 @@ static int material_point_parse_model(const char *name,
 }
 
 static void material_point_load_constants(nlconstants_t *constants,
+                                          manzari_dafalias_constants_t *
+                                              md_material,
+                                          pdmy03_constants_t *
+                                              pdmy03_material,
                                           pj8_material_parameters_t *
                                               pj8_material,
                                           double *pj8_void_ratio,
@@ -5596,6 +5623,8 @@ static void material_point_load_constants(nlconstants_t *constants,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
+    memset(md_material, 0, sizeof(*md_material));
+    memset(pdmy03_material, 0, sizeof(*pdmy03_material));
     memset(pj8_material, 0, sizeof(*pj8_material));
     *pj8_void_ratio = 0.0;
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
@@ -5619,27 +5648,27 @@ static void material_point_load_constants(nlconstants_t *constants,
         return;
     }
     if (model == MANZARI_DAFALIAS) {
-        constants->md.G0 = values[0];
-        constants->md.nu = values[1];
-        constants->md.e_init = values[2];
-        constants->md.Mc = values[3];
-        constants->md.c = values[4];
-        constants->md.lambda_c = values[5];
-        constants->md.e0 = values[6];
-        constants->md.ksi = values[7];
-        constants->md.P_atm = values[8];
-        constants->md.m = values[9];
-        constants->md.h0 = values[10];
-        constants->md.ch = values[11];
-        constants->md.nb = values[12];
-        constants->md.A0 = values[13];
-        constants->md.nd = values[14];
-        constants->md.z_max = values[15];
-        constants->md.cz = values[16];
+        md_material->G0 = values[0];
+        md_material->nu = values[1];
+        md_material->e_init = values[2];
+        md_material->Mc = values[3];
+        md_material->c = values[4];
+        md_material->lambda_c = values[5];
+        md_material->e0 = values[6];
+        md_material->ksi = values[7];
+        md_material->P_atm = values[8];
+        md_material->m = values[9];
+        md_material->h0 = values[10];
+        md_material->ch = values[11];
+        md_material->nb = values[12];
+        md_material->A0 = values[13];
+        md_material->nd = values[14];
+        md_material->z_max = values[15];
+        md_material->cz = values[16];
         return;
     }
     if (model == PRESSURE_DEPEND_MULTIYIELD_03) {
-        pdmy03_constants_t *pdmy = &constants->pdmy03;
+        pdmy03_constants_t *pdmy = pdmy03_material;
         pdmy->ref_shear_modulus = values[0];
         pdmy->ref_bulk_modulus = values[1];
         pdmy->friction_angle = values[2];
@@ -5682,6 +5711,8 @@ static void material_point_load_constants(nlconstants_t *constants,
 
 static int material_point_cpu_history(
     const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
+    const pdmy03_constants_t *pdmy03_material,
     const pj8_material_parameters_t *pj8_material,
     double pj8_void_ratio,
     const nonlinear_gpu_config_t *config,
@@ -5694,12 +5725,14 @@ static int material_point_cpu_history(
     if (config->material_model == MANZARI_DAFALIAS) {
         (void)dt;
         return nonlinear_manzari_dafalias_host_history(
-            constants, config, initial_state, strain_history, steps, results);
+            md_material, config, initial_state, strain_history, steps,
+            results);
     }
     if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
         (void)dt;
         return nonlinear_pdmy03_host_history(
-            constants, config, initial_state, strain_history, steps, results);
+            pdmy03_material, config, initial_state, strain_history, steps,
+            results);
     }
     if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
         (void)dt;
@@ -6054,6 +6087,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         NL_MD_FORWARD_EULER_SUBSTEPS_FIXED;
     nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
     nlconstants_t constants;
+    manzari_dafalias_constants_t md_material;
+    pdmy03_constants_t pdmy03_material;
     pj8_material_parameters_t pj8_material;
     double pj8_void_ratio = 0.0;
     nonlinear_gpu_config_t config;
@@ -6333,11 +6368,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             const pj8_parameters_t reference =
                 pj8_reference_parameters(1000.0);
             nlconstants_t candidate = {};
+            manzari_dafalias_constants_t candidate_md = {};
+            pdmy03_constants_t candidate_pdmy03 = {};
             pj8_material_parameters_t candidate_material = {};
             double candidate_void_ratio = 0.0;
             material_point_load_constants(
-                &candidate, &candidate_material, &candidate_void_ratio,
-                material_model, constants_values);
+                &candidate, &candidate_md, &candidate_pdmy03,
+                &candidate_material, &candidate_void_ratio, material_model,
+                constants_values);
             for (int i = 0; i < MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT;
                  i++) {
                 if (!isfinite(constants_values[i])) {
@@ -6434,8 +6472,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
 
-    material_point_load_constants(&constants, &pj8_material, &pj8_void_ratio,
-                                  material_model, constants_values);
+    material_point_load_constants(
+        &constants, &md_material, &pdmy03_material, &pj8_material,
+        &pj8_void_ratio, material_model, constants_values);
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;
@@ -6449,13 +6488,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
-    if (material_point_cpu_history(&constants, &pj8_material, pj8_void_ratio,
-                                   &config, &initial_state, strain_history,
-                                   steps, dt,
-                                   cpu_results) != 0) goto cleanup;
+    if (material_point_cpu_history(
+            &constants, &md_material, &pdmy03_material, &pj8_material,
+            pj8_void_ratio, &config, &initial_state, strain_history, steps,
+            dt, cpu_results) != 0) goto cleanup;
     if (nonlinear_gpu_material_point_history(
-            &constants, &pj8_material, pj8_void_ratio, &config,
-            &initial_state, strain_history, steps, gpu_results) != 0) {
+            &constants, &md_material, &pdmy03_material, &pj8_material,
+            pj8_void_ratio, &config, &initial_state, strain_history, steps,
+            gpu_results) != 0) {
         goto cleanup;
     }
     if (brickup_enabled == YES) {
@@ -6829,7 +6869,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             clamped_steps += cpu_results[step].pdmy03_substeps_clamped != 0;
         }
         printf("PDMY03 controls: standard automatic surfaces %d, maximum "
-               "substeps %d\n", constants.pdmy03.surface_count, no_substeps);
+               "substeps %d\n", pdmy03_material.surface_count, no_substeps);
         printf("Maximum requested/accepted substeps: %d / %d (CPU), %d "
                "(GPU); clamped steps: %d\n", maximum_requested,
                maximum_cpu_accepted_substeps,
