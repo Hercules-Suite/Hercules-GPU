@@ -377,6 +377,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "ManzariDafalias",
     "PressureDependMultiYield03",
     "PJLiqV8",
+    "PJLiqV8Custom",
   ]) {
     assert.match(physics, new RegExp(`material_model = ${model}`));
   }
@@ -386,6 +387,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "ManzariDafalias",
     "PressureDependMultiYield03",
     "PJLiqV8",
+    "PJLiqV8Custom",
   ]) {
     assert.match(
       physics,
@@ -424,11 +426,14 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /ManzariDafalias: N × 17/);
   assert.match(parameters, /PDMY03: N × 22/);
   assert.match(parameters, /PJLiqV8: N × 2/);
+  assert.match(parameters, /PJLiqV8Custom: N × 12/);
+  assert.match(parameters, /Vs_limit Dr M kd h m zeta e_max e_min Q R n_G/);
+  assert.match(parameters, /This is V8, not the experimental V8.1 h_p0 extension/);
   assert.match(parameters, /9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83/);
   assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
-  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, and PJLiqV8/);
+  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, PJLiqV8, and PJLiqV8Custom/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -647,7 +652,7 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   );
 
   assert.match(header, /MANZARI_DAFALIAS/);
-  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_integration_scheme"/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_forward_euler_substeps"/);
@@ -844,7 +849,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
   assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
-  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
@@ -921,7 +926,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 
-test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpoints", () => {
+test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   const benchmarkRoot = fileURLToPath(
     new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
@@ -937,18 +942,24 @@ test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpo
   const checkpoint = readFileSync(`${sourceRoot}io_checkpoint.cc`, "utf8");
   const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
   const fixture = readFileSync(`${benchmarkRoot}pj_liq_v8_brickup_synthetic.in`, "utf8");
+  const customFixture = readFileSync(`${benchmarkRoot}pj_liq_v8_custom_equivalence.in`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
   const nativeDriver = readFileSync(`${benchmarkRoot}pj_liq_v8_native_driver.cc`, "utf8");
   const nativeStateTest = readFileSync(`${benchmarkRoot}pj_liq_v8_native_state_test.cc`, "utf8");
   const frozenSha = "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83";
 
-  assert.match(header, /PJ_LIQ_V8/);
+  assert.match(header, /PJ_LIQ_V8_CUSTOM/);
+  assert.match(header, /pj8_material_parameters_t/);
   assert.match(cpu, /PJLiqV8[\s\S]*PJ-Liq-V8[\s\S]*PJ_Liq_V8/);
-  assert.match(cpu, /PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /PJLiqV8Custom[\s\S]*PJ-Liq-V8-Custom[\s\S]*PJ_Liq_V8_Custom/);
+  assert.match(cpu, /PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
   assert.match(cpu, /relative density must be[\s\S]*dimensionless range \[0, 1\]/);
-  assert.match(cpu, /pj8_void_ratio_from_relative_density/);
-  assert.match(core, /return p->e_max-relative_density\*\(p->e_max-p->e_min\)/);
-  assert.match(cpu, /PJ-Liq V8\/BrickUP coupling/);
+  assert.match(core, /pj8_void_ratio_from_relative_density/);
+  assert.match(core, /return material->e_max-relative_density\*\(material->e_max-material->e_min\)/);
+  assert.match(core, /pj8_reference_material_parameters/);
+  assert.match(core, /pj8_material_parameters_valid/);
+  assert.match(core, /pj8_update_material/);
+  assert.match(cpu, /"%s\/BrickUP coupling/);
   assert.match(cpu, /V8 evolves effective ["\s]*skeleton stress/);
   assert.match(cpu, /BrickUP independently solves fluid ["\s]*mass balance and applies sigma=sigma'-alpha\*p\*I/);
   assert.match(cpu, /V8 effective-pressure ["\s]*loss is not copied into the pressure DOF/);
@@ -958,9 +969,9 @@ test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpo
   assert.match(core, /pj8_forward_euler/);
   assert.match(core, /pj8_state_values/);
   assert.match(gpuHeader, /NL_PJ8_STATE_VALUE_COUNT 93/);
-  assert.match(gpu, /g_config\.material_model == PJ_LIQ_V8[\s\S]*nonlinear_gpu_launch_pj_liq_v8/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_PJ_LIQ_V8\(g_config\.material_model\)[\s\S]*nonlinear_gpu_launch_pj_liq_v8/);
   assert.match(gpu, /pj8_begin_dynamic_phase/);
-  assert.match(gpu, /pj8_update\(pj8_parameters/);
+  assert.match(gpu, /pj8_update_material\(pj8_parameters, &c->pj8_material/);
   assert.match(gpu, /full_effective_stress/);
   assert.match(gpuUnit, /NL_GPU_PJ_LIQ_V8_ONLY/);
   assert.match(makefile, /nonlinear\/nonlinear_gpu_pj_liq_v8\.o/);
@@ -969,9 +980,13 @@ test("wires frozen PJ-Liq V8 effective stress through CUDA, BrickUP, and checkpo
   assert.match(fixture, /material_point_brickup = yes/);
   assert.match(fixture, /material_point_brickup_biot_alpha = 1\.0/);
   assert.match(suite, /pj_liq_v8_brickup_synthetic\.in/);
+  assert.match(customFixture, /material_model = PJLiqV8Custom/);
+  assert.match(customFixture, /Dr M kd h m zeta e_max e_min Q R n_G/);
+  assert.match(suite, /pj_liq_v8_custom_equivalence\.in/);
+  assert.match(suite, /PJLiqV8Custom reference row differs from frozen V8/);
   assert.match(nativeDriver, /PJ8_STANDALONE/);
   assert.doesNotMatch(nativeDriver, /expected.*stress/i);
-  assert.match(nativeStateTest, /state isolation, restart, zero-increment/);
+  assert.match(nativeStateTest, /frozen\/custom equivalence, zeta exposure/);
   assert.match(nativeStateTest, /relative-density conversion failed/);
   assert.match(nativeStateTest, /fluid mass balance before pressure is combined with[\s\S]*the effective skeleton stress exactly once/);
 

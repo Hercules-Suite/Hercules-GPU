@@ -49,12 +49,15 @@ typedef enum {
     LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER,
     MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
     VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS,
-    PRESSURE_DEPEND_MULTIYIELD_03, PJ_LIQ_V8
+    PRESSURE_DEPEND_MULTIYIELD_03, PJ_LIQ_V8, PJ_LIQ_V8_CUSTOM
 
 } materialmodel_t;
 
 #define MATERIAL_MODEL_IS_BACKBONE(model) \
     ((model) >= VONMISES_BAE && (model) <= VONMISES_RO)
+
+#define MATERIAL_MODEL_IS_PJ_LIQ_V8(model) \
+    ((model) == PJ_LIQ_V8 || (model) == PJ_LIQ_V8_CUSTOM)
 
 typedef struct vect1_t {
 	double x;
@@ -85,6 +88,22 @@ typedef struct tensor_t {
     double xz;
 
 } tensor_t;
+
+/* Compact per-element subset exposed by PJLiqV8Custom.  The remaining V8
+ * controls stay in the single frozen parameter block shared by all elements,
+ * preserving the production kernel's lightweight memory layout. */
+typedef struct pj8_material_parameters_t {
+    double h;
+    double m;
+    double M;
+    double kd;
+    double zeta;
+    double e_max;
+    double e_min;
+    double Q;
+    double R;
+    double n_G;
+} pj8_material_parameters_t;
 
 typedef struct qpvectors_t {
 
@@ -220,6 +239,7 @@ typedef struct nlconstants_t {
 
     manzari_dafalias_constants_t md;
     pdmy03_constants_t pdmy03;
+    pj8_material_parameters_t pj8_material;
     double pj8_void_ratio;
 
     double maxFs;

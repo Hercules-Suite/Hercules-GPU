@@ -43,6 +43,22 @@ static pj8_state_t initial_state(const pj8_parameters_t &parameters,
     return state;
 }
 
+static pj8_state_t initial_material_state(
+    const pj8_parameters_t &parameters,
+    const pj8_material_parameters_t &material,
+    double void_ratio)
+{
+    const tensor_t effective_stress = {-18.0, -18.0, -40.0, 0, 0, 0};
+    pj8_state_t state = {};
+    if (!pj8_initialize_material(&parameters, &material, effective_stress,
+                                 void_ratio, &state) ||
+        !pj8_begin_dynamic_phase(&parameters, effective_stress, &state)) {
+        std::cerr << "PJ-Liq V8 custom-material initialization failed\n";
+        std::exit(1);
+    }
+    return state;
+}
+
 static bool advance(const pj8_parameters_t &parameters, tensor_t increment,
                     int substeps, pj8_state_t *state)
 {
@@ -55,9 +71,30 @@ static bool advance(const pj8_parameters_t &parameters, tensor_t increment,
            pj8_finite_tensor(stress);
 }
 
+static bool advance_material(const pj8_parameters_t &parameters,
+                             const pj8_material_parameters_t &material,
+                             tensor_t increment, int substeps,
+                             pj8_state_t *state)
+{
+    tensor_t stress = state->stress;
+    pj8_update_info_t info = {};
+    const int expected_substeps = pj8_ddot(increment, increment) == 0.0
+        ? 0 : substeps;
+    return pj8_update_material(&parameters, &material, increment, substeps,
+                               state, &stress, &info) &&
+           info.accepted_substeps == expected_substeps &&
+           pj8_finite_tensor(stress);
+}
+
 int main()
 {
     const pj8_parameters_t parameters = pj8_reference_parameters(1.0);
+    const pj8_material_parameters_t reference_material =
+        pj8_reference_material_parameters(&parameters);
+    if (!pj8_material_parameters_valid(&parameters, &reference_material)) {
+        std::cerr << "PJ-Liq V8 reference material block is invalid\n";
+        return 1;
+    }
     const double relative_density_0601 =
         (parameters.e_max-0.601)/(parameters.e_max-parameters.e_min);
     if (pj8_void_ratio_from_relative_density(&parameters, 0.0) !=
@@ -67,6 +104,11 @@ int main()
         pj8_void_ratio_from_relative_density(
             &parameters, relative_density_0601) != 0.601) {
         std::cerr << "PJ-Liq V8 relative-density conversion failed\n";
+        return 1;
+    }
+    if (pj8_void_ratio_from_material_relative_density(
+            &reference_material, relative_density_0601) != 0.601) {
+        std::cerr << "PJ-Liq V8 custom relative-density conversion failed\n";
         return 1;
     }
     const std::array<tensor_t, 8> path = {{
@@ -84,6 +126,35 @@ int main()
     pj8_state_t baseline = initial_state(parameters, 0.601);
     for (const tensor_t increment : path)
         if (!advance(parameters, increment, 4, &baseline)) return 1;
+
+    /* The configurable entry point must be bit-for-bit equivalent when its
+     * compact material block contains the frozen reference values. */
+    pj8_state_t reference_custom =
+        initial_material_state(parameters, reference_material, 0.601);
+    for (const tensor_t increment : path)
+        if (!advance_material(parameters, reference_material, increment, 4,
+                              &reference_custom)) return 1;
+    if (!same_state(baseline, reference_custom)) {
+        std::cerr << "PJLiqV8Custom reference row changed frozen V8 response\n";
+        return 1;
+    }
+
+    /* zeta is an actual V8 material input, not an inert parser column. Its
+     * initial irreversible dilatancy scale changes immediately. */
+    pj8_material_parameters_t custom_material = reference_material;
+    custom_material.zeta = 2.0*reference_material.zeta;
+    if (!pj8_material_parameters_valid(&parameters, &custom_material)) {
+        std::cerr << "PJ-Liq V8 valid custom material block was rejected\n";
+        return 1;
+    }
+    const pj8_state_t reference_initial =
+        initial_material_state(parameters, reference_material, 0.601);
+    const pj8_state_t custom_state =
+        initial_material_state(parameters, custom_material, 0.601);
+    if (custom_state.D_ir == reference_initial.D_ir) {
+        std::cerr << "PJLiqV8Custom zeta does not affect constitutive state\n";
+        return 1;
+    }
 
     pj8_state_t isolated = initial_state(parameters, 0.601);
     pj8_state_t other = initial_state(parameters, 0.70);
@@ -151,7 +222,8 @@ int main()
         return 1;
     }
 
-    std::cout << "PASS: PJ-Liq V8 state isolation, restart, zero-increment, "
-                 "and BrickUP mass-balance/stress-split checks\n";
+    std::cout << "PASS: PJ-Liq V8 frozen/custom equivalence, zeta exposure, "
+                 "state isolation, restart, zero-increment, and BrickUP "
+                 "mass-balance/stress-split checks\n";
     return 0;
 }

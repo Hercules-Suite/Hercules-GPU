@@ -710,6 +710,23 @@ Nonlinear GPU execution (runtime environment):
 	`Dr=1` is the densest, and the constitutive constants remain intentionally
 	unavailable for ad hoc production retuning. This replaces the earlier
 	`initial_void_ratio` column; old V8 property rows must be converted.
+- `material_model=PJLiqV8Custom` uses the same V8 equations, state, explicit
+	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
+	compact set of existing physical constitutive inputs. Its 12-column rows are
+	`Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. Here `M` is the
+	critical-state stress ratio, `kd` sets the dilatancy-surface ratio, `h` and
+	`m` control bounding-surface hardening, `zeta` scales irreversible
+	dilatancy, `e_max` and `e_min` convert relative density to void ratio, `Q`
+	and `R` define the critical-state void-ratio relation, and `n_G` controls
+	pressure dependence of shear stiffness. Hercules linearly interpolates all
+	eleven values following `Vs_limit`; repeat constant soil parameters in
+	adjacent rows when only the selection range should vary. All entries must be
+	finite, with `0<=Dr<=1`, `M,kd,h,Q>0`, `m,zeta,R>=0`,
+	`e_max>e_min>=0`, and `0<=n_G<=1`. The frozen shakedown reference
+	void ratio 0.601 must remain within `[e_min,e_max]`. Parameters not listed
+	here—including the reversible compatibility, amplitude, bias, and event
+	controls—retain the frozen V8 values and calibration SHA. This interface is
+	still V8; it does not add the V8.1 `h_p0` contraction-rate experiment.
 - PJ-Liq V8 is compatible with BrickUP through explicit field ownership.
 	V8 is the effective-skeleton law: its compatibility state separates
 	total volumetric strain into elastic confining, irreversible plastic, and

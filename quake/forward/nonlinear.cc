@@ -111,7 +111,21 @@ static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
 #define PDMY03_PROPERTY_COUNT 21
 static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
-static double               *thePj8RelativeDensity;
+#define PJ8_CUSTOM_PROPERTY_COUNT 11
+enum {
+    PJ8_PROPERTY_DR = 0,
+    PJ8_PROPERTY_M,
+    PJ8_PROPERTY_KD,
+    PJ8_PROPERTY_H,
+    PJ8_PROPERTY_M_EXPONENT,
+    PJ8_PROPERTY_ZETA,
+    PJ8_PROPERTY_E_MAX,
+    PJ8_PROPERTY_E_MIN,
+    PJ8_PROPERTY_Q,
+    PJ8_PROPERTY_R,
+    PJ8_PROPERTY_N_G
+};
+static double               *thePj8Properties[PJ8_CUSTOM_PROPERTY_COUNT];
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -358,6 +372,54 @@ double interpolate_property_value(double vsRequest, double *propVector)
     double result = prop0 + (vsRequest - vs0)*( (prop1 - prop0)/(vs1 - vs0) );
 
     return result;
+}
+
+static pj8_material_parameters_t pj8_material_at_row(int row)
+{
+    const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
+    pj8_material_parameters_t material =
+        pj8_reference_material_parameters(&reference);
+    if (theMaterialModel != PJ_LIQ_V8_CUSTOM) return material;
+    material.M = thePj8Properties[PJ8_PROPERTY_M][row];
+    material.kd = thePj8Properties[PJ8_PROPERTY_KD][row];
+    material.h = thePj8Properties[PJ8_PROPERTY_H][row];
+    material.m = thePj8Properties[PJ8_PROPERTY_M_EXPONENT][row];
+    material.zeta = thePj8Properties[PJ8_PROPERTY_ZETA][row];
+    material.e_max = thePj8Properties[PJ8_PROPERTY_E_MAX][row];
+    material.e_min = thePj8Properties[PJ8_PROPERTY_E_MIN][row];
+    material.Q = thePj8Properties[PJ8_PROPERTY_Q][row];
+    material.R = thePj8Properties[PJ8_PROPERTY_R][row];
+    material.n_G = thePj8Properties[PJ8_PROPERTY_N_G][row];
+    return material;
+}
+
+static pj8_material_parameters_t pj8_material_at_vs(double vs)
+{
+    const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
+    pj8_material_parameters_t material =
+        pj8_reference_material_parameters(&reference);
+    if (theMaterialModel != PJ_LIQ_V8_CUSTOM) return material;
+    material.M = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_M]);
+    material.kd = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_KD]);
+    material.h = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_H]);
+    material.m = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_M_EXPONENT]);
+    material.zeta = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_ZETA]);
+    material.e_max = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_E_MAX]);
+    material.e_min = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_E_MIN]);
+    material.Q = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_Q]);
+    material.R = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_R]);
+    material.n_G = interpolate_property_value(
+        vs, thePj8Properties[PJ8_PROPERTY_N_G]);
+    return material;
 }
 
 /* Categorical material-table fields (PDMY03 loading type and surface count)
@@ -745,9 +807,12 @@ void nonlinear_init( int32_t     myID,
                 thePdmy03Properties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
-        } else if (theMaterialModel == PJ_LIQ_V8) {
-            thePj8RelativeDensity =
-                (double*)malloc(sizeof(double) * thePropertiesCount);
+        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+            const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
+                ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+            for (int field = 0; field < fields; field++)
+                thePj8Properties[field] =
+                    (double*)malloc(sizeof(double) * thePropertiesCount);
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
         theKayPhis          = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -780,9 +845,12 @@ void nonlinear_init( int32_t     myID,
             MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
         }
-    } else if (theMaterialModel == PJ_LIQ_V8) {
-        MPI_Bcast(thePj8RelativeDensity, thePropertiesCount, MPI_DOUBLE, 0,
-                  comm_solver);
+    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
+            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+        for (int field = 0; field < fields; field++)
+            MPI_Bcast(thePj8Properties[field], thePropertiesCount,
+                      MPI_DOUBLE, 0, comm_solver);
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theKayPhis,          thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -960,13 +1028,17 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                strcasecmp(material_model, "PJ-Liq-V8") == 0 ||
                strcasecmp(material_model, "PJ_Liq_V8") == 0) {
         materialmodel = PJ_LIQ_V8;
+    } else if (strcasecmp(material_model, "PJLiqV8Custom") == 0 ||
+               strcasecmp(material_model, "PJ-Liq-V8-Custom") == 0 ||
+               strcasecmp(material_model, "PJ_Liq_V8_Custom") == 0) {
+        materialmodel = PJ_LIQ_V8_CUSTOM;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, PJLiqV8): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, PJLiqV8, PJLiqV8Custom): %s\n", material_model);
         return -1;
     }
 
@@ -1075,14 +1147,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
     if ((materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         materialmodel == PJ_LIQ_V8) &&
+         MATERIAL_MODEL_IS_PJ_LIQ_V8(materialmodel)) &&
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
                 "%s warning: no approximate or "
                 "ramped geostatic initialization was selected. The "
                 "constitutive initialization therefore lacks a physical "
                 "in-situ effective-stress state.\n",
-                materialmodel == PJ_LIQ_V8 ? "PJLiqV8" :
+                MATERIAL_MODEL_IS_PJ_LIQ_V8(materialmodel) ?
+                    (materialmodel == PJ_LIQ_V8_CUSTOM ?
+                        "PJLiqV8Custom" : "PJLiqV8") :
                     "PressureDependMultiYield03");
     }
 
@@ -1126,6 +1200,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     const int property_columns =
         (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
         (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 :
+        (theMaterialModel == PJ_LIQ_V8_CUSTOM) ? 12 :
         (theMaterialModel == PJ_LIQ_V8) ? 2 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
@@ -1141,9 +1216,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
-    } else if (theMaterialModel == PJ_LIQ_V8) {
-        thePj8RelativeDensity =
-            (double*)malloc(sizeof(double) * thePropertiesCount);
+    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
+            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+        for (int field = 0; field < fields; field++)
+            thePj8Properties[field] = (double*)malloc(
+                sizeof(double) * thePropertiesCount);
     } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
     theKayPhis           = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1184,9 +1262,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     auxiliar[row * property_columns + field + 1];
             }
             continue;
-        } else if (theMaterialModel == PJ_LIQ_V8) {
-            thePj8RelativeDensity[row] =
-                auxiliar[row * property_columns + 1];
+        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+            const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
+                ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+            for (int field = 0; field < fields; field++)
+                thePj8Properties[field][row] =
+                    auxiliar[row * property_columns + field + 1];
             continue;
         }
         theAlphaCohes[row]        = auxiliar[ row * 16 + 1 ];
@@ -1280,24 +1361,53 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 return -1;
             }
         }
-    } else if (theMaterialModel == PJ_LIQ_V8) {
+    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
         double minimum_relative_density = 1.0;
         double maximum_relative_density = 0.0;
         for (row = 1; row < thePropertiesCount; row++) {
             if (theVsLimits[row] <= theVsLimits[row-1]) {
                 fprintf(stderr,
-                        "PJLiqV8 Vs limits must be strictly increasing\n");
+                        "%s Vs limits must be strictly increasing\n",
+                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                            "PJLiqV8Custom" : "PJLiqV8");
                 return -1;
             }
         }
+        const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
+        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
+            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
         for (row = 0; row < thePropertiesCount; row++) {
-            const double relative_density = thePj8RelativeDensity[row];
+            for (int field = 0; field < fields; field++) {
+                if (!isfinite(thePj8Properties[field][row])) {
+                    fprintf(stderr,
+                            "Illegal %s row %d: all parameters must be "
+                            "finite\n",
+                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                                "PJLiqV8Custom" : "PJLiqV8", row);
+                    return -1;
+                }
+            }
+            const double relative_density =
+                thePj8Properties[PJ8_PROPERTY_DR][row];
             if (!isfinite(relative_density) || relative_density < 0.0 ||
                 relative_density > 1.0) {
                 fprintf(stderr,
-                        "Illegal PJLiqV8 row %d: relative density must be "
-                        "finite and in the dimensionless range [0, 1]\n",
-                        row);
+                        "Illegal %s row %d: relative density must be finite "
+                        "and in the dimensionless range [0, 1]\n",
+                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                            "PJLiqV8Custom" : "PJLiqV8", row);
+                return -1;
+            }
+            const pj8_material_parameters_t material = pj8_material_at_row(row);
+            if (!pj8_material_parameters_valid(&reference, &material)) {
+                fprintf(stderr,
+                        "Illegal %s row %d: require h>0, m>=0, M>0, kd>0, "
+                        "zeta>=0, e_max>e_min>=0 containing the frozen "
+                        "shakedown anchor e=%.3f, Q>0, R>=0, and "
+                        "0<=n_G<=1\n",
+                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                            "PJLiqV8Custom" : "PJLiqV8", row,
+                        reference.state_shakedown_reference_void_ratio);
                 return -1;
             }
             minimum_relative_density = MIN(minimum_relative_density,
@@ -1305,12 +1415,21 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             maximum_relative_density = MAX(maximum_relative_density,
                                            relative_density);
         }
-        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
-        fprintf(stderr,
-                "PJLiqV8 property input: relative density Dr in [%g, %g]; "
-                "internal e0 uses frozen e_max=%g and e_min=%g\n",
-                minimum_relative_density, maximum_relative_density,
-                frozen.e_max, frozen.e_min);
+        if (theMaterialModel == PJ_LIQ_V8_CUSTOM) {
+            fprintf(stderr,
+                    "PJLiqV8Custom property input: Dr in [%g, %g]; "
+                    "M, kd, h, m, zeta, e_max, e_min, Q, R, and n_G are "
+                    "interpolated by Vs; all other V8 controls retain "
+                    "frozen calibration %s\n",
+                    minimum_relative_density, maximum_relative_density,
+                    PJ8_PARAMETER_SHA256);
+        } else {
+            fprintf(stderr,
+                    "PJLiqV8 property input: relative density Dr in [%g, %g]; "
+                    "internal e0 uses frozen e_max=%g and e_min=%g\n",
+                    minimum_relative_density, maximum_relative_density,
+                    reference.e_max, reference.e_min);
+        }
     }
 
     theNonlinearFlag = 1;
@@ -1605,7 +1724,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
          theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         theMaterialModel == PJ_LIQ_V8) &&
+         MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
@@ -1615,7 +1734,9 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     theMaterialModel == MANZARI_DAFALIAS
                         ? "ManzariDafalias" :
                     theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03
-                        ? "PressureDependMultiYield03" : "PJLiqV8");
+                        ? "PressureDependMultiYield03" :
+                    theMaterialModel == PJ_LIQ_V8_CUSTOM
+                        ? "PJLiqV8Custom" : "PJLiqV8");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1730,14 +1851,16 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         (long long)global_poro_map_counts[
                             POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
             }
-            if (theMaterialModel == PJ_LIQ_V8 && active > 0) {
+            if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) && active > 0) {
                 fprintf(stderr,
-                        "PJ-Liq V8/BrickUP coupling: V8 evolves effective "
+                        "%s/BrickUP coupling: V8 evolves effective "
                         "skeleton stress (including plastic volumetric "
                         "compatibility); BrickUP independently solves fluid "
                         "mass balance and applies sigma=sigma'-alpha*p*I for "
                         "%lld active nonlinear elements. V8 effective-pressure "
                         "loss is not copied into the pressure DOF.\n",
+                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                            "PJ-Liq V8 Custom" : "PJ-Liq V8",
                         (long long)active);
             }
         }
@@ -2276,24 +2399,41 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
             }
 
-            case PJ_LIQ_V8: {
-                const pj8_parameters_t frozen =
+            case PJ_LIQ_V8:
+            case PJ_LIQ_V8_CUSTOM: {
+                const pj8_parameters_t reference =
                     pj8_reference_parameters(1000.0);
                 const double relative_density = interpolate_property_value(
-                    elementVs, thePj8RelativeDensity);
+                    elementVs, thePj8Properties[PJ8_PROPERTY_DR]);
                 if (!isfinite(relative_density) || relative_density < 0.0 ||
                     relative_density > 1.0) {
                     fprintf(stderr,
-                            "Thread %d: PJLiqV8 element %d has invalid "
+                            "Thread %d: %s element %d has invalid "
                             "interpolated relative density %g\n",
-                            myID, eindex, relative_density);
+                            myID,
+                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                                "PJLiqV8Custom" : "PJLiqV8",
+                            eindex, relative_density);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                ecp->pj8_material = pj8_material_at_vs(elementVs);
+                if (!pj8_material_parameters_valid(
+                        &reference, &ecp->pj8_material)) {
+                    fprintf(stderr,
+                            "Thread %d: %s element %d has invalid "
+                            "interpolated material parameters\n",
+                            myID,
+                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
+                                "PJLiqV8Custom" : "PJLiqV8", eindex);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
                 ecp->pj8_void_ratio =
-                    pj8_void_ratio_from_relative_density(
-                        &frozen, relative_density);
-                double sin_phi = 3.0*frozen.M/(6.0+frozen.M);
+                    pj8_void_ratio_from_material_relative_density(
+                        &ecp->pj8_material, relative_density);
+                double sin_phi = 3.0*ecp->pj8_material.M/
+                    (6.0+ecp->pj8_material.M);
                 sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
                 ecp->phi = asin(sin_phi);
                 break;
@@ -2318,7 +2458,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
         if (theMaterialModel == MANZARI_DAFALIAS ||
             theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-            theMaterialModel == PJ_LIQ_V8) {
+            MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
@@ -5356,6 +5496,7 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_MD_CONSTANT_COUNT 17
 #define MATERIAL_POINT_PDMY03_CONSTANT_COUNT 21
 #define MATERIAL_POINT_PJ8_CONSTANT_COUNT 1
+#define MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT 11
 #define MATERIAL_POINT_PJ8_STATE_VALUE_COUNT 93
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
@@ -5411,6 +5552,10 @@ static int material_point_parse_model(const char *name,
              strcasecmp(name, "PJ-Liq-V8") == 0 ||
              strcasecmp(name, "PJ_Liq_V8") == 0)
         *model = PJ_LIQ_V8;
+    else if (strcasecmp(name, "PJLiqV8Custom") == 0 ||
+             strcasecmp(name, "PJ-Liq-V8-Custom") == 0 ||
+             strcasecmp(name, "PJ_Liq_V8_Custom") == 0)
+        *model = PJ_LIQ_V8_CUSTOM;
     else return -1;
     return 0;
 }
@@ -5420,10 +5565,25 @@ static void material_point_load_constants(nlconstants_t *constants,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
-    if (model == PJ_LIQ_V8) {
-        const pj8_parameters_t frozen = pj8_reference_parameters(1000.0);
-        constants->pj8_void_ratio = pj8_void_ratio_from_relative_density(
-            &frozen, values[0]);
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
+        const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
+        constants->pj8_material =
+            pj8_reference_material_parameters(&reference);
+        if (model == PJ_LIQ_V8_CUSTOM) {
+            constants->pj8_material.M = values[1];
+            constants->pj8_material.kd = values[2];
+            constants->pj8_material.h = values[3];
+            constants->pj8_material.m = values[4];
+            constants->pj8_material.zeta = values[5];
+            constants->pj8_material.e_max = values[6];
+            constants->pj8_material.e_min = values[7];
+            constants->pj8_material.Q = values[8];
+            constants->pj8_material.R = values[9];
+            constants->pj8_material.n_G = values[10];
+        }
+        constants->pj8_void_ratio =
+            pj8_void_ratio_from_material_relative_density(
+                &constants->pj8_material, values[0]);
         return;
     }
     if (model == MANZARI_DAFALIAS) {
@@ -5507,7 +5667,7 @@ static int material_point_cpu_history(
         return nonlinear_pdmy03_host_history(
             constants, config, initial_state, strain_history, steps, results);
     }
-    if (config->material_model == PJ_LIQ_V8) {
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
         (void)dt;
         return nonlinear_pj8_host_history(
             constants, config, initial_state, strain_history, steps, results);
@@ -5706,7 +5866,7 @@ static int material_point_validate_zero_increment(
                 current->model_error);
         return -1;
     }
-    if (model == PJ_LIQ_V8) {
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
         for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
             if (current->pj8_state_values[i] !=
                     previous->pj8_state_values[i]) {
@@ -5958,6 +6118,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         ? MATERIAL_POINT_MD_CONSTANT_COUNT :
         (material_model == PRESSURE_DEPEND_MULTIYIELD_03)
         ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
+        (material_model == PJ_LIQ_V8_CUSTOM)
+        ? MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT :
         (material_model == PJ_LIQ_V8)
         ? MATERIAL_POINT_PJ8_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
@@ -5984,7 +6146,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     }
     if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
         material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-        material_model != PJ_LIQ_V8) {
+        !MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
         fprintf(stderr, "A material-point initial state currently requires "
                         "ManzariDafalias, PressureDependMultiYield03, or "
                         "PJLiqV8\n");
@@ -6016,7 +6178,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                   &brickup_solid_bulk_modulus);
         if (material_model != MANZARI_DAFALIAS &&
             material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-            material_model != PJ_LIQ_V8) {
+            !MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
                             "requires ManzariDafalias, "
                             "PressureDependMultiYield03, or PJLiqV8\n");
@@ -6122,13 +6284,35 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
     }
-    if (material_model == PJ_LIQ_V8) {
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
         if (!isfinite(constants_values[0]) ||
             constants_values[0] < 0.0 || constants_values[0] > 1.0) {
             fprintf(stderr,
                     "Illegal PJLiqV8 material-point relative density: "
                     "expected a dimensionless value in [0, 1]\n");
             goto cleanup;
+        }
+        if (material_model == PJ_LIQ_V8_CUSTOM) {
+            const pj8_parameters_t reference =
+                pj8_reference_parameters(1000.0);
+            nlconstants_t candidate = {};
+            material_point_load_constants(
+                &candidate, material_model, constants_values);
+            for (int i = 0; i < MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT;
+                 i++) {
+                if (!isfinite(constants_values[i])) {
+                    fprintf(stderr,
+                            "Illegal PJLiqV8Custom material-point constants: "
+                            "all values must be finite\n");
+                    goto cleanup;
+                }
+            }
+            if (!pj8_material_parameters_valid(
+                    &reference, &candidate.pj8_material)) {
+                fprintf(stderr,
+                        "Illegal PJLiqV8Custom material-point constants\n");
+                goto cleanup;
+            }
         }
         if (initial_array_count != 5) {
             fprintf(stderr,
@@ -6316,7 +6500,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
              material_model == MANZARI_DAFALIAS ||
              material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
-             material_model == PJ_LIQ_V8) && step > 0 &&
+             MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -6494,7 +6678,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 goto cleanup;
             }
         }
-        if (material_model == PJ_LIQ_V8) {
+        if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
             for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
                 const double cpu_state =
                     cpu_results[step].pj8_state_values[i];
@@ -6614,9 +6798,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
-    } else if (material_model == PJ_LIQ_V8) {
-        printf("PJ-Liq V8 controls: frozen calibration %s, %d fixed "
-               "substep%s per host increment\n",
+    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
+        printf("PJ-Liq V8 controls: %s, frozen internal controls %s, %d "
+               "fixed substep%s per host increment\n",
+               material_model == PJ_LIQ_V8_CUSTOM ?
+                   "custom material properties" : "frozen material properties",
                PJ8_PARAMETER_SHA256, no_substeps,
                no_substeps == 1 ? "" : "s");
         if (zero_increment_checks > 0) {
@@ -6655,6 +6841,7 @@ cleanup:
 #undef MATERIAL_POINT_MD_CONSTANT_COUNT
 #undef MATERIAL_POINT_PDMY03_CONSTANT_COUNT
 #undef MATERIAL_POINT_PJ8_CONSTANT_COUNT
+#undef MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT
 #undef MATERIAL_POINT_PJ8_STATE_VALUE_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX

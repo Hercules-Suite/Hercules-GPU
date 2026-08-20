@@ -112,6 +112,22 @@ arrays are zero placeholders; PJ-Liq V8 initializes its complete native state.
 a nonzero increment, while reversal detection occurs once per material-point
 history row. An exact zero increment returns without advancing any history.
 
+For `material_model=PJLiqV8Custom`, `material_point_constants` contains eleven
+values in this order:
+
+```text
+Dr M kd h m zeta e_max e_min Q R n_G
+```
+
+This is a configurable input boundary around the same V8 kernel, not the V8.1
+`h_p0` experiment. It exposes ten existing constitutive fields while the
+remaining compatibility, amplitude, bias, ratchet, event, and integration
+controls retain the frozen reference values. All inputs must be finite;
+`Dr` and `n_G` lie in `[0,1]`, `M`, `kd`, `h`, and `Q` are positive, `m`,
+`zeta`, and `R` are nonnegative, and `e_max>e_min>=0`. The frozen shakedown
+law uses reference void ratio 0.601, which must remain inside the custom
+`[e_min,e_max]` interval.
+
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
 - `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
@@ -180,6 +196,12 @@ history row. An exact zero increment returns without advancing any history.
   `d(zeta)=alpha*d(eps_v)+d(p_f)/M=0`, and the CSV combines the two fields
   exactly once as `sigma_total=sigma_effective-alpha*p_f*I`. The reported
   fluid-balance residual directly checks that split.
+- `pj_liq_v8_custom_equivalence.in` repeats that complete history through
+  `PJLiqV8Custom` using the frozen reference values for all exposed columns.
+  `run_suite.sh` requires the custom and frozen CPU CSVs to match exactly and
+  separately requires their CUDA CSVs to match exactly. This catches parser,
+  interpolation, storage, and kernel-wiring errors without claiming that any
+  non-reference custom parameter set has been calibrated.
 
 The independent native oracle driver consumes the `deps_*` columns from the
 PJ-Liq V8 port package without reading any expected response after row zero.
@@ -210,9 +232,10 @@ flattened state values; event flags and integer counters remain exact. These
 cross-language oracle tolerances do not replace the tighter host/CUDA
 comparison in the Hercules suite.
 
-The companion host-only contract test checks per-point state isolation,
-byte-restored restart reproduction, exact zero-increment preservation, sealed
-BrickUP fluid mass balance, and effective-to-total stress assembly:
+The companion host-only contract test checks frozen/custom reference
+equivalence, active `zeta` exposure, per-point state isolation, byte-restored
+restart reproduction, exact zero-increment preservation, sealed BrickUP fluid
+mass balance, and effective-to-total stress assembly:
 
 ```bash
 c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \

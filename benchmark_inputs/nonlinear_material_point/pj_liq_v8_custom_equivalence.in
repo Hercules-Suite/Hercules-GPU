@@ -1,0 +1,52 @@
+# PJLiqV8Custom reference-row equivalence and sealed BrickUP regression.
+material_model = PJLiqV8Custom
+material_point_delta_time_sec = 1.0e-3
+material_point_steps = 17
+no_substeps = 1
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-5
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-9
+material_point_compare_atol = 1.0e-8
+material_point_output_prefix = pj_liq_v8_custom_equivalence
+
+# Dr M kd h m zeta e_max e_min Q R n_G. These are exactly the frozen V8
+# reference values, so this fixture must reproduce pj_liq_v8_brickup_synthetic.
+material_point_constants =
+  0.66296296296296309 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65
+
+material_point_initial_strain =
+  0 0 0 0 0 0
+material_point_initial_stress =
+  -1.8e4 -1.8e4 -4.0e4 0 0 0
+material_point_initial_alpha =
+  0 0 0 0 0 0
+material_point_initial_alpha_in =
+  0 0 0 0 0 0
+material_point_initial_fabric =
+  0 0 0 0 0 0
+
+material_point_brickup = yes
+material_point_brickup_porosity = 0.40
+material_point_brickup_fluid_bulk_modulus_pa = 2.2e9
+material_point_brickup_biot_alpha = 1.0
+material_point_initial_pore_pressure_pa = 0.0
+
+material_point_strain_history =
+   0.0e+0  0.0e+0  0.0e+0  0.0e+0 0 0
+  -1.0e-5 -1.0e-5 -1.0e-5  2.5e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  7.5e-4 0 0
+  -4.0e-5 -4.0e-5 -4.0e-5  1.0e-3 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -4.0e-5 -4.0e-5 -4.0e-5  1.0e-3 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0

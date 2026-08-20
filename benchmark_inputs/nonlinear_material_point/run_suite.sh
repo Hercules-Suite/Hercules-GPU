@@ -43,7 +43,19 @@ fixtures=(
   pdmy03_cyclic_shear_synthetic.in
   pdmy03_zero_tension_onset_synthetic.in
   pj_liq_v8_brickup_synthetic.in
+  pj_liq_v8_custom_equivalence.in
 )
+
+validate_pj8_custom_equivalence() {
+  local backend
+  for backend in cpu gpu; do
+    if ! cmp -s "pj_liq_v8_brickup_synthetic.${backend}.csv" \
+               "pj_liq_v8_custom_equivalence.${backend}.csv"; then
+      echo "PJLiqV8Custom reference row differs from frozen V8 (${backend})" >&2
+      return 1
+    fi
+  done
+}
 
 validate_md_pressure_floor() {
   local csv=manzari_dafalias_pressure_floor_synthetic.cpu.csv
@@ -120,6 +132,9 @@ for fixture in "${fixtures[@]}"; do
   elif [[ $fixture == manzari_dafalias_pressure_floor_synthetic.in ]] &&
        ! validate_md_pressure_floor; then
     echo "Material-point pressure-floor states do not equal 1.0e-4 P_atm" >&2
+    failures+=("$fixture")
+  elif [[ $fixture == pj_liq_v8_custom_equivalence.in ]] &&
+       ! validate_pj8_custom_equivalence; then
     failures+=("$fixture")
   fi
 done

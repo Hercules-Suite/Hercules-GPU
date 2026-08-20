@@ -9,6 +9,11 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
 - [x] Registered `PJLiqV8` and documented its `Vs_limit relative_density`
   production table; the input boundary converts dimensionless `D_r` in
   `[0,1]` to internal void ratio using frozen `e_max=0.78`, `e_min=0.51`.
+- [x] Registered `PJLiqV8Custom` as the same V8 kernel with compact per-element
+  material storage and the 12-column production table
+  `Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. The original two-column
+  `PJLiqV8` interface and frozen response remain unchanged; `h_p0` is not
+  included because it belongs to the separate V8.1 experiment.
 - [x] Mapped `[xx, yy, zz, xy, yz, xz]`, tensor shear, tension-positive stress,
   and the factor-two symmetric double contraction explicitly.
 - [x] Translated all 112 frozen parameters, four host-event controls, and all
@@ -24,7 +29,9 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
   histories also pass the package's tighter defaults; the final near-collapse
   part of the zero-bias history is sensitive to platform `libm` arithmetic.
 - [x] Verified per-point state isolation, byte-copy restart reproduction, and
-  exact zero-increment preservation in a host-only contract test.
+  exact zero-increment preservation in a host-only contract test. The same
+  test verifies frozen/custom reference equivalence and confirms that exposed
+  `zeta` changes the constitutive state.
 - [x] Added a separate CUDA production object and per-integration-point state.
 - [x] Added versioned checkpoint fields for prior strain/stress, complete V8
   history, and both BrickUP pressure time levels. Legacy displacement-only
@@ -37,6 +44,8 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
   diagnostic is never injected into `p_f`.
 - [x] Added a prescribed-strain PJ/BrickUP regression that compares all 93
   host/CUDA state values and invokes the production uniform pressure kernels.
+- [x] Added a custom-interface material-point fixture whose reference-valued
+  CPU and CUDA histories must exactly reproduce the frozen V8 fixture.
 
 ## Maintainer/Horizon verification still required
 

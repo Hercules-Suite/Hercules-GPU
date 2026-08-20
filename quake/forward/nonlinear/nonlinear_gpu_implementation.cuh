@@ -3204,7 +3204,7 @@ __global__ static void kernel_nonlinear_material_point_history(
 
     const int seeded = (config.material_model == MANZARI_DAFALIAS ||
                         config.material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
-                        config.material_model == PJ_LIQ_V8) &&
+                        MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) &&
                        initial_state.provided != 0;
     tensor_t strain_prev = seeded ? initial_state.strain : nl_zero();
     tensor_t plastic_strain = seeded ? initial_state.plastic_strain : nl_zero();
@@ -3231,11 +3231,12 @@ __global__ static void kernel_nonlinear_material_point_history(
     tensor_t pdmy03_centers[PDMY03_MAX_SURFACES] = {};
     pj8_state_t pj8_state = {};
     pj8_parameters_t pj8_parameters = pj8_reference_parameters(1000.0);
-    if (config.material_model == PJ_LIQ_V8 && seeded) {
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model) && seeded) {
         tensor_t reference = stress;
         reference.xy = reference.yz = reference.xz = 0.0;
-        if (!pj8_initialize(&pj8_parameters, stress,
-                            constants.pj8_void_ratio, &pj8_state) ||
+        if (!pj8_initialize_material(
+                &pj8_parameters, &constants.pj8_material, stress,
+                constants.pj8_void_ratio, &pj8_state) ||
             !pj8_begin_dynamic_phase(&pj8_parameters, reference,
                                      &pj8_state)) return;
     }
@@ -3251,8 +3252,9 @@ __global__ static void kernel_nonlinear_material_point_history(
         pj8_update_info_t pj8_info = {};
 
         int ok;
-        if (config.material_model == PJ_LIQ_V8) {
-            ok = pj8_update(&pj8_parameters,
+        if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) {
+            ok = pj8_update_material(&pj8_parameters,
+                &constants.pj8_material,
                 pj8_sub(strain_history[step], strain_prev),
                 config.no_substeps, &pj8_state, &stress, &pj8_info);
             fs = fabs(pj8_compatibility_residual(&pj8_state));
@@ -3320,7 +3322,7 @@ __global__ static void kernel_nonlinear_material_point_history(
                 center_norm += pdmy03_ddot(pdmy03_centers[i],
                                            pdmy03_centers[i]);
             result.pdmy03_center_norm = sqrt(center_norm);
-        } else if (config.material_model == PJ_LIQ_V8) {
+        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) {
             result.fs = fabs(pj8_compatibility_residual(&pj8_state));
             result.model_error = result.fs;
             result.backstress = pj8_state.alpha;
@@ -3665,8 +3667,9 @@ __global__ static void kernel_nonlinear_update_force(
                 zero_static_shear.xy = 0.0;
                 zero_static_shear.yz = 0.0;
                 zero_static_shear.xz = 0.0;
-                ok = pj8_initialize(pj8_parameters, equilibrated,
-                                    c->pj8_void_ratio, pj8_state) &&
+                ok = pj8_initialize_material(
+                         pj8_parameters, &c->pj8_material, equilibrated,
+                         c->pj8_void_ratio, pj8_state) &&
                      pj8_begin_dynamic_phase(pj8_parameters,
                                              zero_static_shear, pj8_state);
             } else {
@@ -3675,7 +3678,7 @@ __global__ static void kernel_nonlinear_update_force(
             pj8_update_info_t pj8_info = {};
             tensor_t full_effective_stress = pj8_state->stress;
             if (ok) {
-                ok = pj8_update(pj8_parameters,
+                ok = pj8_update_material(pj8_parameters, &c->pj8_material,
                     pj8_sub(strain, strain_prev), cfg.no_substeps,
                     pj8_state, &full_effective_stress, &pj8_info);
             }
@@ -4075,7 +4078,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(strains, strains);
     const int allocate_previous_state_shadows =
         config->material_model != MANZARI_DAFALIAS &&
-        config->material_model != PJ_LIQ_V8;
+        !MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model);
     if (allocate_previous_state_shadows) {
         NL_ALLOC_COPY(strains1, strains1);
         NL_ALLOC_COPY(pstrains1, pstrains1);
@@ -4126,7 +4129,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 "PDMY03 history allocation") != 0) return -1;
     }
 
-    if (config->material_model == PJ_LIQ_V8 && count > 0) {
+    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) && count > 0) {
         const size_t point_count = (size_t)count*NL_GPU_QP;
         const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
         cudaError_t pj8_error = cudaMalloc(
@@ -4264,14 +4267,17 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
-        } else if (config->material_model == PJ_LIQ_V8) {
+        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 sizeof(pj8_state_t))/(1024.0*1024.0);
             fprintf(stderr,
-                    "PJ-Liq V8 integration: frozen calibration %s "
+                    "PJ-Liq V8 integration: %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_history=%.1f MiB, "
                     "effective-skeleton stress with BrickUP pore pressure "
                     "and Biot total-stress coupling, geostatic=%s)\n",
+                    config->material_model == PJ_LIQ_V8_CUSTOM ?
+                        "custom material properties" :
+                        "frozen material properties",
                     PJ8_PARAMETER_SHA256, config->no_substeps, state_mib,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
@@ -4326,7 +4332,7 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
         nonlinear_gpu_launch_pdmy03(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
-    } else if (g_config.material_model == PJ_LIQ_V8) {
+    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(g_config.material_model)) {
         nonlinear_gpu_launch_pj_liq_v8(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
@@ -4924,7 +4930,7 @@ int nonlinear_pj8_host_history(
 {
     if (constants == NULL || config == NULL || initial_state == NULL ||
         strain_history == NULL || results == NULL || steps <= 0 ||
-        config->material_model != PJ_LIQ_V8 ||
+        !MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) ||
         !initial_state->provided || config->no_substeps < 1) return -1;
 
     const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
@@ -4932,14 +4938,16 @@ int nonlinear_pj8_host_history(
     pj8_state_t state = {};
     tensor_t reference = initial_state->stress;
     reference.xy = reference.yz = reference.xz = 0.0;
-    if (!pj8_initialize(&parameters, initial_state->stress,
-                        constants->pj8_void_ratio, &state) ||
+    if (!pj8_initialize_material(
+            &parameters, &constants->pj8_material, initial_state->stress,
+            constants->pj8_void_ratio, &state) ||
         !pj8_begin_dynamic_phase(&parameters, reference, &state)) return -1;
 
     for (int32_t step = 0; step < steps; step++) {
         pj8_update_info_t info = {};
         tensor_t stress = state.stress;
-        const int ok = pj8_update(&parameters,
+        const int ok = pj8_update_material(
+            &parameters, &constants->pj8_material,
             pj8_sub(strain_history[step], strain_previous),
             config->no_substeps, &state, &stress, &info);
         nonlinear_material_point_result_t result = {};
@@ -5048,7 +5056,7 @@ static uint32_t nonlinear_checkpoint_local_flags(mysolver_t *solver)
         flags |= NL_CHECKPOINT_BRICKUP_PRESSURE;
     /* The field schema must agree on ranks that happen to own zero nonlinear
      * elements; their point count is zero and no device bytes are copied. */
-    if (g_active && g_config.material_model == PJ_LIQ_V8)
+    if (g_active && MATERIAL_MODEL_IS_PJ_LIQ_V8(g_config.material_model))
         flags |= NL_CHECKPOINT_PJ8_STATE;
     return flags;
 }

@@ -28,6 +28,9 @@
 typedef struct tensor_t {
     double xx, yy, zz, xy, yz, xz;
 } tensor_t;
+typedef struct pj8_material_parameters_t {
+    double h, m, M, kd, zeta, e_max, e_min, Q, R, n_G;
+} pj8_material_parameters_t;
 #else
 #include "nonlinear.h"
 #endif
@@ -243,37 +246,81 @@ PJ8_HD static inline pj8_parameters_t pj8_reference_parameters(double stress_sca
     return p;
 }
 
-/* PJ-Liq V8 freezes e_max and e_min, so relative density is the clearer
- * external state descriptor. Keep void ratio as an internal constitutive
- * variable and perform this affine conversion at the input boundary. */
+PJ8_HD static inline pj8_material_parameters_t pj8_reference_material_parameters(
+    const pj8_parameters_t *p)
+{
+    pj8_material_parameters_t material = {};
+    material.h=p->h; material.m=p->m; material.M=p->M;
+    material.kd=p->kd; material.zeta=p->zeta;
+    material.e_max=p->e_max; material.e_min=p->e_min;
+    material.Q=p->Q; material.R=p->R; material.n_G=p->n_G;
+    return material;
+}
+
+PJ8_HD static inline int pj8_material_parameters_valid(
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material)
+{
+    return material && isfinite(material->h) && material->h>0.0 &&
+        isfinite(material->m) && material->m>=0.0 &&
+        isfinite(material->M) && material->M>0.0 &&
+        isfinite(material->kd) && material->kd>0.0 &&
+        isfinite(material->zeta) && material->zeta>=0.0 &&
+        isfinite(material->e_max) && isfinite(material->e_min) &&
+        material->e_max>material->e_min && material->e_min>=0.0 &&
+        p->state_shakedown_reference_void_ratio>=material->e_min &&
+        p->state_shakedown_reference_void_ratio<=material->e_max &&
+        isfinite(material->Q) && material->Q>0.0 &&
+        isfinite(material->R) && material->R>=0.0 &&
+        isfinite(material->n_G) && material->n_G>=0.0 &&
+        material->n_G<=1.0;
+}
+
+/* Relative density is the external state descriptor for both the frozen and
+ * custom V8 interfaces. Keep void ratio as an internal constitutive variable
+ * and perform this affine conversion at the input boundary. */
+PJ8_HD static inline double pj8_void_ratio_from_material_relative_density(
+    const pj8_material_parameters_t *material,double relative_density)
+{
+    return material->e_max-relative_density*(material->e_max-material->e_min);
+}
+
 PJ8_HD static inline double pj8_void_ratio_from_relative_density(
     const pj8_parameters_t *p, double relative_density)
 {
-    return p->e_max-relative_density*(p->e_max-p->e_min);
+    const pj8_material_parameters_t material=
+        pj8_reference_material_parameters(p);
+    return pj8_void_ratio_from_material_relative_density(
+        &material,relative_density);
 }
 
 PJ8_HD static inline double pj8_relative_state(
-    const pj8_parameters_t *p, double pressure, double void_ratio)
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
+    double pressure,double void_ratio)
 {
     if (!p->state_enabled) return 0.0;
-    const double dr=pj8_clip((p->e_max-void_ratio)/(p->e_max-p->e_min),0.0,1.0);
+    const double dr=pj8_clip((material->e_max-void_ratio)/
+        (material->e_max-material->e_min),0.0,1.0);
     const double arg=pj8_max(100.0*pj8_max(pressure,p->p_min)/p->p_atm,1.0e-12);
-    const double critical=pj8_clip(p->R/pj8_max(p->Q-log(arg),0.10),0.0,1.0);
+    const double critical=pj8_clip(material->R/
+        pj8_max(material->Q-log(arg),0.10),0.0,1.0);
     return pj8_clip(dr-critical,-p->relative_state_limit,p->relative_state_limit);
 }
 
 PJ8_HD static inline void pj8_surfaces(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material,
     double pressure,double void_ratio,double *mb,double *md,double *xi)
 {
-    *xi=pj8_relative_state(p,pressure,void_ratio);
-    *mb=p->M*exp(p->n_b*(*xi)); *md=p->kd*exp(-p->n_d*(*xi));
+    *xi=pj8_relative_state(p,material,pressure,void_ratio);
+    *mb=material->M*exp(p->n_b*(*xi));
+    *md=material->kd*exp(-p->n_d*(*xi));
 }
 
-PJ8_HD static inline void pj8_moduli(const pj8_parameters_t *p,double pressure,
+PJ8_HD static inline void pj8_moduli(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material,double pressure,
     double *shear,double *bulk)
 {
     const double ratio=pj8_max(pressure,p->p_min)/p->p_ref;
-    const double young=p->E_ref*pow(ratio,p->n_G);
+    const double young=p->E_ref*pow(ratio,material->n_G);
     *shear=young/(2.0*(1.0+p->nu));
     *bulk=young/(3.0*(1.0-2.0*p->nu));
 }
@@ -312,23 +359,29 @@ PJ8_HD static inline double pj8_projected_bias(const pj8_state_t *s)
 }
 
 PJ8_HD static inline double pj8_initial_relative_density(
-    const pj8_parameters_t *p,const pj8_state_t *s)
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
+    const pj8_state_t *s)
 {
     const double arg=pj8_max(100.0*pj8_max(s->pressure_anchor,p->p_min)/p->p_atm,1.0e-12);
-    return pj8_clip(s->initial_relative_state+p->R/pj8_max(p->Q-log(arg),0.10),0.0,1.0);
+    return pj8_clip(s->initial_relative_state+material->R/
+        pj8_max(material->Q-log(arg),0.10),0.0,1.0);
 }
 
-PJ8_HD static inline double pj8_reference_relative_density(const pj8_parameters_t *p)
-{ return (p->e_max-p->state_shakedown_reference_void_ratio)/(p->e_max-p->e_min); }
+PJ8_HD static inline double pj8_reference_relative_density(
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material)
+{ return (material->e_max-p->state_shakedown_reference_void_ratio)/
+    (material->e_max-material->e_min); }
 
 PJ8_HD static inline double pj8_raw_shakedown(const pj8_parameters_t *p,
-    double pressure,const pj8_state_t *s)
+    const pj8_material_parameters_t *material,double pressure,
+    const pj8_state_t *s)
 {
     if (!p->state_shakedown_enabled || !s->cyclic_phase_active ||
         s->amplitude_reversals<p->state_shakedown_minimum_reversals) return 1.0;
     const double bias=pj8_projected_bias(s);
     if (bias<=1.0e-14) return 1.0;
-    const double distance=pj8_initial_relative_density(p,s)-pj8_reference_relative_density(p);
+    const double distance=pj8_initial_relative_density(p,material,s)-
+        pj8_reference_relative_density(p,material);
     const double state_term=exp(p->state_shakedown_state_sensitivity*distance);
     const double anchor_release=1.0-exp(-pow(distance/p->state_shakedown_anchor_width,2.0));
     const double bias_term=pow(bias/p->state_shakedown_bias_reference,
@@ -340,29 +393,33 @@ PJ8_HD static inline double pj8_raw_shakedown(const pj8_parameters_t *p,
 }
 
 PJ8_HD static inline double pj8_dense_state_weight(const pj8_parameters_t *p,
-    const pj8_state_t *s)
+    const pj8_material_parameters_t *material,const pj8_state_t *s)
 {
-    const double d=pj8_max(pj8_initial_relative_density(p,s)-pj8_reference_relative_density(p),0.0);
+    const double d=pj8_max(pj8_initial_relative_density(p,material,s)-
+        pj8_reference_relative_density(p,material),0.0);
     return 1.0-exp(-pow(d/p->state_shakedown_anchor_width,2.0));
 }
 
 PJ8_HD static inline double pj8_shakedown(const pj8_parameters_t *p,
-    double pressure,const pj8_state_t *s)
+    const pj8_material_parameters_t *material,double pressure,
+    const pj8_state_t *s)
 {
-    const double raw=pj8_raw_shakedown(p,pressure,s);
+    const double raw=pj8_raw_shakedown(p,material,pressure,s);
     const double excess=pj8_max(s->cyclic_amplitude-
         p->state_shakedown_dense_hardening_amplitude_onset,0.0);
     const double dense_scale=p->state_shakedown_dense_hardening_scale*
         exp(-p->state_shakedown_dense_hardening_amplitude_decay*excess);
-    const double branch=1.0+pj8_dense_state_weight(p,s)*(dense_scale-1.0);
+    const double branch=1.0+pj8_dense_state_weight(p,material,s)*(dense_scale-1.0);
     return pj8_clip(1.0+(raw-1.0)*branch,1.0,p->state_shakedown_factor_maximum);
 }
 
 PJ8_HD static inline double pj8_shakedown_compliance(const pj8_parameters_t *p,
-    double pressure,const pj8_state_t *s)
+    const pj8_material_parameters_t *material,double pressure,
+    const pj8_state_t *s)
 {
-    const double raw=pj8_raw_shakedown(p,pressure,s);
-    const double d=pj8_max(pj8_initial_relative_density(p,s)-pj8_reference_relative_density(p),0.0);
+    const double raw=pj8_raw_shakedown(p,material,pressure,s);
+    const double d=pj8_max(pj8_initial_relative_density(p,material,s)-
+        pj8_reference_relative_density(p,material),0.0);
     const double attenuation=exp(-p->state_shakedown_dense_compliance_decay*d*d);
     return 1.0+(raw-1.0)*attenuation;
 }
@@ -396,21 +453,23 @@ PJ8_HD static inline double pj8_bias_hardening(const pj8_parameters_t *p,
 }
 
 PJ8_HD static inline void pj8_moduli_for_state(const pj8_parameters_t *p,
-    double pressure,const pj8_state_t *s,double *shear,double *bulk)
+    const pj8_material_parameters_t *material,double pressure,
+    const pj8_state_t *s,double *shear,double *bulk)
 {
-    double sf,hf; pj8_moduli(p,pressure,shear,bulk);
+    double sf,hf; pj8_moduli(p,material,pressure,shear,bulk);
     pj8_cyclic_flow(p,pressure,s,&sf,&hf); (void)hf;
     *shear *= sf;
-    const double compliance=pj8_shakedown_compliance(p,pressure,s);
+    const double compliance=pj8_shakedown_compliance(p,material,pressure,s);
     *shear *= pj8_clip(pow(compliance,-p->state_shakedown_compliance_exponent),
                        p->state_shakedown_shear_multiplier_minimum,1.0);
 }
 
 PJ8_HD static inline double pj8_hardening_for_state(const pj8_parameters_t *p,
-    double pressure,const pj8_state_t *s)
+    const pj8_material_parameters_t *material,double pressure,
+    const pj8_state_t *s)
 {
     const double ratio=pj8_max(pressure,p->p_min)/p->p_ref;
-    double value=p->h*pow(ratio,-p->q_H);
+    double value=material->h*pow(ratio,-p->q_H);
     double sf,hf; pj8_cyclic_flow(p,pressure,s,&sf,&hf); (void)sf;
     value *= hf;
     const double boost=pj8_bias_hardening(p,s);
@@ -418,51 +477,61 @@ PJ8_HD static inline double pj8_hardening_for_state(const pj8_parameters_t *p,
     const double confinement=pow(pj8_clip(p->bias_reference_pressure/
         pj8_max(s->pressure_anchor,p->p_min),0.25,4.0),p->bias_confinement_exponent);
     value *= 1.0+boost*confinement*pow(pressure_ratio,p->bias_pressure_exponent);
-    return value*pj8_shakedown(p,pressure,s);
+    return value*pj8_shakedown(p,material,pressure,s);
 }
 
-PJ8_HD static inline double pj8_bulk_reference(const pj8_parameters_t *p)
-{ double g,k; pj8_moduli(p,p->p_ref,&g,&k); return k; }
+PJ8_HD static inline double pj8_bulk_reference(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material)
+{ double g,k; pj8_moduli(p,material,p->p_ref,&g,&k); return k; }
 
 PJ8_HD static inline double pj8_confining_strain(const pj8_parameters_t *p,
-    double pressure,double anchor)
+    const pj8_material_parameters_t *material,double pressure,double anchor)
 {
     pressure=pj8_max(pressure,p->p_min); anchor=pj8_max(anchor,p->p_min);
-    const double bulk=pj8_bulk_reference(p);
-    if (fabs(p->n_G-1.0)<1.0e-12) return p->p_ref/bulk*log(anchor/pressure);
-    const double factor=pow(p->p_ref,p->n_G)/(bulk*(1.0-p->n_G));
-    return factor*(pow(anchor,1.0-p->n_G)-pow(pressure,1.0-p->n_G));
+    const double bulk=pj8_bulk_reference(p,material);
+    if (fabs(material->n_G-1.0)<1.0e-12)
+        return p->p_ref/bulk*log(anchor/pressure);
+    const double factor=pow(p->p_ref,material->n_G)/
+        (bulk*(1.0-material->n_G));
+    return factor*(pow(anchor,1.0-material->n_G)-
+        pow(pressure,1.0-material->n_G));
 }
 
 PJ8_HD static inline double pj8_pressure_from_confining(
-    const pj8_parameters_t *p,double eps_vc,double anchor,int *at_floor)
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
+    double eps_vc,double anchor,int *at_floor)
 {
-    const double threshold=pj8_confining_strain(p,p->p_min,anchor);
+    const double threshold=pj8_confining_strain(p,material,p->p_min,anchor);
     if (eps_vc>=threshold) { *at_floor=1; return p->p_min; }
     *at_floor=0;
-    const double bulk=pj8_bulk_reference(p);
+    const double bulk=pj8_bulk_reference(p,material);
     double pressure;
-    if (fabs(p->n_G-1.0)<1.0e-12)
+    if (fabs(material->n_G-1.0)<1.0e-12)
         pressure=anchor*exp(-bulk*eps_vc/p->p_ref);
     else {
-        double base=pow(anchor,1.0-p->n_G)-
-            (1.0-p->n_G)*bulk*eps_vc/pow(p->p_ref,p->n_G);
-        base=pj8_max(base,pow(p->p_min,1.0-p->n_G));
-        pressure=pow(base,1.0/(1.0-p->n_G));
+        double base=pow(anchor,1.0-material->n_G)-
+            (1.0-material->n_G)*bulk*eps_vc/
+                pow(p->p_ref,material->n_G);
+        base=pj8_max(base,pow(p->p_min,1.0-material->n_G));
+        pressure=pow(base,1.0/(1.0-material->n_G));
     }
     return pj8_max(pressure,p->p_min);
 }
 
-PJ8_HD static inline int pj8_initialize(const pj8_parameters_t *p,
-    tensor_t stress,double void_ratio,pj8_state_t *state)
+PJ8_HD static inline int pj8_initialize_material(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material,tensor_t stress,
+    double void_ratio,pj8_state_t *state)
 {
     const double pressure=pj8_pressure(stress);
-    if (!(pressure>0.0)||!isfinite(pressure)||!isfinite(void_ratio)) return 0;
+    if (!pj8_material_parameters_valid(p,material) || !(pressure>0.0) ||
+        !isfinite(pressure) || !isfinite(void_ratio)) return 0;
     *state=pj8_state_t{};
     const tensor_t dev=pj8_dev(stress);
-    double mb,md,xi; pj8_surfaces(p,pressure,void_ratio,&mb,&md,&xi); (void)mb;
+    double mb,md,xi;
+    pj8_surfaces(p,material,pressure,void_ratio,&mb,&md,&xi); (void)mb;
     state->stress=stress; state->alpha=pj8_scale(dev,1.0/pressure);
-    state->D_ir=p->irreversible_enabled?p->zeta*sqrt(2.0/3.0)*md:0.0;
+    state->D_ir=p->irreversible_enabled?
+        material->zeta*sqrt(2.0/3.0)*md:0.0;
     state->D=state->D_ir; state->beta=p->beta0;
     state->void_ratio=void_ratio; state->pressure_anchor=pressure;
     state->last_reversal_deviator=dev; state->amplitude_factor=1.0;
@@ -470,6 +539,14 @@ PJ8_HD static inline int pj8_initialize(const pj8_parameters_t *p,
     state->effective_knee_ratio=pj8_effective_knee(p,xi);
     state->geostatic_deviator=dev; state->initialized=1;
     return 1;
+}
+
+PJ8_HD static inline int pj8_initialize(const pj8_parameters_t *p,
+    tensor_t stress,double void_ratio,pj8_state_t *state)
+{
+    const pj8_material_parameters_t material=
+        pj8_reference_material_parameters(p);
+    return pj8_initialize_material(p,&material,stress,void_ratio,state);
 }
 
 PJ8_HD static inline int pj8_begin_dynamic_phase(const pj8_parameters_t *p,
@@ -490,17 +567,20 @@ PJ8_HD static inline int pj8_begin_dynamic_phase(const pj8_parameters_t *p,
 }
 
 PJ8_HD static inline void pj8_dilatancy(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material,
     tensor_t alpha,tensor_t normal,double beta,tensor_t fabric,
     double pressure,double void_ratio,double eps_v_ir,double eps_v_re,
     double *D_ir,double *D_re)
 {
-    double mb,md,xi; pj8_surfaces(p,pressure,void_ratio,&mb,&md,&xi); (void)xi;
+    double mb,md,xi;
+    pj8_surfaces(p,material,pressure,void_ratio,&mb,&md,&xi); (void)xi;
     const double eta=pj8_ddot(alpha,normal);
     const double eta_d=sqrt(2.0/3.0)*md;
     *D_ir=0.0;
     if (p->irreversible_enabled) {
         const double distance=pj8_max(eta_d-eta,0.0);
-        const double amplitude=p->zeta*(1.0+pj8_max(pj8_ddot(fabric,normal),0.0));
+        const double amplitude=material->zeta*
+            (1.0+pj8_max(pj8_ddot(fabric,normal),0.0));
         double gate=1.0;
         if (p->contraction_gate_enabled && p->C_D>0.0) {
             const double reversal=(sqrt(2.0/3.0)*mb-eta)/pj8_max(beta,1.0e-12);
@@ -512,7 +592,8 @@ PJ8_HD static inline void pj8_dilatancy(const pj8_parameters_t *p,
     }
     *D_re=0.0;
     if (p->reversible_enabled) {
-        if (eta>eta_d) *D_re=-p->zeta*p->reversible_ratio*(eta-eta_d);
+        if (eta>eta_d)
+            *D_re=-material->zeta*p->reversible_ratio*(eta-eta_d);
         else if (eps_v_re>0.0)
             *D_re=pj8_min(p->reversible_release_rate*eps_v_re,pj8_max(eta_d,1.0e-12));
     }
@@ -541,15 +622,18 @@ PJ8_HD static inline void pj8_register_reversal(const pj8_parameters_t *p,
 }
 
 PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
-    const pj8_parameters_t *p,const pj8_state_t *old,tensor_t deps,
-    int force_reversal,int allow_legacy_reversal)
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
+    const pj8_state_t *old,tensor_t deps,int force_reversal,
+    int allow_legacy_reversal)
 {
     pj8_state_t state=*old;
     const tensor_t s_t=pj8_dev(old->stress);
     const double p_t=pj8_max(pj8_pressure(old->stress),p->p_min);
-    double shear,bulk; pj8_moduli_for_state(p,p_t,old,&shear,&bulk);
-    const double h_eff=pj8_hardening_for_state(p,p_t,old);
-    const double threshold=pj8_confining_strain(p,p->p_min,old->pressure_anchor);
+    double shear,bulk;
+    pj8_moduli_for_state(p,material,p_t,old,&shear,&bulk);
+    const double h_eff=pj8_hardening_for_state(p,material,p_t,old);
+    const double threshold=pj8_confining_strain(
+        p,material,p->p_min,old->pressure_anchor);
     const int floor_active=p->compatibility_enabled && old->eps_v_confining>=threshold;
     const double coupling_bulk=floor_active?0.0:bulk;
 
@@ -559,8 +643,9 @@ PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
     double p_trial;
     if (p->compatibility_enabled) {
         int at_floor=0;
-        p_trial=pj8_pressure_from_confining(p,old->eps_v_confining+deps_v,
-                                            old->pressure_anchor,&at_floor);
+        p_trial=pj8_pressure_from_confining(
+            p,material,old->eps_v_confining+deps_v,
+            old->pressure_anchor,&at_floor);
     } else p_trial=pj8_max(p_t-bulk*deps_v,p->p_min);
     const tensor_t alpha_trial=pj8_scale(s_trial,1.0/pj8_max(p_trial,p->p_min));
     const tensor_t delta_alpha_trial=pj8_sub(alpha_trial,old->alpha);
@@ -573,7 +658,8 @@ PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
     if (reversal) pj8_register_reversal(p,old,&alpha0,&alpha01,&ep_eq,&beta_t,&reversals);
 
     const double alpha_n_t=pj8_ddot(old->alpha,old->n);
-    const double hardening=p_t*h_eff*pow(pj8_max(beta_t,1.0e-12),p->m);
+    const double hardening=p_t*h_eff*
+        pow(pj8_max(beta_t,1.0e-12),material->m);
     double denominator=2.0*shear+(2.0/3.0)*hardening-
         coupling_bulk*old->D*alpha_n_t;
     const double floor=p->denominator_floor_ratio*2.0*shear;
@@ -595,8 +681,8 @@ PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
     const double eps_v_confining=eps_v_total-eps_v_ir-eps_v_re;
     double pressure; int at_floor=0;
     if (p->compatibility_enabled)
-        pressure=pj8_pressure_from_confining(p,eps_v_confining,
-                                             old->pressure_anchor,&at_floor);
+        pressure=pj8_pressure_from_confining(
+            p,material,eps_v_confining,old->pressure_anchor,&at_floor);
     else {
         pressure=pj8_max(p_t-bulk*(deps_v+d_lambda*(d_ir+d_re)),p->p_min);
         at_floor=pressure<=p->p_min;
@@ -610,7 +696,9 @@ PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
         fabric=pj8_add(fabric,pj8_scale(term,-p->c_z*d_lambda*pj8_max(-d_re,0.0)));
     }
 
-    double mb,md,xi; pj8_surfaces(p,pressure,void_ratio,&mb,&md,&xi); (void)md; (void)xi;
+    double mb,md,xi;
+    pj8_surfaces(p,material,pressure,void_ratio,&mb,&md,&xi);
+    (void)md; (void)xi;
     tensor_t alpha=pj8_scale(s,1.0/pressure);
     const double alpha_limit=sqrt(2.0/3.0)*mb;
     const double alpha_norm=pj8_norm(alpha);
@@ -635,7 +723,7 @@ PJ8_HD static inline pj8_state_t pj8_backbone_forward_euler(
     const double mapped_norm=pj8_norm(mapped);
     const tensor_t normal=mapped_norm>1.0e-12?pj8_scale(mapped,1.0/mapped_norm):pj8_zero();
     double D_ir,D_re;
-    pj8_dilatancy(p,alpha,normal,beta,fabric,pressure,void_ratio,
+    pj8_dilatancy(p,material,alpha,normal,beta,fabric,pressure,void_ratio,
                   eps_v_ir,eps_v_re,&D_ir,&D_re);
     D_ir *= pj8_irreversible_factor(p,old);
 
@@ -766,7 +854,8 @@ PJ8_HD static inline double pj8_bias_ratchet_increment(
 }
 
 PJ8_HD static inline pj8_state_t pj8_without_reversible_bias(
-    const pj8_parameters_t *p,const pj8_state_t *state)
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
+    const pj8_state_t *state)
 {
     if (fabs(state->bias_reversible_volume)<=1.0e-16) return *state;
     pj8_state_t mechanical=*state;
@@ -775,27 +864,30 @@ PJ8_HD static inline pj8_state_t pj8_without_reversible_bias(
         mechanical.eps_v_irreversible-mechanical.eps_v_reversible;
     const tensor_t dev=pj8_dev(state->stress);
     int at_floor=0;
-    const double pressure=pj8_pressure_from_confining(p,mechanical.eps_v_confining,
+    const double pressure=pj8_pressure_from_confining(
+        p,material,mechanical.eps_v_confining,
         mechanical.pressure_anchor,&at_floor); (void)at_floor;
     mechanical.alpha=pj8_scale(dev,1.0/pressure);
     mechanical.stress=pj8_sub(dev,pj8_iso(pressure));
     return mechanical;
 }
 
-PJ8_HD static inline pj8_state_t pj8_forward_euler(const pj8_parameters_t *p,
+PJ8_HD static inline pj8_state_t pj8_forward_euler(
+    const pj8_parameters_t *p,const pj8_material_parameters_t *material,
     const pj8_state_t *old,tensor_t deps,int force_reversal,int allow_legacy)
 {
     const double physical_deps_v=pj8_trace(deps);
-    const pj8_state_t mechanical=pj8_without_reversible_bias(p,old);
+    const pj8_state_t mechanical=pj8_without_reversible_bias(p,material,old);
     const pj8_state_t trial=pj8_backbone_forward_euler(
-        p,&mechanical,deps,force_reversal,allow_legacy);
+        p,material,&mechanical,deps,force_reversal,allow_legacy);
     tensor_t ratchet_direction;
     const double ratchet=pj8_bias_ratchet_increment(p,old,&trial,&ratchet_direction);
     pj8_state_t provisional=trial;
     if (ratchet>0.0) {
         const tensor_t effective_deps=pj8_sub(deps,pj8_scale(ratchet_direction,ratchet));
         provisional=pj8_backbone_forward_euler(
-            p,&mechanical,effective_deps,force_reversal,allow_legacy);
+            p,material,&mechanical,effective_deps,
+            force_reversal,allow_legacy);
     }
     if (provisional.amplitude_reversals>old->amplitude_reversals) {
         const tensor_t reversal_dev=pj8_dev(old->stress);
@@ -815,7 +907,8 @@ PJ8_HD static inline pj8_state_t pj8_forward_euler(const pj8_parameters_t *p,
         state.eps_v_reversible;
     if (changed) {
         const tensor_t dev=pj8_dev(state.stress); int at_floor=0;
-        const double pressure=pj8_pressure_from_confining(p,state.eps_v_confining,
+        const double pressure=pj8_pressure_from_confining(
+            p,material,state.eps_v_confining,
             state.pressure_anchor,&at_floor);
         state.alpha=pj8_scale(dev,1.0/pressure);
         state.stress=pj8_sub(dev,pj8_iso(pressure));
@@ -848,11 +941,13 @@ PJ8_HD static inline int pj8_host_reversal(const pj8_parameters_t *p,
         pj8_max(s->pressure_anchor,p->p_min);
 }
 
-PJ8_HD static inline int pj8_update(const pj8_parameters_t *p,tensor_t deps,
+PJ8_HD static inline int pj8_update_material(const pj8_parameters_t *p,
+    const pj8_material_parameters_t *material,tensor_t deps,
     int32_t fixed_substeps,pj8_state_t *state,tensor_t *stress_new,
     pj8_update_info_t *info)
 {
     if (!state || !state->initialized || fixed_substeps<1 ||
+        !pj8_material_parameters_valid(p,material) ||
         !pj8_finite_tensor(deps)) return 0;
     /* A rate-independent zero increment must not advance compatibility,
      * reversal, or diagnostic history merely because the host took a step. */
@@ -870,7 +965,7 @@ PJ8_HD static inline int pj8_update(const pj8_parameters_t *p,tensor_t deps,
     pj8_state_t current=*state;
     const tensor_t sub=pj8_scale(deps,1.0/(double)fixed_substeps);
     for (int32_t i=0;i<fixed_substeps;i++)
-        current=pj8_forward_euler(p,&current,sub,
+        current=pj8_forward_euler(p,material,&current,sub,
             p->objective_reversal_enabled && reversal && i==0,
             !p->objective_reversal_enabled);
     if (p->objective_reversal_enabled && valid)
@@ -881,6 +976,16 @@ PJ8_HD static inline int pj8_update(const pj8_parameters_t *p,tensor_t deps,
     if (info) { info->accepted_substeps=fixed_substeps;
                 info->reversal_registered=reversal; }
     return 1;
+}
+
+PJ8_HD static inline int pj8_update(const pj8_parameters_t *p,tensor_t deps,
+    int32_t fixed_substeps,pj8_state_t *state,tensor_t *stress_new,
+    pj8_update_info_t *info)
+{
+    const pj8_material_parameters_t material=
+        pj8_reference_material_parameters(p);
+    return pj8_update_material(p,&material,deps,fixed_substeps,state,
+                               stress_new,info);
 }
 
 PJ8_HD static inline double pj8_compatibility_residual(const pj8_state_t *s)
