@@ -452,7 +452,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /seventeen-fixture suite/);
+  assert.match(gpu, /eighteen-fixture suite/);
   assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
