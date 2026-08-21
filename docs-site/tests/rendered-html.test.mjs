@@ -275,8 +275,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 227);
-  assert.equal(documented.length, 227, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 228);
+  assert.equal(documented.length, 228, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -350,6 +350,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
   assert.match(physics, /PressureDependMultiYield03/);
+  assert.match(physics, /RIVASand/);
+  assert.match(physics, /frozen Ottawa F65/);
   assert.match(physics, /standard automatically generated nested yield surfaces/);
   assert.match(physics, /adaptive explicit Modified Euler/);
   assert.match(physics, /integrates the 1-D density column/);
@@ -374,6 +376,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "DruckerPrager",
     "ManzariDafalias",
     "PressureDependMultiYield03",
+    "RIVASand",
+    "RIVASandCustom",
   ]) {
     assert.match(physics, new RegExp(`material_model = ${model}`));
   }
@@ -382,6 +386,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "DruckerPrager",
     "ManzariDafalias",
     "PressureDependMultiYield03",
+    "RIVASand",
+    "RIVASandCustom",
   ]) {
     assert.match(
       physics,
@@ -395,6 +401,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /acoustic_interface_projection = point/);
   assert.match(physics, /Poroelastic–elastic example/);
   assert.match(physics, /Nonlinear PDMY03–BrickUP example/);
+  assert.match(physics, /RIVA-Sand–BrickUP example/);
+  assert.match(physics, /BrickUP independently advances excess fluid pressure/);
+  assert.match(physics, /contributes -alpha\*p_f\*I once/);
   assert.match(physics, /acoustic_poroelastic_interface = open_pore/);
   assert.match(physics, /type_of_damping = rayleigh/);
   assert.match(physics, /type_of_damping = mass/);
@@ -416,10 +425,15 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /plastic-strain evolution/);
   assert.match(parameters, /ManzariDafalias: N × 17/);
   assert.match(parameters, /PDMY03: N × 22/);
+  assert.match(parameters, /RIVASand: N × 2/);
+  assert.match(parameters, /RIVASandCustom: N × 12/);
+  assert.match(parameters, /Vs_limit Dr M kd h m zeta e_max e_min Q R n_G/);
+  assert.match(parameters, /This is RIVA-Sand, not the experimental pre-name V8.1 h_p0 extension/);
+  assert.match(parameters, /9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83/);
   assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
-  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, and PDMY03/);
+  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, RIVASand, and RIVASandCustom/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -438,7 +452,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /sixteen-fixture suite/);
+  assert.match(gpu, /seventeen-fixture suite/);
   assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -638,7 +652,7 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   );
 
   assert.match(header, /MANZARI_DAFALIAS/);
-  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*\? 22 : 16/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_integration_scheme"/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_forward_euler_substeps"/);
@@ -648,6 +662,9 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   assert.match(gpuHeader, /NL_MD_INTEGRATION_MODIFIED_EULER[\s\S]*NL_MD_INTEGRATION_FORWARD_EULER/);
   assert.match(gpuHeader, /NL_MD_FORWARD_EULER_SUBSTEPS_FIXED[\s\S]*NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND/);
   assert.match(gpu, /nl_update_manzari_dafalias/);
+  assert.match(header, /manzari_dafalias_constants_t \*md_materials/);
+  assert.match(gpu, /state\.md_materials\+nl_eindex/);
+  assert.match(gpu, /Manzari-Dafalias material properties/);
   assert.match(gpu, /Fixed subdivision remains the default/);
   assert.match(gpu, /not the[\s\S]*PDMY03 surface-spacing criterion/);
   // The integrator is specialized per scheme and Forward-Euler subdivision
@@ -834,11 +851,14 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
 
   assert.match(header, /PRESSURE_DEPEND_MULTIYIELD_03/);
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
+  assert.match(header, /pdmy03_constants_t \*pdmy03_materials/);
   assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
-  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 : 16/);
+  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
+  assert.match(gpu, /state\.pdmy03_materials\+nl_eindex/);
+  assert.match(gpu, /PDMY03 material properties/);
   assert.match(
     cpu,
     /MPI_Reduce\(&myNonlinElementsCount,[\s\S]{0,160}MPI_SUM, 0, comm_solver\)/,
@@ -910,6 +930,92 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(pressureKernel, /const double mobility\[3\] = \{mobilityX, mobilityY, mobilityZ\}/);
   assert.match(pressureKernel, /double rhs = -qtDeltaU\[j\] - deltaT \* diffusionWeak\[j\]/);
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
+});
+
+test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
+  const core = readFileSync(`${sourceRoot}nonlinear_riva_sand.h`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
+  const gpuUnit = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_riva_sand.cu`, "utf8");
+  const checkpoint = readFileSync(`${sourceRoot}io_checkpoint.cc`, "utf8");
+  const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
+  const fixture = readFileSync(`${benchmarkRoot}riva_sand_brickup_synthetic.in`, "utf8");
+  const customFixture = readFileSync(`${benchmarkRoot}riva_sand_custom_equivalence.in`, "utf8");
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const nativeDriver = readFileSync(`${benchmarkRoot}riva_sand_native_driver.cc`, "utf8");
+  const nativeStateTest = readFileSync(`${benchmarkRoot}riva_sand_native_state_test.cc`, "utf8");
+  const frozenSha = "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83";
+  const commonConstants = header.match(
+    /typedef struct nlconstants_t \{([\s\S]*?)\} nlconstants_t;/,
+  );
+
+  assert.match(header, /RIVA_SAND_CUSTOM/);
+  assert.match(header, /riva_material_parameters_t/);
+  assert.ok(commonConstants);
+  assert.doesNotMatch(
+    commonConstants[1],
+    /manzari_dafalias_constants_t|pdmy03_constants_t|riva_material|riva_void_ratio/,
+  );
+  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*md_materials[\s\S]*pdmy03_materials[\s\S]*riva_materials[\s\S]*riva_void_ratios/);
+  assert.match(cpu, /RIVASand[\s\S]*RIVA-Sand/);
+  assert.match(cpu, /RIVASandCustom[\s\S]*RIVA-Sand-Custom/);
+  assert.doesNotMatch(cpu, /PJLiq|PJ[-_ ]?Liq/);
+  assert.match(cpu, /RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /relative density must be[\s\S]*dimensionless range \[0, 1\]/);
+  assert.match(core, /riva_void_ratio_from_relative_density/);
+  assert.match(core, /return material->e_max-relative_density\*\(material->e_max-material->e_min\)/);
+  assert.match(core, /riva_reference_material_parameters/);
+  assert.match(core, /riva_material_parameters_valid/);
+  assert.match(core, /riva_update_material/);
+  assert.match(cpu, /"%s\/BrickUP coupling/);
+  assert.match(cpu, /RIVA-Sand evolves effective ["\s]*skeleton stress/);
+  assert.match(cpu, /BrickUP independently solves fluid ["\s]*mass balance and applies sigma=sigma'-alpha\*p\*I/);
+  assert.match(cpu, /RIVA-Sand effective-pressure ["\s]*loss is not copied into the pressure DOF/);
+  assert.match(core, new RegExp(frozenSha));
+  assert.match(core, /#define RIVA_STATE_VALUE_COUNT 93/);
+  assert.match(core, /riva_host_reversal/);
+  assert.match(core, /riva_forward_euler/);
+  assert.match(core, /riva_state_values/);
+  assert.match(gpuHeader, /NL_RIVA_STATE_VALUE_COUNT 93/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_RIVA_SAND\(g_config\.material_model\)[\s\S]*nonlinear_gpu_launch_riva_sand/);
+  assert.match(gpu, /riva_begin_dynamic_phase/);
+  assert.match(gpu, /riva_update_material\(riva_parameters, riva_material/);
+  assert.match(gpu, /host_state->riva_materials[\s\S]*host_state->riva_void_ratios/);
+  assert.match(gpu, /local_material=%.1f MiB/);
+  assert.match(gpu, /full_effective_stress/);
+  assert.match(gpuUnit, /NL_GPU_RIVA_SAND_ONLY/);
+  assert.match(makefile, /nonlinear\/nonlinear_gpu_riva_sand\.o/);
+  assert.match(fixture, /material_model = RIVASand/);
+  assert.match(fixture, /0\.66296296296296309/);
+  assert.match(fixture, /material_point_brickup = yes/);
+  assert.match(fixture, /material_point_brickup_biot_alpha = 1\.0/);
+  assert.match(suite, /riva_sand_brickup_synthetic\.in/);
+  assert.match(customFixture, /material_model = RIVASandCustom/);
+  assert.match(customFixture, /Dr M kd h m zeta e_max e_min Q R n_G/);
+  assert.match(suite, /riva_sand_custom_equivalence\.in/);
+  assert.match(suite, /RIVASandCustom reference row differs from frozen RIVA-Sand/);
+  assert.match(nativeDriver, /RIVA_STANDALONE/);
+  assert.doesNotMatch(nativeDriver, /expected.*stress/i);
+  assert.match(nativeStateTest, /frozen\/custom equivalence, zeta exposure/);
+  assert.match(nativeStateTest, /relative-density conversion failed/);
+  assert.match(nativeStateTest, /fluid mass balance before pressure is combined with[\s\S]*the effective skeleton stress exactly once/);
+
+  assert.match(checkpoint, /nonlinear_gpu_checkpoint_write/);
+  assert.match(checkpoint, /nonlinear_gpu_checkpoint_read/);
+  assert.match(gpu, /g_nonlinear_checkpoint_magic/);
+  assert.match(gpu, /pore_pressure_tm1/);
+  assert.match(gpu, /pore_pressure_tm2/);
+  assert.match(gpu, /g_nl\.riva_states/);
+  assert.match(gpu, /RIVA_PARAMETER_SHA256/);
+  assert.match(gpu, /Checkpoint lacks a compatible BrickUP\/RIVA-Sand ["\s]*extension/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {
@@ -1051,7 +1157,36 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);
   assert.match(html, /mesh_coordinates\.0/);
   assert.match(html, /station_mediums\.txt/);
+  assert.match(html, /print_station_pore_pressure_ratios/);
+  assert.match(html, /Ru\(-\)/);
+  assert.match(html, /Δu\/σ′v0/);
+  assert.match(html, /sigma_v0_eff_pa/);
+  assert.match(html, /ramped geostatic phase/);
+  assert.match(html, /Ru remains nan during the ramp/);
+  assert.match(html, /committed vertical skeleton stress/);
   assert.match(html, /output_displacement_file/);
+});
+
+test("reports the conventional BrickUP station pore-pressure ratio", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const nonlinear = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const header = readFileSync(`${sourceRoot}psolve.h`, "utf8");
+  assert.match(psolve, /parsetext\(fp, "print_station_pore_pressure_ratios"/);
+  assert.match(psolve, /print_station_pore_pressure_ratios=yes requires[\s\S]{0,120}include_poroelastic=yes[\s\S]{0,120}include_nonlinear_analysis=yes/);
+  assert.match(psolve, /print_station_pore_pressure_ratios=yes requires an initial[\s\S]{0,240}approximate_geostatic_state=no with a positive geostatic loading/);
+  assert.match(psolve, /hydrostaticBiotStress = Param\.thePoroelasticBiotAlpha \*[\s\S]{0,120}Param\.thePoroelasticFluidDensity \* 9\.81 \* waterDepth/);
+  assert.match(psolve, /effectiveVerticalStress =[\s\S]{0,100}totalVerticalStress - hydrostaticBiotStress/);
+  assert.match(psolve, /get_geostatic_total_time\(\) > 0\.0[\s\S]{0,80}return NAN/);
+  assert.match(psolve, /\? pressure \/ sigmaV0[\s\S]{0,80}: NAN/);
+  assert.match(psolve, /sigma_v0_eff_pa/);
+  assert.match(psolve, /step == get_geostatic_final_step\(\)/);
+  assert.match(psolve, /station_rewrite_mediums_file_from_current_state\(\)/);
+  assert.match(psolve, /return \(Param\.printStationPressures == YES\) \|\|[\s\S]{0,100}\(Param\.printStationPorePressureRatios == YES\)/);
+  assert.match(nonlinear, /-myNonlinSolver->stresses\[nl_eindex\]\.qp\[4\]\.zz/);
+  assert.match(header, /initial_vertical_effective_stress/);
 });
 
 test("provides complete examples for 3-D material and topography inputs", async () => {

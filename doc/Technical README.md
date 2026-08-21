@@ -99,7 +99,7 @@ compilation of the entire solver source.
 The nonlinear constitutive kernels make PTX assembly the most expensive
 forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
 instantiate independent production objects for the classic constitutive
-families, Manzari--Dafalias, and PressureDependMultiYield03, plus small runtime
+families, Manzari--Dafalias, PressureDependMultiYield03, and RIVA-Sand, plus small runtime
 and material-point objects. The runtime selects one family kernel for the
 globally configured `material_model`. This keeps the equations normally
 inlined, avoids relocatable device code, and lets `make -j 8` compile the three
@@ -688,6 +688,70 @@ Nonlinear GPU execution (runtime environment):
 	production soil model. Use `approximate_geostatic_state=yes`, a nonzero ramped
 	geostatic loading stage, or a valid restart; otherwise startup warns that the
 	physical initialization is absent.
+- RIVA-Sand means **R**eversible--**I**rreversible **V**olumetric
+  **A**ccumulation model for Sand. `material_model=RIVASand` selects the native binary64 port of the frozen
+	Ottawa F65 RIVA-Sand pressure-dependent bounding-surface model. Production
+	execution is CUDA-only. The compiled kernel retains 112 calibrated constants,
+	four host-increment reversal controls, and all 38 logical history fields; the
+	startup report prints parameter SHA-256
+	`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
+	`no_substeps` is the exact number of equal Forward-Euler subdivisions per
+	nonzero Hercules increment; an exact zero increment preserves history
+	without subdivision. Reversal detection executes once before subdivision, so
+	changing this number cannot create extra physical reversal events. Start
+	with one and increase it only after a timestep/substep convergence study.
+	`backbone_errTol` and `error_tolerance` remain required by the common
+	nonlinear input block but do not control this fixed explicit update.
+- RIVA-Sand rows use two values in `material_properties_list`:
+	`Vs_limit relative_density`. The first and last `Vs_limit` values select
+	the nonlinear interval. Dimensionless relative density is interpolated by Vs
+	and must remain in `[0,1]`. The input boundary then computes the internal
+	initial void ratio as `e0 = e_max - Dr*(e_max-e_min)` using frozen
+	`e_max=0.78` and `e_min=0.51`. Thus `Dr=0` is the loosest calibrated state,
+	`Dr=1` is the densest, and the constitutive constants remain intentionally
+	unavailable for ad hoc production retuning. This replaces the earlier
+	`initial_void_ratio` column; old RIVA-Sand property rows must be converted.
+- `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
+	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
+	compact set of existing physical constitutive inputs. Its 12-column rows are
+	`Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. Here `M` is the
+	critical-state stress ratio, `kd` sets the dilatancy-surface ratio, `h` and
+	`m` control bounding-surface hardening, `zeta` scales irreversible
+	dilatancy, `e_max` and `e_min` convert relative density to void ratio, `Q`
+	and `R` define the critical-state void-ratio relation, and `n_G` controls
+	pressure dependence of shear stiffness. Hercules linearly interpolates all
+	eleven values following `Vs_limit`; repeat constant soil parameters in
+	adjacent rows when only the selection range should vary. All entries must be
+	finite, with `0<=Dr<=1`, `M,kd,h,Q>0`, `m,zeta,R>=0`,
+	`e_max>e_min>=0`, and `0<=n_G<=1`. The frozen shakedown reference
+	void ratio 0.601 must remain within `[e_min,e_max]`. Parameters not listed
+	here—including the reversible compatibility, amplitude, bias, and event
+	controls—retain the frozen RIVA-Sand values and calibration SHA. This interface is
+	still RIVA-Sand; it does not add the pre-name V8.1 `h_p0` contraction-rate experiment.
+	Pressure-dependent model inputs are stored outside the common nonlinear-
+	element constants. Manzari--Dafalias and PDMY03 allocate one interpolated
+	material block per element only when that family is active. Frozen `RIVASand`
+	shares one material block per rank and stores only the interpolated void ratio
+	per nonlinear element, while `RIVASandCustom` stores one compact interpolated
+	material block plus void ratio per nonlinear element. Other nonlinear families
+	therefore reserve no MD, PDMY03, or RIVA-Sand material memory. Startup output
+	reports each active rank-local material allocation separately from history.
+- RIVA-Sand is compatible with BrickUP through explicit field ownership.
+	RIVA-Sand is the effective-skeleton law: its compatibility state separates
+	total volumetric strain into elastic confining, irreversible plastic, and
+	reversible plastic parts, and reconstructs effective mean stress from the
+	elastic confining part. BrickUP independently solves fluid mass balance,
+	`d(zeta) = alpha*d(eps_v) + d(p_f)/M`, together with Darcy flow and the
+	configured drainage boundaries. Equilibrium then uses
+	`stress_total = stress_effective - alpha*p_f*I`. Hercules never copies the
+	standalone diagnostic `1-p'/p'_anchor` or RIVA-Sand effective-pressure loss into
+	`p_f`, so the same pore-pressure contribution is not generated twice. The
+	nonlinear undrained fast path remains disabled, as for MD and PDMY03.
+- Checkpoints preserve the historical displacement prefix and append a
+	versioned coupled-state section containing both BrickUP pressure time levels
+	and the complete RIVA-Sand integration-point state, including prior strain/stress.
+	A RIVA-Sand/BrickUP restart rejects a legacy displacement-only checkpoint instead
+	of silently resetting pore pressure or constitutive history.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.
@@ -722,13 +786,13 @@ Nonlinear GPU execution (runtime environment):
 	nonlinear block for every accepted `material_model`: `linear`,
 	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
 	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
-	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`, and
-	`PressureDependMultiYield03`. The displayed rows are syntax or regression
+	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`,
+	`PressureDependMultiYield03`, and `RIVASand`. The displayed rows are syntax or regression
 	fixtures, never implicit production calibrations. They use two identical
 	property rows to make the nonlinear Vs interval explicit without adding an
 	interpolation gradient.
 - The documented pressure-dependent recipes for Mohr--Coulomb,
-	Drucker--Prager, Manzari--Dafalias, and PDMY03 set
+	Drucker--Prager, Manzari--Dafalias, PDMY03, and RIVA-Sand set
 	`approximate_geostatic_state=yes`,
 	`geostatic_loading_time_sec=0`, and `geostatic_cushion_time_sec=0`. This is
 	the internally consistent approximate-K0 choice when a case has neither a
@@ -759,7 +823,7 @@ Nonlinear GPU execution (runtime environment):
 	pressure traction remains explicit and the constitutive model owns the
 	skeleton volumetric response. The linear undrained fast path
 	(`lambda += alpha^2*M`) is automatically disabled even if requested. This is
-	particularly important for Manzari--Dafalias and PDMY03, whose skeleton stress is
+	particularly important for Manzari--Dafalias, PDMY03, and RIVA-Sand, whose skeleton stress is
 	effective stress, but it also avoids bypassing every other nonlinear
 	constitutive volumetric update.
 - The synthetic fixture includes a standalone OpenSees driver for both
@@ -853,8 +917,8 @@ Nonlinear GPU execution (runtime environment):
 		not production calibrations.
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
-	force/displacement norms before a production run. Manzari--Dafalias and
-	PDMY03 are production-GPU-only; validate each with its shared host/CUDA
+	force/displacement norms before a production run. Manzari--Dafalias,
+	PDMY03, and RIVA-Sand are production-GPU-only; validate each with its shared host/CUDA
 	material-point regression and an appropriate independent characterization,
 	then run a GPU production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
@@ -1011,6 +1075,36 @@ Acoustic-elastic input flags (input file):
 	pressure. CUDA-aware resident runs report the rank-reduced
 	`Acoustic Station Gather` and `Pore-pressure Station Gather`
 	kernel-plus-copy timings when those paths are active.
+- `print_station_pore_pressure_ratios`
+	Optional; default `no`. With `include_poroelastic=yes` and
+	`include_nonlinear_analysis=yes`, `yes` appends `Ru(-)` to every normal
+	`station.N` row using the conventional experimental definition
+	`r_u(t) = Delta_u(t) / sigma'_v0`. `Delta_u` is the BrickUP excess-pressure
+	unknown (the same value written by the optional `Pressure(Pa)` column), and
+	`sigma'_v0 > 0` is the initial vertical effective-stress magnitude at that
+	station. With `approximate_geostatic_state=yes`, the denominator comes from
+	Hercules' integrated 1-D total-overburden column, adjusted from the owning
+	element center to the exact station depth, minus
+	`poroelastic_biot_alpha * rho_f * g * z_w`. With a ramped geostatic phase,
+	`Ru(-)` remains `nan` while that numerical reference does not yet exist.
+	The last geostatic force evaluation fixes the denominator from the committed
+	vertical skeleton stress at the owning nonlinear element's station-output
+	quadrature point, before the first dynamic output row. This is the same
+	constitutive state used by the nonlinear stress columns and to initialize
+	RIVA-Sand before dynamics. The final value is
+	written as `sigma_v0_eff_pa` in `station_mediums.txt` for auditability.
+	Hercules rejects `print_station_pore_pressure_ratios=yes` when
+	`approximate_geostatic_state=no` and both geostatic times are zero, because
+	that combination supplies no physical initial effective-stress denominator.
+	The valid alternatives are approximate initialization with zero loading and
+	cushion times, or numerical geostatic initialization with a positive loading
+	or cushion interval.
+	The ratio switch also activates the sparse/fused pore-pressure station
+	gather when `print_station_pressures=no`, so enabling only `Ru(-)` does not
+	download the bulk pressure field. Hercules does not clip the ratio: dilation
+	can give negative values and strong buildup can exceed one. Stations outside
+	an active saturated BrickUP element, CPML stations, and zero/nonpositive
+	reference-stress locations write `nan` rather than a misleading ratio.
 - `reconstruct_acoustic_plane_displacements`
 	Optional. `yes` reconstructs displacement at acoustic output-plane points
 	from the pressure gradient and writes those reconstructed values into the
@@ -1030,11 +1124,15 @@ Acoustic-elastic input flags (input file):
 	`basin_material_type=acoustic_water`. Defaults are `1500.0 m/s` and
 	`1000.0 kg/m3`.
 - `station_mediums_output_file`
-	Optional station diagnostic output path. The solver writes this one-time
-	metadata file during station setup. It records each station's owning medium
+	Optional station diagnostic output path. The solver writes this metadata
+	file during station setup and rewrites it after a ramped geostatic reference
+	refresh. It records each station's owning medium
 	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
-	defaults to `output_stations_directory/station_mediums.txt`.
+	defaults to `output_stations_directory/station_mediums.txt`. The metadata
+	includes `sigma_v0_eff_pa`, the positive station-specific denominator used
+	by optional `Ru(-)` output; it is `nan` where the initial effective-stress
+	reference itself is unavailable or nonpositive.
 - `acoustic_quality_factor`
 	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
 	bit-identical to the validated baseline. A positive quality factor

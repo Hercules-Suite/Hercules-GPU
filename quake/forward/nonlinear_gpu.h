@@ -2,8 +2,12 @@
 #ifndef HERCULES_NONLINEAR_GPU_H
 #define HERCULES_NONLINEAR_GPU_H
 
+#include <sys/types.h>
+
 #include "nonlinear.h"
 #include "quake_util.h"
+
+#define NL_RIVA_STATE_VALUE_COUNT 93
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -68,6 +72,8 @@ typedef struct nonlinear_material_point_result_t {
     int32_t pdmy03_substeps_clamped;
     double pdmy03_pressure_d;
     double pdmy03_center_norm;
+    double riva_state_values[NL_RIVA_STATE_VALUE_COUNT];
+    int32_t riva_reversal_registered;
     int32_t status;
 } nonlinear_material_point_result_t;
 
@@ -118,6 +124,10 @@ void nonlinear_gpu_check_error(int32_t myID);
 
 int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
+    const pdmy03_constants_t *pdmy03_material,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -128,7 +138,7 @@ int nonlinear_gpu_material_point_history(
  * used only by the material-point regression path. Production MD updates are
  * CUDA-only. */
 int nonlinear_manzari_dafalias_host_history(
-    const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -136,12 +146,34 @@ int nonlinear_manzari_dafalias_host_history(
     nonlinear_material_point_result_t *results);
 
 int nonlinear_pdmy03_host_history(
-    const nlconstants_t *constants,
+    const pdmy03_constants_t *pdmy03_material,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results);
+
+int nonlinear_riva_host_history(
+    const nlconstants_t *constants,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+/* Append/read the versioned nonlinear/BrickUP extension of a displacement
+ * checkpoint. The legacy displacement prefix is unchanged; extension_offset
+ * is the first byte after its reserved per-rank records. */
+int nonlinear_gpu_checkpoint_write(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver);
+int nonlinear_gpu_checkpoint_read(
+    const char *filename, off_t extension_offset, int32_t myID,
+    int32_t group_size, int32_t node_count, mysolver_t *solver,
+    MPI_Comm comm_solver);
 
 void nonlinear_gpu_finalize(void);
 

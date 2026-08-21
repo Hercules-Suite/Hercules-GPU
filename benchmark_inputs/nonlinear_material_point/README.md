@@ -85,6 +85,49 @@ model. The current common initial-state parser still requires all five arrays;
 alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
 its translated surface centers from stress.
 
+For `material_model=RIVASand`, `material_point_constants` contains one value:
+
+```text
+relative_density
+```
+
+Relative density is dimensionless and must be in `[0,1]`. The input boundary
+converts it to the internal initial void ratio using the frozen calibration
+values `e_max=0.78` and `e_min=0.51`:
+
+```text
+e0 = e_max - relative_density * (e_max - e_min)
+```
+
+The 112 constitutive parameters and four host-increment reversal controls are
+frozen to calibration SHA-256
+`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
+Completed and still-pending port verification gates are tracked in
+`RIVA_SAND_IMPLEMENTATION_CHECKLIST.md`.
+The material-point replay requires all five seeded initial-state arrays so it
+can initialize from equilibrated effective stress and activate dynamics using
+the same normal reference with zero static shear. Alpha, alpha-in, and fabric
+arrays are zero placeholders; RIVA-Sand initializes its complete native state.
+`no_substeps` is the exact count of equal fixed Forward-Euler subdivisions for
+a nonzero increment, while reversal detection occurs once per material-point
+history row. An exact zero increment returns without advancing any history.
+
+For `material_model=RIVASandCustom`, `material_point_constants` contains eleven
+values in this order:
+
+```text
+Dr M kd h m zeta e_max e_min Q R n_G
+```
+
+This is a configurable input boundary around the same RIVA-Sand kernel, not the pre-name V8.1
+`h_p0` experiment. It exposes ten existing constitutive fields while the
+remaining compatibility, amplitude, bias, ratchet, event, and integration
+controls retain the frozen reference values. All inputs must be finite;
+`Dr` and `n_G` lie in `[0,1]`, `M`, `kd`, `h`, and `Q` are positive, `m`,
+`zeta`, and `R` are nonnegative, and `e_max>e_min>=0`. The frozen shakedown
+law uses reference void ratio 0.601, which must remain inside the custom
+`[e_min,e_max]` interval.
+
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
 - `vonmises_fa_quartic_synthetic.in` exercises the FA quartic corrector.
@@ -143,6 +186,63 @@ its translated surface centers from stress.
   BrickUP controls use `alpha=0.8`, so it covers the general storage relation
   `1/M=(alpha-n)/Ks+n/Kf`; the standalone-only
   `material_point_brickup_solid_bulk_modulus_pa` supplies `Ks` for this check.
+- `riva_sand_brickup_synthetic.in` starts from equilibrated K0 effective
+  stress, applies volumetric and reversing tensor-shear increments, compares
+  all 93 flattened native history components between host and CUDA, and
+  executes the production sealed BrickUP pressure kernels. RIVA-Sand evolves the
+  effective skeleton stress through elastic/plastic volumetric compatibility;
+  its diagnostic effective-pressure loss is not copied into the fluid field.
+  BrickUP independently enforces the sealed mass balance
+  `d(zeta)=alpha*d(eps_v)+d(p_f)/M=0`, and the CSV combines the two fields
+  exactly once as `sigma_total=sigma_effective-alpha*p_f*I`. The reported
+  fluid-balance residual directly checks that split.
+- `riva_sand_custom_equivalence.in` repeats that complete history through
+  `RIVASandCustom` using the frozen reference values for all exposed columns.
+  `run_suite.sh` requires the custom and frozen CPU CSVs to match exactly and
+  separately requires their CUDA CSVs to match exactly. This catches parser,
+  interpolation, storage, and kernel-wiring errors without claiming that any
+  non-reference custom parameter set has been calibrated.
+
+The independent native oracle driver consumes the `deps_*` columns from the
+RIVA-Sand port package without reading any expected response after row zero.
+On macOS it can be compiled and checked with:
+
+```bash
+c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \
+  -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 \
+  riva_sand_native_driver.cc -o /tmp/riva_sand_native_driver
+
+mkdir -p /tmp/riva_actual
+for csv in /path/to/rivasand_port/golden_data/*.csv; do
+  /tmp/riva_sand_native_driver "$csv" "/tmp/riva_actual/$(basename "$csv")"
+done
+python3 /path/to/rivasand_port/verify_hercules_output.py \
+  /path/to/rivasand_port/golden_data /tmp/riva_actual \
+  --mode core --rtol 1e-6 --atol 1e-8
+python3 /path/to/rivasand_port/verify_hercules_output.py \
+  /path/to/rivasand_port/golden_data /tmp/riva_actual \
+  --mode full --rtol 1e-6 --atol 1e-6
+```
+
+Four histories pass the package's default `rtol=1e-8, atol=1e-10`. The
+zero-bias history develops platform-libm sensitivity only during its final
+near-pressure-collapse increments. The native macOS five-case aggregate uses
+`rtol=1e-6, atol=1e-8` for core response and `rtol=1e-6, atol=1e-6` for all 93
+flattened state values; event flags and integer counters remain exact. These
+cross-language oracle tolerances do not replace the tighter host/CUDA
+comparison in the Hercules suite.
+
+The companion host-only contract test checks frozen/custom reference
+equivalence, active `zeta` exposure, per-point state isolation, byte-restored
+restart reproduction, exact zero-increment preservation, sealed BrickUP fluid
+mass balance, and effective-to-total stress assembly:
+
+```bash
+c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \
+  -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 \
+  riva_sand_native_state_test.cc -o /tmp/riva_sand_native_state_test
+/tmp/riva_sand_native_state_test
+```
 
 PDMY03 uses deterministic explicit nested-surface subincrements rather than
 the Manzari--Dafalias adaptive error loop. Its request accounts for predicted

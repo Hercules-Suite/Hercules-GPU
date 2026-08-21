@@ -71,6 +71,7 @@ NONLINEAR_GPU_OBJECTS = nonlinear/nonlinear_gpu_runtime.o \
 	nonlinear/nonlinear_gpu_classic.o \
 	nonlinear/nonlinear_gpu_manzari_dafalias.o \
 	nonlinear/nonlinear_gpu_pdmy03.o \
+	nonlinear/nonlinear_gpu_riva_sand.o \
 	nonlinear/nonlinear_gpu_material_point.o
 
 PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o \
@@ -117,6 +118,7 @@ psolve_novis.o: psolve.o
 single_query: single_query.o q4.o
 
 output.o: output.cc output.h psolve.h
+io_checkpoint.o: io_checkpoint.cc io_checkpoint.h psolve.h nonlinear_gpu.h
 psolve.o: psolve.cc psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
           io_checkpoint.h stiffness.h damping.h quake_util.h timers.h \
 		  buildings.h meshformatlab.h drm.h topography.h drm_planewaves.h \
@@ -129,14 +131,15 @@ psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h \
 
 quakesource.o: quakesource.cc quakesource.h psolve.h
 
-nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h nonlinear_pdmy03.h
+nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h nonlinear_pdmy03.h \
+	nonlinear_riva_sand.h
 
 stiffness.o: stiffness.cu stiffness.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 NONLINEAR_GPU_DEPS = nonlinear/nonlinear_gpu_implementation.cuh \
 	nonlinear_gpu.h nonlinear.h nonlinear_pdmy03.h psolve.h kernel.h \
-	util.h quake_util.h
+	nonlinear_riva_sand.h util.h quake_util.h
 
 nonlinear/nonlinear_gpu_%.o: nonlinear/nonlinear_gpu_%.cu $(NONLINEAR_GPU_DEPS)
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@

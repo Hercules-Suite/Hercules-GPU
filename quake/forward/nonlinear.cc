@@ -39,7 +39,12 @@
 //#include "octor.h"
 #include "geometrics.h"
 #include "nonlinear.h"
+#include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
+#include "nonlinear_riva_sand.h"
+
+static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
+              "RIVA-Sand material-point state width mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
 #include "util.h"
@@ -48,7 +53,6 @@
 #include "drm.h"
 
 #include  "kernel.h"
-#include  "nonlinear_gpu.h"
 
 #define KAPPA_MIN      1.0E-010
 #define  QC  qc = 0.577350269189 /* sqrt(3.0)/3.0; */
@@ -107,6 +111,21 @@ static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
 #define PDMY03_PROPERTY_COUNT 21
 static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
+#define RIVA_CUSTOM_PROPERTY_COUNT 11
+enum {
+    RIVA_PROPERTY_DR = 0,
+    RIVA_PROPERTY_M,
+    RIVA_PROPERTY_KD,
+    RIVA_PROPERTY_H,
+    RIVA_PROPERTY_M_EXPONENT,
+    RIVA_PROPERTY_ZETA,
+    RIVA_PROPERTY_E_MAX,
+    RIVA_PROPERTY_E_MIN,
+    RIVA_PROPERTY_Q,
+    RIVA_PROPERTY_R,
+    RIVA_PROPERTY_N_G
+};
+static double               *theRivaProperties[RIVA_CUSTOM_PROPERTY_COUNT];
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -147,6 +166,14 @@ double get_geostatic_total_time() {
 
 double get_geostatic_loading_time() {
     return theGeostaticLoadingT;
+}
+
+int get_geostatic_final_step() {
+    return theGeostaticFinalStep;
+}
+
+int get_approximate_geostatic_state() {
+    return (int)theApproxGeoState;
 }
 
 int assume_groundwatertable() {
@@ -345,6 +372,54 @@ double interpolate_property_value(double vsRequest, double *propVector)
     double result = prop0 + (vsRequest - vs0)*( (prop1 - prop0)/(vs1 - vs0) );
 
     return result;
+}
+
+static riva_material_parameters_t riva_material_at_row(int row)
+{
+    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    riva_material_parameters_t material =
+        riva_reference_material_parameters(&reference);
+    if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
+    material.M = theRivaProperties[RIVA_PROPERTY_M][row];
+    material.kd = theRivaProperties[RIVA_PROPERTY_KD][row];
+    material.h = theRivaProperties[RIVA_PROPERTY_H][row];
+    material.m = theRivaProperties[RIVA_PROPERTY_M_EXPONENT][row];
+    material.zeta = theRivaProperties[RIVA_PROPERTY_ZETA][row];
+    material.e_max = theRivaProperties[RIVA_PROPERTY_E_MAX][row];
+    material.e_min = theRivaProperties[RIVA_PROPERTY_E_MIN][row];
+    material.Q = theRivaProperties[RIVA_PROPERTY_Q][row];
+    material.R = theRivaProperties[RIVA_PROPERTY_R][row];
+    material.n_G = theRivaProperties[RIVA_PROPERTY_N_G][row];
+    return material;
+}
+
+static riva_material_parameters_t riva_material_at_vs(double vs)
+{
+    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    riva_material_parameters_t material =
+        riva_reference_material_parameters(&reference);
+    if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
+    material.M = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_M]);
+    material.kd = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_KD]);
+    material.h = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_H]);
+    material.m = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_M_EXPONENT]);
+    material.zeta = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_ZETA]);
+    material.e_max = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_E_MAX]);
+    material.e_min = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_E_MIN]);
+    material.Q = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_Q]);
+    material.R = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_R]);
+    material.n_G = interpolate_property_value(
+        vs, theRivaProperties[RIVA_PROPERTY_N_G]);
+    return material;
 }
 
 /* Categorical material-table fields (PDMY03 loading type and surface count)
@@ -732,6 +807,12 @@ void nonlinear_init( int32_t     myID,
                 thePdmy03Properties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+            const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+                ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
+            for (int field = 0; field < fields; field++)
+                theRivaProperties[field] =
+                    (double*)malloc(sizeof(double) * thePropertiesCount);
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
         theKayPhis          = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -764,6 +845,12 @@ void nonlinear_init( int32_t     myID,
             MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
         }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
+        for (int field = 0; field < fields; field++)
+            MPI_Bcast(theRivaProperties[field], thePropertiesCount,
+                      MPI_DOUBLE, 0, comm_solver);
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(theKayPhis,          thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -937,13 +1024,19 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     } else if (strcasecmp(material_model, "PressureDependMultiYield03") == 0 ||
                strcasecmp(material_model, "PDMY03") == 0) {
         materialmodel = PRESSURE_DEPEND_MULTIYIELD_03;
+    } else if (strcasecmp(material_model, "RIVASand") == 0 ||
+               strcasecmp(material_model, "RIVA-Sand") == 0) {
+        materialmodel = RIVA_SAND;
+    } else if (strcasecmp(material_model, "RIVASandCustom") == 0 ||
+               strcasecmp(material_model, "RIVA-Sand-Custom") == 0) {
+        materialmodel = RIVA_SAND_CUSTOM;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, RIVASand, RIVASandCustom): %s\n", material_model);
         return -1;
     }
 
@@ -1051,14 +1144,18 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 approx_geostatic_state);
         return -1;
     }
-    if (materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+    if ((materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+         MATERIAL_MODEL_IS_RIVA_SAND(materialmodel)) &&
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
-                "PressureDependMultiYield03 warning: no approximate or "
+                "%s warning: no approximate or "
                 "ramped geostatic initialization was selected. The "
-                "OpenSees-compatible transition clamps tensile mean stress "
-                "to zero, but a production soil model normally requires a "
-                "physical in-situ effective-stress state.\n");
+                "constitutive initialization therefore lacks a physical "
+                "in-situ effective-stress state.\n",
+                MATERIAL_MODEL_IS_RIVA_SAND(materialmodel) ?
+                    (materialmodel == RIVA_SAND_CUSTOM ?
+                        "RIVASandCustom" : "RIVASand") :
+                    "PressureDependMultiYield03");
     }
 
     if ( ( strcasecmp(tension_cutoff, "yes") == 0 ) && ( ( materialmodel == DRUCKERPRAGER ) || ( materialmodel == MOHR_COULOMB ) ) ) {
@@ -1100,7 +1197,9 @@ int32_t nonlinear_initparameters ( const char *parametersin,
 
     const int property_columns =
         (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
-        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 : 16;
+        (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 :
+        (theMaterialModel == RIVA_SAND_CUSTOM) ? 12 :
+        (theMaterialModel == RIVA_SAND) ? 2 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1115,6 +1214,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
+        for (int field = 0; field < fields; field++)
+            theRivaProperties[field] = (double*)malloc(
+                sizeof(double) * thePropertiesCount);
     } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
     theKayPhis           = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1154,6 +1259,13 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 thePdmy03Properties[field][row] =
                     auxiliar[row * property_columns + field + 1];
             }
+            continue;
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+            const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+                ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
+            for (int field = 0; field < fields; field++)
+                theRivaProperties[field][row] =
+                    auxiliar[row * property_columns + field + 1];
             continue;
         }
         theAlphaCohes[row]        = auxiliar[ row * 16 + 1 ];
@@ -1246,6 +1358,75 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     row, PDMY03_MAX_SURFACES);
                 return -1;
             }
+        }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        double minimum_relative_density = 1.0;
+        double maximum_relative_density = 0.0;
+        for (row = 1; row < thePropertiesCount; row++) {
+            if (theVsLimits[row] <= theVsLimits[row-1]) {
+                fprintf(stderr,
+                        "%s Vs limits must be strictly increasing\n",
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand");
+                return -1;
+            }
+        }
+        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
+        for (row = 0; row < thePropertiesCount; row++) {
+            for (int field = 0; field < fields; field++) {
+                if (!isfinite(theRivaProperties[field][row])) {
+                    fprintf(stderr,
+                            "Illegal %s row %d: all parameters must be "
+                            "finite\n",
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand", row);
+                    return -1;
+                }
+            }
+            const double relative_density =
+                theRivaProperties[RIVA_PROPERTY_DR][row];
+            if (!isfinite(relative_density) || relative_density < 0.0 ||
+                relative_density > 1.0) {
+                fprintf(stderr,
+                        "Illegal %s row %d: relative density must be finite "
+                        "and in the dimensionless range [0, 1]\n",
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand", row);
+                return -1;
+            }
+            const riva_material_parameters_t material = riva_material_at_row(row);
+            if (!riva_material_parameters_valid(&reference, &material)) {
+                fprintf(stderr,
+                        "Illegal %s row %d: require h>0, m>=0, M>0, kd>0, "
+                        "zeta>=0, e_max>e_min>=0 containing the frozen "
+                        "shakedown anchor e=%.3f, Q>0, R>=0, and "
+                        "0<=n_G<=1\n",
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand", row,
+                        reference.state_shakedown_reference_void_ratio);
+                return -1;
+            }
+            minimum_relative_density = MIN(minimum_relative_density,
+                                           relative_density);
+            maximum_relative_density = MAX(maximum_relative_density,
+                                           relative_density);
+        }
+        if (theMaterialModel == RIVA_SAND_CUSTOM) {
+            fprintf(stderr,
+                    "RIVASandCustom property input: Dr in [%g, %g]; "
+                    "M, kd, h, m, zeta, e_max, e_min, Q, R, and n_G are "
+                    "interpolated by Vs; all other RIVA-Sand controls retain "
+                    "frozen calibration %s\n",
+                    minimum_relative_density, maximum_relative_density,
+                    RIVA_PARAMETER_SHA256);
+        } else {
+            fprintf(stderr,
+                    "RIVASand property input: relative density Dr in [%g, %g]; "
+                    "internal e0 uses frozen e_max=%g and e_min=%g\n",
+                    minimum_relative_density, maximum_relative_density,
+                    reference.e_max, reference.e_min);
         }
     }
 
@@ -1540,7 +1721,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
     int64_t global_poro_map_counts[7] = {0};
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
-         theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) &&
+         theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+         MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
@@ -1548,7 +1730,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     "backend; HERCULES_NONLINEAR_BACKEND=cpu is not "
                     "supported for production runs.\n",
                     theMaterialModel == MANZARI_DAFALIAS
-                        ? "ManzariDafalias" : "PressureDependMultiYield03");
+                        ? "ManzariDafalias" :
+                    theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03
+                        ? "PressureDependMultiYield03" :
+                    theMaterialModel == RIVA_SAND_CUSTOM
+                        ? "RIVASandCustom" : "RIVASand");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1586,7 +1772,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                    MPI_INT, MPI_MAX, 0, comm_solver);
         if (myID == 0) {
             const size_t host_bytes_per_element =
-                sizeof(nlconstants_t) + 8*sizeof(qptensors_t) +
+                sizeof(nlconstants_t) + sizeof(pdmy03_constants_t) +
+                8*sizeof(qptensors_t) +
                 10*sizeof(qpvectors_t);
             const size_t device_bytes_per_element =
                 host_bytes_per_element + 2*sizeof(double) +
@@ -1663,6 +1850,18 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         (long long)global_poro_map_counts[
                             POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
             }
+            if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) && active > 0) {
+                fprintf(stderr,
+                        "%s/BrickUP coupling: RIVA-Sand evolves effective "
+                        "skeleton stress (including plastic volumetric "
+                        "compatibility); BrickUP independently solves fluid "
+                        "mass balance and applies sigma=sigma'-alpha*p*I for "
+                        "%lld active nonlinear elements. RIVA-Sand effective-pressure "
+                        "loss is not copied into the pressure DOF.\n",
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVA-Sand Custom" : "RIVA-Sand",
+                        (long long)active);
+            }
         }
     }
 
@@ -1673,7 +1872,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     /* Memory allocation for mother structure */
 
-    myNonlinSolver = (nlsolver_t *)malloc(sizeof(nlsolver_t));
+    myNonlinSolver = (nlsolver_t *)calloc(1, sizeof(nlsolver_t));
 
     if (myNonlinSolver == NULL) {
         fprintf(stderr, "Thread %d: nonlinear_init: out of memory\n", myID);
@@ -1685,6 +1884,38 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     myNonlinSolver->constants =
         (nlconstants_t *)calloc(myNonlinElementsCount, sizeof(nlconstants_t));
+    if (theMaterialModel == MANZARI_DAFALIAS &&
+        myNonlinElementsCount > 0) {
+        myNonlinSolver->md_materials =
+            (manzari_dafalias_constants_t *)calloc(
+                (size_t)myNonlinElementsCount,
+                sizeof(manzari_dafalias_constants_t));
+    }
+    if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+        myNonlinElementsCount > 0) {
+        myNonlinSolver->pdmy03_materials =
+            (pdmy03_constants_t *)calloc(
+                (size_t)myNonlinElementsCount,
+                sizeof(pdmy03_constants_t));
+    }
+    if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
+        myNonlinElementsCount > 0) {
+        const size_t material_count =
+            theMaterialModel == RIVA_SAND_CUSTOM
+                ? (size_t)myNonlinElementsCount : 1u;
+        myNonlinSolver->riva_materials =
+            (riva_material_parameters_t *)calloc(
+                material_count, sizeof(riva_material_parameters_t));
+        myNonlinSolver->riva_void_ratios =
+            (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
+        if (theMaterialModel == RIVA_SAND &&
+            myNonlinSolver->riva_materials != NULL) {
+            const riva_parameters_t reference =
+                riva_reference_parameters(1000.0);
+            myNonlinSolver->riva_materials[0] =
+                riva_reference_material_parameters(&reference);
+        }
+    }
     myNonlinSolver->stresses =
         (qptensors_t *)calloc(myNonlinElementsCount, sizeof(qptensors_t));
     myNonlinSolver->strains =
@@ -1727,6 +1958,16 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
 
     if ( (myNonlinSolver->constants           == NULL) ||
+         (theMaterialModel == MANZARI_DAFALIAS &&
+          myNonlinElementsCount > 0 &&
+          myNonlinSolver->md_materials        == NULL) ||
+         (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
+          myNonlinElementsCount > 0 &&
+          myNonlinSolver->pdmy03_materials    == NULL) ||
+         (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
+          myNonlinElementsCount > 0 &&
+          (myNonlinSolver->riva_materials      == NULL ||
+           myNonlinSolver->riva_void_ratios    == NULL)) ||
          (myNonlinSolver->stresses            == NULL) ||
          (myNonlinSolver->strains             == NULL) ||
          (myNonlinSolver->strains1            == NULL) ||
@@ -2101,7 +2342,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
 
             case MANZARI_DAFALIAS: {
-                manzari_dafalias_constants_t *md = &ecp->md;
+                manzari_dafalias_constants_t *md =
+                    myNonlinSolver->md_materials+nl_eindex;
                 md->G0       = interpolate_property_value(
                     elementVs, theManzariDafaliasProperties[0]);
                 md->e_init   = interpolate_property_value(
@@ -2155,7 +2397,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
 
             case PRESSURE_DEPEND_MULTIYIELD_03: {
-                pdmy03_constants_t *pdmy = &ecp->pdmy03;
+                pdmy03_constants_t *pdmy =
+                    myNonlinSolver->pdmy03_materials+nl_eindex;
                 pdmy->ref_shear_modulus = interpolate_property_value(
                     elementVs, thePdmy03Properties[0]);
                 pdmy->ref_bulk_modulus = interpolate_property_value(
@@ -2199,6 +2442,52 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
             }
 
+            case RIVA_SAND:
+            case RIVA_SAND_CUSTOM: {
+                const riva_parameters_t reference =
+                    riva_reference_parameters(1000.0);
+                const size_t material_index =
+                    theMaterialModel == RIVA_SAND_CUSTOM
+                        ? (size_t)nl_eindex : 0u;
+                riva_material_parameters_t *riva_material =
+                    myNonlinSolver->riva_materials+material_index;
+                const double relative_density = interpolate_property_value(
+                    elementVs, theRivaProperties[RIVA_PROPERTY_DR]);
+                if (!isfinite(relative_density) || relative_density < 0.0 ||
+                    relative_density > 1.0) {
+                    fprintf(stderr,
+                            "Thread %d: %s element %d has invalid "
+                            "interpolated relative density %g\n",
+                            myID,
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand",
+                            eindex, relative_density);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                if (theMaterialModel == RIVA_SAND_CUSTOM)
+                    *riva_material = riva_material_at_vs(elementVs);
+                if (!riva_material_parameters_valid(
+                        &reference, riva_material)) {
+                    fprintf(stderr,
+                            "Thread %d: %s element %d has invalid "
+                            "interpolated material parameters\n",
+                            myID,
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand", eindex);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR);
+                    exit(1);
+                }
+                myNonlinSolver->riva_void_ratios[nl_eindex] =
+                    riva_void_ratio_from_material_relative_density(
+                        riva_material, relative_density);
+                double sin_phi = 3.0*riva_material->M/
+                    (6.0+riva_material->M);
+                sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
+                ecp->phi = asin(sin_phi);
+                break;
+            }
+
             default:
                 fprintf(stderr, "Thread %d: nonlinear_solver_init:\n"
                         "\tUnexpected error with the material model\n", myID);
@@ -2217,7 +2506,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
 
         if (theMaterialModel == MANZARI_DAFALIAS ||
-            theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
+            theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
+            MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
@@ -2364,6 +2654,43 @@ void nonlinear_gpu_sync_station_state(mysolver_t *mySolver)
     if (nonlinear_gpu_active()) {
         nonlinear_gpu_download_station_state(mySolver, myNonlinSolver);
     }
+}
+
+int nonlinear_refresh_station_initial_effective_stress(
+    station_t *myStations, int32_t myNumberOfStations)
+{
+    int updated = 0;
+
+    /* A positive geostatic interval and approximate_geostatic_state=no are
+     * enforced together during parameter validation. In that case the
+     * stored stress is the committed, numerically equilibrated skeleton
+     * stress (not a relative stress requiring an approximate K0 offset).
+     * Use the same quadrature point as nonlinear station output so Ru and
+     * the reported nonlinear stress history share one constitutive state. */
+    if (get_geostatic_total_time() <= 0.0 ||
+        myStations == NULL || myNumberOfStations <= 0 ||
+        myNonlinSolver == NULL) {
+        return 0;
+    }
+
+    for (int32_t i = 0; i < myNumberOfNonlinStations; i++) {
+        const int32_t nl_eindex = myStationsElementIndices[i];
+        const int32_t mappingIndex = myNonlinStationsMapping[i];
+
+        if (nl_eindex < 0 || nl_eindex >= myNonlinElementsCount ||
+            mappingIndex < 0 || mappingIndex >= myNumberOfStations ||
+            myStations[mappingIndex].pore_pressure_is_defined == 0) {
+            continue;
+        }
+
+        const double sigmaV0 =
+            -myNonlinSolver->stresses[nl_eindex].qp[4].zz;
+        myStations[mappingIndex].initial_vertical_effective_stress =
+            (isfinite(sigmaV0) && sigmaV0 > 0.0) ? sigmaV0 : NAN;
+        updated++;
+    }
+
+    return updated;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -5217,6 +5544,9 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_CONSTANT_COUNT 24
 #define MATERIAL_POINT_MD_CONSTANT_COUNT 17
 #define MATERIAL_POINT_PDMY03_CONSTANT_COUNT 21
+#define MATERIAL_POINT_RIVA_CONSTANT_COUNT 1
+#define MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT 11
+#define MATERIAL_POINT_RIVA_STATE_VALUE_COUNT 93
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
@@ -5267,37 +5597,74 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "PressureDependMultiYield03") == 0 ||
              strcasecmp(name, "PDMY03") == 0)
         *model = PRESSURE_DEPEND_MULTIYIELD_03;
+    else if (strcasecmp(name, "RIVASand") == 0 ||
+             strcasecmp(name, "RIVA-Sand") == 0)
+        *model = RIVA_SAND;
+    else if (strcasecmp(name, "RIVASandCustom") == 0 ||
+             strcasecmp(name, "RIVA-Sand-Custom") == 0)
+        *model = RIVA_SAND_CUSTOM;
     else return -1;
     return 0;
 }
 
 static void material_point_load_constants(nlconstants_t *constants,
+                                          manzari_dafalias_constants_t *
+                                              md_material,
+                                          pdmy03_constants_t *
+                                              pdmy03_material,
+                                          riva_material_parameters_t *
+                                              riva_material,
+                                          double *riva_void_ratio,
                                           materialmodel_t model,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
+    memset(md_material, 0, sizeof(*md_material));
+    memset(pdmy03_material, 0, sizeof(*pdmy03_material));
+    memset(riva_material, 0, sizeof(*riva_material));
+    *riva_void_ratio = 0.0;
+    if (MATERIAL_MODEL_IS_RIVA_SAND(model)) {
+        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+        *riva_material = riva_reference_material_parameters(&reference);
+        if (model == RIVA_SAND_CUSTOM) {
+            riva_material->M = values[1];
+            riva_material->kd = values[2];
+            riva_material->h = values[3];
+            riva_material->m = values[4];
+            riva_material->zeta = values[5];
+            riva_material->e_max = values[6];
+            riva_material->e_min = values[7];
+            riva_material->Q = values[8];
+            riva_material->R = values[9];
+            riva_material->n_G = values[10];
+        }
+        *riva_void_ratio =
+            riva_void_ratio_from_material_relative_density(
+                riva_material, values[0]);
+        return;
+    }
     if (model == MANZARI_DAFALIAS) {
-        constants->md.G0 = values[0];
-        constants->md.nu = values[1];
-        constants->md.e_init = values[2];
-        constants->md.Mc = values[3];
-        constants->md.c = values[4];
-        constants->md.lambda_c = values[5];
-        constants->md.e0 = values[6];
-        constants->md.ksi = values[7];
-        constants->md.P_atm = values[8];
-        constants->md.m = values[9];
-        constants->md.h0 = values[10];
-        constants->md.ch = values[11];
-        constants->md.nb = values[12];
-        constants->md.A0 = values[13];
-        constants->md.nd = values[14];
-        constants->md.z_max = values[15];
-        constants->md.cz = values[16];
+        md_material->G0 = values[0];
+        md_material->nu = values[1];
+        md_material->e_init = values[2];
+        md_material->Mc = values[3];
+        md_material->c = values[4];
+        md_material->lambda_c = values[5];
+        md_material->e0 = values[6];
+        md_material->ksi = values[7];
+        md_material->P_atm = values[8];
+        md_material->m = values[9];
+        md_material->h0 = values[10];
+        md_material->ch = values[11];
+        md_material->nb = values[12];
+        md_material->A0 = values[13];
+        md_material->nd = values[14];
+        md_material->z_max = values[15];
+        md_material->cz = values[16];
         return;
     }
     if (model == PRESSURE_DEPEND_MULTIYIELD_03) {
-        pdmy03_constants_t *pdmy = &constants->pdmy03;
+        pdmy03_constants_t *pdmy = pdmy03_material;
         pdmy->ref_shear_modulus = values[0];
         pdmy->ref_bulk_modulus = values[1];
         pdmy->friction_angle = values[2];
@@ -5340,6 +5707,10 @@ static void material_point_load_constants(nlconstants_t *constants,
 
 static int material_point_cpu_history(
     const nlconstants_t *constants,
+    const manzari_dafalias_constants_t *md_material,
+    const pdmy03_constants_t *pdmy03_material,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -5350,12 +5721,20 @@ static int material_point_cpu_history(
     if (config->material_model == MANZARI_DAFALIAS) {
         (void)dt;
         return nonlinear_manzari_dafalias_host_history(
-            constants, config, initial_state, strain_history, steps, results);
+            md_material, config, initial_state, strain_history, steps,
+            results);
     }
     if (config->material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
         (void)dt;
         return nonlinear_pdmy03_host_history(
-            constants, config, initial_state, strain_history, steps, results);
+            pdmy03_material, config, initial_state, strain_history, steps,
+            results);
+    }
+    if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model)) {
+        (void)dt;
+        return nonlinear_riva_host_history(
+            constants, riva_material, riva_void_ratio, config, initial_state,
+            strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
     tensor_t plastic_strain = zero_tensor();
@@ -5551,6 +5930,26 @@ static int material_point_validate_zero_increment(
                 current->model_error);
         return -1;
     }
+    if (MATERIAL_MODEL_IS_RIVA_SAND(model)) {
+        for (int i = 0; i < MATERIAL_POINT_RIVA_STATE_VALUE_COUNT; i++) {
+            if (current->riva_state_values[i] !=
+                    previous->riva_state_values[i]) {
+                fprintf(stderr,
+                        "%s RIVA-Sand state changed on a zero strain "
+                        "increment at step %d flattened field %d: "
+                        "previous=%.17e current=%.17e\n",
+                        backend, step, i, previous->riva_state_values[i],
+                        current->riva_state_values[i]);
+                return -1;
+            }
+        }
+        if (current->riva_reversal_registered != 0) {
+            fprintf(stderr,
+                    "%s RIVA-Sand registered a reversal on a zero strain "
+                    "increment at step %d\n", backend, step);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -5684,6 +6083,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         NL_MD_FORWARD_EULER_SUBSTEPS_FIXED;
     nl_md_recovery_mode_t md_recovery_mode = NL_MD_RECOVERY_STRICT;
     nlconstants_t constants;
+    manzari_dafalias_constants_t md_material;
+    pdmy03_constants_t pdmy03_material;
+    riva_material_parameters_t riva_material;
+    double riva_void_ratio = 0.0;
     nonlinear_gpu_config_t config;
     nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
@@ -5691,6 +6094,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     double maximum_pressure_absolute = 0.0;
     double maximum_pressure_relative = 0.0;
     double maximum_gpu_pressure_spread = 0.0;
+    double maximum_gpu_fluid_balance_residual = 0.0;
     double maximum_cpu_residual = 0.0;
     double maximum_gpu_residual = 0.0;
     double maximum_cpu_integration_error = 0.0;
@@ -5781,7 +6185,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     material_constant_count = (material_model == MANZARI_DAFALIAS)
         ? MATERIAL_POINT_MD_CONSTANT_COUNT :
         (material_model == PRESSURE_DEPEND_MULTIYIELD_03)
-        ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
+        ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
+        (material_model == RIVA_SAND_CUSTOM)
+        ? MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT :
+        (material_model == RIVA_SAND)
+        ? MATERIAL_POINT_RIVA_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
         fprintf(stderr, "Cannot read %d material-point constants for %s\n",
@@ -5805,9 +6213,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
     if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
-        material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
+        material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
+        !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
         fprintf(stderr, "A material-point initial state currently requires "
-                        "ManzariDafalias or PressureDependMultiYield03\n");
+                        "ManzariDafalias, PressureDependMultiYield03, or "
+                        "RIVASand\n");
         goto cleanup;
     }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
@@ -5835,10 +6245,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         parsetext(fp, "material_point_brickup_solid_bulk_modulus_pa", 'd',
                   &brickup_solid_bulk_modulus);
         if (material_model != MANZARI_DAFALIAS &&
-            material_model != PRESSURE_DEPEND_MULTIYIELD_03) {
+            material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
+            !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
-                            "requires ManzariDafalias or "
-                            "PressureDependMultiYield03\n");
+                            "requires ManzariDafalias, "
+                            "PressureDependMultiYield03, or RIVASand\n");
             goto cleanup;
         }
         if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
@@ -5941,6 +6352,50 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
     }
+    if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+        if (!isfinite(constants_values[0]) ||
+            constants_values[0] < 0.0 || constants_values[0] > 1.0) {
+            fprintf(stderr,
+                    "Illegal RIVASand material-point relative density: "
+                    "expected a dimensionless value in [0, 1]\n");
+            goto cleanup;
+        }
+        if (material_model == RIVA_SAND_CUSTOM) {
+            const riva_parameters_t reference =
+                riva_reference_parameters(1000.0);
+            nlconstants_t candidate = {};
+            manzari_dafalias_constants_t candidate_md = {};
+            pdmy03_constants_t candidate_pdmy03 = {};
+            riva_material_parameters_t candidate_material = {};
+            double candidate_void_ratio = 0.0;
+            material_point_load_constants(
+                &candidate, &candidate_md, &candidate_pdmy03,
+                &candidate_material, &candidate_void_ratio, material_model,
+                constants_values);
+            for (int i = 0; i < MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT;
+                 i++) {
+                if (!isfinite(constants_values[i])) {
+                    fprintf(stderr,
+                            "Illegal RIVASandCustom material-point constants: "
+                            "all values must be finite\n");
+                    goto cleanup;
+                }
+            }
+            if (!riva_material_parameters_valid(
+                    &reference, &candidate_material)) {
+                fprintf(stderr,
+                        "Illegal RIVASandCustom material-point constants\n");
+                goto cleanup;
+            }
+        }
+        if (initial_array_count != 5) {
+            fprintf(stderr,
+                    "RIVASand material-point input requires equilibrated "
+                    "initial strain and effective stress; alpha, alpha_in, "
+                    "and fabric entries may be zero placeholders\n");
+            goto cleanup;
+        }
+    }
     memset(&initial_state, 0, sizeof(initial_state));
     if (initial_array_count == 5) {
         double *initial_arrays[] = {
@@ -6013,8 +6468,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         goto cleanup;
     }
 
-    material_point_load_constants(&constants, material_model,
-                                  constants_values);
+    material_point_load_constants(
+        &constants, &md_material, &pdmy03_material, &riva_material,
+        &riva_void_ratio, material_model, constants_values);
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;
@@ -6028,12 +6484,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
 
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
-    if (material_point_cpu_history(&constants, &config, &initial_state,
-                                   strain_history, steps, dt,
-                                   cpu_results) != 0) goto cleanup;
-    if (nonlinear_gpu_material_point_history(&constants, &config,
-                                             &initial_state, strain_history,
-                                             steps, gpu_results) != 0) {
+    if (material_point_cpu_history(
+            &constants, &md_material, &pdmy03_material, &riva_material,
+            riva_void_ratio, &config, &initial_state, strain_history, steps,
+            dt, cpu_results) != 0) goto cleanup;
+    if (nonlinear_gpu_material_point_history(
+            &constants, &md_material, &pdmy03_material, &riva_material,
+            riva_void_ratio, &config, &initial_state, strain_history, steps,
+            gpu_results) != 0) {
         goto cleanup;
     }
     if (brickup_enabled == YES) {
@@ -6050,6 +6508,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
         double pressure_scale = 0.0;
+        double previous_gpu_pressure = initial_pore_pressure;
+        tensor_t previous_brickup_strain = initial_state.strain;
         for (int32_t step = 0; step < steps; step++) {
             const double absolute =
                 fabs(cpu_pore_pressure[step] - gpu_pore_pressure[step]);
@@ -6071,11 +6531,36 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                                 gpu_pore_pressure[step], absolute, relative);
                 goto cleanup;
             }
+            /* The constitutive model supplies effective skeleton stress.
+             * Independently, the sealed BrickUP regression must satisfy
+             * d(zeta)=alpha*d(eps_v)+d(p_f)/M=0. Express the residual in Pa
+             * so it uses the same numerical scale as the pressure check. */
+            const double delta_volume =
+                (strain_history[step].xx+strain_history[step].yy+
+                 strain_history[step].zz)-
+                (previous_brickup_strain.xx+previous_brickup_strain.yy+
+                 previous_brickup_strain.zz);
+            const double fluid_balance_residual = fabs(
+                gpu_pore_pressure[step]-previous_gpu_pressure+
+                brickup_storage_modulus*brickup_biot_alpha*delta_volume);
+            maximum_gpu_fluid_balance_residual = MAX(
+                maximum_gpu_fluid_balance_residual, fluid_balance_residual);
+            previous_gpu_pressure = gpu_pore_pressure[step];
+            previous_brickup_strain = strain_history[step];
         }
         if (maximum_gpu_pressure_spread > atol + rtol*pressure_scale) {
             fprintf(stderr, "Material-point BrickUP uniform pressure spread "
                             "%.3e exceeds tolerance %.3e\n",
                     maximum_gpu_pressure_spread, atol + rtol*pressure_scale);
+            goto cleanup;
+        }
+        if (maximum_gpu_fluid_balance_residual >
+                atol + rtol*pressure_scale) {
+            fprintf(stderr,
+                    "Material-point BrickUP sealed fluid-balance residual "
+                    "%.3e Pa exceeds tolerance %.3e Pa\n",
+                    maximum_gpu_fluid_balance_residual,
+                    atol + rtol*pressure_scale);
             goto cleanup;
         }
     }
@@ -6091,7 +6576,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     for (int32_t step = 0; step < steps; step++) {
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
              material_model == MANZARI_DAFALIAS ||
-             material_model == PRESSURE_DEPEND_MULTIYIELD_03) && step > 0 &&
+             material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
+             MATERIAL_MODEL_IS_RIVA_SAND(material_model)) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -6269,6 +6755,29 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 goto cleanup;
             }
         }
+        if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+            for (int i = 0; i < MATERIAL_POINT_RIVA_STATE_VALUE_COUNT; i++) {
+                const double cpu_state =
+                    cpu_results[step].riva_state_values[i];
+                const double gpu_state =
+                    gpu_results[step].riva_state_values[i];
+                const double absolute = fabs(cpu_state-gpu_state);
+                const double scale = MAX(fabs(cpu_state), fabs(gpu_state));
+                maximum_absolute = MAX(maximum_absolute, absolute);
+                if (absolute > atol)
+                    maximum_relative = MAX(maximum_relative,
+                        absolute/MAX(scale, DBL_MIN));
+                if (!isfinite(cpu_state) || !isfinite(gpu_state) ||
+                    (absolute > atol && absolute > rtol*scale)) {
+                    fprintf(stderr,
+                            "RIVASand full-state mismatch at step %d "
+                            "flattened field %d: CPU=%.17e GPU=%.17e "
+                            "abs=%.3e\n", step, i, cpu_state,
+                            gpu_state, absolute);
+                    goto cleanup;
+                }
+            }
+        }
     }
 
     printf("Material-point model: %s; steps: %d\n", material_name, steps);
@@ -6356,11 +6865,23 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             clamped_steps += cpu_results[step].pdmy03_substeps_clamped != 0;
         }
         printf("PDMY03 controls: standard automatic surfaces %d, maximum "
-               "substeps %d\n", constants.pdmy03.surface_count, no_substeps);
+               "substeps %d\n", pdmy03_material.surface_count, no_substeps);
         printf("Maximum requested/accepted substeps: %d / %d (CPU), %d "
                "(GPU); clamped steps: %d\n", maximum_requested,
                maximum_cpu_accepted_substeps,
                maximum_gpu_accepted_substeps, clamped_steps);
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+        printf("RIVA-Sand controls: %s, frozen internal controls %s, %d "
+               "fixed substep%s per host increment\n",
+               material_model == RIVA_SAND_CUSTOM ?
+                   "custom material properties" : "frozen material properties",
+               RIVA_PARAMETER_SHA256, no_substeps,
+               no_substeps == 1 ? "" : "s");
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "
                    "transition%s\n", zero_increment_checks,
@@ -6376,6 +6897,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                maximum_pressure_relative);
         printf("Maximum GPU within-element nodal pressure spread: %.6e Pa\n",
                maximum_gpu_pressure_spread);
+        printf("Maximum GPU sealed fluid-balance residual: %.6e Pa\n",
+               maximum_gpu_fluid_balance_residual);
     }
     printf("PASS: CPU/GPU material-point histories agree\n");
     result = 0;
@@ -6394,6 +6917,9 @@ cleanup:
 #undef MATERIAL_POINT_CONSTANT_COUNT
 #undef MATERIAL_POINT_MD_CONSTANT_COUNT
 #undef MATERIAL_POINT_PDMY03_CONSTANT_COUNT
+#undef MATERIAL_POINT_RIVA_CONSTANT_COUNT
+#undef MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT
+#undef MATERIAL_POINT_RIVA_STATE_VALUE_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
 #undef MATERIAL_POINT_PSI_INDEX
