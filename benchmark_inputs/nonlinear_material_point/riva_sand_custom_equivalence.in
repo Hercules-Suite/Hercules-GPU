@@ -1,5 +1,5 @@
-# Frozen PJ-Liq V8 native host/CUDA and sealed BrickUP coupling regression.
-material_model = PJLiqV8
+# RIVASandCustom reference-row equivalence and sealed BrickUP regression.
+material_model = RIVASandCustom
 material_point_delta_time_sec = 1.0e-3
 material_point_steps = 17
 no_substeps = 1
@@ -8,17 +8,13 @@ backbone_errTol = 1.0e-5
 tension_cutoff = no
 material_point_compare_rtol = 1.0e-9
 material_point_compare_atol = 1.0e-8
-material_point_output_prefix = pj_liq_v8_brickup_synthetic
+material_point_output_prefix = riva_sand_custom_equivalence
 
-# PJ-Liq V8 exposes only relative density Dr; its frozen e_max=0.78 and
-# e_min=0.51 convert this value to the internal initial void ratio e0=0.601.
-# Its 112 constitutive constants are identified by PJ8_PARAMETER_SHA256.
+# Dr M kd h m zeta e_max e_min Q R n_G. These are exactly the frozen RIVA-Sand
+# reference values, so this fixture must reproduce riva_sand_brickup_synthetic.
 material_point_constants =
-  0.66296296296296309
+  0.66296296296296309 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65
 
-# Equilibrated K0 effective stress, tension-positive, in Pa. The final three
-# arrays are required by the common seeded-state parser but V8 initializes its
-# own alpha, reversal, and fabric histories from this stress.
 material_point_initial_strain =
   0 0 0 0 0 0
 material_point_initial_stress =
@@ -30,20 +26,12 @@ material_point_initial_alpha_in =
 material_point_initial_fabric =
   0 0 0 0 0 0
 
-# Exercise the same sealed uniform-element CUDA pressure update used by the
-# existing MD/PDMY03 BrickUP regressions. V8 supplies the effective skeleton
-# law, including plastic volumetric compatibility. BrickUP independently
-# enforces d(zeta)=alpha*d(eps_v)+d(p_f)/M=0; V8's diagnostic effective-pressure
-# loss is never injected into p_f. Total stress applies -alpha*p_f*I once.
 material_point_brickup = yes
 material_point_brickup_porosity = 0.40
 material_point_brickup_fluid_bulk_modulus_pa = 2.2e9
 material_point_brickup_biot_alpha = 1.0
 material_point_initial_pore_pressure_pa = 0.0
 
-# Physical tensor shear components. Small volumetric increments make the
-# independent BrickUP pressure path nontrivial while the reversals exercise
-# V8 host-step event detection.
 material_point_strain_history =
    0.0e+0  0.0e+0  0.0e+0  0.0e+0 0 0
   -1.0e-5 -1.0e-5 -1.0e-5  2.5e-4 0 0

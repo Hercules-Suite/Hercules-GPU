@@ -1,21 +1,21 @@
-# PJ-Liq V8 Hercules integration status
+# RIVA-Sand Hercules integration status
 
 This repository-local copy records the status of the checklist supplied with
-the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
+the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-256 is
 `9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
 
 ## Completed locally
 
-- [x] Registered `PJLiqV8` and documented its `Vs_limit relative_density`
+- [x] Registered `RIVASand` and documented its `Vs_limit relative_density`
   production table; the input boundary converts dimensionless `D_r` in
   `[0,1]` to internal void ratio using frozen `e_max=0.78`, `e_min=0.51`.
-- [x] Registered `PJLiqV8Custom` as the same V8 kernel with model-specific,
+- [x] Registered `RIVASandCustom` as the same RIVA-Sand kernel with model-specific,
   compact per-element material storage and the 12-column production table
   `Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. The original two-column
-  `PJLiqV8` interface and frozen response remain unchanged; `h_p0` is not
-  included because it belongs to the separate V8.1 experiment. Frozen V8
+  `RIVASand` interface and frozen response remain unchanged; `h_p0` is not
+  included because it belongs to the separate pre-name V8.1 experiment. Frozen RIVA-Sand
   shares one material block per rank; unrelated nonlinear families no longer
-  reserve PJ-Liq material or void-ratio fields in `nlconstants_t`.
+  reserve RIVA-Sand material or void-ratio fields in `nlconstants_t`.
 - [x] Mapped `[xx, yy, zz, xy, yz, xz]`, tensor shear, tension-positive stress,
   and the factor-two symmetric double contraction explicitly.
 - [x] Translated all 112 frozen parameters, four host-event controls, and all
@@ -35,23 +35,23 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
   test verifies frozen/custom reference equivalence and confirms that exposed
   `zeta` changes the constitutive state.
 - [x] Added a separate CUDA production object and per-integration-point state.
-- [x] Added versioned checkpoint fields for prior strain/stress, complete V8
+- [x] Added versioned checkpoint fields for prior strain/stress, complete RIVA-Sand
   history, and both BrickUP pressure time levels. Legacy displacement-only
-  checkpoints are rejected for PJ/BrickUP restarts instead of resetting state.
+  checkpoints are rejected for RIVA-Sand/BrickUP restarts instead of resetting state.
 - [x] Kept Python out of the production executable.
-- [x] Implemented the BrickUP effective-stress split. V8 supplies effective
+- [x] Implemented the BrickUP effective-stress split. RIVA-Sand supplies effective
   skeleton stress; BrickUP independently solves
   `d(zeta)=alpha*d(eps_v)+d(p_f)/M` and equilibrium applies
-  `sigma=sigma'-alpha*p_f*I`. V8's standalone effective-pressure-loss
+  `sigma=sigma'-alpha*p_f*I`. RIVA-Sand's standalone effective-pressure-loss
   diagnostic is never injected into `p_f`.
-- [x] Added a prescribed-strain PJ/BrickUP regression that compares all 93
+- [x] Added a prescribed-strain RIVA-Sand/BrickUP regression that compares all 93
   host/CUDA state values and invokes the production uniform pressure kernels.
 - [x] Added a custom-interface material-point fixture whose reference-valued
-  CPU and CUDA histories must exactly reproduce the frozen V8 fixture.
+  CPU and CUDA histories must exactly reproduce the frozen RIVA-Sand fixture.
 
 ## Maintainer/Horizon verification still required
 
-- [ ] Build the full CUDA/MPI solver and run `run_suite.sh` (including the PJ
+- [ ] Build the full CUDA/MPI solver and run `run_suite.sh` (including the RIVA-Sand
   fixture) on the supported NVIDIA toolchain.
 - [ ] Run a full homogeneous one-element solver case to verify element strain
   mapping, rigid motion, force assembly, and non-shared integration-point
@@ -68,4 +68,4 @@ the frozen V8 port package. The authoritative constitutive parameter SHA-256 is
   not the full boundary-value liquefaction response.
 - [ ] Benchmark memory and update time against MD and PDMY03 under identical
   mesh, timestep, hardware, compiler, and output settings.
-- [ ] Review those results before describing PJ-Liq V8 as production-validated.
+- [ ] Review those results before describing RIVA-Sand as production-validated.

@@ -42,16 +42,16 @@ fixtures=(
   manzari_dafalias_pressure_floor_synthetic.in
   pdmy03_cyclic_shear_synthetic.in
   pdmy03_zero_tension_onset_synthetic.in
-  pj_liq_v8_brickup_synthetic.in
-  pj_liq_v8_custom_equivalence.in
+  riva_sand_brickup_synthetic.in
+  riva_sand_custom_equivalence.in
 )
 
-validate_pj8_custom_equivalence() {
+validate_riva_custom_equivalence() {
   local backend
   for backend in cpu gpu; do
-    if ! cmp -s "pj_liq_v8_brickup_synthetic.${backend}.csv" \
-               "pj_liq_v8_custom_equivalence.${backend}.csv"; then
-      echo "PJLiqV8Custom reference row differs from frozen V8 (${backend})" >&2
+    if ! cmp -s "riva_sand_brickup_synthetic.${backend}.csv" \
+               "riva_sand_custom_equivalence.${backend}.csv"; then
+      echo "RIVASandCustom reference row differs from frozen RIVA-Sand (${backend})" >&2
       return 1
     fi
   done
@@ -133,8 +133,8 @@ for fixture in "${fixtures[@]}"; do
        ! validate_md_pressure_floor; then
     echo "Material-point pressure-floor states do not equal 1.0e-4 P_atm" >&2
     failures+=("$fixture")
-  elif [[ $fixture == pj_liq_v8_custom_equivalence.in ]] &&
-       ! validate_pj8_custom_equivalence; then
+  elif [[ $fixture == riva_sand_custom_equivalence.in ]] &&
+       ! validate_riva_custom_equivalence; then
     failures+=("$fixture")
   fi
 done

@@ -350,7 +350,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /DruckerPrager/);
   assert.match(physics, /ManzariDafalias/);
   assert.match(physics, /PressureDependMultiYield03/);
-  assert.match(physics, /PJLiqV8/);
+  assert.match(physics, /RIVASand/);
   assert.match(physics, /frozen Ottawa F65/);
   assert.match(physics, /standard automatically generated nested yield surfaces/);
   assert.match(physics, /adaptive explicit Modified Euler/);
@@ -376,8 +376,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "DruckerPrager",
     "ManzariDafalias",
     "PressureDependMultiYield03",
-    "PJLiqV8",
-    "PJLiqV8Custom",
+    "RIVASand",
+    "RIVASandCustom",
   ]) {
     assert.match(physics, new RegExp(`material_model = ${model}`));
   }
@@ -386,8 +386,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "DruckerPrager",
     "ManzariDafalias",
     "PressureDependMultiYield03",
-    "PJLiqV8",
-    "PJLiqV8Custom",
+    "RIVASand",
+    "RIVASandCustom",
   ]) {
     assert.match(
       physics,
@@ -401,7 +401,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /acoustic_interface_projection = point/);
   assert.match(physics, /Poroelastic–elastic example/);
   assert.match(physics, /Nonlinear PDMY03–BrickUP example/);
-  assert.match(physics, /PJ-Liq V8–BrickUP example/);
+  assert.match(physics, /RIVA-Sand–BrickUP example/);
   assert.match(physics, /BrickUP independently advances excess fluid pressure/);
   assert.match(physics, /contributes -alpha\*p_f\*I once/);
   assert.match(physics, /acoustic_poroelastic_interface = open_pore/);
@@ -425,15 +425,15 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /plastic-strain evolution/);
   assert.match(parameters, /ManzariDafalias: N × 17/);
   assert.match(parameters, /PDMY03: N × 22/);
-  assert.match(parameters, /PJLiqV8: N × 2/);
-  assert.match(parameters, /PJLiqV8Custom: N × 12/);
+  assert.match(parameters, /RIVASand: N × 2/);
+  assert.match(parameters, /RIVASandCustom: N × 12/);
   assert.match(parameters, /Vs_limit Dr M kd h m zeta e_max e_min Q R n_G/);
-  assert.match(parameters, /This is V8, not the experimental V8.1 h_p0 extension/);
+  assert.match(parameters, /This is RIVA-Sand, not the experimental pre-name V8.1 h_p0 extension/);
   assert.match(parameters, /9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83/);
   assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
-  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, PJLiqV8, and PJLiqV8Custom/);
+  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, RIVASand, and RIVASandCustom/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -652,7 +652,7 @@ test("wires Manzari-Dafalias integration schemes through parser, CUDA state, and
   );
 
   assert.match(header, /MANZARI_DAFALIAS/);
-  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /property_columns\s*=\s*[\s\S]*MANZARI_DAFALIAS[\s\S]*\? 17 :[\s\S]*PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
   assert.match(cpu, /theManzariDafaliasProperties\[15\]/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_integration_scheme"/);
   assert.match(cpu, /parsetext\(fp, "manzari_dafalias_forward_euler_substeps"/);
@@ -853,7 +853,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(header, /#define PDMY03_MAX_SURFACES 40/);
   assert.match(header, /pdmy03_constants_t \*pdmy03_materials/);
   assert.match(cpu, /PDMY03_PROPERTY_COUNT 21/);
-  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /PRESSURE_DEPEND_MULTIYIELD_03[\s\S]*\? 22 :[\s\S]*RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
   assert.match(cpu, /nearest_property_value/);
   assert.match(cpu, /pdmy03_prepare_constants/);
   assert.match(cpu, /PDMY03 initialization complete:/);
@@ -932,7 +932,7 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 
-test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints", () => {
+test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   const benchmarkRoot = fileURLToPath(
     new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
@@ -942,66 +942,67 @@ test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints",
   const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
-  const core = readFileSync(`${sourceRoot}nonlinear_pj_liq_v8.h`, "utf8");
+  const core = readFileSync(`${sourceRoot}nonlinear_riva_sand.h`, "utf8");
   const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
-  const gpuUnit = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_pj_liq_v8.cu`, "utf8");
+  const gpuUnit = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_riva_sand.cu`, "utf8");
   const checkpoint = readFileSync(`${sourceRoot}io_checkpoint.cc`, "utf8");
   const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
-  const fixture = readFileSync(`${benchmarkRoot}pj_liq_v8_brickup_synthetic.in`, "utf8");
-  const customFixture = readFileSync(`${benchmarkRoot}pj_liq_v8_custom_equivalence.in`, "utf8");
+  const fixture = readFileSync(`${benchmarkRoot}riva_sand_brickup_synthetic.in`, "utf8");
+  const customFixture = readFileSync(`${benchmarkRoot}riva_sand_custom_equivalence.in`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
-  const nativeDriver = readFileSync(`${benchmarkRoot}pj_liq_v8_native_driver.cc`, "utf8");
-  const nativeStateTest = readFileSync(`${benchmarkRoot}pj_liq_v8_native_state_test.cc`, "utf8");
+  const nativeDriver = readFileSync(`${benchmarkRoot}riva_sand_native_driver.cc`, "utf8");
+  const nativeStateTest = readFileSync(`${benchmarkRoot}riva_sand_native_state_test.cc`, "utf8");
   const frozenSha = "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83";
   const commonConstants = header.match(
     /typedef struct nlconstants_t \{([\s\S]*?)\} nlconstants_t;/,
   );
 
-  assert.match(header, /PJ_LIQ_V8_CUSTOM/);
-  assert.match(header, /pj8_material_parameters_t/);
+  assert.match(header, /RIVA_SAND_CUSTOM/);
+  assert.match(header, /riva_material_parameters_t/);
   assert.ok(commonConstants);
   assert.doesNotMatch(
     commonConstants[1],
-    /manzari_dafalias_constants_t|pdmy03_constants_t|pj8_material|pj8_void_ratio/,
+    /manzari_dafalias_constants_t|pdmy03_constants_t|riva_material|riva_void_ratio/,
   );
-  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*md_materials[\s\S]*pdmy03_materials[\s\S]*pj8_materials[\s\S]*pj8_void_ratios/);
-  assert.match(cpu, /PJLiqV8[\s\S]*PJ-Liq-V8[\s\S]*PJ_Liq_V8/);
-  assert.match(cpu, /PJLiqV8Custom[\s\S]*PJ-Liq-V8-Custom[\s\S]*PJ_Liq_V8_Custom/);
-  assert.match(cpu, /PJ_LIQ_V8_CUSTOM[\s\S]*\? 12 :[\s\S]*PJ_LIQ_V8[\s\S]*\? 2 : 16/);
+  assert.match(header, /typedef struct nlsolver_t \{[\s\S]*md_materials[\s\S]*pdmy03_materials[\s\S]*riva_materials[\s\S]*riva_void_ratios/);
+  assert.match(cpu, /RIVASand[\s\S]*RIVA-Sand/);
+  assert.match(cpu, /RIVASandCustom[\s\S]*RIVA-Sand-Custom/);
+  assert.doesNotMatch(cpu, /PJLiq|PJ[-_ ]?Liq/);
+  assert.match(cpu, /RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
   assert.match(cpu, /relative density must be[\s\S]*dimensionless range \[0, 1\]/);
-  assert.match(core, /pj8_void_ratio_from_relative_density/);
+  assert.match(core, /riva_void_ratio_from_relative_density/);
   assert.match(core, /return material->e_max-relative_density\*\(material->e_max-material->e_min\)/);
-  assert.match(core, /pj8_reference_material_parameters/);
-  assert.match(core, /pj8_material_parameters_valid/);
-  assert.match(core, /pj8_update_material/);
+  assert.match(core, /riva_reference_material_parameters/);
+  assert.match(core, /riva_material_parameters_valid/);
+  assert.match(core, /riva_update_material/);
   assert.match(cpu, /"%s\/BrickUP coupling/);
-  assert.match(cpu, /V8 evolves effective ["\s]*skeleton stress/);
+  assert.match(cpu, /RIVA-Sand evolves effective ["\s]*skeleton stress/);
   assert.match(cpu, /BrickUP independently solves fluid ["\s]*mass balance and applies sigma=sigma'-alpha\*p\*I/);
-  assert.match(cpu, /V8 effective-pressure ["\s]*loss is not copied into the pressure DOF/);
+  assert.match(cpu, /RIVA-Sand effective-pressure ["\s]*loss is not copied into the pressure DOF/);
   assert.match(core, new RegExp(frozenSha));
-  assert.match(core, /#define PJ8_STATE_VALUE_COUNT 93/);
-  assert.match(core, /pj8_host_reversal/);
-  assert.match(core, /pj8_forward_euler/);
-  assert.match(core, /pj8_state_values/);
-  assert.match(gpuHeader, /NL_PJ8_STATE_VALUE_COUNT 93/);
-  assert.match(gpu, /MATERIAL_MODEL_IS_PJ_LIQ_V8\(g_config\.material_model\)[\s\S]*nonlinear_gpu_launch_pj_liq_v8/);
-  assert.match(gpu, /pj8_begin_dynamic_phase/);
-  assert.match(gpu, /pj8_update_material\(pj8_parameters, pj8_material/);
-  assert.match(gpu, /host_state->pj8_materials[\s\S]*host_state->pj8_void_ratios/);
+  assert.match(core, /#define RIVA_STATE_VALUE_COUNT 93/);
+  assert.match(core, /riva_host_reversal/);
+  assert.match(core, /riva_forward_euler/);
+  assert.match(core, /riva_state_values/);
+  assert.match(gpuHeader, /NL_RIVA_STATE_VALUE_COUNT 93/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_RIVA_SAND\(g_config\.material_model\)[\s\S]*nonlinear_gpu_launch_riva_sand/);
+  assert.match(gpu, /riva_begin_dynamic_phase/);
+  assert.match(gpu, /riva_update_material\(riva_parameters, riva_material/);
+  assert.match(gpu, /host_state->riva_materials[\s\S]*host_state->riva_void_ratios/);
   assert.match(gpu, /local_material=%.1f MiB/);
   assert.match(gpu, /full_effective_stress/);
-  assert.match(gpuUnit, /NL_GPU_PJ_LIQ_V8_ONLY/);
-  assert.match(makefile, /nonlinear\/nonlinear_gpu_pj_liq_v8\.o/);
-  assert.match(fixture, /material_model = PJLiqV8/);
+  assert.match(gpuUnit, /NL_GPU_RIVA_SAND_ONLY/);
+  assert.match(makefile, /nonlinear\/nonlinear_gpu_riva_sand\.o/);
+  assert.match(fixture, /material_model = RIVASand/);
   assert.match(fixture, /0\.66296296296296309/);
   assert.match(fixture, /material_point_brickup = yes/);
   assert.match(fixture, /material_point_brickup_biot_alpha = 1\.0/);
-  assert.match(suite, /pj_liq_v8_brickup_synthetic\.in/);
-  assert.match(customFixture, /material_model = PJLiqV8Custom/);
+  assert.match(suite, /riva_sand_brickup_synthetic\.in/);
+  assert.match(customFixture, /material_model = RIVASandCustom/);
   assert.match(customFixture, /Dr M kd h m zeta e_max e_min Q R n_G/);
-  assert.match(suite, /pj_liq_v8_custom_equivalence\.in/);
-  assert.match(suite, /PJLiqV8Custom reference row differs from frozen V8/);
-  assert.match(nativeDriver, /PJ8_STANDALONE/);
+  assert.match(suite, /riva_sand_custom_equivalence\.in/);
+  assert.match(suite, /RIVASandCustom reference row differs from frozen RIVA-Sand/);
+  assert.match(nativeDriver, /RIVA_STANDALONE/);
   assert.doesNotMatch(nativeDriver, /expected.*stress/i);
   assert.match(nativeStateTest, /frozen\/custom equivalence, zeta exposure/);
   assert.match(nativeStateTest, /relative-density conversion failed/);
@@ -1012,9 +1013,9 @@ test("wires frozen and custom PJ-Liq V8 through CUDA, BrickUP, and checkpoints",
   assert.match(gpu, /g_nonlinear_checkpoint_magic/);
   assert.match(gpu, /pore_pressure_tm1/);
   assert.match(gpu, /pore_pressure_tm2/);
-  assert.match(gpu, /g_nl\.pj8_states/);
-  assert.match(gpu, /PJ8_PARAMETER_SHA256/);
-  assert.match(gpu, /Checkpoint lacks a compatible BrickUP\/PJ-Liq V8 ["\s]*extension/);
+  assert.match(gpu, /g_nl\.riva_states/);
+  assert.match(gpu, /RIVA_PARAMETER_SHA256/);
+  assert.match(gpu, /Checkpoint lacks a compatible BrickUP\/RIVA-Sand ["\s]*extension/);
 });
 
 test("ships the BAE virgin-onset regression fixture", () => {

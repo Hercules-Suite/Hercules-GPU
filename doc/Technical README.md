@@ -99,7 +99,7 @@ compilation of the entire solver source.
 The nonlinear constitutive kernels make PTX assembly the most expensive
 forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
 instantiate independent production objects for the classic constitutive
-families, Manzari--Dafalias, PressureDependMultiYield03, and PJ-Liq V8, plus small runtime
+families, Manzari--Dafalias, PressureDependMultiYield03, and RIVA-Sand, plus small runtime
 and material-point objects. The runtime selects one family kernel for the
 globally configured `material_model`. This keeps the equations normally
 inlined, avoids relocatable device code, and lets `make -j 8` compile the three
@@ -688,8 +688,9 @@ Nonlinear GPU execution (runtime environment):
 	production soil model. Use `approximate_geostatic_state=yes`, a nonzero ramped
 	geostatic loading stage, or a valid restart; otherwise startup warns that the
 	physical initialization is absent.
-- `material_model=PJLiqV8` selects the native binary64 port of the frozen
-	Ottawa F65 PJ-Liq V8 pressure-dependent bounding-surface model. Production
+- RIVA-Sand means **R**eversible--**I**rreversible **V**olumetric
+  **A**ccumulation model for Sand. `material_model=RIVASand` selects the native binary64 port of the frozen
+	Ottawa F65 RIVA-Sand pressure-dependent bounding-surface model. Production
 	execution is CUDA-only. The compiled kernel retains 112 calibrated constants,
 	four host-increment reversal controls, and all 38 logical history fields; the
 	startup report prints parameter SHA-256
@@ -701,7 +702,7 @@ Nonlinear GPU execution (runtime environment):
 	with one and increase it only after a timestep/substep convergence study.
 	`backbone_errTol` and `error_tolerance` remain required by the common
 	nonlinear input block but do not control this fixed explicit update.
-- PJ-Liq V8 rows use two values in `material_properties_list`:
+- RIVA-Sand rows use two values in `material_properties_list`:
 	`Vs_limit relative_density`. The first and last `Vs_limit` values select
 	the nonlinear interval. Dimensionless relative density is interpolated by Vs
 	and must remain in `[0,1]`. The input boundary then computes the internal
@@ -709,8 +710,8 @@ Nonlinear GPU execution (runtime environment):
 	`e_max=0.78` and `e_min=0.51`. Thus `Dr=0` is the loosest calibrated state,
 	`Dr=1` is the densest, and the constitutive constants remain intentionally
 	unavailable for ad hoc production retuning. This replaces the earlier
-	`initial_void_ratio` column; old V8 property rows must be converted.
-- `material_model=PJLiqV8Custom` uses the same V8 equations, state, explicit
+	`initial_void_ratio` column; old RIVA-Sand property rows must be converted.
+- `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
 	compact set of existing physical constitutive inputs. Its 12-column rows are
 	`Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`. Here `M` is the
@@ -725,31 +726,31 @@ Nonlinear GPU execution (runtime environment):
 	`e_max>e_min>=0`, and `0<=n_G<=1`. The frozen shakedown reference
 	void ratio 0.601 must remain within `[e_min,e_max]`. Parameters not listed
 	here—including the reversible compatibility, amplitude, bias, and event
-	controls—retain the frozen V8 values and calibration SHA. This interface is
-	still V8; it does not add the V8.1 `h_p0` contraction-rate experiment.
+	controls—retain the frozen RIVA-Sand values and calibration SHA. This interface is
+	still RIVA-Sand; it does not add the pre-name V8.1 `h_p0` contraction-rate experiment.
 	Pressure-dependent model inputs are stored outside the common nonlinear-
 	element constants. Manzari--Dafalias and PDMY03 allocate one interpolated
-	material block per element only when that family is active. Frozen `PJLiqV8`
+	material block per element only when that family is active. Frozen `RIVASand`
 	shares one material block per rank and stores only the interpolated void ratio
-	per nonlinear element, while `PJLiqV8Custom` stores one compact interpolated
+	per nonlinear element, while `RIVASandCustom` stores one compact interpolated
 	material block plus void ratio per nonlinear element. Other nonlinear families
-	therefore reserve no MD, PDMY03, or PJ-Liq material memory. Startup output
+	therefore reserve no MD, PDMY03, or RIVA-Sand material memory. Startup output
 	reports each active rank-local material allocation separately from history.
-- PJ-Liq V8 is compatible with BrickUP through explicit field ownership.
-	V8 is the effective-skeleton law: its compatibility state separates
+- RIVA-Sand is compatible with BrickUP through explicit field ownership.
+	RIVA-Sand is the effective-skeleton law: its compatibility state separates
 	total volumetric strain into elastic confining, irreversible plastic, and
 	reversible plastic parts, and reconstructs effective mean stress from the
 	elastic confining part. BrickUP independently solves fluid mass balance,
 	`d(zeta) = alpha*d(eps_v) + d(p_f)/M`, together with Darcy flow and the
 	configured drainage boundaries. Equilibrium then uses
 	`stress_total = stress_effective - alpha*p_f*I`. Hercules never copies the
-	standalone diagnostic `1-p'/p'_anchor` or V8 effective-pressure loss into
+	standalone diagnostic `1-p'/p'_anchor` or RIVA-Sand effective-pressure loss into
 	`p_f`, so the same pore-pressure contribution is not generated twice. The
 	nonlinear undrained fast path remains disabled, as for MD and PDMY03.
 - Checkpoints preserve the historical displacement prefix and append a
 	versioned coupled-state section containing both BrickUP pressure time levels
-	and the complete PJ integration-point state, including prior strain/stress.
-	A PJ/BrickUP restart rejects a legacy displacement-only checkpoint instead
+	and the complete RIVA-Sand integration-point state, including prior strain/stress.
+	A RIVA-Sand/BrickUP restart rejects a legacy displacement-only checkpoint instead
 	of silently resetting pore pressure or constitutive history.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
@@ -786,12 +787,12 @@ Nonlinear GPU execution (runtime environment):
 	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
 	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
 	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`,
-	`PressureDependMultiYield03`, and `PJLiqV8`. The displayed rows are syntax or regression
+	`PressureDependMultiYield03`, and `RIVASand`. The displayed rows are syntax or regression
 	fixtures, never implicit production calibrations. They use two identical
 	property rows to make the nonlinear Vs interval explicit without adding an
 	interpolation gradient.
 - The documented pressure-dependent recipes for Mohr--Coulomb,
-	Drucker--Prager, Manzari--Dafalias, PDMY03, and PJ-Liq V8 set
+	Drucker--Prager, Manzari--Dafalias, PDMY03, and RIVA-Sand set
 	`approximate_geostatic_state=yes`,
 	`geostatic_loading_time_sec=0`, and `geostatic_cushion_time_sec=0`. This is
 	the internally consistent approximate-K0 choice when a case has neither a
@@ -822,7 +823,7 @@ Nonlinear GPU execution (runtime environment):
 	pressure traction remains explicit and the constitutive model owns the
 	skeleton volumetric response. The linear undrained fast path
 	(`lambda += alpha^2*M`) is automatically disabled even if requested. This is
-	particularly important for Manzari--Dafalias, PDMY03, and PJ-Liq V8, whose skeleton stress is
+	particularly important for Manzari--Dafalias, PDMY03, and RIVA-Sand, whose skeleton stress is
 	effective stress, but it also avoids bypassing every other nonlinear
 	constitutive volumetric update.
 - The synthetic fixture includes a standalone OpenSees driver for both
@@ -917,7 +918,7 @@ Nonlinear GPU execution (runtime environment):
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
 	force/displacement norms before a production run. Manzari--Dafalias,
-	PDMY03, and PJ-Liq V8 are production-GPU-only; validate each with its shared host/CUDA
+	PDMY03, and RIVA-Sand are production-GPU-only; validate each with its shared host/CUDA
 	material-point regression and an appropriate independent characterization,
 	then run a GPU production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.
@@ -1090,7 +1091,7 @@ Acoustic-elastic input flags (input file):
 	vertical skeleton stress at the owning nonlinear element's station-output
 	quadrature point, before the first dynamic output row. This is the same
 	constitutive state used by the nonlinear stress columns and to initialize
-	V8 before dynamics. The final value is
+	RIVA-Sand before dynamics. The final value is
 	written as `sigma_v0_eff_pa` in `station_mediums.txt` for auditability.
 	Hercules rejects `print_station_pore_pressure_ratios=yes` when
 	`approximate_geostatic_state=no` and both geostatic times are zero, because

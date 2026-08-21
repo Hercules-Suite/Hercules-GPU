@@ -26951,7 +26951,7 @@ static void station_rewrite_mediums_file_from_current_state(void) {
 }
 
 /* At the last ramped-geostatic force evaluation, the host nonlinear state is
- * exactly the state from which V8 will initialize on the first dynamic step.
+ * exactly the state from which RIVA-Sand will initialize on the first dynamic step.
  * Replace the setup-time 1-D estimate with that committed skeleton stress.
  * The GPU caller forces its sparse station gather on this step even when it
  * does not coincide with the normal station print rate. */

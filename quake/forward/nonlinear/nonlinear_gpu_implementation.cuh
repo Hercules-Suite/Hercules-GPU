@@ -26,11 +26,11 @@
 #include "kernel.h"
 #include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
-#if defined(NL_GPU_RUNTIME_ONLY) || defined(NL_GPU_PJ_LIQ_V8_ONLY) || \
+#if defined(NL_GPU_RUNTIME_ONLY) || defined(NL_GPU_RIVA_SAND_ONLY) || \
     defined(NL_GPU_MATERIAL_POINT_ONLY)
-#include "nonlinear_pj_liq_v8.h"
-static_assert(NL_PJ8_STATE_VALUE_COUNT == PJ8_STATE_VALUE_COUNT,
-              "PJ-Liq V8 material-point state width mismatch");
+#include "nonlinear_riva_sand.h"
+static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
+              "RIVA-Sand material-point state width mismatch");
 #endif
 
 #define NL_GPU_QP 8
@@ -41,7 +41,7 @@ static_assert(NL_PJ8_STATE_VALUE_COUNT == PJ8_STATE_VALUE_COUNT,
 #if (defined(NL_GPU_RUNTIME_ONLY) + defined(NL_GPU_CLASSIC_ONLY) + \
      defined(NL_GPU_MANZARI_DAFALIAS_ONLY) + \
      defined(NL_GPU_PDMY03_ONLY) + \
-     defined(NL_GPU_PJ_LIQ_V8_ONLY) + \
+     defined(NL_GPU_RIVA_SAND_ONLY) + \
      defined(NL_GPU_MATERIAL_POINT_ONLY)) != 1
 #error "select exactly one nonlinear CUDA compilation unit"
 #endif
@@ -129,8 +129,8 @@ typedef struct nonlinear_gpu_state_t {
     nlconstants_t *constants;
     manzari_dafalias_constants_t *md_materials;
     pdmy03_constants_t *pdmy03_materials;
-    pj8_material_parameters_t *pj8_materials;
-    double *pj8_void_ratios;
+    riva_material_parameters_t *riva_materials;
+    double *riva_void_ratios;
     qptensors_t *stresses;
     qptensors_t *strains;
     qptensors_t *strains1;
@@ -152,8 +152,8 @@ typedef struct nonlinear_gpu_state_t {
     qpvectors_t *ggmax;
     pdmy03_state_t *pdmy03_states;
     tensor_t *pdmy03_centers;
-    void *pj8_parameters;
-    void *pj8_states;
+    void *riva_parameters;
+    void *riva_states;
     nonlinear_gpu_error_t *error;
 } nonlinear_gpu_state_t;
 
@@ -172,7 +172,7 @@ extern "C" void nonlinear_gpu_launch_pdmy03(
     gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
     int32_t step, double delta_t, double delta_t_squared,
     cudaStream_t stream);
-extern "C" void nonlinear_gpu_launch_pj_liq_v8(
+extern "C" void nonlinear_gpu_launch_riva_sand(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
     gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
     int32_t step, double delta_t, double delta_t_squared,
@@ -3202,8 +3202,8 @@ __global__ static void kernel_nonlinear_material_point_history(
     nlconstants_t constants,
     manzari_dafalias_constants_t md_material,
     pdmy03_constants_t pdmy03_material,
-    pj8_material_parameters_t pj8_material,
-    double pj8_void_ratio,
+    riva_material_parameters_t riva_material,
+    double riva_void_ratio,
     nonlinear_gpu_config_t config,
     nonlinear_material_point_initial_state_t initial_state,
     const tensor_t *strain_history,
@@ -3214,7 +3214,7 @@ __global__ static void kernel_nonlinear_material_point_history(
 
     const int seeded = (config.material_model == MANZARI_DAFALIAS ||
                         config.material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
-                        MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) &&
+                        MATERIAL_MODEL_IS_RIVA_SAND(config.material_model)) &&
                        initial_state.provided != 0;
     tensor_t strain_prev = seeded ? initial_state.strain : nl_zero();
     tensor_t plastic_strain = seeded ? initial_state.plastic_strain : nl_zero();
@@ -3239,16 +3239,16 @@ __global__ static void kernel_nonlinear_material_point_history(
     int32_t md_substeps = 0;
     pdmy03_state_t pdmy03_state = {};
     tensor_t pdmy03_centers[PDMY03_MAX_SURFACES] = {};
-    pj8_state_t pj8_state = {};
-    pj8_parameters_t pj8_parameters = pj8_reference_parameters(1000.0);
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model) && seeded) {
+    riva_state_t riva_state = {};
+    riva_parameters_t riva_parameters = riva_reference_parameters(1000.0);
+    if (MATERIAL_MODEL_IS_RIVA_SAND(config.material_model) && seeded) {
         tensor_t reference = stress;
         reference.xy = reference.yz = reference.xz = 0.0;
-        if (!pj8_initialize_material(
-                &pj8_parameters, &pj8_material, stress,
-                pj8_void_ratio, &pj8_state) ||
-            !pj8_begin_dynamic_phase(&pj8_parameters, reference,
-                                     &pj8_state)) return;
+        if (!riva_initialize_material(
+                &riva_parameters, &riva_material, stress,
+                riva_void_ratio, &riva_state) ||
+            !riva_begin_dynamic_phase(&riva_parameters, reference,
+                                     &riva_state)) return;
     }
 
     for (int32_t step = 0; step < steps; step++) {
@@ -3259,15 +3259,15 @@ __global__ static void kernel_nonlinear_material_point_history(
         double model_error = 0.0;
         nl_md_diagnostics_t md_diagnostics = {};
         pdmy03_diagnostics_t pdmy03_diagnostics = {};
-        pj8_update_info_t pj8_info = {};
+        riva_update_info_t riva_info = {};
 
         int ok;
-        if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) {
-            ok = pj8_update_material(&pj8_parameters,
-                &pj8_material,
-                pj8_sub(strain_history[step], strain_prev),
-                config.no_substeps, &pj8_state, &stress, &pj8_info);
-            fs = fabs(pj8_compatibility_residual(&pj8_state));
+        if (MATERIAL_MODEL_IS_RIVA_SAND(config.material_model)) {
+            ok = riva_update_material(&riva_parameters,
+                &riva_material,
+                riva_sub(strain_history[step], strain_prev),
+                config.no_substeps, &riva_state, &stress, &riva_info);
+            fs = fabs(riva_compatibility_residual(&riva_state));
             model_error = fs;
         } else if (config.material_model == PRESSURE_DEPEND_MULTIYIELD_03) {
             ok = pdmy03_update(
@@ -3333,26 +3333,26 @@ __global__ static void kernel_nonlinear_material_point_history(
                 center_norm += pdmy03_ddot(pdmy03_centers[i],
                                            pdmy03_centers[i]);
             result.pdmy03_center_norm = sqrt(center_norm);
-        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config.material_model)) {
-            result.fs = fabs(pj8_compatibility_residual(&pj8_state));
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(config.material_model)) {
+            result.fs = fabs(riva_compatibility_residual(&riva_state));
             result.model_error = result.fs;
-            result.backstress = pj8_state.alpha;
-            result.ep_bar = pj8_state.lambda_total;
-            result.psi = pj8_state.D;
-            result.load_unload = (double)pj8_info.accepted_substeps;
-            result.kappa = pj8_pressure(pj8_state.stress);
-            result.stress_reference = pj8_state.alpha01;
-            result.gamma1d = pj8_state.eps_v_irreversible;
-            result.tao1d = pj8_state.eps_v_reversible;
-            result.ggmax = pj8_state.amplitude_factor;
-            result.fabric = pj8_state.fabric;
-            result.alpha_in = pj8_state.alpha0;
-            result.accepted_substeps = pj8_info.accepted_substeps;
-            result.void_ratio = pj8_state.void_ratio;
-            result.plastic_multiplier = pj8_state.lambda_total;
-            pj8_state_values(&pj8_state, result.pj8_state_values);
-            result.pj8_reversal_registered =
-                pj8_info.reversal_registered;
+            result.backstress = riva_state.alpha;
+            result.ep_bar = riva_state.lambda_total;
+            result.psi = riva_state.D;
+            result.load_unload = (double)riva_info.accepted_substeps;
+            result.kappa = riva_pressure(riva_state.stress);
+            result.stress_reference = riva_state.alpha01;
+            result.gamma1d = riva_state.eps_v_irreversible;
+            result.tao1d = riva_state.eps_v_reversible;
+            result.ggmax = riva_state.amplitude_factor;
+            result.fabric = riva_state.fabric;
+            result.alpha_in = riva_state.alpha0;
+            result.accepted_substeps = riva_info.accepted_substeps;
+            result.void_ratio = riva_state.void_ratio;
+            result.plastic_multiplier = riva_state.lambda_total;
+            riva_state_values(&riva_state, result.riva_state_values);
+            result.riva_reversal_registered =
+                riva_info.reversal_registered;
         }
         result.status = ok ? 0 : 1;
         results[step] = result;
@@ -3369,7 +3369,7 @@ __global__ static void kernel_nonlinear_material_point_history(
 
 #if defined(NL_GPU_CLASSIC_ONLY) || \
     defined(NL_GPU_MANZARI_DAFALIAS_ONLY) || defined(NL_GPU_PDMY03_ONLY) || \
-    defined(NL_GPU_PJ_LIQ_V8_ONLY)
+    defined(NL_GPU_RIVA_SAND_ONLY)
 __device__ static inline void nl_accumulate_stress_force(
     fvector_t local_force[8], int node, tensor_t stress,
     double dx, double dy, double dz, double weight)
@@ -3570,22 +3570,22 @@ __global__ static void kernel_nonlinear_update_force(
 #endif
 
     int update_constitutive_state = any_displacement;
-#ifdef NL_GPU_PJ_LIQ_V8_ONLY
+#ifdef NL_GPU_RIVA_SAND_ONLY
     /* A cyclic element can return to exactly zero absolute displacement from a
      * nonzero committed strain.  The old absolute-displacement shortcut would
-     * skip that real unloading increment and assemble the previous V8 stress.
+     * skip that real unloading increment and assemble the previous RIVA-Sand stress.
      * Inspect committed strain only after the point has initialized, retaining
      * the inexpensive untouched-wavefront path. */
     if (!update_constitutive_state) {
-        const pj8_state_t *pj8_states =
-            (const pj8_state_t *)state.pj8_states;
+        const riva_state_t *riva_states =
+            (const riva_state_t *)state.riva_states;
         int history_qp = 0;
         if (c->isTopoNonlin) {
             while (history_qp < 5 && c->tetraVol[history_qp] == 0.0)
                 history_qp++;
         }
         if (history_qp < (c->isTopoNonlin ? 5 : NL_GPU_QP) &&
-            pj8_states[nl_eindex*NL_GPU_QP+history_qp].initialized) {
+            riva_states[nl_eindex*NL_GPU_QP+history_qp].initialized) {
             const int ngp = c->isTopoNonlin ? 5 : NL_GPU_QP;
             for (int qp = 0; qp < ngp; qp++) {
                 if (c->isTopoNonlin && c->tetraVol[qp] == 0.0) continue;
@@ -3666,48 +3666,48 @@ __global__ static void kernel_nonlinear_update_force(
                         -1.0),
                     pdmy03_sub(strain, strain_prev));
             }
-#elif defined(NL_GPU_PJ_LIQ_V8_ONLY)
+#elif defined(NL_GPU_RIVA_SAND_ONLY)
             const int32_t point = nl_eindex*NL_GPU_QP+qp;
-            pj8_state_t *pj8_states = (pj8_state_t *)state.pj8_states;
-            const pj8_parameters_t *pj8_parameters =
-                (const pj8_parameters_t *)state.pj8_parameters;
+            riva_state_t *riva_states = (riva_state_t *)state.riva_states;
+            const riva_parameters_t *riva_parameters =
+                (const riva_parameters_t *)state.riva_parameters;
             const int32_t material_index =
-                cfg.material_model == PJ_LIQ_V8_CUSTOM ? nl_eindex : 0;
-            const pj8_material_parameters_t *pj8_material =
-                state.pj8_materials+material_index;
-            pj8_state_t *pj8_state = pj8_states+point;
-            if (!pj8_state->initialized) {
-                const tensor_t equilibrated = pj8_add(
+                cfg.material_model == RIVA_SAND_CUSTOM ? nl_eindex : 0;
+            const riva_material_parameters_t *riva_material =
+                state.riva_materials+material_index;
+            riva_state_t *riva_state = riva_states+point;
+            if (!riva_state->initialized) {
+                const tensor_t equilibrated = riva_add(
                     state.stresses[nl_eindex].qp[qp], static_stress);
                 tensor_t zero_static_shear = equilibrated;
                 zero_static_shear.xy = 0.0;
                 zero_static_shear.yz = 0.0;
                 zero_static_shear.xz = 0.0;
-                ok = pj8_initialize_material(
-                         pj8_parameters, pj8_material, equilibrated,
-                         state.pj8_void_ratios[nl_eindex], pj8_state) &&
-                     pj8_begin_dynamic_phase(pj8_parameters,
-                                             zero_static_shear, pj8_state);
+                ok = riva_initialize_material(
+                         riva_parameters, riva_material, equilibrated,
+                         state.riva_void_ratios[nl_eindex], riva_state) &&
+                     riva_begin_dynamic_phase(riva_parameters,
+                                             zero_static_shear, riva_state);
             } else {
                 ok = 1;
             }
-            pj8_update_info_t pj8_info = {};
-            tensor_t full_effective_stress = pj8_state->stress;
+            riva_update_info_t riva_info = {};
+            tensor_t full_effective_stress = riva_state->stress;
             if (ok) {
-                ok = pj8_update_material(pj8_parameters, pj8_material,
-                    pj8_sub(strain, strain_prev), cfg.no_substeps,
-                    pj8_state, &full_effective_stress, &pj8_info);
+                ok = riva_update_material(riva_parameters, riva_material,
+                    riva_sub(strain, strain_prev), cfg.no_substeps,
+                    riva_state, &full_effective_stress, &riva_info);
             }
             state.stresses[nl_eindex].qp[qp] =
-                pj8_sub(full_effective_stress, static_stress);
-            model_error = fabs(pj8_compatibility_residual(pj8_state));
+                riva_sub(full_effective_stress, static_stress);
+            model_error = fabs(riva_compatibility_residual(riva_state));
             c->fs[qp] = model_error;
             state.load_unload_n[nl_eindex].qv[qp] =
-                (double)pj8_info.accepted_substeps;
+                (double)riva_info.accepted_substeps;
             if (!ok || !isfinite(model_error) ||
-                !pj8_finite_tensor(full_effective_stress)) {
+                !riva_finite_tensor(full_effective_stress)) {
                 nl_record_error(state.error, 5, eindex, qp, model_error,
-                                pj8_pressure(full_effective_stress));
+                                riva_pressure(full_effective_stress));
             }
 #elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
             int32_t md_substeps = 0;
@@ -3886,8 +3886,8 @@ extern "C" void nonlinear_gpu_launch_pdmy03(
     kernel_nonlinear_update_force<<<grid_size, block_size, 0, stream>>>(
         state, config, gpu, step, delta_t, delta_t_squared);
 }
-#elif defined(NL_GPU_PJ_LIQ_V8_ONLY)
-extern "C" void nonlinear_gpu_launch_pj_liq_v8(
+#elif defined(NL_GPU_RIVA_SAND_ONLY)
+extern "C" void nonlinear_gpu_launch_riva_sand(
     nonlinear_gpu_state_t state, nonlinear_gpu_config_t config,
     gpu_data_t *gpu, int32_t grid_size, int32_t block_size,
     int32_t step, double delta_t, double delta_t_squared,
@@ -4107,7 +4107,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     NL_ALLOC_COPY(strains, strains);
     const int allocate_previous_state_shadows =
         config->material_model != MANZARI_DAFALIAS &&
-        !MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model);
+        !MATERIAL_MODEL_IS_RIVA_SAND(config->material_model);
     if (allocate_previous_state_shadows) {
         NL_ALLOC_COPY(strains1, strains1);
         NL_ALLOC_COPY(pstrains1, pstrains1);
@@ -4158,31 +4158,31 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 "PDMY03 history allocation") != 0) return -1;
     }
 
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) && count > 0) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model) && count > 0) {
         const size_t material_count =
-            config->material_model == PJ_LIQ_V8_CUSTOM ? (size_t)count : 1u;
-        if (nonlinear_alloc_copy(myID, &g_nl.pj8_materials,
-                host_state->pj8_materials, material_count,
-                "PJ-Liq V8 material properties") != 0 ||
-            nonlinear_alloc_copy(myID, &g_nl.pj8_void_ratios,
-                host_state->pj8_void_ratios, (size_t)count,
-                "PJ-Liq V8 void ratios") != 0)
+            config->material_model == RIVA_SAND_CUSTOM ? (size_t)count : 1u;
+        if (nonlinear_alloc_copy(myID, &g_nl.riva_materials,
+                host_state->riva_materials, material_count,
+                "RIVA-Sand material properties") != 0 ||
+            nonlinear_alloc_copy(myID, &g_nl.riva_void_ratios,
+                host_state->riva_void_ratios, (size_t)count,
+                "RIVA-Sand void ratios") != 0)
             return -1;
         const size_t point_count = (size_t)count*NL_GPU_QP;
-        const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
-        cudaError_t pj8_error = cudaMalloc(
-            &g_nl.pj8_parameters, sizeof(parameters));
-        if (pj8_error == cudaSuccess)
-            pj8_error = cudaMemcpy(g_nl.pj8_parameters, &parameters,
+        const riva_parameters_t parameters = riva_reference_parameters(1000.0);
+        cudaError_t riva_error = cudaMalloc(
+            &g_nl.riva_parameters, sizeof(parameters));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMemcpy(g_nl.riva_parameters, &parameters,
                 sizeof(parameters), cudaMemcpyHostToDevice);
-        if (pj8_error == cudaSuccess)
-            pj8_error = cudaMalloc(&g_nl.pj8_states,
-                point_count*sizeof(pj8_state_t));
-        if (pj8_error == cudaSuccess)
-            pj8_error = cudaMemset(g_nl.pj8_states, 0,
-                point_count*sizeof(pj8_state_t));
-        if (nonlinear_cuda_failure(myID, pj8_error,
-                "PJ-Liq V8 history allocation") != 0) return -1;
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMalloc(&g_nl.riva_states,
+                point_count*sizeof(riva_state_t));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMemset(g_nl.riva_states, 0,
+                point_count*sizeof(riva_state_t));
+        if (nonlinear_cuda_failure(myID, riva_error,
+                "RIVA-Sand history allocation") != 0) return -1;
     }
 
     if (nonlinear_cuda_failure(myID,
@@ -4311,25 +4311,25 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
-        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model)) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
-                sizeof(pj8_state_t))/(1024.0*1024.0);
+                sizeof(riva_state_t))/(1024.0*1024.0);
             const size_t material_count = count == 0 ? 0u :
-                (config->material_model == PJ_LIQ_V8_CUSTOM
+                (config->material_model == RIVA_SAND_CUSTOM
                     ? (size_t)count : 1u);
             const double material_mib = (double)(
-                material_count*sizeof(pj8_material_parameters_t)+
+                material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*sizeof(double))/(1024.0*1024.0);
             fprintf(stderr,
-                    "PJ-Liq V8 integration: %s, frozen internal controls %s "
+                    "RIVA-Sand integration: %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_material=%.1f MiB, "
                     "local_history=%.1f MiB, "
                     "effective-skeleton stress with BrickUP pore pressure "
                     "and Biot total-stress coupling, geostatic=%s)\n",
-                    config->material_model == PJ_LIQ_V8_CUSTOM ?
+                    config->material_model == RIVA_SAND_CUSTOM ?
                         "custom material properties" :
                         "frozen material properties",
-                    PJ8_PARAMETER_SHA256, config->no_substeps, material_mib,
+                    RIVA_PARAMETER_SHA256, config->no_substeps, material_mib,
                     state_mib,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
@@ -4384,8 +4384,8 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
         nonlinear_gpu_launch_pdmy03(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
-    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(g_config.material_model)) {
-        nonlinear_gpu_launch_pj_liq_v8(
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(g_config.material_model)) {
+        nonlinear_gpu_launch_riva_sand(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
     } else {
@@ -4798,7 +4798,7 @@ void nonlinear_gpu_check_error(int32_t myID)
                     g_error_host.md_strain_increment_norm);
         } else if (g_error_host.code == 5) {
             fprintf(stderr,
-                    "  PJ-Liq V8 reason: invalid/non-finite explicit state "
+                    "  RIVA-Sand reason: invalid/non-finite explicit state "
                     "or initialization; compatibility_residual=%12.8E, "
                     "effective_mean_stress=%12.8E Pa\n",
                     g_error_host.residual, g_error_host.value);
@@ -4816,8 +4816,8 @@ int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
     const manzari_dafalias_constants_t *md_material,
     const pdmy03_constants_t *pdmy03_material,
-    const pj8_material_parameters_t *pj8_material,
-    double pj8_void_ratio,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -4825,7 +4825,7 @@ int nonlinear_gpu_material_point_history(
     nonlinear_material_point_result_t *results)
 {
     if (constants == NULL || md_material == NULL ||
-        pdmy03_material == NULL || pj8_material == NULL || config == NULL ||
+        pdmy03_material == NULL || riva_material == NULL || config == NULL ||
         initial_state == NULL ||
         strain_history == NULL ||
         results == NULL || steps <= 0) {
@@ -4847,8 +4847,8 @@ int nonlinear_gpu_material_point_history(
     }
     if (error == cudaSuccess) {
         kernel_nonlinear_material_point_history<<<1, 1>>>(
-            *constants, *md_material, *pdmy03_material, *pj8_material,
-            pj8_void_ratio, *config, *initial_state, strain_device, steps,
+            *constants, *md_material, *pdmy03_material, *riva_material,
+            riva_void_ratio, *config, *initial_state, strain_device, steps,
             result_device);
         error = cudaGetLastError();
     }
@@ -4979,47 +4979,47 @@ int nonlinear_pdmy03_host_history(
     return 0;
 }
 
-int nonlinear_pj8_host_history(
+int nonlinear_riva_host_history(
     const nlconstants_t *constants,
-    const pj8_material_parameters_t *pj8_material,
-    double pj8_void_ratio,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
     int32_t steps,
     nonlinear_material_point_result_t *results)
 {
-    if (constants == NULL || pj8_material == NULL || config == NULL ||
+    if (constants == NULL || riva_material == NULL || config == NULL ||
         initial_state == NULL ||
         strain_history == NULL || results == NULL || steps <= 0 ||
-        !MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model) ||
+        !MATERIAL_MODEL_IS_RIVA_SAND(config->material_model) ||
         !initial_state->provided || config->no_substeps < 1) return -1;
 
-    const pj8_parameters_t parameters = pj8_reference_parameters(1000.0);
+    const riva_parameters_t parameters = riva_reference_parameters(1000.0);
     tensor_t strain_previous = initial_state->strain;
-    pj8_state_t state = {};
+    riva_state_t state = {};
     tensor_t reference = initial_state->stress;
     reference.xy = reference.yz = reference.xz = 0.0;
-    if (!pj8_initialize_material(
-            &parameters, pj8_material, initial_state->stress,
-            pj8_void_ratio, &state) ||
-        !pj8_begin_dynamic_phase(&parameters, reference, &state)) return -1;
+    if (!riva_initialize_material(
+            &parameters, riva_material, initial_state->stress,
+            riva_void_ratio, &state) ||
+        !riva_begin_dynamic_phase(&parameters, reference, &state)) return -1;
 
     for (int32_t step = 0; step < steps; step++) {
-        pj8_update_info_t info = {};
+        riva_update_info_t info = {};
         tensor_t stress = state.stress;
-        const int ok = pj8_update_material(
-            &parameters, pj8_material,
-            pj8_sub(strain_history[step], strain_previous),
+        const int ok = riva_update_material(
+            &parameters, riva_material,
+            riva_sub(strain_history[step], strain_previous),
             config->no_substeps, &state, &stress, &info);
         nonlinear_material_point_result_t result = {};
         result.stress = stress;
         result.backstress = state.alpha;
         result.ep_bar = state.lambda_total;
-        result.fs = fabs(pj8_compatibility_residual(&state));
+        result.fs = fabs(riva_compatibility_residual(&state));
         result.psi = state.D;
         result.load_unload = (double)info.accepted_substeps;
-        result.kappa = pj8_pressure(state.stress);
+        result.kappa = riva_pressure(state.stress);
         result.stress_reference = state.alpha01;
         result.gamma1d = state.eps_v_irreversible;
         result.tao1d = state.eps_v_reversible;
@@ -5030,8 +5030,8 @@ int nonlinear_pj8_host_history(
         result.void_ratio = state.void_ratio;
         result.plastic_multiplier = state.lambda_total;
         result.accepted_substeps = info.accepted_substeps;
-        pj8_state_values(&state, result.pj8_state_values);
-        result.pj8_reversal_registered = info.reversal_registered;
+        riva_state_values(&state, result.riva_state_values);
+        result.riva_reversal_registered = info.reversal_registered;
         result.status = ok ? 0 : 1;
         results[step] = result;
         strain_previous = strain_history[step];
@@ -5043,7 +5043,7 @@ int nonlinear_pj8_host_history(
 #ifdef NL_GPU_RUNTIME_ONLY
 enum {
     NL_CHECKPOINT_BRICKUP_PRESSURE = 1u,
-    NL_CHECKPOINT_PJ8_STATE = 2u
+    NL_CHECKPOINT_RIVA_STATE = 2u
 };
 
 typedef struct nonlinear_checkpoint_header_t {
@@ -5051,9 +5051,9 @@ typedef struct nonlinear_checkpoint_header_t {
     uint32_t version;
     uint32_t flags;
     uint32_t rank_count;
-    uint32_t pj8_state_bytes;
+    uint32_t riva_state_bytes;
     uint64_t data_bytes;
-    char pj8_parameter_sha256[65];
+    char riva_parameter_sha256[65];
     char reserved[7];
 } nonlinear_checkpoint_header_t;
 
@@ -5067,10 +5067,10 @@ static size_t nonlinear_checkpoint_rank_bytes(
     size_t bytes = 0;
     if ((flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0)
         bytes += (size_t)(2*nodes)*sizeof(solver_float);
-    if ((flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+    if ((flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
         const uint64_t elements = points/NL_GPU_QP;
         bytes += (size_t)(2*elements)*sizeof(qptensors_t);
-        bytes += (size_t)points*sizeof(pj8_state_t);
+        bytes += (size_t)points*sizeof(riva_state_t);
     }
     return bytes;
 }
@@ -5118,8 +5118,8 @@ static uint32_t nonlinear_checkpoint_local_flags(mysolver_t *solver)
         flags |= NL_CHECKPOINT_BRICKUP_PRESSURE;
     /* The field schema must agree on ranks that happen to own zero nonlinear
      * elements; their point count is zero and no device bytes are copied. */
-    if (g_active && MATERIAL_MODEL_IS_PJ_LIQ_V8(g_config.material_model))
-        flags |= NL_CHECKPOINT_PJ8_STATE;
+    if (g_active && MATERIAL_MODEL_IS_RIVA_SAND(g_config.material_model))
+        flags |= NL_CHECKPOINT_RIVA_STATE;
     return flags;
 }
 
@@ -5145,7 +5145,7 @@ int nonlinear_gpu_checkpoint_write(
         (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
             ? (uint64_t)node_count : 0;
     const uint64_t local_points =
-        (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
+        (local_flags & NL_CHECKPOINT_RIVA_STATE) != 0
             ? (uint64_t)g_nl.count*NL_GPU_QP : 0;
     uint64_t *counts = (uint64_t *)malloc(
         (size_t)2*group_size*sizeof(uint64_t));
@@ -5168,10 +5168,10 @@ int nonlinear_gpu_checkpoint_write(
     header.version = 1;
     header.flags = local_flags;
     header.rank_count = (uint32_t)group_size;
-    header.pj8_state_bytes = (uint32_t)sizeof(pj8_state_t);
-    if ((local_flags & NL_CHECKPOINT_PJ8_STATE) != 0)
-        memcpy(header.pj8_parameter_sha256, PJ8_PARAMETER_SHA256,
-               sizeof(PJ8_PARAMETER_SHA256));
+    header.riva_state_bytes = (uint32_t)sizeof(riva_state_t);
+    if ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0)
+        memcpy(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256,
+               sizeof(RIVA_PARAMETER_SHA256));
     for (int rank = 0; rank < group_size; rank++)
         header.data_bytes += nonlinear_checkpoint_rank_bytes(
             local_flags, counts[rank], counts[group_size+rank]);
@@ -5227,7 +5227,7 @@ int nonlinear_gpu_checkpoint_write(
                          scratch_bytes) != 0))
                     local_error = 1;
                 if (!local_error &&
-                    (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+                    (local_flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
                     const size_t element_bytes =
                         (size_t)g_nl.count*sizeof(qptensors_t);
                     if (nonlinear_checkpoint_write_device(
@@ -5237,8 +5237,8 @@ int nonlinear_gpu_checkpoint_write(
                             fp, g_nl.stresses, element_bytes, scratch,
                             scratch_bytes) != 0 ||
                         nonlinear_checkpoint_write_device(
-                            fp, g_nl.pj8_states,
-                            (size_t)local_points*sizeof(pj8_state_t), scratch,
+                            fp, g_nl.riva_states,
+                            (size_t)local_points*sizeof(riva_state_t), scratch,
                             scratch_bytes) != 0)
                         local_error = 1;
                 }
@@ -5256,8 +5256,8 @@ int nonlinear_gpu_checkpoint_write(
                 "Checkpoint extension: saved%s%s state (%llu bytes)\n",
                 (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
                     ? " BrickUP pressure" : "",
-                (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
-                    ? " PJ-Liq V8" : "",
+                (local_flags & NL_CHECKPOINT_RIVA_STATE) != 0
+                    ? " RIVA-Sand" : "",
                 (unsigned long long)header.data_bytes);
     }
     return global_error ? -1 : 0;
@@ -5293,12 +5293,12 @@ int nonlinear_gpu_checkpoint_read(
                sizeof(header.magic)) != 0 ||
         header.version != 1 || header.flags != local_flags ||
         header.rank_count != (uint32_t)group_size ||
-        ((local_flags & NL_CHECKPOINT_PJ8_STATE) != 0 &&
-         (header.pj8_state_bytes != sizeof(pj8_state_t) ||
-          strcmp(header.pj8_parameter_sha256, PJ8_PARAMETER_SHA256) != 0))) {
+        ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0 &&
+         (header.riva_state_bytes != sizeof(riva_state_t) ||
+          strcmp(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256) != 0))) {
         if (myID == 0)
             fprintf(stderr,
-                    "Checkpoint lacks a compatible BrickUP/PJ-Liq V8 "
+                    "Checkpoint lacks a compatible BrickUP/RIVA-Sand "
                     "extension; a coupled restart cannot reset pressure or "
                     "constitutive history\n");
         return -1;
@@ -5329,7 +5329,7 @@ int nonlinear_gpu_checkpoint_read(
         (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
             ? (uint64_t)node_count : 0;
     const uint64_t local_points =
-        (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0
+        (local_flags & NL_CHECKPOINT_RIVA_STATE) != 0
             ? (uint64_t)g_nl.count*NL_GPU_QP : 0;
     uint64_t expected_data_bytes = 0;
     for (int rank = 0; rank < group_size; rank++)
@@ -5375,7 +5375,7 @@ int nonlinear_gpu_checkpoint_read(
                          scratch_bytes) != 0))
                     local_error = 1;
                 if (!local_error &&
-                    (local_flags & NL_CHECKPOINT_PJ8_STATE) != 0) {
+                    (local_flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
                     const size_t element_bytes =
                         (size_t)g_nl.count*sizeof(qptensors_t);
                     if (nonlinear_checkpoint_read_device(
@@ -5385,8 +5385,8 @@ int nonlinear_gpu_checkpoint_read(
                             fp, g_nl.stresses, element_bytes, scratch,
                             scratch_bytes) != 0 ||
                         nonlinear_checkpoint_read_device(
-                            fp, g_nl.pj8_states,
-                            (size_t)local_points*sizeof(pj8_state_t), scratch,
+                            fp, g_nl.riva_states,
+                            (size_t)local_points*sizeof(riva_state_t), scratch,
                             scratch_bytes) != 0)
                         local_error = 1;
                 }
@@ -5412,7 +5412,7 @@ int nonlinear_gpu_checkpoint_read(
     free(counts);
     if (!global_error && myID == 0)
         fprintf(stderr,
-                "Checkpoint extension: restored BrickUP/PJ-Liq V8 "
+                "Checkpoint extension: restored BrickUP/RIVA-Sand "
                 "coupled state\n");
     return global_error ? -1 : 0;
 }
@@ -5425,7 +5425,7 @@ void nonlinear_gpu_finalize(void)
 #define NL_FREE(field) do { if (g_nl.field != NULL) cudaFree(g_nl.field); } while (0)
     NL_FREE(elements); NL_FREE(constants);
     NL_FREE(md_materials); NL_FREE(pdmy03_materials);
-    NL_FREE(pj8_materials); NL_FREE(pj8_void_ratios);
+    NL_FREE(riva_materials); NL_FREE(riva_void_ratios);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);
     NL_FREE(pstrains1); NL_FREE(pstrains2);
     NL_FREE(alphastress1); NL_FREE(alphastress2);
@@ -5433,7 +5433,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(sv_n); NL_FREE(sv_max); NL_FREE(kappa); NL_FREE(sref);
     NL_FREE(fabric);
     NL_FREE(pdmy03_states); NL_FREE(pdmy03_centers);
-    NL_FREE(pj8_parameters); NL_FREE(pj8_states);
+    NL_FREE(riva_parameters); NL_FREE(riva_states);
     NL_FREE(gamma1d); NL_FREE(tao1d); NL_FREE(ggmax); NL_FREE(error);
 #undef NL_FREE
     memset(&g_nl, 0, sizeof(g_nl));

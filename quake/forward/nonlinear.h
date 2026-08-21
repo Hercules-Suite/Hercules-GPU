@@ -49,15 +49,15 @@ typedef enum {
     LINEAR = 0, VONMISES_EP, VONMISES_FA, VONMISES_FAM, DRUCKERPRAGER,
     MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
     VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS,
-    PRESSURE_DEPEND_MULTIYIELD_03, PJ_LIQ_V8, PJ_LIQ_V8_CUSTOM
+    PRESSURE_DEPEND_MULTIYIELD_03, RIVA_SAND, RIVA_SAND_CUSTOM
 
 } materialmodel_t;
 
 #define MATERIAL_MODEL_IS_BACKBONE(model) \
     ((model) >= VONMISES_BAE && (model) <= VONMISES_RO)
 
-#define MATERIAL_MODEL_IS_PJ_LIQ_V8(model) \
-    ((model) == PJ_LIQ_V8 || (model) == PJ_LIQ_V8_CUSTOM)
+#define MATERIAL_MODEL_IS_RIVA_SAND(model) \
+    ((model) == RIVA_SAND || (model) == RIVA_SAND_CUSTOM)
 
 typedef struct vect1_t {
 	double x;
@@ -89,11 +89,11 @@ typedef struct tensor_t {
 
 } tensor_t;
 
-/* Compact material subset exposed by PJLiqV8Custom.  Production stores this
- * outside nlconstants_t so unrelated nonlinear families do not reserve PJ-Liq
+/* Compact material subset exposed by RIVASandCustom.  Production stores this
+ * outside nlconstants_t so unrelated nonlinear families do not reserve RIVA-Sand
  * memory.  The frozen interface shares one instance per rank; the custom
  * interface stores one interpolated instance per nonlinear element. */
-typedef struct pj8_material_parameters_t {
+typedef struct riva_material_parameters_t {
     double h;
     double m;
     double M;
@@ -104,7 +104,7 @@ typedef struct pj8_material_parameters_t {
     double Q;
     double R;
     double n_G;
-} pj8_material_parameters_t;
+} riva_material_parameters_t;
 
 typedef struct qpvectors_t {
 
@@ -254,8 +254,8 @@ typedef struct nlsolver_t {
 	nlconstants_t *constants;
 	manzari_dafalias_constants_t *md_materials;
 	pdmy03_constants_t *pdmy03_materials;
-	pj8_material_parameters_t *pj8_materials;
-	double        *pj8_void_ratios;
+	riva_material_parameters_t *riva_materials;
+	double        *riva_void_ratios;
 	qptensors_t   *stresses;
 	qptensors_t   *strains;
 	qptensors_t   *strains1;      // total strains at t-1

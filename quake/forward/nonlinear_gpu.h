@@ -7,7 +7,7 @@
 #include "nonlinear.h"
 #include "quake_util.h"
 
-#define NL_PJ8_STATE_VALUE_COUNT 93
+#define NL_RIVA_STATE_VALUE_COUNT 93
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -72,8 +72,8 @@ typedef struct nonlinear_material_point_result_t {
     int32_t pdmy03_substeps_clamped;
     double pdmy03_pressure_d;
     double pdmy03_center_norm;
-    double pj8_state_values[NL_PJ8_STATE_VALUE_COUNT];
-    int32_t pj8_reversal_registered;
+    double riva_state_values[NL_RIVA_STATE_VALUE_COUNT];
+    int32_t riva_reversal_registered;
     int32_t status;
 } nonlinear_material_point_result_t;
 
@@ -126,8 +126,8 @@ int nonlinear_gpu_material_point_history(
     const nlconstants_t *constants,
     const manzari_dafalias_constants_t *md_material,
     const pdmy03_constants_t *pdmy03_material,
-    const pj8_material_parameters_t *pj8_material,
-    double pj8_void_ratio,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -153,10 +153,10 @@ int nonlinear_pdmy03_host_history(
     int32_t steps,
     nonlinear_material_point_result_t *results);
 
-int nonlinear_pj8_host_history(
+int nonlinear_riva_host_history(
     const nlconstants_t *constants,
-    const pj8_material_parameters_t *pj8_material,
-    double pj8_void_ratio,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,

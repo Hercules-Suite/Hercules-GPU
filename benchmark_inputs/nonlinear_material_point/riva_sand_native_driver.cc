@@ -1,11 +1,11 @@
-/* Native host-side PJ-Liq V8 golden-data driver.
+/* Native host-side RIVA-Sand golden-data driver.
  *
  * This executable reads the prescribed deps_* columns and row-zero initial
  * state from one oracle CSV, then writes a same-schema native result. It does
  * not call Python or consume any expected constitutive response after row 0.
  */
-#define PJ8_STANDALONE
-#include "../../quake/forward/nonlinear_pj_liq_v8.h"
+#define RIVA_STANDALONE
+#include "../../quake/forward/nonlinear_riva_sand.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -57,7 +57,7 @@ static void put(Row &row, const std::string &name, Value value)
     row[name] = text.str();
 }
 
-static void put_state(Row &row, const pj8_state_t &state)
+static void put_state(Row &row, const riva_state_t &state)
 {
     put_tensor(row, "stress", state.stress);
     put_tensor(row, "alpha", state.alpha);
@@ -125,40 +125,40 @@ int main(int argc, char **argv)
     }
     if (rows.empty()) return 2;
 
-    const pj8_parameters_t parameters = pj8_reference_parameters(1.0);
-    pj8_state_t state = {};
+    const riva_parameters_t parameters = riva_reference_parameters(1.0);
+    riva_state_t state = {};
     const tensor_t initial_stress = read_tensor(rows.front(), "stress");
     tensor_t reference_stress = initial_stress;
     reference_stress.xy = reference_stress.yz = reference_stress.xz = 0.0;
-    if (!pj8_initialize(&parameters, initial_stress,
+    if (!riva_initialize(&parameters, initial_stress,
                         std::stod(rows.front().at("void_ratio")), &state) ||
-        !pj8_begin_dynamic_phase(&parameters, reference_stress, &state)) {
-        std::cerr << "PJ-Liq V8 initialization failed\n";
+        !riva_begin_dynamic_phase(&parameters, reference_stress, &state)) {
+        std::cerr << "RIVA-Sand initialization failed\n";
         return 1;
     }
-    const double p0 = pj8_pressure(initial_stress);
+    const double p0 = riva_pressure(initial_stress);
     const double sv0 = -initial_stress.zz;
 
     for (size_t index = 0; index < rows.size(); ++index) {
-        pj8_update_info_t info = {};
+        riva_update_info_t info = {};
         if (index > 0) {
             const tensor_t deps = read_tensor(rows[index], "deps");
-            if (!pj8_update(&parameters, deps,
+            if (!riva_update(&parameters, deps,
                             std::stoi(rows[index].at("nsub")), &state,
                             nullptr, &info)) {
-                std::cerr << "PJ-Liq V8 update failed at row " << index + 2
+                std::cerr << "RIVA-Sand update failed at row " << index + 2
                           << '\n';
                 return 1;
             }
         }
         put(rows[index], "accepted_substeps", info.accepted_substeps);
         put(rows[index], "reversal_registered", info.reversal_registered);
-        put(rows[index], "mean_effective_pressure", pj8_pressure(state.stress));
-        put(rows[index], "q", pj8_q(state.stress));
+        put(rows[index], "mean_effective_pressure", riva_pressure(state.stress));
+        put(rows[index], "q", riva_q(state.stress));
         put(rows[index], "ru_vertical", 1.0 - (-state.stress.zz) / sv0);
-        put(rows[index], "ru_mean", 1.0 - pj8_pressure(state.stress) / p0);
+        put(rows[index], "ru_mean", 1.0 - riva_pressure(state.stress) / p0);
         put(rows[index], "compatibility_residual",
-            pj8_compatibility_residual(&state));
+            riva_compatibility_residual(&state));
         put_state(rows[index], state);
     }
 
@@ -175,7 +175,7 @@ int main(int argc, char **argv)
             output << (i ? "," : "") << row.at(header[i]);
         output << '\n';
     }
-    std::cout << "PJ-Liq V8 native history: " << rows.size()
+    std::cout << "RIVA-Sand native history: " << rows.size()
               << " states -> " << argv[2] << '\n';
     return 0;
 }

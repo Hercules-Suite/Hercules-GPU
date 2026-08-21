@@ -41,10 +41,10 @@
 #include "nonlinear.h"
 #include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
-#include "nonlinear_pj_liq_v8.h"
+#include "nonlinear_riva_sand.h"
 
-static_assert(NL_PJ8_STATE_VALUE_COUNT == PJ8_STATE_VALUE_COUNT,
-              "PJ-Liq V8 material-point state width mismatch");
+static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
+              "RIVA-Sand material-point state width mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
 #include "util.h"
@@ -111,21 +111,21 @@ static double               *theManzariDafaliasProperties[
                                 MANZARI_DAFALIAS_PROPERTY_COUNT];
 #define PDMY03_PROPERTY_COUNT 21
 static double               *thePdmy03Properties[PDMY03_PROPERTY_COUNT];
-#define PJ8_CUSTOM_PROPERTY_COUNT 11
+#define RIVA_CUSTOM_PROPERTY_COUNT 11
 enum {
-    PJ8_PROPERTY_DR = 0,
-    PJ8_PROPERTY_M,
-    PJ8_PROPERTY_KD,
-    PJ8_PROPERTY_H,
-    PJ8_PROPERTY_M_EXPONENT,
-    PJ8_PROPERTY_ZETA,
-    PJ8_PROPERTY_E_MAX,
-    PJ8_PROPERTY_E_MIN,
-    PJ8_PROPERTY_Q,
-    PJ8_PROPERTY_R,
-    PJ8_PROPERTY_N_G
+    RIVA_PROPERTY_DR = 0,
+    RIVA_PROPERTY_M,
+    RIVA_PROPERTY_KD,
+    RIVA_PROPERTY_H,
+    RIVA_PROPERTY_M_EXPONENT,
+    RIVA_PROPERTY_ZETA,
+    RIVA_PROPERTY_E_MAX,
+    RIVA_PROPERTY_E_MIN,
+    RIVA_PROPERTY_Q,
+    RIVA_PROPERTY_R,
+    RIVA_PROPERTY_N_G
 };
-static double               *thePj8Properties[PJ8_CUSTOM_PROPERTY_COUNT];
+static double               *theRivaProperties[RIVA_CUSTOM_PROPERTY_COUNT];
 static double                theGeostaticLoadingT = 0;
 static double                theErrorTol             = 1E-03;
 static double                theBackboneErrorTol     = 1E-05;
@@ -374,51 +374,51 @@ double interpolate_property_value(double vsRequest, double *propVector)
     return result;
 }
 
-static pj8_material_parameters_t pj8_material_at_row(int row)
+static riva_material_parameters_t riva_material_at_row(int row)
 {
-    const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
-    pj8_material_parameters_t material =
-        pj8_reference_material_parameters(&reference);
-    if (theMaterialModel != PJ_LIQ_V8_CUSTOM) return material;
-    material.M = thePj8Properties[PJ8_PROPERTY_M][row];
-    material.kd = thePj8Properties[PJ8_PROPERTY_KD][row];
-    material.h = thePj8Properties[PJ8_PROPERTY_H][row];
-    material.m = thePj8Properties[PJ8_PROPERTY_M_EXPONENT][row];
-    material.zeta = thePj8Properties[PJ8_PROPERTY_ZETA][row];
-    material.e_max = thePj8Properties[PJ8_PROPERTY_E_MAX][row];
-    material.e_min = thePj8Properties[PJ8_PROPERTY_E_MIN][row];
-    material.Q = thePj8Properties[PJ8_PROPERTY_Q][row];
-    material.R = thePj8Properties[PJ8_PROPERTY_R][row];
-    material.n_G = thePj8Properties[PJ8_PROPERTY_N_G][row];
+    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    riva_material_parameters_t material =
+        riva_reference_material_parameters(&reference);
+    if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
+    material.M = theRivaProperties[RIVA_PROPERTY_M][row];
+    material.kd = theRivaProperties[RIVA_PROPERTY_KD][row];
+    material.h = theRivaProperties[RIVA_PROPERTY_H][row];
+    material.m = theRivaProperties[RIVA_PROPERTY_M_EXPONENT][row];
+    material.zeta = theRivaProperties[RIVA_PROPERTY_ZETA][row];
+    material.e_max = theRivaProperties[RIVA_PROPERTY_E_MAX][row];
+    material.e_min = theRivaProperties[RIVA_PROPERTY_E_MIN][row];
+    material.Q = theRivaProperties[RIVA_PROPERTY_Q][row];
+    material.R = theRivaProperties[RIVA_PROPERTY_R][row];
+    material.n_G = theRivaProperties[RIVA_PROPERTY_N_G][row];
     return material;
 }
 
-static pj8_material_parameters_t pj8_material_at_vs(double vs)
+static riva_material_parameters_t riva_material_at_vs(double vs)
 {
-    const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
-    pj8_material_parameters_t material =
-        pj8_reference_material_parameters(&reference);
-    if (theMaterialModel != PJ_LIQ_V8_CUSTOM) return material;
+    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    riva_material_parameters_t material =
+        riva_reference_material_parameters(&reference);
+    if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
     material.M = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_M]);
+        vs, theRivaProperties[RIVA_PROPERTY_M]);
     material.kd = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_KD]);
+        vs, theRivaProperties[RIVA_PROPERTY_KD]);
     material.h = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_H]);
+        vs, theRivaProperties[RIVA_PROPERTY_H]);
     material.m = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_M_EXPONENT]);
+        vs, theRivaProperties[RIVA_PROPERTY_M_EXPONENT]);
     material.zeta = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_ZETA]);
+        vs, theRivaProperties[RIVA_PROPERTY_ZETA]);
     material.e_max = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_E_MAX]);
+        vs, theRivaProperties[RIVA_PROPERTY_E_MAX]);
     material.e_min = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_E_MIN]);
+        vs, theRivaProperties[RIVA_PROPERTY_E_MIN]);
     material.Q = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_Q]);
+        vs, theRivaProperties[RIVA_PROPERTY_Q]);
     material.R = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_R]);
+        vs, theRivaProperties[RIVA_PROPERTY_R]);
     material.n_G = interpolate_property_value(
-        vs, thePj8Properties[PJ8_PROPERTY_N_G]);
+        vs, theRivaProperties[RIVA_PROPERTY_N_G]);
     return material;
 }
 
@@ -807,11 +807,11 @@ void nonlinear_init( int32_t     myID,
                 thePdmy03Properties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
-        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
-            const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
-                ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+            const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+                ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
             for (int field = 0; field < fields; field++)
-                thePj8Properties[field] =
+                theRivaProperties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
         } else {
         theAlphaCohes       = (double*)malloc(sizeof(double) * thePropertiesCount);
@@ -845,11 +845,11 @@ void nonlinear_init( int32_t     myID,
             MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
         }
-    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
-        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
-            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (int field = 0; field < fields; field++)
-            MPI_Bcast(thePj8Properties[field], thePropertiesCount,
+            MPI_Bcast(theRivaProperties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
     } else {
     MPI_Bcast(theAlphaCohes,       thePropertiesCount, MPI_DOUBLE, 0, comm_solver);
@@ -1024,21 +1024,19 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     } else if (strcasecmp(material_model, "PressureDependMultiYield03") == 0 ||
                strcasecmp(material_model, "PDMY03") == 0) {
         materialmodel = PRESSURE_DEPEND_MULTIYIELD_03;
-    } else if (strcasecmp(material_model, "PJLiqV8") == 0 ||
-               strcasecmp(material_model, "PJ-Liq-V8") == 0 ||
-               strcasecmp(material_model, "PJ_Liq_V8") == 0) {
-        materialmodel = PJ_LIQ_V8;
-    } else if (strcasecmp(material_model, "PJLiqV8Custom") == 0 ||
-               strcasecmp(material_model, "PJ-Liq-V8-Custom") == 0 ||
-               strcasecmp(material_model, "PJ_Liq_V8_Custom") == 0) {
-        materialmodel = PJ_LIQ_V8_CUSTOM;
+    } else if (strcasecmp(material_model, "RIVASand") == 0 ||
+               strcasecmp(material_model, "RIVA-Sand") == 0) {
+        materialmodel = RIVA_SAND;
+    } else if (strcasecmp(material_model, "RIVASandCustom") == 0 ||
+               strcasecmp(material_model, "RIVA-Sand-Custom") == 0) {
+        materialmodel = RIVA_SAND_CUSTOM;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, PJLiqV8, PJLiqV8Custom): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, RIVASand, RIVASandCustom): %s\n", material_model);
         return -1;
     }
 
@@ -1147,16 +1145,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
     if ((materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         MATERIAL_MODEL_IS_PJ_LIQ_V8(materialmodel)) &&
+         MATERIAL_MODEL_IS_RIVA_SAND(materialmodel)) &&
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
                 "%s warning: no approximate or "
                 "ramped geostatic initialization was selected. The "
                 "constitutive initialization therefore lacks a physical "
                 "in-situ effective-stress state.\n",
-                MATERIAL_MODEL_IS_PJ_LIQ_V8(materialmodel) ?
-                    (materialmodel == PJ_LIQ_V8_CUSTOM ?
-                        "PJLiqV8Custom" : "PJLiqV8") :
+                MATERIAL_MODEL_IS_RIVA_SAND(materialmodel) ?
+                    (materialmodel == RIVA_SAND_CUSTOM ?
+                        "RIVASandCustom" : "RIVASand") :
                     "PressureDependMultiYield03");
     }
 
@@ -1200,8 +1198,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     const int property_columns =
         (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
         (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 :
-        (theMaterialModel == PJ_LIQ_V8_CUSTOM) ? 12 :
-        (theMaterialModel == PJ_LIQ_V8) ? 2 : 16;
+        (theMaterialModel == RIVA_SAND_CUSTOM) ? 12 :
+        (theMaterialModel == RIVA_SAND) ? 2 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1216,11 +1214,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
-    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
-        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
-            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (int field = 0; field < fields; field++)
-            thePj8Properties[field] = (double*)malloc(
+            theRivaProperties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
     } else {
     theAlphaCohes        = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1262,11 +1260,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     auxiliar[row * property_columns + field + 1];
             }
             continue;
-        } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
-            const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
-                ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+            const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+                ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
             for (int field = 0; field < fields; field++)
-                thePj8Properties[field][row] =
+                theRivaProperties[field][row] =
                     auxiliar[row * property_columns + field + 1];
             continue;
         }
@@ -1361,52 +1359,52 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 return -1;
             }
         }
-    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
         double minimum_relative_density = 1.0;
         double maximum_relative_density = 0.0;
         for (row = 1; row < thePropertiesCount; row++) {
             if (theVsLimits[row] <= theVsLimits[row-1]) {
                 fprintf(stderr,
                         "%s Vs limits must be strictly increasing\n",
-                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                            "PJLiqV8Custom" : "PJLiqV8");
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand");
                 return -1;
             }
         }
-        const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
-        const int fields = theMaterialModel == PJ_LIQ_V8_CUSTOM
-            ? PJ8_CUSTOM_PROPERTY_COUNT : 1;
+        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+        const int fields = theMaterialModel == RIVA_SAND_CUSTOM
+            ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (row = 0; row < thePropertiesCount; row++) {
             for (int field = 0; field < fields; field++) {
-                if (!isfinite(thePj8Properties[field][row])) {
+                if (!isfinite(theRivaProperties[field][row])) {
                     fprintf(stderr,
                             "Illegal %s row %d: all parameters must be "
                             "finite\n",
-                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                                "PJLiqV8Custom" : "PJLiqV8", row);
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand", row);
                     return -1;
                 }
             }
             const double relative_density =
-                thePj8Properties[PJ8_PROPERTY_DR][row];
+                theRivaProperties[RIVA_PROPERTY_DR][row];
             if (!isfinite(relative_density) || relative_density < 0.0 ||
                 relative_density > 1.0) {
                 fprintf(stderr,
                         "Illegal %s row %d: relative density must be finite "
                         "and in the dimensionless range [0, 1]\n",
-                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                            "PJLiqV8Custom" : "PJLiqV8", row);
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand", row);
                 return -1;
             }
-            const pj8_material_parameters_t material = pj8_material_at_row(row);
-            if (!pj8_material_parameters_valid(&reference, &material)) {
+            const riva_material_parameters_t material = riva_material_at_row(row);
+            if (!riva_material_parameters_valid(&reference, &material)) {
                 fprintf(stderr,
                         "Illegal %s row %d: require h>0, m>=0, M>0, kd>0, "
                         "zeta>=0, e_max>e_min>=0 containing the frozen "
                         "shakedown anchor e=%.3f, Q>0, R>=0, and "
                         "0<=n_G<=1\n",
-                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                            "PJLiqV8Custom" : "PJLiqV8", row,
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVASandCustom" : "RIVASand", row,
                         reference.state_shakedown_reference_void_ratio);
                 return -1;
             }
@@ -1415,17 +1413,17 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             maximum_relative_density = MAX(maximum_relative_density,
                                            relative_density);
         }
-        if (theMaterialModel == PJ_LIQ_V8_CUSTOM) {
+        if (theMaterialModel == RIVA_SAND_CUSTOM) {
             fprintf(stderr,
-                    "PJLiqV8Custom property input: Dr in [%g, %g]; "
+                    "RIVASandCustom property input: Dr in [%g, %g]; "
                     "M, kd, h, m, zeta, e_max, e_min, Q, R, and n_G are "
-                    "interpolated by Vs; all other V8 controls retain "
+                    "interpolated by Vs; all other RIVA-Sand controls retain "
                     "frozen calibration %s\n",
                     minimum_relative_density, maximum_relative_density,
-                    PJ8_PARAMETER_SHA256);
+                    RIVA_PARAMETER_SHA256);
         } else {
             fprintf(stderr,
-                    "PJLiqV8 property input: relative density Dr in [%g, %g]; "
+                    "RIVASand property input: relative density Dr in [%g, %g]; "
                     "internal e0 uses frozen e_max=%g and e_min=%g\n",
                     minimum_relative_density, maximum_relative_density,
                     reference.e_max, reference.e_min);
@@ -1724,7 +1722,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
          theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) &&
+         MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
@@ -1735,8 +1733,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         ? "ManzariDafalias" :
                     theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03
                         ? "PressureDependMultiYield03" :
-                    theMaterialModel == PJ_LIQ_V8_CUSTOM
-                        ? "PJLiqV8Custom" : "PJLiqV8");
+                    theMaterialModel == RIVA_SAND_CUSTOM
+                        ? "RIVASandCustom" : "RIVASand");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1852,16 +1850,16 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         (long long)global_poro_map_counts[
                             POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
             }
-            if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) && active > 0) {
+            if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) && active > 0) {
                 fprintf(stderr,
-                        "%s/BrickUP coupling: V8 evolves effective "
+                        "%s/BrickUP coupling: RIVA-Sand evolves effective "
                         "skeleton stress (including plastic volumetric "
                         "compatibility); BrickUP independently solves fluid "
                         "mass balance and applies sigma=sigma'-alpha*p*I for "
-                        "%lld active nonlinear elements. V8 effective-pressure "
+                        "%lld active nonlinear elements. RIVA-Sand effective-pressure "
                         "loss is not copied into the pressure DOF.\n",
-                        theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                            "PJ-Liq V8 Custom" : "PJ-Liq V8",
+                        theMaterialModel == RIVA_SAND_CUSTOM ?
+                            "RIVA-Sand Custom" : "RIVA-Sand",
                         (long long)active);
             }
         }
@@ -1900,22 +1898,22 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 (size_t)myNonlinElementsCount,
                 sizeof(pdmy03_constants_t));
     }
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
+    if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
         myNonlinElementsCount > 0) {
         const size_t material_count =
-            theMaterialModel == PJ_LIQ_V8_CUSTOM
+            theMaterialModel == RIVA_SAND_CUSTOM
                 ? (size_t)myNonlinElementsCount : 1u;
-        myNonlinSolver->pj8_materials =
-            (pj8_material_parameters_t *)calloc(
-                material_count, sizeof(pj8_material_parameters_t));
-        myNonlinSolver->pj8_void_ratios =
+        myNonlinSolver->riva_materials =
+            (riva_material_parameters_t *)calloc(
+                material_count, sizeof(riva_material_parameters_t));
+        myNonlinSolver->riva_void_ratios =
             (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
-        if (theMaterialModel == PJ_LIQ_V8 &&
-            myNonlinSolver->pj8_materials != NULL) {
-            const pj8_parameters_t reference =
-                pj8_reference_parameters(1000.0);
-            myNonlinSolver->pj8_materials[0] =
-                pj8_reference_material_parameters(&reference);
+        if (theMaterialModel == RIVA_SAND &&
+            myNonlinSolver->riva_materials != NULL) {
+            const riva_parameters_t reference =
+                riva_reference_parameters(1000.0);
+            myNonlinSolver->riva_materials[0] =
+                riva_reference_material_parameters(&reference);
         }
     }
     myNonlinSolver->stresses =
@@ -1966,10 +1964,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
          (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
           myNonlinElementsCount > 0 &&
           myNonlinSolver->pdmy03_materials    == NULL) ||
-         (MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel) &&
+         (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
           myNonlinElementsCount > 0 &&
-          (myNonlinSolver->pj8_materials      == NULL ||
-           myNonlinSolver->pj8_void_ratios    == NULL)) ||
+          (myNonlinSolver->riva_materials      == NULL ||
+           myNonlinSolver->riva_void_ratios    == NULL)) ||
          (myNonlinSolver->stresses            == NULL) ||
          (myNonlinSolver->strains             == NULL) ||
          (myNonlinSolver->strains1            == NULL) ||
@@ -2444,47 +2442,47 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 break;
             }
 
-            case PJ_LIQ_V8:
-            case PJ_LIQ_V8_CUSTOM: {
-                const pj8_parameters_t reference =
-                    pj8_reference_parameters(1000.0);
+            case RIVA_SAND:
+            case RIVA_SAND_CUSTOM: {
+                const riva_parameters_t reference =
+                    riva_reference_parameters(1000.0);
                 const size_t material_index =
-                    theMaterialModel == PJ_LIQ_V8_CUSTOM
+                    theMaterialModel == RIVA_SAND_CUSTOM
                         ? (size_t)nl_eindex : 0u;
-                pj8_material_parameters_t *pj8_material =
-                    myNonlinSolver->pj8_materials+material_index;
+                riva_material_parameters_t *riva_material =
+                    myNonlinSolver->riva_materials+material_index;
                 const double relative_density = interpolate_property_value(
-                    elementVs, thePj8Properties[PJ8_PROPERTY_DR]);
+                    elementVs, theRivaProperties[RIVA_PROPERTY_DR]);
                 if (!isfinite(relative_density) || relative_density < 0.0 ||
                     relative_density > 1.0) {
                     fprintf(stderr,
                             "Thread %d: %s element %d has invalid "
                             "interpolated relative density %g\n",
                             myID,
-                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                                "PJLiqV8Custom" : "PJLiqV8",
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand",
                             eindex, relative_density);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
-                if (theMaterialModel == PJ_LIQ_V8_CUSTOM)
-                    *pj8_material = pj8_material_at_vs(elementVs);
-                if (!pj8_material_parameters_valid(
-                        &reference, pj8_material)) {
+                if (theMaterialModel == RIVA_SAND_CUSTOM)
+                    *riva_material = riva_material_at_vs(elementVs);
+                if (!riva_material_parameters_valid(
+                        &reference, riva_material)) {
                     fprintf(stderr,
                             "Thread %d: %s element %d has invalid "
                             "interpolated material parameters\n",
                             myID,
-                            theMaterialModel == PJ_LIQ_V8_CUSTOM ?
-                                "PJLiqV8Custom" : "PJLiqV8", eindex);
+                            theMaterialModel == RIVA_SAND_CUSTOM ?
+                                "RIVASandCustom" : "RIVASand", eindex);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
-                myNonlinSolver->pj8_void_ratios[nl_eindex] =
-                    pj8_void_ratio_from_material_relative_density(
-                        pj8_material, relative_density);
-                double sin_phi = 3.0*pj8_material->M/
-                    (6.0+pj8_material->M);
+                myNonlinSolver->riva_void_ratios[nl_eindex] =
+                    riva_void_ratio_from_material_relative_density(
+                        riva_material, relative_density);
+                double sin_phi = 3.0*riva_material->M/
+                    (6.0+riva_material->M);
                 sin_phi = MIN(MAX(sin_phi, 0.0), 0.999999);
                 ecp->phi = asin(sin_phi);
                 break;
@@ -2509,7 +2507,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
         if (theMaterialModel == MANZARI_DAFALIAS ||
             theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-            MATERIAL_MODEL_IS_PJ_LIQ_V8(theMaterialModel)) {
+            MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
@@ -5546,9 +5544,9 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_CONSTANT_COUNT 24
 #define MATERIAL_POINT_MD_CONSTANT_COUNT 17
 #define MATERIAL_POINT_PDMY03_CONSTANT_COUNT 21
-#define MATERIAL_POINT_PJ8_CONSTANT_COUNT 1
-#define MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT 11
-#define MATERIAL_POINT_PJ8_STATE_VALUE_COUNT 93
+#define MATERIAL_POINT_RIVA_CONSTANT_COUNT 1
+#define MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT 11
+#define MATERIAL_POINT_RIVA_STATE_VALUE_COUNT 93
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
@@ -5599,14 +5597,12 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "PressureDependMultiYield03") == 0 ||
              strcasecmp(name, "PDMY03") == 0)
         *model = PRESSURE_DEPEND_MULTIYIELD_03;
-    else if (strcasecmp(name, "PJLiqV8") == 0 ||
-             strcasecmp(name, "PJ-Liq-V8") == 0 ||
-             strcasecmp(name, "PJ_Liq_V8") == 0)
-        *model = PJ_LIQ_V8;
-    else if (strcasecmp(name, "PJLiqV8Custom") == 0 ||
-             strcasecmp(name, "PJ-Liq-V8-Custom") == 0 ||
-             strcasecmp(name, "PJ_Liq_V8_Custom") == 0)
-        *model = PJ_LIQ_V8_CUSTOM;
+    else if (strcasecmp(name, "RIVASand") == 0 ||
+             strcasecmp(name, "RIVA-Sand") == 0)
+        *model = RIVA_SAND;
+    else if (strcasecmp(name, "RIVASandCustom") == 0 ||
+             strcasecmp(name, "RIVA-Sand-Custom") == 0)
+        *model = RIVA_SAND_CUSTOM;
     else return -1;
     return 0;
 }
@@ -5616,35 +5612,35 @@ static void material_point_load_constants(nlconstants_t *constants,
                                               md_material,
                                           pdmy03_constants_t *
                                               pdmy03_material,
-                                          pj8_material_parameters_t *
-                                              pj8_material,
-                                          double *pj8_void_ratio,
+                                          riva_material_parameters_t *
+                                              riva_material,
+                                          double *riva_void_ratio,
                                           materialmodel_t model,
                                           const double values[24])
 {
     memset(constants, 0, sizeof(*constants));
     memset(md_material, 0, sizeof(*md_material));
     memset(pdmy03_material, 0, sizeof(*pdmy03_material));
-    memset(pj8_material, 0, sizeof(*pj8_material));
-    *pj8_void_ratio = 0.0;
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
-        const pj8_parameters_t reference = pj8_reference_parameters(1000.0);
-        *pj8_material = pj8_reference_material_parameters(&reference);
-        if (model == PJ_LIQ_V8_CUSTOM) {
-            pj8_material->M = values[1];
-            pj8_material->kd = values[2];
-            pj8_material->h = values[3];
-            pj8_material->m = values[4];
-            pj8_material->zeta = values[5];
-            pj8_material->e_max = values[6];
-            pj8_material->e_min = values[7];
-            pj8_material->Q = values[8];
-            pj8_material->R = values[9];
-            pj8_material->n_G = values[10];
+    memset(riva_material, 0, sizeof(*riva_material));
+    *riva_void_ratio = 0.0;
+    if (MATERIAL_MODEL_IS_RIVA_SAND(model)) {
+        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+        *riva_material = riva_reference_material_parameters(&reference);
+        if (model == RIVA_SAND_CUSTOM) {
+            riva_material->M = values[1];
+            riva_material->kd = values[2];
+            riva_material->h = values[3];
+            riva_material->m = values[4];
+            riva_material->zeta = values[5];
+            riva_material->e_max = values[6];
+            riva_material->e_min = values[7];
+            riva_material->Q = values[8];
+            riva_material->R = values[9];
+            riva_material->n_G = values[10];
         }
-        *pj8_void_ratio =
-            pj8_void_ratio_from_material_relative_density(
-                pj8_material, values[0]);
+        *riva_void_ratio =
+            riva_void_ratio_from_material_relative_density(
+                riva_material, values[0]);
         return;
     }
     if (model == MANZARI_DAFALIAS) {
@@ -5713,8 +5709,8 @@ static int material_point_cpu_history(
     const nlconstants_t *constants,
     const manzari_dafalias_constants_t *md_material,
     const pdmy03_constants_t *pdmy03_material,
-    const pj8_material_parameters_t *pj8_material,
-    double pj8_void_ratio,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
     const nonlinear_gpu_config_t *config,
     const nonlinear_material_point_initial_state_t *initial_state,
     const tensor_t *strain_history,
@@ -5734,10 +5730,10 @@ static int material_point_cpu_history(
             pdmy03_material, config, initial_state, strain_history, steps,
             results);
     }
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(config->material_model)) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model)) {
         (void)dt;
-        return nonlinear_pj8_host_history(
-            constants, pj8_material, pj8_void_ratio, config, initial_state,
+        return nonlinear_riva_host_history(
+            constants, riva_material, riva_void_ratio, config, initial_state,
             strain_history, steps, results);
     }
     tensor_t strain_prev = zero_tensor();
@@ -5934,22 +5930,22 @@ static int material_point_validate_zero_increment(
                 current->model_error);
         return -1;
     }
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(model)) {
-        for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
-            if (current->pj8_state_values[i] !=
-                    previous->pj8_state_values[i]) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND(model)) {
+        for (int i = 0; i < MATERIAL_POINT_RIVA_STATE_VALUE_COUNT; i++) {
+            if (current->riva_state_values[i] !=
+                    previous->riva_state_values[i]) {
                 fprintf(stderr,
-                        "%s PJ-Liq V8 state changed on a zero strain "
+                        "%s RIVA-Sand state changed on a zero strain "
                         "increment at step %d flattened field %d: "
                         "previous=%.17e current=%.17e\n",
-                        backend, step, i, previous->pj8_state_values[i],
-                        current->pj8_state_values[i]);
+                        backend, step, i, previous->riva_state_values[i],
+                        current->riva_state_values[i]);
                 return -1;
             }
         }
-        if (current->pj8_reversal_registered != 0) {
+        if (current->riva_reversal_registered != 0) {
             fprintf(stderr,
-                    "%s PJ-Liq V8 registered a reversal on a zero strain "
+                    "%s RIVA-Sand registered a reversal on a zero strain "
                     "increment at step %d\n", backend, step);
             return -1;
         }
@@ -6089,8 +6085,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     nlconstants_t constants;
     manzari_dafalias_constants_t md_material;
     pdmy03_constants_t pdmy03_material;
-    pj8_material_parameters_t pj8_material;
-    double pj8_void_ratio = 0.0;
+    riva_material_parameters_t riva_material;
+    double riva_void_ratio = 0.0;
     nonlinear_gpu_config_t config;
     nonlinear_material_point_initial_state_t initial_state;
     double maximum_absolute = 0.0;
@@ -6190,10 +6186,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         ? MATERIAL_POINT_MD_CONSTANT_COUNT :
         (material_model == PRESSURE_DEPEND_MULTIYIELD_03)
         ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
-        (material_model == PJ_LIQ_V8_CUSTOM)
-        ? MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT :
-        (material_model == PJ_LIQ_V8)
-        ? MATERIAL_POINT_PJ8_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
+        (material_model == RIVA_SAND_CUSTOM)
+        ? MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT :
+        (material_model == RIVA_SAND)
+        ? MATERIAL_POINT_RIVA_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
         fprintf(stderr, "Cannot read %d material-point constants for %s\n",
@@ -6218,10 +6214,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     }
     if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
         material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-        !MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
+        !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
         fprintf(stderr, "A material-point initial state currently requires "
                         "ManzariDafalias, PressureDependMultiYield03, or "
-                        "PJLiqV8\n");
+                        "RIVASand\n");
         goto cleanup;
     }
     if (strcasecmp(tension_name, "yes") == 0) tension_cutoff = YES;
@@ -6250,10 +6246,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                   &brickup_solid_bulk_modulus);
         if (material_model != MANZARI_DAFALIAS &&
             material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-            !MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
+            !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
                             "requires ManzariDafalias, "
-                            "PressureDependMultiYield03, or PJLiqV8\n");
+                            "PressureDependMultiYield03, or RIVASand\n");
             goto cleanup;
         }
         if (!(brickup_porosity > 0.0 && brickup_porosity <= 1.0) ||
@@ -6356,45 +6352,45 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
     }
-    if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
         if (!isfinite(constants_values[0]) ||
             constants_values[0] < 0.0 || constants_values[0] > 1.0) {
             fprintf(stderr,
-                    "Illegal PJLiqV8 material-point relative density: "
+                    "Illegal RIVASand material-point relative density: "
                     "expected a dimensionless value in [0, 1]\n");
             goto cleanup;
         }
-        if (material_model == PJ_LIQ_V8_CUSTOM) {
-            const pj8_parameters_t reference =
-                pj8_reference_parameters(1000.0);
+        if (material_model == RIVA_SAND_CUSTOM) {
+            const riva_parameters_t reference =
+                riva_reference_parameters(1000.0);
             nlconstants_t candidate = {};
             manzari_dafalias_constants_t candidate_md = {};
             pdmy03_constants_t candidate_pdmy03 = {};
-            pj8_material_parameters_t candidate_material = {};
+            riva_material_parameters_t candidate_material = {};
             double candidate_void_ratio = 0.0;
             material_point_load_constants(
                 &candidate, &candidate_md, &candidate_pdmy03,
                 &candidate_material, &candidate_void_ratio, material_model,
                 constants_values);
-            for (int i = 0; i < MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT;
+            for (int i = 0; i < MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT;
                  i++) {
                 if (!isfinite(constants_values[i])) {
                     fprintf(stderr,
-                            "Illegal PJLiqV8Custom material-point constants: "
+                            "Illegal RIVASandCustom material-point constants: "
                             "all values must be finite\n");
                     goto cleanup;
                 }
             }
-            if (!pj8_material_parameters_valid(
+            if (!riva_material_parameters_valid(
                     &reference, &candidate_material)) {
                 fprintf(stderr,
-                        "Illegal PJLiqV8Custom material-point constants\n");
+                        "Illegal RIVASandCustom material-point constants\n");
                 goto cleanup;
             }
         }
         if (initial_array_count != 5) {
             fprintf(stderr,
-                    "PJLiqV8 material-point input requires equilibrated "
+                    "RIVASand material-point input requires equilibrated "
                     "initial strain and effective stress; alpha, alpha_in, "
                     "and fabric entries may be zero placeholders\n");
             goto cleanup;
@@ -6473,8 +6469,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     }
 
     material_point_load_constants(
-        &constants, &md_material, &pdmy03_material, &pj8_material,
-        &pj8_void_ratio, material_model, constants_values);
+        &constants, &md_material, &pdmy03_material, &riva_material,
+        &riva_void_ratio, material_model, constants_values);
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;
@@ -6489,12 +6485,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     snprintf(cpu_path, sizeof(cpu_path), "%s.cpu.csv", output_prefix);
     snprintf(gpu_path, sizeof(gpu_path), "%s.gpu.csv", output_prefix);
     if (material_point_cpu_history(
-            &constants, &md_material, &pdmy03_material, &pj8_material,
-            pj8_void_ratio, &config, &initial_state, strain_history, steps,
+            &constants, &md_material, &pdmy03_material, &riva_material,
+            riva_void_ratio, &config, &initial_state, strain_history, steps,
             dt, cpu_results) != 0) goto cleanup;
     if (nonlinear_gpu_material_point_history(
-            &constants, &md_material, &pdmy03_material, &pj8_material,
-            pj8_void_ratio, &config, &initial_state, strain_history, steps,
+            &constants, &md_material, &pdmy03_material, &riva_material,
+            riva_void_ratio, &config, &initial_state, strain_history, steps,
             gpu_results) != 0) {
         goto cleanup;
     }
@@ -6581,7 +6577,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
              material_model == MANZARI_DAFALIAS ||
              material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
-             MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) && step > 0 &&
+             MATERIAL_MODEL_IS_RIVA_SAND(material_model)) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -6759,12 +6755,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 goto cleanup;
             }
         }
-        if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
-            for (int i = 0; i < MATERIAL_POINT_PJ8_STATE_VALUE_COUNT; i++) {
+        if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+            for (int i = 0; i < MATERIAL_POINT_RIVA_STATE_VALUE_COUNT; i++) {
                 const double cpu_state =
-                    cpu_results[step].pj8_state_values[i];
+                    cpu_results[step].riva_state_values[i];
                 const double gpu_state =
-                    gpu_results[step].pj8_state_values[i];
+                    gpu_results[step].riva_state_values[i];
                 const double absolute = fabs(cpu_state-gpu_state);
                 const double scale = MAX(fabs(cpu_state), fabs(gpu_state));
                 maximum_absolute = MAX(maximum_absolute, absolute);
@@ -6774,7 +6770,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                 if (!isfinite(cpu_state) || !isfinite(gpu_state) ||
                     (absolute > atol && absolute > rtol*scale)) {
                     fprintf(stderr,
-                            "PJLiqV8 full-state mismatch at step %d "
+                            "RIVASand full-state mismatch at step %d "
                             "flattened field %d: CPU=%.17e GPU=%.17e "
                             "abs=%.3e\n", step, i, cpu_state,
                             gpu_state, absolute);
@@ -6879,12 +6875,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
-    } else if (MATERIAL_MODEL_IS_PJ_LIQ_V8(material_model)) {
-        printf("PJ-Liq V8 controls: %s, frozen internal controls %s, %d "
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+        printf("RIVA-Sand controls: %s, frozen internal controls %s, %d "
                "fixed substep%s per host increment\n",
-               material_model == PJ_LIQ_V8_CUSTOM ?
+               material_model == RIVA_SAND_CUSTOM ?
                    "custom material properties" : "frozen material properties",
-               PJ8_PARAMETER_SHA256, no_substeps,
+               RIVA_PARAMETER_SHA256, no_substeps,
                no_substeps == 1 ? "" : "s");
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "
@@ -6921,9 +6917,9 @@ cleanup:
 #undef MATERIAL_POINT_CONSTANT_COUNT
 #undef MATERIAL_POINT_MD_CONSTANT_COUNT
 #undef MATERIAL_POINT_PDMY03_CONSTANT_COUNT
-#undef MATERIAL_POINT_PJ8_CONSTANT_COUNT
-#undef MATERIAL_POINT_PJ8_CUSTOM_CONSTANT_COUNT
-#undef MATERIAL_POINT_PJ8_STATE_VALUE_COUNT
+#undef MATERIAL_POINT_RIVA_CONSTANT_COUNT
+#undef MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT
+#undef MATERIAL_POINT_RIVA_STATE_VALUE_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
 #undef MATERIAL_POINT_PSI_INDEX
