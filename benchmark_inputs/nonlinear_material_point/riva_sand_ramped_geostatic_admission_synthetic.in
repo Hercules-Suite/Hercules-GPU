@@ -1,0 +1,44 @@
+# RIVA-Sand compressive over-bound geostatic-admission host/CUDA regression.
+material_model = RIVASand
+material_point_delta_time_sec = 1.0e-3
+material_point_steps = 9
+no_substeps = 4
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-5
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-9
+material_point_compare_atol = 1.0e-8
+material_point_output_prefix = riva_sand_ramped_geostatic_admission_synthetic
+
+# Dr=0.66296296296296309 gives the frozen internal e0=0.601.
+material_point_constants =
+  0.66296296296296309
+
+# This all-compressive stress represents a numerically solved ramped-gravity
+# state. Its low K0 places alpha outside the calibrated bounding cone. The
+# common host/device initialization must preserve this balanced stress,
+# recenter alpha0/alpha01, and prevent normalized deviatoric stress from
+# expanding farther away from the cone during the first nonlinear increments.
+material_point_initial_strain =
+  0 0 0 0 0 0
+material_point_initial_stress =
+  -2.0e3 -2.0e3 -4.0e4 0 0 0
+material_point_initial_alpha =
+  0 0 0 0 0 0
+material_point_initial_alpha_in =
+  0 0 0 0 0 0
+material_point_initial_fabric =
+  0 0 0 0 0 0
+
+# Physical tensor shear components. Row zero verifies exact stress admission;
+# the following small cycle exercises the non-expansive radial rule.
+material_point_strain_history =
+  0 0 0  0.0e+0 0 0
+  0 0 0  5.0e-5 0 0
+  0 0 0  1.0e-4 0 0
+  0 0 0  5.0e-5 0 0
+  0 0 0  0.0e+0 0 0
+  0 0 0 -5.0e-5 0 0
+  0 0 0 -1.0e-4 0 0
+  0 0 0 -5.0e-5 0 0
+  0 0 0  0.0e+0 0 0

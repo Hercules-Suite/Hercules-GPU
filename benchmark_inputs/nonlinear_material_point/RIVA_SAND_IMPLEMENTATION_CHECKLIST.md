@@ -55,6 +55,17 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   and added a low-but-nonzero static-bias host/CUDA material-point fixture. The
   gate tends continuously to zero and is exactly one throughout the retained
   calibrated range.
+- [x] Added a common compressive geostatic initializer for both approximate-K0
+  and ramped-gravity effective stresses. Admissible states remain unchanged;
+  over-bound states preserve their equilibrated stress, recenter the mapping
+  origins, and use a closed-form non-expansive radial limit with no added
+  iterations or substeps. Noncompressive physical states are rejected.
+- [x] Added an internal residual-cone-pressure control with production default
+  zero. The standalone contract test enables `0.01*p_atm` only to verify the
+  translated cone and the separate physical-pressure admission check.
+- [x] Added an over-bound ramped-geostatic host/CUDA material-point fixture;
+  the existing K0/BrickUP fixture covers the admissible approximate-geostatic
+  path through the same initializer.
 - [x] Added a custom-interface material-point fixture whose reference-valued
   CPU and CUDA histories must exactly reproduce the frozen RIVA-Sand fixture.
 
@@ -69,6 +80,13 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   uninterrupted history.
 - [ ] Run zero-bias, statically biased, and dense wave cases; inspect pressure,
   denominator-floor, beta-fallback, and nonfinite diagnostics.
+- [ ] Run one full `approximate_geostatic_state=yes` RIVA-Sand/BrickUP case and
+  one `approximate_geostatic_state=no` ramped-gravity case on the supported GPU
+  solver; confirm admission flags, first-dynamic-step stress continuity, and
+  finite station histories.
+- [ ] Characterize optional `p_residual=0.01*p_atm` at shallow confinement
+  before exposing or enabling it in production input. The default remains
+  exactly zero.
 - [ ] Characterize the reversible-volume branch at low cyclic amplitude and low
   effective confinement. The contained low-bias gate removes the singularity
   but does not validate or recalibrate those two separate regimes.

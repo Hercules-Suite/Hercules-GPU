@@ -702,6 +702,16 @@ Nonlinear GPU execution (runtime environment):
 	with one and increase it only after a timestep/substep convergence study.
 	`backbone_errTol` and `error_tolerance` remain required by the common
 	nonlinear input block but do not control this fixed explicit update.
+- RIVA-Sand uses one compressive geostatic-admission path for both analytical
+	`approximate_geostatic_state=yes` stresses and the committed stress from a
+	ramped `approximate_geostatic_state=no` solve. An admissible stress is
+	unchanged. An over-bound stress is preserved, its mapping origins are
+	recentered, and a closed-form radial rule prevents its normalized deviatoric
+	stress from moving farther from the bounding cone. This adds no iterations
+	or constitutive substeps. A physical mean effective stress at or below
+	`p_min` is rejected instead of being silently changed at the start of
+	shaking. The internal residual cone-pressure research control remains zero
+	and is not exposed in `parameters.in`.
 - RIVA-Sand rows use two values in `material_properties_list`:
 	`Vs_limit relative_density`. The first and last `Vs_limit` values select
 	the nonlinear interval. Dimensionless relative density is interpolated by Vs
@@ -751,7 +761,9 @@ Nonlinear GPU execution (runtime environment):
 	versioned coupled-state section containing both BrickUP pressure time levels
 	and the complete RIVA-Sand integration-point state, including prior strain/stress.
 	A RIVA-Sand/BrickUP restart rejects a legacy displacement-only checkpoint instead
-	of silently resetting pore pressure or constitutive history.
+	of silently resetting pore pressure or constitutive history. It also requires
+	`RIVA_KERNEL_REVISION=2`, so a checkpoint created before geostatic admission
+	and non-expansive regularization cannot silently resume under new equations.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.

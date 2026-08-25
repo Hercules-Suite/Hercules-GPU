@@ -130,9 +130,10 @@ int main(int argc, char **argv)
     const tensor_t initial_stress = read_tensor(rows.front(), "stress");
     tensor_t reference_stress = initial_stress;
     reference_stress.xy = reference_stress.yz = reference_stress.xz = 0.0;
-    if (!riva_initialize(&parameters, initial_stress,
-                        std::stod(rows.front().at("void_ratio")), &state) ||
-        !riva_begin_dynamic_phase(&parameters, reference_stress, &state)) {
+    if (!riva_initialize_geostatic(
+            &parameters, initial_stress,
+            std::stod(rows.front().at("void_ratio")), reference_stress,
+            &state, nullptr)) {
         std::cerr << "RIVA-Sand initialization failed\n";
         return 1;
     }

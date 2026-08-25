@@ -203,6 +203,13 @@ law uses reference void ratio 0.601, which must remain inside the custom
   the 93 flattened history values. The regularization leaves the original law
   unchanged at and above its onset; it is an equation revision rather than a
   parameter recalibration.
+- `riva_sand_ramped_geostatic_admission_synthetic.in` begins from an
+  all-compressive, over-bound stress representative of a numerical ramped
+  gravity solution. Both host and CUDA paths must preserve that equilibrated
+  tensor, recenter the mapping origins, and prevent normalized deviatoric
+  stress from expanding farther from the cone. The existing
+  `riva_sand_brickup_synthetic.in` supplies the corresponding admissible
+  analytical-K0 initialization case.
 - `riva_sand_custom_equivalence.in` repeats that complete history through
   `RIVASandCustom` using the frozen reference values for all exposed columns.
   `run_suite.sh` requires the custom and frozen CPU CSVs to match exactly and
@@ -218,6 +225,10 @@ revision. RIVA-Sand checkpoints record `RIVA_KERNEL_REVISION` in addition to
 the frozen parameter SHA; a checkpoint written before this marker was added is
 rejected for RIVA-Sand restart instead of silently continuing with changed
 constitutive equations. BrickUP-only checkpoint compatibility is unaffected.
+The same revision also admits compressive over-bound geostatic stresses
+non-expansively. Its internal residual cone pressure remains zero in the
+production factory; a host-only test enables `0.01*p_atm` solely to
+characterize the optional low-confinement translation.
 
 The independent native oracle driver consumes the `deps_*` columns from the
 RIVA-Sand port package without reading any expected response after row zero.

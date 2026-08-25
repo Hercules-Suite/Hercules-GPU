@@ -3244,11 +3244,9 @@ __global__ static void kernel_nonlinear_material_point_history(
     if (MATERIAL_MODEL_IS_RIVA_SAND(config.material_model) && seeded) {
         tensor_t reference = stress;
         reference.xy = reference.yz = reference.xz = 0.0;
-        if (!riva_initialize_material(
+        if (!riva_initialize_geostatic_material(
                 &riva_parameters, &riva_material, stress,
-                riva_void_ratio, &riva_state) ||
-            !riva_begin_dynamic_phase(&riva_parameters, reference,
-                                     &riva_state)) return;
+                riva_void_ratio, reference, &riva_state, 0)) return;
     }
 
     for (int32_t step = 0; step < steps; step++) {
@@ -3683,11 +3681,10 @@ __global__ static void kernel_nonlinear_update_force(
                 zero_static_shear.xy = 0.0;
                 zero_static_shear.yz = 0.0;
                 zero_static_shear.xz = 0.0;
-                ok = riva_initialize_material(
-                         riva_parameters, riva_material, equilibrated,
-                         state.riva_void_ratios[nl_eindex], riva_state) &&
-                     riva_begin_dynamic_phase(riva_parameters,
-                                             zero_static_shear, riva_state);
+                ok = riva_initialize_geostatic_material(
+                    riva_parameters, riva_material, equilibrated,
+                    state.riva_void_ratios[nl_eindex], zero_static_shear,
+                    riva_state, 0);
             } else {
                 ok = 1;
             }
@@ -5000,10 +4997,9 @@ int nonlinear_riva_host_history(
     riva_state_t state = {};
     tensor_t reference = initial_state->stress;
     reference.xy = reference.yz = reference.xz = 0.0;
-    if (!riva_initialize_material(
+    if (!riva_initialize_geostatic_material(
             &parameters, riva_material, initial_state->stress,
-            riva_void_ratio, &state) ||
-        !riva_begin_dynamic_phase(&parameters, reference, &state)) return -1;
+            riva_void_ratio, reference, &state, 0)) return -1;
 
     for (int32_t step = 0; step < steps; step++) {
         riva_update_info_t info = {};
