@@ -2,14 +2,16 @@
  *
  * These checks complement the golden-response replay: they verify that two
  * material points have isolated histories, that a byte-restored checkpoint
- * state reproduces uninterrupted integration, and that the coupled BrickUP
- * split satisfies sealed fluid mass balance before pressure is combined with
- * the effective skeleton stress exactly once.
+ * state reproduces uninterrupted integration, that the low-static-bias
+ * reversible-volume response is bounded, and that the coupled BrickUP split
+ * satisfies sealed fluid mass balance before pressure is combined with the
+ * effective skeleton stress exactly once.
  */
 #define RIVA_STANDALONE
 #include "../../quake/forward/nonlinear_riva_sand.h"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -86,6 +88,31 @@ static bool advance_material(const riva_parameters_t &parameters,
            riva_finite_tensor(stress);
 }
 
+static double reversible_bias_target(const riva_parameters_t &parameters,
+                                     double projected_bias)
+{
+    riva_state_t state = {};
+    state.cyclic_phase_active = 1;
+    state.amplitude_reversals = 6;
+    state.cyclic_direction.xy = 1.0;
+    const double direction_norm = riva_norm(state.cyclic_direction);
+    state.static_bias_tensor = riva_scale(
+        state.cyclic_direction, projected_bias/direction_norm);
+    state.pressure_anchor = parameters.bias_reversible_mean_transition_pressure;
+    state.cyclic_amplitude = 0.40;
+    state.geostatic_deviator = riva_zero();
+
+    const tensor_t phase_direction =
+        riva_scale(state.cyclic_direction, 1.0/direction_norm);
+    const tensor_t static_deviator =
+        riva_scale(state.static_bias_tensor, state.pressure_anchor);
+    const tensor_t dynamic_deviator = riva_scale(
+        phase_direction, state.pressure_anchor*state.cyclic_amplitude);
+    state.stress = riva_sub(riva_add(static_deviator, dynamic_deviator),
+                            riva_iso(state.pressure_anchor));
+    return riva_bias_reversible_volume_target(&parameters, &state);
+}
+
 int main()
 {
     const riva_parameters_t parameters = riva_reference_parameters(1.0);
@@ -109,6 +136,50 @@ int main()
     if (riva_void_ratio_from_material_relative_density(
             &reference_material, relative_density_0601) != 0.601) {
         std::cerr << "RIVA-Sand custom relative-density conversion failed\n";
+        return 1;
+    }
+
+    /* The inverse-bias reversible-volume law must remain unchanged in its
+     * calibrated range while remaining bounded and vanishing as bias tends
+     * to zero.  This is shared host/device code, so the host contract test
+     * also guards the CUDA implementation against the singular expression. */
+    const double bias_onset =
+        0.25*parameters.bias_reversible_volume_reference_bias;
+    const double onset_target =
+        reversible_bias_target(parameters, bias_onset);
+    const double above_bias = 1.5*bias_onset;
+    const double above_target =
+        reversible_bias_target(parameters, above_bias);
+    const double pressure_factor = std::pow(
+        parameters.bias_reversible_mean_transition_pressure/
+            parameters.bias_reference_pressure,
+        parameters.bias_reversible_volume_pressure_exponent);
+    const double buildup = 1.0-std::exp(
+        -6.0/parameters.bias_reversible_volume_buildup_reversals);
+    const auto unregularized_target = [&](double bias) {
+        return -parameters.bias_reversible_volume_amplitude*std::pow(
+            parameters.bias_reversible_volume_reference_bias/bias,
+            parameters.bias_reversible_volume_bias_exponent)*
+            pressure_factor*buildup;
+    };
+    const double low_target =
+        reversible_bias_target(parameters, 1.0e-3*bias_onset);
+    const double expected_onset = unregularized_target(bias_onset);
+    const double expected_above = unregularized_target(above_bias);
+    if (!std::isfinite(onset_target) || !std::isfinite(above_target) ||
+        !std::isfinite(low_target) ||
+        std::fabs(onset_target-expected_onset) >
+            1.0e-12*std::fabs(expected_onset) ||
+        std::fabs(above_target-expected_above) >
+            1.0e-12*std::fabs(expected_above) ||
+        std::fabs(low_target) >= 1.0e-6*std::fabs(onset_target) ||
+        reversible_bias_target(parameters, 0.0) != 0.0) {
+        std::cerr << "RIVA-Sand low-static-bias regularization failed: "
+                  << "onset=" << onset_target
+                  << " expected_onset=" << expected_onset
+                  << " above=" << above_target
+                  << " expected_above=" << expected_above
+                  << " low=" << low_target << "\n";
         return 1;
     }
     const std::array<tensor_t, 8> path = {{
@@ -223,7 +294,8 @@ int main()
     }
 
     std::cout << "PASS: RIVA-Sand frozen/custom equivalence, zeta exposure, "
-                 "state isolation, restart, zero-increment, and BrickUP "
-                 "mass-balance/stress-split checks\n";
+                 "low-bias regularization, state isolation, restart, "
+                 "zero-increment, and BrickUP mass-balance/stress-split "
+                 "checks\n";
     return 0;
 }

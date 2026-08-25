@@ -5053,9 +5053,13 @@ typedef struct nonlinear_checkpoint_header_t {
     uint32_t rank_count;
     uint32_t riva_state_bytes;
     uint64_t data_bytes;
+    uint32_t riva_kernel_revision;
     char riva_parameter_sha256[65];
-    char reserved[7];
+    char reserved[3];
 } nonlinear_checkpoint_header_t;
+
+static_assert(sizeof(nonlinear_checkpoint_header_t) == 104,
+              "nonlinear checkpoint extension header layout changed");
 
 static const char g_nonlinear_checkpoint_magic[8] = {
     'H', 'N', 'L', 'V', '8', 'C', 'P', '\0'
@@ -5169,9 +5173,11 @@ int nonlinear_gpu_checkpoint_write(
     header.flags = local_flags;
     header.rank_count = (uint32_t)group_size;
     header.riva_state_bytes = (uint32_t)sizeof(riva_state_t);
-    if ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0)
+    if ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
+        header.riva_kernel_revision = RIVA_KERNEL_REVISION;
         memcpy(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256,
                sizeof(RIVA_PARAMETER_SHA256));
+    }
     for (int rank = 0; rank < group_size; rank++)
         header.data_bytes += nonlinear_checkpoint_rank_bytes(
             local_flags, counts[rank], counts[group_size+rank]);
@@ -5295,6 +5301,7 @@ int nonlinear_gpu_checkpoint_read(
         header.rank_count != (uint32_t)group_size ||
         ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0 &&
          (header.riva_state_bytes != sizeof(riva_state_t) ||
+          header.riva_kernel_revision != RIVA_KERNEL_REVISION ||
           strcmp(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256) != 0))) {
         if (myID == 0)
             fprintf(stderr,

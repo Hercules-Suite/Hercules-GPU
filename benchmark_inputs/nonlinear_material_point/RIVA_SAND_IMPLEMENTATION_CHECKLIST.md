@@ -38,6 +38,10 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
 - [x] Added versioned checkpoint fields for prior strain/stress, complete RIVA-Sand
   history, and both BrickUP pressure time levels. Legacy displacement-only
   checkpoints are rejected for RIVA-Sand/BrickUP restarts instead of resetting state.
+  The extension also records `RIVA_KERNEL_REVISION` separately from the frozen
+  parameter SHA, so a pre-revision RIVA-Sand checkpoint cannot silently resume
+  under changed constitutive equations; BrickUP-only checkpoint compatibility
+  is unchanged.
 - [x] Kept Python out of the production executable.
 - [x] Implemented the BrickUP effective-stress split. RIVA-Sand supplies effective
   skeleton stress; BrickUP independently solves
@@ -46,6 +50,11 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   diagnostic is never injected into `p_f`.
 - [x] Added a prescribed-strain RIVA-Sand/BrickUP regression that compares all 93
   host/CUDA state values and invokes the production uniform pressure kernels.
+- [x] Bounded the inverse-square reversible-volume law below one quarter of its
+  reference projected bias, synchronized the Python oracle and formulation,
+  and added a low-but-nonzero static-bias host/CUDA material-point fixture. The
+  gate tends continuously to zero and is exactly one throughout the retained
+  calibrated range.
 - [x] Added a custom-interface material-point fixture whose reference-valued
   CPU and CUDA histories must exactly reproduce the frozen RIVA-Sand fixture.
 
@@ -60,6 +69,9 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   uninterrupted history.
 - [ ] Run zero-bias, statically biased, and dense wave cases; inspect pressure,
   denominator-floor, beta-fallback, and nonfinite diagnostics.
+- [ ] Characterize the reversible-volume branch at low cyclic amplitude and low
+  effective confinement. The contained low-bias gate removes the singularity
+  but does not validate or recalibrate those two separate regimes.
 - [ ] Compare global timestep refinement and `no_substeps=1,2,4`; retain one
   unless subdivision materially changes the response.
 - [ ] Run a stress-controlled coupled BrickUP element characterization with

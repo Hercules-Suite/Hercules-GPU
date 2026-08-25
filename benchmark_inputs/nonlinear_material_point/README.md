@@ -196,12 +196,28 @@ law uses reference void ratio 0.601, which must remain inside the custom
   `d(zeta)=alpha*d(eps_v)+d(p_f)/M=0`, and the CSV combines the two fields
   exactly once as `sigma_total=sigma_effective-alpha*p_f*I`. The reported
   fluid-balance residual directly checks that split.
+- `riva_sand_low_bias_synthetic.in` adds a small nonzero geostatic shear bias,
+  below one quarter of the frozen reference bias, to a reversing tensor-shear
+  history. This makes both the host and CUDA material-point paths execute the
+  bounded low-bias reversible-volume branch while still comparing every one of
+  the 93 flattened history values. The regularization leaves the original law
+  unchanged at and above its onset; it is an equation revision rather than a
+  parameter recalibration.
 - `riva_sand_custom_equivalence.in` repeats that complete history through
   `RIVASandCustom` using the frozen reference values for all exposed columns.
   `run_suite.sh` requires the custom and frozen CPU CSVs to match exactly and
   separately requires their CUDA CSVs to match exactly. This catches parser,
   interpolation, storage, and kernel-wiring errors without claiming that any
   non-reference custom parameter set has been calibrated.
+
+The low-bias gate removes the inverse-bias singularity only. It does not by
+itself validate the reversible-volume branch at arbitrarily small cyclic
+amplitude or low effective confinement. Those regimes require additional
+characterization and, if their equations are changed, a new calibrated model
+revision. RIVA-Sand checkpoints record `RIVA_KERNEL_REVISION` in addition to
+the frozen parameter SHA; a checkpoint written before this marker was added is
+rejected for RIVA-Sand restart instead of silently continuing with changed
+constitutive equations. BrickUP-only checkpoint compatibility is unaffected.
 
 The independent native oracle driver consumes the `deps_*` columns from the
 RIVA-Sand port package without reading any expected response after row zero.
@@ -233,9 +249,10 @@ cross-language oracle tolerances do not replace the tighter host/CUDA
 comparison in the Hercules suite.
 
 The companion host-only contract test checks frozen/custom reference
-equivalence, active `zeta` exposure, per-point state isolation, byte-restored
-restart reproduction, exact zero-increment preservation, sealed BrickUP fluid
-mass balance, and effective-to-total stress assembly:
+equivalence, active `zeta` exposure, bounded low-static-bias reversible-volume
+response, per-point state isolation, byte-restored restart reproduction, exact
+zero-increment preservation, sealed BrickUP fluid mass balance, and
+effective-to-total stress assembly:
 
 ```bash
 c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \

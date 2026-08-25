@@ -5,6 +5,9 @@
 /* Native, allocation-free RIVA-Sand constitutive kernel.
  *
  * Source of truth: rivasand_port/model.py and RIVASAND_FORMULATION.md.
+ * RIVA_KERNEL_REVISION identifies equation-level compatibility separately
+ * from the frozen parameter SHA.  Increment it whenever a constitutive
+ * equation changes even if all 112 calibrated parameter values are retained.
  * Tensor order is Hercules's [xx, yy, zz, xy, yz, xz], with physical
  * (not engineering) shear components. Stress and strain are tension-positive.
  *
@@ -44,6 +47,7 @@ typedef struct riva_material_parameters_t {
 #define RIVA_PARAMETER_COUNT 116
 #define RIVA_CONSTITUTIVE_PARAMETER_COUNT 112
 #define RIVA_STATE_VALUE_COUNT 93
+#define RIVA_KERNEL_REVISION 1u
 #define RIVA_PARAMETER_SHA256 \
     "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83"
 
@@ -777,8 +781,18 @@ RIVA_HD static inline double riva_bias_reversible_volume_target(
     const double dynamic_projection=riva_ddot(riva_sub(current,static_dev),phase_direction);
     const double phase=riva_clip(dynamic_projection/
         (s->pressure_anchor*s->cyclic_amplitude),-1.0,1.0);
-    const double bias_factor=pow(p->bias_reversible_volume_reference_bias/bias,
-                                 p->bias_reversible_volume_bias_exponent);
+    double bias_factor=pow(p->bias_reversible_volume_reference_bias/bias,
+                           p->bias_reversible_volume_bias_exponent);
+    /* The calibrated inverse-bias law is not defined in the zero-bias limit.
+     * Leave the verified range unchanged, but fade it continuously to zero
+     * below one quarter of the reference bias.  The cubic smoothstep cancels
+     * the inverse-square singularity without adding a fitted parameter. */
+    const double bias_onset=0.25*p->bias_reversible_volume_reference_bias;
+    if (bias<bias_onset) {
+        const double x=riva_clip(bias/bias_onset,0.0,1.0);
+        const double gate=x*x*(3.0-2.0*x);
+        bias_factor *= gate*gate*gate;
+    }
     const double pressure_factor=pow(riva_max(s->pressure_anchor,p->p_min)/
         p->bias_reference_pressure,p->bias_reversible_volume_pressure_exponent);
     const double oscillation_buildup=1.0-exp(-(double)s->amplitude_reversals/

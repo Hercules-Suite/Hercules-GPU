@@ -452,7 +452,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(gpu, /Material-point CPU\/GPU regression/);
   assert.match(gpu, /run_suite\.sh/);
   assert.match(gpu, /FA\/FAM quartic correctors/);
-  assert.match(gpu, /eighteen-fixture suite/);
+  assert.match(gpu, /nineteen-fixture suite/);
   assert.match(gpu, /device-first and currently require the GPU backend/);
   assert.match(gpu, /incremental bounding\/backbone update directly/);
   assert.match(gpu, /true zero strain increment preserves/);
@@ -949,6 +949,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   const makefile = readFileSync(`${sourceRoot}Makefile`, "utf8");
   const fixture = readFileSync(`${benchmarkRoot}riva_sand_brickup_synthetic.in`, "utf8");
   const customFixture = readFileSync(`${benchmarkRoot}riva_sand_custom_equivalence.in`, "utf8");
+  const lowBiasFixture = readFileSync(`${benchmarkRoot}riva_sand_low_bias_synthetic.in`, "utf8");
   const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
   const nativeDriver = readFileSync(`${benchmarkRoot}riva_sand_native_driver.cc`, "utf8");
   const nativeStateTest = readFileSync(`${benchmarkRoot}riva_sand_native_state_test.cc`, "utf8");
@@ -981,6 +982,9 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(cpu, /RIVA-Sand effective-pressure ["\s]*loss is not copied into the pressure DOF/);
   assert.match(core, new RegExp(frozenSha));
   assert.match(core, /#define RIVA_STATE_VALUE_COUNT 93/);
+  assert.match(core, /#define RIVA_KERNEL_REVISION 1u/);
+  assert.match(core, /bias_onset=0\.25\*p->bias_reversible_volume_reference_bias/);
+  assert.match(core, /bias_factor \*= gate\*gate\*gate/);
   assert.match(core, /riva_host_reversal/);
   assert.match(core, /riva_forward_euler/);
   assert.match(core, /riva_state_values/);
@@ -998,6 +1002,9 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(fixture, /material_point_brickup = yes/);
   assert.match(fixture, /material_point_brickup_biot_alpha = 1\.0/);
   assert.match(suite, /riva_sand_brickup_synthetic\.in/);
+  assert.match(lowBiasFixture, /material_model = RIVASand/);
+  assert.match(lowBiasFixture, /-1\.8e4 -1\.8e4 -4\.0e4 1\.0e3 0 0/);
+  assert.match(suite, /riva_sand_low_bias_synthetic\.in/);
   assert.match(customFixture, /material_model = RIVASandCustom/);
   assert.match(customFixture, /Dr M kd h m zeta e_max e_min Q R n_G/);
   assert.match(suite, /riva_sand_custom_equivalence\.in/);
@@ -1006,7 +1013,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.doesNotMatch(nativeDriver, /expected.*stress/i);
   assert.match(nativeStateTest, /frozen\/custom equivalence, zeta exposure/);
   assert.match(nativeStateTest, /relative-density conversion failed/);
-  assert.match(nativeStateTest, /fluid mass balance before pressure is combined with[\s\S]*the effective skeleton stress exactly once/);
+  assert.match(nativeStateTest, /fluid mass balance before pressure is combined with[\s\S]*the[\s\S]*effective skeleton stress exactly once/);
 
   assert.match(checkpoint, /nonlinear_gpu_checkpoint_write/);
   assert.match(checkpoint, /nonlinear_gpu_checkpoint_read/);
@@ -1015,6 +1022,8 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(gpu, /pore_pressure_tm2/);
   assert.match(gpu, /g_nl\.riva_states/);
   assert.match(gpu, /RIVA_PARAMETER_SHA256/);
+  assert.match(gpu, /riva_kernel_revision = RIVA_KERNEL_REVISION/);
+  assert.match(gpu, /header\.riva_kernel_revision != RIVA_KERNEL_REVISION/);
   assert.match(gpu, /Checkpoint lacks a compatible BrickUP\/RIVA-Sand ["\s]*extension/);
 });
 

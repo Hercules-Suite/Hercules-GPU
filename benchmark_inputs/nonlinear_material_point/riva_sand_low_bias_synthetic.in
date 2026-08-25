@@ -1,0 +1,69 @@
+# RIVA-Sand low-but-nonzero static-bias host/CUDA regression.
+material_model = RIVASand
+material_point_delta_time_sec = 1.0e-3
+material_point_steps = 17
+no_substeps = 1
+error_tolerance = 1.0e-1
+backbone_errTol = 1.0e-5
+tension_cutoff = no
+material_point_compare_rtol = 1.0e-9
+material_point_compare_atol = 1.0e-8
+material_point_output_prefix = riva_sand_low_bias_synthetic
+
+# RIVA-Sand exposes only relative density Dr; its frozen e_max=0.78 and
+# e_min=0.51 convert this value to the internal initial void ratio e0=0.601.
+# Its 112 constitutive constants are identified by RIVA_PARAMETER_SHA256.
+material_point_constants =
+  0.66296296296296309
+
+# Equilibrated K0 effective stress plus a small xy static shear bias,
+# tension-positive, in Pa. With p'=25.333 kPa, the projected bias is about
+# sqrt(2)*1/25.333=0.0558: nonzero but below the regularization onset
+# 0.25*0.646=0.1615. Reversing xy strain therefore makes both the host and CUDA
+# material-point paths execute the bounded low-bias reversible-volume branch.
+# The final three
+# arrays are required by the common seeded-state parser but RIVA-Sand initializes its
+# own alpha, reversal, and fabric histories from this stress.
+material_point_initial_strain =
+  0 0 0 0 0 0
+material_point_initial_stress =
+  -1.8e4 -1.8e4 -4.0e4 1.0e3 0 0
+material_point_initial_alpha =
+  0 0 0 0 0 0
+material_point_initial_alpha_in =
+  0 0 0 0 0 0
+material_point_initial_fabric =
+  0 0 0 0 0 0
+
+# Exercise the same sealed uniform-element CUDA pressure update used by the
+# existing MD/PDMY03 BrickUP regressions. RIVA-Sand supplies the effective skeleton
+# law, including plastic volumetric compatibility. BrickUP independently
+# enforces d(zeta)=alpha*d(eps_v)+d(p_f)/M=0; RIVA-Sand's diagnostic effective-pressure
+# loss is never injected into p_f. Total stress applies -alpha*p_f*I once.
+material_point_brickup = yes
+material_point_brickup_porosity = 0.40
+material_point_brickup_fluid_bulk_modulus_pa = 2.2e9
+material_point_brickup_biot_alpha = 1.0
+material_point_initial_pore_pressure_pa = 0.0
+
+# Physical tensor shear components. Small volumetric increments make the
+# independent BrickUP pressure path nontrivial while the reversals exercise
+# RIVA-Sand host-step event detection.
+material_point_strain_history =
+   0.0e+0  0.0e+0  0.0e+0  0.0e+0 0 0
+  -1.0e-5 -1.0e-5 -1.0e-5  2.5e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  7.5e-4 0 0
+  -4.0e-5 -4.0e-5 -4.0e-5  1.0e-3 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -4.0e-5 -4.0e-5 -4.0e-5  1.0e-3 0 0
+  -3.5e-5 -3.5e-5 -3.5e-5  5.0e-4 0 0
+  -3.0e-5 -3.0e-5 -3.0e-5  0.0e+0 0 0
+  -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
+  -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0
