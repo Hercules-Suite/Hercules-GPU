@@ -111,6 +111,10 @@ arrays are zero placeholders; RIVA-Sand initializes its complete native state.
 `no_substeps` is the exact count of equal fixed Forward-Euler subdivisions for
 a nonzero increment, while reversal detection occurs once per material-point
 history row. An exact zero increment returns without advancing any history.
+RIVA-Sand retains a frozen 93-value numerical history schema. The committed
+`geostatic_admitted` selector is compared separately because it controls future
+non-expansive regularization. The exact transition equations and production
+diagnostic are specified in `RIVA_SAND_GEOSTATIC_ADMISSION.md`.
 
 For `material_model=RIVASandCustom`, `material_point_constants` contains eleven
 values in this order:
@@ -188,7 +192,8 @@ law uses reference void ratio 0.601, which must remain inside the custom
   `material_point_brickup_solid_bulk_modulus_pa` supplies `Ks` for this check.
 - `riva_sand_brickup_synthetic.in` starts from equilibrated K0 effective
   stress, applies volumetric and reversing tensor-shear increments, compares
-  all 93 flattened native history components between host and CUDA, and
+  all 93 frozen flattened native history components plus the committed
+  geostatic-admission selector between host and CUDA, and
   executes the production sealed BrickUP pressure kernels. RIVA-Sand evolves the
   effective skeleton stress through elastic/plastic volumetric compatibility;
   its diagnostic effective-pressure loss is not copied into the fluid field.

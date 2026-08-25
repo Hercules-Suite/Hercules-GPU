@@ -29,6 +29,14 @@ static bool close_value(double a, double b, double tolerance = 1.0e-12)
 
 static bool same_state(const riva_state_t &a, const riva_state_t &b)
 {
+    if (a.geostatic_admitted != b.geostatic_admitted ||
+        a.initialized != b.initialized) {
+        std::cerr << "RIVA-Sand state flags differ: geostatic_admitted="
+                  << a.geostatic_admitted << " versus "
+                  << b.geostatic_admitted << ", initialized="
+                  << a.initialized << " versus " << b.initialized << "\n";
+        return false;
+    }
     double av[RIVA_STATE_VALUE_COUNT] = {};
     double bv[RIVA_STATE_VALUE_COUNT] = {};
     if (riva_state_values(&a, av) != RIVA_STATE_VALUE_COUNT ||
@@ -171,7 +179,9 @@ int main()
         admitted != 1 || ramped_state.geostatic_admitted != 1 ||
         !same_tensor(ramped_state.stress, ramped_stress) ||
         !same_tensor(ramped_state.alpha0, ramped_state.alpha) ||
-        !same_tensor(ramped_state.alpha01, ramped_state.alpha)) {
+        !same_tensor(ramped_state.alpha01, ramped_state.alpha) ||
+        !(riva_geostatic_cone_ratio(
+              &parameters, &reference_material, &ramped_state) > 1.0)) {
         std::cerr << "RIVA-Sand ramped over-bound geostatic admission failed\n";
         return 1;
     }

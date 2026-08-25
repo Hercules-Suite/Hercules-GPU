@@ -73,6 +73,7 @@ typedef struct nonlinear_material_point_result_t {
     double pdmy03_pressure_d;
     double pdmy03_center_norm;
     double riva_state_values[NL_RIVA_STATE_VALUE_COUNT];
+    int32_t riva_geostatic_admitted;
     int32_t riva_reversal_registered;
     int32_t status;
 } nonlinear_material_point_result_t;

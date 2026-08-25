@@ -692,7 +692,7 @@ Nonlinear GPU execution (runtime environment):
   **A**ccumulation model for Sand. `material_model=RIVASand` selects the native binary64 port of the frozen
 	Ottawa F65 RIVA-Sand pressure-dependent bounding-surface model. Production
 	execution is CUDA-only. The compiled kernel retains 112 calibrated constants,
-	four host-increment reversal controls, and all 38 logical history fields; the
+	four host-increment reversal controls, and all 39 logical history fields; the
 	startup report prints parameter SHA-256
 	`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
 	`no_substeps` is the exact number of equal Forward-Euler subdivisions per
@@ -710,8 +710,14 @@ Nonlinear GPU execution (runtime environment):
 	stress from moving farther from the bounding cone. This adds no iterations
 	or constitutive substeps. A physical mean effective stress at or below
 	`p_min` is rejected instead of being silently changed at the start of
-	shaking. The internal residual cone-pressure research control remains zero
-	and is not exposed in `parameters.in`.
+	shaking. At the first post-geostatic step Hercules initializes every active
+	RIVA-Sand integration point and reports the global initialized count, admitted
+	count, and maximum admitted cone ratio. The frozen 93-value numerical oracle
+	remains unchanged; the committed admission selector is compared separately.
+	The exact extension is specified in
+	`benchmark_inputs/nonlinear_material_point/RIVA_SAND_GEOSTATIC_ADMISSION.md`.
+	The internal residual cone-pressure research control remains zero and is not
+	exposed in `parameters.in`.
 - RIVA-Sand rows use two values in `material_properties_list`:
 	`Vs_limit relative_density`. The first and last `Vs_limit` values select
 	the nonlinear interval. Dimensionless relative density is interpolated by Vs

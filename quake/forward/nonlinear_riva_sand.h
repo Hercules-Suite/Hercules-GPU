@@ -4,7 +4,10 @@
 
 /* Native, allocation-free RIVA-Sand constitutive kernel.
  *
- * Source of truth: rivasand_port/model.py and RIVASAND_FORMULATION.md.
+ * Frozen cyclic source of truth: rivasand_port/model.py and
+ * RIVASAND_FORMULATION.md.  Hercules-specific geostatic admission is specified
+ * independently in benchmark_inputs/nonlinear_material_point/
+ * RIVA_SAND_GEOSTATIC_ADMISSION.md and guarded by the native state contract.
  * RIVA_KERNEL_REVISION identifies equation-level compatibility separately
  * from the frozen parameter SHA.  Increment it whenever a constitutive
  * equation changes even if all 112 calibrated parameter values are retained.
@@ -358,6 +361,24 @@ RIVA_HD static inline tensor_t riva_regularize_deviator(
     }
     if (alpha_out) *alpha_out=alpha;
     return deviator;
+}
+
+/* Ratio of the initialized stress-ratio norm to its current bounding-cone
+ * radius.  Values at or below one are ordinarily admissible; values above one
+ * identify a compressive geostatic state admitted without changing stress. */
+RIVA_HD static inline double riva_geostatic_cone_ratio(
+    const riva_parameters_t *p,const riva_material_parameters_t *material,
+    const riva_state_t *state)
+{
+    if (!p || !material || !state || !state->initialized ||
+        !(state->pressure_anchor>0.0)) return NAN;
+    double mb,md,xi;
+    riva_surfaces(p,material,state->pressure_anchor,state->void_ratio,
+                  &mb,&md,&xi);
+    (void)md; (void)xi;
+    const double bound=sqrt(2.0/3.0)*mb;
+    return bound>0.0 && isfinite(bound)
+        ? riva_norm(state->alpha)/bound : NAN;
 }
 
 RIVA_HD static inline void riva_moduli(const riva_parameters_t *p,
