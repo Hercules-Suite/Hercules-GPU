@@ -692,7 +692,7 @@ Nonlinear GPU execution (runtime environment):
   **A**ccumulation model for Sand. `material_model=RIVASand` selects the native binary64 port of the frozen
 	Ottawa F65 RIVA-Sand pressure-dependent bounding-surface model. Production
 	execution is CUDA-only. The compiled kernel retains 112 calibrated constants,
-	four host-increment reversal controls, and all 38 logical history fields; the
+	four host-increment reversal controls, and all 39 logical history fields; the
 	startup report prints parameter SHA-256
 	`9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
 	`no_substeps` is the exact number of equal Forward-Euler subdivisions per
@@ -702,6 +702,22 @@ Nonlinear GPU execution (runtime environment):
 	with one and increase it only after a timestep/substep convergence study.
 	`backbone_errTol` and `error_tolerance` remain required by the common
 	nonlinear input block but do not control this fixed explicit update.
+- RIVA-Sand uses one compressive geostatic-admission path for both analytical
+	`approximate_geostatic_state=yes` stresses and the committed stress from a
+	ramped `approximate_geostatic_state=no` solve. An admissible stress is
+	unchanged. An over-bound stress is preserved, its mapping origins are
+	recentered, and a closed-form radial rule prevents its normalized deviatoric
+	stress from moving farther from the bounding cone. This adds no iterations
+	or constitutive substeps. A physical mean effective stress at or below
+	`p_min` is rejected instead of being silently changed at the start of
+	shaking. At the first post-geostatic step Hercules initializes every active
+	RIVA-Sand integration point and reports the global initialized count, admitted
+	count, and maximum admitted cone ratio. The frozen 93-value numerical oracle
+	remains unchanged; the committed admission selector is compared separately.
+	The exact extension is specified in
+	`benchmark_inputs/nonlinear_material_point/RIVA_SAND_GEOSTATIC_ADMISSION.md`.
+	The internal residual cone-pressure research control remains zero and is not
+	exposed in `parameters.in`.
 - RIVA-Sand rows use two values in `material_properties_list`:
 	`Vs_limit relative_density`. The first and last `Vs_limit` values select
 	the nonlinear interval. Dimensionless relative density is interpolated by Vs
@@ -751,7 +767,9 @@ Nonlinear GPU execution (runtime environment):
 	versioned coupled-state section containing both BrickUP pressure time levels
 	and the complete RIVA-Sand integration-point state, including prior strain/stress.
 	A RIVA-Sand/BrickUP restart rejects a legacy displacement-only checkpoint instead
-	of silently resetting pore pressure or constitutive history.
+	of silently resetting pore pressure or constitutive history. It also requires
+	`RIVA_KERNEL_REVISION=2`, so a checkpoint created before geostatic admission
+	and non-expansive regularization cannot silently resume under new equations.
 - Manzari--Dafalias rows use 17 values in `material_properties_list`:
 	`Vs_limit G0 e_init Mc c lambda_c e0 ksi P_atm m h0 ch nb A0 nd z_max cz`.
 	Poisson's ratio and density come from the element's `Vp`, `Vs`, and `rho`.

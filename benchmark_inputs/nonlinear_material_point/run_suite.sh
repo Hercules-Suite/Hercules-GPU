@@ -43,6 +43,8 @@ fixtures=(
   pdmy03_cyclic_shear_synthetic.in
   pdmy03_zero_tension_onset_synthetic.in
   riva_sand_brickup_synthetic.in
+  riva_sand_low_bias_synthetic.in
+  riva_sand_ramped_geostatic_admission_synthetic.in
   riva_sand_custom_equivalence.in
 )
 

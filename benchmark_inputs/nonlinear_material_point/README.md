@@ -111,6 +111,10 @@ arrays are zero placeholders; RIVA-Sand initializes its complete native state.
 `no_substeps` is the exact count of equal fixed Forward-Euler subdivisions for
 a nonzero increment, while reversal detection occurs once per material-point
 history row. An exact zero increment returns without advancing any history.
+RIVA-Sand retains a frozen 93-value numerical history schema. The committed
+`geostatic_admitted` selector is compared separately because it controls future
+non-expansive regularization. The exact transition equations and production
+diagnostic are specified in `RIVA_SAND_GEOSTATIC_ADMISSION.md`.
 
 For `material_model=RIVASandCustom`, `material_point_constants` contains eleven
 values in this order:
@@ -188,7 +192,8 @@ law uses reference void ratio 0.601, which must remain inside the custom
   `material_point_brickup_solid_bulk_modulus_pa` supplies `Ks` for this check.
 - `riva_sand_brickup_synthetic.in` starts from equilibrated K0 effective
   stress, applies volumetric and reversing tensor-shear increments, compares
-  all 93 flattened native history components between host and CUDA, and
+  all 93 frozen flattened native history components plus the committed
+  geostatic-admission selector between host and CUDA, and
   executes the production sealed BrickUP pressure kernels. RIVA-Sand evolves the
   effective skeleton stress through elastic/plastic volumetric compatibility;
   its diagnostic effective-pressure loss is not copied into the fluid field.
@@ -196,12 +201,39 @@ law uses reference void ratio 0.601, which must remain inside the custom
   `d(zeta)=alpha*d(eps_v)+d(p_f)/M=0`, and the CSV combines the two fields
   exactly once as `sigma_total=sigma_effective-alpha*p_f*I`. The reported
   fluid-balance residual directly checks that split.
+- `riva_sand_low_bias_synthetic.in` adds a small nonzero geostatic shear bias,
+  below one quarter of the frozen reference bias, to a reversing tensor-shear
+  history. This makes both the host and CUDA material-point paths execute the
+  bounded low-bias reversible-volume branch while still comparing every one of
+  the 93 flattened history values. The regularization leaves the original law
+  unchanged at and above its onset; it is an equation revision rather than a
+  parameter recalibration.
+- `riva_sand_ramped_geostatic_admission_synthetic.in` begins from an
+  all-compressive, over-bound stress representative of a numerical ramped
+  gravity solution. Both host and CUDA paths must preserve that equilibrated
+  tensor, recenter the mapping origins, and prevent normalized deviatoric
+  stress from expanding farther from the cone. The existing
+  `riva_sand_brickup_synthetic.in` supplies the corresponding admissible
+  analytical-K0 initialization case.
 - `riva_sand_custom_equivalence.in` repeats that complete history through
   `RIVASandCustom` using the frozen reference values for all exposed columns.
   `run_suite.sh` requires the custom and frozen CPU CSVs to match exactly and
   separately requires their CUDA CSVs to match exactly. This catches parser,
   interpolation, storage, and kernel-wiring errors without claiming that any
   non-reference custom parameter set has been calibrated.
+
+The low-bias gate removes the inverse-bias singularity only. It does not by
+itself validate the reversible-volume branch at arbitrarily small cyclic
+amplitude or low effective confinement. Those regimes require additional
+characterization and, if their equations are changed, a new calibrated model
+revision. RIVA-Sand checkpoints record `RIVA_KERNEL_REVISION` in addition to
+the frozen parameter SHA; a checkpoint written before this marker was added is
+rejected for RIVA-Sand restart instead of silently continuing with changed
+constitutive equations. BrickUP-only checkpoint compatibility is unaffected.
+The same revision also admits compressive over-bound geostatic stresses
+non-expansively. Its internal residual cone pressure remains zero in the
+production factory; a host-only test enables `0.01*p_atm` solely to
+characterize the optional low-confinement translation.
 
 The independent native oracle driver consumes the `deps_*` columns from the
 RIVA-Sand port package without reading any expected response after row zero.
@@ -233,9 +265,10 @@ cross-language oracle tolerances do not replace the tighter host/CUDA
 comparison in the Hercules suite.
 
 The companion host-only contract test checks frozen/custom reference
-equivalence, active `zeta` exposure, per-point state isolation, byte-restored
-restart reproduction, exact zero-increment preservation, sealed BrickUP fluid
-mass balance, and effective-to-total stress assembly:
+equivalence, active `zeta` exposure, bounded low-static-bias reversible-volume
+response, per-point state isolation, byte-restored restart reproduction, exact
+zero-increment preservation, sealed BrickUP fluid mass balance, and
+effective-to-total stress assembly:
 
 ```bash
 c++ -O2 -std=c++17 -Wall -Wextra -Wpedantic \

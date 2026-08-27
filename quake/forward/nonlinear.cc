@@ -5943,6 +5943,16 @@ static int material_point_validate_zero_increment(
                 return -1;
             }
         }
+        if (current->riva_geostatic_admitted !=
+                previous->riva_geostatic_admitted) {
+            fprintf(stderr,
+                    "%s RIVA-Sand geostatic-admission flag changed on a "
+                    "zero strain increment at step %d: previous=%d "
+                    "current=%d\n",
+                    backend, step, previous->riva_geostatic_admitted,
+                    current->riva_geostatic_admitted);
+            return -1;
+        }
         if (current->riva_reversal_registered != 0) {
             fprintf(stderr,
                     "%s RIVA-Sand registered a reversal on a zero strain "
@@ -6777,6 +6787,15 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                     goto cleanup;
                 }
             }
+            if (cpu_results[step].riva_geostatic_admitted !=
+                    gpu_results[step].riva_geostatic_admitted) {
+                fprintf(stderr,
+                        "RIVASand geostatic-admission mismatch at step %d: "
+                        "CPU=%d GPU=%d\n", step,
+                        cpu_results[step].riva_geostatic_admitted,
+                        gpu_results[step].riva_geostatic_admitted);
+                goto cleanup;
+            }
         }
     }
 
@@ -6882,6 +6901,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "custom material properties" : "frozen material properties",
                RIVA_PARAMETER_SHA256, no_substeps,
                no_substeps == 1 ? "" : "s");
+        printf("Validated CPU/GPU geostatic-admission selector: %d\n",
+               cpu_results[0].riva_geostatic_admitted);
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "
                    "transition%s\n", zero_increment_checks,

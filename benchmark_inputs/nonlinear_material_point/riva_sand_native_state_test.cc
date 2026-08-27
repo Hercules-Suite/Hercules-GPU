@@ -2,20 +2,41 @@
  *
  * These checks complement the golden-response replay: they verify that two
  * material points have isolated histories, that a byte-restored checkpoint
- * state reproduces uninterrupted integration, and that the coupled BrickUP
- * split satisfies sealed fluid mass balance before pressure is combined with
- * the effective skeleton stress exactly once.
+ * state reproduces uninterrupted integration, that the low-static-bias
+ * reversible-volume response is bounded, and that the coupled BrickUP split
+ * satisfies sealed fluid mass balance before pressure is combined with the
+ * effective skeleton stress exactly once.
  */
 #define RIVA_STANDALONE
 #include "../../quake/forward/nonlinear_riva_sand.h"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 
+static bool same_tensor(const tensor_t &a, const tensor_t &b)
+{
+    return a.xx == b.xx && a.yy == b.yy && a.zz == b.zz &&
+           a.xy == b.xy && a.yz == b.yz && a.xz == b.xz;
+}
+
+static bool close_value(double a, double b, double tolerance = 1.0e-12)
+{
+    return std::fabs(a-b) <= tolerance*(1.0+std::fabs(a)+std::fabs(b));
+}
+
 static bool same_state(const riva_state_t &a, const riva_state_t &b)
 {
+    if (a.geostatic_admitted != b.geostatic_admitted ||
+        a.initialized != b.initialized) {
+        std::cerr << "RIVA-Sand state flags differ: geostatic_admitted="
+                  << a.geostatic_admitted << " versus "
+                  << b.geostatic_admitted << ", initialized="
+                  << a.initialized << " versus " << b.initialized << "\n";
+        return false;
+    }
     double av[RIVA_STATE_VALUE_COUNT] = {};
     double bv[RIVA_STATE_VALUE_COUNT] = {};
     if (riva_state_values(&a, av) != RIVA_STATE_VALUE_COUNT ||
@@ -35,8 +56,9 @@ static riva_state_t initial_state(const riva_parameters_t &parameters,
 {
     const tensor_t effective_stress = {-18.0, -18.0, -40.0, 0, 0, 0};
     riva_state_t state = {};
-    if (!riva_initialize(&parameters, effective_stress, void_ratio, &state) ||
-        !riva_begin_dynamic_phase(&parameters, effective_stress, &state)) {
+    if (!riva_initialize_geostatic(
+            &parameters, effective_stress, void_ratio, effective_stress,
+            &state, nullptr)) {
         std::cerr << "RIVA-Sand initialization failed\n";
         std::exit(1);
     }
@@ -50,9 +72,9 @@ static riva_state_t initial_material_state(
 {
     const tensor_t effective_stress = {-18.0, -18.0, -40.0, 0, 0, 0};
     riva_state_t state = {};
-    if (!riva_initialize_material(&parameters, &material, effective_stress,
-                                 void_ratio, &state) ||
-        !riva_begin_dynamic_phase(&parameters, effective_stress, &state)) {
+    if (!riva_initialize_geostatic_material(
+            &parameters, &material, effective_stress, void_ratio,
+            effective_stress, &state, nullptr)) {
         std::cerr << "RIVA-Sand custom-material initialization failed\n";
         std::exit(1);
     }
@@ -86,6 +108,31 @@ static bool advance_material(const riva_parameters_t &parameters,
            riva_finite_tensor(stress);
 }
 
+static double reversible_bias_target(const riva_parameters_t &parameters,
+                                     double projected_bias)
+{
+    riva_state_t state = {};
+    state.cyclic_phase_active = 1;
+    state.amplitude_reversals = 6;
+    state.cyclic_direction.xy = 1.0;
+    const double direction_norm = riva_norm(state.cyclic_direction);
+    state.static_bias_tensor = riva_scale(
+        state.cyclic_direction, projected_bias/direction_norm);
+    state.pressure_anchor = parameters.bias_reversible_mean_transition_pressure;
+    state.cyclic_amplitude = 0.40;
+    state.geostatic_deviator = riva_zero();
+
+    const tensor_t phase_direction =
+        riva_scale(state.cyclic_direction, 1.0/direction_norm);
+    const tensor_t static_deviator =
+        riva_scale(state.static_bias_tensor, state.pressure_anchor);
+    const tensor_t dynamic_deviator = riva_scale(
+        phase_direction, state.pressure_anchor*state.cyclic_amplitude);
+    state.stress = riva_sub(riva_add(static_deviator, dynamic_deviator),
+                            riva_iso(state.pressure_anchor));
+    return riva_bias_reversible_volume_target(&parameters, &state);
+}
+
 int main()
 {
     const riva_parameters_t parameters = riva_reference_parameters(1.0);
@@ -93,6 +140,134 @@ int main()
         riva_reference_material_parameters(&parameters);
     if (!riva_material_parameters_valid(&parameters, &reference_material)) {
         std::cerr << "RIVA-Sand reference material block is invalid\n";
+        return 1;
+    }
+    if (parameters.p_residual != 0.0 || RIVA_KERNEL_REVISION != 2u) {
+        std::cerr << "RIVA-Sand production residual pressure or kernel "
+                     "revision is incorrect\n";
+        return 1;
+    }
+
+    /* approximate_geostatic_state=yes supplies an admissible analytical K0
+     * stress. It must pass through the common admission path unchanged and
+     * must not be marked as an over-bound research state. */
+    double sin_phi = 3.0*reference_material.M/(6.0+reference_material.M);
+    const double k0 = 1.0-sin_phi;
+    const tensor_t approximate_stress = {
+        -40.0*k0, -40.0*k0, -40.0, 0, 0, 0};
+    riva_state_t approximate_state = {};
+    int32_t admitted = -1;
+    if (!riva_initialize_geostatic_material(
+            &parameters, &reference_material, approximate_stress, 0.601,
+            approximate_stress, &approximate_state, &admitted) ||
+        admitted != 0 || approximate_state.geostatic_admitted != 0 ||
+        !same_tensor(approximate_state.stress, approximate_stress)) {
+        std::cerr << "RIVA-Sand approximate K0 admission changed an "
+                     "admissible stress\n";
+        return 1;
+    }
+
+    /* approximate_geostatic_state=no supplies the stress committed by the
+     * ramped gravity solve. A compressive over-bound state must be preserved,
+     * recentered, and prevented from moving farther away from the cone. */
+    const tensor_t ramped_stress = {-2.0, -2.0, -40.0, 0, 0, 0};
+    riva_state_t ramped_state = {};
+    admitted = 0;
+    if (!riva_initialize_geostatic_material(
+            &parameters, &reference_material, ramped_stress, 0.601,
+            ramped_stress, &ramped_state, &admitted) ||
+        admitted != 1 || ramped_state.geostatic_admitted != 1 ||
+        !same_tensor(ramped_state.stress, ramped_stress) ||
+        !same_tensor(ramped_state.alpha0, ramped_state.alpha) ||
+        !same_tensor(ramped_state.alpha01, ramped_state.alpha) ||
+        !(riva_geostatic_cone_ratio(
+              &parameters, &reference_material, &ramped_state) > 1.0)) {
+        std::cerr << "RIVA-Sand ramped over-bound geostatic admission failed\n";
+        return 1;
+    }
+    const riva_state_t admitted_before_zero = ramped_state;
+    if (!advance_material(parameters, reference_material, riva_zero(), 4,
+                          &ramped_state) ||
+        !same_state(admitted_before_zero, ramped_state) ||
+        ramped_state.geostatic_admitted != 1) {
+        std::cerr << "RIVA-Sand admitted stress changed at zero increment\n";
+        return 1;
+    }
+    const tensor_t expanding_candidate = riva_scale(
+        admitted_before_zero.alpha,1.25*admitted_before_zero.pressure_anchor);
+    tensor_t regularized_alpha = {};
+    const tensor_t regularized_deviator = riva_regularize_deviator(
+        &parameters, &reference_material,
+        admitted_before_zero.pressure_anchor,
+        admitted_before_zero.void_ratio, admitted_before_zero.alpha, 1,
+        expanding_candidate, &regularized_alpha);
+    (void)regularized_deviator;
+    if (!close_value(riva_norm(regularized_alpha),
+                     riva_norm(admitted_before_zero.alpha))) {
+        std::cerr << "RIVA-Sand admitted stress expanded away from the cone\n";
+        return 1;
+    }
+    riva_state_t admitted_after_shear = admitted_before_zero;
+    const tensor_t first_dynamic_increment = {0, 0, 0, 5.0e-5, 0, 0};
+    if (!advance_material(parameters, reference_material,
+                          first_dynamic_increment, 4,
+                          &admitted_after_shear) ||
+        admitted_after_shear.geostatic_admitted != 1 ||
+        riva_norm(admitted_after_shear.alpha) >
+            riva_norm(admitted_before_zero.alpha)*(1.0+1.0e-12)) {
+        std::cerr << "RIVA-Sand first dynamic update expanded an admitted "
+                     "geostatic stress\n";
+        return 1;
+    }
+
+    /* pResidual remains a non-exposed research control. Enabling 1% of
+     * atmospheric pressure translates the cone while leaving physical stress
+     * unchanged; the production factory above keeps the value exactly zero. */
+    riva_parameters_t residual_parameters = parameters;
+    residual_parameters.p_residual = 0.01*parameters.p_atm;
+    const tensor_t shallow_stress = {-0.20, -0.20, -0.20, 0, 0, 0};
+    riva_state_t residual_state = {};
+    admitted = -1;
+    if (!riva_initialize_geostatic_material(
+            &residual_parameters, &reference_material, shallow_stress, 0.601,
+            shallow_stress, &residual_state, &admitted) ||
+        admitted != 0 || !same_tensor(residual_state.stress, shallow_stress) ||
+        !close_value(residual_state.pressure_anchor,
+                     0.20+residual_parameters.p_residual)) {
+        std::cerr << "RIVA-Sand residual cone-pressure translation failed\n";
+        return 1;
+    }
+    int residual_floor_hit = 0;
+    const double residual_cone_floor = riva_pressure_from_confining(
+        &residual_parameters, &reference_material, 1.0e6,
+        residual_state.pressure_anchor, &residual_floor_hit);
+    if (!residual_floor_hit ||
+        residual_cone_floor != riva_cone_pressure_floor(&residual_parameters) ||
+        !close_value(riva_physical_pressure(
+                         &residual_parameters,residual_cone_floor),
+                     residual_parameters.p_min)) {
+        std::cerr << "RIVA-Sand translated cone lost the physical pressure "
+                     "floor: hit=" << residual_floor_hit
+                  << " cone=" << residual_cone_floor
+                  << " expected="
+                  << riva_cone_pressure_floor(&residual_parameters)
+                  << " physical="
+                  << riva_physical_pressure(
+                         &residual_parameters,residual_cone_floor)
+                  << " expected physical=" << residual_parameters.p_min
+                  << "\n";
+        return 1;
+    }
+    const tensor_t tensile_stress = {0.50, 0.50, 0.50, 0, 0, 0};
+    riva_state_t raw_translated_state = {};
+    if (!riva_initialize_material(
+            &residual_parameters, &reference_material, tensile_stress, 0.601,
+            &raw_translated_state) ||
+        riva_initialize_geostatic_material(
+            &residual_parameters, &reference_material, tensile_stress, 0.601,
+            tensile_stress, &raw_translated_state, nullptr)) {
+        std::cerr << "RIVA-Sand geostatic admission accepted noncompressive "
+                     "physical stress\n";
         return 1;
     }
     const double relative_density_0601 =
@@ -109,6 +284,50 @@ int main()
     if (riva_void_ratio_from_material_relative_density(
             &reference_material, relative_density_0601) != 0.601) {
         std::cerr << "RIVA-Sand custom relative-density conversion failed\n";
+        return 1;
+    }
+
+    /* The inverse-bias reversible-volume law must remain unchanged in its
+     * calibrated range while remaining bounded and vanishing as bias tends
+     * to zero.  This is shared host/device code, so the host contract test
+     * also guards the CUDA implementation against the singular expression. */
+    const double bias_onset =
+        0.25*parameters.bias_reversible_volume_reference_bias;
+    const double onset_target =
+        reversible_bias_target(parameters, bias_onset);
+    const double above_bias = 1.5*bias_onset;
+    const double above_target =
+        reversible_bias_target(parameters, above_bias);
+    const double pressure_factor = std::pow(
+        parameters.bias_reversible_mean_transition_pressure/
+            parameters.bias_reference_pressure,
+        parameters.bias_reversible_volume_pressure_exponent);
+    const double buildup = 1.0-std::exp(
+        -6.0/parameters.bias_reversible_volume_buildup_reversals);
+    const auto unregularized_target = [&](double bias) {
+        return -parameters.bias_reversible_volume_amplitude*std::pow(
+            parameters.bias_reversible_volume_reference_bias/bias,
+            parameters.bias_reversible_volume_bias_exponent)*
+            pressure_factor*buildup;
+    };
+    const double low_target =
+        reversible_bias_target(parameters, 1.0e-3*bias_onset);
+    const double expected_onset = unregularized_target(bias_onset);
+    const double expected_above = unregularized_target(above_bias);
+    if (!std::isfinite(onset_target) || !std::isfinite(above_target) ||
+        !std::isfinite(low_target) ||
+        std::fabs(onset_target-expected_onset) >
+            1.0e-12*std::fabs(expected_onset) ||
+        std::fabs(above_target-expected_above) >
+            1.0e-12*std::fabs(expected_above) ||
+        std::fabs(low_target) >= 1.0e-6*std::fabs(onset_target) ||
+        reversible_bias_target(parameters, 0.0) != 0.0) {
+        std::cerr << "RIVA-Sand low-static-bias regularization failed: "
+                  << "onset=" << onset_target
+                  << " expected_onset=" << expected_onset
+                  << " above=" << above_target
+                  << " expected_above=" << expected_above
+                  << " low=" << low_target << "\n";
         return 1;
     }
     const std::array<tensor_t, 8> path = {{
@@ -223,7 +442,9 @@ int main()
     }
 
     std::cout << "PASS: RIVA-Sand frozen/custom equivalence, zeta exposure, "
-                 "state isolation, restart, zero-increment, and BrickUP "
-                 "mass-balance/stress-split checks\n";
+                 "low-bias and geostatic admission regularization, optional "
+                 "residual-cone translation, state isolation, restart, "
+                 "zero-increment, and BrickUP mass-balance/stress-split "
+                 "checks\n";
     return 0;
 }

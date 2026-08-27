@@ -19,7 +19,8 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
 - [x] Mapped `[xx, yy, zz, xy, yz, xz]`, tensor shear, tension-positive stress,
   and the factor-two symmetric double contraction explicitly.
 - [x] Translated all 112 frozen parameters, four host-event controls, and all
-  38 logical state fields (93 flattened scalar values) to allocation-free
+  39 logical state fields (93 frozen flattened scalar values plus the separate
+  committed geostatic-admission selector) to allocation-free
   binary64 host/device code.
 - [x] Initialized from equilibrated effective stress and activated dynamics
   once with the zero-static-shear reference stress.
@@ -38,6 +39,10 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
 - [x] Added versioned checkpoint fields for prior strain/stress, complete RIVA-Sand
   history, and both BrickUP pressure time levels. Legacy displacement-only
   checkpoints are rejected for RIVA-Sand/BrickUP restarts instead of resetting state.
+  The extension also records `RIVA_KERNEL_REVISION` separately from the frozen
+  parameter SHA, so a pre-revision RIVA-Sand checkpoint cannot silently resume
+  under changed constitutive equations; BrickUP-only checkpoint compatibility
+  is unchanged.
 - [x] Kept Python out of the production executable.
 - [x] Implemented the BrickUP effective-stress split. RIVA-Sand supplies effective
   skeleton stress; BrickUP independently solves
@@ -45,7 +50,30 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   `sigma=sigma'-alpha*p_f*I`. RIVA-Sand's standalone effective-pressure-loss
   diagnostic is never injected into `p_f`.
 - [x] Added a prescribed-strain RIVA-Sand/BrickUP regression that compares all 93
-  host/CUDA state values and invokes the production uniform pressure kernels.
+  frozen numerical host/CUDA state values, separately compares the committed
+  `geostatic_admitted` flag, and invokes the production uniform pressure kernels.
+- [x] Bounded the inverse-square reversible-volume law below one quarter of its
+  reference projected bias, synchronized the Python oracle and formulation,
+  and added a low-but-nonzero static-bias host/CUDA material-point fixture. The
+  gate tends continuously to zero and is exactly one throughout the retained
+  calibrated range.
+- [x] Added a common compressive geostatic initializer for both approximate-K0
+  and ramped-gravity effective stresses. Admissible states remain unchanged;
+  over-bound states preserve their equilibrated stress, recenter the mapping
+  origins, and use a closed-form non-expansive radial limit with no added
+  iterations or substeps. Noncompressive physical states are rejected.
+- [x] Specified the Hercules-only equations in
+  `RIVA_SAND_GEOSTATIC_ADMISSION.md`. Production initializes all active points
+  at the first post-geostatic step and reports the global initialized/admitted
+  counts plus maximum admitted cone ratio instead of silently discarding the
+  admission result.
+- [x] Added an internal residual-cone-pressure control with production default
+  zero. The standalone contract test enables `0.01*p_atm` only to verify the
+  translated cone and the separate physical-pressure admission check.
+- [x] Added an over-bound ramped-geostatic host/CUDA material-point fixture;
+  the existing K0/BrickUP fixture covers the admissible approximate-geostatic
+  path through the same initializer. The committed admission flag is compared
+  independently of the frozen 93-value numerical oracle.
 - [x] Added a custom-interface material-point fixture whose reference-valued
   CPU and CUDA histories must exactly reproduce the frozen RIVA-Sand fixture.
 
@@ -60,6 +88,16 @@ the frozen RIVA-Sand port package. The authoritative constitutive parameter SHA-
   uninterrupted history.
 - [ ] Run zero-bias, statically biased, and dense wave cases; inspect pressure,
   denominator-floor, beta-fallback, and nonfinite diagnostics.
+- [ ] Run one full `approximate_geostatic_state=yes` RIVA-Sand/BrickUP case and
+  one `approximate_geostatic_state=no` ramped-gravity case on the supported GPU
+  solver; inspect the printed admission counts and maximum admitted cone ratio, then
+  confirm first-dynamic-step stress continuity and finite station histories.
+- [ ] Characterize optional `p_residual=0.01*p_atm` at shallow confinement
+  before exposing or enabling it in production input. The default remains
+  exactly zero.
+- [ ] Characterize the reversible-volume branch at low cyclic amplitude and low
+  effective confinement. The contained low-bias gate removes the singularity
+  but does not validate or recalibrate those two separate regimes.
 - [ ] Compare global timestep refinement and `no_substeps=1,2,4`; retain one
   unless subdivision materially changes the response.
 - [ ] Run a stress-controlled coupled BrickUP element characterization with
