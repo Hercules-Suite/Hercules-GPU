@@ -30,14 +30,11 @@ Native contract:
   update, rigid-motion suppression, and BrickUP ownership host checks.
 - [x] Production frozen/custom host-state regression remains passing.
 - [x] Documentation build and all 28 rendered-source tests pass.
-- [ ] Six-case core parity at `rtol=1e-8`, `atol=1e-10`: five pass. The
-  `3484_zero_bias` trace first exceeds tolerance late in the low-confinement
-  history (`state_alpha` at output row 99; stress at row 131). The largest
-  reported stress difference is approximately `1.11e-7` in the fixture's kPa
-  units. Events, substep counts, and gates remain aligned.
-- [ ] Six-case full parity at the same tolerance: four pass. In addition to
-  the zero-bias drift, `4666_dense_zero_bias` has a near-zero normal-component
-  difference of approximately `1.73e-10` at output row 291. No tolerance was
+- [x] All six cases pass core parity at `rtol=1e-8`, `atol=1e-10`.
+- [x] All six cases pass full 235-column parity at the same tolerance. The
+  native research kernel preserves NumPy's pairwise tensor-contraction tree,
+  binary64 operation boundaries, and the frozen NumPy 2.0.2 FMA `tanh`
+  intervals needed by the dense unbiased phase path. No tolerance was
   loosened and no calibration value was changed.
 - [ ] CUDA compile, host/device parity, device checkpoint round trip,
   multi-rank MPI restart, approximate/ramped geostatic wave cases, and complete
@@ -52,9 +49,8 @@ benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_su
   /opt/homebrew/bin/g++-15
 ```
 
-The suite deliberately returns nonzero until both core and full six-case
-parity pass. It still runs the state checks and native benchmark after a parity
-failure so the remaining evidence is retained.
+The suite runs the state checks and native benchmark even after a parity
+failure so all validation evidence is retained in one invocation.
 
 ## Native host benchmark
 
@@ -64,13 +60,12 @@ process for both kernels. A 2,000-repetition GCC 15 `-O2` sample measured:
 
 | Kernel | Time | Time per row |
 | --- | ---: | ---: |
-| Production RIVA-Sand | 2.830349 s | 2,923.91 ns |
-| Intermediate-bias research | 4.678666 s | 4,833.33 ns |
+| Production RIVA-Sand | 2.727994 s | 2,818.18 ns |
+| Intermediate-bias research | 5.788280 s | 5,979.63 ns |
 
-The research/production ratio was 1.653 for that local host sample. A repeated
-2,000-repetition run measured 2.844910 s and 4.358742 s (1.532), respectively;
-the spread is reported rather than hidden because this laptop benchmark does
-not pin cores or control system load. This is a native constitutive
-microbenchmark, not the required GPU/MPI production benchmark; target-system
-register pressure, occupancy, transfer, and end-to-end wave runtime remain
-unmeasured.
+The research/production ratio was 2.122 for that local host sample. The strict
+oracle arithmetic adds host-side cost to a research kernel that also carries a
+larger state and parameter block. This laptop benchmark does not pin cores or
+control system load. It is a native constitutive microbenchmark, not the
+required GPU/MPI production benchmark; target-system register pressure,
+occupancy, transfer, and end-to-end wave runtime remain unmeasured.

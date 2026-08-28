@@ -341,13 +341,13 @@ static double shakedown_compliance(const riva_ib_parameters_t &p,
 
 static double branch_stress_phase(const riva_ib_state_t &s)
 {
-    const double norm = riva_norm(s.base.cyclic_direction);
+    const double norm = riva_ib_numpy_norm(s.base.cyclic_direction);
     if (norm <= 1.0e-14 || s.base.cyclic_amplitude <= 1.0e-14) return 1.0;
     const tensor_t direction = riva_scale(s.base.cyclic_direction, 1.0 / norm);
     const tensor_t static_deviator = riva_add(
         s.base.geostatic_deviator,
         riva_scale(s.base.static_bias_tensor, s.base.pressure_anchor));
-    const double projection = riva_ddot(
+    const double projection = riva_ib_numpy_ddot(
         riva_sub(riva_dev(s.base.stress), static_deviator), direction);
     return riva_clip(projection /
                          (s.base.pressure_anchor * s.base.cyclic_amplitude),
@@ -431,7 +431,8 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
     diagnostic("branch_compliance_multiplier",
                riva_ib_branch_compliance_multiplier(&p, &m, &state));
     diagnostic("branch_bias_sign",
-               signum(riva_ddot(s.static_bias_tensor, s.cyclic_direction)));
+               signum(riva_ib_numpy_ddot(
+                   s.static_bias_tensor, s.cyclic_direction)));
     diagnostic("phase_dense_bias_gate",
                riva_ib_phase_dense_bias_gate(&p, &state));
     diagnostic("phase_volume_density_weight",
@@ -482,7 +483,7 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
     diagnostic("loose_phase_gate", loose_gate);
     diagnostic("unbiased_phase_gate", riva_ib_unbiased_gate(&p, &state));
     diagnostic("unbiased_phase_direction_norm",
-               riva_norm(state.unbiased_phase_direction));
+               riva_ib_numpy_norm(state.unbiased_phase_direction));
     diagnostic("loose_shear_memory", riva_ib_loose_shear_memory(&state));
     diagnostic("loose_shear_hardening_state", state.loose_shear_hardening_state);
     diagnostic("loose_shear_gate_value", state.loose_shear_gate_value);
@@ -493,9 +494,10 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
                    (1.0 + loose_gate * p.loose_shear_branch_compliance_gain *
                               loose_transition));
     diagnostic("mapping_gate", riva_ib_mapping_gate(&p, &state));
-    diagnostic("mapping_backstress_norm", riva_norm(state.mapping_backstress));
+    diagnostic("mapping_backstress_norm",
+               riva_ib_numpy_norm(state.mapping_backstress));
     diagnostic("mapping_fabric_norm",
-               riva_norm(state.mapping_directional_fabric));
+               riva_ib_numpy_norm(state.mapping_directional_fabric));
     diagnostic("mapping_capacity", state.mapping_capacity);
     diagnostic("mapping_kinematic_denominator",
                state.mapping_kinematic_denominator);
@@ -539,7 +541,9 @@ static Row response_row(const riva_ib_parameters_t &parameters,
     put_tensor(row, "deps", deps);
     put_tensor(row, "stress", state.base.stress);
     put(row, "mean_effective_pressure", riva_pressure(state.base.stress));
-    put(row, "q", riva_q(state.base.stress));
+    const tensor_t deviator = riva_dev(state.base.stress);
+    put(row, "q", sqrt(riva_max(
+        1.5 * riva_ib_numpy_ddot(deviator, deviator), 0.0)));
     put(row, "ru_vertical",
         1.0 - (-state.base.stress.zz) / vertical_effective_stress);
     put(row, "accepted_substeps", info.accepted_substeps);
