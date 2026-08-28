@@ -727,6 +727,19 @@ Nonlinear GPU execution (runtime environment):
 	`Dr=1` is the densest, and the constitutive constants remain intentionally
 	unavailable for ad hoc production retuning. This replaces the earlier
 	`initial_void_ratio` column; old RIVA-Sand property rows must be converted.
+- `material_model=RIVASandIntermediateBiasResearch` selects the native
+	intermediate-bias research successor sourced from OpenSees_RIVA commit
+	`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`. It is a distinct internal
+	material, not an alias for or replacement of production `RIVASand` or
+	`RIVASandCustom`. Its production-case property rows retain the compact
+	`Vs_limit Dr` boundary with finite `0<=Dr<=1`; all other research calibration
+	values remain frozen in
+	the native research kernel. The research material shares one compact frozen
+	material block per rank and stores one interpolated void ratio per nonlinear
+	element. It returns effective skeleton stress. BrickUP remains the sole owner
+	of pore pressure and contributes that pressure exactly once when total stress
+	is assembled. Keep this identifier confined to explicitly reported research
+	and verification work until its validation program is complete.
 - `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
 	compact set of existing physical constitutive inputs. Its 12-column rows are
@@ -805,7 +818,8 @@ Nonlinear GPU execution (runtime environment):
 	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
 	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
 	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`,
-	`PressureDependMultiYield03`, and `RIVASand`. The displayed rows are syntax or regression
+	`PressureDependMultiYield03`, `RIVASand`, `RIVASandCustom`, and
+	`RIVASandIntermediateBiasResearch`. The displayed rows are syntax or regression
 	fixtures, never implicit production calibrations. They use two identical
 	property rows to make the nonlinear Vs interval explicit without adding an
 	interpolation gradient.

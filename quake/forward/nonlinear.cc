@@ -42,9 +42,14 @@
 #include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
 #include "nonlinear_riva_sand.h"
+#include "nonlinear_riva_sand_intermediate_bias_research.h"
 
 static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
               "RIVA-Sand material-point state width mismatch");
+static_assert(RIVA_IB_PARAMETER_COUNT == 248 &&
+              RIVA_IB_LOGICAL_STATE_COUNT == 62 &&
+              RIVA_IB_STATE_VALUE_COUNT == 137,
+              "RIVA-Sand intermediate-bias research contract mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
 #include "util.h"
@@ -376,7 +381,10 @@ double interpolate_property_value(double vsRequest, double *propVector)
 
 static riva_material_parameters_t riva_material_at_row(int row)
 {
-    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    const riva_parameters_t reference =
+        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+            ? riva_ib_reference_parameters(1000.0).base
+            : riva_reference_parameters(1000.0);
     riva_material_parameters_t material =
         riva_reference_material_parameters(&reference);
     if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
@@ -395,7 +403,10 @@ static riva_material_parameters_t riva_material_at_row(int row)
 
 static riva_material_parameters_t riva_material_at_vs(double vs)
 {
-    const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    const riva_parameters_t reference =
+        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+            ? riva_ib_reference_parameters(1000.0).base
+            : riva_reference_parameters(1000.0);
     riva_material_parameters_t material =
         riva_reference_material_parameters(&reference);
     if (theMaterialModel != RIVA_SAND_CUSTOM) return material;
@@ -807,7 +818,7 @@ void nonlinear_init( int32_t     myID,
                 thePdmy03Properties[field] =
                     (double*)malloc(sizeof(double) * thePropertiesCount);
             }
-        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
             const int fields = theMaterialModel == RIVA_SAND_CUSTOM
                 ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
             for (int field = 0; field < fields; field++)
@@ -845,7 +856,7 @@ void nonlinear_init( int32_t     myID,
             MPI_Bcast(thePdmy03Properties[field], thePropertiesCount,
                       MPI_DOUBLE, 0, comm_solver);
         }
-    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
         const int fields = theMaterialModel == RIVA_SAND_CUSTOM
             ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (int field = 0; field < fields; field++)
@@ -1030,13 +1041,16 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     } else if (strcasecmp(material_model, "RIVASandCustom") == 0 ||
                strcasecmp(material_model, "RIVA-Sand-Custom") == 0) {
         materialmodel = RIVA_SAND_CUSTOM;
+    } else if (strcasecmp(material_model,
+                          "RIVASandIntermediateBiasResearch") == 0) {
+        materialmodel = RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH;
     }
     else {
         fprintf(stderr,
                 "Illegal material model for nonlinear analysis \n"
                 "(linear, vonMises_ep (Elasto-plastic), vonMises_FA (Frederick-Armstrong), vonMises_FAM (Frederick-Armstrong modified), \n "
                 "vonMises_BAE (Borja-Aimes exponential), vonMises_BAH (Borja-Aimes hyperbolic), vonMises_GQH (Groholski et al GQH model), \n"
-                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, RIVASand, RIVASandCustom): %s\n", material_model);
+                "vonMises_MKZ (Matasovic 1994), vonMises_RO (Ramberg-Osgood), DruckerPrager, MohrCoulomb, ManzariDafalias, PressureDependMultiYield03, RIVASand, RIVASandCustom, RIVASandIntermediateBiasResearch): %s\n", material_model);
         return -1;
     }
 
@@ -1145,16 +1159,18 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
     if ((materialmodel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         MATERIAL_MODEL_IS_RIVA_SAND(materialmodel)) &&
+         MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(materialmodel)) &&
         approxgeostatic == NO && geostatic_loading_t <= 0.0) {
         fprintf(stderr,
                 "%s warning: no approximate or "
                 "ramped geostatic initialization was selected. The "
                 "constitutive initialization therefore lacks a physical "
                 "in-situ effective-stress state.\n",
-                MATERIAL_MODEL_IS_RIVA_SAND(materialmodel) ?
+                MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(materialmodel) ?
                     (materialmodel == RIVA_SAND_CUSTOM ?
-                        "RIVASandCustom" : "RIVASand") :
+                        "RIVASandCustom" :
+                     materialmodel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                        "RIVASandIntermediateBiasResearch" : "RIVASand") :
                     "PressureDependMultiYield03");
     }
 
@@ -1199,7 +1215,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         (theMaterialModel == MANZARI_DAFALIAS) ? 17 :
         (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) ? 22 :
         (theMaterialModel == RIVA_SAND_CUSTOM) ? 12 :
-        (theMaterialModel == RIVA_SAND) ? 2 : 16;
+        (theMaterialModel == RIVA_SAND ||
+         theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) ? 2 : 16;
     auxiliar             = (double*)malloc(
         sizeof(double) * thePropertiesCount * property_columns );
     theVsLimits          = (double*)malloc( sizeof(double) * thePropertiesCount );
@@ -1214,7 +1231,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             thePdmy03Properties[field] = (double*)malloc(
                 sizeof(double) * thePropertiesCount);
         }
-    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
         const int fields = theMaterialModel == RIVA_SAND_CUSTOM
             ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (int field = 0; field < fields; field++)
@@ -1260,7 +1277,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     auxiliar[row * property_columns + field + 1];
             }
             continue;
-        } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
             const int fields = theMaterialModel == RIVA_SAND_CUSTOM
                 ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
             for (int field = 0; field < fields; field++)
@@ -1359,19 +1376,34 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 return -1;
             }
         }
-    } else if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
         double minimum_relative_density = 1.0;
         double maximum_relative_density = 0.0;
+        if (theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) {
+            for (row = 0; row < thePropertiesCount; row++) {
+                if (!isfinite(theVsLimits[row])) {
+                    fprintf(stderr,
+                            "Illegal RIVASandIntermediateBiasResearch row "
+                            "%d: Vs_limit must be finite\n", row);
+                    return -1;
+                }
+            }
+        }
         for (row = 1; row < thePropertiesCount; row++) {
             if (theVsLimits[row] <= theVsLimits[row-1]) {
                 fprintf(stderr,
                         "%s Vs limits must be strictly increasing\n",
                         theMaterialModel == RIVA_SAND_CUSTOM ?
-                            "RIVASandCustom" : "RIVASand");
+                            "RIVASandCustom" :
+                        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                            "RIVASandIntermediateBiasResearch" : "RIVASand");
                 return -1;
             }
         }
-        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+        const riva_parameters_t reference =
+            theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+                ? riva_ib_reference_parameters(1000.0).base
+                : riva_reference_parameters(1000.0);
         const int fields = theMaterialModel == RIVA_SAND_CUSTOM
             ? RIVA_CUSTOM_PROPERTY_COUNT : 1;
         for (row = 0; row < thePropertiesCount; row++) {
@@ -1381,7 +1413,10 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                             "Illegal %s row %d: all parameters must be "
                             "finite\n",
                             theMaterialModel == RIVA_SAND_CUSTOM ?
-                                "RIVASandCustom" : "RIVASand", row);
+                                "RIVASandCustom" :
+                            theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                                "RIVASandIntermediateBiasResearch" : "RIVASand",
+                            row);
                     return -1;
                 }
             }
@@ -1393,7 +1428,9 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                         "Illegal %s row %d: relative density must be finite "
                         "and in the dimensionless range [0, 1]\n",
                         theMaterialModel == RIVA_SAND_CUSTOM ?
-                            "RIVASandCustom" : "RIVASand", row);
+                            "RIVASandCustom" :
+                        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                            "RIVASandIntermediateBiasResearch" : "RIVASand", row);
                 return -1;
             }
             const riva_material_parameters_t material = riva_material_at_row(row);
@@ -1404,7 +1441,9 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                         "shakedown anchor e=%.3f, Q>0, R>=0, and "
                         "0<=n_G<=1\n",
                         theMaterialModel == RIVA_SAND_CUSTOM ?
-                            "RIVASandCustom" : "RIVASand", row,
+                            "RIVASandCustom" :
+                        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                            "RIVASandIntermediateBiasResearch" : "RIVASand", row,
                         reference.state_shakedown_reference_void_ratio);
                 return -1;
             }
@@ -1421,6 +1460,13 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     "frozen calibration %s\n",
                     minimum_relative_density, maximum_relative_density,
                     RIVA_PARAMETER_SHA256);
+        } else if (theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) {
+            fprintf(stderr,
+                    "RIVASandIntermediateBiasResearch property input: "
+                    "relative density Dr in [%g, %g]; all constitutive "
+                    "parameters are frozen to research calibration %s\n",
+                    minimum_relative_density, maximum_relative_density,
+                    RIVA_IB_PARAMETER_SHA256);
         } else {
             fprintf(stderr,
                     "RIVASand property input: relative density Dr in [%g, %g]; "
@@ -1722,7 +1768,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
     if ((theMaterialModel == MANZARI_DAFALIAS ||
          theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-         MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) &&
+         MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) &&
         !nonlinear_gpu_requested()) {
         if (myID == 0) {
             fprintf(stderr,
@@ -1734,7 +1780,9 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03
                         ? "PressureDependMultiYield03" :
                     theMaterialModel == RIVA_SAND_CUSTOM
-                        ? "RIVASandCustom" : "RIVASand");
+                        ? "RIVASandCustom" :
+                    theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+                        ? "RIVASandIntermediateBiasResearch" : "RIVASand");
         }
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
@@ -1850,7 +1898,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         (long long)global_poro_map_counts[
                             POROELASTIC_MAP_ELIGIBLE_UNMAPPED]);
             }
-            if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) && active > 0) {
+            if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel) &&
+                active > 0) {
                 fprintf(stderr,
                         "%s/BrickUP coupling: RIVA-Sand evolves effective "
                         "skeleton stress (including plastic volumetric "
@@ -1859,7 +1908,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                         "%lld active nonlinear elements. RIVA-Sand effective-pressure "
                         "loss is not copied into the pressure DOF.\n",
                         theMaterialModel == RIVA_SAND_CUSTOM ?
-                            "RIVA-Sand Custom" : "RIVA-Sand",
+                            "RIVA-Sand Custom" :
+                        theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                            "RIVA-Sand Intermediate-Bias Research" :
+                            "RIVA-Sand",
                         (long long)active);
             }
         }
@@ -1898,7 +1950,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 (size_t)myNonlinElementsCount,
                 sizeof(pdmy03_constants_t));
     }
-    if (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel) &&
         myNonlinElementsCount > 0) {
         const size_t material_count =
             theMaterialModel == RIVA_SAND_CUSTOM
@@ -1908,10 +1960,13 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 material_count, sizeof(riva_material_parameters_t));
         myNonlinSolver->riva_void_ratios =
             (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
-        if (theMaterialModel == RIVA_SAND &&
+        if ((theMaterialModel == RIVA_SAND ||
+             theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) &&
             myNonlinSolver->riva_materials != NULL) {
             const riva_parameters_t reference =
-                riva_reference_parameters(1000.0);
+                theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+                    ? riva_ib_reference_parameters(1000.0).base
+                    : riva_reference_parameters(1000.0);
             myNonlinSolver->riva_materials[0] =
                 riva_reference_material_parameters(&reference);
         }
@@ -1964,7 +2019,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
          (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 &&
           myNonlinElementsCount > 0 &&
           myNonlinSolver->pdmy03_materials    == NULL) ||
-         (MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel) &&
+         (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel) &&
           myNonlinElementsCount > 0 &&
           (myNonlinSolver->riva_materials      == NULL ||
            myNonlinSolver->riva_void_ratios    == NULL)) ||
@@ -2443,9 +2498,12 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
 
             case RIVA_SAND:
-            case RIVA_SAND_CUSTOM: {
+            case RIVA_SAND_CUSTOM:
+            case RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH: {
                 const riva_parameters_t reference =
-                    riva_reference_parameters(1000.0);
+                    theMaterialModel == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+                        ? riva_ib_reference_parameters(1000.0).base
+                        : riva_reference_parameters(1000.0);
                 const size_t material_index =
                     theMaterialModel == RIVA_SAND_CUSTOM
                         ? (size_t)nl_eindex : 0u;
@@ -2460,7 +2518,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                             "interpolated relative density %g\n",
                             myID,
                             theMaterialModel == RIVA_SAND_CUSTOM ?
-                                "RIVASandCustom" : "RIVASand",
+                                "RIVASandCustom" :
+                            theMaterialModel ==
+                                RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                                "RIVASandIntermediateBiasResearch" :
+                                "RIVASand",
                             eindex, relative_density);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
@@ -2474,7 +2536,11 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                             "interpolated material parameters\n",
                             myID,
                             theMaterialModel == RIVA_SAND_CUSTOM ?
-                                "RIVASandCustom" : "RIVASand", eindex);
+                                "RIVASandCustom" :
+                            theMaterialModel ==
+                                RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ?
+                                "RIVASandIntermediateBiasResearch" :
+                                "RIVASand", eindex);
                     MPI_Abort(MPI_COMM_WORLD, ERROR);
                     exit(1);
                 }
@@ -2507,7 +2573,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 
         if (theMaterialModel == MANZARI_DAFALIAS ||
             theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03 ||
-            MATERIAL_MODEL_IS_RIVA_SAND(theMaterialModel)) {
+            MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
             ecp->strainrate = 0.0;
             ecp->sensitivity = 0.0;
         } else {
