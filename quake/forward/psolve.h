@@ -168,6 +168,7 @@ typedef struct corner_ref_t corner_ref_t;
 #define ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY 1
 #define ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY 2
 #define ACOUSTIC_VS_EPS 1.0e-6
+#define ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9.81
 
 /**
  * Mesh database (element) record payload.
@@ -661,6 +662,10 @@ typedef struct gpu_data_t {
      * exchanges solid normal VELOCITY (1st time-difference, ~omega) and
      * the solid feels p = -dphi/dt, and station pressure output = -dphi/dt. */
     int           acousticVelocityPotential;
+    /* Free-surface condition for scalar acoustic nodes on the flat z-min
+     * external face. 0 = legacy pressure release; 1 = linearized gravity
+     * boundary, assembled as a lumped surface mass during solver setup. */
+    int           acousticFreeSurfaceGravity;
     /* Acoustic interface projection. 0 = legacy one-point fragment coupling;
      * 1 = 2x2 face-mass projection over each interface fragment. */
     int           acousticInterfaceProjectionMode;

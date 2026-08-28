@@ -1060,6 +1060,7 @@ static struct Param_t {
   noyesflag_t acousticInterfaceCoupling;
   noyesflag_t acousticPressureFormulation;
   noyesflag_t reconstructAcousticPlaneDisplacements;
+  noyesflag_t theAcousticFreeSurfaceGravity;
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
@@ -1211,6 +1212,7 @@ static struct Param_t {
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
            .reconstructAcousticPlaneDisplacements = NO,
+           .theAcousticFreeSurfaceGravity = NO,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
@@ -2174,7 +2176,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  62 /* Must adjust this if adding int params */
+  63 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2358,6 +2360,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[59] = (int)Param.thePoroelasticUndrainedFastPath;
   int_message[60] = Param.theAcousticPoroelasticInterface;
   int_message[61] = (int)Param.printStationPorePressureRatios;
+  int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2425,6 +2428,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticUndrainedFastPath = (noyesflag_t)int_message[59];
   Param.theAcousticPoroelasticInterface = int_message[60];
   Param.printStationPorePressureRatios = (noyesflag_t)int_message[61];
+  Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2712,6 +2716,7 @@ static int32_t parse_parameters(const char* numericalin) {
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
+       acoustic_free_surface_gravity[64] = "no",
        reconstruct_acoustic_plane_displacements[64] = "no",
        acoustic_poroelastic_interface[64] = "no_flow",
        include_poroelastic[64] = "no",
@@ -2754,6 +2759,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t includeAcoustic = UNSET;
   noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t acousticPressureFormulation = NO;
+  noyesflag_t acousticFreeSurfaceGravity = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
   int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
@@ -3136,6 +3142,8 @@ static int32_t parse_parameters(const char* numericalin) {
   acoustic_formulation_explicit =
       (parsetext(fp, "acoustic_formulation", 's',
                  &acoustic_formulation) == 0);
+  parsetext(fp, "acoustic_free_surface_gravity", 's',
+            &acoustic_free_surface_gravity);
   parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
             &reconstruct_acoustic_plane_displacements);
   parsetext(fp, "acoustic_poroelastic_interface", 's',
@@ -3651,6 +3659,17 @@ static int32_t parse_parameters(const char* numericalin) {
     strcpy(acoustic_formulation, "velocity_potential");
   }
 
+  if (strcasecmp(acoustic_free_surface_gravity, "yes") == 0) {
+    acousticFreeSurfaceGravity = YES;
+  } else if (strcasecmp(acoustic_free_surface_gravity, "no") == 0) {
+    acousticFreeSurfaceGravity = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_free_surface_gravity "
+                 "(yes or no): %s\n",
+                 acoustic_free_surface_gravity);
+  }
+
   if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
     reconstructAcousticPlaneDisplacements = YES;
   } else if (strcasecmp(reconstruct_acoustic_plane_displacements, "no") == 0) {
@@ -3800,6 +3819,13 @@ static int32_t parse_parameters(const char* numericalin) {
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
+                 "include_acoustic=yes and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
+  }
+  if ((acousticFreeSurfaceGravity == YES) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_free_surface_gravity=yes requires "
                  "include_acoustic=yes and acoustic_formulation=pressure or "
                  "acoustic_formulation=velocity_potential\n");
   }
@@ -4053,6 +4079,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
   Param.theAcousticInterfaceFaceFilter = acousticInterfaceFaceFilter;
+  Param.theAcousticFreeSurfaceGravity = acousticFreeSurfaceGravity;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includePoroelastic = includePoroelastic;
@@ -4130,6 +4157,10 @@ static int32_t parse_parameters(const char* numericalin) {
                    (legacyAcousticPressureFormulation == YES))
                       ? " [from legacy acoustic_pressure_formulation=yes]"
                       : "");
+    monitor_print("Acoustic free surface:              %s\n",
+                  (Param.theAcousticFreeSurfaceGravity == YES)
+                      ? "gravity (linearized, g=9.81 m/s^2)"
+                      : "pressure_release (legacy p=0)");
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
@@ -11473,8 +11504,24 @@ static void solver_init() {
       }
       if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
           Global.myOctree->nearendp[2]) {
+        const double gravitySurfaceMass =
+            (Param.theAcousticFreeSurfaceGravity == YES)
+                ? (((double)edata->edgesize * (double)edata->edgesize) /
+                   (4.0 * (double)edata->rho *
+                    ACOUSTIC_GRAVITY_ACCELERATION_M_S2))
+                : 0.0;
         for (j = 0; j < 4; j++) {
           pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
+          if (Param.theAcousticFreeSurfaceGravity == YES) {
+            /* The linearized free-surface condition q_tt = g*q_z adds
+             * integral_Gamma N_i*N_j/(rho*g) to the scalar acoustic mass.
+             * Lump the flat Hex8 top face consistently with the existing
+             * lumped volume mass: each of its four nodes receives A/(4*rho*g).
+             * q is pressure or the scaled velocity potential; both obey the
+             * same scalar wave equation and gravity boundary condition. */
+            Global.mySolver->pressure_mass[elemp->lnid[j]] +=
+                (solver_float)gravitySurfaceMass;
+          }
         }
       }
 
@@ -13291,6 +13338,8 @@ static void solver_init() {
   /* Independent velocity-potential coupling. */
   Global.gpuData.acousticVelocityPotential =
       Param.theAcousticVelocityPotential;
+  Global.gpuData.acousticFreeSurfaceGravity =
+      (Param.theAcousticFreeSurfaceGravity == YES) ? 1 : 0;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,

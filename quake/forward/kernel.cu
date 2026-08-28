@@ -1013,7 +1013,8 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   }
 
   if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
-      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0)) {
+      (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0) &&
+      (gpuData->acousticFreeSurfaceGravity == 0)) {
     /* Pressure-release free surface, p = 0. Pressure mode: field=p, set
      * 0. velocity_potential: p = -dphi/dt = 0  ->  phi^{n+1} = phi^n. */
     gpuData->pressureTm2Device[nindex] =
@@ -1024,6 +1025,8 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
     return;
   }
 
+  /* Gravity free-surface nodes carry their weak boundary contribution in
+   * pressureMassDevice and therefore use the ordinary scalar update below. */
   const solver_float mass = gpuData->pressureMassDevice[nindex];
   /* Step B: acoustic CPML mass-proportional damping. cd is the
    * assembled dt*C term (dt baked in at build, dt*C summed across
