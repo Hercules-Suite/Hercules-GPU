@@ -1081,9 +1081,16 @@ Acoustic-elastic input flags (input file):
 	face is lumped as `h^2/(4 rho g)` per node. This supports linear surface-
 	gravity waves without adding a bulk `rho g` load, a moving mesh, or a
 	hydrostatic prestress solve. It currently applies only to acoustic nodes on
-	the flat global top (`z_min`) external face. Changing this option affects
-	phase-B solver setup but not mesh generation, so an existing compatible mesh
-	etree can be reused.
+	the flat global top (`z_min`) external face. Where this face intersects a
+	lateral acoustic CPML, the surface mass uses the tangential Jacobian
+	`kappa_x*kappa_y`; the solver also adds the paired `x/y` mass-proportional
+	damping and CFS restoring/memory terms on the four top-face nodes. The
+	vertical CPML stretch is intentionally excluded because `z` is normal to the
+	gravity surface. Corner PML faces include both tangential directions. This
+	keeps the optional surface-wave operator matched to the existing acoustic
+	CPML without adding per-step work to non-surface PML elements. Changing this
+	option affects phase-B solver setup but not mesh generation, so an existing
+	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver

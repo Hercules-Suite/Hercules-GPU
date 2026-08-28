@@ -3321,6 +3321,58 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
 }
 
 
+__global__ void kernelPMLAcousticGravitySurfaceStep(
+    int32_t lenum, gpu_data_t* gpuData, int32_t surfaceCount)
+{
+    const int32_t surface_idx =
+        (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (surface_idx >= surfaceCount) return;
+
+    const int32_t pml_idx =
+        gpuData->pml_acoustic_gravitySurfacePmlIndexArrayDevice[surface_idx];
+    const int32_t eindex =
+        gpuData->pmlAcousticElemMapperDevice[pml_idx];
+    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
+
+    /* One-point face projection, consistent with the lumped gravity surface
+     * mass: qbar is the mean over the four z-min nodes. The host setup has
+     * already applied kappa_x*kappa_y to that mass and dt*(d_x+d_y) to its
+     * nodal damping. This kernel supplies the paired tangential CFS restoring
+     * and memory forces, including both axes in a corner PML. */
+    double qbar = 0.0;
+    for (int n = 0; n < 4; n++) {
+        const int32_t lnid = lnid_base[n * lenum];
+        qbar += (double)gpuData->pressureTm1Device[lnid];
+    }
+    qbar *= 0.25;
+
+    double fmem = 0.0;
+    for (int axis = 0; axis < 2; axis++) {
+        const double decay =
+            gpuData->pml_acoustic_zetaDecayArrayDevice[axis][pml_idx];
+        const double gain =
+            gpuData->pml_acoustic_zetaGainArrayDevice[axis][pml_idx];
+        solver_float* surface_zeta =
+            gpuData->pml_acoustic_gravitySurfaceZetaArrayDevice[axis];
+        const double z_old = (double)surface_zeta[surface_idx];
+        const double z_new = decay * z_old + gain * qbar;
+        surface_zeta[surface_idx] = (solver_float)z_new;
+        const double* surface_mem =
+            gpuData->pml_acoustic_gravitySurfaceMemForceArrayDevice[axis];
+        fmem += surface_mem[surface_idx] * z_new;
+    }
+    const double restore =
+        gpuData->pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice[surface_idx];
+    const double cfs = restore * qbar - fmem;
+
+    for (int n = 0; n < 4; n++) {
+        const int32_t lnid = lnid_base[n * lenum];
+        atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
+                  (solver_float)cfs);
+    }
+}
+
+
 /* ---------------------------------------------------------------------
  * GPU station strain / viscoelastic-stress gather.
  *

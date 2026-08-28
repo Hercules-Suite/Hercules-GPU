@@ -620,6 +620,16 @@ typedef struct gpu_data_t {
     double*       pml_acoustic_restoreCoeffArrayDevice;/* dt^2 Mp sum d_a a_a */
     solver_float* pml_acoustic_zetaPArrayDevice[3];    /* [j_axis] zeta_p */
 
+    /* Gravity free-surface CPML correction. Only top-face acoustic PML
+     * elements are mapped, so gravity-free and non-surface PML elements pay
+     * no per-step cost. The surface inertia is stretched in tangential x/y;
+     * its CFS restoring/memory pair is assembled only to the four top nodes. */
+    int32_t       pmlAcousticGravitySurfaceCount;
+    int32_t*      pml_acoustic_gravitySurfacePmlIndexArrayDevice;
+    double*       pml_acoustic_gravitySurfaceMemForceArrayDevice[2];
+    double*       pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice;
+    solver_float* pml_acoustic_gravitySurfaceZetaArrayDevice[2];
+
     /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
      * non-NULL, has value 1 for any element that lives in either PML pipeline
      * (elastic or acoustic) and 0 otherwise. Lets the existing non-PML

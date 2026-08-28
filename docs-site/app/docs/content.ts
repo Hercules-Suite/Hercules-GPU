@@ -730,7 +730,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
         codeLabel: "parameters.in — water over elastic solid",
         code: "include_acoustic = yes\nacoustic_formulation = velocity_potential\nacoustic_free_surface_gravity = no\nacoustic_interface_coupling = yes\nacoustic_interface_projection = point\nacoustic_interface_face_filter = all\nacoustic_interface_max_level = -1\nacoustic_mesh_refinement_factor = 1.0\nacoustic_quality_factor = 0\n\ncvmdb_input_file = profile\nnumber_profile_layers = 2\nprofile_layers =\n# z_top(m) Vp(m/s) Vs(m/s) rho(kg/m3) Qp Qs\n 0.0   1500.0    0.0 1000.0 1.0e6 1.0e6\n 100.0 2600.0 1400.0 2300.0 1.0e6 1.0e6",
-        note: "The default pressure-release surface is appropriate for the existing hydroacoustic path. Set acoustic_free_surface_gravity=yes when linear surface-gravity waves are part of the modeled physics. Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
+        note: "The default pressure-release surface is appropriate for the existing hydroacoustic path. Set acoustic_free_surface_gravity=yes when linear surface-gravity waves are part of the modeled physics; lateral acoustic CPML then includes the matched tangential gravity-surface correction. Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
       },
       {
         id: "coupling-poroelastic",

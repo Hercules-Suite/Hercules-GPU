@@ -1124,6 +1124,13 @@ void psolve_launch_pml_acoustic(
       lenum, gpuData, pmlAcousticCount);
 }
 
+void psolve_launch_pml_acoustic_gravity_surface(
+    int grid, int block, size_t shared, cudaStream_t stream, int32_t lenum,
+    gpu_data_t* gpuData, int32_t surfaceCount) {
+  kernelPMLAcousticGravitySurfaceStep<<<grid, block, shared, stream>>>(
+      lenum, gpuData, surfaceCount);
+}
+
 void psolve_launch_acoustic_interface_force(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t faceCount, gpu_data_t* gpuData, double dt2, double dt) {

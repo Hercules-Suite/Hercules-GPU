@@ -325,8 +325,11 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   assert.match(psolve, /parsetext\(fp, "acoustic_free_surface_gravity"/);
   assert.match(psolve, /gravitySurfaceMass[\s\S]*?edgesize[\s\S]*?4\.0[\s\S]*?rho/);
+  assert.match(psolve, /gravity_surface_kprod = kappa_axis\[0\] \* kappa_axis\[1\]/);
+  assert.match(psolve, /psolve_launch_pml_acoustic_gravity_surface/);
   assert.match(header, /ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9\.81/);
   assert.match(kernel, /pressureFreeSurfaceNodeFlagsDevice[\s\S]*?acousticFreeSurfaceGravity == 0/);
+  assert.match(kernel, /kernelPMLAcousticGravitySurfaceStep/);
 });
 
 test("documents the phase launcher contract", async () => {
