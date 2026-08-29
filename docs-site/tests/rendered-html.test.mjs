@@ -1056,6 +1056,10 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
     researchMaterialPointUnit,
     /riva_ib_state_values\(state,[\s\n ]*result->riva_intermediate_bias_state_values\)/,
   );
+  assert.match(
+    researchMaterialPointUnit,
+    /#include "psolve\.h"[\s\S]*#include "nonlinear_gpu\.h"/,
+  );
   assert.match(researchMaterialPointUnit, /riva_ib_zero_increment/);
   assert.match(researchMaterialPointUnit, /riva_ib_update_material/);
   assert.match(

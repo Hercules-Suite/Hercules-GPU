@@ -10,6 +10,11 @@
 #include <stdint.h>
 #include <stdio.h>
 
+/* nonlinear_gpu.h exposes solver-facing declarations whose mesh, matrix, and
+ * MPI types are defined by psolve.h.  The shared nonlinear CUDA translation
+ * unit includes this prerequisite before nonlinear_gpu.h; preserve the same
+ * order in this isolated material-point unit. */
+#include "psolve.h"
 #include "nonlinear_gpu.h"
 #include "nonlinear_riva_sand_intermediate_bias_research.h"
 
