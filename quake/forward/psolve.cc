@@ -693,12 +693,59 @@ typedef struct cpml_build_s {
   double*  acoustic_memForce[3];  /* dt^2 * nodalPressureMass * d_a*alpha_a^2 */
   double*  acoustic_restoreCoeff; /* dt^2 * nodalPressureMass * sum d_a*alpha_a */
 
+  /* Tangential CFS stretch of the gravity free-surface inertia. The mapper
+   * stores indices into acoustic_elem_list/coeff arrays, not mesh indices. */
+  int32_t  acoustic_gravity_surface_count;
+  int32_t  acoustic_gravity_surface_capacity;
+  int32_t* acoustic_gravity_surface_pml_index;
+  double*  acoustic_gravity_surface_memForce[2];
+  double*  acoustic_gravity_surface_restoreCoeff;
+
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
   double   reference_vp;          /* global max Vp over CPML elements */
   int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
+
+static int cpml_reserve_acoustic_gravity_surface(int32_t required) {
+  if (required <= g_cpmlBuild.acoustic_gravity_surface_capacity) {
+    return 0;
+  }
+
+  int64_t new_capacity =
+      (g_cpmlBuild.acoustic_gravity_surface_capacity > 0)
+          ? g_cpmlBuild.acoustic_gravity_surface_capacity
+          : 4096;
+  while (new_capacity < required) {
+    new_capacity *= 2;
+    if (new_capacity > INT32_MAX) {
+      new_capacity = required;
+      break;
+    }
+  }
+
+  void* resized = realloc(
+      g_cpmlBuild.acoustic_gravity_surface_pml_index,
+      (size_t)new_capacity * sizeof(int32_t));
+  if (resized == NULL) return -1;
+  g_cpmlBuild.acoustic_gravity_surface_pml_index = (int32_t*)resized;
+
+  for (int axis = 0; axis < 2; axis++) {
+    resized = realloc(g_cpmlBuild.acoustic_gravity_surface_memForce[axis],
+                      (size_t)new_capacity * sizeof(double));
+    if (resized == NULL) return -1;
+    g_cpmlBuild.acoustic_gravity_surface_memForce[axis] = (double*)resized;
+  }
+
+  resized = realloc(g_cpmlBuild.acoustic_gravity_surface_restoreCoeff,
+                    (size_t)new_capacity * sizeof(double));
+  if (resized == NULL) return -1;
+  g_cpmlBuild.acoustic_gravity_surface_restoreCoeff = (double*)resized;
+  g_cpmlBuild.acoustic_gravity_surface_capacity = (int32_t)new_capacity;
+  return 0;
+}
+
 /* Persistent host-side CPML membership used by setup-time formulation
  * partitioning after g_cpmlBuild.face_mask has been released. Keep one bit
  * per local element instead of retaining the lenum-byte build mask. */
@@ -1060,6 +1107,7 @@ static struct Param_t {
   noyesflag_t acousticInterfaceCoupling;
   noyesflag_t acousticPressureFormulation;
   noyesflag_t reconstructAcousticPlaneDisplacements;
+  noyesflag_t theAcousticFreeSurfaceGravity;
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
@@ -1211,6 +1259,7 @@ static struct Param_t {
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
            .reconstructAcousticPlaneDisplacements = NO,
+           .theAcousticFreeSurfaceGravity = NO,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
            .theStationsDirOut = "outputfiles/stations",
@@ -2174,7 +2223,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  62 /* Must adjust this if adding int params */
+  63 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2358,6 +2407,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[59] = (int)Param.thePoroelasticUndrainedFastPath;
   int_message[60] = Param.theAcousticPoroelasticInterface;
   int_message[61] = (int)Param.printStationPorePressureRatios;
+  int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2425,6 +2475,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticUndrainedFastPath = (noyesflag_t)int_message[59];
   Param.theAcousticPoroelasticInterface = int_message[60];
   Param.printStationPorePressureRatios = (noyesflag_t)int_message[61];
+  Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2712,6 +2763,7 @@ static int32_t parse_parameters(const char* numericalin) {
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
+       acoustic_free_surface_gravity[64] = "no",
        reconstruct_acoustic_plane_displacements[64] = "no",
        acoustic_poroelastic_interface[64] = "no_flow",
        include_poroelastic[64] = "no",
@@ -2754,6 +2806,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t includeAcoustic = UNSET;
   noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t acousticPressureFormulation = NO;
+  noyesflag_t acousticFreeSurfaceGravity = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
   int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
@@ -3136,6 +3189,8 @@ static int32_t parse_parameters(const char* numericalin) {
   acoustic_formulation_explicit =
       (parsetext(fp, "acoustic_formulation", 's',
                  &acoustic_formulation) == 0);
+  parsetext(fp, "acoustic_free_surface_gravity", 's',
+            &acoustic_free_surface_gravity);
   parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
             &reconstruct_acoustic_plane_displacements);
   parsetext(fp, "acoustic_poroelastic_interface", 's',
@@ -3651,6 +3706,17 @@ static int32_t parse_parameters(const char* numericalin) {
     strcpy(acoustic_formulation, "velocity_potential");
   }
 
+  if (strcasecmp(acoustic_free_surface_gravity, "yes") == 0) {
+    acousticFreeSurfaceGravity = YES;
+  } else if (strcasecmp(acoustic_free_surface_gravity, "no") == 0) {
+    acousticFreeSurfaceGravity = NO;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown response for acoustic_free_surface_gravity "
+                 "(yes or no): %s\n",
+                 acoustic_free_surface_gravity);
+  }
+
   if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
     reconstructAcousticPlaneDisplacements = YES;
   } else if (strcasecmp(reconstruct_acoustic_plane_displacements, "no") == 0) {
@@ -3800,6 +3866,13 @@ static int32_t parse_parameters(const char* numericalin) {
       ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "reconstruct_acoustic_plane_displacements=yes requires "
+                 "include_acoustic=yes and acoustic_formulation=pressure or "
+                 "acoustic_formulation=velocity_potential\n");
+  }
+  if ((acousticFreeSurfaceGravity == YES) &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_free_surface_gravity=yes requires "
                  "include_acoustic=yes and acoustic_formulation=pressure or "
                  "acoustic_formulation=velocity_potential\n");
   }
@@ -4053,6 +4126,7 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.acousticPressureFormulation = acousticPressureFormulation;
   Param.theAcousticInterfaceProjectionMode = acousticInterfaceProjectionMode;
   Param.theAcousticInterfaceFaceFilter = acousticInterfaceFaceFilter;
+  Param.theAcousticFreeSurfaceGravity = acousticFreeSurfaceGravity;
   Param.reconstructAcousticPlaneDisplacements =
       reconstructAcousticPlaneDisplacements;
   Param.includePoroelastic = includePoroelastic;
@@ -4130,6 +4204,10 @@ static int32_t parse_parameters(const char* numericalin) {
                    (legacyAcousticPressureFormulation == YES))
                       ? " [from legacy acoustic_pressure_formulation=yes]"
                       : "");
+    monitor_print("Acoustic free surface:              %s\n",
+                  (Param.theAcousticFreeSurfaceGravity == YES)
+                      ? "gravity (linearized, g=9.81 m/s^2)"
+                      : "pressure_release (legacy p=0)");
     monitor_print("Acoustic plane displacement recon.: %s\n",
                   reconstruct_acoustic_plane_displacements);
     monitor_print("Acoustic mesh refinement factor:    %f\n",
@@ -11096,6 +11174,8 @@ static void solver_init() {
   if (Param.theAbcType == ABC_CPML) {
     g_cpmlBuild.elastic_count = 0;
     g_cpmlBuild.acoustic_count = 0;
+    g_cpmlBuild.acoustic_gravity_surface_count = 0;
+    g_cpmlBuild.acoustic_gravity_surface_capacity = 0;
     g_cpmlBuild.active_axis_count = 0;
 
     /* Publish the elastic PML stiffness mode to the device (read by
@@ -11355,6 +11435,16 @@ static void solver_init() {
       const double volume =
           edata->edgesize * edata->edgesize * edata->edgesize;
       const double nodalPressureMass = volume / (8.0 * bulk);
+      const int isTopAcousticSurface =
+          (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
+           Global.myOctree->nearendp[2]);
+      const double gravitySurfaceMass =
+          ((Param.theAcousticFreeSurfaceGravity == YES) &&
+           isTopAcousticSurface)
+              ? (((double)edata->edgesize * (double)edata->edgesize) /
+                 (4.0 * (double)edata->rho *
+                  ACOUSTIC_GRAVITY_ACCELERATION_M_S2))
+              : 0.0;
 
       ep->c1 = 0.0;
       ep->c2 = 0.0;
@@ -11369,6 +11459,8 @@ static void solver_init() {
        * nodal pressure-mass / pressure-damp accumulation below. */
       double acoustic_kprod = 1.0;
       double acoustic_damp = 0.0;
+      double gravity_surface_kprod = 1.0;
+      double gravity_surface_damp = 0.0;
 
 #ifdef BOUNDARY
       /* Step A activation + Step B divergence-side coefficient build.
@@ -11456,6 +11548,45 @@ static void solver_init() {
           g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
               dt2 * nodalPressureMass * restore;
           acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
+
+          /* The gravity boundary is a top-face inertia. At lateral PML
+           * intersections its coordinate Jacobian contains only the
+           * tangential x/y stretches. Mirror the bulk Matzen CFS pair with
+           * a compact surface-only mapper; z is the face normal and must not
+           * enter this surface operator. */
+          const uint8_t lateral_mask =
+              ACOUSTIC_FACE_X_MINUS | ACOUSTIC_FACE_X_PLUS |
+              ACOUSTIC_FACE_Y_MINUS | ACOUSTIC_FACE_Y_PLUS;
+          if ((gravitySurfaceMass > 0.0) &&
+              ((pml_face_mask & lateral_mask) != 0)) {
+            const int32_t surface_idx =
+                g_cpmlBuild.acoustic_gravity_surface_count;
+            if (cpml_reserve_acoustic_gravity_surface(surface_idx + 1) != 0) {
+              fprintf(stderr,
+                      "Thread %d: solver_init: out of memory for acoustic "
+                      "gravity-surface CPML state\n",
+                      Global.myID);
+              MPI_Abort(MPI_COMM_WORLD, ERROR);
+              exit(1);
+            }
+            g_cpmlBuild.acoustic_gravity_surface_count++;
+            g_cpmlBuild.acoustic_gravity_surface_pml_index[surface_idx] =
+                pml_idx;
+            gravity_surface_kprod = kappa_axis[0] * kappa_axis[1];
+            gravity_surface_damp = d_axis[0] + d_axis[1];
+            double surface_restore = 0.0;
+            for (int axis = 0; axis < 2; axis++) {
+              const double da = d_axis[axis];
+              const double aa = alpha_axis[axis];
+              double* surface_mem =
+                  g_cpmlBuild.acoustic_gravity_surface_memForce[axis];
+              surface_mem[surface_idx] =
+                  dt2 * gravitySurfaceMass * da * aa * aa;
+              surface_restore += da * aa;
+            }
+            g_cpmlBuild.acoustic_gravity_surface_restoreCoeff[surface_idx] =
+                dt2 * gravitySurfaceMass * surface_restore;
+          }
         }
       }
 #endif /* BOUNDARY */
@@ -11471,10 +11602,22 @@ static void solver_init() {
             (solver_float)(nodalPressureMass * acoustic_damp *
                            Param.theDeltaT);
       }
-      if (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
-          Global.myOctree->nearendp[2]) {
+      if (isTopAcousticSurface) {
         for (j = 0; j < 4; j++) {
           pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
+          if (Param.theAcousticFreeSurfaceGravity == YES) {
+            /* The linearized free-surface condition q_tt = g*q_z adds
+             * integral_Gamma N_i*N_j/(rho*g) to the scalar acoustic mass.
+             * Lump the flat Hex8 top face consistently with the existing
+             * lumped volume mass: each of its four nodes receives A/(4*rho*g).
+             * q is pressure or the scaled velocity potential; both obey the
+             * same scalar wave equation and gravity boundary condition. */
+            Global.mySolver->pressure_mass[elemp->lnid[j]] +=
+                (solver_float)(gravitySurfaceMass * gravity_surface_kprod);
+            Global.mySolver->pressure_damp[elemp->lnid[j]] +=
+                (solver_float)(gravitySurfaceMass * gravity_surface_damp *
+                               Param.theDeltaT);
+          }
         }
       }
 
@@ -12355,6 +12498,88 @@ static void solver_init() {
       }
     }
 
+    /* --- Gravity free-surface / lateral acoustic CPML upload --- */
+    {
+      const int32_t surfaceN =
+          g_cpmlBuild.acoustic_gravity_surface_count;
+      Global.gpuData.pmlAcousticGravitySurfaceCount = surfaceN;
+      if (surfaceN > 0) {
+        if (cudaMalloc(
+                (void**)&Global.gpuData
+                    .pml_acoustic_gravitySurfacePmlIndexArrayDevice,
+                (size_t)surfaceN * sizeof(int32_t)) != cudaSuccess ||
+            cudaMemcpy(
+                Global.gpuData
+                    .pml_acoustic_gravitySurfacePmlIndexArrayDevice,
+                g_cpmlBuild.acoustic_gravity_surface_pml_index,
+                (size_t)surfaceN * sizeof(int32_t),
+                cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: allocate/copy gravity-surface CPML mapper "
+                  "failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+        for (int axis = 0; axis < 2; axis++) {
+          if (cudaMalloc(
+                  (void**)&Global.gpuData
+                      .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis],
+                  (size_t)surfaceN * sizeof(double)) != cudaSuccess ||
+              cudaMemcpy(
+                  Global.gpuData
+                      .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis],
+                  g_cpmlBuild.acoustic_gravity_surface_memForce[axis],
+                  (size_t)surfaceN * sizeof(double),
+                  cudaMemcpyHostToDevice) != cudaSuccess ||
+              cudaMalloc(
+                  (void**)&Global.gpuData
+                      .pml_acoustic_gravitySurfaceZetaArrayDevice[axis],
+                  (size_t)surfaceN * sizeof(solver_float)) != cudaSuccess) {
+            fprintf(stderr,
+                    "Thread %d: allocate/copy gravity-surface CPML axis %d "
+                    "failed\n",
+                    Global.myID, axis);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+          }
+          cudaMemset(
+              Global.gpuData
+                  .pml_acoustic_gravitySurfaceZetaArrayDevice[axis],
+              0, (size_t)surfaceN * sizeof(solver_float));
+        }
+        if (cudaMalloc(
+                (void**)&Global.gpuData
+                    .pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice,
+                (size_t)surfaceN * sizeof(double)) != cudaSuccess ||
+            cudaMemcpy(
+                Global.gpuData
+                    .pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice,
+                g_cpmlBuild.acoustic_gravity_surface_restoreCoeff,
+                (size_t)surfaceN * sizeof(double),
+                cudaMemcpyHostToDevice) != cudaSuccess) {
+          fprintf(stderr,
+                  "Thread %d: allocate/copy gravity-surface CPML restoring "
+                  "coefficient failed\n",
+                  Global.myID);
+          MPI_Abort(MPI_COMM_WORLD, ERROR);
+          exit(1);
+        }
+      }
+
+      long long local_surface = (long long)surfaceN;
+      long long global_surface = 0;
+      MPI_Allreduce(&local_surface, &global_surface, 1, MPI_LONG_LONG, MPI_SUM,
+                    comm_solver);
+      if ((Global.myID == 0) &&
+          (Param.theAcousticFreeSurfaceGravity == YES)) {
+        monitor_print(
+            "CPML gravity free-surface correction: %lld top-face acoustic "
+            "PML elements (tangential x/y CFS stretch)\n",
+            global_surface);
+      }
+    }
+
     /* --- Per-element PML flag (lenum-sized) --- */
     /* Lets the non-PML kernels (kernelStiffnessCalcLocal,
      * kernelAcousticPressureForce, BKT damping) early-exit on PML elements
@@ -12717,6 +12942,12 @@ static void solver_init() {
     g_cpmlBuild.acoustic_forceCoeff = NULL;
     free(g_cpmlBuild.acoustic_restoreCoeff);
     g_cpmlBuild.acoustic_restoreCoeff = NULL;
+    free(g_cpmlBuild.acoustic_gravity_surface_pml_index);
+    g_cpmlBuild.acoustic_gravity_surface_pml_index = NULL;
+    free(g_cpmlBuild.acoustic_gravity_surface_restoreCoeff);
+    g_cpmlBuild.acoustic_gravity_surface_restoreCoeff = NULL;
+    g_cpmlBuild.acoustic_gravity_surface_count = 0;
+    g_cpmlBuild.acoustic_gravity_surface_capacity = 0;
     for (int axis = 0; axis < 3; axis++) {
       free(g_cpmlBuild.elastic_a[axis]);
       g_cpmlBuild.elastic_a[axis] = NULL;
@@ -12742,6 +12973,10 @@ static void solver_init() {
       g_cpmlBuild.acoustic_zetaGain[axis] = NULL;
       free(g_cpmlBuild.acoustic_memForce[axis]);
       g_cpmlBuild.acoustic_memForce[axis] = NULL;
+      if (axis < 2) {
+        free(g_cpmlBuild.acoustic_gravity_surface_memForce[axis]);
+        g_cpmlBuild.acoustic_gravity_surface_memForce[axis] = NULL;
+      }
     }
   }
 #endif /* BOUNDARY */
@@ -13291,6 +13526,8 @@ static void solver_init() {
   /* Independent velocity-potential coupling. */
   Global.gpuData.acousticVelocityPotential =
       Param.theAcousticVelocityPotential;
+  Global.gpuData.acousticFreeSurfaceGravity =
+      (Param.theAcousticFreeSurfaceGravity == YES) ? 1 : 0;
   Global.gpuData.acousticInterfaceProjectionMode =
       Param.theAcousticInterfaceProjectionMode;
   /* Stiffness-proportional (Kelvin-Voigt) acoustic damping coefficient,
@@ -14885,6 +15122,17 @@ static void solver_delete() {
     cudaFree(Global.gpuData.pml_acoustic_zetaGainArrayDevice[axis]);
     cudaFree(Global.gpuData.pml_acoustic_memForceArrayDevice[axis]);
     cudaFree(Global.gpuData.pml_acoustic_zetaPArrayDevice[axis]);
+  }
+  cudaFree(
+      Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice);
+  cudaFree(
+      Global.gpuData.pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice);
+  for (int axis = 0; axis < 2; axis++) {
+    cudaFree(
+        Global.gpuData
+            .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis]);
+    cudaFree(
+        Global.gpuData.pml_acoustic_gravitySurfaceZetaArrayDevice[axis]);
   }
   free(Global.mySolver->pmlElasticElemList);
   Global.mySolver->pmlElasticElemList = NULL;
@@ -17125,12 +17373,21 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
   if (Param.theAbcType == ABC_CPML &&
       solver->gpuData->pmlAcousticElemCount > 0) {
     const int32_t pmlN = solver->gpuData->pmlAcousticElemCount;
+    const int32_t gravitySurfaceN =
+        solver->gpuData->pmlAcousticGravitySurfaceCount;
     const int pmlBlock = 128;
     const int pmlGrid = (pmlN + pmlBlock - 1) / pmlBlock;
     Timer_Start("Acoustic pressure PML kernel");
     psolve_launch_pml_acoustic(pmlGrid, pmlBlock, 0,
-                            solver->streams[CUDA_STREAM_MAIN],
-        mesh->lenum, solver->gpuDataDevice, pmlN);
+                               solver->streams[CUDA_STREAM_MAIN], mesh->lenum,
+                               solver->gpuDataDevice, pmlN);
+    if (gravitySurfaceN > 0) {
+      const int surfaceGrid =
+          (gravitySurfaceN + pmlBlock - 1) / pmlBlock;
+      psolve_launch_pml_acoustic_gravity_surface(
+          surfaceGrid, pmlBlock, 0, solver->streams[CUDA_STREAM_MAIN],
+          mesh->lenum, solver->gpuDataDevice, gravitySurfaceN);
+    }
     cerror = cudaGetLastError();
     Timer_Stop("Acoustic pressure PML kernel");
     if (cerror != cudaSuccess) {

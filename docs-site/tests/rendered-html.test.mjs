@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 207 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 208 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -196,6 +196,7 @@ test("renders the categorized parameter reference", async () => {
 
   const html = await response.text();
   assert.match(html, /Acoustic and poroelastic parameters/);
+  assert.match(html, /acoustic_free_surface_gravity/);
   assert.match(html, /acoustic_interface_face_filter/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
@@ -275,8 +276,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 228);
-  assert.equal(documented.length, 228, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 229);
+  assert.equal(documented.length, 229, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -313,6 +314,22 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("wires the optional acoustic gravity free surface through setup and CUDA", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const header = readFileSync(`${sourceRoot}psolve.h`, "utf8");
+  const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
+  assert.match(psolve, /parsetext\(fp, "acoustic_free_surface_gravity"/);
+  assert.match(psolve, /gravitySurfaceMass[\s\S]*?edgesize[\s\S]*?4\.0[\s\S]*?rho/);
+  assert.match(psolve, /gravity_surface_kprod = kappa_axis\[0\] \* kappa_axis\[1\]/);
+  assert.match(psolve, /psolve_launch_pml_acoustic_gravity_surface/);
+  assert.match(header, /ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9\.81/);
+  assert.match(kernel, /pressureFreeSurfaceNodeFlagsDevice[\s\S]*?acousticFreeSurfaceGravity == 0/);
+  assert.match(kernel, /kernelPMLAcousticGravitySurfaceStep/);
 });
 
 test("documents the phase launcher contract", async () => {
