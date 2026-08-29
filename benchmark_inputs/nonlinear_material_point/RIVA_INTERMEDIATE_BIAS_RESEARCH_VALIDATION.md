@@ -36,10 +36,22 @@ Native contract:
   binary64 operation boundaries, and the frozen NumPy 2.0.2 FMA `tanh`
   intervals needed by the dense unbiased phase path. No tolerance was
   loosened and no calibration value was changed.
-- [ ] CUDA compile, host/device parity, device checkpoint round trip,
+- [x] The standard Hercules material-point runner now has a dedicated
+  intermediate-bias research fixture. It replays the same native core on host
+  and CUDA, compares all 137 state values and lifecycle selectors, checks an
+  exact zero increment, and invokes the uniform sealed BrickUP pressure path.
+- [ ] Target-host CUDA compilation and execution of that standard fixture,
+  device checkpoint round trip,
   multi-rank MPI restart, approximate/ramped geostatic wave cases, and complete
   BrickUP motions require an NVIDIA/MPI Hercules host. This local machine has
   no `nvcc`, CUDA headers, `mpirun`, or `mpicxx`.
+
+Run the standard host/CUDA fixture on the NVIDIA target with:
+
+```bash
+mpirun -np 1 quake/forward/psolve --nonlinear-material-point \
+  benchmark_inputs/nonlinear_material_point/riva_sand_intermediate_bias_research_synthetic.in
+```
 
 Run the complete local suite with:
 

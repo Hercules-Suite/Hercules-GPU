@@ -8,6 +8,7 @@
 #include "quake_util.h"
 
 #define NL_RIVA_STATE_VALUE_COUNT 93
+#define NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 137
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -73,6 +74,8 @@ typedef struct nonlinear_material_point_result_t {
     double pdmy03_pressure_d;
     double pdmy03_center_norm;
     double riva_state_values[NL_RIVA_STATE_VALUE_COUNT];
+    double riva_intermediate_bias_state_values[
+        NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT];
     int32_t riva_geostatic_admitted;
     int32_t riva_reversal_registered;
     int32_t status;
@@ -156,6 +159,28 @@ int nonlinear_pdmy03_host_history(
 
 int nonlinear_riva_host_history(
     const nlconstants_t *constants,
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+/* The intermediate-bias research material has a distinct 137-value restart
+ * contract.  Its material-point replay is compiled separately so adding the
+ * larger research kernel does not increase the existing all-model regression
+ * translation unit. */
+int nonlinear_riva_intermediate_bias_research_host_history(
+    const riva_material_parameters_t *riva_material,
+    double riva_void_ratio,
+    const nonlinear_gpu_config_t *config,
+    const nonlinear_material_point_initial_state_t *initial_state,
+    const tensor_t *strain_history,
+    int32_t steps,
+    nonlinear_material_point_result_t *results);
+
+int nonlinear_gpu_riva_intermediate_bias_research_material_point_history(
     const riva_material_parameters_t *riva_material,
     double riva_void_ratio,
     const nonlinear_gpu_config_t *config,

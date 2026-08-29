@@ -99,11 +99,13 @@ compilation of the entire solver source.
 The nonlinear constitutive kernels make PTX assembly the most expensive
 forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
 instantiate independent production objects for the classic constitutive
-families, Manzari--Dafalias, PressureDependMultiYield03, and RIVA-Sand, plus small runtime
-and material-point objects. The runtime selects one family kernel for the
-globally configured `material_model`. This keeps the equations normally
-inlined, avoids relocatable device code, and lets `make -j 8` compile the three
-independent production kernels concurrently. The split also creates stable
+families, Manzari--Dafalias, PressureDependMultiYield03, production RIVA-Sand,
+and `RIVASandIntermediateBiasResearch`, plus small runtime and material-point
+objects. The research successor also has its own material-point CUDA object
+because its frozen restart state contains 137 values. The runtime selects one
+family kernel for the globally configured `material_model`. This keeps the
+equations normally inlined, avoids relocatable device code, and lets
+`make -j 8` compile the independent kernels concurrently. The split also creates stable
 boundaries for moving model-specific implementation details without returning
 to a single production PTX-assembly job.
 Prefer an explicit outer job count such as `-j 8` over bare `-j`, which gives
@@ -738,7 +740,10 @@ Nonlinear GPU execution (runtime environment):
 	material block per rank and stores one interpolated void ratio per nonlinear
 	element. It returns effective skeleton stress. BrickUP remains the sole owner
 	of pore pressure and contributes that pressure exactly once when total stress
-	is assembled. Keep this identifier confined to explicitly reported research
+	is assembled. Its standard material-point regression is compiled in an
+	isolated CUDA object and compares the shared host/device core over all 137
+	flattened state values, lifecycle selectors, a zero increment, and the sealed
+	uniform BrickUP pressure path. Keep this identifier confined to explicitly reported research
 	and verification work until its validation program is complete.
 - `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
@@ -950,7 +955,8 @@ Nonlinear GPU execution (runtime environment):
 - For a new calibration of a model supported by both production backends,
 	compare CPU and GPU nonlinear station histories, final yield statistics, and
 	force/displacement norms before a production run. Manzari--Dafalias,
-	PDMY03, and RIVA-Sand are production-GPU-only; validate each with its shared host/CUDA
+	PDMY03, RIVA-Sand, and the intermediate-bias research successor are
+	production-GPU-only; validate each with its shared host/CUDA
 	material-point regression and an appropriate independent characterization,
 	then run a GPU production case. Keep geostatic, tolerance, substep, stiffness-damping, and
 	`material_properties_list` values case-specific.

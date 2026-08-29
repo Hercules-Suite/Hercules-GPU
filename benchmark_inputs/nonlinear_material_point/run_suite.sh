@@ -46,6 +46,7 @@ fixtures=(
   riva_sand_low_bias_synthetic.in
   riva_sand_ramped_geostatic_admission_synthetic.in
   riva_sand_custom_equivalence.in
+  riva_sand_intermediate_bias_research_synthetic.in
 )
 
 validate_riva_custom_equivalence() {

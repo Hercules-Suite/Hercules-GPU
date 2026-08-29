@@ -46,6 +46,9 @@
 
 static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
               "RIVA-Sand material-point state width mismatch");
+static_assert(NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT ==
+                  RIVA_IB_STATE_VALUE_COUNT,
+              "RIVA-Sand intermediate-bias material-point state width mismatch");
 static_assert(RIVA_IB_PARAMETER_COUNT == 248 &&
               RIVA_IB_LOGICAL_STATE_COUNT == 62 &&
               RIVA_IB_STATE_VALUE_COUNT == 137,
@@ -5613,6 +5616,7 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_RIVA_CONSTANT_COUNT 1
 #define MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT 11
 #define MATERIAL_POINT_RIVA_STATE_VALUE_COUNT 93
+#define MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 137
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
@@ -5669,6 +5673,8 @@ static int material_point_parse_model(const char *name,
     else if (strcasecmp(name, "RIVASandCustom") == 0 ||
              strcasecmp(name, "RIVA-Sand-Custom") == 0)
         *model = RIVA_SAND_CUSTOM;
+    else if (strcasecmp(name, "RIVASandIntermediateBiasResearch") == 0)
+        *model = RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH;
     else return -1;
     return 0;
 }
@@ -5689,8 +5695,11 @@ static void material_point_load_constants(nlconstants_t *constants,
     memset(pdmy03_material, 0, sizeof(*pdmy03_material));
     memset(riva_material, 0, sizeof(*riva_material));
     *riva_void_ratio = 0.0;
-    if (MATERIAL_MODEL_IS_RIVA_SAND(model)) {
-        const riva_parameters_t reference = riva_reference_parameters(1000.0);
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(model)) {
+        const riva_parameters_t reference =
+            MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(model)
+                ? riva_ib_reference_parameters(1000.0).base
+                : riva_reference_parameters(1000.0);
         *riva_material = riva_reference_material_parameters(&reference);
         if (model == RIVA_SAND_CUSTOM) {
             riva_material->M = values[1];
@@ -5795,6 +5804,13 @@ static int material_point_cpu_history(
         return nonlinear_pdmy03_host_history(
             pdmy03_material, config, initial_state, strain_history, steps,
             results);
+    }
+    if (MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(config->material_model)) {
+        (void)constants;
+        (void)dt;
+        return nonlinear_riva_intermediate_bias_research_host_history(
+            riva_material, riva_void_ratio, config, initial_state,
+            strain_history, steps, results);
     }
     if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model)) {
         (void)dt;
@@ -5947,6 +5963,36 @@ static double material_point_comparison_scale(
     return scale;
 }
 
+static int material_point_compare_flattened_state(
+    const char *label,
+    const double *cpu_state,
+    const double *gpu_state,
+    int count,
+    int32_t step,
+    double atol,
+    double rtol,
+    double *maximum_absolute,
+    double *maximum_relative)
+{
+    for (int i = 0; i < count; i++) {
+        const double absolute = fabs(cpu_state[i]-gpu_state[i]);
+        const double scale = MAX(fabs(cpu_state[i]), fabs(gpu_state[i]));
+        *maximum_absolute = MAX(*maximum_absolute, absolute);
+        if (absolute > atol)
+            *maximum_relative = MAX(
+                *maximum_relative, absolute/MAX(scale, DBL_MIN));
+        if (!isfinite(cpu_state[i]) || !isfinite(gpu_state[i]) ||
+            (absolute > atol && absolute > rtol*scale)) {
+            fprintf(stderr,
+                    "%s full-state mismatch at step %d flattened field %d: "
+                    "CPU=%.17e GPU=%.17e abs=%.3e\n",
+                    label, step, i, cpu_state[i], gpu_state[i], absolute);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int material_point_same_strain(tensor_t left, tensor_t right)
 {
     return left.xx == right.xx && left.yy == right.yy &&
@@ -5971,8 +6017,10 @@ static int material_point_validate_zero_increment(
          * no-op update intentionally resets it to zero. */
         if (i == MATERIAL_POINT_FS_INDEX ||
             i == MATERIAL_POINT_MODEL_ERROR_INDEX ||
-            (model == MANZARI_DAFALIAS &&
-             (i == MATERIAL_POINT_PSI_INDEX ||
+            ((model == MANZARI_DAFALIAS &&
+              i == MATERIAL_POINT_PSI_INDEX) ||
+             ((model == MANZARI_DAFALIAS ||
+               MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(model)) &&
               i == MATERIAL_POINT_LOAD_UNLOAD_INDEX)) ||
             i == MATERIAL_POINT_PLASTIC_MULTIPLIER_INDEX ||
             i == MATERIAL_POINT_INTEGRATION_ERROR_INDEX ||
@@ -6023,6 +6071,39 @@ static int material_point_validate_zero_increment(
             fprintf(stderr,
                     "%s RIVA-Sand registered a reversal on a zero strain "
                     "increment at step %d\n", backend, step);
+            return -1;
+        }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(model)) {
+        for (int i = 0;
+             i < MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT;
+             i++) {
+            if (current->riva_intermediate_bias_state_values[i] !=
+                    previous->riva_intermediate_bias_state_values[i]) {
+                fprintf(stderr,
+                        "%s RIVA-Sand intermediate-bias research state "
+                        "changed on a zero strain increment at step %d "
+                        "flattened field %d: previous=%.17e current=%.17e\n",
+                        backend, step, i,
+                        previous->riva_intermediate_bias_state_values[i],
+                        current->riva_intermediate_bias_state_values[i]);
+                return -1;
+            }
+        }
+        if (current->riva_geostatic_admitted !=
+                previous->riva_geostatic_admitted) {
+            fprintf(stderr,
+                    "%s RIVA-Sand intermediate-bias geostatic-admission flag "
+                    "changed on a zero strain increment at step %d: "
+                    "previous=%d current=%d\n",
+                    backend, step, previous->riva_geostatic_admitted,
+                    current->riva_geostatic_admitted);
+            return -1;
+        }
+        if (current->riva_reversal_registered != 0) {
+            fprintf(stderr,
+                    "%s RIVA-Sand intermediate-bias research registered a "
+                    "reversal on a zero strain increment at step %d\n",
+                    backend, step);
             return -1;
         }
     }
@@ -6264,7 +6345,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
         (material_model == RIVA_SAND_CUSTOM)
         ? MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT :
-        (material_model == RIVA_SAND)
+        (material_model == RIVA_SAND ||
+         material_model == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH)
         ? MATERIAL_POINT_RIVA_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
     if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
@@ -6290,7 +6372,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     }
     if (initial_array_count != 0 && material_model != MANZARI_DAFALIAS &&
         material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-        !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+        !MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)) {
         fprintf(stderr, "A material-point initial state currently requires "
                         "ManzariDafalias, PressureDependMultiYield03, or "
                         "RIVASand\n");
@@ -6322,7 +6404,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                   &brickup_solid_bulk_modulus);
         if (material_model != MANZARI_DAFALIAS &&
             material_model != PRESSURE_DEPEND_MULTIYIELD_03 &&
-            !MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+            !MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)) {
             fprintf(stderr, "The material-point BrickUP comparison currently "
                             "requires ManzariDafalias, "
                             "PressureDependMultiYield03, or RIVASand\n");
@@ -6428,7 +6510,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             goto cleanup;
         }
     }
-    if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)) {
         if (!isfinite(constants_values[0]) ||
             constants_values[0] < 0.0 || constants_values[0] > 1.0) {
             fprintf(stderr,
@@ -6564,10 +6646,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             &constants, &md_material, &pdmy03_material, &riva_material,
             riva_void_ratio, &config, &initial_state, strain_history, steps,
             dt, cpu_results) != 0) goto cleanup;
-    if (nonlinear_gpu_material_point_history(
-            &constants, &md_material, &pdmy03_material, &riva_material,
-            riva_void_ratio, &config, &initial_state, strain_history, steps,
-            gpu_results) != 0) {
+    if (MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(material_model)) {
+        if (nonlinear_gpu_riva_intermediate_bias_research_material_point_history(
+                &riva_material, riva_void_ratio, &config, &initial_state,
+                strain_history, steps, gpu_results) != 0) goto cleanup;
+    } else if (nonlinear_gpu_material_point_history(
+                   &constants, &md_material, &pdmy03_material, &riva_material,
+                   riva_void_ratio, &config, &initial_state, strain_history,
+                   steps, gpu_results) != 0) {
         goto cleanup;
     }
     if (brickup_enabled == YES) {
@@ -6653,7 +6739,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         if ((MATERIAL_MODEL_IS_BACKBONE(material_model) ||
              material_model == MANZARI_DAFALIAS ||
              material_model == PRESSURE_DEPEND_MULTIYIELD_03 ||
-             MATERIAL_MODEL_IS_RIVA_SAND(material_model)) && step > 0 &&
+             MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)) && step > 0 &&
             material_point_same_strain(strain_history[step],
                                        strain_history[step-1])) {
             if (material_point_validate_zero_increment(
@@ -6832,27 +6918,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
             }
         }
         if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
-            for (int i = 0; i < MATERIAL_POINT_RIVA_STATE_VALUE_COUNT; i++) {
-                const double cpu_state =
-                    cpu_results[step].riva_state_values[i];
-                const double gpu_state =
-                    gpu_results[step].riva_state_values[i];
-                const double absolute = fabs(cpu_state-gpu_state);
-                const double scale = MAX(fabs(cpu_state), fabs(gpu_state));
-                maximum_absolute = MAX(maximum_absolute, absolute);
-                if (absolute > atol)
-                    maximum_relative = MAX(maximum_relative,
-                        absolute/MAX(scale, DBL_MIN));
-                if (!isfinite(cpu_state) || !isfinite(gpu_state) ||
-                    (absolute > atol && absolute > rtol*scale)) {
-                    fprintf(stderr,
-                            "RIVASand full-state mismatch at step %d "
-                            "flattened field %d: CPU=%.17e GPU=%.17e "
-                            "abs=%.3e\n", step, i, cpu_state,
-                            gpu_state, absolute);
-                    goto cleanup;
-                }
-            }
+            if (material_point_compare_flattened_state(
+                    "RIVASand", cpu_results[step].riva_state_values,
+                    gpu_results[step].riva_state_values,
+                    MATERIAL_POINT_RIVA_STATE_VALUE_COUNT, step, atol, rtol,
+                    &maximum_absolute, &maximum_relative) != 0) goto cleanup;
             if (cpu_results[step].riva_geostatic_admitted !=
                     gpu_results[step].riva_geostatic_admitted) {
                 fprintf(stderr,
@@ -6860,6 +6930,42 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                         "CPU=%d GPU=%d\n", step,
                         cpu_results[step].riva_geostatic_admitted,
                         gpu_results[step].riva_geostatic_admitted);
+                goto cleanup;
+            }
+            if (cpu_results[step].riva_reversal_registered !=
+                    gpu_results[step].riva_reversal_registered) {
+                fprintf(stderr,
+                        "RIVASand reversal-selector mismatch at step %d: "
+                        "CPU=%d GPU=%d\n", step,
+                        cpu_results[step].riva_reversal_registered,
+                        gpu_results[step].riva_reversal_registered);
+                goto cleanup;
+            }
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(material_model)) {
+            if (material_point_compare_flattened_state(
+                    "RIVASandIntermediateBiasResearch",
+                    cpu_results[step].riva_intermediate_bias_state_values,
+                    gpu_results[step].riva_intermediate_bias_state_values,
+                    MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT,
+                    step, atol, rtol, &maximum_absolute,
+                    &maximum_relative) != 0) goto cleanup;
+            if (cpu_results[step].riva_geostatic_admitted !=
+                    gpu_results[step].riva_geostatic_admitted) {
+                fprintf(stderr,
+                        "RIVASandIntermediateBiasResearch geostatic-admission "
+                        "mismatch at step %d: "
+                        "CPU=%d GPU=%d\n", step,
+                        cpu_results[step].riva_geostatic_admitted,
+                        gpu_results[step].riva_geostatic_admitted);
+                goto cleanup;
+            }
+            if (cpu_results[step].riva_reversal_registered !=
+                    gpu_results[step].riva_reversal_registered) {
+                fprintf(stderr,
+                        "RIVASandIntermediateBiasResearch reversal-selector "
+                        "mismatch at step %d: CPU=%d GPU=%d\n", step,
+                        cpu_results[step].riva_reversal_registered,
+                        gpu_results[step].riva_reversal_registered);
                 goto cleanup;
             }
         }
@@ -6960,6 +7066,20 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    "transition%s\n", zero_increment_checks,
                    zero_increment_checks == 1 ? "" : "s");
         }
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(material_model)) {
+        printf("RIVA-Sand intermediate-bias research controls: %d frozen "
+               "parameters %s, %d-value full state, %d fixed substep%s per "
+               "host increment\n",
+               RIVA_IB_PARAMETER_COUNT, RIVA_IB_PARAMETER_SHA256,
+               RIVA_IB_STATE_VALUE_COUNT, no_substeps,
+               no_substeps == 1 ? "" : "s");
+        printf("Validated CPU/GPU geostatic-admission selector: %d\n",
+               cpu_results[0].riva_geostatic_admitted);
+        if (zero_increment_checks > 0) {
+            printf("Validated zero-increment state preservation: %d "
+                   "transition%s\n", zero_increment_checks,
+                   zero_increment_checks == 1 ? "" : "s");
+        }
     } else if (MATERIAL_MODEL_IS_RIVA_SAND(material_model)) {
         printf("RIVA-Sand controls: %s, frozen internal controls %s, %d "
                "fixed substep%s per host increment\n",
@@ -7007,6 +7127,7 @@ cleanup:
 #undef MATERIAL_POINT_RIVA_CONSTANT_COUNT
 #undef MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT
 #undef MATERIAL_POINT_RIVA_STATE_VALUE_COUNT
+#undef MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT
 #undef MATERIAL_POINT_RESULT_VALUE_COUNT
 #undef MATERIAL_POINT_FS_INDEX
 #undef MATERIAL_POINT_PSI_INDEX

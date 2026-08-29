@@ -73,6 +73,7 @@ NONLINEAR_GPU_OBJECTS = nonlinear/nonlinear_gpu_runtime.o \
 	nonlinear/nonlinear_gpu_pdmy03.o \
 	nonlinear/nonlinear_gpu_riva_sand.o \
 	nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_research.o \
+	nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_material_point.o \
 	nonlinear/nonlinear_gpu_material_point.o
 
 PSOLVE_OBJECTS = psolve.o psolve_gpu_launch.o nrutila.o quakesource.o geometrics.o nonlinear.o \

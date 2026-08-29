@@ -221,6 +221,15 @@ law uses reference void ratio 0.601, which must remain inside the custom
   separately requires their CUDA CSVs to match exactly. This catches parser,
   interpolation, storage, and kernel-wiring errors without claiming that any
   non-reference custom parameter set has been calibrated.
+- `riva_sand_intermediate_bias_research_synthetic.in` exercises the distinct
+  248-parameter intermediate-bias research successor from an admitted K0 state
+  with nonzero static shear bias. Its dedicated host/CUDA replay compares all
+  137 flattened state values, the geostatic-admission and reversal selectors,
+  and an exact repeated-strain transition. The same fixture independently runs
+  the sealed uniform BrickUP pressure kernels and verifies the effective-
+  skeleton/pore-pressure ownership split. This is a numerical implementation
+  regression for the research identifier, not physical validation or a
+  production RIVA-Sand equivalence claim.
 
 The low-bias gate removes the inverse-bias singularity only. It does not by
 itself validate the reversible-volume branch at arbitrarily small cyclic
