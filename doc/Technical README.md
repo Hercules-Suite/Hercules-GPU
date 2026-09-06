@@ -100,7 +100,7 @@ The nonlinear constitutive kernels make PTX assembly the most expensive
 forward-solver build phase. Sources under `quake/forward/nonlinear/` therefore
 instantiate independent production objects for the classic constitutive
 families, Manzari--Dafalias, PressureDependMultiYield03, production RIVA-Sand,
-and `RIVASandIntermediateBiasResearch`, plus small runtime and material-point
+and `RIVASand02`, plus small runtime and material-point
 objects. The research successor also has its own material-point CUDA object
 because its frozen restart state contains 138 values. The runtime selects one
 family kernel for the globally configured `material_model`. This keeps the
@@ -729,18 +729,24 @@ Nonlinear GPU execution (runtime environment):
 	`Dr=1` is the densest, and the constitutive constants remain intentionally
 	unavailable for ad hoc production retuning. This replaces the earlier
 	`initial_void_ratio` column; old RIVA-Sand property rows must be converted.
-- `material_model=RIVASandIntermediateBiasResearch` selects the native
+- `material_model=RIVASand02` selects the native
 	intermediate-bias research successor sourced from OpenSees_RIVA commit
 	`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`, with the completed-half-cycle
 	plastic-activity gate from `5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c`.
 	It is a distinct internal
 	material, not an alias for or replacement of production `RIVASand` or
-	`RIVASandCustom`. Its production-case property rows retain the compact
-	`Vs_limit Dr` boundary with finite `0<=Dr<=1`; all other research calibration
-	values remain frozen in
-	the native research kernel. The research material shares one compact frozen
-	material block per rank and stores one interpolated void ratio per nonlinear
-	element. It returns effective skeleton stress. BrickUP remains the sole owner
+	`RIVASandCustom`. Its property rows retain the compact `Vs_limit Dr`
+	boundary with finite `0<=Dr<=1`; the other parameters use the research
+	reference calibration. `RIVASandCustom02` selects the same revision-3
+	kernel with the 12-column input `Vs_limit Dr M kd h m zeta e_max e_min Q R n_G`.
+	All eleven columns after Vs_limit are dimensionless and linearly interpolated.
+	Use the same validation bounds and physical meanings as `RIVASandCustom` below.
+	A Custom02 row with `Dr=0.663` and `1.25 1.125 122.44207260468994 0.945
+	0.025 0.78 0.51 10.0 1.5 0.65` for its ten physical inputs reproduces
+	`RIVASand02` at that density exactly. Non-reference rows need independent
+	calibration. Default 02 shares one material block per rank; Custom02 stores
+	one interpolated block per element. Both store one void ratio per nonlinear
+	element. They return effective skeleton stress. BrickUP remains the sole owner
 	of pore pressure and contributes that pressure exactly once when total stress
 	is assembled. Its standard material-point regression is compiled in an
 	isolated CUDA object and compares the shared host/device core over all 138
@@ -753,9 +759,14 @@ Nonlinear GPU execution (runtime environment):
 	the reversal reset; the separate phase-transformation volume is not gated.
 	This adds no iterations, substeps, or input fields. Revision-2 research
 	checkpoints are incompatible and are rejected; restart from a newly generated
-	checkpoint. This focused update keeps the Hercules material name unchanged
-	and does not add the later OpenSees `RIVASAND02` `BiasVolume` options or
-	OpenSees-specific `reversalLatch`.
+	checkpoint. The old input name `RIVASandIntermediateBiasResearch` is retired:
+	replace it with `RIVASand02`, retaining the two-column rows. The rename
+	changes no equations, revision-3 state layout, or default numerical model ID;
+	retain the same material data and selection when restarting. Both 02 names
+	use reference SHA `3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e`
+	for the remaining internal controls, not the original V8 reference.
+	Neither adds the later OpenSees `RIVASAND02` `BiasVolume` options or
+	OpenSees-specific `reversalLatch`. NVIDIA/MPI field qualification remains pending.
 - `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
 	compact set of existing physical constitutive inputs. Its 12-column rows are
@@ -834,8 +845,8 @@ Nonlinear GPU execution (runtime environment):
 	`vonMises_ep`, `vonMises_fa`, `vonMises_faM`, `vonMises_baE`,
 	`vonMises_baH`, `vonMises_GQH`, `vonMises_MKZ`, `vonMises_RO`,
 	`MohrCoulomb`, `DruckerPrager`, `ManzariDafalias`,
-	`PressureDependMultiYield03`, `RIVASand`, `RIVASandCustom`, and
-	`RIVASandIntermediateBiasResearch`. The displayed rows are syntax or regression
+	`PressureDependMultiYield03`, `RIVASand`, `RIVASandCustom`,
+	`RIVASand02`, and `RIVASandCustom02`. The displayed rows are syntax or regression
 	fixtures, never implicit production calibrations. They use two identical
 	property rows to make the nonlinear Vs interval explicit without adding an
 	interpolation gradient.

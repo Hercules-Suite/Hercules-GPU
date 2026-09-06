@@ -3792,7 +3792,8 @@ __global__ static void kernel_nonlinear_update_force(
             const riva_ib_parameters_t *riva_parameters =
                 (const riva_ib_parameters_t *)state.riva_ib_parameters;
             const riva_material_parameters_t *riva_material =
-                state.riva_materials;
+                state.riva_materials +
+                (cfg.material_model == RIVA_SAND_CUSTOM_02 ? nl_eindex : 0);
             riva_ib_state_t *riva_state = riva_states+point;
             if (!riva_state->base.initialized) {
                 const tensor_t equilibrated = riva_add(
@@ -4260,7 +4261,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     const int allocate_previous_state_shadows =
         config->material_model != MANZARI_DAFALIAS &&
         !MATERIAL_MODEL_IS_RIVA_SAND(config->material_model) &&
-        config->material_model != RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH;
+        !MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model);
     if (allocate_previous_state_shadows) {
         NL_ALLOC_COPY(strains1, strains1);
         NL_ALLOC_COPY(pstrains1, pstrains1);
@@ -4347,10 +4348,12 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         g_riva_geostatic.device = g_nl.riva_geostatic_stats;
     }
 
-    if (config->material_model == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH &&
+    if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
         count > 0) {
+        const size_t material_count =
+            config->material_model == RIVA_SAND_CUSTOM_02 ? (size_t)count : 1u;
         if (nonlinear_alloc_copy(myID, &g_nl.riva_materials,
-                host_state->riva_materials, 1u,
+                host_state->riva_materials, material_count,
                 "RIVA-Sand intermediate-bias research material") != 0 ||
             nonlinear_alloc_copy(myID, &g_nl.riva_void_ratios,
                 host_state->riva_void_ratios, (size_t)count,
@@ -4510,20 +4513,23 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     config->approximate_geostatic_state == YES
                         ? "approximate K0 effective stress"
                         : "solver stress history");
-        } else if (config->material_model ==
-                   RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) {
+        } else if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model)) {
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 sizeof(riva_ib_state_t))/(1024.0*1024.0);
+            const size_t material_count = count == 0 ? 0u :
+                (config->material_model == RIVA_SAND_CUSTOM_02
+                    ? (size_t)count : 1u);
             const double material_mib = (double)(
-                (count == 0 ? 0u : sizeof(riva_material_parameters_t))+
+                material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*sizeof(double))/(1024.0*1024.0);
             fprintf(stderr,
-                    "RIVA-Sand intermediate-bias research integration: "
+                    "%s integration: "
                     "OpenSees_RIVA %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_material=%.1f MiB, "
                     "local_history=%.1f MiB, effective-skeleton stress "
                     "with BrickUP pore pressure and Biot total-stress "
                     "coupling, geostatic=%s)\n",
+                    RIVA_SAND_MODEL_NAME(config->material_model),
                     RIVA_IB_SOURCE_COMMIT, RIVA_IB_PARAMETER_SHA256,
                     config->no_substeps, material_mib, state_mib,
                     config->approximate_geostatic_state == YES
@@ -4571,9 +4577,7 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
         g_workload.step = step;
         memset(&g_workload.host, 0, sizeof(g_workload.host));
     }
-    if ((MATERIAL_MODEL_IS_RIVA_SAND(g_config.material_model) ||
-         g_config.material_model ==
-             RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) &&
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(g_config.material_model) &&
         !g_riva_geostatic.reported &&
         step == g_config.geostatic_final_step+1) {
         g_riva_geostatic.pending = 1;
@@ -4612,8 +4616,7 @@ void nonlinear_gpu_enqueue(mysolver_t *solver, int32_t step,
         nonlinear_gpu_launch_pdmy03(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
-    } else if (g_config.material_model ==
-               RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH) {
+    } else if (MATERIAL_MODEL_IS_RIVA_SAND_02(g_config.material_model)) {
         nonlinear_gpu_launch_riva_sand_intermediate_bias_research(
             g_nl, g_config, solver->gpuDataDevice, grid_size, block_size,
             step, delta_t, delta_t_squared, stream);
@@ -4866,9 +4869,7 @@ static void nonlinear_gpu_report_workload(int32_t myID)
 static void nonlinear_gpu_report_riva_geostatic(int32_t myID)
 {
     if (!g_riva_geostatic.pending) return;
-    const char *model_name = g_config.material_model ==
-            RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
-        ? "RIVA-Sand intermediate-bias research" : "RIVA-Sand";
+    const char *model_name = RIVA_SAND_MODEL_NAME(g_config.material_model);
 
     if (g_nl.count > 0 && g_riva_geostatic.device != NULL) {
         const cudaError_t error = cudaMemcpy(
@@ -5438,8 +5439,7 @@ static uint32_t nonlinear_checkpoint_local_flags(mysolver_t *solver)
      * elements; their point count is zero and no device bytes are copied. */
     if (g_active && MATERIAL_MODEL_IS_RIVA_SAND(g_config.material_model))
         flags |= NL_CHECKPOINT_RIVA_STATE;
-    if (g_active && g_config.material_model ==
-            RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH)
+    if (g_active && MATERIAL_MODEL_IS_RIVA_SAND_02(g_config.material_model))
         flags |= NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE;
     return flags;
 }

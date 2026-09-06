@@ -50,7 +50,7 @@ typedef enum {
     MOHR_COULOMB, VONMISES_BAE, VONMISES_BAH, VONMISES_GQH,
     VONMISES_MKZ, VONMISES_RO, MANZARI_DAFALIAS,
     PRESSURE_DEPEND_MULTIYIELD_03, RIVA_SAND, RIVA_SAND_CUSTOM,
-    RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH
+    RIVA_SAND_02, RIVA_SAND_CUSTOM_02
 
 } materialmodel_t;
 
@@ -60,12 +60,20 @@ typedef enum {
 #define MATERIAL_MODEL_IS_RIVA_SAND(model) \
     ((model) == RIVA_SAND || (model) == RIVA_SAND_CUSTOM)
 
-#define MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(model) \
-    ((model) == RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH)
+#define MATERIAL_MODEL_IS_RIVA_SAND_02(model) \
+    ((model) == RIVA_SAND_02 || (model) == RIVA_SAND_CUSTOM_02)
+
+#define MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM(model) \
+    ((model) == RIVA_SAND_CUSTOM || (model) == RIVA_SAND_CUSTOM_02)
+
+#define RIVA_SAND_MODEL_NAME(model) \
+    ((model) == RIVA_SAND_CUSTOM_02 ? "RIVASandCustom02" : \
+     (model) == RIVA_SAND_02 ? "RIVASand02" : \
+     (model) == RIVA_SAND_CUSTOM ? "RIVASandCustom" : "RIVASand")
 
 #define MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(model) \
     (MATERIAL_MODEL_IS_RIVA_SAND(model) || \
-     MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH(model))
+     MATERIAL_MODEL_IS_RIVA_SAND_02(model))
 
 typedef struct vect1_t {
 	double x;

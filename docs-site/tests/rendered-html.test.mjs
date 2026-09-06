@@ -351,7 +351,9 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /ManzariDafalias/);
   assert.match(physics, /PressureDependMultiYield03/);
   assert.match(physics, /RIVASand/);
-  assert.match(physics, /RIVASandIntermediateBiasResearch/);
+  assert.match(physics, /RIVASand02/);
+  assert.match(physics, /RIVASandCustom02/);
+  assert.match(physics, /RIVASandIntermediateBiasResearch is retired as an input identifier/);
   assert.match(physics, /not an alias for, replacement for, or retuning of production RIVASand/);
   assert.match(physics, /BrickUP remains the sole owner of pore pressure/);
   assert.match(physics, /frozen Ottawa F65/);
@@ -381,7 +383,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "PressureDependMultiYield03",
     "RIVASand",
     "RIVASandCustom",
-    "RIVASandIntermediateBiasResearch",
+    "RIVASand02",
+    "RIVASandCustom02",
   ]) {
     assert.match(physics, new RegExp(`material_model = ${model}`));
   }
@@ -392,7 +395,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
     "PressureDependMultiYield03",
     "RIVASand",
     "RIVASandCustom",
-    "RIVASandIntermediateBiasResearch",
+    "RIVASand02",
+    "RIVASandCustom02",
   ]) {
     assert.match(
       physics,
@@ -432,15 +436,16 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(parameters, /PDMY03: N × 22/);
   assert.match(parameters, /RIVASand: N × 2/);
   assert.match(parameters, /RIVASandCustom: N × 12/);
-  assert.match(parameters, /RIVASandIntermediateBiasResearch: N × 2/);
+  assert.match(parameters, /RIVASand02: N × 2/);
+  assert.match(parameters, /RIVASandCustom02: N × 12/);
   assert.match(parameters, /distinct research successor/);
   assert.match(parameters, /Vs_limit Dr M kd h m zeta e_max e_min Q R n_G/);
-  assert.match(parameters, /This is RIVA-Sand, not the experimental pre-name V8.1 h_p0 extension/);
+  assert.match(parameters, /Neither interface exposes the experimental pre-name V8.1 h_p0 extension/);
   assert.match(parameters, /9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83/);
   assert.match(parameters, /surface_count is an integer from 2 through 40/);
   assert.match(parameters, /Vs_limit G0 e_init Mc c lambda_c/);
   assert.match(parameters, /maximum absolute yield-surface residual/);
-  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, RIVASand, RIVASandCustom, and RIVASandIntermediateBiasResearch/);
+  assert.match(parameters, /documented MohrCoulomb, DruckerPrager, ManzariDafalias, PDMY03, RIVASand, RIVASandCustom, RIVASand02, and RIVASandCustom02/);
 
   const gpuResponse = await render("/docs/gpu-execution");
   assert.equal(gpuResponse.status, 200);
@@ -939,6 +944,63 @@ test("wires PressureDependMultiYield03 through parser, shared core, CUDA state, 
   assert.match(suite, /pdmy03_cyclic_shear_synthetic\.in/);
 });
 
+test("wires both RIVA-Sand 02 interfaces without changing the original family", () => {
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  const benchmarkRoot = fileURLToPath(
+    new URL("../../benchmark_inputs/nonlinear_material_point/", import.meta.url),
+  );
+  if (!existsSync(sourceRoot)) return;
+  const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
+  const cpu = readFileSync(`${sourceRoot}nonlinear.cc`, "utf8");
+  const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
+  const point = readFileSync(
+    `${sourceRoot}nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_material_point.cu`, "utf8",
+  );
+  const suite = readFileSync(`${benchmarkRoot}run_suite.sh`, "utf8");
+  const originalFixture = readFileSync(
+    `${benchmarkRoot}riva_sand_intermediate_bias_research_synthetic.in`, "utf8",
+  );
+  const customFixture = readFileSync(`${benchmarkRoot}riva_sand_custom02_equivalence.in`, "utf8");
+  assert.match(header, /RIVA_SAND, RIVA_SAND_CUSTOM,\s*RIVA_SAND_02, RIVA_SAND_CUSTOM_02\s*\} materialmodel_t/);
+  assert.match(header, /#define MATERIAL_MODEL_IS_RIVA_SAND\(model\) \\\n\s*\(\(model\) == RIVA_SAND \|\| \(model\) == RIVA_SAND_CUSTOM\)/);
+  assert.match(header, /#define MATERIAL_MODEL_IS_RIVA_SAND_02\(model\) \\\n\s*\(\(model\) == RIVA_SAND_02 \|\| \(model\) == RIVA_SAND_CUSTOM_02\)/);
+  assert.match(header, /#define MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(model\) \\\n\s*\(\(model\) == RIVA_SAND_CUSTOM \|\| \(model\) == RIVA_SAND_CUSTOM_02\)/);
+  for (const name of ["RIVASand02", "RIVASandCustom02"]) {
+    assert.match(cpu, new RegExp(`strcasecmp\\(material_model, "${name}"\\)`));
+    assert.match(cpu, new RegExp(`strcasecmp\\(name, "${name}"\\)`));
+  }
+  assert.doesNotMatch(cpu, /RIVASandIntermediateBiasResearch|RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH/);
+  const customGuard = "MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM(theMaterialModel)";
+  const rows = cpu.slice(cpu.indexOf("static riva_material_parameters_t riva_material_at_row"),
+    cpu.indexOf("/* Categorical material-table fields"));
+  assert.equal(rows.split(customGuard).length - 1, 2);
+  for (const field of ["M", "kd", "h", "m", "zeta", "e_max", "e_min", "Q", "R", "n_G"])
+    assert.equal((rows.match(new RegExp(`material\\.${field} =`, "g")) ?? []).length, 2);
+  assert.match(cpu, /MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(theMaterialModel\)\s*\? \(size_t\)myNonlinElementsCount : 1u/);
+  assert.match(cpu, /if \(!MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(theMaterialModel\) &&\s*myNonlinSolver->riva_materials != NULL\)/);
+  assert.match(cpu, /case RIVA_SAND_02:\s*case RIVA_SAND_CUSTOM_02:/);
+  assert.match(cpu, /MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(material_model\)\s*\? MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT/);
+  const load = cpu.slice(cpu.indexOf("static void material_point_load_constants"),
+    cpu.indexOf("static void material_point_load_constants") + 2500);
+  assert.match(load, /if \(MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(model\)\)/);
+  ["M", "kd", "h", "m", "zeta", "e_max", "e_min", "Q", "R", "n_G"].forEach((field, i) => {
+    assert.match(load, new RegExp(`riva_material->${field} = values\\[${i + 1}\\]`));
+  });
+  assert.match(gpu, /state\.riva_materials \+\s*\(cfg\.material_model == RIVA_SAND_CUSTOM_02 \? nl_eindex : 0\)/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_RIVA_SAND_02\(config->material_model\) &&\s*count > 0\) \{\s*const size_t material_count =\s*config->material_model == RIVA_SAND_CUSTOM_02 \? \(size_t\)count : 1u;\s*if \(nonlinear_alloc_copy\(myID, &g_nl\.riva_materials,\s*host_state->riva_materials, material_count,/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_RIVA_SAND_FAMILY\(g_config\.material_model\) &&\s*!g_riva_geostatic\.reported/);
+  assert.match(gpu, /MATERIAL_MODEL_IS_RIVA_SAND_02\(g_config\.material_model\)\) \{\s*nonlinear_gpu_launch_riva_sand_intermediate_bias_research/);
+  assert.match(gpu, /g_active && MATERIAL_MODEL_IS_RIVA_SAND_02\(g_config\.material_model\)\)\s*flags \|= NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE/);
+  assert.match(point, /!MATERIAL_MODEL_IS_RIVA_SAND_02\(config->material_model\)/);
+  assert.match(customFixture, /material_model = RIVASandCustom02/);
+  assert.match(customFixture, /Dr M kd h m zeta e_max e_min Q R n_G/);
+  assert.equal(customFixture.slice(customFixture.indexOf("material_point_initial_strain")),
+    originalFixture.slice(originalFixture.indexOf("material_point_initial_strain")));
+  assert.match(suite, /riva_sand_custom02_equivalence\.in/);
+  assert.match(suite, /validate_riva_custom02_equivalence/);
+  assert.match(suite, /RIVASandCustom02 reference row differs from RIVASand02/);
+});
+
 test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints", () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   const benchmarkRoot = fileURLToPath(
@@ -985,10 +1047,10 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   );
 
   assert.match(header, /RIVA_SAND_CUSTOM/);
-  assert.match(header, /RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH/);
+  assert.match(header, /RIVA_SAND_02/);
   assert.match(
     header,
-    /#define MATERIAL_MODEL_IS_RIVA_SAND\(model\)[\s\S]*RIVA_SAND_CUSTOM\)[\s\S]*#define MATERIAL_MODEL_IS_RIVA_SAND_RESEARCH/,
+    /#define MATERIAL_MODEL_IS_RIVA_SAND\(model\)[\s\S]*RIVA_SAND_CUSTOM\)[\s\S]*#define MATERIAL_MODEL_IS_RIVA_SAND_02/,
   );
   assert.match(header, /MATERIAL_MODEL_IS_RIVA_SAND_FAMILY/);
   assert.match(header, /riva_material_parameters_t/);
@@ -1000,10 +1062,10 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(header, /typedef struct nlsolver_t \{[\s\S]*md_materials[\s\S]*pdmy03_materials[\s\S]*riva_materials[\s\S]*riva_void_ratios/);
   assert.match(cpu, /RIVASand[\s\S]*RIVA-Sand/);
   assert.match(cpu, /RIVASandCustom[\s\S]*RIVA-Sand-Custom/);
-  assert.match(cpu, /RIVASandIntermediateBiasResearch/);
+  assert.match(cpu, /RIVASand02/);
   assert.match(cpu, /RIVA_IB_PARAMETER_SHA256/);
   assert.doesNotMatch(cpu, /PJLiq|PJ[-_ ]?Liq/);
-  assert.match(cpu, /RIVA_SAND_CUSTOM[\s\S]*\? 12 :[\s\S]*RIVA_SAND[\s\S]*\? 2 : 16/);
+  assert.match(cpu, /MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM\(theMaterialModel\) \? 12 :\s*MATERIAL_MODEL_IS_RIVA_SAND_FAMILY\(theMaterialModel\) \? 2 : 16/);
   assert.match(cpu, /relative density must be[\s\S]*dimensionless range \[0, 1\]/);
   assert.match(core, /riva_void_ratio_from_relative_density/);
   assert.match(core, /return material->e_max-relative_density\*\(material->e_max-material->e_min\)/);
@@ -1057,7 +1119,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(gpu, /maximum admitted cone ratio/);
   assert.match(gpuHeader, /riva_geostatic_admitted/);
   assert.match(cpu, /RIVASand geostatic-admission mismatch/);
-  assert.match(cpu, /RIVASandIntermediateBiasResearch reversal-selector/);
+  assert.match(cpu, /RIVASand02 reversal-selector/);
   assert.match(gpu, /riva_update_material\(riva_parameters, riva_material/);
   assert.match(gpu, /host_state->riva_materials[\s\S]*host_state->riva_void_ratios/);
   assert.match(gpu, /local_material=%.1f MiB/);
@@ -1102,7 +1164,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(suite, /RIVASandCustom reference row differs from frozen RIVA-Sand/);
   assert.match(
     researchFixture,
-    /material_model = RIVASandIntermediateBiasResearch/,
+    /material_model = RIVASand02/,
   );
   assert.match(researchFixture, /material_point_steps = 18/);
   assert.match(researchFixture, /material_point_brickup = yes/);

@@ -1,4 +1,4 @@
-/* Host state-contract checks for RIVASandIntermediateBiasResearch.
+/* Host state-contract checks for RIVASand02.
  *
  * The test uses the frozen low-bias input path to exercise byte restart at a
  * static preload checkpoint, immediately after one-time activation, and next
@@ -474,12 +474,12 @@ int main(int argc, char **argv)
             throw std::runtime_error("effective-to-total stress assembled incorrectly");
 
         std::cout
-            << "PASS: RIVASandIntermediateBiasResearch 249-parameter/63-state/"
+            << "PASS: RIVASand02 249-parameter/63-state/"
                "138-value flatten contract, static/post-activation/reversal restart, "
                "activation idempotence, point isolation, homogeneous/rigid "
                "Hex8 behavior, and BrickUP effective-stress ownership\n";
     } catch (const std::exception &error) {
-        std::cerr << "RIVASandIntermediateBiasResearch state test failed: "
+        std::cerr << "RIVASand02 state test failed: "
                   << error.what() << '\n';
         return 1;
     }

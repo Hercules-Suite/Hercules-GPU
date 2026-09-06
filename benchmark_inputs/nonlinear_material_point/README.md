@@ -222,7 +222,7 @@ law uses reference void ratio 0.601, which must remain inside the custom
   interpolation, storage, and kernel-wiring errors without claiming that any
   non-reference custom parameter set has been calibrated.
 - `riva_sand_intermediate_bias_research_synthetic.in` exercises the distinct
-  249-parameter intermediate-bias research successor from an admitted K0 state
+  `RIVASand02` 249-parameter intermediate-bias successor from an admitted K0 state
   with nonzero static shear bias. Its dedicated host/CUDA replay compares all
   138 flattened state values, the geostatic-admission and reversal selectors,
   and an exact repeated-strain transition. The same fixture independently runs
@@ -230,6 +230,15 @@ law uses reference void ratio 0.601, which must remain inside the custom
   skeleton/pore-pressure ownership split. This is a numerical implementation
   regression for the research identifier, not physical validation or a
   production RIVA-Sand equivalence claim.
+- `riva_sand_custom02_equivalence.in` repeats that exact history with
+  `RIVASandCustom02`. The material-point row is `Dr M kd h m zeta e_max e_min
+  Q R n_G` (no Vs selector in a single-point fixture). `run_suite.sh` requires
+  byte-identical full CPU CSVs and, separately, full CUDA CSVs relative to
+  `RIVASand02`. The host-only `riva_sand02_custom_test.cc` checks exact
+  reference equivalence, ten independently perturbed physical inputs,
+  custom-material point isolation, restart, and 1/4/16 fixed substeps.
+  Historical research filenames remain for traceability; the old
+  `RIVASandIntermediateBiasResearch` input identifier is no longer accepted.
 
 The low-bias gate removes the inverse-bias singularity only. It does not by
 itself validate the reversible-volume branch at arbitrarily small cyclic

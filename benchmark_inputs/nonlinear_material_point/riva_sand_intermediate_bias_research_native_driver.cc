@@ -664,7 +664,7 @@ int main(int argc, char **argv)
         for (const CaseDefinition &definition : kCases)
             replay_case(definition, input_directory, output_directory, header);
     } catch (const std::exception &error) {
-        std::cerr << "RIVASandIntermediateBiasResearch replay failed: "
+        std::cerr << "RIVASand02 replay failed: "
                   << error.what() << '\n';
         return 1;
     }

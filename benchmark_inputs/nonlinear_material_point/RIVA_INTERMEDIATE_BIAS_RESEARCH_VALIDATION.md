@@ -1,6 +1,6 @@
 # RIVA-Sand intermediate-bias research validation
 
-This record applies only to `RIVASandIntermediateBiasResearch`, translated
+This record applies to `RIVASand02` and `RIVASandCustom02`, translated
 from OpenSees_RIVA commit
 `637d207e867b863dee7b2bf14d9aeb75fdc32e7b`, with the plastic-activity gate
 from `5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c`. It does not qualify or modify
@@ -38,7 +38,8 @@ Native contract:
   and 16 fixed substeps. Capture occurs exactly once per host reversal.
 - [x] The new scalar survives byte restart after a completed half-cycle and
   idempotent activation; reused point initialization clears it.
-- [x] Documentation build and all 28 rendered-source tests pass.
+- [x] Documentation lint, TypeScript checks, build, and all 29 rendered/source
+  tests pass after the 02 interface update.
 - [x] All six cases pass core parity at `rtol=1e-8`, `atol=1e-10`.
 - [x] All six cases pass full 236-column parity at the same tolerance. The
   native research kernel preserves NumPy's pairwise tensor-contraction tree,
@@ -90,10 +91,38 @@ host/CUDA result buffers now include it. Full GPU/MPI checkpoint execution
 still requires the target system; the local byte-restart test is not a
 substitute for that qualification.
 
-This port keeps `RIVASandIntermediateBiasResearch` and its `Vs_limit Dr`
-input unchanged. It does not import the later `BiasVolume` modes or
-OpenSees-specific `reversalLatch`, nor rename the Hercules material to
-`RIVASAND02`. Original `RIVASand`/`RIVASandCustom` are unchanged.
+The gate originally retained the `RIVASandIntermediateBiasResearch` name.
+The subsequent interface change below retires that name. Neither change
+imports the later OpenSees `BiasVolume` modes or OpenSees-specific
+`reversalLatch`. Original `RIVASand`/`RIVASandCustom` are unchanged.
+
+## 02 interface rename and configurable adapter (2026-09-06)
+
+- `RIVASand02`: renamed default interface with `Vs_limit Dr` rows.
+- `RIVASandCustom02`: the same revision-3 kernel with `Vs_limit Dr M kd h m
+  zeta e_max e_min Q R n_G` rows. Custom material blocks are interpolated and
+  stored per element on both host and device; default 02 retains one block
+  per rank. Material-point inputs omit only the Vs selector.
+- `RIVASandIntermediateBiasResearch` is no longer accepted by either parser.
+  Historical source/fixture filenames remain unchanged for traceability.
+- No constitutive code or state-layout changes. Default model ID remains
+  15, new Custom02 is 16, and revision-3 reference hash/state remain unchanged.
+  Resume with the same model selection and physical inputs. This does not
+  make revision-2 checkpoints compatible.
+- Native exact default/custom reference equality, all ten independently
+  perturbed physical inputs, per-material isolation, void-ratio bounds, and
+  custom byte restart pass with 1/4/16 substeps. This tests input activity,
+  not calibration of the perturbed parameter sets.
+- All six successor histories still pass full 236-column parity at the
+  established `rtol=1e-8`, `atol=1e-10`. The original five histories retain
+  their pre-existing host tolerance; no golden data is regenerated.
+- The standard target-host suite adds `riva_sand_custom02_equivalence.in`
+  and requires byte-identical default/custom full CSVs independently on CPU
+  and CUDA. Source-wiring tests cover both parser names, column layouts,
+  per-element GPU parameter indexing/allocation, launch selection, geostatic
+  reporting, and checkpoint state-family selection.
+- Full NVIDIA/MPI compilation and execution are still pending on the target
+  machine. Host tests and source inspection do not substitute for those runs.
 
 ### Incremental host cost
 

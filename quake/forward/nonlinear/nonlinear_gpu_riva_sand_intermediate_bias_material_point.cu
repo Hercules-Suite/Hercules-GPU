@@ -72,7 +72,7 @@ __host__ __device__ static inline int riva_ib_material_point_replay(
 {
     if (material == NULL || config == NULL || initial_state == NULL ||
         strain_history == NULL || results == NULL || steps <= 0 ||
-        config->material_model != RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH ||
+        !MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) ||
         !initial_state->provided || config->no_substeps < 1) return 0;
 
     const riva_ib_parameters_t parameters =

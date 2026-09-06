@@ -1,5 +1,5 @@
 # RIVA-Sand intermediate-bias research host/CUDA full-state regression.
-material_model = RIVASandIntermediateBiasResearch
+material_model = RIVASand02
 material_point_delta_time_sec = 1.0e-3
 material_point_steps = 18
 no_substeps = 4
