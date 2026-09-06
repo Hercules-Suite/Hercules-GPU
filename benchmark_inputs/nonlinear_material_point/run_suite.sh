@@ -46,6 +46,8 @@ fixtures=(
   riva_sand_low_bias_synthetic.in
   riva_sand_ramped_geostatic_admission_synthetic.in
   riva_sand_custom_equivalence.in
+  riva_sand_intermediate_bias_research_synthetic.in
+  riva_sand_custom02_equivalence.in
 )
 
 validate_riva_custom_equivalence() {
@@ -54,6 +56,17 @@ validate_riva_custom_equivalence() {
     if ! cmp -s "riva_sand_brickup_synthetic.${backend}.csv" \
                "riva_sand_custom_equivalence.${backend}.csv"; then
       echo "RIVASandCustom reference row differs from frozen RIVA-Sand (${backend})" >&2
+      return 1
+    fi
+  done
+}
+
+validate_riva_custom02_equivalence() {
+  local backend
+  for backend in cpu gpu; do
+    if ! cmp -s "riva_sand_intermediate_bias_research_synthetic.${backend}.csv" \
+               "riva_sand_custom02_equivalence.${backend}.csv"; then
+      echo "RIVASandCustom02 reference row differs from RIVASand02 (${backend})" >&2
       return 1
     fi
   done
@@ -137,6 +150,9 @@ for fixture in "${fixtures[@]}"; do
     failures+=("$fixture")
   elif [[ $fixture == riva_sand_custom_equivalence.in ]] &&
        ! validate_riva_custom_equivalence; then
+    failures+=("$fixture")
+  elif [[ $fixture == riva_sand_custom02_equivalence.in ]] &&
+       ! validate_riva_custom02_equivalence; then
     failures+=("$fixture")
   fi
 done
