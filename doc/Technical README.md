@@ -102,7 +102,7 @@ instantiate independent production objects for the classic constitutive
 families, Manzari--Dafalias, PressureDependMultiYield03, production RIVA-Sand,
 and `RIVASandIntermediateBiasResearch`, plus small runtime and material-point
 objects. The research successor also has its own material-point CUDA object
-because its frozen restart state contains 137 values. The runtime selects one
+because its frozen restart state contains 138 values. The runtime selects one
 family kernel for the globally configured `material_model`. This keeps the
 equations normally inlined, avoids relocatable device code, and lets
 `make -j 8` compile the independent kernels concurrently. The split also creates stable
@@ -731,7 +731,9 @@ Nonlinear GPU execution (runtime environment):
 	`initial_void_ratio` column; old RIVA-Sand property rows must be converted.
 - `material_model=RIVASandIntermediateBiasResearch` selects the native
 	intermediate-bias research successor sourced from OpenSees_RIVA commit
-	`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`. It is a distinct internal
+	`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`, with the completed-half-cycle
+	plastic-activity gate from `5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c`.
+	It is a distinct internal
 	material, not an alias for or replacement of production `RIVASand` or
 	`RIVASandCustom`. Its production-case property rows retain the compact
 	`Vs_limit Dr` boundary with finite `0<=Dr<=1`; all other research calibration
@@ -741,10 +743,19 @@ Nonlinear GPU execution (runtime environment):
 	element. It returns effective skeleton stress. BrickUP remains the sole owner
 	of pore pressure and contributes that pressure exactly once when total stress
 	is assembled. Its standard material-point regression is compiled in an
-	isolated CUDA object and compares the shared host/device core over all 137
+	isolated CUDA object and compares the shared host/device core over all 138
 	flattened state values, lifecycle selectors, a zero increment, and the sealed
 	uniform BrickUP pressure path. Keep this identifier confined to explicitly reported research
 	and verification work until its validation program is complete.
+	Kernel revision 3 stores the previous half-cycle's plastic activity and
+	uses it to suppress the inherited biased-volume correction during weakly
+	plastic cycling. Both stress-update backbones capture that activity before
+	the reversal reset; the separate phase-transformation volume is not gated.
+	This adds no iterations, substeps, or input fields. Revision-2 research
+	checkpoints are incompatible and are rejected; restart from a newly generated
+	checkpoint. This focused update keeps the Hercules material name unchanged
+	and does not add the later OpenSees `RIVASAND02` `BiasVolume` options or
+	OpenSees-specific `reversalLatch`.
 - `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
 	compact set of existing physical constitutive inputs. Its 12-column rows are

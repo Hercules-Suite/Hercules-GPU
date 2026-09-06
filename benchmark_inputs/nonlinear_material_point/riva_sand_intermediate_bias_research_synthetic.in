@@ -11,7 +11,7 @@ material_point_compare_atol = 1.0e-10
 material_point_output_prefix = riva_sand_intermediate_bias_research_synthetic
 
 # The research successor exposes the same relative-density row as frozen
-# RIVASand. Its private 248-parameter record is identified at runtime by
+# RIVASand. Its private 249-parameter record is identified at runtime by
 # RIVA_IB_PARAMETER_SHA256; e_max=0.78 and e_min=0.51 give e0=0.601 here.
 material_point_constants =
   0.66296296296296309
@@ -20,7 +20,7 @@ material_point_constants =
 # tension-positive, in Pa. The p'=26.267 kPa and tau=10 kPa state is adapted
 # from the frozen PRJ-3484 intermediate-bias oracle family. The common seeded
 # parser requires all five arrays; the final three are placeholders because
-# the research model initializes its own 137-value constitutive history.
+# the research model initializes its own 138-value constitutive history.
 material_point_initial_strain =
   0 0 0 0 0 0
 material_point_initial_stress =
@@ -42,7 +42,7 @@ material_point_brickup_biot_alpha = 1.0
 material_point_initial_pore_pressure_pa = 0.0
 
 # Physical tensor shear components. The final duplicate row is an explicit
-# zero-increment contract check over all 137 state values and both selectors.
+# zero-increment contract check over all 138 state values and both selectors.
 material_point_strain_history =
    0.0e+0  0.0e+0  0.0e+0  0.0e+0 0 0
   -1.0e-5 -1.0e-5 -1.0e-5  2.5e-4 0 0

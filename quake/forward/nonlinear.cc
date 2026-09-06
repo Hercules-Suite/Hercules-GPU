@@ -49,9 +49,9 @@ static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
 static_assert(NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT ==
                   RIVA_IB_STATE_VALUE_COUNT,
               "RIVA-Sand intermediate-bias material-point state width mismatch");
-static_assert(RIVA_IB_PARAMETER_COUNT == 248 &&
-              RIVA_IB_LOGICAL_STATE_COUNT == 62 &&
-              RIVA_IB_STATE_VALUE_COUNT == 137,
+static_assert(RIVA_IB_PARAMETER_COUNT == 249 &&
+              RIVA_IB_LOGICAL_STATE_COUNT == 63 &&
+              RIVA_IB_STATE_VALUE_COUNT == 138,
               "RIVA-Sand intermediate-bias research contract mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
@@ -5616,7 +5616,7 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_RIVA_CONSTANT_COUNT 1
 #define MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT 11
 #define MATERIAL_POINT_RIVA_STATE_VALUE_COUNT 93
-#define MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 137
+#define MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20

@@ -2,15 +2,18 @@
 
 This record applies only to `RIVASandIntermediateBiasResearch`, translated
 from OpenSees_RIVA commit
-`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`. It does not qualify or modify
+`637d207e867b863dee7b2bf14d9aeb75fdc32e7b`, with the plastic-activity gate
+from `5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c`. It does not qualify or modify
 production `RIVASand` or `RIVASandCustom`.
 
 Native contract:
 
-- 248 frozen calibrated inputs; SHA-256
-  `85bd23d467e3e5f29a3b44da9903606a9dee95d5f16d9f25f16e1b1611b34397`.
-- 62 logical point-state fields, flattened to 137 schema values.
-- 1,104 bytes per native point state and 1,976 bytes in the shared immutable
+- 249 frozen calibrated inputs; SHA-256
+  `3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e`.
+- 63 logical point-state fields, flattened to 138 schema values.
+- Kernel revision 3; revision-2 research checkpoints are rejected by the
+  existing state-size, kernel-revision, and parameter-hash checks.
+- 1,112 bytes per native point state and 1,984 bytes in the shared immutable
   parameter block on the arm64 GCC 15 host used below.
 - Effective skeleton stress only. BrickUP retains pore-pressure, storage,
   drainage, and total-stress assembly ownership.
@@ -23,22 +26,28 @@ Native contract:
 - [x] Native host/CUDA-compatible kernel with fixed substeps, host reversal
   order, ratchet reevaluation, compatible-volume rebuild, mapping correction,
   and activation caches.
-- [x] Native 235-column replay driver reading `input_paths` only.
+- [x] Native 236-column replay driver reading `input_paths` only, including
+  the new `state_ep_half_last` column.
 - [x] Exact byte restart at static preload, immediately post-activation, and
   reversal-adjacent checkpoints.
 - [x] Activation idempotence, point-state isolation, eight-point homogeneous
   update, rigid-motion suppression, and BrickUP ownership host checks.
 - [x] Production frozen/custom host-state regression remains passing.
+- [x] Gate endpoints and transition, independent PT volume, weak microcycles,
+  and completed-half-cycle capture in both real backbones pass with 1, 4,
+  and 16 fixed substeps. Capture occurs exactly once per host reversal.
+- [x] The new scalar survives byte restart after a completed half-cycle and
+  idempotent activation; reused point initialization clears it.
 - [x] Documentation build and all 28 rendered-source tests pass.
 - [x] All six cases pass core parity at `rtol=1e-8`, `atol=1e-10`.
-- [x] All six cases pass full 235-column parity at the same tolerance. The
+- [x] All six cases pass full 236-column parity at the same tolerance. The
   native research kernel preserves NumPy's pairwise tensor-contraction tree,
   binary64 operation boundaries, and the frozen NumPy 2.0.2 FMA `tanh`
   intervals needed by the dense unbiased phase path. No tolerance was
   loosened and no calibration value was changed.
 - [x] The standard Hercules material-point runner now has a dedicated
   intermediate-bias research fixture. It replays the same native core on host
-  and CUDA, compares all 137 state values and lifecycle selectors, checks an
+  and CUDA, compares all 138 state values and lifecycle selectors, checks an
   exact zero increment, and invokes the uniform sealed BrickUP pressure path.
 - [ ] Target-host CUDA compilation and execution of that standard fixture,
   device checkpoint round trip,
@@ -64,7 +73,41 @@ benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_su
 The suite runs the state checks and native benchmark even after a parity
 failure so all validation evidence is retained in one invocation.
 
-## Native host benchmark
+## Plastic-activity update (2026-09-06)
+
+The new scalar stores the plastic multiplier accumulated in the last
+completed half-cycle. Both the base and directional-mapping backbones capture
+it before their reversal counters reset; later substeps retain that captured
+value. Its bounded activity factor acts only on the inherited biased-volume
+target, not on the separate phase-transformation volume. Initialization clears
+the scalar, while reactivating an already-active restored point preserves it.
+No fictitious cyclic reversals are introduced at activation.
+
+Use the private revision-3 handoff package for oracle verification. No golden
+responses or tolerances were changed to make the native implementation pass.
+The new state is appended after the previous 137 numerical values, and the
+host/CUDA result buffers now include it. Full GPU/MPI checkpoint execution
+still requires the target system; the local byte-restart test is not a
+substitute for that qualification.
+
+This port keeps `RIVASandIntermediateBiasResearch` and its `Vs_limit Dr`
+input unchanged. It does not import the later `BiasVolume` modes or
+OpenSees-specific `reversalLatch`, nor rename the Hercules material to
+`RIVASAND02`. Original `RIVASand`/`RIVASandCustom` are unchanged.
+
+### Incremental host cost
+
+Three alternating before/after samples used GCC 15.1.0 `-O2`, 1,000
+repetitions of the same 484-increment `3484_intermediate_bias025` path, and
+the same local arm64 machine. Median research-kernel time was 2.983728 s
+before the gate and 2.975631 s after it (ratio 0.9973). This difference is
+within ordinary timing noise and does not establish a speedup or a GPU cost.
+The gate adds one 8-byte state scalar and one 8-byte shared parameter;
+it introduces no additional constitutive iterations or substeps. The
+research kernel remains approximately twice the cost of the original model
+in this host microbenchmark; that is not overhead introduced by this gate.
+
+## Historical revision-2 native host benchmark
 
 The benchmark replays the 484-row `3484_intermediate_bias025` path with the
 same initial state, activation row, row-specific fixed substeps, compiler, and

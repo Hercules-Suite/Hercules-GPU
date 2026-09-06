@@ -3,7 +3,8 @@
 #define HERCULES_NONLINEAR_RIVA_SAND_INTERMEDIATE_BIAS_RESEARCH_H
 
 /* Native, allocation-free translation of the private intermediate-bias
- * RIVA-Sand research successor at OpenSees_RIVA commit 637d207e867b863d.
+ * RIVA-Sand research successor at OpenSees_RIVA commit 637d207e867b863d,
+ * with the completed-half-cycle plastic gate from commit 5e4ebd30cb5f43b6.
  *
  * This is deliberately a separate material.  It does not change the frozen
  * production RIVASand/RIVASandCustom kernel in nonlinear_riva_sand.h.  The
@@ -24,18 +25,18 @@
 #define RIVA_IB_HD
 #endif
 
-#define RIVA_IB_PARAMETER_COUNT 248
-#define RIVA_IB_LOGICAL_STATE_COUNT 62
-#define RIVA_IB_STATE_VALUE_COUNT 137
-#define RIVA_IB_KERNEL_REVISION 2u
+#define RIVA_IB_PARAMETER_COUNT 249
+#define RIVA_IB_LOGICAL_STATE_COUNT 63
+#define RIVA_IB_STATE_VALUE_COUNT 138
+#define RIVA_IB_KERNEL_REVISION 3u
 #define RIVA_IB_PARAMETER_SHA256 \
-    "85bd23d467e3e5f29a3b44da9903606a9dee95d5f16d9f25f16e1b1611b34397"
+    "3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e"
 #define RIVA_IB_SOURCE_COMMIT \
-    "637d207e867b863dee7b2bf14d9aeb75fdc32e7b"
+    "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
- * not counted among the handoff's 248 values. */
+ * not counted among the handoff's 249 values. */
 typedef struct riva_ib_parameters_t {
     riva_parameters_t base;
 
@@ -178,12 +179,15 @@ typedef struct riva_ib_parameters_t {
     double intermediate_high_bias_phase_activation_reversals;
     double intermediate_high_bias_pre_reversal_phase_scale;
 
+    /* Last completed half-cycle plastic multiplier needed for full activity. */
+    double bias_reversible_volume_ep_ref;
+
     /* Derived once for the frozen material record; not a calibrated input. */
     double reference_relative_density_value;
 } riva_ib_parameters_t;
 
 /* base contains the first 38 logical handoff fields plus two Hercules lifecycle
- * flags.  The fields below complete the exact 62-field restart contract. */
+ * flags.  The fields below complete the exact 63-field restart contract. */
 typedef struct riva_ib_state_t {
     riva_state_t base;
     double phase_irreversible_volume;
@@ -210,6 +214,8 @@ typedef struct riva_ib_state_t {
     double initial_relative_density_value;
     double intermediate_low_gate_value;
     double intermediate_high_gate_base;
+    /* Committed activity before the most recent reversal reset. */
+    double ep_half_last;
 } riva_ib_state_t;
 
 /* The Python oracle uses NumPy's component-wise tensor division.  Keep that
@@ -612,6 +618,7 @@ riva_ib_reference_parameters(double stress_scale)
     p.intermediate_high_bias_phase_relaxation_multiplier=0.25;
     p.intermediate_high_bias_phase_activation_reversals=6.0;
     p.intermediate_high_bias_pre_reversal_phase_scale=1.50;
+    p.bias_reversible_volume_ep_ref=1.5e-5;
     p.reference_relative_density_value=
         (p.base.e_max-p.base.state_shakedown_reference_void_ratio)/
         (p.base.e_max-p.base.e_min);
@@ -1268,6 +1275,7 @@ RIVA_IB_HD static inline int riva_ib_initialize_material(
         &p->base,m,&state->base);
     state->intermediate_low_gate_value=0.0;
     state->intermediate_high_gate_base=0.0;
+    state->ep_half_last=0.0;
     return 1;
 }
 
@@ -1304,6 +1312,7 @@ RIVA_IB_HD static inline int riva_ib_begin_dynamic_phase(
     s->base.bias_reversible_volume=0.0;
     s->base.eps_v_total=s->base.physical_eps_v_total;
     s->base.last_host_deviatoric_strain_direction=riva_zero();
+    s->ep_half_last=0.0;
 
     s->phase_irreversible_volume=0.0;
     s->phase_reversible_volume=0.0;
@@ -1547,6 +1556,8 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_base_backbone(
     state.base.eps_v_total=eps_total; state.base.eps_v_confining=eps_confining;
     state.base.eps_v_irreversible=eps_ir; state.base.eps_v_reversible=eps_re;
     if (reversals>old->base.reversals) {
+        /* Capture the completed branch before its plastic counter is reset. */
+        state.ep_half_last=old->base.ep_eq_since_reversal;
         const tensor_t reversal_dev=riva_dev(old->base.stress);
         const double excursion=riva_norm(riva_sub(reversal_dev,
             old->base.last_reversal_deviator));
@@ -1912,6 +1923,8 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_mapping_backbone(
     state.mapping_corrector_passes=p->mapping_corrector_iterations;
     state.mapping_monotone_caps=monotone_caps;
     if (reversals>old->base.reversals) {
+        /* The directional mapping backbone registers its own reversals. */
+        state.ep_half_last=old->base.ep_eq_since_reversal;
         const tensor_t reversal_dev=riva_dev(old->base.stress);
         const double excursion=riva_norm(riva_sub(reversal_dev,
             old->base.last_reversal_deviator));
@@ -1988,6 +2001,9 @@ RIVA_IB_HD static inline double riva_ib_bias_volume_target(
     const riva_ib_parameters_t *p,const riva_ib_state_t *s,int inside_substeps)
 {
     double target=riva_bias_reversible_volume_target(&p->base,&s->base);
+    const double plastic_gate=riva_smoothstep(
+        s->ep_half_last/p->bias_reversible_volume_ep_ref);
+    target=riva_ib_mul_rn(target,plastic_gate);
     if (!p->phase_transformation_enabled) return target;
     target*=1.0-riva_ib_phase_volume_replacement_gate(p,s);
     if (inside_substeps) target+=s->phase_reversible_volume;
@@ -2346,6 +2362,7 @@ RIVA_IB_HD static inline int riva_ib_state_values(
     values[i++]=s->initial_relative_density_value;
     values[i++]=s->intermediate_low_gate_value;
     values[i++]=s->intermediate_high_gate_base;
+    values[i++]=s->ep_half_last;
 #undef RIVA_IB_STATE_TENSOR
     return i;
 }

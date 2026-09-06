@@ -3,7 +3,7 @@
  * The test uses the frozen low-bias input path to exercise byte restart at a
  * static preload checkpoint, immediately after one-time activation, and next
  * to the first host reversal.  It also verifies point-state isolation, the
- * 62-field/137-value flatten contract, activation idempotence after restart,
+ * 63-field/138-value flatten contract, activation idempotence after restart,
  * and BrickUP ownership of fluid pressure and total-stress assembly.
  *
  * Usage:
@@ -179,6 +179,118 @@ static riva_ib_state_t run_history(
     return state;
 }
 
+static riva_ib_state_t biased_state(const riva_ib_parameters_t &parameters,
+                                    const riva_material_parameters_t &material,
+                                    double void_ratio, double shear)
+{
+    const tensor_t reference = {-19.4, -19.4, -40.0, 0, 0, 0};
+    tensor_t stress = reference;
+    stress.xz = shear;
+    riva_ib_state_t state = {};
+    if (!riva_ib_initialize_material(&parameters, &material, stress, void_ratio,
+                                     &state) ||
+        !riva_ib_begin_dynamic_phase(&parameters, &material, &reference, &state))
+        throw std::runtime_error("biased gate fixture failed to initialize");
+    if (state.ep_half_last != 0.0 || state.base.amplitude_reversals != 0)
+        throw std::runtime_error("activation fabricated completed cyclic activity");
+    return state;
+}
+
+static void check_plastic_gate(const riva_ib_parameters_t &parameters,
+                               const riva_material_parameters_t &material)
+{
+    if (parameters.bias_reversible_volume_ep_ref != 1.5e-5)
+        throw std::runtime_error("plastic activity reference changed");
+    riva_ib_parameters_t isolated = parameters;
+    isolated.phase_transformation_enabled = 0;
+    riva_ib_state_t state = biased_state(isolated, material, 0.601, 10.0);
+    state.base.cyclic_direction = {0, 0, 0, 0, 0, 1};
+    state.base.amplitude_reversals = 6;
+    state.base.cyclic_amplitude = 0.2;
+    const double raw = riva_bias_reversible_volume_target(&isolated.base,
+                                                         &state.base);
+    if (std::fabs(raw) <= 1.0e-12)
+        throw std::runtime_error("gate test requires a nonzero inherited target");
+    const double fractions[] = {0.0, 0.25, 0.5, 1.0, 2.0};
+    const double factors[] = {0.0, 0.15625, 0.5, 1.0, 1.0};
+    for (size_t i = 0; i < 5; ++i) {
+        state.ep_half_last = fractions[i]*parameters.bias_reversible_volume_ep_ref;
+        if (!close_value(riva_ib_bias_volume_target(&isolated, &state, 0),
+                         raw*factors[i], 1.0e-18))
+            throw std::runtime_error("plastic gate endpoints or transition failed");
+    }
+    // The independent PT volume remains present when inherited activity is zero.
+    state.ep_half_last = 0.0;
+    state.phase_reversible_volume = 2.5e-5;
+    if (riva_ib_bias_volume_target(&parameters, &state, 1) !=
+        state.phase_reversible_volume)
+        throw std::runtime_error("gate suppressed independent PT volume");
+
+    // Reused point storage must not retain an activity scalar from a prior soil.
+    state.ep_half_last = 1.0;
+    if (!riva_ib_initialize_material(&parameters, &material, state.base.stress,
+                                     0.601, &state) || state.ep_half_last != 0.0)
+        throw std::runtime_error("reinitialization retained plastic activity");
+
+    // Exercise both real backbones, checking the capture before reset and its
+    // preservation across every subsequent constitutive substep in that host step.
+    for (bool mapping : {false, true}) {
+        for (int nsub : {1, 4, 16}) {
+            for (double amplitude : {1.0e-5, 0.01}) {
+                riva_ib_parameters_t p = parameters;
+                if (!mapping) {
+                    p.phase_transformation_enabled = 0;
+                    p.mapping_backstress_enabled = 0;
+                    p.intermediate_bias_flow_enabled = 0;
+                }
+                riva_ib_state_t s = biased_state(
+                    p, material, mapping ? 0.662 : 0.601, mapping ? 15.0 : 10.0);
+                if (mapping && riva_ib_mapping_gate(&p, &s) <= 1.0e-14)
+                    throw std::runtime_error("mapping test did not activate mapping");
+                int reversals = 0;
+                double previous = 0.0;
+                for (int step = 1; step <= 64; ++step) {
+                    const double gamma = amplitude*std::sin(
+                        2.0*3.14159265358979323846*step/32.0);
+                    const riva_ib_state_t before = s;
+                    const Increment increment = {
+                        "dynamic", {0, 0, 0, 0, 0, 0.5*(gamma-previous)},
+                        nsub, false};
+                    riva_update_info_t info = {};
+                    if (!advance(p, material, increment, &s, &info))
+                        throw std::runtime_error("gate cycle integration failed");
+                    const double expected = info.reversal_registered
+                        ? before.base.ep_eq_since_reversal : before.ep_half_last;
+                    if (s.ep_half_last != expected || s.ep_half_last < 0.0 ||
+                        !std::isfinite(s.ep_half_last))
+                        throw std::runtime_error("half-cycle capture/reset order failed");
+                    if (info.reversal_registered) ++reversals;
+                    previous = gamma;
+                }
+                if (reversals != 4)
+                    throw std::runtime_error("gate fixture lost a host reversal");
+                if (amplitude == 0.01 &&
+                    s.ep_half_last <= p.bias_reversible_volume_ep_ref)
+                    throw std::runtime_error("plastic cycle did not saturate gate");
+                if (!mapping && amplitude == 1.0e-5 &&
+                    (s.ep_half_last >= p.bias_reversible_volume_ep_ref ||
+                     std::fabs(s.base.bias_reversible_volume) >= 1.0e-10))
+                    throw std::runtime_error("gate did not suppress weak microcycles");
+                double values[RIVA_IB_STATE_VALUE_COUNT] = {};
+                if (riva_ib_state_values(&s, values) != RIVA_IB_STATE_VALUE_COUNT ||
+                    values[RIVA_IB_STATE_VALUE_COUNT-1] != s.ep_half_last)
+                    throw std::runtime_error("activity missing from flattened restart");
+                const riva_ib_state_t active = s;
+                if (!riva_ib_begin_dynamic_phase(&p, &material, nullptr, &s) ||
+                    !same_state(active, s, "active plastic-memory restart"))
+                    throw std::runtime_error("active restart reset plastic memory");
+            }
+        }
+    }
+    std::cout << "PASS: plastic gate endpoints, PT isolation, microcycles, both "
+                 "backbones, and capture-once ordering with 1/4/16 substeps\n";
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -186,14 +298,15 @@ int main(int argc, char **argv)
         return 2;
     }
     try {
-        if (RIVA_IB_PARAMETER_COUNT != 248 ||
-            RIVA_IB_LOGICAL_STATE_COUNT != 62 ||
-            RIVA_IB_STATE_VALUE_COUNT != 137) {
+        if (RIVA_IB_PARAMETER_COUNT != 249 ||
+            RIVA_IB_LOGICAL_STATE_COUNT != 63 ||
+            RIVA_IB_STATE_VALUE_COUNT != 138 || RIVA_IB_KERNEL_REVISION != 3u) {
             throw std::runtime_error("compile-time parameter/state contract changed");
         }
         const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t material =
             riva_reference_material_parameters(&parameters.base);
+        check_plastic_gate(parameters, material);
         riva_ib_state_t initial = initialize(parameters, material);
         double flattened[RIVA_IB_STATE_VALUE_COUNT] = {};
         if (riva_ib_state_values(&initial, flattened) !=
@@ -233,6 +346,11 @@ int main(int argc, char **argv)
         const riva_ib_state_t reversal_restart = run_history(
             parameters, material, increments, first_reversal_index - 1, true);
         if (!same_state(baseline, reversal_restart, "reversal-adjacent restart"))
+            return 1;
+
+        const riva_ib_state_t completed_restart = run_history(
+            parameters, material, increments, first_reversal_index, true);
+        if (!same_state(baseline, completed_restart, "completed-half-cycle restart"))
             return 1;
 
         /* Interleave a different point history.  The primary point must remain
@@ -356,8 +474,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("effective-to-total stress assembled incorrectly");
 
         std::cout
-            << "PASS: RIVASandIntermediateBiasResearch 248-parameter/62-state/"
-               "137-value flatten contract, static/post-activation/reversal restart, "
+            << "PASS: RIVASandIntermediateBiasResearch 249-parameter/63-state/"
+               "138-value flatten contract, static/post-activation/reversal restart, "
                "activation idempotence, point isolation, homogeneous/rigid "
                "Hex8 behavior, and BrickUP effective-stress ownership\n";
     } catch (const std::exception &error) {

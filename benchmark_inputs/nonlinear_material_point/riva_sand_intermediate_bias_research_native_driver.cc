@@ -1,6 +1,6 @@
 /* Standalone prescribed-strain replay for the intermediate-bias RIVA-Sand
  * research successor.  The executable consumes only frozen input_paths CSVs
- * and writes the complete 235-column oracle schema.  It never reads golden
+ * and writes the complete 236-column oracle schema.  It never reads golden
  * response files and has no Python runtime dependency.
  *
  * Usage:
@@ -136,7 +136,8 @@ static void append_state_columns(std::vector<std::string> &columns)
              "mapping_phase_contraction_scale", "mapping_outer_residual",
              "mapping_stress_corrections", "mapping_corrector_passes",
              "mapping_monotone_caps", "initial_relative_density_value",
-             "intermediate_low_gate_value", "intermediate_high_gate_base"})
+             "intermediate_low_gate_value", "intermediate_high_gate_base",
+             "ep_half_last"})
         columns.push_back(std::string("state_") + name);
 }
 
@@ -197,8 +198,8 @@ static std::vector<std::string> output_header()
     append_state_columns(columns);
     for (const std::string &name : diagnostic_names())
         columns.push_back("diagnostic_" + name);
-    if (columns.size() != 235)
-        throw std::runtime_error("internal output schema is not 235 columns");
+    if (columns.size() != 236)
+        throw std::runtime_error("internal output schema is not 236 columns");
     return columns;
 }
 
@@ -280,6 +281,7 @@ static void put_state(Row &row, const riva_ib_state_t &state)
         state.intermediate_low_gate_value);
     put(row, "state_intermediate_high_gate_base",
         state.intermediate_high_gate_base);
+    put(row, "state_ep_half_last", state.ep_half_last);
 }
 
 static double base_ratchet_activity(const riva_ib_parameters_t &p,

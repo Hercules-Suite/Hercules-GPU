@@ -8,7 +8,7 @@
 #include "quake_util.h"
 
 #define NL_RIVA_STATE_VALUE_COUNT 93
-#define NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 137
+#define NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -167,7 +167,7 @@ int nonlinear_riva_host_history(
     int32_t steps,
     nonlinear_material_point_result_t *results);
 
-/* The intermediate-bias research material has a distinct 137-value restart
+/* The intermediate-bias research material has a distinct 138-value restart
  * contract.  Its material-point replay is compiled separately so adding the
  * larger research kernel does not increase the existing all-model regression
  * translation unit. */

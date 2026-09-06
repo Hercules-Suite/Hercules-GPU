@@ -950,6 +950,9 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   const header = readFileSync(`${sourceRoot}nonlinear.h`, "utf8");
   const gpuHeader = readFileSync(`${sourceRoot}nonlinear_gpu.h`, "utf8");
   const core = readFileSync(`${sourceRoot}nonlinear_riva_sand.h`, "utf8");
+  const researchCore = readFileSync(
+    `${sourceRoot}nonlinear_riva_sand_intermediate_bias_research.h`, "utf8",
+  );
   const gpu = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_implementation.cuh`, "utf8");
   const gpuUnit = readFileSync(`${sourceRoot}nonlinear/nonlinear_gpu_riva_sand.cu`, "utf8");
   const researchMaterialPointUnit = readFileSync(
@@ -1025,7 +1028,24 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(core, /riva_forward_euler/);
   assert.match(core, /riva_state_values/);
   assert.match(gpuHeader, /NL_RIVA_STATE_VALUE_COUNT 93/);
-  assert.match(gpuHeader, /NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 137/);
+  assert.match(gpuHeader, /NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138/);
+  assert.match(researchCore, /#define RIVA_IB_KERNEL_REVISION 3u/);
+  assert.match(researchCore, /#define RIVA_IB_PARAMETER_COUNT 249/);
+  assert.match(researchCore, /#define RIVA_IB_LOGICAL_STATE_COUNT 63/);
+  assert.match(researchCore, /#define RIVA_IB_STATE_VALUE_COUNT 138/);
+  assert.match(researchCore, /3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e/);
+  assert.equal(
+    (researchCore.match(/state\.ep_half_last=old->base\.ep_eq_since_reversal;/g) ?? []).length,
+    2, "both actual research backbones must capture completed activity",
+  );
+  assert.match(researchCore, /state->ep_half_last=0\.0/);
+  assert.match(researchCore, /s->ep_half_last=0\.0/);
+  assert.match(researchCore, /values\[i\+\+\]=s->ep_half_last/);
+  assert.match(researchCore, /target=riva_ib_mul_rn\(target,plastic_gate\)/);
+  assert.match(researchCore, /s->ep_half_last\/p->bias_reversible_volume_ep_ref/);
+  assert.match(gpu, /header\.riva_kernel_revision != RIVA_IB_KERNEL_REVISION/);
+  assert.match(gpu, /header\.riva_state_bytes != sizeof\(riva_ib_state_t\)/);
+  assert.match(gpu, /strcmp\(header\.riva_parameter_sha256,\s*RIVA_IB_PARAMETER_SHA256\) != 0/);
   assert.match(
     gpuHeader,
     /nonlinear_gpu_riva_intermediate_bias_research_material_point_history/,
