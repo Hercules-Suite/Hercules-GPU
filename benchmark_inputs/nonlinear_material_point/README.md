@@ -239,6 +239,14 @@ law uses reference void ratio 0.601, which must remain inside the custom
   custom-material point isolation, restart, and 1/4/16 fixed substeps.
   Historical research filenames remain for traceability; the old
   `RIVASandIntermediateBiasResearch` input identifier is no longer accepted.
+- `riva_sand02_custom_density_test.cc` checks that changing either or both
+  void-ratio bounds (including a Vs-interpolated midpoint) preserves the
+  shakedown anchor. `compare_riva_sand02_custom_density.py` compares 150
+  independent native/Python diagnostics at and on either side of that anchor.
+  Both run in `run_riva_intermediate_bias_research_suite.sh`. This catches
+  incorrect custom reference density that reference-row equality and mere
+  parameter-sensitivity tests do not detect. Custom02 checkpoint marker 4
+  rejects histories produced before this correction; default 02 remains 3.
 
 The low-bias gate removes the inverse-bias singularity only. It does not by
 itself validate the reversible-volume branch at arbitrarily small cyclic

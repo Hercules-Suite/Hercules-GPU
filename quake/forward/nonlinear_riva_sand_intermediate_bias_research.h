@@ -29,10 +29,16 @@
 #define RIVA_IB_LOGICAL_STATE_COUNT 63
 #define RIVA_IB_STATE_VALUE_COUNT 138
 #define RIVA_IB_KERNEL_REVISION 3u
+/* Custom02 histories written before material-specific density was corrected
+ * cannot safely be continued, although their 138-value layout is unchanged. */
+#define RIVA_IB_CUSTOM_KERNEL_REVISION 4u
 #define RIVA_IB_PARAMETER_SHA256 \
     "3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e"
 #define RIVA_IB_SOURCE_COMMIT \
     "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
+
+RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(int custom)
+{ return custom ? RIVA_IB_CUSTOM_KERNEL_REVISION : RIVA_IB_KERNEL_REVISION; }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
@@ -629,14 +635,26 @@ RIVA_IB_HD static inline double riva_ib_initial_density(
     const riva_ib_state_t *s)
 { return s->initial_relative_density_value; }
 
+RIVA_IB_HD static inline double riva_ib_reference_relative_density(
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m)
+{
+    /* p is shared by every element. Its cached density is valid only for
+     * the reference bounds, not for arbitrary Custom02 material rows. */
+    if (m->e_max==p->base.e_max && m->e_min==p->base.e_min)
+        return p->reference_relative_density_value;
+    return (m->e_max-p->base.state_shakedown_reference_void_ratio)/
+           (m->e_max-m->e_min);
+}
+
 RIVA_IB_HD static inline double riva_ib_projected_bias(
     const riva_ib_state_t *s)
 { return riva_projected_bias(&s->base); }
 
 RIVA_IB_HD static inline double riva_ib_density_weight(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s)
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s)
 { const double d=riva_max(riva_ib_initial_density(s)-
-      p->reference_relative_density_value,0.0);
+      riva_ib_reference_relative_density(p,m),0.0);
   return 1.0-exp(-pow(d/p->base.state_shakedown_anchor_width,2.0)); }
 
 RIVA_IB_HD static inline double riva_ib_phase_amplitude_activity(
@@ -781,9 +799,10 @@ RIVA_IB_HD static inline double riva_ib_phase_volume_density_weight(
     (p->phase_volume_density_full-p->phase_volume_density_onset)); }
 
 RIVA_IB_HD static inline double riva_ib_phase_dense_bias_gate(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s)
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s)
 { const double onset=0.5*p->branch_compliance_bias_reference;
-  return riva_ib_density_weight(p,s)*riva_smoothstep(
+  return riva_ib_density_weight(p,m,s)*riva_smoothstep(
       riva_ib_projected_bias(s)/riva_max(onset,1.0e-14)); }
 
 RIVA_IB_HD static inline double riva_ib_phase_volume_gate_parent(
@@ -962,7 +981,7 @@ RIVA_IB_HD static inline double riva_ib_branch_compliance_multiplier(
     const riva_ib_state_t *s)
 {
     if (!p->phase_transformation_enabled) return 1.0;
-    const double density=riva_ib_density_weight(p,s);
+    const double density=riva_ib_density_weight(p,m,s);
     const double bias=riva_ib_projected_bias(s);
     const double ba=bias<=1.0e-14?0.0:riva_min(pow(bias/
         p->branch_compliance_bias_reference,p->branch_compliance_bias_exponent),2.0);
@@ -1008,7 +1027,8 @@ RIVA_IB_HD static inline double riva_ib_intermediate_branch_multiplier(
 }
 
 RIVA_IB_HD static inline void riva_ib_cyclic_flow(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s,double pressure,
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,double pressure,
     double *shear,double *hardening)
 {
     const riva_parameters_t *b=&p->base;
@@ -1026,7 +1046,7 @@ RIVA_IB_HD static inline void riva_ib_cyclic_flow(
     if (p->phase_transformation_enabled) {
         const double phase=riva_ib_sub_rn(1.0,riva_ib_mul_rn(
             p->phase_cyclic_shear_modulus_reduction,activity));
-        const double gate=riva_ib_phase_dense_bias_gate(p,s);
+        const double gate=riva_ib_phase_dense_bias_gate(p,m,s);
         *shear=riva_ib_add_rn(*shear,riva_ib_mul_rn(
             gate,riva_ib_sub_rn(phase,*shear)));
     }
@@ -1042,13 +1062,14 @@ RIVA_IB_HD static inline void riva_ib_cyclic_flow(
 }
 
 RIVA_IB_HD static inline double riva_ib_raw_shakedown(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s,double pressure)
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,double pressure)
 {
     const riva_parameters_t *b=&p->base;
     if (!b->state_shakedown_enabled || !s->base.cyclic_phase_active ||
         s->base.amplitude_reversals<b->state_shakedown_minimum_reversals) return 1.0;
     const double bias=riva_ib_projected_bias(s); if (bias<=1.0e-14) return 1.0;
-    const double distance=riva_ib_initial_density(s)-p->reference_relative_density_value;
+    const double distance=riva_ib_initial_density(s)-riva_ib_reference_relative_density(p,m);
     const double state_term=exp(b->state_shakedown_state_sensitivity*distance);
     const double release=1.0-exp(-pow(distance/b->state_shakedown_anchor_width,2.0));
     const double bias_term=pow(bias/b->state_shakedown_bias_reference,
@@ -1060,25 +1081,27 @@ RIVA_IB_HD static inline double riva_ib_raw_shakedown(
 }
 
 RIVA_IB_HD static inline double riva_ib_shakedown(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s,double pressure)
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,double pressure)
 {
     const riva_parameters_t *b=&p->base;
-    const double raw=riva_ib_raw_shakedown(p,s,pressure);
+    const double raw=riva_ib_raw_shakedown(p,m,s,pressure);
     const double excess=riva_max(s->base.cyclic_amplitude-
         b->state_shakedown_dense_hardening_amplitude_onset,0.0);
     const double dense=b->state_shakedown_dense_hardening_scale*
         exp(-b->state_shakedown_dense_hardening_amplitude_decay*excess);
-    const double branch=1.0+riva_ib_density_weight(p,s)*(dense-1.0);
+    const double branch=1.0+riva_ib_density_weight(p,m,s)*(dense-1.0);
     return riva_clip(1.0+(raw-1.0)*branch,1.0,b->state_shakedown_factor_maximum);
 }
 
 RIVA_IB_HD static inline double riva_ib_shakedown_shear(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s,double pressure)
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,double pressure)
 {
     const riva_parameters_t *b=&p->base;
-    const double raw=riva_ib_raw_shakedown(p,s,pressure);
+    const double raw=riva_ib_raw_shakedown(p,m,s,pressure);
     const double distance=riva_max(riva_ib_initial_density(s)-
-        p->reference_relative_density_value,0.0);
+        riva_ib_reference_relative_density(p,m),0.0);
     const double attenuation=exp(-b->state_shakedown_dense_compliance_decay*
         distance*distance);
     const double compliance=1.0+(raw-1.0)*attenuation;
@@ -1102,13 +1125,13 @@ RIVA_IB_HD static inline double riva_ib_phase_bias_hardening(
     const double phase=p->phase_bias_hardening_intercept*
         pow(bias,p->phase_bias_hardening_exponent)*exp(-b->bias_crossing_decay*crossing)+
         b->bias_hardening_scale*pow(margin,b->bias_margin_exponent);
-    const double gate=riva_ib_phase_dense_bias_gate(p,s);
+    const double gate=riva_ib_phase_dense_bias_gate(p,m,s);
     double boost=frozen+gate*(phase-frozen);
     const double high=riva_smoothstep((bias/p->branch_compliance_bias_reference-1.0)/0.50);
     const double memory=1.0-exp(-riva_max(-s->phase_irreversible_volume,0.0)/
         p->phase_memory_reference_volume);
     const double log_mult=-p->phase_memory_hardening_reduction*
-        riva_ib_density_weight(p,s)*riva_ib_transformation_zone(p,m,s)*high*memory;
+        riva_ib_density_weight(p,m,s)*riva_ib_transformation_zone(p,m,s)*high*memory;
     return boost*exp(log_mult);
 }
 
@@ -1181,9 +1204,9 @@ RIVA_IB_HD static inline void riva_ib_moduli_for_state(
     const riva_ib_state_t *s,double pressure,double *shear,double *bulk)
 {
     riva_moduli(&p->base,m,pressure,shear,bulk);
-    double sf,hf; riva_ib_cyclic_flow(p,s,pressure,&sf,&hf); (void)hf;
+    double sf,hf; riva_ib_cyclic_flow(p,m,s,pressure,&sf,&hf); (void)hf;
     *shear=riva_ib_mul_rn(*shear,sf);
-    *shear=riva_ib_mul_rn(*shear,riva_ib_shakedown_shear(p,s,pressure));
+    *shear=riva_ib_mul_rn(*shear,riva_ib_shakedown_shear(p,m,s,pressure));
     *shear=riva_ib_mul_rn(*shear,
         riva_ib_branch_compliance_multiplier(p,m,s));
     if (p->loose_shear_flow_enabled && s->base.cyclic_phase_active) {
@@ -1209,14 +1232,14 @@ RIVA_IB_HD static inline double riva_ib_hardening_for_state(
 {
     const riva_parameters_t *b=&p->base;
     double hardening=m->h*pow(riva_max(pressure,b->p_min)/b->p_ref,-b->q_H);
-    double sf,hf; riva_ib_cyclic_flow(p,s,pressure,&sf,&hf); (void)sf;
+    double sf,hf; riva_ib_cyclic_flow(p,m,s,pressure,&sf,&hf); (void)sf;
     hardening*=hf;
     const double boost=riva_ib_phase_bias_hardening(p,m,s);
     const double pr=riva_clip(pressure/riva_max(s->base.pressure_anchor,b->p_min),0.0,1.0);
     const double confinement=pow(riva_clip(b->bias_reference_pressure/
         riva_max(s->base.pressure_anchor,b->p_min),0.25,4.0),b->bias_confinement_exponent);
     hardening*=1.0+boost*confinement*pow(pr,b->bias_pressure_exponent);
-    hardening*=riva_ib_shakedown(p,s,pressure);
+    hardening*=riva_ib_shakedown(p,m,s,pressure);
     hardening*=1.0+p->phase_accumulation_hardening_gain*
         riva_max(s->phase_accumulation_hardening_state,0.0);
     const double loose_gate=riva_ib_loose_gate(p,s);
@@ -2113,10 +2136,13 @@ RIVA_IB_HD static inline void riva_ib_rebuild_pressure(
 }
 
 RIVA_IB_HD static inline double riva_ib_phase_dense_transition(
-    const riva_ib_parameters_t *p,const riva_ib_state_t *s)
-{ return riva_smoothstep((riva_ib_initial_density(s)-
-    p->reference_relative_density_value)/riva_max(p->phase_volume_density_full-
-    p->reference_relative_density_value,1.0e-14)); }
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s)
+{
+    const double reference=riva_ib_reference_relative_density(p,m);
+    return riva_smoothstep((riva_ib_initial_density(s)-reference)/
+        riva_max(p->phase_volume_density_full-reference,1.0e-14));
+}
 
 RIVA_IB_HD static inline riva_ib_state_t riva_ib_apply_host_phase_volume(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
@@ -2161,8 +2187,8 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_apply_host_phase_volume(
         -riva_max(-state.phase_irreversible_volume,0.0),
         p->phase_memory_reference_volume)));
     const double transition=riva_ib_mul_rn(0.5,riva_ib_add_rn(
-        riva_ib_phase_dense_transition(p,old),
-        riva_ib_phase_dense_transition(p,&state)));
+        riva_ib_phase_dense_transition(p,m,old),
+        riva_ib_phase_dense_transition(p,m,&state)));
     const double wave_mult=riva_ib_add_rn(
         p->phase_intermediate_wave_multiplier,riva_ib_mul_rn(transition,
         riva_ib_sub_rn(1.0,p->phase_intermediate_wave_multiplier)));
@@ -2293,7 +2319,7 @@ RIVA_IB_HD static inline int riva_ib_update_material(
     const riva_ib_state_t initial=*state;
     riva_ib_state_t current=initial;
     const int phase_active=p->phase_transformation_enabled &&
-        (riva_ib_phase_dense_bias_gate(p,&initial)>1.0e-14 ||
+        (riva_ib_phase_dense_bias_gate(p,m,&initial)>1.0e-14 ||
          riva_ib_phase_volume_gate(p,&initial)>1.0e-14);
     const tensor_t sub=riva_ib_div(deps,(double)nsub);
     for (int32_t i=0;i<nsub;i++)

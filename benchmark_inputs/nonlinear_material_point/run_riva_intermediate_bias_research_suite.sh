@@ -48,12 +48,21 @@ echo "==> Compile research-vs-production benchmark with $cxx"
 echo "==> Compile RIVASand02 custom-interface state checks"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_test.cc" \
   -o "$suite_tmp_dir/riva_sand02_custom_test"
+"$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_density_test.cc" \
+  -o "$suite_tmp_dir/riva_sand02_custom_density_test"
 
 echo "==> Replay all six frozen input paths"
 "$driver_bin" "$input_paths" "$native_output"
 
 suite_status=0
 if ! "$suite_tmp_dir/riva_sand02_custom_test"; then
+  suite_status=1
+fi
+if ! "$suite_tmp_dir/riva_sand02_custom_density_test"; then
+  suite_status=1
+fi
+if ! python3 "$suite_dir/compare_riva_sand02_custom_density.py" \
+    "$port_root" "$suite_tmp_dir/riva_sand02_custom_density_test"; then
   suite_status=1
 fi
 echo "==> Verify native output: core"

@@ -353,6 +353,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /RIVASand/);
   assert.match(physics, /RIVASand02/);
   assert.match(physics, /RIVASandCustom02/);
+  assert.match(physics, /Custom02 uses its own e_max\/e_min for both the initial and reference relative densities/);
+  assert.match(physics, /Custom02 checkpoint marker is 4/);
   assert.match(physics, /RIVASandIntermediateBiasResearch is retired as an input identifier/);
   assert.match(physics, /not an alias for, replacement for, or retuning of production RIVASand/);
   assert.match(physics, /BrickUP remains the sole owner of pore pressure/);
@@ -1105,7 +1107,14 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(researchCore, /values\[i\+\+\]=s->ep_half_last/);
   assert.match(researchCore, /target=riva_ib_mul_rn\(target,plastic_gate\)/);
   assert.match(researchCore, /s->ep_half_last\/p->bias_reversible_volume_ep_ref/);
-  assert.match(gpu, /header\.riva_kernel_revision != RIVA_IB_KERNEL_REVISION/);
+  assert.match(researchCore, /#define RIVA_IB_CUSTOM_KERNEL_REVISION 4u/);
+  assert.match(researchCore, /return custom \? RIVA_IB_CUSTOM_KERNEL_REVISION : RIVA_IB_KERNEL_REVISION/);
+  assert.match(gpu, /header\.riva_kernel_revision = riva_ib_checkpoint_revision\(\s*g_config\.material_model == RIVA_SAND_CUSTOM_02\)/);
+  assert.match(gpu, /header\.riva_kernel_revision != riva_ib_checkpoint_revision\(\s*g_config\.material_model == RIVA_SAND_CUSTOM_02\)/);
+  assert.match(researchCore, /riva_ib_reference_relative_density\(\s*const riva_ib_parameters_t \*p,const riva_material_parameters_t \*m\)/);
+  assert.match(researchCore, /if \(m->e_max==p->base\.e_max && m->e_min==p->base\.e_min\)\s*return p->reference_relative_density_value/);
+  assert.equal((researchCore.match(/p->reference_relative_density_value/g) ?? []).length,
+    1, "only the material-bound-aware helper may use the shared cached density");
   assert.match(gpu, /header\.riva_state_bytes != sizeof\(riva_ib_state_t\)/);
   assert.match(gpu, /strcmp\(header\.riva_parameter_sha256,\s*RIVA_IB_PARAMETER_SHA256\) != 0/);
   assert.match(

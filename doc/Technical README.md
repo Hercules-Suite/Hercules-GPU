@@ -767,6 +767,15 @@ Nonlinear GPU execution (runtime environment):
 	for the remaining internal controls, not the original V8 reference.
 	Neither adds the later OpenSees `RIVASAND02` `BiasVolume` options or
 	OpenSees-specific `reversalLatch`. NVIDIA/MPI field qualification remains pending.
+	A correction after `9203e02` makes Custom02 use its own void-ratio bounds
+	for the reference density as well as the initial density. Previously the
+	shared cache retained the default bounds and could spuriously harden a
+	custom material at the shakedown anchor. All dependent shakedown, compliance,
+	dense weighting, and phase-transition paths now use material-specific bounds.
+	No state fields or constitutive iterations were added. Custom02 checkpoint
+	marker 4 rejects pre-fix Custom02 histories; rerun them from initialization.
+	Default `RIVASand02` retains marker 3 and its prior checkpoint layout.
+	This native compatibility marker does not indicate the OpenSees option set.
 - `material_model=RIVASandCustom` uses the same RIVA-Sand equations, state, explicit
 	integrator, BrickUP coupling, and frozen host-event controls, but exposes a
 	compact set of existing physical constitutive inputs. Its 12-column rows are

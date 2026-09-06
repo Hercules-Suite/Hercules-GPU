@@ -331,11 +331,12 @@ static double ratchet_capacity(const riva_ib_parameters_t &p,
 }
 
 static double shakedown_compliance(const riva_ib_parameters_t &p,
+                                   const riva_material_parameters_t &m,
                                    const riva_ib_state_t &s, double pressure)
 {
-    const double raw = riva_ib_raw_shakedown(&p, &s, pressure);
+    const double raw = riva_ib_raw_shakedown(&p, &m, &s, pressure);
     const double distance = riva_max(
-        riva_ib_initial_density(&s) - p.reference_relative_density_value, 0.0);
+        riva_ib_initial_density(&s) - riva_ib_reference_relative_density(&p, &m), 0.0);
     const double attenuation = std::exp(
         -p.base.state_shakedown_dense_compliance_decay * distance * distance);
     return 1.0 + (raw - 1.0) * attenuation;
@@ -368,9 +369,9 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
     const riva_state_t &s = state.base;
     const double pressure = riva_pressure(s.stress);
     double shear_factor = 1.0, hardening_factor = 1.0;
-    riva_ib_cyclic_flow(&p, &state, pressure, &shear_factor, &hardening_factor);
+    riva_ib_cyclic_flow(&p, &m, &state, pressure, &shear_factor, &hardening_factor);
     const double projected_bias = riva_ib_projected_bias(&state);
-    const double compliance = shakedown_compliance(p, state, pressure);
+    const double compliance = shakedown_compliance(p, m, state, pressure);
     double loading_eta = 0.0, eta_pt = 0.0, signed_phase = -1.0;
     riva_ib_phase_coordinates(&p, &m, &state, &loading_eta, &eta_pt,
                               &signed_phase);
@@ -423,10 +424,10 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
     diagnostic("bias_ratchet_capacity", ratchet_capacity(p, state));
     diagnostic("bias_ratchet_strain", s.bias_ratchet_strain);
     diagnostic("state_shakedown_factor",
-               riva_ib_shakedown(&p, &state, pressure));
+               riva_ib_shakedown(&p, &m, &state, pressure));
     diagnostic("state_shakedown_compliance_factor", compliance);
     diagnostic("state_shakedown_shear_multiplier",
-               riva_ib_shakedown_shear(&p, &state, pressure));
+               riva_ib_shakedown_shear(&p, &m, &state, pressure));
     diagnostic("lambda_total", s.lambda_total);
     diagnostic("ep_eq_since_reversal", s.ep_eq_since_reversal);
     diagnostic("branch_progress", riva_ib_branch_progress(&p, &state));
@@ -436,14 +437,14 @@ static void put_diagnostics(Row &row, const riva_ib_parameters_t &p,
                signum(riva_ib_numpy_ddot(
                    s.static_bias_tensor, s.cyclic_direction)));
     diagnostic("phase_dense_bias_gate",
-               riva_ib_phase_dense_bias_gate(&p, &state));
+               riva_ib_phase_dense_bias_gate(&p, &m, &state));
     diagnostic("phase_volume_density_weight",
                riva_ib_phase_volume_density_weight(&p, &state));
     diagnostic("phase_volume_gate", riva_ib_phase_volume_gate(&p, &state));
     diagnostic("phase_volume_replacement_gate",
                riva_ib_phase_volume_replacement_gate(&p, &state));
     diagnostic("phase_volume_dense_transition",
-               riva_ib_phase_dense_transition(&p, &state));
+               riva_ib_phase_dense_transition(&p, &m, &state));
     diagnostic("transformation_progress",
                riva_ib_transformation_progress(&p, &state));
     diagnostic("transformation_zone",

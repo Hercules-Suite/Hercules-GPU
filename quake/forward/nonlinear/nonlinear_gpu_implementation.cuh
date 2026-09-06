@@ -5498,7 +5498,8 @@ int nonlinear_gpu_checkpoint_write(
     } else if ((local_flags &
                 NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0) {
         header.riva_state_bytes = (uint32_t)sizeof(riva_ib_state_t);
-        header.riva_kernel_revision = RIVA_IB_KERNEL_REVISION;
+        header.riva_kernel_revision = riva_ib_checkpoint_revision(
+            g_config.material_model == RIVA_SAND_CUSTOM_02);
         memcpy(header.riva_parameter_sha256, RIVA_IB_PARAMETER_SHA256,
                sizeof(RIVA_IB_PARAMETER_SHA256));
     }
@@ -5644,7 +5645,8 @@ int nonlinear_gpu_checkpoint_read(
         ((local_flags &
           NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0 &&
          (header.riva_state_bytes != sizeof(riva_ib_state_t) ||
-          header.riva_kernel_revision != RIVA_IB_KERNEL_REVISION ||
+          header.riva_kernel_revision != riva_ib_checkpoint_revision(
+              g_config.material_model == RIVA_SAND_CUSTOM_02) ||
           strcmp(header.riva_parameter_sha256,
                  RIVA_IB_PARAMETER_SHA256) != 0))) {
         if (myID == 0) {

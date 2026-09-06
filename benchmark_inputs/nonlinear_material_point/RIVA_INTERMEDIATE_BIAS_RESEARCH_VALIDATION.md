@@ -124,6 +124,38 @@ imports the later OpenSees `BiasVolume` modes or OpenSees-specific
 - Full NVIDIA/MPI compilation and execution are still pending on the target
   machine. Host tests and source inspection do not substitute for those runs.
 
+## Custom02 reference-density correction (2026-09-06, after 9203e02)
+
+The initial custom-interface tests checked that parameters affected the
+history, but did not verify the correctness of the shifted reference density.
+The reviewer identified that the shared reference cache still used frozen
+bounds. The new native test reproduces the reported case at `e_max=0.819`,
+`e_min=0.51`, `e0=0.601`: before the fix, reference density was
+`0.66296296296296309` and shakedown was `5.916100227612068`. With material-
+specific reference density `0.7055016181229774`, shakedown is correctly 1.
+
+All four consumers now obtain the reference density from the material-aware
+helper: raw shakedown, shear compliance, dense-state weighting (also used by
+cyclic shear/hardening), and the dense phase-volume transition. Default bounds
+retain the original cached fast path. The shared parameter record is never
+mutated for individual elements; no state fields, iterations, or substeps
+are added. Both custom-bound endpoints and an interpolated midpoint are
+tested at and on either side of the reference void ratio against the untouched
+private Python model: 15 cases, 150 diagnostics, `rtol=1e-12`, `atol=1e-13`.
+
+Custom02 now writes/requires native checkpoint marker 4, rejecting pre-fix
+Custom02 histories even though the 138-value state layout is unchanged.
+Restart those simulations from initialization; their earlier accumulated
+history cannot be repaired by fixing the cache alone. Default RIVASand02
+retains marker 3. These native markers do not imply OpenSees revision-4 options.
+Full CUDA/MPI restart execution remains a target-host validation requirement.
+
+Post-fix checks pass: all six reference histories in core and full modes at
+their unchanged tolerances, the default/custom equivalence and ten-input
+activity checks with 1/4/16 substeps, the lifecycle/byte-restart/BrickUP host
+tests, and all 29 documentation/source-wiring tests. The original production
+kernel is untouched by this correction.
+
 ### Incremental host cost
 
 Three alternating before/after samples used GCC 15.1.0 `-O2`, 1,000
