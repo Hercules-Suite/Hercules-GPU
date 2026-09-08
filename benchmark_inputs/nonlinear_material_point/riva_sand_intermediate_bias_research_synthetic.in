@@ -10,11 +10,11 @@ material_point_compare_rtol = 1.0e-8
 material_point_compare_atol = 1.0e-10
 material_point_output_prefix = riva_sand_intermediate_bias_research_synthetic
 
-# The research successor exposes the same relative-density row as frozen
-# RIVASand. Its private 249-parameter record is identified at runtime by
+# Both RIVA-Sand generations expose the same full Dr G0 M kd h m zeta
+# e_max e_min Q R n_G row. Its private 249-parameter record is identified at runtime by
 # RIVA_IB_PARAMETER_SHA256; e_max=0.78 and e_min=0.51 give e0=0.601 here.
 material_point_constants =
-  0.66296296296296309
+  0.66296296296296309 483.48301127222084 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65
 
 # Equilibrated K0 effective stress with intermediate static shear bias,
 # tension-positive, in Pa. The p'=26.267 kPa and tau=10 kPa state is adapted

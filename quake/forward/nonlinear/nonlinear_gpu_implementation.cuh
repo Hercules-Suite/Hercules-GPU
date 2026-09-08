@@ -3744,7 +3744,7 @@ __global__ static void kernel_nonlinear_update_force(
             const riva_parameters_t *riva_parameters =
                 (const riva_parameters_t *)state.riva_parameters;
             const int32_t material_index =
-                cfg.material_model == RIVA_SAND_CUSTOM ? nl_eindex : 0;
+                nl_eindex;
             const riva_material_parameters_t *riva_material =
                 state.riva_materials+material_index;
             riva_state_t *riva_state = riva_states+point;
@@ -3793,7 +3793,7 @@ __global__ static void kernel_nonlinear_update_force(
                 (const riva_ib_parameters_t *)state.riva_ib_parameters;
             const riva_material_parameters_t *riva_material =
                 state.riva_materials +
-                (cfg.material_model == RIVA_SAND_CUSTOM_02 ? nl_eindex : 0);
+                nl_eindex;
             riva_ib_state_t *riva_state = riva_states+point;
             if (!riva_state->base.initialized) {
                 const tensor_t equilibrated = riva_add(
@@ -4314,7 +4314,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 
     if (MATERIAL_MODEL_IS_RIVA_SAND(config->material_model) && count > 0) {
         const size_t material_count =
-            config->material_model == RIVA_SAND_CUSTOM ? (size_t)count : 1u;
+            (size_t)count;
         if (nonlinear_alloc_copy(myID, &g_nl.riva_materials,
                 host_state->riva_materials, material_count,
                 "RIVA-Sand material properties") != 0 ||
@@ -4351,7 +4351,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
         count > 0) {
         const size_t material_count =
-            config->material_model == RIVA_SAND_CUSTOM_02 ? (size_t)count : 1u;
+            (size_t)count;
         if (nonlinear_alloc_copy(myID, &g_nl.riva_materials,
                 host_state->riva_materials, material_count,
                 "RIVA-Sand intermediate-bias research material") != 0 ||
@@ -4517,8 +4517,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 sizeof(riva_ib_state_t))/(1024.0*1024.0);
             const size_t material_count = count == 0 ? 0u :
-                (config->material_model == RIVA_SAND_CUSTOM_02
-                    ? (size_t)count : 1u);
+                (size_t)count;
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*sizeof(double))/(1024.0*1024.0);
@@ -4539,8 +4538,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 sizeof(riva_state_t))/(1024.0*1024.0);
             const size_t material_count = count == 0 ? 0u :
-                (config->material_model == RIVA_SAND_CUSTOM
-                    ? (size_t)count : 1u);
+                (size_t)count;
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*sizeof(double))/(1024.0*1024.0);
@@ -4550,9 +4548,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     "local_history=%.1f MiB, "
                     "effective-skeleton stress with BrickUP pore pressure "
                     "and Biot total-stress coupling, geostatic=%s)\n",
-                    config->material_model == RIVA_SAND_CUSTOM ?
-                        "custom material properties" :
-                        "frozen material properties",
+                    "user-specified material properties",
                     RIVA_PARAMETER_SHA256, config->no_substeps, material_mib,
                     state_mib,
                     config->approximate_geostatic_state == YES
@@ -5492,7 +5488,7 @@ int nonlinear_gpu_checkpoint_write(
     header.rank_count = (uint32_t)group_size;
     header.riva_state_bytes = (uint32_t)sizeof(riva_state_t);
     if ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
-        header.riva_kernel_revision = RIVA_KERNEL_REVISION;
+        header.riva_kernel_revision = RIVA_G0_CHECKPOINT_REVISION;
         memcpy(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256,
                sizeof(RIVA_PARAMETER_SHA256));
     } else if ((local_flags &
@@ -5640,7 +5636,7 @@ int nonlinear_gpu_checkpoint_read(
         header.rank_count != (uint32_t)group_size ||
         ((local_flags & NL_CHECKPOINT_RIVA_STATE) != 0 &&
          (header.riva_state_bytes != sizeof(riva_state_t) ||
-          header.riva_kernel_revision != RIVA_KERNEL_REVISION ||
+          header.riva_kernel_revision != RIVA_G0_CHECKPOINT_REVISION ||
           strcmp(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256) != 0)) ||
         ((local_flags &
           NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0 &&

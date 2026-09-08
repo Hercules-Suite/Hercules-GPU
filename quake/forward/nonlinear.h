@@ -105,10 +105,10 @@ typedef struct tensor_t {
 
 } tensor_t;
 
-/* Compact material subset exposed by RIVASandCustom.  Production stores this
+/* Compact material subset exposed by every RIVA-Sand input name.  Production stores this
  * outside nlconstants_t so unrelated nonlinear families do not reserve RIVA-Sand
- * memory.  The frozen interface shares one instance per rank; the custom
- * interface stores one interpolated instance per nonlinear element. */
+ * memory.  All names store one interpolated instance per nonlinear element;
+ * Custom names are retained as input aliases for their generation. */
 typedef struct riva_material_parameters_t {
     double h;
     double m;
@@ -120,6 +120,7 @@ typedef struct riva_material_parameters_t {
     double Q;
     double R;
     double n_G;
+    double E_ref; /* setup-time cache from dimensionless G0 */
 } riva_material_parameters_t;
 
 typedef struct qpvectors_t {

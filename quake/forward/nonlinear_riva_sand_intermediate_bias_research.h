@@ -38,7 +38,7 @@
     "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
 
 RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(int custom)
-{ return custom ? RIVA_IB_CUSTOM_KERNEL_REVISION : RIVA_IB_KERNEL_REVISION; }
+{ (void)custom; return 5u; /* full G0 input for both 02 names */ }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is

@@ -46,6 +46,9 @@ echo "==> Compile research-vs-production benchmark with $cxx"
 "$cxx" "${compile_flags[@]}" "$benchmark_source" -o "$benchmark_bin"
 
 echo "==> Compile RIVASand02 custom-interface state checks"
+"$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand_g0_test.cc" \
+  -o "$suite_tmp_dir/riva_sand_g0_test"
+"$suite_tmp_dir/riva_sand_g0_test"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_test.cc" \
   -o "$suite_tmp_dir/riva_sand02_custom_test"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_density_test.cc" \
