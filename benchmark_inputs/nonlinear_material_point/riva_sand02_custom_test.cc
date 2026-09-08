@@ -62,8 +62,8 @@ static void advance(const riva_ib_parameters_t &p,
 int main()
 {
     try {
-        require(riva_ib_checkpoint_revision(0) == 5u &&
-                riva_ib_checkpoint_revision(1) == 5u,
+        require(riva_ib_checkpoint_revision(0) == 6u &&
+                riva_ib_checkpoint_revision(1) == 6u,
                 "custom density correction must reject old Custom02 checkpoints");
         const riva_ib_parameters_t p = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t frozen =

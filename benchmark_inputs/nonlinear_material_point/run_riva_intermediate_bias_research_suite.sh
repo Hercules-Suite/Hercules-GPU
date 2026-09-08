@@ -45,6 +45,18 @@ echo "==> Compile host state-contract test with $cxx"
 echo "==> Compile research-vs-production benchmark with $cxx"
 "$cxx" "${compile_flags[@]}" "$benchmark_source" -o "$benchmark_bin"
 
+echo "==> Compile velocity-input and stiffness checks"
+"$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand_velocity_test.cc" \
+  -o "$suite_tmp_dir/riva_sand_velocity_test"
+"$suite_tmp_dir/riva_sand_velocity_test" \
+  "$suite_dir/riva_sand_brickup_synthetic.in" \
+  "$suite_dir/riva_sand_low_bias_synthetic.in" \
+  "$suite_dir/riva_sand_ramped_geostatic_admission_synthetic.in" \
+  "$suite_dir/riva_sand_custom_equivalence.in" \
+  "$suite_dir/riva_sand_intermediate_bias_research_synthetic.in" \
+  "$suite_dir/riva_sand_custom02_equivalence.in" \
+  "$suite_dir/riva_sand_velocity_synthetic.in" \
+  "$suite_dir/riva_sand02_velocity_synthetic.in"
 echo "==> Compile RIVASand02 custom-interface state checks"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand_g0_test.cc" \
   -o "$suite_tmp_dir/riva_sand_g0_test"

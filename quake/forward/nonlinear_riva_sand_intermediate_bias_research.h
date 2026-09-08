@@ -38,7 +38,7 @@
     "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
 
 RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(int custom)
-{ (void)custom; return 5u; /* full G0 input for both 02 names */ }
+{ (void)custom; return 6u; /* checkpointed per-point stiffness for both 02 names */ }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
@@ -1363,6 +1363,22 @@ RIVA_IB_HD static inline int riva_ib_begin_dynamic_phase(
                                     &s->intermediate_high_gate_base);
     s->phase_potential_anchor*=1.0+s->intermediate_high_gate_base*
         (p->intermediate_high_bias_phase_anchor_fraction-1.0);
+    return 1;
+}
+
+/* Setup-only velocity calibration using this generation's full initialized
+ * modulus, including its loose/intermediate-bias compliance multipliers. */
+RIVA_IB_HD static inline int riva_ib_fit_initial_shear(
+    const riva_ib_parameters_t *p,riva_material_parameters_t *m,
+    const riva_ib_state_t *s,double target)
+{
+    if (!p || !m || !s || !s->base.initialized || !(target>0) || !isfinite(target)) return 0;
+    double shear,bulk;
+    riva_ib_moduli_for_state(p,m,s,riva_cone_pressure(&p->base,s->base.stress),&shear,&bulk);
+    if (!(shear>0) || !isfinite(shear)) return 0;
+    const double candidate=m->E_ref*(target/shear);
+    if (!(candidate>0) || !isfinite(candidate)) return 0;
+    m->E_ref=candidate;
     return 1;
 }
 

@@ -1,5 +1,9 @@
 # RIVA-Sand G0 input migration and host checks — 2026-09-08
 
+Historical record for commit 111ef81. The later
+[compact inputs and velocity-derived stiffness](RIVA_VELOCITY_STIFFNESS.md)
+supersede this all-full-row interface and its checkpoint markers.
+
 All four names (`RIVASand`, `RIVASandCustom`, `RIVASand02`, and
 `RIVASandCustom02`) now use the same complete material-table format:
 

@@ -153,6 +153,8 @@ typedef struct nonlinear_gpu_state_t {
     pdmy03_constants_t *pdmy03_materials;
     riva_material_parameters_t *riva_materials;
     double *riva_void_ratios;
+    double *riva_target_shear; // per element; zero means explicit G0
+    double *riva_E_refs; // per point; calibrated once, checkpointed
     qptensors_t *stresses;
     qptensors_t *strains;
     qptensors_t *strains1;
@@ -3745,8 +3747,8 @@ __global__ static void kernel_nonlinear_update_force(
                 (const riva_parameters_t *)state.riva_parameters;
             const int32_t material_index =
                 nl_eindex;
-            const riva_material_parameters_t *riva_material =
-                state.riva_materials+material_index;
+            riva_material_parameters_t point_material=state.riva_materials[material_index];
+            const riva_material_parameters_t *riva_material=&point_material;
             riva_state_t *riva_state = riva_states+point;
             if (!riva_state->initialized) {
                 const tensor_t equilibrated = riva_add(
@@ -3764,8 +3766,13 @@ __global__ static void kernel_nonlinear_update_force(
                     nl_record_riva_geostatic_initialization(
                         state.riva_geostatic_stats, riva_parameters,
                         riva_material, riva_state, admitted);
+                if (ok && state.riva_target_shear[nl_eindex]>0.0)
+                    ok=riva_fit_initial_shear(riva_parameters,&point_material,
+                        riva_state,state.riva_target_shear[nl_eindex]);
+                if (ok) state.riva_E_refs[point]=point_material.E_ref;
             } else {
-                ok = 1;
+                point_material.E_ref=state.riva_E_refs[point];
+                ok=isfinite(point_material.E_ref) && point_material.E_ref>0.0;
             }
             riva_update_info_t riva_info = {};
             tensor_t full_effective_stress = riva_state->stress;
@@ -3791,9 +3798,8 @@ __global__ static void kernel_nonlinear_update_force(
                 (riva_ib_state_t *)state.riva_ib_states;
             const riva_ib_parameters_t *riva_parameters =
                 (const riva_ib_parameters_t *)state.riva_ib_parameters;
-            const riva_material_parameters_t *riva_material =
-                state.riva_materials +
-                nl_eindex;
+            riva_material_parameters_t point_material=state.riva_materials[nl_eindex];
+            const riva_material_parameters_t *riva_material=&point_material;
             riva_ib_state_t *riva_state = riva_states+point;
             if (!riva_state->base.initialized) {
                 const tensor_t equilibrated = riva_add(
@@ -3819,8 +3825,13 @@ __global__ static void kernel_nonlinear_update_force(
                         state.riva_geostatic_stats,
                         &riva_parameters->base, riva_material,
                         &riva_state->base, admitted);
+                if (ok && state.riva_target_shear[nl_eindex]>0.0)
+                    ok=riva_ib_fit_initial_shear(riva_parameters,&point_material,
+                        riva_state,state.riva_target_shear[nl_eindex]);
+                if (ok) state.riva_E_refs[point]=point_material.E_ref;
             } else {
-                ok = 1;
+                point_material.E_ref=state.riva_E_refs[point];
+                ok=isfinite(point_material.E_ref) && point_material.E_ref>0.0;
             }
             riva_update_info_t riva_info = {};
             tensor_t full_effective_stress = riva_state->base.stress;
@@ -4320,7 +4331,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 "RIVA-Sand material properties") != 0 ||
             nonlinear_alloc_copy(myID, &g_nl.riva_void_ratios,
                 host_state->riva_void_ratios, (size_t)count,
-                "RIVA-Sand void ratios") != 0)
+                "RIVA-Sand void ratios") != 0 ||
+            nonlinear_alloc_copy(myID, &g_nl.riva_target_shear,
+                host_state->riva_target_shear, (size_t)count,
+                "RIVA-Sand target initial shear modulus") != 0)
             return -1;
         const size_t point_count = (size_t)count*NL_GPU_QP;
         const riva_parameters_t parameters = riva_reference_parameters(1000.0);
@@ -4335,6 +4349,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         if (riva_error == cudaSuccess)
             riva_error = cudaMemset(g_nl.riva_states, 0,
                 point_count*sizeof(riva_state_t));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMalloc((void **)&g_nl.riva_E_refs,point_count*sizeof(double));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMemset(g_nl.riva_E_refs,0,point_count*sizeof(double));
         if (riva_error == cudaSuccess)
             riva_error = cudaMalloc(
                 (void **)&g_nl.riva_geostatic_stats,
@@ -4357,7 +4375,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 "RIVA-Sand intermediate-bias research material") != 0 ||
             nonlinear_alloc_copy(myID, &g_nl.riva_void_ratios,
                 host_state->riva_void_ratios, (size_t)count,
-                "RIVA-Sand intermediate-bias research void ratios") != 0)
+                "RIVA-Sand intermediate-bias research void ratios") != 0 ||
+            nonlinear_alloc_copy(myID, &g_nl.riva_target_shear,
+                host_state->riva_target_shear, (size_t)count,
+                "RIVA-Sand target initial shear modulus") != 0)
             return -1;
         const size_t point_count = (size_t)count*NL_GPU_QP;
         const riva_ib_parameters_t parameters =
@@ -4373,6 +4394,10 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         if (riva_error == cudaSuccess)
             riva_error = cudaMemset(g_nl.riva_ib_states, 0,
                 point_count*sizeof(riva_ib_state_t));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMalloc((void **)&g_nl.riva_E_refs,point_count*sizeof(double));
+        if (riva_error == cudaSuccess)
+            riva_error = cudaMemset(g_nl.riva_E_refs,0,point_count*sizeof(double));
         if (riva_error == cudaSuccess)
             riva_error = cudaMalloc(
                 (void **)&g_nl.riva_geostatic_stats,
@@ -4520,7 +4545,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 (size_t)count;
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
-                (size_t)count*sizeof(double))/(1024.0*1024.0);
+                (size_t)count*(2+NL_GPU_QP)*sizeof(double))/(1024.0*1024.0);
             fprintf(stderr,
                     "%s integration: "
                     "OpenSees_RIVA %s, frozen internal controls %s "
@@ -4541,7 +4566,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 (size_t)count;
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
-                (size_t)count*sizeof(double))/(1024.0*1024.0);
+                (size_t)count*(2+NL_GPU_QP)*sizeof(double))/(1024.0*1024.0);
             fprintf(stderr,
                     "RIVA-Sand integration: %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_material=%.1f MiB, "
@@ -5379,13 +5404,13 @@ static size_t nonlinear_checkpoint_rank_bytes(
     if ((flags & NL_CHECKPOINT_RIVA_STATE) != 0) {
         const uint64_t elements = points/NL_GPU_QP;
         bytes += (size_t)(2*elements)*sizeof(qptensors_t);
-        bytes += (size_t)points*sizeof(riva_state_t);
+        bytes += (size_t)points*(sizeof(riva_state_t)+sizeof(double));
     }
     if ((flags &
          NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0) {
         const uint64_t elements = points/NL_GPU_QP;
         bytes += (size_t)(2*elements)*sizeof(qptensors_t);
-        bytes += (size_t)points*sizeof(riva_ib_state_t);
+        bytes += (size_t)points*(sizeof(riva_ib_state_t)+sizeof(double));
     }
     return bytes;
 }
@@ -5577,7 +5602,10 @@ int nonlinear_gpu_checkpoint_write(
                         nonlinear_checkpoint_write_device(
                             fp, constitutive_states,
                             constitutive_state_bytes, scratch, scratch_bytes)
-                            != 0)
+                            != 0 ||
+                        nonlinear_checkpoint_write_device(
+                            fp,g_nl.riva_E_refs,(size_t)local_points*sizeof(double),
+                            scratch,scratch_bytes)!=0)
                         local_error = 1;
                 }
             }
@@ -5753,7 +5781,10 @@ int nonlinear_gpu_checkpoint_read(
                         nonlinear_checkpoint_read_device(
                             fp, constitutive_states,
                             constitutive_state_bytes, scratch, scratch_bytes)
-                            != 0)
+                            != 0 ||
+                        nonlinear_checkpoint_read_device(
+                            fp,g_nl.riva_E_refs,(size_t)local_points*sizeof(double),
+                            scratch,scratch_bytes)!=0)
                         local_error = 1;
                 }
             }
@@ -5802,6 +5833,7 @@ void nonlinear_gpu_finalize(void)
     NL_FREE(elements); NL_FREE(constants);
     NL_FREE(md_materials); NL_FREE(pdmy03_materials);
     NL_FREE(riva_materials); NL_FREE(riva_void_ratios);
+    NL_FREE(riva_target_shear); NL_FREE(riva_E_refs);
     NL_FREE(stresses); NL_FREE(strains); NL_FREE(strains1);
     NL_FREE(pstrains1); NL_FREE(pstrains2);
     NL_FREE(alphastress1); NL_FREE(alphastress2);

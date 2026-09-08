@@ -273,6 +273,7 @@ typedef struct nlsolver_t {
 	pdmy03_constants_t *pdmy03_materials;
 	riva_material_parameters_t *riva_materials;
 	double        *riva_void_ratios;
+	double        *riva_target_shear; /* per element: rho*Vs^2, or 0 for input G0 */
 	qptensors_t   *stresses;
 	qptensors_t   *strains;
 	qptensors_t   *strains1;      // total strains at t-1

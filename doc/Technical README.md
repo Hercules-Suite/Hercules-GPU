@@ -720,49 +720,49 @@ Nonlinear GPU execution (runtime environment):
 	`benchmark_inputs/nonlinear_material_point/RIVA_SAND_GEOSTATIC_ADMISSION.md`.
 	The internal residual cone-pressure research control remains zero and is not
 	exposed in `parameters.in`.
-- All four RIVA-Sand names now use 13 values in `material_properties_list`:
+- RIVASand and RIVASand02 use compact `Vs_limit Dr` rows by default.
+  Optional positive G0 after Dr selects an explicit stiffness override:
+  `Vs_limit Dr G0`. Their remaining material inputs use reference values.
+  RIVASandCustom and RIVASandCustom02 require the full row:
 
   `Vs_limit Dr G0 M kd h m zeta e_max e_min Q R n_G`.
 
-  `RIVASandCustom` and `RIVASandCustom02` remain aliases for their respective
-  generations, with the same full input as `RIVASand` and `RIVASand02`.
-  The standard names no longer accept Dr-only rows. Insert dimensionless G0
-  immediately after Dr in old custom rows; expand old two-column rows with
-  the complete calibration. For example (syntax/reference fixture, not a site calibration):
+  Use G0=0 in every row for automatic stiffness, or positive G0 in every
+  row for explicit stiffness; mixed modes and inconsistent row widths are
+  rejected. G0 is dimensionless. The reference value 483.48301127222084
+  preserves the former 48.976829 MPa stiffness at 101.3 kPa. Every numeric
+  input must be finite; Dr and n_G lie in [0,1], G0>=0, M,kd,h,Q>0,
+  m,zeta,R>=0, and e_max>e_min>=0 containing the anchor e=0.601.
 
-  `200 0.66296296296296309 483.48301127222084 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65`
+  Automatic stiffness targets the actual mesh bulk-density times Vs squared,
+  not Vs_limit and not buoyant density. After stress-preserving geostatic
+  admission, each integration point is calibrated using its full initialized
+  shear-modulus evaluator, including pressure guards and bias multipliers.
+  Approximate=yes uses its admitted K0 field; ramped no uses the actually
+  solved effective stress. The cached elastic scale is fixed throughout
+  dynamics, so pressure-dependent degradation is retained. Bulk stiffness
+  follows the existing nu=0.30 and does not also match mesh Vp. Near-zero
+  effective stress must still pass admission; it is not silently changed.
 
-  G0=483.48301127222084 preserves the original reference shear modulus
-  48.976829 MPa at mean effective pressure 101.3 kPa. It is not a modulus in
-  Pa and is not derived from Dr or Vs_limit. Its conversion to dimensional
-  stiffness is cached once during material setup. Adjusting it scales both
-  elastic shear and bulk stiffness at fixed Poisson ratio 0.30; the pressure
-  exponent n_G=0.65, pressure guards, and cyclic laws remain unchanged.
-  Calibrate G0 against measured small-strain stiffness at the relevant
-  confinement and recheck pore pressure, strains, and acceleration spectra.
+  This adds one target-modulus double per element and one elastic-scale double
+  per quadrature point; unrelated families allocate neither. Per-step updates
+  load the cached scale but do not repeat the calibration. Checkpoints now
+  store the per-point scale and require marker 4 (original) or 6 (02).
+  Older checkpoints are incompatible: rerun initialization and retain the
+  same model, mesh and material inputs on restart.
 
-  Vs_limit selects the active interval; all twelve material fields are
-  linearly interpolated by Vs. Repeat constants across rows where appropriate.
-  Require finite inputs with 0<=Dr<=1, G0,M,kd,h,Q>0, m,zeta,R>=0,
-  e_max>e_min>=0 containing the shakedown anchor e=0.601, and 0<=n_G<=1.
-  Every active RIVA-Sand name stores one interpolated material block plus
-  initial void ratio per nonlinear element. Other families allocate none of
-  that storage. The material-point driver uses the same twelve values without Vs_limit.
+  The material-point driver takes Dr [G0] or the twelve Custom values,
+  without Vs_limit. Automatic mode additionally requires
+  material_point_riva_density (kg/m3) and material_point_riva_vs (m/s).
+  Full reference histories are retained using explicit reference G0.
 
-  RIVASand02 remains the distinct 249-parameter/revision-3 plastic-activity-gated
-  successor. Its 138-value history, both plastic-activity backbones, and
-  material-specific reference density fix remain intact. The retired
-  RIVASandIntermediateBiasResearch name is not restored. Neither the OpenSees
-  BiasVolume modes nor reversalLatch is included in this Hercules port.
-  Both generations still return effective skeleton stress; BrickUP owns
-  pore pressure and adds its contribution to total stress exactly once.
-
-  The G0 input/cache contract now requires checkpoint marker 3 for original
-  RIVA-Sand names and 5 for both 02 names. Pre-G0 checkpoints are rejected;
-  rerun initialization and retain the same complete inputs when restarting.
-  These adapter markers do not change the original/research equation revisions
-  or frozen reference hashes. NVIDIA/MPI field qualification remains required;
-  host tests alone do not qualify a full GPU mesh.
+  The 02 kernel remains the distinct revision-3 plastic-activity successor,
+  with unchanged 138-value history and material-specific density correction.
+  OpenSees BiasVolume and reversalLatch are not included. Both generations
+  return effective skeleton stress; BrickUP owns pressure and its total-stress
+  contribution. Automatic initial Vs matching is not a new cyclic calibration
+  and does not establish full-mesh CUDA/MPI qualification.
+  See `benchmark_inputs/nonlinear_material_point/RIVA_VELOCITY_STIFFNESS.md`.
 - RIVA-Sand is compatible with BrickUP through explicit field ownership.
 	RIVA-Sand is the effective-skeleton law: its compatibility state separates
 	total volumetric strain into elastic confining, irreversible plastic, and

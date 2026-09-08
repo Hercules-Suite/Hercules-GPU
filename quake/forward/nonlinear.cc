@@ -42,6 +42,7 @@
 #include "nonlinear_gpu.h"
 #include "nonlinear_pdmy03.h"
 #include "nonlinear_riva_sand.h"
+#include "nonlinear_riva_sand_input.h"
 #include "nonlinear_riva_sand_intermediate_bias_research.h"
 
 static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
@@ -391,7 +392,8 @@ static riva_material_parameters_t riva_material_at_row(int row)
             : riva_reference_parameters(1000.0);
     riva_material_parameters_t material =
         riva_reference_material_parameters(&reference);
-    riva_material_set_G0(&reference, &material, theRivaProperties[RIVA_PROPERTY_G0][row]);
+    if (theRivaProperties[RIVA_PROPERTY_G0][row]>0.0)
+        riva_material_set_G0(&reference, &material, theRivaProperties[RIVA_PROPERTY_G0][row]);
     material.M = theRivaProperties[RIVA_PROPERTY_M][row];
     material.kd = theRivaProperties[RIVA_PROPERTY_KD][row];
     material.h = theRivaProperties[RIVA_PROPERTY_H][row];
@@ -413,8 +415,8 @@ static riva_material_parameters_t riva_material_at_vs(double vs)
             : riva_reference_parameters(1000.0);
     riva_material_parameters_t material =
         riva_reference_material_parameters(&reference);
-    riva_material_set_G0(&reference, &material, interpolate_property_value(
-        vs, theRivaProperties[RIVA_PROPERTY_G0]));
+    const double G0=interpolate_property_value(vs, theRivaProperties[RIVA_PROPERTY_G0]);
+    if (G0>0.0) riva_material_set_G0(&reference, &material, G0);
     material.M = interpolate_property_value(
         vs, theRivaProperties[RIVA_PROPERTY_M]);
     material.kd = interpolate_property_value(
@@ -1254,9 +1256,25 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     }
 
 
-    if ( parsedarray( fp, "material_properties_list",
-                      thePropertiesCount * property_columns, auxiliar ) != 0) {
+    int property_parse_error;
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel)) {
+        const riva_parameters_t riva_input_reference =
+            MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)
+                ? riva_ib_reference_parameters(1000.0).base : riva_reference_parameters(1000.0);
+        property_parse_error = riva_read_material_rows(fp, "material_properties_list", thePropertiesCount,
+              MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM(theMaterialModel), 1,
+              &riva_input_reference, auxiliar);
+    } else {
+        property_parse_error = parsedarray(fp, "material_properties_list",
+              thePropertiesCount * property_columns, auxiliar);
+    }
+    if (property_parse_error != 0) {
         fprintf(stderr, "Error parsing nonlinear material properties list from %s\n", parametersin);
+        if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel))
+            fprintf(stderr, "RIVA-Sand rows: standard Vs_limit Dr [G0], Custom "
+                    "Vs_limit Dr G0 M kd h m zeta e_max e_min Q R n_G. "
+                    "Use uniform row widths; G0=0 selects mesh stiffness. "
+                    "Do not mix automatic and positive G0 rows.\n");
         return -1;
     }
 
@@ -1423,7 +1441,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             const riva_material_parameters_t material = riva_material_at_row(row);
             if (!riva_material_parameters_valid(&reference, &material)) {
                 fprintf(stderr,
-                        "Illegal %s row %d: require G0>0, h>0, m>=0, M>0, kd>0, "
+                        "Illegal %s row %d: require G0>=0 (0=automatic), h>0, m>=0, M>0, kd>0, "
                         "zeta>=0, e_max>e_min>=0 containing the frozen "
                         "shakedown anchor e=%.3f, Q>0, R>=0, and "
                         "0<=n_G<=1\n",
@@ -1436,6 +1454,10 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             maximum_relative_density = MAX(maximum_relative_density,
                                            relative_density);
         }
+        fprintf(stderr, "%s stiffness: %s\n", RIVA_SAND_MODEL_NAME(theMaterialModel),
+                theRivaProperties[RIVA_PROPERTY_G0][0]==0.0
+                    ? "mesh rho*Vs^2; per-point calibration at dynamic activation"
+                    : "explicit dimensionless G0");
         fprintf(stderr,
                 "%s property input: Dr in [%g, %g]; "
                 "G0, M, kd, h, m, zeta, e_max, e_min, Q, R, and n_G are "
@@ -1923,6 +1945,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 material_count, sizeof(riva_material_parameters_t));
         myNonlinSolver->riva_void_ratios =
             (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
+        myNonlinSolver->riva_target_shear =
+            (double *)calloc((size_t)myNonlinElementsCount, sizeof(double));
     }
     myNonlinSolver->stresses =
         (qptensors_t *)calloc(myNonlinElementsCount, sizeof(qptensors_t));
@@ -1975,7 +1999,8 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
          (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel) &&
           myNonlinElementsCount > 0 &&
           (myNonlinSolver->riva_materials      == NULL ||
-           myNonlinSolver->riva_void_ratios    == NULL)) ||
+           myNonlinSolver->riva_void_ratios    == NULL ||
+           myNonlinSolver->riva_target_shear   == NULL)) ||
          (myNonlinSolver->stresses            == NULL) ||
          (myNonlinSolver->strains             == NULL) ||
          (myNonlinSolver->strains1            == NULL) ||
@@ -2476,6 +2501,14 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     exit(1);
                 }
                 *riva_material = riva_material_at_vs(elementVs);
+                const int automatic = theRivaProperties[RIVA_PROPERTY_G0][0]==0.0;
+                if (automatic && (!(elementVs>0.0) || !isfinite(elementVs) ||
+                    !(edata->rho>0.0) || !isfinite(edata->rho) ||
+                    !(mu>0.0) || !isfinite(mu))) {
+                    fprintf(stderr,"Invalid RIVA-Sand mesh Vs/density at element %d\n",eindex);
+                    MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
+                }
+                myNonlinSolver->riva_target_shear[nl_eindex] = automatic ? mu : 0.0;
                 if (!riva_material_parameters_valid(
                         &reference, riva_material)) {
                     fprintf(stderr,
@@ -5643,7 +5676,7 @@ static void material_point_load_constants(nlconstants_t *constants,
                 : riva_reference_parameters(1000.0);
         *riva_material = riva_reference_material_parameters(&reference);
         if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(model)) {
-            riva_material_set_G0(&reference, riva_material, values[1]);
+            if (values[1]>0.0) riva_material_set_G0(&reference, riva_material, values[1]);
             riva_material->M = values[2];
             riva_material->kd = values[3];
             riva_material->h = values[4];
@@ -6287,7 +6320,16 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         ? MATERIAL_POINT_PDMY03_CONSTANT_COUNT :
         MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)
         ? MATERIAL_POINT_RIVA_CONSTANT_COUNT : MATERIAL_POINT_CONSTANT_COUNT;
-    if (parsedarray(fp, "material_point_constants", material_constant_count,
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model)) {
+        const riva_parameters_t reference = MATERIAL_MODEL_IS_RIVA_SAND_02(material_model)
+            ? riva_ib_reference_parameters(1000.0).base : riva_reference_parameters(1000.0);
+        if (riva_read_material_rows(fp,"material_point_constants",1,
+                MATERIAL_MODEL_IS_RIVA_SAND_CUSTOM(material_model),0,
+                &reference,constants_values)!=0) {
+            fprintf(stderr,"RIVA-Sand constants require Dr [G0], or the full Custom row\n");
+            goto cleanup;
+        }
+    } else if (parsedarray(fp, "material_point_constants", material_constant_count,
                     constants_values) != 0) {
         fprintf(stderr, "Cannot read %d material-point constants for %s\n",
                 material_constant_count, material_name);
@@ -6572,6 +6614,35 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     material_point_load_constants(
         &constants, &md_material, &pdmy03_material, &riva_material,
         &riva_void_ratio, material_model, constants_values);
+    if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(material_model) && constants_values[1]==0.0) {
+        double density=0.0, vs=0.0;
+        if (parsetext(fp,"material_point_riva_density",'d',&density)!=0 ||
+            parsetext(fp,"material_point_riva_vs",'d',&vs)!=0 ||
+            !(density>0.0) || !isfinite(density) || !(vs>0.0) || !isfinite(vs)) {
+            fprintf(stderr,"Automatic RIVA-Sand material-point stiffness requires positive "
+                    "material_point_riva_density (kg/m3) and material_point_riva_vs (m/s)\n");
+            goto cleanup;
+        }
+        tensor_t reference_stress=initial_state.stress;
+        reference_stress.xy=reference_stress.yz=reference_stress.xz=0.0;
+        int ok=0;
+        if (MATERIAL_MODEL_IS_RIVA_SAND_02(material_model)) {
+            const riva_ib_parameters_t p=riva_ib_reference_parameters(1000.0);
+            riva_ib_state_t state={};
+            ok=riva_ib_initialize_material(&p,&riva_material,initial_state.stress,riva_void_ratio,&state) &&
+                riva_ib_admit_geostatic_state(&p,&riva_material,&state,NULL) &&
+                riva_ib_begin_dynamic_phase(&p,&riva_material,&reference_stress,&state) &&
+                riva_ib_fit_initial_shear(&p,&riva_material,&state,density*vs*vs);
+        } else {
+            const riva_parameters_t p=riva_reference_parameters(1000.0);
+            riva_state_t state={};
+            ok=riva_initialize_geostatic_material(&p,&riva_material,initial_state.stress,
+                riva_void_ratio,reference_stress,&state,NULL) &&
+                riva_fit_initial_shear(&p,&riva_material,&state,density*vs*vs);
+        }
+        if (!ok) { fprintf(stderr,"Cannot calibrate initial RIVA-Sand stiffness\n"); goto cleanup; }
+        printf("Velocity-derived RIVA-Sand G0: %.17g\n",riva_material.E_ref/(2.6*101300.0));
+    }
     memset(&config, 0, sizeof(config));
     config.material_model = material_model;
     config.tension_cutoff = tension_cutoff;

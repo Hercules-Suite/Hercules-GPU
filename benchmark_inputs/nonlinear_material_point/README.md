@@ -85,7 +85,10 @@ model. The current common initial-state parser still requires all five arrays;
 alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
 its translated surface centers from stress.
 
-For all four RIVA-Sand names, `material_point_constants` contains twelve values:
+For standard `RIVASand` and `RIVASand02`, `material_point_constants` is
+`Dr [G0]`. Omitted G0 or G0=0 requests automatic stiffness and requires
+`material_point_riva_density` (kg/m3) and `material_point_riva_vs` (m/s).
+The Custom names instead require twelve values:
 
 ```text
 Dr G0 M kd h m zeta e_max e_min Q R n_G
@@ -115,7 +118,7 @@ RIVA-Sand retains a frozen 93-value numerical history schema. The committed
 non-expansive regularization. The exact transition equations and production
 diagnostic are specified in `RIVA_SAND_GEOSTATIC_ADMISSION.md`.
 
-The retained Custom names accept the identical row for their generation:
+Custom names expose the complete physical parameter row for their generation:
 
 ```text
 Dr G0 M kd h m zeta e_max e_min Q R n_G
@@ -125,7 +128,8 @@ This is a configurable input boundary around the same RIVA-Sand kernel, not the 
 `h_p0` experiment. It exposes eleven physical fields in addition to Dr while the
 remaining compatibility, amplitude, bias, ratchet, event, and integration
 controls retain the frozen reference values. All inputs must be finite;
-`Dr` and `n_G` lie in `[0,1]`, `G0`, `M`, `kd`, `h`, and `Q` are positive, `m`,
+`Dr` and `n_G` lie in `[0,1]`, `G0` is nonnegative (zero means automatic),
+`M`, `kd`, `h`, and `Q` are positive, `m`,
 `zeta`, and `R` are nonnegative, and `e_max>e_min>=0`. The frozen shakedown
 law uses reference void ratio 0.601, which must remain inside the custom
 `[e_min,e_max]` interval.
@@ -134,9 +138,10 @@ G0 is dimensionless, independent of the Pa stress units and of Dr. Its
 reference value 483.48301127222084 gives 48.976829 MPa at 101.3 kPa.
 Both elastic shear and bulk stiffness change with G0 at fixed Poisson ratio;
 the setup-time cache adds no constitutive iterations. Standard and Custom
-names now all use per-element material storage and the same full input order.
-Old Dr-only inputs must be expanded; old custom rows must insert G0 after Dr.
-Pre-G0 checkpoints must be rerun (new markers: original 3; both 02 names 5).
+names use per-element material storage plus a per-point elastic-scale cache.
+Standard inputs are compact again; Custom rows retain their full input order.
+Pre-velocity-cache checkpoints must be rerun (markers: original 4; both 02 names 6).
+See [velocity stiffness and migration](RIVA_VELOCITY_STIFFNESS.md).
 
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.

@@ -53,7 +53,7 @@ typedef struct riva_material_parameters_t {
 #define RIVA_STATE_VALUE_COUNT 93
 #define RIVA_KERNEL_REVISION 2u
 /* Host input/checkpoint contract; frozen equation revision stays unchanged. */
-#define RIVA_G0_CHECKPOINT_REVISION 3u
+#define RIVA_G0_CHECKPOINT_REVISION 4u
 #define RIVA_PARAMETER_SHA256 \
     "9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83"
 
@@ -710,6 +710,22 @@ RIVA_HD static inline int riva_initialize_geostatic(
         riva_reference_material_parameters(p);
     return riva_initialize_geostatic_material(
         p,&material,stress,void_ratio,reference_stress,state,admitted_out);
+}
+
+/* Setup only: match the initialized elastic shear response to rho*Vs^2.
+ * No history is changed. Cache the resulting E_ref per quadrature point and
+ * retain it on restart; never call this as pressure evolves during dynamics. */
+RIVA_HD static inline int riva_fit_initial_shear(const riva_parameters_t *p,
+    riva_material_parameters_t *m,const riva_state_t *s,double target)
+{
+    if (!p || !m || !s || !s->initialized || !(target>0) || !isfinite(target)) return 0;
+    double shear,bulk;
+    riva_moduli_for_state(p,m,riva_cone_pressure(p,s->stress),s,&shear,&bulk);
+    if (!(shear>0) || !isfinite(shear)) return 0;
+    const double candidate=m->E_ref*(target/shear);
+    if (!(candidate>0) || !isfinite(candidate)) return 0;
+    m->E_ref=candidate;
+    return 1;
 }
 
 RIVA_HD static inline void riva_dilatancy(const riva_parameters_t *p,
