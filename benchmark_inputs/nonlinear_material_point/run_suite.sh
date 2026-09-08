@@ -48,6 +48,8 @@ fixtures=(
   riva_sand_custom_equivalence.in
   riva_sand_intermediate_bias_research_synthetic.in
   riva_sand_custom02_equivalence.in
+  riva_sand_velocity_synthetic.in
+  riva_sand02_velocity_synthetic.in
 )
 
 validate_riva_custom_equivalence() {

@@ -12,7 +12,7 @@ material_point_output_prefix = riva_sand_ramped_geostatic_admission_synthetic
 
 # Dr=0.66296296296296309 gives the frozen internal e0=0.601.
 material_point_constants =
-  0.66296296296296309
+  0.66296296296296309 483.48301127222084
 
 # This all-compressive stress represents a numerically solved ramped-gravity
 # state. Its low K0 places alpha outside the calibrated bounding cone. The
