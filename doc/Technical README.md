@@ -1066,9 +1066,9 @@ Acoustic-elastic input flags (input file):
 	Acoustic elements assemble scalar acoustic mass/stiffness instead of
 	displacement mass/stiffness, while elastic elements continue to use
 	displacement DOFs. On a flat model surface, acoustic scalar nodes on the top
-	external domain face are constrained to enforce a pressure-release water
-	surface. When `acoustic_interface_coupling=yes`, scalar acoustic
-	formulations build an explicit acoustic-solid interface table. In octree
+	external domain face use the condition selected by
+	`acoustic_free_surface_gravity`. When `acoustic_interface_coupling=yes`,
+	scalar acoustic formulations build an explicit acoustic-solid interface table. In octree
 	meshes, nonconforming interface faces are split into area-weighted fragments
 	with fragment centers and normals, and CUDA kernels apply the normal
 	traction/acceleration coupling only on those fragments. Each fragment
@@ -1084,6 +1084,26 @@ Acoustic-elastic input flags (input file):
 	backward-compatibility alias only when `acoustic_formulation` is absent:
 	`yes` maps to `velocity_potential`, and explicit `no` maps to `none`. New
 	input files should use `acoustic_formulation`.
+- `acoustic_free_surface_gravity`
+	Optional yes/no control for the flat acoustic free surface. Default is `no`,
+	which preserves the established pressure-release condition (`p=0`, or
+	`phi[n+1]=phi[n]` for velocity potential). `yes` enables the linearized
+	gravity condition `q_tt = g q_z`, with `g=9.81 m/s^2`, for either scalar
+	formulation. Hercules applies it weakly by adding
+	`integral_Gamma N_i N_j/(rho g)` to the acoustic surface mass; the Hex8 top
+	face is lumped as `h^2/(4 rho g)` per node. This supports linear surface-
+	gravity waves without adding a bulk `rho g` load, a moving mesh, or a
+	hydrostatic prestress solve. It currently applies only to acoustic nodes on
+	the flat global top (`z_min`) external face. Where this face intersects a
+	lateral acoustic CPML, the surface mass uses the tangential Jacobian
+	`kappa_x*kappa_y`; the solver also adds the paired `x/y` mass-proportional
+	damping and CFS restoring/memory terms on the four top-face nodes. The
+	vertical CPML stretch is intentionally excluded because `z` is normal to the
+	gravity surface. Corner PML faces include both tangential directions. This
+	keeps the optional surface-wave operator matched to the existing acoustic
+	CPML without adding per-step work to non-surface PML elements. Changing this
+	option affects phase-B solver setup but not mesh generation, so an existing
+	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
 	Optional acoustic-interface diagnostic output path. When this path is set
 	and `acoustic_formulation` is `pressure` or `velocity_potential`, the solver

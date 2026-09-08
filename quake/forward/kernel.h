@@ -210,6 +210,9 @@ __global__ void kernelPMLAcousticStep(int32_t lenum,
 				      gpu_data_t* gpuData,
 				      int32_t pmlAcousticCount);
 
+__global__ void kernelPMLAcousticGravitySurfaceStep(
+    int32_t lenum, gpu_data_t* gpuData, int32_t surfaceCount);
+
 /* Physics functions used on both host and device */
 #ifdef __cplusplus
 extern "C" {
