@@ -76,14 +76,20 @@ of GPU checkpoint file I/O or multi-rank MPI restart.
 
 ## Reproduction and target validation
 
-Run the host suite with the unchanged private revision-3 handoff:
+Run the host suite with the unchanged private revision-3 handoff and the
+separately identified corrected verifier:
 
 ```sh
 bash benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_suite.sh \
-  /path/to/rivasand_intermediate_bias_flow_port /path/to/c++
+  /path/to/rivasand_intermediate_bias_flow_port /path/to/c++ \
+  /path/to/rivasand_hercules_branch_reversal_research/verify.py
 ```
 
-This includes branch checks, historical parity and corrected native replays.
+This includes branch checks, historical parity, corrected native replays, and
+the full 236-column corrected-oracle comparison. A verifier failure makes the
+suite fail. The third argument is optional for environments that do not have
+the private corrected oracle; when omitted, the suite explicitly reports that
+corrected-default oracle acceptance was skipped.
 The corrected Python oracle is separately retained in the private
 `rivasand_hercules_branch_reversal_research` workspace; the JSON record identifies
 its source hash and six-case comparisons. It does not become a runtime dependency.

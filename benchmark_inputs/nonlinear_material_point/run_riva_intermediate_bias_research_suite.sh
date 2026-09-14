@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# < 1 || $# > 2 )); then
-  echo "Usage: $0 PORT_ROOT [CXX]" >&2
+if (( $# < 1 || $# > 3 )); then
+  echo "Usage: $0 PORT_ROOT [CXX] [CORRECTED_VERIFY]" >&2
   exit 2
 fi
 
 port_root=$1
 cxx=${2:-c++}
+corrected_verify=${3:-}
 if [[ ! -d $port_root/golden_data/input_paths ||
       ! -f $port_root/verify_hercules_output.py ]]; then
   echo "PORT_ROOT is not a complete RIVA-Sand handoff package: $port_root" >&2
+  exit 2
+fi
+if [[ -n $corrected_verify && ! -f $corrected_verify ]]; then
+  echo "Corrected branch-reversal verifier does not exist: $corrected_verify" >&2
   exit 2
 fi
 
@@ -33,6 +38,7 @@ driver_bin=$suite_tmp_dir/riva_ib_replay
 state_bin=$suite_tmp_dir/riva_ib_state_test
 benchmark_bin=$suite_tmp_dir/riva_ib_benchmark
 native_output=$suite_tmp_dir/native_output
+corrected_output=$suite_tmp_dir/corrected_output
 input_paths=$port_root/golden_data/input_paths
 benchmark_repetitions=${RIVA_IB_BENCHMARK_REPETITIONS:-2000}
 
@@ -75,9 +81,19 @@ echo "==> Replay frozen oracle with the explicit historical reference"
 "$driver_bin" "$input_paths" "$native_output" --legacy-reversal-reference
 
 echo "==> Replay the corrected default on all six input paths"
-"$driver_bin" "$input_paths" "$suite_tmp_dir/corrected_output"
+"$driver_bin" "$input_paths" "$corrected_output"
 
 suite_status=0
+if [[ -n $corrected_verify ]]; then
+  echo "==> Verify corrected default against the branch-reversal oracle"
+  if ! python3 "$corrected_verify" \
+      --native-output "$corrected_output" \
+      --output "$suite_tmp_dir/corrected_reference"; then
+    suite_status=1
+  fi
+else
+  echo "==> Skip corrected-default oracle comparison (CORRECTED_VERIFY not provided)"
+fi
 if ! "$suite_tmp_dir/riva_sand02_custom_test"; then
   suite_status=1
 fi

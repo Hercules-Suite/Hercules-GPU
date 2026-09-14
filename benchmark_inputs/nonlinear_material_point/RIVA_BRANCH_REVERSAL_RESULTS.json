@@ -18,6 +18,7 @@
   },
   "corrected_python_parity": {
     "reference": "Separate Python branch-reversal successor; frozen handoff untouched",
+    "suite_hook": "Optional CORRECTED_VERIFY third argument; comparison failure propagates to the suite exit status",
     "oracle_sha256": "49ec218c73ff8db2f00ff8f10bac120d7bb32a46a2c685f9fd6fdc0c4964704f",
     "results": [
       {
@@ -198,7 +199,7 @@
     "quake/forward/nonlinear.cc": "504c7fcb6017d3265072699176ab78fd6c604e963f732d7a1c1ef1ddc13c8029",
     "benchmark_inputs/nonlinear_material_point/riva_sand02_branch_reversal_test.cc": "f0e19946841d3fb033f1a38d34f560c4fd8cf2b58d571501e35f80e24263bc57",
     "benchmark_inputs/nonlinear_material_point/riva_sand_intermediate_bias_research_native_driver.cc": "3a0d3380455e10de9cc410c872a83d70a1fcd200b3764faabb8839845c84faae",
-    "benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_suite.sh": "5f938e2087a016cf92e797dec880981d54e46fbda39bd3b4f0a6499f9b664532",
+    "benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_suite.sh": "460e84bbe3dd2fc5e35ab2f7c142cf525b338d975531ab9eb5b23cde610da64a",
     "benchmark_inputs/nonlinear_material_point/run_riva_branch_reversal_cuda.py": "84414105ec996a31d11bad8b8f25885dd81138837c0edfbfa0e4673c7703dc75"
   },
   "local_evidence_log_sha256": {
