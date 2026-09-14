@@ -1,0 +1,213 @@
+{
+  "date": "2026-09-14",
+  "branch": "research/rivasand02-branch-reversal",
+  "base_commit": "04a5cfa1504aacf88f0ca543af0e263c4130c979",
+  "opensees_reversal_source_commit": "e97c12fbcf3f4fff63ff9acd602fdb78af44630c",
+  "kernel_revision": 4,
+  "checkpoint_marker": 7,
+  "parameter_sha256": "3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e",
+  "calibration_changed": false,
+  "environment": {
+    "host": "macOS arm64",
+    "native_compiler": "GCC 15.1.0",
+    "cuda_mpi_toolchain_available": false
+  },
+  "native_suite": {
+    "status": "passed",
+    "scope": "Host kernel, input, state, restart contract, ownership and historical replay checks; no full psolve build"
+  },
+  "corrected_python_parity": {
+    "reference": "Separate Python branch-reversal successor; frozen handoff untouched",
+    "oracle_sha256": "49ec218c73ff8db2f00ff8f10bac120d7bb32a46a2c685f9fd6fdc0c4964704f",
+    "results": [
+      {
+        "case": "3484_zero_bias",
+        "rows": 145,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      },
+      {
+        "case": "3484_intermediate_bias025",
+        "rows": 485,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      },
+      {
+        "case": "3484_intermediate_bias030",
+        "rows": 204,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      },
+      {
+        "case": "4666_loose_bias015",
+        "rows": 331,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      },
+      {
+        "case": "4666_dense_zero_bias",
+        "rows": 369,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      },
+      {
+        "case": "4666_loose_high_bias",
+        "rows": 293,
+        "columns": 236,
+        "passed": true,
+        "errors": []
+      }
+    ],
+    "rtol": 1e-08,
+    "atol": 1e-10
+  },
+  "legacy_python_parity": {
+    "status": "passed",
+    "cases": 6,
+    "modes": [
+      "core",
+      "full"
+    ],
+    "selection": "Offline driver --legacy-reversal-reference only"
+  },
+  "smooth_mixed_path_refinement": {
+    "cycles": 2,
+    "reference_steps_per_cycle": 8192,
+    "results": [
+      {
+        "steps_per_cycle": 128,
+        "nsub": 4,
+        "legacy_reversals": 4,
+        "branch_reversals": 4,
+        "error_to_8192_kPa": 1.1993782167942055
+      },
+      {
+        "steps_per_cycle": 512,
+        "nsub": 4,
+        "legacy_reversals": 0,
+        "branch_reversals": 4,
+        "error_to_8192_kPa": 0.22991749515437743
+      },
+      {
+        "steps_per_cycle": 2048,
+        "nsub": 4,
+        "legacy_reversals": 0,
+        "branch_reversals": 4,
+        "error_to_8192_kPa": 0.04797365833860691
+      },
+      {
+        "steps_per_cycle": 8192,
+        "nsub": 4,
+        "legacy_reversals": 0,
+        "branch_reversals": 4,
+        "error_to_8192_kPa": 0.0
+      }
+    ]
+  },
+  "additional_branch_checks": {
+    "status": "passed",
+    "checks": [
+      "pure shear parity except six redefined reference slots",
+      "nSub 1/4/16 reversal counts",
+      "rigid rotation",
+      "Pa/kPa covariance",
+      "discarded and invalid trial isolation",
+      "byte restart continuation",
+      "old/future checkpoint marker rejection",
+      "state width and calibration mismatch rejection",
+      "target CUDA fixture rows evaluated on host"
+    ]
+  },
+  "opensees_shared_path_parity": {
+    "scope": "Dense and loose zero-static-bias prescribed paths; hosts retain different option sets",
+    "results": [
+      {
+        "layer": "bottom",
+        "rows": 4096,
+        "max_stress_difference_kPa": 2.0961010704922955e-13,
+        "reversals_identical": true
+      },
+      {
+        "layer": "loose",
+        "rows": 4096,
+        "max_stress_difference_kPa": 1.1368683772161603e-13,
+        "reversals_identical": true
+      }
+    ]
+  },
+  "original_generation_regression": {
+    "status": "passed",
+    "histories": 5,
+    "compared_values": 31742,
+    "mode": "full",
+    "rtol": 1e-06,
+    "atol": 1e-06,
+    "state_checks": "passed"
+  },
+  "documentation": {
+    "build": "passed",
+    "tests_passed": 31,
+    "typecheck": "passed",
+    "lint": "passed"
+  },
+  "cuda_fixtures": {
+    "status": "not_run",
+    "generated_cases": [
+      {
+        "case": "branch_02_n128",
+        "status": "generated; not run"
+      },
+      {
+        "case": "branch_custom02_n128",
+        "status": "generated; not run"
+      },
+      {
+        "case": "branch_02_n512",
+        "status": "generated; not run"
+      },
+      {
+        "case": "branch_custom02_n512",
+        "status": "generated; not run"
+      },
+      {
+        "case": "branch_02_n2048",
+        "status": "generated; not run"
+      },
+      {
+        "case": "branch_custom02_n2048",
+        "status": "generated; not run"
+      }
+    ]
+  },
+  "pending": [
+    "CUDA compilation and CPU/GPU execution",
+    "Device checkpoint file I/O",
+    "Multi-rank MPI restart",
+    "Both geostatic field workflows",
+    "Coupled wave/BrickUP time-step and mesh checks",
+    "Experimental validation"
+  ],
+  "source_sha256": {
+    "quake/forward/nonlinear_riva_sand_intermediate_bias_research.h": "32ffeedf79f922377edfa5f517e8245e9ab4121b767362224d8a93fc1690c84b",
+    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "4d8cab758eda52ddbd761331f5634ccb2d95d9cc5d7bcd92443d5e9050654bc0",
+    "quake/forward/nonlinear.cc": "504c7fcb6017d3265072699176ab78fd6c604e963f732d7a1c1ef1ddc13c8029",
+    "benchmark_inputs/nonlinear_material_point/riva_sand02_branch_reversal_test.cc": "f0e19946841d3fb033f1a38d34f560c4fd8cf2b58d571501e35f80e24263bc57",
+    "benchmark_inputs/nonlinear_material_point/riva_sand_intermediate_bias_research_native_driver.cc": "3a0d3380455e10de9cc410c872a83d70a1fcd200b3764faabb8839845c84faae",
+    "benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_suite.sh": "5f938e2087a016cf92e797dec880981d54e46fbda39bd3b4f0a6499f9b664532",
+    "benchmark_inputs/nonlinear_material_point/run_riva_branch_reversal_cuda.py": "84414105ec996a31d11bad8b8f25885dd81138837c0edfbfa0e4673c7703dc75"
+  },
+  "local_evidence_log_sha256": {
+    "native_suite.log": "5a20cefebaa068924926b1ec4ceb5d62b0e4b2fd619eeedf89756d86cb102fb8",
+    "branch_checks.log": "ba1e0a92e998bb38959b224a181f6662fb91f5e694bc26b1e6a9d47c79dcad20",
+    "original_regression/run.log": "a9f846aaafbf1046429fe1e6f7f9c85651e2d261ee4b98744b62614f8ae0eebb",
+    "docs_test.log": "eac90fdce832109a638b1b40094e004e48fcf3848801f1da22a800d6ccdfa5c1",
+    "docs_final.log": "b78940afe03376d9d00999606d5b0d9e4948a2fa9003d138c1d24ee1524b8e9b",
+    "typecheck.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lint.log": "7a52c6eaae53f1dc110842e74fbd3d95fd1293d174c3192c07e098bb21454ffc"
+  }
+}

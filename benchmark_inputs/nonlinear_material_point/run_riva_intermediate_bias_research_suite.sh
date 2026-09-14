@@ -45,6 +45,11 @@ echo "==> Compile host state-contract test with $cxx"
 echo "==> Compile research-vs-production benchmark with $cxx"
 "$cxx" "${compile_flags[@]}" "$benchmark_source" -o "$benchmark_bin"
 
+echo "==> Compile corrected branch-reversal/state/checkpoint checks"
+"$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_branch_reversal_test.cc" \
+  -o "$suite_tmp_dir/riva_branch_test"
+"$suite_tmp_dir/riva_branch_test" "$suite_tmp_dir/branch_results"
+
 echo "==> Compile velocity-input and stiffness checks"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand_velocity_test.cc" \
   -o "$suite_tmp_dir/riva_sand_velocity_test"
@@ -66,8 +71,11 @@ echo "==> Compile RIVASand02 custom-interface state checks"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_density_test.cc" \
   -o "$suite_tmp_dir/riva_sand02_custom_density_test"
 
-echo "==> Replay all six frozen input paths"
-"$driver_bin" "$input_paths" "$native_output"
+echo "==> Replay frozen oracle with the explicit historical reference"
+"$driver_bin" "$input_paths" "$native_output" --legacy-reversal-reference
+
+echo "==> Replay the corrected default on all six input paths"
+"$driver_bin" "$input_paths" "$suite_tmp_dir/corrected_output"
 
 suite_status=0
 if ! "$suite_tmp_dir/riva_sand02_custom_test"; then
@@ -80,13 +88,13 @@ if ! python3 "$suite_dir/compare_riva_sand02_custom_density.py" \
     "$port_root" "$suite_tmp_dir/riva_sand02_custom_density_test"; then
   suite_status=1
 fi
-echo "==> Verify native output: core"
+echo "==> Verify historical-reference output: core (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode core; then
   suite_status=1
 fi
 
-echo "==> Verify native output: full"
+echo "==> Verify historical-reference output: full (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode full; then
   suite_status=1

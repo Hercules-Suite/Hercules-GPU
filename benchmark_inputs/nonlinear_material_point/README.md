@@ -1,5 +1,10 @@
 # Nonlinear material-point CPU/GPU test
 
+The `research/rivasand02-branch-reversal` branch adds
+[loading-branch reversal checks and checkpoint migration](RIVA_BRANCH_REVERSAL_VALIDATION.md)
+for both 02 interfaces. Use `run_riva_branch_reversal_cuda.py` for the smooth-path
+CPU/GPU event-count checks in addition to the full fixture suite below.
+
 This test drives one constitutive point with a prescribed strain history. It
 does not build a mesh, read a source, or advance the wave solver. Its purpose is
 to isolate CPU/CUDA constitutive parity before running an element or production
