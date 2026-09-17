@@ -1252,6 +1252,78 @@ Acoustic-elastic input flags (input file):
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
 
+Basin-bottom grid (`basin_input_file`):
+
+Enable the basin in `parameters.in` and locate its grid origin geographically.
+The coordinates below are illustrative; replace them with your grid's origin.
+Keep a valid background `cvmdb_input_file` or profile for points outside the
+basin. These settings explicitly select the basin replacement:
+
+```ini
+Istanbul_velocity_model    = no
+3D_velocity_model          = no
+basin_velocity_model       = yes
+basin_input_file           = input/basin.in
+basin_origin_latitude_deg  = 34.0000
+basin_origin_longitude_deg = -118.5000
+basin_material_type        = elastic
+```
+
+Relative file paths are resolved from the solver's working directory. The file
+starts with `Nx Ny 1`, followed by exactly `Nx * Ny` rows of
+`x y bottom_depth`. Use whitespace-separated numbers without column labels or
+comments. The current lookup uses one bottom surface, so set the third header
+value to `1` and use at least two points on each horizontal axis.
+
+- All three columns are in metres. Solver X is north and Y is east, measured
+  from the basin origin. Bottom depth is positive downward and uses the same
+  reference as solver Z, rather than thickness below local topography.
+- Start at `(0, 0)` with a positive uniform spacing and `dx = dy`. `readBasin`
+  infers the common spacing from the first two X values.
+- Write X fastest: loop over Y outside and X inside. For zero-based indices
+  `i` and `j`, data row `j * Nx + i` contains
+  `i * spacing`, `j * spacing`, and the bottom depth at that location.
+
+For example, `input/basin.in` can contain this illustrative 3-by-3 grid with
+1,000 m spacing and a 500 m bottom depth at its centre. This is a file-format
+example, not a validated simulation case:
+
+```text
+3 3 1
+0    0    0
+1000 0    0
+2000 0    0
+0    1000 0
+1000 1000 500
+2000 1000 0
+0    2000 0
+1000 2000 0
+2000 2000 0
+```
+
+**Current maximum-edge limitation:** `interpolateZ` accesses the next X/Y
+points without clamping at the last row or column. Extend the grid beyond
+the largest solver query in each direction so queried basin-relative
+`X < (Nx - 1) * spacing` and `Y < (Ny - 1) * spacing`. Queries exactly on
+either maximum edge can access invalid grid data.
+
+`isInBasin` bilinearly interpolates the bottom depth and classifies a point
+inside the horizontal footprint as basin material only when
+`z < bottom_depth(x, y)`. Points on or below the bottom, or outside the
+horizontal grid, use the background `cvmdb_input_file` or profile. A zero
+bottom depth excludes points at nonnegative solver depths.
+
+The grid supplies geometry. For `basin_material_type=elastic`,
+`quake/forward/basin.cc` supplies the hard-coded depth-dependent material
+formulas. For `basin_material_type=acoustic_water`, `include_acoustic=yes` is
+required; `basin_water_vp` and `basin_water_rho` set the water properties and
+`Vs`, `Qs`, and `Qp` are zero.
+
+The existing [bowl basin file](../benchmark_inputs/bowl/bowl_basin_250m.in)
+has header `162 162 1`, 250 m spacing, and the same X-fastest ordering.
+The current reader and lookup are `readBasin`, `interpolateZ`, and `isInBasin`
+in `quake/forward/psolve.cc`.
+
 3D velocity-model file layout and ordering:
 
 - With `3D_velocity_model=yes`, `3D_velocity_model_directory` must contain
