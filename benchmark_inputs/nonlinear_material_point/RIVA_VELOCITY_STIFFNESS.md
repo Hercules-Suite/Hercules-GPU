@@ -89,10 +89,14 @@ is saved/restored with constitutive history. Updates load the cache; fitting
 occurs only at first dynamic initialization, not per substep. There are no new
 local iterations. Actual CUDA register/runtime impact still requires measurement.
 
-Checkpoint markers are now **4 for original RIVA-Sand and 6 for 02**. Older
+On the branch-reversal research branch, checkpoint markers are **4 for original
+RIVA-Sand and 7 for 02**. The earlier velocity-stiffness release used marker 6
+for 02; the [changed branch reference](RIVA_BRANCH_REVERSAL_VALIDATION.md) requires
+fresh initialization. Older
 checkpoints are incompatible even with explicit G0: rerun initialization.
 Keep the same model selection, mesh and complete material inputs on restart.
-Reference state layouts, equations and calibration hashes are unchanged.
+The saved elastic-scale layout and calibration hashes are unchanged; the six
+02 reversal-reference values now store accumulated branch strain.
 
 ## Verification and target-system commands
 

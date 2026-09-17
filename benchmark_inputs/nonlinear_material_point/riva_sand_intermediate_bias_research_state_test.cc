@@ -300,7 +300,7 @@ int main(int argc, char **argv)
     try {
         if (RIVA_IB_PARAMETER_COUNT != 249 ||
             RIVA_IB_LOGICAL_STATE_COUNT != 63 ||
-            RIVA_IB_STATE_VALUE_COUNT != 138 || RIVA_IB_KERNEL_REVISION != 3u) {
+            RIVA_IB_STATE_VALUE_COUNT != 138 || RIVA_IB_KERNEL_REVISION != 4u) {
             throw std::runtime_error("compile-time parameter/state contract changed");
         }
         const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0);

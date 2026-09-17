@@ -1,5 +1,10 @@
 # Nonlinear material-point CPU/GPU test
 
+The `research/rivasand02-branch-reversal` branch adds
+[loading-branch reversal checks and checkpoint migration](RIVA_BRANCH_REVERSAL_VALIDATION.md)
+for both 02 interfaces. Use `run_riva_branch_reversal_cuda.py` for the smooth-path
+CPU/GPU event-count checks in addition to the full fixture suite below.
+
 This test drives one constitutive point with a prescribed strain history. It
 does not build a mesh, read a source, or advance the wave solver. Its purpose is
 to isolate CPU/CUDA constitutive parity before running an element or production
@@ -256,8 +261,11 @@ See [velocity stiffness and migration](RIVA_VELOCITY_STIFFNESS.md).
   independent native/Python diagnostics at and on either side of that anchor.
   Both run in `run_riva_intermediate_bias_research_suite.sh`. This catches
   incorrect custom reference density that reference-row equality and mere
-  parameter-sensitivity tests do not detect. Custom02 checkpoint marker 4
-  rejects histories produced before this correction; default 02 remains 3.
+  parameter-sensitivity tests do not detect. Both 02 selectors now require
+  checkpoint marker 7; older 02 histories must restart from initialization.
+  Pass the private branch-reversal `verify.py` as the suite's optional third
+  argument to make the complete corrected six-path comparison part of its
+  acceptance status.
 
 The low-bias gate removes the inverse-bias singularity only. It does not by
 itself validate the reversible-volume branch at arbitrarily small cyclic

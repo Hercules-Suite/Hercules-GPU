@@ -1467,6 +1467,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 minimum_relative_density, maximum_relative_density,
                 MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)
                     ? RIVA_IB_PARAMETER_SHA256 : RIVA_PARAMETER_SHA256);
+        if (MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)) {
+            fprintf(stderr, "%s: loading-branch reversal research, kernel %u, "
+                    "checkpoint %u (older 02 checkpoints must be rerun)\n",
+                    RIVA_SAND_MODEL_NAME(theMaterialModel),RIVA_IB_KERNEL_REVISION,
+                    riva_ib_checkpoint_revision(theMaterialModel==RIVA_SAND_CUSTOM_02));
+        }
     }
 
     theNonlinearFlag = 1;
@@ -7081,6 +7087,9 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     } else if (MATERIAL_MODEL_IS_RIVA_SAND_02(material_model)) {
+        printf("%s: loading-branch reversal research, kernel %u, checkpoint %u\n",
+               RIVA_SAND_MODEL_NAME(material_model),RIVA_IB_KERNEL_REVISION,
+               riva_ib_checkpoint_revision(material_model==RIVA_SAND_CUSTOM_02));
         printf("%s controls: %s, %d reference parameters %s, "
                "%d-value full state, %d fixed substep%s per "
                "host increment\n",
@@ -7091,6 +7100,10 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                no_substeps == 1 ? "" : "s");
         printf("Validated CPU/GPU geostatic-admission selector: %d\n",
                cpu_results[0].riva_geostatic_admitted);
+        int registered_reversals=0;
+        for (int step=0;step<steps;++step)
+            registered_reversals+=cpu_results[step].riva_reversal_registered;
+        printf("Validated CPU/GPU registered reversals: %d\n",registered_reversals);
         if (zero_increment_checks > 0) {
             printf("Validated zero-increment state preservation: %d "
                    "transition%s\n", zero_increment_checks,

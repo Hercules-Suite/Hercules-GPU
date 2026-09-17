@@ -5668,11 +5668,9 @@ int nonlinear_gpu_checkpoint_read(
           strcmp(header.riva_parameter_sha256, RIVA_PARAMETER_SHA256) != 0)) ||
         ((local_flags &
           NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0 &&
-         (header.riva_state_bytes != sizeof(riva_ib_state_t) ||
-          header.riva_kernel_revision != riva_ib_checkpoint_revision(
-              g_config.material_model == RIVA_SAND_CUSTOM_02) ||
-          strcmp(header.riva_parameter_sha256,
-                 RIVA_IB_PARAMETER_SHA256) != 0))) {
+         !riva_ib_checkpoint_compatible(header.riva_kernel_revision,
+              header.riva_state_bytes,header.riva_parameter_sha256,
+              g_config.material_model == RIVA_SAND_CUSTOM_02))) {
         if (myID == 0) {
             const char *riva_name =
                 (local_flags &

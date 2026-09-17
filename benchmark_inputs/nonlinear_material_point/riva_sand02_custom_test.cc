@@ -62,9 +62,9 @@ static void advance(const riva_ib_parameters_t &p,
 int main()
 {
     try {
-        require(riva_ib_checkpoint_revision(0) == 6u &&
-                riva_ib_checkpoint_revision(1) == 6u,
-                "custom density correction must reject old Custom02 checkpoints");
+        require(riva_ib_checkpoint_revision(0) == 7u &&
+                riva_ib_checkpoint_revision(1) == 7u,
+                "branch reference must reject old 02 checkpoints");
         const riva_ib_parameters_t p = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t frozen =
             riva_reference_material_parameters(&p.base);

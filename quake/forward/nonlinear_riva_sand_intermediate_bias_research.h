@@ -5,6 +5,8 @@
 /* Native, allocation-free translation of the private intermediate-bias
  * RIVA-Sand research successor at OpenSees_RIVA commit 637d207e867b863d,
  * with the completed-half-cycle plastic gate from commit 5e4ebd30cb5f43b6.
+ * This branch adds the loading-branch reversal research correction from
+ * OpenSees_RIVA e97c12fbc. It does not import OpenSees BiasVolume/reversalLatch.
  *
  * This is deliberately a separate material.  It does not change the frozen
  * production RIVASand/RIVASandCustom kernel in nonlinear_riva_sand.h.  The
@@ -28,7 +30,7 @@
 #define RIVA_IB_PARAMETER_COUNT 249
 #define RIVA_IB_LOGICAL_STATE_COUNT 63
 #define RIVA_IB_STATE_VALUE_COUNT 138
-#define RIVA_IB_KERNEL_REVISION 3u
+#define RIVA_IB_KERNEL_REVISION 4u
 /* Custom02 histories written before material-specific density was corrected
  * cannot safely be continued, although their 138-value layout is unchanged. */
 #define RIVA_IB_CUSTOM_KERNEL_REVISION 4u
@@ -36,9 +38,11 @@
     "3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e"
 #define RIVA_IB_SOURCE_COMMIT \
     "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
+#define RIVA_IB_REVERSAL_SOURCE_COMMIT \
+    "e97c12fbcf3f4fff63ff9acd602fdb78af44630c"
 
 RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(int custom)
-{ (void)custom; return 6u; /* checkpointed per-point stiffness for both 02 names */ }
+{ (void)custom; return 7u; /* accumulated branch reference and per-point stiffness */ }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
@@ -223,6 +227,20 @@ typedef struct riva_ib_state_t {
     /* Committed activity before the most recent reversal reset. */
     double ep_half_last;
 } riva_ib_state_t;
+
+/* Shared by the device-checkpoint reader and host restart-contract tests.
+ * Even though the byte count is unchanged, marker 6 stored a unit direction
+ * in the six slots now holding accumulated loading-branch strain. */
+RIVA_IB_HD static inline int riva_ib_checkpoint_compatible(
+    uint32_t revision,uint64_t state_bytes,const char *parameter_hash,int custom)
+{
+    if (revision!=riva_ib_checkpoint_revision(custom) ||
+        state_bytes!=sizeof(riva_ib_state_t) || !parameter_hash) return 0;
+    const char expected[]=RIVA_IB_PARAMETER_SHA256;
+    for (unsigned int i=0;i<sizeof(expected);++i)
+        if (parameter_hash[i]!=expected[i]) return 0;
+    return 1;
+}
 
 /* The Python oracle uses NumPy's component-wise tensor division.  Keep that
  * operation distinct from reciprocal multiplication: the two are not
@@ -2318,10 +2336,12 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_host_outer_correction(
     return s;
 }
 
-RIVA_IB_HD static inline int riva_ib_update_material(
+// The legacy reference is retained solely for frozen-oracle replay tests.
+// Field and material-point adapters call riva_ib_update_material below.
+RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
     tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
-    riva_update_info_t *info)
+    riva_update_info_t *info,int32_t branch_reference)
 {
     if (!p || !m || !state || !state->base.initialized || nsub<1 ||
         !riva_material_parameters_valid(&p->base,m) || !riva_finite_tensor(deps))
@@ -2341,8 +2361,17 @@ RIVA_IB_HD static inline int riva_ib_update_material(
     for (int32_t i=0;i<nsub;i++)
         current=riva_ib_forward_euler(p,m,&current,sub,
             objective && reversal && i==0,!objective,phase_active);
-    if (objective && valid)
-        current.base.last_host_deviatoric_strain_direction=direction;
+    if (objective && valid) {
+        if (branch_reference) {
+            const tensor_t branch=initial.base.last_host_deviatoric_strain_direction;
+            const tensor_t increment=riva_dev(deps);
+            current.base.last_host_deviatoric_strain_direction=
+                reversal || riva_norm(branch)<=p->base.reversal_strain_deadband?
+                increment:riva_add(branch,increment);
+        } else {
+            current.base.last_host_deviatoric_strain_direction=direction;
+        }
+    }
     if (phase_active)
         current=riva_ib_apply_host_phase_volume(p,m,&initial,&current,deps);
     current.phase_accumulation_hardening_state=
@@ -2362,6 +2391,15 @@ RIVA_IB_HD static inline int riva_ib_update_material(
     *state=current; if (stress_new) *stress_new=current.base.stress;
     if (info) { info->accepted_substeps=nsub; info->reversal_registered=reversal; }
     return 1;
+}
+
+RIVA_IB_HD static inline int riva_ib_update_material(
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
+    riva_update_info_t *info)
+{
+    return riva_ib_update_material_reference_ex(p,m,deps,nsub,state,stress_new,
+                                               info,1);
 }
 
 RIVA_IB_HD static inline int riva_ib_update(
