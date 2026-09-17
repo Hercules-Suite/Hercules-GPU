@@ -1392,6 +1392,49 @@ test("reports the conventional BrickUP station pore-pressure ratio", () => {
   assert.match(header, /initial_vertical_effective_stress/);
 });
 
+test("documents the basin-bottom grid format and renders a usable numeric example", async () => {
+  const response = await render("/docs/input-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /id="basin-configuration"/);
+  assert.match(html, /basin_velocity_model\s*= yes/);
+  assert.match(html, /basin_input_file\s*= input\/basin\.in/);
+  assert.match(html, /basin_origin_latitude_deg/);
+  assert.match(html, /basin_origin_longitude_deg/);
+  assert.match(html, /X is north and Y is east/);
+  assert.match(html, /same depth reference as solver Z/);
+  assert.match(html, /Δx = Δy/);
+  assert.match(html, /Write X fastest/);
+  assert.match(html, /no column labels or comments/);
+  assert.match(html, /Current maximum-edge limitation/);
+  assert.match(html, /without clamping/);
+  assert.match(html, /z &lt; bottom_depth\(x, y\)/);
+  assert.match(html, /basin_material_type=acoustic_water/);
+  assert.match(html, /benchmark_inputs\/bowl\/bowl_basin_250m\.in/);
+
+  const formatSection = html.match(/<section[^>]*id="basin-input-format"[^>]*>([\s\S]*?)<\/section>/)?.[1];
+  assert.ok(formatSection, "basin format section is rendered");
+  const example = formatSection.match(/<pre><code>([\s\S]*?)<\/code><\/pre>/)?.[1];
+  assert.ok(example, "basin example is a copyable code block");
+  const [header, ...rows] = example.trim().split("\n").map((line) => line.trim().split(/\s+/).map(Number));
+  const [nx, ny, nz] = header;
+  assert.deepEqual(header, [3, 3, 1]);
+  assert.equal(rows.length, nx * ny * nz);
+  for (const [index, row] of rows.entries()) {
+    assert.equal(row.length, 3);
+    assert.ok(row.every(Number.isFinite));
+    assert.equal(row[0], (index % nx) * 1000, "X varies fastest from zero");
+    assert.equal(row[1], Math.floor(index / nx) * 1000, "Y uses the same spacing");
+    assert.equal(row[2], index === 4 ? 500 : 0, "only the centre has nonzero bottom depth");
+  }
+
+  const parameterResponse = await render("/docs/parameters-material-mesh");
+  assert.equal(parameterResponse.status, 200);
+  const parameters = await parameterResponse.text();
+  assert.match(parameters, /Basin-bottom text grid: Nx Ny 1/);
+  assert.match(parameters, /Basin-bottom grid format for the example and edge limitation/);
+});
+
 test("provides complete examples for 3-D material and topography inputs", async () => {
   const response = await render("/docs/input-files");
   assert.equal(response.status, 200);

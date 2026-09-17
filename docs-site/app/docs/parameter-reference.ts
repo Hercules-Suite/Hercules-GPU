@@ -92,9 +92,9 @@ const parameterPages: ParameterPage[] = [
         parameters: [
           p("Istanbul_velocity_model", "Optional", "Yes/no", "Default: no", "Enable the built-in Istanbul material-model replacement where it covers the domain."),
           p("basin_velocity_model", "Optional", "Yes/no", "Default: no", "Enable a basin geometry that replaces the background material inside its boundary."),
-          p("basin_origin_latitude_deg", "Conditional", "Float (degrees)", "Required when basin_velocity_model=yes", "Latitude of the basin model's lower-left origin."),
-          p("basin_origin_longitude_deg", "Conditional", "Float (degrees)", "Required when basin_velocity_model=yes", "Longitude of the basin model's lower-left origin."),
-          p("basin_input_file", "Conditional", "Path", "Required when basin_velocity_model=yes", "Text file describing the basin boundary grid."),
+          p("basin_origin_latitude_deg", "Conditional", "Float (degrees)", "Required when basin_velocity_model=yes", "Latitude of the basin grid's (0, 0) origin; grid X is distance north and Y is distance east."),
+          p("basin_origin_longitude_deg", "Conditional", "Float (degrees)", "Required when basin_velocity_model=yes", "Longitude of the basin grid's (0, 0) origin; grid X is distance north and Y is distance east."),
+          p("basin_input_file", "Conditional", "Path", "Required when basin_velocity_model=yes", "Basin-bottom text grid: Nx Ny 1, then Nx × Ny rows of x y bottom_depth in metres, X fastest. Start at (0, 0), with Nx/Ny >= 2 and equal positive X/Y spacing; depth uses solver Z, positive downward. Relative paths use the solver working directory. Extend the grid beyond maximum query coordinates. See Input files and directories: Basin-bottom grid format for the example and edge limitation."),
           p("basin_material_type", "Optional", "String", "Default: elastic; elastic | acoustic_water", "Material assigned inside basin geometry. acoustic_water requires include_acoustic=yes."),
           p("basin_water_vp", "Optional", "Float (m/s)", "Default: 1500; > 0", "Compressional-wave speed used when basin_material_type=acoustic_water."),
           p("basin_water_rho", "Optional", "Float (kg/m3)", "Default: 1000; > 0", "Density used when basin_material_type=acoustic_water."),

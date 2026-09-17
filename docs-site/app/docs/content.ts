@@ -1088,6 +1088,41 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "Incident DRM plane waves are configured in parameters.in and are not a type_of_source value.",
       },
       {
+        id: "basin-configuration",
+        title: "Configure a basin model",
+        paragraphs: [
+          "basin_input_file points to a plain-text grid of basin-bottom depths. Enable it in parameters.in with basin_velocity_model=yes and specify the geographic location of the grid's (0, 0) origin. Relative file paths are resolved from the solver's working directory.",
+          "The latitude and longitude below are illustrative; replace them with your basin-grid origin. Keep a valid background cvmdb_input_file or profile for points outside the basin. The example disables the Istanbul and general 3-D replacements to select the basin path explicitly.",
+        ],
+        codeLabel: "parameters.in — basin settings",
+        code: "Istanbul_velocity_model    = no\n3D_velocity_model          = no\nbasin_velocity_model       = yes\nbasin_input_file           = input/basin.in\nbasin_origin_latitude_deg  = 34.0000\nbasin_origin_longitude_deg = -118.5000\nbasin_material_type        = elastic",
+      },
+      {
+        id: "basin-input-format",
+        title: "Basin-bottom grid format",
+        paragraphs: [
+          "The first line is Nx Ny 1, followed by exactly Nx × Ny rows of x y bottom_depth. Use whitespace-separated numbers with no column labels or comments. Nx and Ny must each be at least 2. Set the third header value to 1 because the current lookup uses a single bottom surface.",
+          "All three columns are in metres. X is north and Y is east, measured from the basin origin. Bottom depth is positive downward and uses the same depth reference as solver Z; it is not a thickness measured below local topography.",
+        ],
+        bullets: [
+          "Start at (0, 0) and use a positive, uniform spacing with Δx = Δy. The reader infers the common spacing from the first two X values.",
+          "Write X fastest, with Y as the outer loop and X as the inner loop. For zero-based indices i and j, data row = j * Nx + i, with x = i * spacing and y = j * spacing.",
+          "The example below has 1,000 m spacing and a 500 m bottom depth at its centre. It illustrates the file format and is not a validated simulation case.",
+        ],
+        codeLabel: "input/basin.in — 3 × 3 grid",
+        code: "3 3 1\n0    0    0\n1000 0    0\n2000 0    0\n0    1000 0\n1000 1000 500\n2000 1000 0\n0    2000 0\n1000 2000 0\n2000 2000 0",
+        note: "Current maximum-edge limitation: the interpolator accesses the next X and Y grid points without clamping at the final row or column. Extend the grid beyond the largest solver query in each direction, keeping queried basin-relative X < (Nx - 1) * spacing and Y < (Ny - 1) * spacing. A query exactly on either maximum edge can access invalid grid data.",
+      },
+      {
+        id: "basin-material-lookup",
+        title: "Basin depth and material lookup",
+        paragraphs: [
+          "Hercules bilinearly interpolates bottom_depth from the four surrounding grid points. A point within the horizontal grid is inside the basin when z < bottom_depth(x, y). Points on or below the bottom, or outside the horizontal footprint, use the background cvmdb_input_file or profile. A zero bottom depth excludes points at nonnegative solver depths.",
+          "The file supplies geometry. With basin_material_type=elastic, material properties come from the hard-coded depth-dependent formulas in quake/forward/basin.cc. With basin_material_type=acoustic_water and include_acoustic=yes, basin_water_vp and basin_water_rho supply water properties; Vs, Qs, and Qp are zero.",
+          "The repository example benchmark_inputs/bowl/bowl_basin_250m.in has a 162 × 162 grid, 250 m spacing, and a 162 162 1 header. Its rows follow the same X-fastest ordering. The current reader and lookup are readBasin, interpolateZ, and isInBasin in quake/forward/psolve.cc.",
+        ],
+      },
+      {
         id: "velocity-model-configuration",
         title: "Configure a three-dimensional velocity model",
         paragraphs: [
