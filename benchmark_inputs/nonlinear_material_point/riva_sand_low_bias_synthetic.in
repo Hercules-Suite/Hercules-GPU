@@ -14,7 +14,7 @@ material_point_output_prefix = riva_sand_low_bias_synthetic
 # e_min=0.51 convert this value to the internal initial void ratio e0=0.601.
 # Its 112 constitutive constants are identified by RIVA_PARAMETER_SHA256.
 material_point_constants =
-  0.66296296296296309
+  0.66296296296296309 483.48301127222084
 
 # Equilibrated K0 effective stress plus a small xy static shear bias,
 # tension-positive, in Pa. With p'=25.333 kPa, the projected bias is about

@@ -1,5 +1,11 @@
 # RIVA-Sand intermediate-bias research validation
 
+**Current research branch:** see [the loading-branch reversal port](RIVA_BRANCH_REVERSAL_VALIDATION.md)
+for kernel revision 4 and checkpoint marker 7. Both current 02 input names use
+that corrected reference. The record below describes the preceding revision-3
+handoff and its historical verification; its frozen oracle remains available
+through the offline replay driver's explicit legacy-reference option.
+
 This record applies to `RIVASand02` and `RIVASandCustom02`, translated
 from OpenSees_RIVA commit
 `637d207e867b863dee7b2bf14d9aeb75fdc32e7b`, with the plastic-activity gate

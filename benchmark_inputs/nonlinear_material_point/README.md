@@ -1,5 +1,10 @@
 # Nonlinear material-point CPU/GPU test
 
+The `research/rivasand02-branch-reversal` branch adds
+[loading-branch reversal checks and checkpoint migration](RIVA_BRANCH_REVERSAL_VALIDATION.md)
+for both 02 interfaces. Use `run_riva_branch_reversal_cuda.py` for the smooth-path
+CPU/GPU event-count checks in addition to the full fixture suite below.
+
 This test drives one constitutive point with a prescribed strain history. It
 does not build a mesh, read a source, or advance the wave solver. Its purpose is
 to isolate CPU/CUDA constitutive parity before running an element or production
@@ -85,22 +90,24 @@ model. The current common initial-state parser still requires all five arrays;
 alpha, alpha-in, and fabric are zero placeholders because PDMY03 initializes
 its translated surface centers from stress.
 
-For `material_model=RIVASand`, `material_point_constants` contains one value:
+For standard `RIVASand` and `RIVASand02`, `material_point_constants` is
+`Dr [G0]`. Omitted G0 or G0=0 requests automatic stiffness and requires
+`material_point_riva_density` (kg/m3) and `material_point_riva_vs` (m/s).
+The Custom names instead require twelve values:
 
 ```text
-relative_density
+Dr G0 M kd h m zeta e_max e_min Q R n_G
 ```
 
 Relative density is dimensionless and must be in `[0,1]`. The input boundary
-converts it to the internal initial void ratio using the frozen calibration
-values `e_max=0.78` and `e_min=0.51`:
+converts it to the internal initial void ratio using the supplied bounds
+(reference `e_max=0.78` and `e_min=0.51`):
 
 ```text
 e0 = e_max - relative_density * (e_max - e_min)
 ```
 
-The 112 constitutive parameters and four host-increment reversal controls are
-frozen to calibration SHA-256
+The original reference calibration (including G0=483.48301127222084) retains SHA-256
 `9585f0c155c9444885c5115e7753a1a5d97c783e2c685938a49a65435c9e8f83`.
 Completed and still-pending port verification gates are tracked in
 `RIVA_SAND_IMPLEMENTATION_CHECKLIST.md`.
@@ -116,21 +123,30 @@ RIVA-Sand retains a frozen 93-value numerical history schema. The committed
 non-expansive regularization. The exact transition equations and production
 diagnostic are specified in `RIVA_SAND_GEOSTATIC_ADMISSION.md`.
 
-For `material_model=RIVASandCustom`, `material_point_constants` contains eleven
-values in this order:
+Custom names expose the complete physical parameter row for their generation:
 
 ```text
-Dr M kd h m zeta e_max e_min Q R n_G
+Dr G0 M kd h m zeta e_max e_min Q R n_G
 ```
 
 This is a configurable input boundary around the same RIVA-Sand kernel, not the pre-name V8.1
-`h_p0` experiment. It exposes ten existing constitutive fields while the
+`h_p0` experiment. It exposes eleven physical fields in addition to Dr while the
 remaining compatibility, amplitude, bias, ratchet, event, and integration
 controls retain the frozen reference values. All inputs must be finite;
-`Dr` and `n_G` lie in `[0,1]`, `M`, `kd`, `h`, and `Q` are positive, `m`,
+`Dr` and `n_G` lie in `[0,1]`, `G0` is nonnegative (zero means automatic),
+`M`, `kd`, `h`, and `Q` are positive, `m`,
 `zeta`, and `R` are nonnegative, and `e_max>e_min>=0`. The frozen shakedown
 law uses reference void ratio 0.601, which must remain inside the custom
 `[e_min,e_max]` interval.
+
+G0 is dimensionless, independent of the Pa stress units and of Dr. Its
+reference value 483.48301127222084 gives 48.976829 MPa at 101.3 kPa.
+Both elastic shear and bulk stiffness change with G0 at fixed Poisson ratio;
+the setup-time cache adds no constitutive iterations. Standard and Custom
+names use per-element material storage plus a per-point elastic-scale cache.
+Standard inputs are compact again; Custom rows retain their full input order.
+Pre-velocity-cache checkpoints must be rerun (markers: original 4; both 02 names 6).
+See [velocity stiffness and migration](RIVA_VELOCITY_STIFFNESS.md).
 
 - `vonmises_ep_synthetic.in` is the shortest smoke test for yielding and
   plastic-state advancement.
@@ -245,8 +261,11 @@ law uses reference void ratio 0.601, which must remain inside the custom
   independent native/Python diagnostics at and on either side of that anchor.
   Both run in `run_riva_intermediate_bias_research_suite.sh`. This catches
   incorrect custom reference density that reference-row equality and mere
-  parameter-sensitivity tests do not detect. Custom02 checkpoint marker 4
-  rejects histories produced before this correction; default 02 remains 3.
+  parameter-sensitivity tests do not detect. Both 02 selectors now require
+  checkpoint marker 7; older 02 histories must restart from initialization.
+  Pass the private branch-reversal `verify.py` as the suite's optional third
+  argument to make the complete corrected six-path comparison part of its
+  acceptance status.
 
 The low-bias gate removes the inverse-bias singularity only. It does not by
 itself validate the reversible-volume branch at arbitrarily small cyclic

@@ -10,10 +10,10 @@ material_point_compare_rtol = 1.0e-9
 material_point_compare_atol = 1.0e-8
 material_point_output_prefix = riva_sand_custom_equivalence
 
-# Dr M kd h m zeta e_max e_min Q R n_G. These are exactly the frozen RIVA-Sand
+# Dr G0 M kd h m zeta e_max e_min Q R n_G. These are exactly the frozen RIVA-Sand
 # reference values, so this fixture must reproduce riva_sand_brickup_synthetic.
 material_point_constants =
-  0.66296296296296309 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65
+  0.66296296296296309 483.48301127222084 1.25 1.125 122.44207260468994 0.945 0.025 0.78 0.51 10.0 1.5 0.65
 
 material_point_initial_strain =
   0 0 0 0 0 0

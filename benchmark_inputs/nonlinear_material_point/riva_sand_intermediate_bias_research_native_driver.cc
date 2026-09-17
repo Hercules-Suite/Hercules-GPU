@@ -593,7 +593,8 @@ static void write_row(std::ofstream &output,
 static void replay_case(const CaseDefinition &definition,
                         const fs::path &input_directory,
                         const fs::path &output_directory,
-                        const std::vector<std::string> &header)
+                        const std::vector<std::string> &header,
+                        bool legacy_reference)
 {
     const fs::path input_path = input_directory / (std::string(definition.name) + ".csv");
     const fs::path output_path = output_directory / (std::string(definition.name) + ".csv");
@@ -634,8 +635,11 @@ static void replay_case(const CaseDefinition &definition,
                                      definition.name + " step " +
                                      std::to_string(step));
         riva_update_info_t info = {};
-        if (!riva_ib_update_material(&parameters, &material, deps, nsub, &state,
-                                     nullptr, &info))
+        if (!(legacy_reference ?
+              riva_ib_update_material_reference_ex(&parameters, &material, deps,
+                  nsub, &state, nullptr, &info, 0) :
+              riva_ib_update_material(&parameters, &material, deps, nsub, &state,
+                  nullptr, &info)))
             throw std::runtime_error(std::string("update failed for ") +
                                      definition.name + " step " +
                                      std::to_string(step));
@@ -650,8 +654,11 @@ static void replay_case(const CaseDefinition &definition,
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        std::cerr << "usage: " << argv[0] << " INPUT_PATH_DIR OUTPUT_DIR\n";
+    const bool legacy_reference = argc == 4 &&
+        std::string(argv[3]) == "--legacy-reversal-reference";
+    if (argc != 3 && !legacy_reference) {
+        std::cerr << "usage: " << argv[0]
+                  << " INPUT_PATH_DIR OUTPUT_DIR [--legacy-reversal-reference]\n";
         return 2;
     }
     try {
@@ -663,7 +670,8 @@ int main(int argc, char **argv)
         fs::create_directories(output_directory);
         const std::vector<std::string> header = output_header();
         for (const CaseDefinition &definition : kCases)
-            replay_case(definition, input_directory, output_directory, header);
+            replay_case(definition, input_directory, output_directory, header,
+                        legacy_reference);
     } catch (const std::exception &error) {
         std::cerr << "RIVASand02 replay failed: "
                   << error.what() << '\n';

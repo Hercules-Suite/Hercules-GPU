@@ -62,19 +62,20 @@ static void advance(const riva_ib_parameters_t &p,
 int main()
 {
     try {
-        require(riva_ib_checkpoint_revision(0) == 3u &&
-                riva_ib_checkpoint_revision(1) == 4u,
-                "custom density correction must reject old Custom02 checkpoints");
+        require(riva_ib_checkpoint_revision(0) == 7u &&
+                riva_ib_checkpoint_revision(1) == 7u,
+                "branch reference must reject old 02 checkpoints");
         const riva_ib_parameters_t p = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t frozen =
             riva_reference_material_parameters(&p.base);
         riva_material_parameters_t reference = {};
+        riva_material_set_G0(&p.base, &reference, RIVA_REFERENCE_G0);
         reference.M=1.25; reference.kd=1.125;
         reference.h=122.44207260468994; reference.m=0.945;
         reference.zeta=0.025; reference.e_max=0.78; reference.e_min=0.51;
         reference.Q=10.0; reference.R=1.5; reference.n_G=0.65;
-        const std::array<double riva_material_parameters_t::*, 10> fields = {
-            &riva_material_parameters_t::M, &riva_material_parameters_t::kd,
+        const std::array<double riva_material_parameters_t::*, 11> fields = {
+            &riva_material_parameters_t::E_ref, &riva_material_parameters_t::M, &riva_material_parameters_t::kd,
             &riva_material_parameters_t::h, &riva_material_parameters_t::m,
             &riva_material_parameters_t::zeta, &riva_material_parameters_t::e_max,
             &riva_material_parameters_t::e_min, &riva_material_parameters_t::Q,
@@ -111,7 +112,7 @@ int main()
         require(!riva_material_parameters_valid(&p.base, &invalid),
                 "out-of-range shakedown anchor accepted");
         std::cout << "PASS: RIVASand02/RIVASandCustom02 exact reference equality, "
-                     "all ten physical inputs active, per-material isolation, "
+                     "all eleven physical inputs active, per-material isolation, "
                      "custom byte restart, and bounds (1/4/16 substeps)\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
