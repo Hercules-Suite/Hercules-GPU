@@ -1374,6 +1374,9 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /--check-only/);
   assert.match(html, /--first-time/);
   assert.match(html, /reported extrema remain unclipped/);
+  assert.match(html, /closes its PyGMT session before deleting its temporary directory/);
+  assert.match(html, /GMT_DATA_UPDATE_INTERVAL = off/);
+  assert.match(html, /HERCULES_TEST_PYGMT=1/);
   assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);
   assert.match(html, /mesh_coordinates\.0/);
   assert.match(html, /station_mediums\.txt/);

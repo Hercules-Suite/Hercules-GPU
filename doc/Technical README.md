@@ -61,7 +61,24 @@ percentages expose out-of-range amplitudes. Differentiating decimated snapshots
 can differ from solver-step station velocity, especially at higher frequencies.
 
 Each worker keeps one read-only mapping and an isolated temporary GMT directory
-and CPT for its assigned frames. No MPI communication or shared marker file is
+and CPT for its assigned frames. The worker closes its PyGMT session before
+deleting that directory and removes the corresponding exit callback, including
+when rendering fails. A reused worker starts a new session for its next chunk.
+Both GMT and Python temporary files, including GMT download locks, use the
+worker's private directory. Remote catalogue refresh is disabled with
+`GMT_DATA_UPDATE_INTERVAL = off` before importing PyGMT; these plots use local
+displacements and the installed `vik` colour table and require no remote data.
+See the [GMT catalogue setting](https://docs.generic-mapping-tools.org/6.4/gmt.conf.html#gmt-data-update-interval).
+
+Older script versions could print `Not available in classic mode` and
+`Module 'end' failed with status code 30` at interpreter exit because the
+session directory was already deleted. They could also report
+`gmt_data_server.txt.download` or `Bad record counter` errors when concurrent
+catalogue refreshes collided. Those diagnostics do not change already saved
+PNGs; use the updated script to fix session teardown and catalogue isolation.
+Rendering failures still propagate as errors rather than being suppressed.
+
+No MPI communication or shared marker file is
 required; disjoint frame ranges and numbered PNG names preserve time order.
 `--check-only` checks layout and samples three velocity frames without loading
 plotting libraries; it is not a full-file or physical validation. For restarted
@@ -70,6 +87,11 @@ output, supply `--first-time` for the first snapshot actually stored (default:
 Read native float64 files on a matching-byte-order
 machine. Local numerical checks run with
 `python -m unittest discover -s tests -p 'test_animations_mpi.py'`.
+With the plotting dependencies installed, run
+`HERCULES_TEST_PYGMT=1 python -m unittest discover -s tests -p 'test_animations_mpi.py'`
+to include real PNG rendering, serial and parallel worker reuse, failure
+cleanup, and interpreter-exit checks. These local checks do not validate a
+multi-node cluster run or its performance.
 
 ### Open MPI placement and CPU affinity for animation workers
 

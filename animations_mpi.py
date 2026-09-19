@@ -30,10 +30,12 @@ mirrored. Plot coordinates are distances from the plane origin, not lat/lon.
 """
 
 import argparse
+import atexit
 import math
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,14 +124,50 @@ def partition(total, rank, size):
     return total * rank // size, total * (rank + 1) // size
 
 
-def render_chunk(plane, args, start, stop, rank):
-    """One worker owns a mapping, GMT directory, and CPT for its whole chunk."""
+@contextmanager
+def worker_gmt_session(rank):
+    """End the worker's GMT session before removing its private scratch files."""
     local_tmp = os.environ.get("SLURM_TMPDIR") or os.environ.get("TMPDIR") or "/tmp"
     with tempfile.TemporaryDirectory(prefix=f"hercules_gmt_rank{rank}_", dir=local_tmp) as scratch:
-        # Set these before importing PyGMT in THIS worker process.
-        os.environ["GMT_USERDIR"] = scratch
-        os.environ["GMT_TMPDIR"] = scratch
-        import pygmt
+        scratch = str(Path(scratch).resolve())
+        previous_cwd, previous_tempdir = Path.cwd(), tempfile.tempdir
+        previous_env = {key: os.environ.get(key) for key in
+                        ("GMT_USERDIR", "GMT_TMPDIR", "TMPDIR")}
+        # GMT's download locks use TMPDIR; GMT_TMPDIR alone does not isolate them.
+        # Python may already have cached its temp directory before this call.
+        # Configure GMT before importing PyGMT, which starts a session immediately.
+        Path(scratch, "gmt.conf").write_text("GMT_DATA_UPDATE_INTERVAL = off\n")
+        try:
+            os.environ.update({key: scratch for key in previous_env})
+            tempfile.tempdir = scratch
+            os.chdir(scratch)
+            already_imported = "pygmt" in sys.modules
+            import pygmt
+            from pygmt.session_management import begin, end
+
+            # Own teardown explicitly, including when rendering fails. Leaving
+            # PyGMT's exit callback registered would try to end the session twice.
+            atexit.unregister(end)
+            if already_imported:
+                # Joblib can reuse this process for another chunk after end().
+                begin()
+            try:
+                yield pygmt, scratch
+            finally:
+                end()
+        finally:
+            os.chdir(previous_cwd)
+            tempfile.tempdir = previous_tempdir
+            for key, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+def render_chunk(plane, args, start, stop, rank):
+    """One worker owns a mapping, GMT directory, and CPT for its whole chunk."""
+    with worker_gmt_session(rank) as (pygmt, scratch):
         import xarray as xr
 
         cpt = str(Path(scratch) / "vertical_velocity.cpt")

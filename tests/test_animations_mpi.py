@@ -5,6 +5,8 @@ import io
 import os
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -158,6 +160,74 @@ class PlaneAnimationTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as error:
                 main(options + ["--check-only"])
             self.assertEqual(error.exception.code, 2)
+
+    def run_renderer_process(self, code):
+        """Include interpreter shutdown so PyGMT's atexit errors are observable."""
+        environment = os.environ.copy()
+        for key in ("OMPI_COMM_WORLD_RANK", "OMPI_COMM_WORLD_SIZE", "PMI_RANK", "PMI_SIZE",
+                    "PMIX_RANK", "PMIX_SIZE", "SLURM_PROCID", "SLURM_NTASKS"):
+            environment.pop(key, None)
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        scratch = Path("scratch").resolve()
+        scratch.mkdir(exist_ok=True)
+        environment["SLURM_TMPDIR"] = str(scratch)
+        result = subprocess.run([sys.executable, "-c", code], env=environment,
+                                capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotRegex(result.stderr, r"\[WARNING\]|\[ERROR\]|Exception ignored|Traceback")
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    @unittest.skipUnless(os.environ.get("HERCULES_TEST_PYGMT") == "1",
+                         "Set HERCULES_TEST_PYGMT=1 with PyGMT/GMT, xarray and joblib installed")
+    def test_render_and_shutdown_with_serial_and_reused_parallel_workers(self):
+        for workers in (1, 2):
+            with self.subTest(workers=workers):
+                output = Path(f"pngs_{workers}")
+                options = self.options + ["--workers", str(workers), "--dpi", "50",
+                                           "--output-dir", str(output)]
+                self.run_renderer_process(f"""
+import os
+import tempfile
+from pathlib import Path
+from animations_mpi import main
+tempfile.gettempdir()  # Joblib also initializes this cache in the parent.
+def state():
+    return (Path.cwd(), tempfile.tempdir,
+            [os.environ.get(key) for key in ('GMT_USERDIR', 'GMT_TMPDIR', 'TMPDIR')])
+before = state()
+main({options!r})
+main({options!r})  # Exercise another chunk in a process that has imported PyGMT.
+assert state() == before
+""")
+                images = sorted(output.glob("*.png"))
+                self.assertEqual(len(images), 4)
+                for image in images:
+                    self.assertTrue(image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    @unittest.skipUnless(os.environ.get("HERCULES_TEST_PYGMT") == "1",
+                         "Set HERCULES_TEST_PYGMT=1 with PyGMT/GMT, xarray and joblib installed")
+    def test_failed_frame_closes_session_and_allows_next_render(self):
+        bad = np.fromfile(self.plane_file, dtype=np.float64).reshape(4, 3, 2, 3)
+        bad[1, 0, 0, 2] = np.nan
+        bad.tofile("planes/bad.0")
+        good_options = self.options + ["--workers", "1", "--dpi", "50"]
+        bad_options = good_options.copy()
+        bad_options[bad_options.index("--plane-file") + 1] = "planes/bad.0"
+        self.run_renderer_process(f"""
+import os
+from pathlib import Path
+from animations_mpi import main
+before = (Path.cwd(), dict(os.environ))
+try:
+    main({bad_options!r})
+except ValueError as error:
+    assert 'Non-finite velocity' in str(error)
+else:
+    raise AssertionError('Invalid frame must fail')
+assert (Path.cwd(), dict(os.environ)) == before
+assert not list(Path(os.environ['SLURM_TMPDIR']).iterdir())
+main({good_options!r})
+""")
 
 
 if __name__ == "__main__":
