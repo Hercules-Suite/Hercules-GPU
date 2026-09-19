@@ -27,6 +27,9 @@ Storage: [snapshot, along-strike point, down-dip point, Cartesian component].
 This renderer assumes strike=0 (modulo 360), dip=0. For these planes,
 rows advance in solver X and columns in solver Y. Nothing is transposed or
 mirrored. Plot coordinates are distances from the plane origin, not lat/lon.
+The display uses a continuous color palette and 4x linear grid upsampling.
+--plot-upsample 1 displays the original grid. These options affect rendering
+only; velocities and their reported extrema are calculated on the original grid.
 """
 
 import argparse
@@ -172,13 +175,18 @@ def render_chunk(plane, args, start, stop, rank):
 
         cpt = str(Path(scratch) / "vertical_velocity.cpt")
         # GMT B/F colors saturate the display without modifying the data.
-        pygmt.makecpt(cmap="vik", series=[-args.velocity_limit, args.velocity_limit],
-                      background=True, output=cpt)
+        pygmt.makecpt(cmap="vik", series=[-args.velocity_limit, args.velocity_limit,
+                                       2 * args.velocity_limit / 512],
+                      continuous=True, background=True, output=cpt)
         data = plane.open()
         horizontal, vertical = plane.coordinates()
         width, height = horizontal[-1], vertical[-1]
         region = [0, width, 0, height]
         projection = f"X{20 * width / height:g}c/20c"
+        interpolation = {"linear": "l", "cubic": "c+c"}[args.plot_interpolation]
+        # Spacing is in kilometres. Plot X is solver Y; plot Y is solver X.
+        display_spacing = [plane.dy / (1000 * args.plot_upsample),
+                           plane.dx / (1000 * args.plot_upsample)]
         for frame in range(start, stop):
             velocity = vertical_velocity(data, frame, plane.dt)
             if args.progress_every and (frame == start or frame % args.progress_every == 0):
@@ -188,11 +196,17 @@ def render_chunk(plane, args, start, stop, rank):
                       f"{100 * saturated / velocity.size:.2f}% beyond color limits", flush=True)
             grid = xr.DataArray(velocity, coords={"y": vertical, "x": horizontal},
                                 dims=("y", "x"))
+            if args.plot_upsample > 1:
+                # Resample only the display grid. Keep the original data for
+                # derivatives, extrema and saturation statistics above.
+                grid = pygmt.grdsample(grid=grid, region=region,
+                                      spacing=display_spacing,
+                                      interpolation=interpolation, cores=1)
             fig = pygmt.Figure()
             with pygmt.config(FONT_LABEL="18p", FONT_ANNOT_PRIMARY="14p",
                               FONT_TITLE="20p", MAP_FRAME_TYPE="plain"):
                 fig.grdimage(grid=grid, region=region, projection=projection, cmap=cpt,
-                             interpolation="c+c", cores=1,
+                             interpolation=interpolation, cores=1,
                              frame=["xaf+lY offset from plane origin (km)",
                                     "yaf+lX offset from plane origin (km)",
                                     f"+t{args.title}"])
@@ -237,6 +251,10 @@ def main(argv=None):
     parser.add_argument("--progress-every", type=int,
                         default=int(os.environ.get("FRAME_PROGRESS_EVERY", "100")))
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--plot-upsample", type=int, default=4,
+                        help="Display grid refinement per axis (default: 4; 1 keeps native grid)")
+    parser.add_argument("--plot-interpolation", choices=("linear", "cubic"), default="linear",
+                        help="Display interpolation (default: linear); cubic may overshoot locally")
     parser.add_argument("--title", default="Hercules vertical velocity")
     parser.add_argument("--first-time", type=float, default=0.0,
                         help="Time of the first stored snapshot in seconds (default: 0); set for restarted output")
@@ -246,6 +264,7 @@ def main(argv=None):
     positive(args.workers, "workers")
     positive(args.velocity_limit, "velocity limit")
     positive(args.dpi, "DPI")
+    positive(args.plot_upsample, "plot-upsample")
     if args.progress_every < 0:
         raise ValueError("progress-every must be nonnegative (0 disables progress)")
     rank, ranks = detect_rank_info()
@@ -263,6 +282,8 @@ def main(argv=None):
               f"Snapshot interval: {plane.dt:g} s; first/last time: "
               f"{args.first_time:g}/{args.first_time + (plane.nt - 1) * plane.dt:g} s\n"
               f"Velocity: cm/s, positive down; color limits +/-{args.velocity_limit:g}\n"
+              f"Display: continuous palette, {args.plot_upsample}x {args.plot_interpolation} "
+              "upsampling; source-grid statistics\n"
               "Endpoint velocities use one-sided differences; interiors use central differences.", flush=True)
     if args.check_only:
         if rank == 0:

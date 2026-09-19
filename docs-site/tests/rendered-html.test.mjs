@@ -1377,6 +1377,11 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /--check-only/);
   assert.match(html, /--first-time/);
   assert.match(html, /reported extrema remain unclipped/);
+  assert.match(html, /--plot-upsample 4 --plot-interpolation linear/);
+  assert.match(html, /--plot-upsample 1/);
+  assert.match(html, /801 by 501 display points/);
+  assert.match(html, /--plot-interpolation cubic/);
+  assert.match(html, /keeping the same limit across frames/);
   assert.match(html, /closes its PyGMT session before deleting its temporary directory/);
   assert.match(html, /GMT_DATA_UPDATE_INTERVAL = off/);
   assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);

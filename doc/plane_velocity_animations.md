@@ -72,6 +72,39 @@ output, supply `--first-time` for the first snapshot actually stored (default:
 0 s), since the binary has no timestamps and the script cannot detect restarts.
 Read native float64 files on a matching-byte-order machine.
 
+## Smoother colour transitions
+
+The renderer uses a continuous `vik` colour palette and, by default, linear
+interpolation onto a display grid with four times as many intervals per axis.
+This reduces the visible blocks between the original plane samples. The
+defaults are equivalent to adding these options to your existing command:
+
+```bash
+--plot-upsample 4 --plot-interpolation linear --dpi 300
+```
+
+`--plot-upsample` must be a positive integer. Set it to `1` to display the native
+grid, or `8` for a finer display grid. Higher factors cost more memory and
+rendering work: the number of display points grows approximately with the
+square of this factor. A 201 by 126 plane becomes 801 by 501 display points at
+the default factor of four. Account for that cost when choosing workers per
+node. `--dpi` controls the exported PNG resolution; increasing DPI alone does
+not add intermediate values between grid samples.
+
+`--plot-interpolation cubic` gives smoother spatial gradients but can introduce
+local overshoot; GMT's clipping modifier limits the interpolated grid to the
+input's global range. The default `linear` option avoids interpolation overshoot.
+Interpolation applies only to the display grid, after computing velocity.
+The displacement file, original velocity samples, matrix orientation, and
+reported extrema and saturation percentages are unchanged. A finer display
+does not increase the simulation's physical resolution.
+
+Solid red or blue regions can also indicate colour saturation, which
+interpolation cannot remove. `--velocity-limit 10` maps everything beyond
+±10 cm/s to the endpoint colours. Increase this limit if you want to distinguish
+larger amplitudes; use one fixed limit across all frames for a comparable
+animation. For example, `--velocity-limit 50` displays the range ±50 cm/s.
+
 ## Open MPI placement and CPU affinity for animation workers
 
 Check `mpirun --version` first: these examples use **Open MPI** options. Intel

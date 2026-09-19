@@ -1886,6 +1886,17 @@ if __name__ == "__main__":
         note: "Relative paths resolve from the current working directory. Each worker retains one memory mapping and has its own temporary GMT directory and color table. Frame names encode time order even when workers finish out of order. --check-only checks complete snapshot sizes and samples the first, middle, and last velocity frames; it does not validate the source location or all snapshots. For restarted output, set --first-time to the time of its first stored snapshot (default: 0 s); restarts cannot be detected from the binary. Input byte order must match the machine reading the native float64 file.",
       },
       {
+        id: "plane-animation-colours",
+        title: "Smooth the animation colours",
+        paragraphs: [
+          "The renderer uses a continuous vik colour palette and defaults to --plot-upsample 4 --plot-interpolation linear. It interpolates velocity onto a finer display grid before plotting, reducing visible blocks between native samples. A 201 by 126 plane becomes 801 by 501 display points. --dpi controls exported PNG resolution; increasing DPI alone does not add intermediate grid values.",
+          "Set --plot-upsample 1 to display the native grid, or 8 for a finer display. The factor must be a positive integer; display-point count grows approximately with its square, increasing memory and rendering work per worker. --plot-interpolation cubic produces smoother gradients but can overshoot locally; GMT clipping limits values to the input's global range. The default linear interpolation avoids overshoot.",
+          "Only the display grid is interpolated. Displacement files, original velocity samples, matrix orientation, and reported extrema and saturation percentages are unchanged. Interpolation does not increase the simulation's physical resolution. Broad solid red or blue areas can instead indicate saturation: increase --velocity-limit to distinguish larger amplitudes, keeping the same limit across frames. --velocity-limit 50 displays the range ±50 cm/s.",
+        ],
+        codeLabel: "Options to append to the animation command (also the defaults)",
+        code: "--plot-upsample 4 --plot-interpolation linear --dpi 300",
+      },
+      {
         id: "plane-animation-affinity",
         title: "Set Open MPI affinity for animation workers",
         paragraphs: [
