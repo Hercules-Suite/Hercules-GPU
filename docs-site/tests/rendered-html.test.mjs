@@ -1357,7 +1357,7 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /np\.loadtxt/);
   assert.match(html, /np\.fromfile/);
   assert.match(html, /raw\.reshape/);
-  assert.match(html, /animations_mpi\.py/);
+  assert.match(html, /script\/animations_mpi\.py/);
   assert.match(html, /does not read parameters\.in or any other configuration file/);
   assert.match(html, /--nx 201 --ny 126 --dx 500 --dy 325 --dt 0\.02/);
   assert.match(html, /mpirun -np 2/);

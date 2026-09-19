@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from animations_mpi import (detect_rank_info, load_plane, main, partition,
-                            vertical_velocity)
+from script.animations_mpi import (detect_rank_info, load_plane, main, partition,
+                                   vertical_velocity)
 
 
 class PlaneAnimationTests(unittest.TestCase):
@@ -189,7 +189,7 @@ class PlaneAnimationTests(unittest.TestCase):
 import os
 import tempfile
 from pathlib import Path
-from animations_mpi import main
+from script.animations_mpi import main
 tempfile.gettempdir()  # Joblib also initializes this cache in the parent.
 def state():
     return (Path.cwd(), tempfile.tempdir,
@@ -216,7 +216,7 @@ assert state() == before
         self.run_renderer_process(f"""
 import os
 from pathlib import Path
-from animations_mpi import main
+from script.animations_mpi import main
 before = (Path.cwd(), dict(os.environ))
 try:
     main({bad_options!r})

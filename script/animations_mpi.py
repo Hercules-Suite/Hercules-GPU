@@ -7,11 +7,11 @@ from the current working directory. --dt is the time between saved snapshots,
 in seconds, not the solver time step.
 Requires NumPy; rendering also requires PyGMT/GMT, xarray, and joblib.
 
-    python animations_mpi.py --plane-file planes_fullDomain/planedisplacements.0 \\
+    python script/animations_mpi.py --plane-file planes_fullDomain/planedisplacements.0 \\
         --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only
     # Open MPI: two allocated nodes, at least four cores per rank.
     mpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \\
-        python animations_mpi.py \\
+        python script/animations_mpi.py \\
         --plane-file planes_fullDomain/planedisplacements.0 \\
         --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --workers 4
 
