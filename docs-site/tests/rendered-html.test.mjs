@@ -440,7 +440,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Baseline CPML example/);
   assert.match(physics, /cpml_reflection_target = 1\.0e-3/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
-  assert.match(physics, /benchmark_inputs\/taper_topography\.py/);
+  assert.match(physics, /script\/taper_topography\.py/);
 
   const parameterResponse = await render("/docs/parameters-nonlinear");
   assert.equal(parameterResponse.status, 200);
@@ -1357,6 +1357,9 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /np\.loadtxt/);
   assert.match(html, /np\.fromfile/);
   assert.match(html, /raw\.reshape/);
+  for (const name of ["read_stations", "read_planes", "read_mesh"]) {
+    assert.ok(html.includes(`script/${name}.py`));
+  }
   assert.match(html, /script\/animations_mpi\.py/);
   assert.match(html, /does not read parameters\.in or any other configuration file/);
   assert.match(html, /--nx 201 --ny 126 --dx 500 --dy 325 --dt 0\.02/);
@@ -1473,7 +1476,10 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /unequal layer counts: 4, 4, 3, and 4/);
   assert.match(html, /piecewise constant with depth/);
   assert.match(html, /bilinearly interpolates Vs, Vp, density/);
-  assert.match(html, /benchmark_inputs\/convert_3d_velocity_model\.py/);
+  assert.match(html, /script\/convert_3d_velocity_model\.py/);
+  for (const name of ["validate_3d_velocity_model", "generate_topography", "validate_topography"]) {
+    assert.ok(html.includes(`script/${name}.py`));
+  }
   assert.match(html, /csv\.DictReader/);
   assert.match(html, /--output-dir/);
   assert.match(html, /both qs and qp/);
@@ -1484,7 +1490,7 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /np\.meshgrid/);
   assert.match(html, /values\.reshape\(nx, ny\)/);
   assert.match(html, /perimeter range/);
-  assert.match(html, /benchmark_inputs\/taper_topography\.py/);
+  assert.match(html, /script\/taper_topography\.py/);
   assert.match(html, /--flat-margin 1500/);
   assert.match(html, /--pml-thickness.*does not configure Hercules/s);
   assert.match(html, /max \|z_boundary - z_ref\| = 0/);
@@ -1493,8 +1499,8 @@ test("provides complete examples for 3-D material and topography inputs", async 
 
 test("converts a row-wise CSV into Hercules 3-D model files", () => {
   const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const script = join(repositoryRoot, "benchmark_inputs", "convert_3d_velocity_model.py");
-  if (!existsSync(script)) return;
+  const script = join(repositoryRoot, "script", "convert_3d_velocity_model.py");
+  assert.ok(existsSync(script), "the documented converter exists under script/");
 
   const temporaryRoot = mkdtempSync(join(tmpdir(), "hercules-3d-model-"));
   try {
@@ -1535,6 +1541,38 @@ test("converts a row-wise CSV into Hercules 3-D model files", () => {
     assert.ok(existsSync(join(outputDir, "rho.in")));
     assert.equal(existsSync(join(outputDir, "qs.in")), false);
     assert.equal(existsSync(join(outputDir, "qp.in")), false);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("tapers rectangular topography in solver X-major order", () => {
+  const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const script = join(repositoryRoot, "script", "taper_topography.py");
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "hercules-topography-"));
+  try {
+    const source = join(temporaryRoot, "topography.in");
+    const output = join(temporaryRoot, "tapered.in");
+    const values = Array.from({ length: 63 }, (_, k) => 100 * Math.floor(k / 9) + k % 9);
+    writeFileSync(source, [100, ...values].join("\n") + "\n");
+    const result = spawnSync("python3", [
+      script, source, "--out", output, "--lx", "600", "--ly", "800",
+      "--buffer", "250", "--flat-margin", "50", "--pml-thickness", "25", "--z-ref", "0",
+    ], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const [spacing, ...tapered] = readFileSync(output, "utf8").trim().split(/\s+/).map(Number);
+    assert.equal(spacing, 100);
+    assert.equal(tapered.length, 63);
+    assert.equal(tapered[3 * 9 + 4], 304, "deep interior retains its elevation");
+    assert.equal(tapered[1 * 9 + 4], 15.2304, "north ramp has the analytical raised-cosine value");
+    for (let i = 0; i < 7; i++) {
+      assert.equal(tapered[i * 9], 0);
+      assert.equal(tapered[i * 9 + 8], 0);
+    }
+    for (let j = 0; j < 9; j++) {
+      assert.equal(tapered[j], 0);
+      assert.equal(tapered[6 * 9 + j], 0);
+    }
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }

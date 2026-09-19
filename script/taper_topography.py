@@ -43,9 +43,8 @@ topography.in FORMAT (Hercules convention; unchanged on output)
 ---------------------------------------------------------------
   line 1            : grid spacing d (m), SAME in x and y
   lines 2 .. Nx*Ny+1: one elevation (m) per grid point
-Ordering: first point = SW corner (x=0,y=0); OUTER loop y (west->east),
-INNER loop x (south->north) -- finish all points sharing a y before
-advancing y.  x = south->north, y = west->east.
+Ordering: first point = SW corner (x=0,y=0); OUTER loop x (south->north),
+INNER loop y (west->east). The solver uses flat_index = x_index * ny + y_index.
 
 DEFAULTS (40 km x 40 km benchmark domain; surface mesh ~78 m, PML ~10
 layers ~ 780 m): buffer 6000 m, flat_margin 1500 m (>= the ~780 m PML
@@ -100,6 +99,12 @@ def main():
                          "inside the taper band")
     a = ap.parse_args()
 
+    if not all(math.isfinite(value) for value in
+               (a.lx, a.ly, a.buffer, a.flat_margin, a.pml_thickness)):
+        sys.exit("error: domain and taper dimensions must be finite")
+    if min(a.lx, a.ly) <= 0 or a.pml_thickness < 0:
+        sys.exit("error: domain lengths must be positive and PML thickness nonnegative")
+
     if not os.path.isfile(a.infile):
         sys.exit("error: input file not found: %s" % a.infile)
     if os.path.abspath(a.out) == os.path.abspath(a.infile) and not a.force:
@@ -124,11 +129,12 @@ def main():
               % (a.flat_margin, a.pml_thickness), file=sys.stderr)
 
     with open(a.infile) as f:
-        first = f.readline()
-        if not first.strip():
-            sys.exit("error: empty / malformed input (no spacing line)")
-        spacing = float(first.split()[0])
-        z = [float(line.split()[0]) for line in f if line.strip()]
+        values = [float(value) for value in f.read().split()]
+    if len(values) < 2 or not all(math.isfinite(value) for value in values):
+        sys.exit("error: need spacing and finite elevation values")
+    spacing, z = values[0], values[1:]
+    if spacing <= 0:
+        sys.exit("error: spacing must be positive")
 
     nx = int(round(a.lx / spacing)) + 1
     ny = int(round(a.ly / spacing)) + 1
@@ -147,7 +153,7 @@ def main():
     if str(a.z_ref).lower() == "auto":
         ring, lo, hi = [], a.buffer, a.buffer + spacing
         for k, zk in enumerate(z):
-            i, j = k % nx, k // nx
+            i, j = divmod(k, ny)
             r = min(i * spacing, a.lx - i * spacing,
                     j * spacing, a.ly - j * spacing)
             if lo <= r < hi:
@@ -156,12 +162,14 @@ def main():
         zref_src = "auto (mean of first interior ring = %.4f m)" % z_ref
     else:
         z_ref = float(a.z_ref)
+        if not math.isfinite(z_ref):
+            sys.exit("error: z-ref must be finite")
         zref_src = "%.4f m (fixed)" % z_ref
 
     max_dz, n_mod, max_perim = 0.0, 0, 0.0
     out = [None] * len(z)
     for k, zk in enumerate(z):
-        i, j = k % nx, k // nx
+        i, j = divmod(k, ny)
         x, y = i * spacing, j * spacing
         fac = edge_factor(x, y, a.lx, a.ly, a.buffer, a.flat_margin)
         zo = z_ref + fac * (zk - z_ref)

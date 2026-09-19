@@ -900,7 +900,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "CPML with 3-D materials, water, and topography",
         paragraphs: [
           "Keep cpml_3d_material_extension=yes when a finite 3-D material grid or water classification should be extended from the nearest interior column through the absorber. This avoids sampling outside the model footprint and creating a false coastline or basin boundary inside CPML corners.",
-          "When topography reaches a lateral PML, taper it to the flat boundary datum before running. benchmark_inputs/taper_topography.py provides the repository workflow. The material extension controls properties, while the taper controls geometry; both are needed for a clean heterogeneous PML interface.",
+          "When topography reaches a lateral PML, taper it to the flat boundary datum before running. script/taper_topography.py provides the repository workflow. The material extension controls properties, while the taper controls geometry; both are needed for a clean heterogeneous PML interface.",
         ],
         codeLabel: "parameters.in — heterogeneous acoustic/elastic CPML additions",
         code: "3D_velocity_model = yes\ninclude_acoustic = yes\ninclude_topography = yes\n\nabc_type = cpml\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_kappa_max = 1.0\ncpml_clamp_outer = no",
@@ -1285,11 +1285,11 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "velocity-model-converter",
         title: "Convert a CSV model automatically",
         paragraphs: [
-          "The repository includes benchmark_inputs/convert_3d_velocity_model.py, a complete converter based on the script pattern in the original Hercules documentation. It uses only the Python standard library, so Pandas and NumPy are not required.",
+          "The repository includes script/convert_3d_velocity_model.py, a complete converter based on the script pattern in the original Hercules documentation. It uses only the Python standard library, so Pandas and NumPy are not required.",
           "The CSV header must contain x,y,z,vs,vp,rho. It may also contain both qs and qp; providing only one is an error. The converter sorts axis coordinates and profile depths, writes profiles in the required Y-outer/X-inner order, and rejects incomplete rectangular grids, nonuniform horizontal spacing, duplicate depths, non-finite numbers, and invalid material values.",
         ],
         codeLabel: "shell — run from the Hercules_GPU repository",
-        code: "python3 benchmark_inputs/convert_3d_velocity_model.py \\\n  hercules-velocity-model.csv \\\n  --output-dir input/materialfiles\n\n# Expected summary for the worked example:\n# wrote 2 x 2 profiles and 15 samples to input/materialfiles",
+        code: "python3 script/convert_3d_velocity_model.py \\\n  hercules-velocity-model.csv \\\n  --output-dir input/materialfiles\n\n# Expected summary for the worked example:\n# wrote 2 x 2 profiles and 15 samples to input/materialfiles",
         bullets: [
           "Always writes x.in, y.in, index.in, z.in, vs.in, vp.in, and rho.in.",
           "Writes qs.in and qp.in only when both optional CSV columns are present.",
@@ -1303,7 +1303,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         paragraphs: [
           "The checked-in script is reproduced below so the format and conversion logic remain visible with the example. Save it as convert_3d_velocity_model.py if you are using the documentation independently of the repository.",
         ],
-        codeLabel: "Python 3 — benchmark_inputs/convert_3d_velocity_model.py",
+        codeLabel: "Python 3 — script/convert_3d_velocity_model.py",
         code: String.raw`#!/usr/bin/env python3
 """Convert a row-wise CSV model to Hercules count-prefixed 3-D model files."""
 
@@ -1414,9 +1414,10 @@ if __name__ == "__main__":
         title: "Validate 3-D model files with Python",
         paragraphs: [
           "Run this inexpensive structural check before launching mesh generation. It verifies counts, horizontal regularity, profile starts, vertical ordering, material ranges, and the optional Q-file pair.",
+          "The standalone script/validate_3d_velocity_model.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "from pathlib import Path\nimport numpy as np\n\nroot = Path(\"input/materialfiles\")\n\ndef counted(name, dtype=float):\n    raw = np.loadtxt(root / name, dtype=dtype, ndmin=1)\n    n, values = int(raw[0]), raw[1:]\n    if values.size != n:\n        raise ValueError(f\"{name}: header says {n}, found {values.size}\")\n    return values\n\nx = counted(\"x.in\")\ny = counted(\"y.in\")\nz = counted(\"z.in\")\nstarts = counted(\"index.in\", int).astype(int)\nvs, vp, rho = (counted(name) for name in (\"vs.in\", \"vp.in\", \"rho.in\"))\n\nfor name, axis in ((\"x.in\", x), (\"y.in\", y)):\n    if axis.size < 2 or np.any(np.diff(axis) <= 0):\n        raise ValueError(f\"{name}: need at least two increasing values\")\n    if not np.allclose(np.diff(axis), np.diff(axis)[0]):\n        raise ValueError(f\"{name}: spacing is not uniform\")\nif starts.size != x.size * y.size or starts[0] != 0 or np.any(np.diff(starts) <= 0):\n    raise ValueError(\"index.in does not define one ordered profile per x-y column\")\nif not (z.size == vs.size == vp.size == rho.size):\n    raise ValueError(\"z, Vs, Vp, and density counts differ\")\nfor column, (begin, end) in enumerate(zip(starts, np.r_[starts[1:], z.size])):\n    if begin >= end or np.any(np.diff(z[begin:end]) <= 0):\n        raise ValueError(f\"vertical profile {column} is empty or not increasing\")\nif np.any(vs < 0) or np.any(vp <= 0) or np.any(rho <= 0):\n    raise ValueError(\"invalid Vs, Vp, or density value\")\nqs_exists, qp_exists = (root / \"qs.in\").exists(), (root / \"qp.in\").exists()\nif qs_exists != qp_exists:\n    raise ValueError(\"provide both qs.in and qp.in, or neither\")\nif qs_exists and (counted(\"qs.in\").size != z.size or counted(\"qp.in\").size != z.size):\n    raise ValueError(\"Q-file counts must match z.in\")\nprint(f\"valid model: {x.size} x {y.size} columns, {z.size} material samples\")",
+        codeLabel: "Python — script/validate_3d_velocity_model.py",
+        code: "# Runnable version from the repository root:\n# python3 script/validate_3d_velocity_model.py input/materialfiles\n\nfrom pathlib import Path\nimport numpy as np\n\nroot = Path(\"input/materialfiles\")\n\ndef counted(name, dtype=float):\n    raw = np.loadtxt(root / name, dtype=dtype, ndmin=1)\n    n, values = int(raw[0]), raw[1:]\n    if values.size != n:\n        raise ValueError(f\"{name}: header says {n}, found {values.size}\")\n    return values\n\nx = counted(\"x.in\")\ny = counted(\"y.in\")\nz = counted(\"z.in\")\nstarts = counted(\"index.in\", int).astype(int)\nvs, vp, rho = (counted(name) for name in (\"vs.in\", \"vp.in\", \"rho.in\"))\n\nfor name, axis in ((\"x.in\", x), (\"y.in\", y)):\n    if axis.size < 2 or np.any(np.diff(axis) <= 0):\n        raise ValueError(f\"{name}: need at least two increasing values\")\n    if not np.allclose(np.diff(axis), np.diff(axis)[0]):\n        raise ValueError(f\"{name}: spacing is not uniform\")\nif starts.size != x.size * y.size or starts[0] != 0 or np.any(np.diff(starts) <= 0):\n    raise ValueError(\"index.in does not define one ordered profile per x-y column\")\nif not (z.size == vs.size == vp.size == rho.size):\n    raise ValueError(\"z, Vs, Vp, and density counts differ\")\nfor column, (begin, end) in enumerate(zip(starts, np.r_[starts[1:], z.size])):\n    if begin >= end or np.any(np.diff(z[begin:end]) <= 0):\n        raise ValueError(f\"vertical profile {column} is empty or not increasing\")\nif np.any(vs < 0) or np.any(vp <= 0) or np.any(rho <= 0):\n    raise ValueError(\"invalid Vs, Vp, or density value\")\nqs_exists, qp_exists = (root / \"qs.in\").exists(), (root / \"qp.in\").exists()\nif qs_exists != qp_exists:\n    raise ValueError(\"provide both qs.in and qp.in, or neither\")\nif qs_exists and (counted(\"qs.in\").size != z.size or counted(\"qp.in\").size != z.size):\n    raise ValueError(\"Q-file counts must match z.in\")\nprint(f\"valid model: {x.size} x {y.size} columns, {z.size} material samples\")",
       },
       {
         id: "topography-configuration",
@@ -1479,18 +1480,20 @@ if __name__ == "__main__":
         title: "Generate a regular topography grid with Python",
         paragraphs: [
           "This example generates a Gaussian hill using the same x-major flattening implemented by point_elevation. Replace the analytical expression with resampled DEM elevations while preserving the grid, order, and units.",
+          "The standalone script/generate_topography.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "import numpy as np\n\nlength_north = 40_000.0\nlength_east = 40_000.0\nspacing = 100.0\nheight = 800.0\nsigma = 3_000.0\ncenter_x = center_y = 20_000.0\n\nnx = int(round(length_north / spacing)) + 1\nny = int(round(length_east / spacing)) + 1\nif not np.isclose((nx - 1) * spacing, length_north) or not np.isclose((ny - 1) * spacing, length_east):\n    raise ValueError(\"spacing must divide both domain lengths exactly\")\nx = np.arange(nx) * spacing\ny = np.arange(ny) * spacing\nX, Y = np.meshgrid(x, y, indexing=\"ij\")  # array shape: (north, east)\nelevation = height * np.exp(-((X-center_x)**2 + (Y-center_y)**2) / (2*sigma**2))\n\nwith open(\"topography.in\", \"w\") as output:\n    output.write(f\"{spacing:g}\\n\")\n    np.savetxt(output, elevation.reshape(-1, order=\"C\"), fmt=\"%.6f\")\nprint(f\"wrote {nx} x {ny} = {elevation.size} elevations\")",
+        codeLabel: "Python — script/generate_topography.py",
+        code: "# Runnable version from the repository root:\n# python3 script/generate_topography.py --lx 40000 --ly 40000 --spacing 100 --height 800 --sigma 3000 --out input/topography/topography.in\n\nimport numpy as np\n\nlength_north = 40_000.0\nlength_east = 40_000.0\nspacing = 100.0\nheight = 800.0\nsigma = 3_000.0\ncenter_x = center_y = 20_000.0\n\nnx = int(round(length_north / spacing)) + 1\nny = int(round(length_east / spacing)) + 1\nif not np.isclose((nx - 1) * spacing, length_north) or not np.isclose((ny - 1) * spacing, length_east):\n    raise ValueError(\"spacing must divide both domain lengths exactly\")\nx = np.arange(nx) * spacing\ny = np.arange(ny) * spacing\nX, Y = np.meshgrid(x, y, indexing=\"ij\")  # array shape: (north, east)\nelevation = height * np.exp(-((X-center_x)**2 + (Y-center_y)**2) / (2*sigma**2))\n\nwith open(\"topography.in\", \"w\") as output:\n    output.write(f\"{spacing:g}\\n\")\n    np.savetxt(output, elevation.reshape(-1, order=\"C\"), fmt=\"%.6f\")\nprint(f\"wrote {nx} x {ny} = {elevation.size} elevations\")",
       },
       {
         id: "topography-validation",
         title: "Validate and inspect topography.in",
         paragraphs: [
           "The check below rejects a spacing/count mismatch, non-finite elevations, and an invalid base coordinate. It also reports perimeter relief, which should be essentially flat when CPML is used for a production model.",
+          "The standalone script/validate_topography.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "import numpy as np\n\nlength_north = 40_000.0\nlength_east = 40_000.0\ntopography_base = 1_250.0\nraw = np.loadtxt(\"input/topography/topography.in\")\nspacing, values = raw[0], raw[1:]\nnx = int(round(length_north / spacing)) + 1\nny = int(round(length_east / spacing)) + 1\nif not np.isclose((nx-1)*spacing, length_north) or not np.isclose((ny-1)*spacing, length_east):\n    raise ValueError(\"topographic spacing does not divide the domain\")\nif values.size != nx * ny:\n    raise ValueError(f\"expected {nx*ny} elevations, found {values.size}\")\nif not np.isfinite(values).all():\n    raise ValueError(\"topography contains NaN or infinite values\")\nelevation = values.reshape(nx, ny)  # [north index, east index]\nif topography_base <= elevation.max():\n    raise ValueError(\"topographybase_zcoord must exceed the highest elevation\")\nperimeter = np.r_[elevation[0,:], elevation[-1,:], elevation[:,0], elevation[:,-1]]\nprint(f\"grid={nx}x{ny}, range={elevation.min():.3f}..{elevation.max():.3f} m\")\nprint(f\"perimeter range={np.ptp(perimeter):.6g} m\")",
+        codeLabel: "Python — script/validate_topography.py",
+        code: "# Runnable version from the repository root:\n# python3 script/validate_topography.py input/topography/topography.in --lx 40000 --ly 40000 --base 1250\n\nimport numpy as np\n\nlength_north = 40_000.0\nlength_east = 40_000.0\ntopography_base = 1_250.0\nraw = np.loadtxt(\"input/topography/topography.in\")\nspacing, values = raw[0], raw[1:]\nnx = int(round(length_north / spacing)) + 1\nny = int(round(length_east / spacing)) + 1\nif not np.isclose((nx-1)*spacing, length_north) or not np.isclose((ny-1)*spacing, length_east):\n    raise ValueError(\"topographic spacing does not divide the domain\")\nif values.size != nx * ny:\n    raise ValueError(f\"expected {nx*ny} elevations, found {values.size}\")\nif not np.isfinite(values).all():\n    raise ValueError(\"topography contains NaN or infinite values\")\nelevation = values.reshape(nx, ny)  # [north index, east index]\nif topography_base <= elevation.max():\n    raise ValueError(\"topographybase_zcoord must exceed the highest elevation\")\nperimeter = np.r_[elevation[0,:], elevation[-1,:], elevation[:,0], elevation[:,-1]]\nprint(f\"grid={nx}x{ny}, range={elevation.min():.3f}..{elevation.max():.3f} m\")\nprint(f\"perimeter range={np.ptp(perimeter):.6g} m\")",
         note: "For CPML runs, taper real relief smoothly to one flat reference within an interior buffer that becomes fully flat before the PML inner edge. The solver's flatten-PML route is a stability backstop, not a substitute for preprocessing the surface.",
       },
       {
@@ -1499,19 +1502,19 @@ if __name__ == "__main__":
         paragraphs: [
           "C-PML is a regular, axis-aligned absorbing layer with a flat top. With computation_method=vt, Hercules can force topography-intersecting lateral PML elements back onto a flat cube-and-CPML path. This flatten-PML route prevents an unstable element treatment, but it does not remove the artificial scattering produced when substantial relief is cut off abruptly at the PML inner edge.",
           "For a production model, begin the transition inside the physical domain. Leave the deep-interior elevations unchanged, reduce their deviation from a chosen reference elevation through a smooth raised-cosine ramp, and provide an exactly flat outer collar that covers the complete PML thickness with extra margin.",
-          "The repository helper applies z_out = z_ref + factor × (z_in - z_ref). The factor is one in the interior, follows a C1 raised-cosine through the taper ramp, and is exactly zero throughout the outer flat collar.",
+          "The repository helper applies z_out = z_ref + factor × (z_in - z_ref). The factor is one in the interior, follows a C1 raised-cosine through the taper ramp, and is exactly zero throughout the outer flat collar. The helper now uses the solver's X-outer/Y-inner topography order, including rectangular grids; earlier versions used transposed point indices.",
         ],
         note: "Surface tapering and cpml_3d_material_extension solve different problems. The taper flattens the PML's top surface; material extension controls the 3-D material or water mask inside the PML volume.",
       },
       {
         id: "topography-taper-command",
-        title: "Use benchmark_inputs/taper_topography.py",
+        title: "Use script/taper_topography.py",
         paragraphs: [
           "Run the dependency-free Python 3 helper from the Hercules_GPU repository. It reads the grid spacing from the first line, checks the supplied domain dimensions and point count, and writes another file in the same topography.in format. Create the output directory first because the script does not create parent directories.",
           "This example is configured for the bundled 40 km × 40 km benchmark. Replace every dimensional value with the actual case values. Set the PML thickness from the realized thickness printed by Hercules to standard error at startup rather than assuming the benchmark value applies to another mesh. The PML element counts and optional outer-clamp count are reported on that same startup stream.",
         ],
         codeLabel: "shell — run from the Hercules_GPU repository",
-        code: "mkdir -p input/topography_pml\n\npython3 benchmark_inputs/taper_topography.py \\\n  input/topography_raw/topography.in \\\n  --out input/topography_pml/topography.in \\\n  --lx 40000 \\\n  --ly 40000 \\\n  --buffer 6000 \\\n  --flat-margin 1500 \\\n  --pml-thickness 780 \\\n  --z-ref auto",
+        code: "mkdir -p input/topography_pml\n\npython3 script/taper_topography.py \\\n  input/topography_raw/topography.in \\\n  --out input/topography_pml/topography.in \\\n  --lx 40000 \\\n  --ly 40000 \\\n  --buffer 6000 \\\n  --flat-margin 1500 \\\n  --pml-thickness 780 \\\n  --z-ref auto",
         note: "The input is kept unchanged. If the output already exists, the script stops; add --force only when replacing that output intentionally. Hercules requires the final filename to be topography.in.",
       },
       {
@@ -1842,9 +1845,10 @@ if __name__ == "__main__":
         title: "Read station.N with Python",
         paragraphs: [
           "The header records the actual columns. This example matches the configuration above: time, three displacement components, three velocity components, and three acceleration components.",
+          "The standalone script/read_stations.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "import numpy as np\n\nstation = np.loadtxt(\"output/stations/station.0\", comments=\"#\")\ntime = station[:, 0]\ndisplacement = station[:, 1:4]\nvelocity = station[:, 4:7]\nacceleration = station[:, 7:10]\n\nprint(f\"{len(time)} samples, dt_out={np.diff(time).mean():.6g} s\")\nprint(\"peak |u| =\", np.linalg.norm(displacement, axis=1).max())",
+        codeLabel: "Python — script/read_stations.py",
+        code: "# Runnable version from the repository root:\n# python3 script/read_stations.py output/stations/station.0\n\nimport numpy as np\n\nstation = np.loadtxt(\"output/stations/station.0\", comments=\"#\")\ntime = station[:, 0]\ndisplacement = station[:, 1:4]\nvelocity = station[:, 4:7]\nacceleration = station[:, 7:10]\n\nprint(f\"{len(time)} samples, dt_out={np.diff(time).mean():.6g} s\")\nprint(\"peak |u| =\", np.linalg.norm(displacement, axis=1).max())",
         note: "Do not hard-code later column offsets when pressure, strain, stress, or nonlinear output is enabled. Read the header and document the exact column selection used in post-processing.",
       },
       {
@@ -1862,9 +1866,10 @@ if __name__ == "__main__":
         title: "Read planedisplacements.N with Python",
         paragraphs: [
           "The file has no header, so the grid dimensions must come from the exact parameters.in used for the run. In the reshaped array below, the indices are output time, along-strike point, down-dip point, and Cartesian component.",
+          "The standalone script/read_planes.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "import numpy as np\n\nn_strike = 101\nn_dip = 81\nprint_rate = 20\nsimulation_dt = 0.001\n\nraw = np.fromfile(\"output/planes/planedisplacements.0\", dtype=np.float64)\nvalues_per_snapshot = n_strike * n_dip * 3\nif raw.size % values_per_snapshot:\n    raise ValueError(\"file size does not match the configured plane grid\")\n\nu = raw.reshape(-1, n_strike, n_dip, 3)\ntime = np.arange(u.shape[0]) * print_rate * simulation_dt\nvertical = u[..., 2]\nprint(u.shape, time[-1], np.abs(vertical).max())",
+        codeLabel: "Python — script/read_planes.py",
+        code: "# Runnable version from the repository root:\n# python3 script/read_planes.py output/planes/planedisplacements.0 --nx 101 --ny 81 --dt 0.02\n\nimport numpy as np\n\nn_strike = 101\nn_dip = 81\nprint_rate = 20\nsimulation_dt = 0.001\n\nraw = np.fromfile(\"output/planes/planedisplacements.0\", dtype=np.float64)\nvalues_per_snapshot = n_strike * n_dip * 3\nif raw.size % values_per_snapshot:\n    raise ValueError(\"file size does not match the configured plane grid\")\n\nu = raw.reshape(-1, n_strike, n_dip, 3)\ntime = np.arange(u.shape[0]) * print_rate * simulation_dt\nvertical = u[..., 2]\nprint(u.shape, time[-1], np.abs(vertical).max())",
         note: "reconstruct_acoustic_plane_displacements=yes reconstructs motion at scalar-acoustic plane points; elastic points continue to use the elastic displacement field in the same file.",
       },
       {
@@ -1926,9 +1931,10 @@ if __name__ == "__main__":
         title: "Export and read a selected mesh subdomain",
         paragraphs: [
           "mesh_coordinates_for_matlab writes one pair of binary files per rank that owns selected elements. mesh_coordinates.RANK contains eight records per hexahedral element; mesh_data.RANK contains one material record per element.",
+          "The standalone script/read_mesh.py accepts command-line arguments; run the command shown below without its leading comment marker. script/README.md lists the utilities and their dependencies.",
         ],
-        codeLabel: "Python",
-        code: "import numpy as np\n\ncoord_dtype = np.dtype([\n    (\"geid\", np.int64), (\"x\", np.float64),\n    (\"y\", np.float64), (\"z\", np.float64),\n])\nmaterial_dtype = np.dtype([\n    (\"geid\", np.int64), (\"Vs\", np.float32),\n    (\"Vp\", np.float32), (\"rho\", np.float32),\n])\ncoords = np.fromfile(\"output/mesh/mesh_coordinates.0\", dtype=coord_dtype)\nmaterials = np.fromfile(\"output/mesh/mesh_data.0\", dtype=material_dtype)\nassert coords.size == 8 * materials.size",
+        codeLabel: "Python — script/read_mesh.py",
+        code: "# Runnable version from the repository root:\n# python3 script/read_mesh.py output/mesh/mesh_coordinates.0 output/mesh/mesh_data.0\n\nimport numpy as np\n\ncoord_dtype = np.dtype([\n    (\"geid\", np.int64), (\"x\", np.float64),\n    (\"y\", np.float64), (\"z\", np.float64),\n])\nmaterial_dtype = np.dtype([\n    (\"geid\", np.int64), (\"Vs\", np.float32),\n    (\"Vp\", np.float32), (\"rho\", np.float32),\n])\ncoords = np.fromfile(\"output/mesh/mesh_coordinates.0\", dtype=coord_dtype)\nmaterials = np.fromfile(\"output/mesh/mesh_data.0\", dtype=material_dtype)\nassert coords.size == 8 * materials.size",
         note: "Enable the export with mesh_coordinates_for_matlab=yes, set mesh_coordinates_directory_for_matlab, and define mesh_corners_matlab as min_x min_y max_x max_y min_z max_z in metres.",
       },
       {

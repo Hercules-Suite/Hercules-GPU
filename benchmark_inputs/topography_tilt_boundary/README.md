@@ -7,7 +7,7 @@
 > inner edge (a "cliff" for steep boundary relief — a strong spurious
 > scatterer). **For real models, taper your topography to flat before
 > the PML** (flatten-PML is a stability backstop, **not** a substitute
-> for tapering): run `../taper_topography.py` on your `topography.in`,
+> for tapering): run `../../script/taper_topography.py` on your `topography.in`,
 > or regenerate this surface with `--edge-taper`. See the repo
 > `README.md` → "Topography + C-PML" note for the rationale.
 
@@ -51,7 +51,7 @@ sees no relief and there is no artificial inner-edge step:
 python3 gen_topography_tilt.py --edge-taper
 
 # or taper ANY existing topography.in (incl. real DEM-derived):
-python3 ../taper_topography.py topography.in --out topography_tapered.in
+python3 ../../script/taper_topography.py topography.in --out topography_tapered.in
 ```
 
 Both apply the same 2-D raised-cosine (Tukey) edge window: a
