@@ -1876,8 +1876,29 @@ if __name__ == "__main__":
           "Vertical velocity is positive downward in cm/s, calculated with central differences inside the record and one-sided differences at the endpoints. The color table saturates outside the selected limits; the velocity arrays and reported extrema remain unclipped. This derivative of sampled displacement need not exactly match velocity computed at the solver time step.",
         ],
         codeLabel: "Shell — select a completed plane file; dt=0.02 assumes snapshots every 0.02 s",
-        code: "python /path/to/Hercules_GPU/animations_mpi.py \\\n  --plane-file planes_fullDomain/planedisplacements.0 \\\n  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only\n\n# --workers is per MPI rank; match the allocation's CPUs per task.\n# Use a fresh output directory to avoid mixing frames from different runs.\nmpirun -np 2 python /path/to/Hercules_GPU/animations_mpi.py \\\n  --plane-file planes_fullDomain/planedisplacements.0 \\\n  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \\\n  --workers 4 --output-dir Animations_velocity_run1 --velocity-limit 10",
+        code: "python /path/to/Hercules_GPU/animations_mpi.py \\\n  --plane-file planes_fullDomain/planedisplacements.0 \\\n  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only\n\n# Open MPI: two allocated nodes, at least four cores per rank.\n# --workers is per MPI rank. Use a fresh output directory for each run.\nmpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \\\n  python /path/to/Hercules_GPU/animations_mpi.py \\\n  --plane-file planes_fullDomain/planedisplacements.0 \\\n  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \\\n  --workers 4 --output-dir Animations_velocity_run1 --velocity-limit 10",
         note: "Relative paths resolve from the current working directory. Each worker retains one memory mapping and has its own temporary GMT directory and color table. Frame names encode time order even when workers finish out of order. --check-only checks complete snapshot sizes and samples the first, middle, and last velocity frames; it does not validate the source location or all snapshots. For restarted output, set --first-time to the time of its first stored snapshot (default: 0 s); restarts cannot be detected from the binary. Input byte order must match the machine reading the native float64 file.",
+      },
+      {
+        id: "plane-animation-affinity",
+        title: "Set Open MPI affinity for animation workers",
+        paragraphs: [
+          "Check mpirun --version first: these flags are for Open MPI. Intel MPI and MPICH use different affinity controls. On Linux, child processes inherit CPU affinity, so binding a Python rank to one core can leave all its joblib workers competing on that core. Set both mapping and binding explicitly when launching the animation.",
+          "For two exclusively allocated nodes with at least 100 available cores each, use one rank per node and --bind-to none as below. ppr:1:node controls rank placement; --bind-to none adds no Open MPI CPU binding. Scheduler-enforced CPU sets still apply. Each rank starts 100 rendering workers, for 200 workers across the two nodes. Workers are not individually pinned. Match -np to the node count and --workers to the cores available to each rank.",
+          "For four workers per rank, the preceding example uses --map-by ppr:1:node:PE=4 --bind-to core. The rank and its workers share a four-core group under the default core-based PE interpretation. For two such ranks per node, use ppr:2:node:PE=4, allocate at least eight cores per node, and adjust the total -np accordingly. Mapping and binding do not request resources from the scheduler.",
+        ],
+        codeLabel: "Open MPI — two exclusively allocated nodes with at least 100 cores each",
+        code: "mpirun -np 2 \\\n  --map-by ppr:1:node --bind-to none --report-bindings \\\n  python /path/to/Hercules_GPU/animations_mpi.py \\\n  --plane-file planes_fullDomain/planedisplacements.0 \\\n  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \\\n  --workers 100 --output-dir Animations_velocity_run1",
+        note: "Use --report-bindings to inspect each launched rank's binding. These examples describe placement and CPU availability; they do not establish an optimal worker count or validate rendering performance on a particular cluster.",
+      },
+      {
+        id: "plane-animation-affinity-check",
+        title: "Check the CPU set visible to Python",
+        paragraphs: [
+          "On Linux, run the same placement policy with os.sched_getaffinity(0) to report the parent rank's allowed logical CPUs on each host. Substitute the PE=4 policy to check that alternative. Logical CPU counts may exceed physical core counts when simultaneous multithreading is enabled; this does not show individual worker placement.",
+        ],
+        codeLabel: "Open MPI — Linux CPU-affinity diagnostic",
+        code: "mpirun -np 2 --map-by ppr:1:node --bind-to none --report-bindings \\\n  python -c 'import os, socket; cpus = sorted(os.sched_getaffinity(0)); print(socket.gethostname(), \"allowed logical CPUs:\", len(cpus), cpus, flush=True)'",
       },
       {
         id: "checkpoints-write",

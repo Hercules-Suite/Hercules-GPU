@@ -9,9 +9,19 @@ Requires NumPy; rendering also requires PyGMT/GMT, xarray, and joblib.
 
     python animations_mpi.py --plane-file planes_fullDomain/planedisplacements.0 \\
         --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only
-    mpirun -np 2 python animations_mpi.py \\
+    # Open MPI: two allocated nodes, at least four cores per rank.
+    mpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \\
+        python animations_mpi.py \\
         --plane-file planes_fullDomain/planedisplacements.0 \\
         --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --workers 4
+
+For one rank per exclusively allocated node with many workers, use
+--map-by ppr:1:node --bind-to none --report-bindings and set --workers to fit
+the available cores. Linux child processes inherit the parent's affinity;
+binding a rank to one core can constrain all its workers to that core.
+PE=4 gives the rank and its workers a shared four-core group; workers are not
+individually pinned. Scheduler-enforced CPU sets still apply. These Open MPI
+flags do not allocate resources; check mpirun --version for your implementation.
 
 Storage: [snapshot, along-strike point, down-dip point, Cartesian component].
 This renderer assumes strike=0 (modulo 360), dip=0. For these planes,

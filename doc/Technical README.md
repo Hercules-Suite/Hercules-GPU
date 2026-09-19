@@ -25,7 +25,9 @@ python /path/to/Hercules_GPU/animations_mpi.py \
   --plane-file planes_fullDomain/planedisplacements.0 \
   --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only
 
-mpirun -np 2 python /path/to/Hercules_GPU/animations_mpi.py \
+# Open MPI: two allocated nodes, at least four cores per rank.
+mpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \
+  python /path/to/Hercules_GPU/animations_mpi.py \
   --plane-file planes_fullDomain/planedisplacements.0 \
   --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \
   --workers 4 --output-dir Animations_velocity_run1
@@ -68,6 +70,55 @@ output, supply `--first-time` for the first snapshot actually stored (default:
 Read native float64 files on a matching-byte-order
 machine. Local numerical checks run with
 `python -m unittest discover -s tests -p 'test_animations_mpi.py'`.
+
+### Open MPI placement and CPU affinity for animation workers
+
+Check `mpirun --version` first: these examples use **Open MPI** options. Intel
+MPI and MPICH have different affinity controls. On Linux, child processes
+inherit CPU affinity through process creation and execution. Consequently,
+binding a Python rank to one core can constrain all its joblib workers to the
+same core. See the [Linux affinity documentation](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html).
+
+For **two exclusively allocated nodes, each providing at least 100 available
+cores**, start one Python rank per node and let its workers use the available
+CPU set:
+
+```bash
+mpirun -np 2 \
+  --map-by ppr:1:node --bind-to none --report-bindings \
+  python /path/to/Hercules_GPU/animations_mpi.py \
+  --plane-file planes_fullDomain/planedisplacements.0 \
+  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \
+  --workers 100 --output-dir Animations_velocity_run1
+```
+
+`ppr:1:node` places one rank on each node; `--bind-to none` adds no Open MPI CPU
+binding. Scheduler-enforced CPU sets still apply. Each rank starts 100 workers,
+giving 200 rendering workers across two nodes. Workers are not individually
+pinned. Set `-np` to the intended number of nodes for this one-rank-per-node
+layout and size `--workers` to the cores actually available to each rank.
+
+For an explicit core group, use
+`--map-by ppr:1:node:PE=4 --bind-to core --report-bindings` together with
+`--workers 4`, as in the smaller example above. The rank and its workers share
+four physical cores under the default core-based PE interpretation. To put two
+such ranks on each node, use `ppr:2:node:PE=4` and allocate at least eight cores
+per node; the total `-np` must match the intended rank count. Mapping and binding
+options control placement within an existing allocation; they do not request
+nodes or CPUs from the scheduler. See the [Open MPI mapping and binding reference](https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man1/mpirun.1.html).
+
+`--report-bindings` reports each launched rank's binding. For a Linux check of
+the CPU set actually visible to Python, run the same placement policy with:
+
+```bash
+mpirun -np 2 --map-by ppr:1:node --bind-to none --report-bindings \
+  python -c 'import os, socket; cpus = sorted(os.sched_getaffinity(0)); print(socket.gethostname(), "allowed logical CPUs:", len(cpus), cpus, flush=True)'
+```
+
+The reported IDs/count are logical CPUs; simultaneous multithreading can make
+this count larger than the physical core count. Repeat with the `PE=4` policy
+when checking that alternative. This checks the parent rank's allowed CPU set,
+not individual worker placement or measured rendering performance.
 
 ## Octree-compatible domain sizing
 

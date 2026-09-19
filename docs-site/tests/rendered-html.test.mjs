@@ -1361,6 +1361,14 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /does not read parameters\.in or any other configuration file/);
   assert.match(html, /--nx 201 --ny 126 --dx 500 --dy 325 --dt 0\.02/);
   assert.match(html, /mpirun -np 2/);
+  assert.match(html, /--map-by ppr:1:node --bind-to none --report-bindings/);
+  assert.match(html, /--map-by ppr:1:node:PE=4 --bind-to core/);
+  assert.match(html, /--workers 100/);
+  assert.match(html, /Scheduler-enforced CPU sets still apply/);
+  assert.match(html, /Workers are not individually pinned/);
+  assert.match(html, /Mapping and binding do not request resources from the scheduler/);
+  assert.match(html, /mpirun --version/);
+  assert.match(html, /os\.sched_getaffinity\(0\)/);
   assert.match(html, /Do not transpose or mirror this matrix/);
   assert.match(html, /40\.625 km/);
   assert.match(html, /--check-only/);
