@@ -70,14 +70,7 @@ required; disjoint frame ranges and numbered PNG names preserve time order.
 plotting libraries; it is not a full-file or physical validation. For restarted
 output, supply `--first-time` for the first snapshot actually stored (default:
 0 s), since the binary has no timestamps and the script cannot detect restarts.
-Read native float64 files on a matching-byte-order
-machine. From the repository root, local numerical checks run with
-`python -m unittest discover -s tests -p 'test_animations_mpi.py'`.
-With the plotting dependencies installed, run
-`HERCULES_TEST_PYGMT=1 python -m unittest discover -s tests -p 'test_animations_mpi.py'`
-to include real PNG rendering, serial and parallel worker reuse, failure
-cleanup, and interpreter-exit checks. These local checks do not validate a
-multi-node cluster run or its performance.
+Read native float64 files on a matching-byte-order machine.
 
 ## Open MPI placement and CPU affinity for animation workers
 
