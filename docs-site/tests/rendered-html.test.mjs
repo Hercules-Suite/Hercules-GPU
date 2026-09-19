@@ -1357,6 +1357,12 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /np\.loadtxt/);
   assert.match(html, /np\.fromfile/);
   assert.match(html, /raw\.reshape/);
+  assert.match(html, /animations_mpi\.py/);
+  assert.match(html, /Do not transpose or mirror this matrix/);
+  assert.match(html, /40\.625 km/);
+  assert.match(html, /--check-only/);
+  assert.match(html, /--first-time/);
+  assert.match(html, /reported extrema remain unclipped/);
   assert.match(html, /checkpoint\.out1.*checkpoint\.in/s);
   assert.match(html, /mesh_coordinates\.0/);
   assert.match(html, /station_mediums\.txt/);
