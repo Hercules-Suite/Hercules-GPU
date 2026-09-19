@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Render Hercules horizontal plane displacements as vertical-velocity PNGs.
 
-Run from the simulation case directory, using the exact parameters.in from the
-run. Relative input/output paths follow the solver's working-directory rule.
+Select one binary file and supply its grid size and snapshot interval manually.
+No parameters.in or other configuration file is read. Relative paths resolve
+from the current working directory. --dt is the time between saved snapshots,
+in seconds, not the solver time step.
 Requires NumPy; rendering also requires PyGMT/GMT, xarray, and joblib.
 
-    python animations_mpi.py --parameters parameters.in --check-only
-    srun python animations_mpi.py --parameters parameters.in --workers 100
+    python animations_mpi.py --plane-file planes_fullDomain/planedisplacements.0 \\
+        --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only
+    mpirun -np 2 python animations_mpi.py \\
+        --plane-file planes_fullDomain/planedisplacements.0 \\
+        --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --workers 4
 
 Storage: [snapshot, along-strike point, down-dip point, Cartesian component].
-This renderer accepts strike=0 (modulo 360), dip=0 only. For these planes,
+This renderer assumes strike=0 (modulo 360), dip=0. For these planes,
 rows advance in solver X and columns in solver Y. Nothing is transposed or
 mirrored. Plot coordinates are distances from the plane origin, not lat/lon.
 """
@@ -17,7 +22,6 @@ mirrored. Plot coordinates are distances from the plane origin, not lat/lon.
 import argparse
 import math
 import os
-import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -46,69 +50,19 @@ class Plane:
         return np.arange(self.ny) * self.dy / 1000, np.arange(self.nx) * self.dx / 1000
 
 
-def config_lines(path):
-    return [line.split("#", 1)[0].strip()
-            for line in Path(path).read_text(encoding="utf-8").splitlines()]
-
-
-def scalar(lines, name, default=None):
-    pattern = re.compile(rf"^{re.escape(name)}\s*(?:=\s*)?(.+)$")
-    for line in lines:
-        # Require a complete parameter name, not a prefix of another name.
-        if not re.match(rf"^{re.escape(name)}(?:\s|=)", line):
-            continue
-        match = pattern.match(line)
-        if match and len(match[1].split()) == 1:
-            return match[1].strip()
-        raise ValueError(f"Expected one value for {name}: {line}")
-    if default is None:
-        raise ValueError(f"Missing required parameter: {name}")
-    return default
-
-
 def positive(value, name):
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be finite and positive")
     return value
 
 
-def load_plane(parameters, plane_index=0, plane_file=None):
-    lines = config_lines(parameters)
-    count = int(scalar(lines, "number_output_planes"))
-    if not 0 <= plane_index < count:
-        raise ValueError(f"Plane index must be in [0, {count})")
-    simulation_dt = positive(float(scalar(lines, "simulation_delta_time_sec")),
-                             "simulation_delta_time_sec")
-    # The current solver reads the print rate from parameters.in, even when
-    # the geometry comes from a separate planes_input_file.
-    rate = int(scalar(lines, "output_planes_print_rate"))
-    positive(rate, "output_planes_print_rate")
-    dt = positive(simulation_dt * rate, "plane output interval")
-    plane_lines = config_lines(scalar(lines, "planes_input_file", str(parameters)))
-    tokens = None
-    for index, line in enumerate(plane_lines):
-        if re.match(r"^output_planes(?:\s|=|$)", line):
-            tail = re.sub(r"^output_planes\s*=?\s*", "", line)
-            tokens = (tail + " " + " ".join(plane_lines[index + 1:])).split()
-            break
-    if tokens is None or len(tokens) < 9 * (plane_index + 1):
-        raise ValueError("Missing or incomplete output_planes definition")
-    row = tokens[9 * plane_index:9 * (plane_index + 1)]
-    values = [float(value) for value in row]
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError("Plane definition must contain finite values")
-    _, _, _, dx, _, dy, _, strike, dip = values
-    nx, ny = int(row[4]), int(row[6])
+def load_plane(plane_file, nx, ny, dt, dx=500.0, dy=325.0):
+    """Validate the manually specified layout and map one plane's binary file."""
     if nx < 2 or ny < 2:
         raise ValueError("Rendering requires at least two points on each plane axis")
+    positive(dt, "snapshot interval --dt")
     positive(dx, "along-strike spacing")
     positive(dy, "down-dip spacing")
-    if strike % 360 != 0 or dip != 0:
-        raise ValueError("This renderer requires strike=0 (mod 360), dip=0; "
-                         "rotated planes need coordinate-aware regridding")
-    if plane_file is None:
-        directory = scalar(lines, "output_planes_directory", "outputfiles/planes")
-        plane_file = Path(directory) / f"planedisplacements.{plane_index}"
     path = Path(plane_file).resolve()
     frame_bytes = nx * ny * 3 * np.dtype(np.float64).itemsize
     nt, remainder = divmod(path.stat().st_size, frame_bytes)
@@ -212,9 +166,18 @@ def render_chunk(plane, args, start, stop, rank):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--parameters", type=Path, default=Path("parameters.in"))
-    parser.add_argument("--plane-index", type=int, default=0)
-    parser.add_argument("--plane-file", type=Path, help="Override the displacement file path")
+    parser.add_argument("--plane-file", type=Path, required=True,
+                        help="Binary displacement file for the selected plane")
+    parser.add_argument("--nx", type=int, required=True,
+                        help="Along-strike point count (solver X for strike=0, dip=0)")
+    parser.add_argument("--ny", type=int, required=True,
+                        help="Down-dip point count (solver Y for strike=0, dip=0)")
+    parser.add_argument("--dt", type=float, required=True,
+                        help="Time between SAVED snapshots, in seconds; not the solver time step")
+    parser.add_argument("--dx", type=float, default=500.0,
+                        help="Along-strike spacing in metres (default: 500)")
+    parser.add_argument("--dy", type=float, default=325.0,
+                        help="Down-dip spacing in metres (default: 325)")
     parser.add_argument("--output-dir", type=Path, default=Path("Animations_velocity"))
     parser.add_argument("--workers", type=int,
                         default=int(os.environ.get("FRAME_WORKERS_PER_RANK",
@@ -227,8 +190,8 @@ def main(argv=None):
                         default=int(os.environ.get("FRAME_PROGRESS_EVERY", "100")))
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--title", default="Hercules vertical velocity")
-    parser.add_argument("--first-time", type=float,
-                        help="Time of the first stored snapshot in seconds (default: 0 for fresh runs)")
+    parser.add_argument("--first-time", type=float, default=0.0,
+                        help="Time of the first stored snapshot in seconds (default: 0); set for restarted output")
     parser.add_argument("--check-only", action="store_true",
                         help="Check layout and sample velocities without importing plotting libraries")
     args = parser.parse_args(argv)
@@ -238,16 +201,13 @@ def main(argv=None):
     if args.progress_every < 0:
         raise ValueError("progress-every must be nonnegative (0 disables progress)")
     rank, ranks = detect_rank_info()
-    plane = load_plane(args.parameters, args.plane_index, args.plane_file)
-    if args.first_time is None:
-        if int(scalar(config_lines(args.parameters), "use_checkpoint", "0")) != 0:
-            raise ValueError("Restarted output requires --first-time for its first stored snapshot")
-        args.first_time = 0.0
+    plane = load_plane(args.plane_file, args.nx, args.ny, args.dt, args.dx, args.dy)
     if not math.isfinite(args.first_time):
         raise ValueError("first-time must be finite")
     if rank == 0:
         horizontal, vertical = plane.coordinates()
         print(f"Plane: {plane.path}\n"
+              "Manual geometry: assumes strike=0, dip=0\n"
               f"Layout: ({plane.nt}, {plane.nx}, {plane.ny}, 3), native float64, C order\n"
               f"Rows: solver X, spacing {plane.dx:g} m; columns: solver Y, spacing {plane.dy:g} m\n"
               f"Plot: Y rightward 0..{horizontal[-1]:g} km; X upward 0..{vertical[-1]:g} km\n"

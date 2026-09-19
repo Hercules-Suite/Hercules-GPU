@@ -16,29 +16,41 @@ Some general description of the core components in this directory are given as f
 
 [`animations_mpi.py`](../animations_mpi.py) generates vertical-velocity PNG
 frames from completed `planedisplacements.N` files. Run it from the simulation
-case directory with the exact `parameters.in` used by the solver:
+output directory, selecting one binary and specifying its dimensions and
+snapshot interval manually. The script does not read `parameters.in` or any
+other configuration file:
 
 ```bash
-python /path/to/Hercules_GPU/animations_mpi.py --parameters parameters.in --check-only
-srun python /path/to/Hercules_GPU/animations_mpi.py --parameters parameters.in --workers 4 --output-dir Animations_velocity_run1
+python /path/to/Hercules_GPU/animations_mpi.py \
+  --plane-file planes_fullDomain/planedisplacements.0 \
+  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 --check-only
+
+mpirun -np 2 python /path/to/Hercules_GPU/animations_mpi.py \
+  --plane-file planes_fullDomain/planedisplacements.0 \
+  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \
+  --workers 4 --output-dir Animations_velocity_run1
 ```
 
 The plotting environment needs NumPy, xarray, joblib, and PyGMT/GMT. Worker count
 is **per MPI rank**; match it to the CPUs allocated to each task. Use a fresh
-output directory for each run. `--plane-file` overrides the binary path when
-files have been moved. Relative paths follow the solver's case-working-directory
-convention. The current writer reads `output_planes_print_rate` from
-`parameters.in`; `planes_input_file`, when present, supplies plane geometry.
+output directory for each run. `--plane-file`, `--nx`, `--ny`, and `--dt` are
+required. Select any plane by its binary filename, with that plane's dimensions.
+`--dx` and `--dy` set the along-strike and down-dip spacing in metres (defaults:
+500 and 325). Relative paths resolve from the current working directory.
 
 The headerless native-float64 layout is `[time, strike point, dip point, XYZ]`
-in C order, with down-dip points varying fastest. The helper supports only
-strike=0 (modulo 360), dip=0: a plane with spacing/count pairs `500 201` and
+in C order, with down-dip points varying fastest. The helper assumes
+strike=0 (modulo 360), dip=0; it cannot check these angles from the binary.
+A plane with spacing/count pairs `500 201` and
 `325 126` uses `(NT, 201, 126, 3)`, with solver X upward and solver Y rightward
 in the plot. Neither transpose nor mirror is applied. Axes are distances from
 the plane origin; geographic origin conversion and source-location consistency
 remain separate checks.
 
-Snapshot spacing is `simulation_delta_time_sec * output_planes_print_rate`.
+`--dt` is the interval between **saved snapshots**, in seconds, equal to
+`simulation_delta_time_sec * output_planes_print_rate` for the run. Supply
+that product directly; the script applies no additional print-rate factor.
+The example's `0.02` is appropriate only for snapshots saved every 0.02 s.
 The script differentiates component 2, retaining downward-positive velocity,
 then converts m/s to cm/s. It uses central differences except for one-sided
 endpoint differences. Numerical velocities remain unclipped while the GMT color
@@ -51,8 +63,9 @@ and CPT for its assigned frames. No MPI communication or shared marker file is
 required; disjoint frame ranges and numbered PNG names preserve time order.
 `--check-only` checks layout and samples three velocity frames without loading
 plotting libraries; it is not a full-file or physical validation. For restarted
-output, supply `--first-time` for the first snapshot actually stored, since the
-binary has no timestamps. Read native float64 files on a matching-byte-order
+output, supply `--first-time` for the first snapshot actually stored (default:
+0 s), since the binary has no timestamps and the script cannot detect restarts.
+Read native float64 files on a matching-byte-order
 machine. Local numerical checks run with
 `python -m unittest discover -s tests -p 'test_animations_mpi.py'`.
 
