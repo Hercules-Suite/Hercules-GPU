@@ -37,7 +37,7 @@ decrease sigma for a steeper stress test; keep the feature interior.
 Optional --edge-taper (default OFF) smoothly forces the surface to a
 flat reference inside an interior buffer so it is flat -- with margin --
 BEFORE the PML inner edge (the recommended real-model workflow; see
-../taper_topography.py). For THIS default interior hill it is a near
+../../script/taper_topography.py). For THIS default interior hill it is a near
 no-op (the hill already decays to ~0 well before the boundary); it
 matters once you widen/relocate the hill so it reaches the boundary.
 Default OFF keeps this example's topography.in exactly reproducible.
@@ -48,7 +48,7 @@ import argparse, math
 def _edge_taper_factor(x, y, lx, ly, buffer_w, flat_margin):
     """2-D raised-cosine edge window: 0 in the boundary collar, smoothly
     up to 1 at the taper-start, exactly 1 in the interior. See
-    ../taper_topography.py for the standalone (real-DEM) version."""
+    ../../script/taper_topography.py for the standalone (real-DEM) version."""
     r = min(x, lx - x, y, ly - y)
     if r >= buffer_w:
         return 1.0

@@ -35,7 +35,7 @@ inner-edge step). Either regenerate with `--edge-taper`, or taper any
 existing `topography.in` (incl. real DEM-derived):
 
 ```
-python3 ../taper_topography.py topography.in --out topography_tapered.in
+python3 ../../script/taper_topography.py topography.in --out topography_tapered.in
 ```
 
 Both apply the same 2-D raised-cosine (Tukey) edge window (flat collar

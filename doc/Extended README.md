@@ -808,7 +808,7 @@ Notes on C-PML behavior:
 	inside an interior buffer that ends flat — with margin — *before* the
 	PML inner edge (flat collar ≥ PML thickness; a multi-km smooth ramp).
 	Then the PML and the flatten-PML re-route see no relief and there is
-	no cliff. The helper `benchmark_inputs/taper_topography.py` applies
+	no cliff. The helper `script/taper_topography.py` applies
 	exactly this 2-D raised-cosine (Tukey) edge taper to any
 	`topography.in` (incl. real DEM-derived); the two example generators
 	also take `--edge-taper`. (FEM is a strict no-op for flatten-PML;
@@ -817,7 +817,7 @@ Notes on C-PML behavior:
 	is a *deliberate boundary-reaching worst-case* to functionally
 	exercise the re-route, **not** a model-setup template.)
 
-Using `benchmark_inputs/taper_topography.py` (the recommended
+Using `script/taper_topography.py` (the recommended
 preprocessing step for any real topography + C-PML run):
 
 - **What it is.** A standalone, dependency-free Python 3 script (stdlib
@@ -832,8 +832,8 @@ preprocessing step for any real topography + C-PML run):
 	spacing is read from the file's line 1):
 
 	```
-	cd benchmark_inputs
-	python3 taper_topography.py path/to/topography.in --out topography_tapered.in
+	cd /path/to/Hercules_GPU
+	python3 script/taper_topography.py path/to/topography.in --out topography_tapered.in
 	```
 
 	Then point Hercules at the tapered file — set
@@ -843,7 +843,7 @@ preprocessing step for any real topography + C-PML run):
 
 	```
 	mkdir -p model/topo_tapered
-	python3 taper_topography.py raw/topography.in \
+	python3 script/taper_topography.py raw/topography.in \
 	    --out model/topo_tapered/topography.in --force
 	# parameters.in:  topography_directory = .../model/topo_tapered
 	```
@@ -877,7 +877,7 @@ preprocessing step for any real topography + C-PML run):
 	self-check** (`max |z_boundary − z_ref|` must be `0` → prints `OK`).
 	If that check is not `OK`, do not use the file.
 - **`--help`** lists every option with its default
-	(`python3 taper_topography.py --help`).
+	(`python3 script/taper_topography.py --help`).
 - **Alternative for the two bundled examples.** Instead of running the
 	utility you can regenerate either example surface already tapered:
 	`python3 gen_topography_tilt.py --edge-taper` (or

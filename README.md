@@ -10,6 +10,8 @@ studies.
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.liling-dpim.chatgpt.site) — installation, input parameters, source models, running, output, and validation
 - [Technical README](doc/Technical%20README.md) — actively maintained detailed solver controls, runtime settings, performance notes, and development history moved from the former root README
+- [Plane velocity animations](doc/plane_velocity_animations.md) — rendering plane output, manual geometry and timing, MPI affinity, and GMT troubleshooting
+- [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, and output readers
 - [Legacy Extended README](doc/Extended%20README.md) — recovered historical reference retained separately from the current technical documentation
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 - [`docs-site/`](docs-site/README.md) — source code for the documentation website
@@ -94,6 +96,7 @@ layout.
 | `octor/` | Adaptive octree mesh generation, partitioning, and load balancing |
 | `quake/` | Material database tools, mesh generation, and the wave solver |
 | `benchmark_inputs/` | Reproducible validation and feature cases |
+| `script/` | Input preparation, validation, output readers, and animation scripts |
 | `doc/` | Extended technical notes and specialized workflows |
 | `docs-site/` | Documentation website source and rendered-page tests |
 | `examples/` | Legacy examples and sample build configuration |

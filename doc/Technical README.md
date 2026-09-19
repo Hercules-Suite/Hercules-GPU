@@ -1316,14 +1316,14 @@ in `quake/forward/psolve.cc`.
 	used above the shallowest listed depth and the last sample below the deepest
 	listed depth. The public input-files guide contains a complete 2-by-2
 	row-table-to-file conversion with unequal profile lengths.
-- `benchmark_inputs/convert_3d_velocity_model.py` converts a row-wise CSV with
+- `script/convert_3d_velocity_model.py` converts a row-wise CSV with
 	`x,y,z,vs,vp,rho` columns into the required count-prefixed files. Optional
 	`qs,qp` columns must be provided together. The converter sorts profiles into
 	the required Y-outer/X-inner order and validates the rectangular grid,
 	horizontal spacing, vertical depth uniqueness, and material ranges:
 
 	```bash
-	python3 benchmark_inputs/convert_3d_velocity_model.py model.csv \
+	python3 script/convert_3d_velocity_model.py model.csv \
 	    --output-dir input/materialfiles
 	```
 
@@ -1693,7 +1693,7 @@ Notes on C-PML behavior:
 	For real models, taper `topography.in` smoothly down to flat inside
 	an interior buffer that ends flat — with margin — before the PML
 	inner edge (flat collar ≥ PML thickness, plus a smooth ramp). The
-	helper `benchmark_inputs/taper_topography.py` does exactly this for
+	helper `script/taper_topography.py` does exactly this for
 	any `topography.in`; the two example generators also take
 	`--edge-taper`. (FEM is a strict no-op for flatten-PML; non-CPML /
 	non-VT / flat runs are byte-identical. The
@@ -1704,7 +1704,12 @@ Notes on C-PML behavior:
 	`cpml_3d_material_extension` extends the 3D material/water mask
 	through the PML volume.
 
-Using `benchmark_inputs/taper_topography.py` (the recommended
+The reusable utilities and extracted Python examples are indexed in
+[`script/README.md`](../script/README.md). The relocated taper follows
+`point_elevation`: `flat_index = x_index * n_east + y_index`. Earlier
+versions interpreted rectangular topography grids with transposed indices.
+
+Using `script/taper_topography.py` (the recommended
 preprocessing step for any real topography + C-PML run):
 
 - **What it is.** A standalone, dependency-free Python 3 script (stdlib
@@ -1717,8 +1722,8 @@ preprocessing step for any real topography + C-PML run):
 	spacing is read from the file's line 1):
 
 	```
-	cd benchmark_inputs
-	python3 taper_topography.py path/to/topography.in --out topography_tapered.in
+	cd /path/to/Hercules_GPU
+	python3 script/taper_topography.py path/to/topography.in --out topography_tapered.in
 	```
 
 	Then point Hercules at the tapered file — Hercules expects the
@@ -1726,7 +1731,7 @@ preprocessing step for any real topography + C-PML run):
 
 	```
 	mkdir -p model/topo_tapered
-	python3 taper_topography.py raw/topography.in \
+	python3 script/taper_topography.py raw/topography.in \
 	    --out model/topo_tapered/topography.in --force
 	# parameters.in:  topography_directory = .../model/topo_tapered
 	```
@@ -1761,9 +1766,9 @@ preprocessing step for any real topography + C-PML run):
 	example surface already tapered with `python3 gen_topography_tilt.py
 	--edge-taper` (or `gen_topography_gaussian_hill.py --edge-taper`),
 	with matching `--taper-buffer` / `--taper-flat-margin` /
-	`--taper-zref`. Output is identical to running the standalone utility
-	on the un-tapered surface; the flag is off by default so the
-	committed example files stay reproducible.
+	`--taper-zref`. For these square benchmark domains, output is identical
+	to running the standalone utility on the un-tapered surface; the flag
+	is off by default so the committed example files stay reproducible.
 
 Stability fixes baked in:
 
