@@ -84,15 +84,15 @@
   },
   "cuda_mpi": "Not run; six fixtures generated per mode for target-system execution",
   "source_sha256": {
-    "quake/forward/nonlinear.cc": "9c2d2626ee7dc0e3a8c6b4761cee0c9de67e0756ec51806cd46f897796faa448",
+    "quake/forward/nonlinear.cc": "2b3394f93aa55f82548b8d5d9c91e09b539e92885041e159286efbd9e37561fa",
     "quake/forward/nonlinear_gpu.h": "07f6f652c181941c362e17d2a755e2f5ecbc30a2218952208451792b11e63ba5",
-    "quake/forward/nonlinear_riva_sand_input.h": "d7a60e82540e4144399f214166bb506100c348777ec17450762bf7286682f8ef",
+    "quake/forward/nonlinear_riva_sand_input.h": "e538ba3eede9c42a26b502fa944575806bd833f6ab787584dfe8362752d2ae1f",
     "quake/forward/nonlinear_riva_sand_intermediate_bias_research.h": "e8fa2206671b4540328252a471b55242287b7ad6e95c4c002d4d4ea7bd3ba69d",
-    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "24ea64942d536b403230b54c7b8ba941cc0170ba439cf591007297b37da86f5f",
+    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "1a759e917259af0f34e5ade565867083d6e137074e3db9a9ba823ed35bd70bc2",
     "quake/forward/nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_material_point.cu": "86b16eb375547dc0f6493e2b39e50374f2e9d2afd9f1cb22e9f3858c4707b88c",
-    "benchmark_inputs/nonlinear_material_point/riva_sand02_reversal_selector_test.cc": "2adf87258de0ba3f4912aa0ab3945fdbf2e3bdb7391ce2777ce928f3848e058a"
+    "benchmark_inputs/nonlinear_material_point/riva_sand02_reversal_selector_test.cc": "133f59cd61891e13558ac4f68429e58dfe7e584938b5c6957ce8bc68f688e689"
   },
-  "input_key": "rivasand02_reversalType",
+  "input_key": "rivasand02_reversaltype",
   "default": 1,
   "accepted_values": [
     1,
@@ -100,10 +100,11 @@
   ],
   "input_rename_validation": {
     "previous_selector_commit": "36af020ce7bbdd56675717a06fe9805d2e22103e",
-    "scope": "Public input key and diagnostics renamed; retired key rejected without silent fallback",
-    "host_selector_test": "passed, including defaults, old-key rejection, both modes and restart isolation",
+    "scope": "Public input key and diagnostics renamed to all lowercase; both retired keys rejected without silent fallback",
+    "host_selector_test": "passed, including defaults, rejection of both retired keys, both modes and restart isolation",
     "documentation": "locked offline install, lint, TypeScript, production build and 33/33 tests passed",
-    "generated_fixtures": "12/12 use rivasand02_reversalType with the requested value; CUDA not executed",
-    "historical_evidence": "Full native suite and byte-identical comparisons above were run for the previous selector commit; constitutive kernel and native replay driver are unchanged by this rename"
+    "generated_fixtures": "12/12 use rivasand02_reversaltype with the requested value; CUDA not executed",
+    "historical_evidence": "Full native suite and byte-identical comparisons above were run for the previous selector commit; constitutive kernel and native replay driver are unchanged by this rename",
+    "previous_input_rename_commit": "6efcd77fd51354035b723268ef8bf47e0ed77c21"
   }
 }

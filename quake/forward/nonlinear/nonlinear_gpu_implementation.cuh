@@ -4206,7 +4206,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 
     if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
         !riva_ib_reversal_type_valid(config->riva_reversal_type)) {
-        fprintf(stderr, "RIVASand02 rivasand02_reversalType must be 1 or 2\n");
+        fprintf(stderr, "RIVASand02 rivasand02_reversaltype must be 1 or 2\n");
         return -1;
     }
 

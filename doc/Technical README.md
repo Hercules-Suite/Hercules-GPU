@@ -749,14 +749,14 @@ Nonlinear GPU execution (runtime environment):
   load the cached scale but do not repeat the calibration. Checkpoints now
   store the per-point scale and require marker 4 (original), 8 (02 type 1),
   or 7 (02 type 2). Both `RIVASand02` and `RIVASandCustom02` accept the
-  optional scalar `rivasand02_reversalType = 1` in `parameters.in`; omission also means
-  type 1. The former `reversalType` key is rejected; rename it while preserving
-  its value. Type 1 compares adjacent valid increments. Set `rivasand02_reversalType = 2`
+  optional scalar `rivasand02_reversaltype = 1` in `parameters.in`; omission also means
+  type 1. The former `reversalType` and `rivasand02_reversalType` keys are
+  rejected; rename either while preserving its value. Type 1 compares adjacent valid increments. Set `rivasand02_reversaltype = 2`
   to retain the previous accumulated loading-branch rule. Detection occurs
   once per host increment before substeps. Only the integers 1 and 2 are
   accepted, and only for the two 02 names; it is not a material-row column.
   The material-point test input accepts the same key. Existing marker-7
-  checkpoints require explicit `rivasand02_reversalType = 2`; cross-type restarts and
+  checkpoints require explicit `rivasand02_reversaltype = 2`; cross-type restarts and
   marker-6 or earlier 02 files are rejected. Retain the same model, mesh,
   physical inputs and reversal type on restart. Original RIVA-Sand inputs
   and checkpoints are unchanged.

@@ -5,10 +5,10 @@ Both `RIVASand02` and `RIVASandCustom02` accept this optional scalar in
 
 ```ini
 material_model = RIVASand02
-rivasand02_reversalType = 1
+rivasand02_reversaltype = 1
 ```
 
-Omitting `rivasand02_reversalType` also selects **1**. It is a separate setting, not an
+Omitting `rivasand02_reversaltype` also selects **1**. It is a separate setting, not an
 additional column in `material_properties_list` or `material_point_constants`.
 The selector applies to all RS02 integration points in the simulation.
 
@@ -17,19 +17,19 @@ The selector applies to all RS02 integration points in the simulation.
 | 1 | Previous valid host increment | Yes | 8 |
 | 2 | Accumulated loading-branch strain | No | 7 |
 
-Use `rivasand02_reversalType = 2` to preserve the behavior of Hercules `main` at
+Use `rivasand02_reversaltype = 2` to preserve the behavior of Hercules `main` at
 `9975658`, including the previously merged loading-branch correction.
 Only the integers 1 and 2 are accepted. Type 3, fractional values, duplicate
 entries and explicit use with another material model are rejected.
-The former `reversalType` key is rejected; rename it to
-`rivasand02_reversalType` in existing inputs, preserving its value.
+The former `reversalType` and `rivasand02_reversalType` keys are rejected;
+rename either to `rivasand02_reversaltype` in existing inputs, preserving its value.
 Original `RIVASand` and `RIVASandCustom` behavior is unchanged.
 
 Both rules check reversal once per host increment before the fixed material
 substeps. The existing equations, coefficient values, deadbands, integration
 order and 138-value state layout are unchanged. The selector does not add
 OpenSees `reversalLatch` or `BiasVolume`. The 249-value reference calibration
-hash is unchanged; `rivasand02_reversalType` is an exposed execution choice rather than
+hash is unchanged; `rivasand02_reversaltype` is an exposed execution choice rather than
 a recalibrated material coefficient.
 
 The root input value is broadcast to all solver ranks and carried in the
@@ -43,7 +43,7 @@ material-point output identify the selected rule and checkpoint marker.
 The two references occupy the same six history slots but have different
 meanings. Cross-type restart is rejected before state is loaded. Type 2 keeps
 marker 7 and can continue an existing marker-7 history with explicit
-`rivasand02_reversalType = 2`, subject to the usual unchanged model, mesh and material
+`rivasand02_reversaltype = 2`, subject to the usual unchanged model, mesh and material
 inputs. The new default type 1 writes marker 8. Marker-6 and earlier RS02
 checkpoints remain unsupported; rerun their initialization. Original-generation
 marker 4 is unchanged. A change of the default does not silently convert a

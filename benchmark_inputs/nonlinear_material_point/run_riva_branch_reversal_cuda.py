@@ -24,7 +24,7 @@ def fixture(steps, custom, prefix, reversal_type=2):
     history.append(history[-1].copy())  # Exact zero-increment state check.
     text = f"""# Loading-branch research; two smooth shear cycles with vertical strain.
 material_model = {material}
-rivasand02_reversalType = {reversal_type}
+rivasand02_reversaltype = {reversal_type}
 material_point_delta_time_sec = {1/steps:.17g}
 material_point_steps = {len(history)}
 no_substeps = 4
@@ -77,7 +77,7 @@ def main():
                 for marker in ("PASS: CPU/GPU material-point histories agree",
                                f"Validated CPU/GPU registered reversals: {4 if args.reversal_type==2 or steps==128 else 0}",
                                f"kernel 4, checkpoint {7 if args.reversal_type==2 else 8}",
-                               f"rivasand02_reversalType={args.reversal_type}"):
+                               f"rivasand02_reversaltype={args.reversal_type}"):
                     if result.returncode != 0 or marker not in result.stdout:
                         raise RuntimeError(f"{name} failed or used an old executable:\n{result.stdout[-4000:]}")
                 for backend in ("cpu", "gpu"):

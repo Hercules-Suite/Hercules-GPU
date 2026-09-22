@@ -1064,11 +1064,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
 
-    if (riva_read_reversal_type(fp, "rivasand02_reversalType",
+    if (riva_read_reversal_type(fp, "rivasand02_reversaltype",
             MATERIAL_MODEL_IS_RIVA_SAND_02(materialmodel), &riva_reversal_type) != 0) {
-        fprintf(stderr, "rivasand02_reversalType must be 1 or 2 and is only valid for "
+        fprintf(stderr, "rivasand02_reversaltype must be 1 or 2 and is only valid for "
                         "RIVASand02 or RIVASandCustom02 (default: 1). "
-                        "The retired reversalType key is not accepted.\n");
+                        "The retired reversalType and rivasand02_reversalType keys are not accepted.\n");
         return -1;
     }
 
@@ -1481,7 +1481,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)
                     ? RIVA_IB_PARAMETER_SHA256 : RIVA_PARAMETER_SHA256);
         if (MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)) {
-            fprintf(stderr, "%s: rivasand02_reversalType=%d (%s), kernel %u, checkpoint %u\n",
+            fprintf(stderr, "%s: rivasand02_reversaltype=%d (%s), kernel %u, checkpoint %u\n",
                     RIVA_SAND_MODEL_NAME(theMaterialModel),theRivaReversalType,
                     theRivaReversalType==1 ? "previous increment" : "accumulated loading branch",
                     RIVA_IB_KERNEL_REVISION,
@@ -6291,11 +6291,11 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
         goto cleanup;
     }
-    if (riva_read_reversal_type(fp, "rivasand02_reversalType",
+    if (riva_read_reversal_type(fp, "rivasand02_reversaltype",
             MATERIAL_MODEL_IS_RIVA_SAND_02(material_model), &riva_reversal_type) != 0) {
-        fprintf(stderr, "rivasand02_reversalType must be 1 or 2 and is only valid for "
+        fprintf(stderr, "rivasand02_reversaltype must be 1 or 2 and is only valid for "
                         "RIVASand02 or RIVASandCustom02 (default: 1). "
-                        "The retired reversalType key is not accepted.\n");
+                        "The retired reversalType and rivasand02_reversalType keys are not accepted.\n");
         goto cleanup;
     }
 
@@ -7113,7 +7113,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     } else if (MATERIAL_MODEL_IS_RIVA_SAND_02(material_model)) {
-        printf("%s: rivasand02_reversalType=%d (%s), kernel %u, checkpoint %u\n",
+        printf("%s: rivasand02_reversaltype=%d (%s), kernel %u, checkpoint %u\n",
                RIVA_SAND_MODEL_NAME(material_model),riva_reversal_type,
                riva_reversal_type==1 ? "previous increment" : "accumulated loading branch",
                RIVA_IB_KERNEL_REVISION,

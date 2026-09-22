@@ -15,7 +15,7 @@ static int parse(const std::string &text,int is_02,int32_t *value)
 {
     FILE *f=tmpfile(); require(f!=nullptr,"tmpfile failed");
     require(fwrite(text.data(),1,text.size(),f)==text.size(),"fixture write failed");
-    const int result=riva_read_reversal_type(f,"rivasand02_reversalType",is_02,value);
+    const int result=riva_read_reversal_type(f,"rivasand02_reversaltype",is_02,value);
     fclose(f); return result;
 }
 
@@ -36,31 +36,36 @@ int main()
         require(parse("# omitted\nmaterial_model=RIVASand02\n",1,&value)==0 && value==1,
                 "omitted selector did not default to type 1");
         for (int type : {1,2}) {
-            require(parse("  rivasand02_reversalType = "+std::to_string(type)+" # comment\n",1,&value)==0 && value==type,
+            require(parse("  rivasand02_reversaltype = "+std::to_string(type)+" # comment\n",1,&value)==0 && value==type,
                     "valid selector rejected");
-            require(parse("rivasand02_reversalType="+std::to_string(type),1,&value)==0 && value==type,
+            require(parse("rivasand02_reversaltype="+std::to_string(type),1,&value)==0 && value==type,
                     "selector without final newline rejected");
         }
         for (const char *bad : {"0","3","-1","1.0","1e0","2junk","1 2","nan",""}) {
             value=99;
-            require(parse(std::string("rivasand02_reversalType = ")+bad+"\n",1,&value)!=0 && value==99,
+            require(parse(std::string("rivasand02_reversaltype = ")+bad+"\n",1,&value)!=0 && value==99,
                     "invalid selector accepted or changed output");
         }
-        for (const char *bad : {"rivasand02_reversalType\n","rivasand02_reversalType 2\n",
-                               "rivasand02_reversalType=1\nrivasand02_reversalType=2\n"})
+        for (const char *bad : {"rivasand02_reversaltype\n","rivasand02_reversaltype 2\n",
+                               "rivasand02_reversaltype=1\nrivasand02_reversaltype=2\n"})
             require(parse(bad,1,&value)!=0,"malformed/duplicate selector accepted");
-        require(parse("rivasand02_reversalType=1\n",0,&value)!=0,"selector accepted for another model");
+        require(parse("rivasand02_reversaltype=1\n",0,&value)!=0,"selector accepted for another model");
         require(parse("material_model=RIVASand\n",0,&value)==0 && value==1,
                 "original model without selector rejected");
         for (const char *retired : {"reversalType=2\n", "  reversalType = 1 # old\n",
                                    "reversalType\n", "reversalType 2\n",
-                                   "reversalType=2\nrivasand02_reversalType=2\n",
-                                   "rivasand02_reversalType=2\nreversalType=2\n"}) {
+                                   "reversalType=2\nrivasand02_reversaltype=2\n",
+                                   "rivasand02_reversaltype=2\nreversalType=2\n",
+                                   "rivasand02_reversalType=2\n",
+                                   "  rivasand02_reversalType = 1 # old\n",
+                                   "rivasand02_reversalType\n", "rivasand02_reversalType 2\n",
+                                   "rivasand02_reversalType=2\nrivasand02_reversaltype=2\n",
+                                   "rivasand02_reversaltype=2\nrivasand02_reversalType=2\n"}) {
             value=99;
             require(parse(retired,1,&value)!=0 && value==99,
                     "retired key accepted or silently defaulted");
         }
-        require(parse("# reversalType=2\nrivasand02_reversalType=2\n",1,&value)==0 && value==2,
+        require(parse("# reversalType=2\n# rivasand02_reversalType=2\nrivasand02_reversaltype=2\n",1,&value)==0 && value==2,
                 "comment mentioning retired key rejected");
         require(parse("reversalTypeExtra=2\n",1,&value)==0 && value==1,
                 "unrelated key matched retired name");
@@ -117,7 +122,7 @@ int main()
         require(riva_ib_checkpoint_revision(0)==8 &&
                 !riva_ib_checkpoint_compatible(0,sizeof(riva_ib_state_t),RIVA_IB_PARAMETER_SHA256,0,3),
                 "default/invalid checkpoint contract failed");
-        std::cout << "PASS: rivasand02_reversalType input, type-1 default, type-2 event counts, rejected selectors and restart isolation\n";
+        std::cout << "PASS: rivasand02_reversaltype input, type-1 default, type-2 event counts, rejected selectors and restart isolation\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;
     }
