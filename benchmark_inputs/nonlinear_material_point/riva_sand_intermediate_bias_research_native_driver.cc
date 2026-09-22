@@ -594,7 +594,7 @@ static void replay_case(const CaseDefinition &definition,
                         const fs::path &input_directory,
                         const fs::path &output_directory,
                         const std::vector<std::string> &header,
-                        bool legacy_reference)
+                        int reversal_type)
 {
     const fs::path input_path = input_directory / (std::string(definition.name) + ".csv");
     const fs::path output_path = output_directory / (std::string(definition.name) + ".csv");
@@ -635,11 +635,8 @@ static void replay_case(const CaseDefinition &definition,
                                      definition.name + " step " +
                                      std::to_string(step));
         riva_update_info_t info = {};
-        if (!(legacy_reference ?
-              riva_ib_update_material_reference_ex(&parameters, &material, deps,
-                  nsub, &state, nullptr, &info, 0) :
-              riva_ib_update_material(&parameters, &material, deps, nsub, &state,
-                  nullptr, &info)))
+        if (!riva_ib_update_material(&parameters, &material, deps, nsub, &state,
+                                    nullptr, &info, reversal_type))
             throw std::runtime_error(std::string("update failed for ") +
                                      definition.name + " step " +
                                      std::to_string(step));
@@ -654,11 +651,15 @@ static void replay_case(const CaseDefinition &definition,
 
 int main(int argc, char **argv)
 {
-    const bool legacy_reference = argc == 4 &&
-        std::string(argv[3]) == "--legacy-reversal-reference";
-    if (argc != 3 && !legacy_reference) {
+    int reversal_type=1;
+    const bool legacy_reference=argc==4 &&
+        std::string(argv[3])=="--legacy-reversal-reference";
+    const bool explicit_type=argc==5 && std::string(argv[3])=="--reversal-type" &&
+        (std::string(argv[4])=="1" || std::string(argv[4])=="2");
+    if (explicit_type) reversal_type=argv[4][0]-'0';
+    if (argc!=3 && !legacy_reference && !explicit_type) {
         std::cerr << "usage: " << argv[0]
-                  << " INPUT_PATH_DIR OUTPUT_DIR [--legacy-reversal-reference]\n";
+                  << " INPUT_PATH_DIR OUTPUT_DIR [--reversal-type 1|2]\n";
         return 2;
     }
     try {
@@ -671,7 +672,7 @@ int main(int argc, char **argv)
         const std::vector<std::string> header = output_header();
         for (const CaseDefinition &definition : kCases)
             replay_case(definition, input_directory, output_directory, header,
-                        legacy_reference);
+                        reversal_type);
     } catch (const std::exception &error) {
         std::cerr << "RIVASand02 replay failed: "
                   << error.what() << '\n';

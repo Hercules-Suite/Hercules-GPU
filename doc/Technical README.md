@@ -747,9 +747,18 @@ Nonlinear GPU execution (runtime environment):
   This adds one target-modulus double per element and one elastic-scale double
   per quadrature point; unrelated families allocate neither. Per-step updates
   load the cached scale but do not repeat the calibration. Checkpoints now
-  store the per-point scale and require marker 4 (original) or 6 (02).
-  Older checkpoints are incompatible: rerun initialization and retain the
-  same model, mesh and material inputs on restart.
+  store the per-point scale and require marker 4 (original), 8 (02 type 1),
+  or 7 (02 type 2). Both `RIVASand02` and `RIVASandCustom02` accept the
+  optional scalar `reversalType = 1` in `parameters.in`; omission also means
+  type 1. Type 1 compares adjacent valid increments. Set `reversalType = 2`
+  to retain the previous accumulated loading-branch rule. Detection occurs
+  once per host increment before substeps. Only the integers 1 and 2 are
+  accepted, and only for the two 02 names; it is not a material-row column.
+  The material-point test input accepts the same key. Existing marker-7
+  checkpoints require explicit `reversalType = 2`; cross-type restarts and
+  marker-6 or earlier 02 files are rejected. Retain the same model, mesh,
+  physical inputs and reversal type on restart. Original RIVA-Sand inputs
+  and checkpoints are unchanged.
 
   The material-point driver takes Dr [G0] or the twelve Custom values,
   without Vs_limit. Automatic mode additionally requires

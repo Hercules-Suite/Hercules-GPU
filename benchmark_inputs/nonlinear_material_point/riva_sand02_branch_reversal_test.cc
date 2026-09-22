@@ -1,7 +1,7 @@
 /* Loading-branch research regression; no OpenSees or CUDA runtime required.
  * Usage: executable OUTPUT_DIR
- * The field/material-point entry point must select the new reference. The
- * legacy entry point is used only to reproduce the diagnosed event loss.
+ * The field/material-point entry point explicitly selects type 2 here.
+ * Type 1 reproduces the diagnosed event loss on the mixed path.
  */
 #define RIVA_STANDALONE
 #include "../../quake/forward/nonlinear_riva_sand_intermediate_bias_research.h"
@@ -43,7 +43,7 @@ static bool restore(const Snapshot &saved,int custom,
                     riva_material_parameters_t &m,riva_ib_state_t &s)
 {
     if (!riva_ib_checkpoint_compatible(saved.revision,saved.state_bytes,
-                                      saved.parameter_hash,custom) ||
+                                      saved.parameter_hash,custom,2) ||
         !std::isfinite(saved.elastic_scale) || saved.elastic_scale<=0.0)
         return false;
     m.E_ref=saved.elastic_scale;
@@ -54,7 +54,7 @@ static bool restore(const Snapshot &saved,int custom,
 static void checkpoint(riva_material_parameters_t &m,riva_ib_state_t &s,int custom)
 {
     Snapshot saved={};
-    saved.revision=riva_ib_checkpoint_revision(custom);
+    saved.revision=riva_ib_checkpoint_revision(custom,2);
     saved.state_bytes=sizeof(s);
     std::memcpy(saved.parameter_hash,RIVA_IB_PARAMETER_SHA256,65);
     saved.elastic_scale=m.E_ref;
@@ -120,14 +120,14 @@ static History run(int steps,int nsub,bool mixed,bool branch,
         previous=gamma;
         const auto committed=s;
         riva_update_info_t info={};
-        const int ok=branch ? riva_ib_update_material(&p,&m,deps,nsub,&s,nullptr,&info) :
+        const int ok=branch ? riva_ib_update_material(&p,&m,deps,nsub,&s,nullptr,&info,2) :
             riva_ib_update_material_reference_ex(&p,&m,deps,nsub,&s,nullptr,&info,0);
         require(ok && info.accepted_substeps==nsub,"constitutive update failed");
         if (branch) {
             // Every accepted state must agree with a separately restored point.
             riva_update_info_t other={};
             require(riva_ib_update_material(&p,&restart_material,deps,nsub,
-                     &restarted,nullptr,&other) && same(s,restarted),"restart trajectory changed");
+                     &restarted,nullptr,&other,2) && same(s,restarted),"restart trajectory changed");
             if (i==steps/4-1 || i==steps/4 || info.reversal_registered || i==steps)
                 for (int custom : {0,1}) checkpoint(restart_material,restarted,custom);
             if (!mixed) {
@@ -141,13 +141,13 @@ static History run(int steps,int nsub,bool mixed,bool branch,
             if (i==steps/4) {
                 auto trial=committed;
                 require(riva_ib_update_material(&p,&m,riva_scale(deps,-1),nsub,
-                          &trial,nullptr,&other),"speculative update failed");
+                          &trial,nullptr,&other,2),"speculative update failed");
                 trial=committed;
-                require(riva_ib_update_material(&p,&m,deps,nsub,&trial,nullptr,&other)
+                require(riva_ib_update_material(&p,&m,deps,nsub,&trial,nullptr,&other,2)
                         && same(trial,s),"discarded trial changed accepted state");
                 auto failed=s;
                 tensor_t bad=deps; bad.xx=std::numeric_limits<double>::infinity();
-                require(!riva_ib_update_material(&p,&m,bad,nsub,&failed,nullptr,&other)
+                require(!riva_ib_update_material(&p,&m,bad,nsub,&failed,nullptr,&other,2)
                         && same(failed,s),"failed trial changed committed state");
             }
         }

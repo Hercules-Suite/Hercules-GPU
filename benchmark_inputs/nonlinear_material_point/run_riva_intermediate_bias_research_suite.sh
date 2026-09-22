@@ -77,22 +77,27 @@ echo "==> Compile RIVASand02 custom-interface state checks"
 "$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_custom_density_test.cc" \
   -o "$suite_tmp_dir/riva_sand02_custom_density_test"
 
-echo "==> Replay frozen oracle with the explicit historical reference"
-"$driver_bin" "$input_paths" "$native_output" --legacy-reversal-reference
+echo "==> Compile reversal selector/input/checkpoint checks"
+"$cxx" "${compile_flags[@]}" "$suite_dir/riva_sand02_reversal_selector_test.cc" \
+  -o "$suite_tmp_dir/riva_selector_test"
+"$suite_tmp_dir/riva_selector_test"
 
-echo "==> Replay the corrected default on all six input paths"
-"$driver_bin" "$input_paths" "$corrected_output"
+echo "==> Replay frozen oracle with default type 1"
+"$driver_bin" "$input_paths" "$native_output"
+
+echo "==> Replay explicit type 2 on all six input paths"
+"$driver_bin" "$input_paths" "$corrected_output" --reversal-type 2
 
 suite_status=0
 if [[ -n $corrected_verify ]]; then
-  echo "==> Verify corrected default against the branch-reversal oracle"
+  echo "==> Verify type 2 against the branch-reversal oracle"
   if ! python3 "$corrected_verify" \
       --native-output "$corrected_output" \
       --output "$suite_tmp_dir/corrected_reference"; then
     suite_status=1
   fi
 else
-  echo "==> Skip corrected-default oracle comparison (CORRECTED_VERIFY not provided)"
+  echo "==> Skip type-2 oracle comparison (CORRECTED_VERIFY not provided)"
 fi
 if ! "$suite_tmp_dir/riva_sand02_custom_test"; then
   suite_status=1
@@ -104,13 +109,13 @@ if ! python3 "$suite_dir/compare_riva_sand02_custom_density.py" \
     "$port_root" "$suite_tmp_dir/riva_sand02_custom_density_test"; then
   suite_status=1
 fi
-echo "==> Verify historical-reference output: core (not corrected-mode acceptance)"
+echo "==> Verify default type-1 output: core (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode core; then
   suite_status=1
 fi
 
-echo "==> Verify historical-reference output: full (not corrected-mode acceptance)"
+echo "==> Verify default type-1 output: full (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode full; then
   suite_status=1

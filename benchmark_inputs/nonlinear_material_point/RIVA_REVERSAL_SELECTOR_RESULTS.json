@@ -1,0 +1,100 @@
+{
+  "date": "2026-09-22",
+  "baseline_commit": "997565868a87feca2e1aad9f52c617ab4ee3e561",
+  "scope": "Input selection of existing RS02 reversal rules; no recalibration or new equation",
+  "default_reversalType": 1,
+  "accepted_reversalTypes": [
+    1,
+    2
+  ],
+  "checkpoint_markers": {
+    "1": 8,
+    "2": 7
+  },
+  "native_host_suite": "passed",
+  "reference_comparisons": {
+    "type1_frozen_oracle": "6/6 core and full",
+    "type2_branch_oracle": "6/6, all 236 columns"
+  },
+  "byte_identical_before_after": {
+    "1": {
+      "3484_intermediate_bias025.csv": {
+        "sha256": "2f40b9175cd5f596b23ea5d7a7a1ce71ab95e5b965e7fcc3cb18e6e8c2acec3e",
+        "rows": 485
+      },
+      "3484_intermediate_bias030.csv": {
+        "sha256": "f9ef62267c5fe4040d114555ddbea9412ba65d28a75506546930c975acb0f48c",
+        "rows": 204
+      },
+      "3484_zero_bias.csv": {
+        "sha256": "e7a1676ee1d795c1c7852ead3c35204fddadb2a9936ee28ec4b497be5a9199a9",
+        "rows": 145
+      },
+      "4666_dense_zero_bias.csv": {
+        "sha256": "7e7c3192b7d2501985015d6442fd19af178a39d8b1574797403ca3e9899f5835",
+        "rows": 369
+      },
+      "4666_loose_bias015.csv": {
+        "sha256": "4ac217ee21209463bd2ac5b7ddd482eeaa8767c456133903b1920f3fd45e80d6",
+        "rows": 331
+      },
+      "4666_loose_high_bias.csv": {
+        "sha256": "235690f75ace0ba49312c736369736b385f246db6669a11a929c9a5519790d66",
+        "rows": 293
+      }
+    },
+    "2": {
+      "3484_intermediate_bias025.csv": {
+        "sha256": "12b2bf17aaeb8b34071c94efcc66f83fa3c8b89fcae315e95d62a145a1b17dd9",
+        "rows": 485
+      },
+      "3484_intermediate_bias030.csv": {
+        "sha256": "421d8a541c3e5de1d636a581b2ca7169f2a68f446ae620bc5aae1aedaf18a797",
+        "rows": 204
+      },
+      "3484_zero_bias.csv": {
+        "sha256": "6b1ab0c8f4480a4e7965d8324ce0fdbd559ea2f17287fee33f2ef571a7782443",
+        "rows": 145
+      },
+      "4666_dense_zero_bias.csv": {
+        "sha256": "d99319fdcec2272a87dae1bd6afd034476f18f3740e11be76c830cbce96d9d5b",
+        "rows": 369
+      },
+      "4666_loose_bias015.csv": {
+        "sha256": "42850bab8bebee87b0bfc5302a5ff81bd017c17f218d0be1de4f94f7e572bfae",
+        "rows": 331
+      },
+      "4666_loose_high_bias.csv": {
+        "sha256": "151b2f55f5614afcb0dd80808c1d1c3660e8faf0de51fe58d4c6610b632b8f1c",
+        "rows": 293
+      }
+    }
+  },
+  "selector_contracts": {
+    "input_default_and_rejection": "passed",
+    "standard_and_custom_rows": "passed for types 1 and 2",
+    "substeps": [
+      1,
+      4,
+      16
+    ],
+    "cross_type_restart_rejected": true,
+    "same_type_restart_continuation": "passed"
+  },
+  "documentation": {
+    "locked_install": "passed",
+    "lint": "passed",
+    "typescript": "passed",
+    "build_and_tests": "33/33"
+  },
+  "cuda_mpi": "Not run; six fixtures generated per mode for target-system execution",
+  "source_sha256": {
+    "quake/forward/nonlinear.cc": "bde2746d9d5a5ae2f8977771623941e216d70b5ece0ba75d63374db2f79cbd0b",
+    "quake/forward/nonlinear_gpu.h": "07f6f652c181941c362e17d2a755e2f5ecbc30a2218952208451792b11e63ba5",
+    "quake/forward/nonlinear_riva_sand_input.h": "c422d5ca59a963fdaed9cee5ebb92949fba112ac87f9b9bd7ab26f039c33f059",
+    "quake/forward/nonlinear_riva_sand_intermediate_bias_research.h": "e8fa2206671b4540328252a471b55242287b7ad6e95c4c002d4d4ea7bd3ba69d",
+    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "77d82f36062e53199832125fb0399964b14f5c35f54401aec982a703819f5fb1",
+    "quake/forward/nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_material_point.cu": "86b16eb375547dc0f6493e2b39e50374f2e9d2afd9f1cb22e9f3858c4707b88c",
+    "benchmark_inputs/nonlinear_material_point/riva_sand02_reversal_selector_test.cc": "163acc09a39d02f485fd3deb1f2963b2f7a237eb50f2767b2fcacb75479db15e"
+  }
+}

@@ -5,8 +5,9 @@
 /* Native, allocation-free translation of the private intermediate-bias
  * RIVA-Sand research successor at OpenSees_RIVA commit 637d207e867b863d,
  * with the completed-half-cycle plastic gate from commit 5e4ebd30cb5f43b6.
- * This branch adds the loading-branch reversal research correction from
- * OpenSees_RIVA e97c12fbc. It does not import OpenSees BiasVolume/reversalLatch.
+ * Type 1 (default) uses the preceding valid increment. Opt-in type 2 uses
+ * the loading-branch reversal correction from OpenSees_RIVA e97c12fbc.
+ * Neither imports OpenSees BiasVolume/reversalLatch.
  *
  * This is deliberately a separate material.  It does not change the frozen
  * production RIVASand/RIVASandCustom kernel in nonlinear_riva_sand.h.  The
@@ -41,8 +42,17 @@
 #define RIVA_IB_REVERSAL_SOURCE_COMMIT \
     "e97c12fbcf3f4fff63ff9acd602fdb78af44630c"
 
-RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(int custom)
-{ (void)custom; return 7u; /* accumulated branch reference and per-point stiffness */ }
+RIVA_IB_HD static inline int riva_ib_reversal_type_valid(int reversal_type)
+{ return reversal_type==1 || reversal_type==2; }
+
+RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(
+    int custom,int reversal_type=1)
+{
+    (void)custom;
+    // Type 2 retains marker 7 and its byte-identical branch history.
+    // Type 1 gets a distinct marker; historical pre-selector files stay rejected.
+    return reversal_type==1 ? 8u : reversal_type==2 ? 7u : 0u;
+}
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
@@ -229,12 +239,14 @@ typedef struct riva_ib_state_t {
 } riva_ib_state_t;
 
 /* Shared by the device-checkpoint reader and host restart-contract tests.
- * Even though the byte count is unchanged, marker 6 stored a unit direction
- * in the six slots now holding accumulated loading-branch strain. */
+ * Direction and accumulated-branch slots have different meanings despite
+ * identical byte counts. Never continue one rule's history with the other. */
 RIVA_IB_HD static inline int riva_ib_checkpoint_compatible(
-    uint32_t revision,uint64_t state_bytes,const char *parameter_hash,int custom)
+    uint32_t revision,uint64_t state_bytes,const char *parameter_hash,int custom,
+    int reversal_type=1)
 {
-    if (revision!=riva_ib_checkpoint_revision(custom) ||
+    if (!riva_ib_reversal_type_valid(reversal_type) ||
+        revision!=riva_ib_checkpoint_revision(custom,reversal_type) ||
         state_bytes!=sizeof(riva_ib_state_t) || !parameter_hash) return 0;
     const char expected[]=RIVA_IB_PARAMETER_SHA256;
     for (unsigned int i=0;i<sizeof(expected);++i)
@@ -2336,8 +2348,8 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_host_outer_correction(
     return s;
 }
 
-// The legacy reference is retained solely for frozen-oracle replay tests.
-// Field and material-point adapters call riva_ib_update_material below.
+// Shared implementation of the two existing reference rules.
+// Field and material-point adapters call the checked public entry below.
 RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
     tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
@@ -2396,18 +2408,20 @@ RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
 RIVA_IB_HD static inline int riva_ib_update_material(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
     tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
-    riva_update_info_t *info)
+    riva_update_info_t *info,int32_t reversal_type=1)
 {
+    if (!riva_ib_reversal_type_valid(reversal_type)) return 0;
     return riva_ib_update_material_reference_ex(p,m,deps,nsub,state,stress_new,
-                                               info,1);
+                                               info,reversal_type==2);
 }
 
 RIVA_IB_HD static inline int riva_ib_update(
     const riva_ib_parameters_t *p,tensor_t deps,int32_t nsub,
-    riva_ib_state_t *state,tensor_t *stress_new,riva_update_info_t *info)
+    riva_ib_state_t *state,tensor_t *stress_new,riva_update_info_t *info,
+    int32_t reversal_type=1)
 {
     const riva_material_parameters_t m=riva_reference_material_parameters(&p->base);
-    return riva_ib_update_material(p,&m,deps,nsub,state,stress_new,info);
+    return riva_ib_update_material(p,&m,deps,nsub,state,stress_new,info,reversal_type);
 }
 
 RIVA_IB_HD static inline int riva_ib_state_values(

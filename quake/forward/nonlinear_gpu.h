@@ -33,6 +33,7 @@ typedef struct nonlinear_gpu_config_t {
     noyesflag_t tension_cutoff;
     int32_t geostatic_final_step;
     int32_t no_substeps;
+    int32_t riva_reversal_type; /* RIVASand02/Custom02: 1 (default) or 2 */
     nl_md_integration_scheme_t md_integration_scheme;
     nl_md_forward_euler_substeps_t md_forward_euler_substeps;
     nl_md_recovery_mode_t md_recovery_mode;

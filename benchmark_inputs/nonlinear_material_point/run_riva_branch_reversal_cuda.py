@@ -12,7 +12,7 @@ import shlex
 import subprocess
 
 
-def fixture(steps, custom, prefix):
+def fixture(steps, custom, prefix, reversal_type=2):
     material = "RIVASandCustom02" if custom else "RIVASand02"
     row = "0.90 900"
     if custom:
@@ -24,6 +24,7 @@ def fixture(steps, custom, prefix):
     history.append(history[-1].copy())  # Exact zero-increment state check.
     text = f"""# Loading-branch research; two smooth shear cycles with vertical strain.
 material_model = {material}
+reversalType = {reversal_type}
 material_point_delta_time_sec = {1/steps:.17g}
 material_point_steps = {len(history)}
 no_substeps = 4
@@ -55,6 +56,7 @@ def main():
     parser.add_argument("--psolve", type=Path)
     parser.add_argument("--launcher", default="", help="Optional launcher, e.g. 'mpirun -np 1'")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--reversal-type", type=int, choices=(1, 2), default=2)
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -65,7 +67,7 @@ def main():
             name = f"branch_{'custom02' if custom else '02'}_n{steps}"
             prefixes.append(name)
             path = output / (name + ".in")
-            path.write_text(fixture(steps, custom, name))
+            path.write_text(fixture(steps, custom, name, args.reversal_type))
             if args.psolve:
                 command = shlex.split(args.launcher) + [str(args.psolve.resolve()),
                            "--nonlinear-material-point", str(path)]
@@ -73,8 +75,9 @@ def main():
                                         stderr=subprocess.STDOUT, text=True, timeout=600)
                 (output / (name + ".log")).write_text(result.stdout)
                 for marker in ("PASS: CPU/GPU material-point histories agree",
-                               "Validated CPU/GPU registered reversals: 4",
-                               "kernel 4, checkpoint 7"):
+                               f"Validated CPU/GPU registered reversals: {4 if args.reversal_type==2 or steps==128 else 0}",
+                               f"kernel 4, checkpoint {7 if args.reversal_type==2 else 8}",
+                               f"reversalType={args.reversal_type}"):
                     if result.returncode != 0 or marker not in result.stdout:
                         raise RuntimeError(f"{name} failed or used an old executable:\n{result.stdout[-4000:]}")
                 for backend in ("cpu", "gpu"):
@@ -90,7 +93,7 @@ def main():
                     output / f"{prefixes[1]}.{backend}.csv").read_bytes(), "Standard02/Custom02 mismatch"
     (output / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
     print("PASS: CUDA branch-reference parity and event counts" if args.psolve else
-          "Generated six CUDA fixtures; CUDA execution remains pending")
+          f"Generated six type-{args.reversal_type} CUDA fixtures; CUDA execution remains pending")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,37 @@
 #include <ctype.h>
 #include "nonlinear_riva_sand.h"
 
+/* Strict optional scalar reader shared by field and material-point inputs.
+ * A missing selector means type 1; an explicit selector is valid for 02 only.
+ * Reject duplicate keys and numeric prefixes such as 1.5 or 2junk. */
+static inline int riva_read_reversal_type(FILE *fp, const char *key,
+    int is_02, int32_t *out)
+{
+    if (!fp || !key || !out) return -1;
+    rewind(fp);
+    char line[4096];
+    int found=0, selected=1;
+    while (fgets(line,sizeof(line),fp)) {
+        if (!strchr(line,'\n') && !feof(fp)) return -1;
+        char *comment=strchr(line,'#'); if (comment) *comment='\0';
+        char *s=line; while (isspace((unsigned char)*s)) ++s;
+        const size_t n=strlen(key);
+        if (strncmp(s,key,n) || (s[n] && !isspace((unsigned char)s[n]) && s[n]!='='))
+            continue;
+        if (found++ || !is_02) return -1;
+        s+=n; while (isspace((unsigned char)*s)) ++s;
+        if (*s++!='=') return -1;
+        while (isspace((unsigned char)*s)) ++s;
+        if (*s!='1' && *s!='2') return -1;
+        selected=*s++-'0';
+        while (isspace((unsigned char)*s)) ++s;
+        if (*s) return -1;
+    }
+    if (ferror(fp)) return -1;
+    *out=selected;
+    return 0;
+}
+
 static inline int riva_read_material_rows(FILE *fp, const char *key,
     int rows, int custom, int with_vs, const riva_parameters_t *p, double *out)
 {

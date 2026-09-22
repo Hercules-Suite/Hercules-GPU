@@ -142,6 +142,7 @@ static double                theBackboneErrorTol     = 1E-05;
 static double                theGeostaticCushionT = 0;
 static int                   theGeostaticFinalStep;
 static int                   theNoSubsteps=1000;
+static int32_t               theRivaReversalType=1;
 static nl_md_integration_scheme_t theMdIntegrationScheme =
                                 NL_MD_INTEGRATION_MODIFIED_EULER;
 static nl_md_forward_euler_substeps_t theMdForwardEulerSubsteps =
@@ -736,7 +737,7 @@ void nonlinear_init( int32_t     myID,
                      double      theEndT )
 {
     double  double_message[11];
-    int     int_message[15];
+    int     int_message[16];
 
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
@@ -776,9 +777,10 @@ void nonlinear_init( int32_t     myID,
     int_message[12] = (int)theMdRecoveryMode;
     int_message[13] = (int)theMdIntegrationScheme;
     int_message[14] = (int)theMdForwardEulerSubsteps;
+    int_message[15] = theRivaReversalType;
 
     MPI_Bcast(double_message, 11, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    15, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    16, MPI_INT,    0, comm_solver);
 
     theGeostaticLoadingT  = double_message[0];
     theGeostaticCushionT  = double_message[1];
@@ -809,6 +811,7 @@ void nonlinear_init( int32_t     myID,
         (nl_md_integration_scheme_t)int_message[13];
     theMdForwardEulerSubsteps  =
         (nl_md_forward_euler_substeps_t)int_message[14];
+    theRivaReversalType        = int_message[15];
 
     /* allocate table of properties for all other PEs */
 
@@ -895,6 +898,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
 {
     FILE    *fp;
     int32_t  properties_count, no_substeps;
+    int32_t  riva_reversal_type=1;
     int      row;
     double   geostatic_loading_t, geostatic_cushion_t, errorTol, backbone_errorTol,
             *auxiliar, stff_dmp, stff_dmp_freq;
@@ -1060,6 +1064,13 @@ int32_t nonlinear_initparameters ( const char *parametersin,
         return -1;
     }
 
+    if (riva_read_reversal_type(fp, "reversalType",
+            MATERIAL_MODEL_IS_RIVA_SAND_02(materialmodel), &riva_reversal_type) != 0) {
+        fprintf(stderr, "reversalType must be 1 or 2 and is only valid for "
+                        "RIVASand02 or RIVASandCustom02 (default: 1)\n");
+        return -1;
+    }
+
     if (parse_md_integration_scheme(
             md_integration_name, &md_integration_scheme) != 0) {
         fprintf(stderr, "Unknown manzari_dafalias_integration_scheme value "
@@ -1208,6 +1219,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theSurfaceGroundwaterTable = surf_groundwater_table;
     theTensionCutoff           = tensioncutoff;
     theNoSubsteps              = no_substeps;
+    theRivaReversalType        = riva_reversal_type;
     theMdIntegrationScheme     = md_integration_scheme;
     theMdForwardEulerSubsteps  = md_forward_euler_substeps;
     theMdRecoveryMode          = md_recovery_mode;
@@ -1468,10 +1480,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)
                     ? RIVA_IB_PARAMETER_SHA256 : RIVA_PARAMETER_SHA256);
         if (MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)) {
-            fprintf(stderr, "%s: loading-branch reversal research, kernel %u, "
-                    "checkpoint %u (older 02 checkpoints must be rerun)\n",
-                    RIVA_SAND_MODEL_NAME(theMaterialModel),RIVA_IB_KERNEL_REVISION,
-                    riva_ib_checkpoint_revision(theMaterialModel==RIVA_SAND_CUSTOM_02));
+            fprintf(stderr, "%s: reversalType=%d (%s), kernel %u, checkpoint %u\n",
+                    RIVA_SAND_MODEL_NAME(theMaterialModel),theRivaReversalType,
+                    theRivaReversalType==1 ? "previous increment" : "accumulated loading branch",
+                    RIVA_IB_KERNEL_REVISION,
+                    riva_ib_checkpoint_revision(theMaterialModel==RIVA_SAND_CUSTOM_02,
+                                                theRivaReversalType));
         }
     }
 
@@ -2605,6 +2619,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         gpuConfig.tension_cutoff = theTensionCutoff;
         gpuConfig.geostatic_final_step = theGeostaticFinalStep;
         gpuConfig.no_substeps = theNoSubsteps;
+        gpuConfig.riva_reversal_type = theRivaReversalType;
         gpuConfig.md_integration_scheme = theMdIntegrationScheme;
         gpuConfig.md_forward_euler_substeps = theMdForwardEulerSubsteps;
         gpuConfig.md_recovery_mode = theMdRecoveryMode;
@@ -6184,6 +6199,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     int result = 1;
     int steps = 0;
     int no_substeps = 0;
+    int32_t riva_reversal_type = 1;
     int initial_array_count = 0;
     int material_constant_count = MATERIAL_POINT_CONSTANT_COUNT;
     double dt = 0.0;
@@ -6274,6 +6290,13 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
         fprintf(stderr, "Unknown material-point model %s\n", material_name);
         goto cleanup;
     }
+    if (riva_read_reversal_type(fp, "reversalType",
+            MATERIAL_MODEL_IS_RIVA_SAND_02(material_model), &riva_reversal_type) != 0) {
+        fprintf(stderr, "reversalType must be 1 or 2 and is only valid for "
+                        "RIVASand02 or RIVASandCustom02 (default: 1)\n");
+        goto cleanup;
+    }
+
     if (parse_md_integration_scheme(
             md_integration_name, &md_integration_scheme) != 0) {
         fprintf(stderr, "Unknown manzari_dafalias_integration_scheme value "
@@ -6654,6 +6677,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     config.tension_cutoff = tension_cutoff;
     config.geostatic_final_step = -1;
     config.no_substeps = no_substeps;
+    config.riva_reversal_type = riva_reversal_type;
     config.md_integration_scheme = md_integration_scheme;
     config.md_forward_euler_substeps = md_forward_euler_substeps;
     config.md_recovery_mode = md_recovery_mode;
@@ -7087,9 +7111,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                    zero_increment_checks == 1 ? "" : "s");
         }
     } else if (MATERIAL_MODEL_IS_RIVA_SAND_02(material_model)) {
-        printf("%s: loading-branch reversal research, kernel %u, checkpoint %u\n",
-               RIVA_SAND_MODEL_NAME(material_model),RIVA_IB_KERNEL_REVISION,
-               riva_ib_checkpoint_revision(material_model==RIVA_SAND_CUSTOM_02));
+        printf("%s: reversalType=%d (%s), kernel %u, checkpoint %u\n",
+               RIVA_SAND_MODEL_NAME(material_model),riva_reversal_type,
+               riva_reversal_type==1 ? "previous increment" : "accumulated loading branch",
+               RIVA_IB_KERNEL_REVISION,
+               riva_ib_checkpoint_revision(material_model==RIVA_SAND_CUSTOM_02,
+                                           riva_reversal_type));
         printf("%s controls: %s, %d reference parameters %s, "
                "%d-value full state, %d fixed substep%s per "
                "host increment\n",

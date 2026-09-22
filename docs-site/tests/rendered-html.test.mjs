@@ -276,8 +276,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 231);
-  assert.equal(documented.length, 231, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 232);
+  assert.equal(documented.length, 232, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -302,7 +302,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
     "output_debug_file",
     "output_planes",
   ]);
-  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bparsedarray2?)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
+  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bparsedarray2?|\briva_read_reversal_type)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
   for (const filename of parserFiles) {
     const source = readFileSync(`${sourceRoot}${filename}`, "utf8");
     for (const match of source.matchAll(parserPattern)) parsed.add(match[1]);
@@ -371,7 +371,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /RIVASand02/);
   assert.match(physics, /RIVASandCustom02/);
   assert.match(physics, /Custom02 uses its own e_max\/e_min for both the initial and reference relative densities/);
-  assert.match(physics, /marker 6 for both 02 names/);
+  assert.match(physics, /Marker 8 identifies type-1 history and marker 7 identifies type-2 history/);
   assert.match(physics, /retired RIVASandIntermediateBiasResearch input is not restored/);
   assert.match(physics, /not an alias for, replacement for, or retuning of production RIVASand/);
   assert.match(physics, /BrickUP remains the sole owner of pore pressure/);
@@ -1112,6 +1112,18 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(gpuHeader, /NL_RIVA_STATE_VALUE_COUNT 93/);
   assert.match(gpuHeader, /NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138/);
   assert.match(researchCore, /#define RIVA_IB_KERNEL_REVISION 4u/);
+  assert.equal((cpu.match(/riva_read_reversal_type\(fp, "reversalType"/g) ?? []).length, 2);
+  assert.match(cpu, /theRivaReversalType=1/);
+  assert.match(cpu, /int_message\[15\] = theRivaReversalType/);
+  assert.match(cpu, /MPI_Bcast\(int_message,\s*16,/);
+  assert.match(cpu, /theRivaReversalType\s*= int_message\[15\]/);
+  assert.match(cpu, /gpuConfig\.riva_reversal_type = theRivaReversalType/);
+  assert.match(cpu, /config\.riva_reversal_type = riva_reversal_type/);
+  assert.match(gpuHeader, /int32_t riva_reversal_type/);
+  assert.match(gpu, /&riva_info,cfg\.riva_reversal_type/);
+  assert.match(researchMaterialPointUnit, /&state, &stress, &info, config->riva_reversal_type/);
+  assert.match(researchCore, /riva_update_info_t \*info,int32_t reversal_type=1/);
+
   assert.match(researchCore, /#define RIVA_IB_PARAMETER_COUNT 249/);
   assert.match(researchCore, /#define RIVA_IB_LOGICAL_STATE_COUNT 63/);
   assert.match(researchCore, /#define RIVA_IB_STATE_VALUE_COUNT 138/);
@@ -1126,9 +1138,9 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(researchCore, /target=riva_ib_mul_rn\(target,plastic_gate\)/);
   assert.match(researchCore, /s->ep_half_last\/p->bias_reversible_volume_ep_ref/);
   assert.match(researchCore, /#define RIVA_IB_CUSTOM_KERNEL_REVISION 4u/);
-  assert.match(researchCore, /return 7u; \/\* accumulated branch reference and per-point stiffness/);
-  assert.match(gpu, /header\.riva_kernel_revision = riva_ib_checkpoint_revision\(\s*g_config\.material_model == RIVA_SAND_CUSTOM_02\)/);
-  assert.match(gpu, /!riva_ib_checkpoint_compatible\(header\.riva_kernel_revision,[\s\S]*?g_config\.material_model == RIVA_SAND_CUSTOM_02\)/);
+  assert.match(researchCore, /return reversal_type==1 \? 8u : reversal_type==2 \? 7u : 0u;/);
+  assert.match(gpu, /header\.riva_kernel_revision = riva_ib_checkpoint_revision\(\s*g_config\.material_model == RIVA_SAND_CUSTOM_02,\s*g_config\.riva_reversal_type\)/);
+  assert.match(gpu, /!riva_ib_checkpoint_compatible\(header\.riva_kernel_revision,[\s\S]*?g_config\.material_model == RIVA_SAND_CUSTOM_02,\s*g_config\.riva_reversal_type\)/);
   assert.match(researchCore, /riva_ib_reference_relative_density\(\s*const riva_ib_parameters_t \*p,const riva_material_parameters_t \*m\)/);
   assert.match(researchCore, /if \(m->e_max==p->base\.e_max && m->e_min==p->base\.e_min\)\s*return p->reference_relative_density_value/);
   assert.equal((researchCore.match(/p->reference_relative_density_value/g) ?? []).length,
@@ -1608,7 +1620,7 @@ test("preserves explicit G0 and caches velocity-derived RIVA-Sand stiffness", ()
   assert.match(gpu, /riva_ib_fit_initial_shear\(riva_parameters,&point_material/);
   assert.equal((gpu.match(/point_material\.E_ref=state\.riva_E_refs\[point\]/g) ?? []).length, 2);
   assert.match(core, /RIVA_G0_CHECKPOINT_REVISION 4u/);
-  assert.match(research, /return 7u;/);
+  assert.match(research, /reversal_type==2 \? 7u/);
   for (const verb of ["read", "write"])
     assert.match(gpu, new RegExp(`nonlinear_checkpoint_${verb}_device\\(\\s*fp,g_nl\\.riva_E_refs`));
 });
