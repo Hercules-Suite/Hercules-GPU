@@ -1,10 +1,11 @@
 # RIVA-Sand intermediate-bias research validation
 
-**Current research branch:** see [the loading-branch reversal port](RIVA_BRANCH_REVERSAL_VALIDATION.md)
-for kernel revision 4 and checkpoint marker 7. Both current 02 input names use
-that corrected reference. The record below describes the preceding revision-3
-handoff and its historical verification; its frozen oracle remains available
-through the offline replay driver's explicit legacy-reference option.
+**Current interface:** see the [rivasand02_reversaltype selector](RIVA_REVERSAL_SELECTOR.md)
+for default type 1 and opt-in type 2, with checkpoint markers 8 and 7.
+The [loading-branch port](RIVA_BRANCH_REVERSAL_VALIDATION.md) records type 2.
+Both current 02 input names support these choices. The record below describes
+the preceding revision-3 handoff and its historical verification; its frozen
+oracle now checks the default type-1 replay.
 
 This record applies to `RIVASand02` and `RIVASandCustom02`, translated
 from OpenSees_RIVA commit

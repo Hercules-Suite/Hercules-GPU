@@ -48,23 +48,25 @@ static riva_ib_state_t initialize(const riva_ib_parameters_t &p,
 
 static void advance(const riva_ib_parameters_t &p,
                     const riva_material_parameters_t &m,
-                    riva_ib_state_t &s, int step, int nsub)
+                    riva_ib_state_t &s, int step, int nsub, int reversal_type)
 {
     const double angle = 2.0*3.14159265358979323846/32.0;
     const double shear = 0.002*(std::sin((step+1)*angle)-std::sin(step*angle));
     const tensor_t deps = {0.0, 0.0, 0.0, shear, 0.0, 0.0};
     tensor_t stress = s.base.stress;
     riva_update_info_t info = {};
-    require(riva_ib_update_material(&p, &m, deps, nsub, &s, &stress, &info),
+    require(riva_ib_update_material(&p, &m, deps, nsub, &s, &stress, &info, reversal_type),
             "custom update failed");
 }
 
 int main()
 {
     try {
-        require(riva_ib_checkpoint_revision(0) == 7u &&
-                riva_ib_checkpoint_revision(1) == 7u,
-                "branch reference must reject old 02 checkpoints");
+        require(riva_ib_checkpoint_revision(0) == 8u &&
+                riva_ib_checkpoint_revision(1) == 8u &&
+                riva_ib_checkpoint_revision(0,2) == 7u &&
+                riva_ib_checkpoint_revision(1,2) == 7u,
+                "standard/custom reversal checkpoint markers differ");
         const riva_ib_parameters_t p = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t frozen =
             riva_reference_material_parameters(&p.base);
@@ -82,7 +84,7 @@ int main()
             &riva_material_parameters_t::R, &riva_material_parameters_t::n_G};
         for (auto field : fields)
             require(reference.*field == frozen.*field, "reference value drift");
-        for (const int nsub : {1, 4, 16}) {
+        for (int reversal_type : {1,2}) for (const int nsub : {1, 4, 16}) {
             for (auto field : fields) {
                 auto custom = reference;
                 custom.*field *= 1.05;
@@ -90,10 +92,10 @@ int main()
                 auto c = initialize(p, custom), restarted = c;
                 bool changed = !same(a, c);
                 for (int step = 0; step < 160; ++step) {
-                    advance(p, custom, c, step, nsub);
-                    advance(p, frozen, a, step, nsub);
-                    advance(p, reference, b, step, nsub);
-                    advance(p, custom, restarted, step, nsub);
+                    advance(p, custom, c, step, nsub, reversal_type);
+                    advance(p, frozen, a, step, nsub, reversal_type);
+                    advance(p, reference, b, step, nsub, reversal_type);
+                    advance(p, custom, restarted, step, nsub, reversal_type);
                     require(same(a, b), "default/custom reference mismatch");
                     require(same(c, restarted), "custom point/restart mismatch");
                     changed |= !same(a, c);
@@ -113,7 +115,7 @@ int main()
                 "out-of-range shakedown anchor accepted");
         std::cout << "PASS: RIVASand02/RIVASandCustom02 exact reference equality, "
                      "all eleven physical inputs active, per-material isolation, "
-                     "custom byte restart, and bounds (1/4/16 substeps)\n";
+                     "custom byte restart, and bounds (types 1/2, 1/4/16 substeps)\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

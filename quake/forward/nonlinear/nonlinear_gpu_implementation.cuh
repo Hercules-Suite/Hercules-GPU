@@ -3845,7 +3845,7 @@ __global__ static void kernel_nonlinear_update_force(
                     ok = riva_ib_update_material(
                         riva_parameters,riva_material,increment,
                         cfg.no_substeps,riva_state,&full_effective_stress,
-                        &riva_info);
+                        &riva_info,cfg.riva_reversal_type);
                 }
             }
             /* The research kernel, like production RIVA-Sand, owns only
@@ -4203,6 +4203,12 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         (config->md_integration_scheme == NL_MD_INTEGRATION_FORWARD_EULER &&
          config->md_recovery_mode != NL_MD_RECOVERY_STRICT))
         return -1;
+
+    if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
+        !riva_ib_reversal_type_valid(config->riva_reversal_type)) {
+        fprintf(stderr, "RIVASand02 rivasand02_reversaltype must be 1 or 2\n");
+        return -1;
+    }
 
     const int local_stats_interval =
         nonlinear_gpu_workload_interval(myID);
@@ -5520,7 +5526,8 @@ int nonlinear_gpu_checkpoint_write(
                 NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0) {
         header.riva_state_bytes = (uint32_t)sizeof(riva_ib_state_t);
         header.riva_kernel_revision = riva_ib_checkpoint_revision(
-            g_config.material_model == RIVA_SAND_CUSTOM_02);
+            g_config.material_model == RIVA_SAND_CUSTOM_02,
+            g_config.riva_reversal_type);
         memcpy(header.riva_parameter_sha256, RIVA_IB_PARAMETER_SHA256,
                sizeof(RIVA_IB_PARAMETER_SHA256));
     }
@@ -5670,7 +5677,8 @@ int nonlinear_gpu_checkpoint_read(
           NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0 &&
          !riva_ib_checkpoint_compatible(header.riva_kernel_revision,
               header.riva_state_bytes,header.riva_parameter_sha256,
-              g_config.material_model == RIVA_SAND_CUSTOM_02))) {
+              g_config.material_model == RIVA_SAND_CUSTOM_02,
+              g_config.riva_reversal_type))) {
         if (myID == 0) {
             const char *riva_name =
                 (local_flags &
