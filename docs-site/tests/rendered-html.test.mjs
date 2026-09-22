@@ -1112,7 +1112,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(gpuHeader, /NL_RIVA_STATE_VALUE_COUNT 93/);
   assert.match(gpuHeader, /NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138/);
   assert.match(researchCore, /#define RIVA_IB_KERNEL_REVISION 4u/);
-  assert.equal((cpu.match(/riva_read_reversal_type\(fp, "reversalType"/g) ?? []).length, 2);
+  assert.equal((cpu.match(/riva_read_reversal_type\(fp, "rivasand02_reversalType"/g) ?? []).length, 2);
   assert.match(cpu, /theRivaReversalType=1/);
   assert.match(cpu, /int_message\[15\] = theRivaReversalType/);
   assert.match(cpu, /MPI_Bcast\(int_message,\s*16,/);

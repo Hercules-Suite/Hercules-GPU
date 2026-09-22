@@ -11,7 +11,8 @@
 
 /* Strict optional scalar reader shared by field and material-point inputs.
  * A missing selector means type 1; an explicit selector is valid for 02 only.
- * Reject duplicate keys and numeric prefixes such as 1.5 or 2junk. */
+ * Reject duplicate keys and numeric prefixes such as 1.5 or 2junk.
+ * Reject the retired generic key rather than silently selecting the default. */
 static inline int riva_read_reversal_type(FILE *fp, const char *key,
     int is_02, int32_t *out)
 {
@@ -23,6 +24,11 @@ static inline int riva_read_reversal_type(FILE *fp, const char *key,
         if (!strchr(line,'\n') && !feof(fp)) return -1;
         char *comment=strchr(line,'#'); if (comment) *comment='\0';
         char *s=line; while (isspace((unsigned char)*s)) ++s;
+        const char *retired="reversalType";
+        const size_t retired_n=strlen(retired);
+        if (!strncmp(s,retired,retired_n) &&
+            (!s[retired_n] || isspace((unsigned char)s[retired_n]) || s[retired_n]=='='))
+            return -1;
         const size_t n=strlen(key);
         if (strncmp(s,key,n) || (s[n] && !isspace((unsigned char)s[n]) && s[n]!='='))
             continue;

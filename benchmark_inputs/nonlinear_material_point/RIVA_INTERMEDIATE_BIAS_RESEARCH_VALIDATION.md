@@ -1,6 +1,6 @@
 # RIVA-Sand intermediate-bias research validation
 
-**Current interface:** see the [reversalType selector](RIVA_REVERSAL_SELECTOR.md)
+**Current interface:** see the [rivasand02_reversalType selector](RIVA_REVERSAL_SELECTOR.md)
 for default type 1 and opt-in type 2, with checkpoint markers 8 and 7.
 The [loading-branch port](RIVA_BRANCH_REVERSAL_VALIDATION.md) records type 2.
 Both current 02 input names support these choices. The record below describes

@@ -1,7 +1,7 @@
 # Hercules 02 loading-branch reversal research
 
-**Current interface:** the [reversalType selector](RIVA_REVERSAL_SELECTOR.md)
-defaults to type 1. Set `reversalType = 2` to reproduce this historical
+**Current interface:** the [rivasand02_reversalType selector](RIVA_REVERSAL_SELECTOR.md)
+defaults to type 1. Set `rivasand02_reversalType = 2` to reproduce this historical
 branch-reference study or continue its marker-7 checkpoints. The validation
 record below describes the original type-2 port.
 

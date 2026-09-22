@@ -2,11 +2,6 @@
   "date": "2026-09-22",
   "baseline_commit": "997565868a87feca2e1aad9f52c617ab4ee3e561",
   "scope": "Input selection of existing RS02 reversal rules; no recalibration or new equation",
-  "default_reversalType": 1,
-  "accepted_reversalTypes": [
-    1,
-    2
-  ],
   "checkpoint_markers": {
     "1": 8,
     "2": 7
@@ -89,12 +84,26 @@
   },
   "cuda_mpi": "Not run; six fixtures generated per mode for target-system execution",
   "source_sha256": {
-    "quake/forward/nonlinear.cc": "bde2746d9d5a5ae2f8977771623941e216d70b5ece0ba75d63374db2f79cbd0b",
+    "quake/forward/nonlinear.cc": "9c2d2626ee7dc0e3a8c6b4761cee0c9de67e0756ec51806cd46f897796faa448",
     "quake/forward/nonlinear_gpu.h": "07f6f652c181941c362e17d2a755e2f5ecbc30a2218952208451792b11e63ba5",
-    "quake/forward/nonlinear_riva_sand_input.h": "c422d5ca59a963fdaed9cee5ebb92949fba112ac87f9b9bd7ab26f039c33f059",
+    "quake/forward/nonlinear_riva_sand_input.h": "d7a60e82540e4144399f214166bb506100c348777ec17450762bf7286682f8ef",
     "quake/forward/nonlinear_riva_sand_intermediate_bias_research.h": "e8fa2206671b4540328252a471b55242287b7ad6e95c4c002d4d4ea7bd3ba69d",
-    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "77d82f36062e53199832125fb0399964b14f5c35f54401aec982a703819f5fb1",
+    "quake/forward/nonlinear/nonlinear_gpu_implementation.cuh": "24ea64942d536b403230b54c7b8ba941cc0170ba439cf591007297b37da86f5f",
     "quake/forward/nonlinear/nonlinear_gpu_riva_sand_intermediate_bias_material_point.cu": "86b16eb375547dc0f6493e2b39e50374f2e9d2afd9f1cb22e9f3858c4707b88c",
-    "benchmark_inputs/nonlinear_material_point/riva_sand02_reversal_selector_test.cc": "163acc09a39d02f485fd3deb1f2963b2f7a237eb50f2767b2fcacb75479db15e"
+    "benchmark_inputs/nonlinear_material_point/riva_sand02_reversal_selector_test.cc": "2adf87258de0ba3f4912aa0ab3945fdbf2e3bdb7391ce2777ce928f3848e058a"
+  },
+  "input_key": "rivasand02_reversalType",
+  "default": 1,
+  "accepted_values": [
+    1,
+    2
+  ],
+  "input_rename_validation": {
+    "previous_selector_commit": "36af020ce7bbdd56675717a06fe9805d2e22103e",
+    "scope": "Public input key and diagnostics renamed; retired key rejected without silent fallback",
+    "host_selector_test": "passed, including defaults, old-key rejection, both modes and restart isolation",
+    "documentation": "locked offline install, lint, TypeScript, production build and 33/33 tests passed",
+    "generated_fixtures": "12/12 use rivasand02_reversalType with the requested value; CUDA not executed",
+    "historical_evidence": "Full native suite and byte-identical comparisons above were run for the previous selector commit; constitutive kernel and native replay driver are unchanged by this rename"
   }
 }
