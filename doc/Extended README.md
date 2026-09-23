@@ -44,7 +44,7 @@ versions; consolidating these documents does not validate new combinations.
 
 Hercules domains must be compatible with the dyadic octree grid. Define
 
-$$
+```math
 \begin{aligned}
 L_{\mathrm{north}} &= \mathtt{region\_length\_north\_m}, \\
 L_{\mathrm{east}}  &= \mathtt{region\_length\_east\_m}, \\
@@ -52,40 +52,40 @@ L_{\mathrm{depth}} &= \mathtt{region\_depth\_deep\_m}
                      -\mathtt{region\_depth\_shallow\_m}, \\
 L_{\max} &= \max(L_{\mathrm{north}},L_{\mathrm{east}},L_{\mathrm{depth}}).
 \end{aligned}
-$$
+```
 
-At a common octree level $N$, every physical extent $D$ must be an integer
-multiple of $\Delta_N=L_{\max}/2^N$. Equivalently,
+At a common octree level $`N`$, every physical extent $`D`$ must be an integer
+multiple of $`\Delta_N=L_{\max}/2^N`$. Equivalently,
 
-$$
+```math
 D=m\frac{L_{\max}}{2^N},\qquad m\in\mathbb{Z},\quad 0<D\le L_{\max},
-$$
+```
 
 or
 
-$$
+```math
 D=\sum_{i=0}^{N}a_i\frac{L_{\max}}{2^i},\qquad a_i\in\{0,1\}.
-$$
+```
 
 Use exact whole-metre extents with the current Octor path, which reduces the
 physical dimensions using integer metre values.
 
-For $L_{\max}=\mathtt{region\_length\_east\_m}=1{,}000{,}000\,\mathrm{m}$,
-the dyadic sequence begins $1{,}000{,}000$, $500{,}000$, $250{,}000$,
-$125{,}000$, $62{,}500$, and $31{,}250\,\mathrm{m}$. Thus
-$\mathtt{region\_length\_north\_m}=750{,}000\,\mathrm{m}$ is compatible
-because $750{,}000=500{,}000+250{,}000$, and a depth thickness of
-$187{,}500\,\mathrm{m}$ is compatible because
-$187{,}500=125{,}000+62{,}500$. If
-$\mathtt{region\_depth\_shallow\_m}=10{,}000\,\mathrm{m}$, the corresponding
+For $`L_{\max}=\mathtt{region\_length\_east\_m}=1{,}000{,}000\,\mathrm{m}`$,
+the dyadic sequence begins $`1{,}000{,}000`$, $`500{,}000`$, $`250{,}000`$,
+$`125{,}000`$, $`62{,}500`$, and $`31{,}250\,\mathrm{m}`$. Thus
+$`\mathtt{region\_length\_north\_m}=750{,}000\,\mathrm{m}`$ is compatible
+because $`750{,}000=500{,}000+250{,}000`$, and a depth thickness of
+$`187{,}500\,\mathrm{m}`$ is compatible because
+$`187{,}500=125{,}000+62{,}500`$. If
+$`\mathtt{region\_depth\_shallow\_m}=10{,}000\,\mathrm{m}`$, the corresponding
 bottom coordinate is
-$\mathtt{region\_depth\_deep\_m}=197{,}500\,\mathrm{m}$.
+$`\mathtt{region\_depth\_deep\_m}=197{,}500\,\mathrm{m}`$.
 
 For topographic meshes, choose `maximum_octant_level` from the wavelength
-target. Let $V_{S,\min}^{\mathrm{model}}$ be the smallest shear velocity in
-the active solid material model. Choose the smallest integer $N$ satisfying
+target. Let $`V_{S,\min}^{\mathrm{model}}`$ be the smallest shear velocity in
+the active solid material model. Choose the smallest integer $`N`$ satisfying
 
-$$
+```math
 \frac{
 \max\!\left(
 \mathtt{region\_length\_north\_m},
@@ -101,17 +101,17 @@ $$
 \mathtt{simulation\_wave\_max\_freq\_hz}\,
 \mathtt{simulation\_node\_per\_wavelength}
 },
-$$
+```
 
-then set $\mathtt{maximum\_octant\_level}=N$. The accepted input range is
+then set $`\mathtt{maximum\_octant\_level}=N`$. The accepted input range is
 0 through 30. For example, with a maximum extent of
-$1{,}000{,}000\,\mathrm{m}$, $V_{S,\min}^{\mathrm{model}}=500\,\mathrm{m/s}$,
-$\mathtt{simulation\_shear\_velocity\_min}=400\,\mathrm{m/s}$,
-$\mathtt{simulation\_wave\_max\_freq\_hz}=2\,\mathrm{Hz}$, and
-$\mathtt{simulation\_node\_per\_wavelength}=8$, the wavelength target is
-$31.25\,\mathrm{m}$. Level 14 gives $61.035\,\mathrm{m}$, while level 15
-gives $30.518\,\mathrm{m}$, so the smallest acceptable value is
-$\mathtt{maximum\_octant\_level}=15$.
+$`1{,}000{,}000\,\mathrm{m}`$, $`V_{S,\min}^{\mathrm{model}}=500\,\mathrm{m/s}`$,
+$`\mathtt{simulation\_shear\_velocity\_min}=400\,\mathrm{m/s}`$,
+$`\mathtt{simulation\_wave\_max\_freq\_hz}=2\,\mathrm{Hz}`$, and
+$`\mathtt{simulation\_node\_per\_wavelength}=8`$, the wavelength target is
+$`31.25\,\mathrm{m}`$. Level 14 gives $`61.035\,\mathrm{m}`$, while level 15
+gives $`30.518\,\mathrm{m}`$, so the smallest acceptable value is
+$`\mathtt{maximum\_octant\_level}=15`$.
 This explicit parameter is required only with `include_topography=yes`.
 Acoustic or other feature-specific refinement rules can be more restrictive;
 the chosen topography cap must not prevent the finest active rule.
