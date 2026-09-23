@@ -780,8 +780,7 @@ Notes:
   store the per-point scale and require marker 4 (original), 8 (02 type 1),
   or 7 (02 type 2). Both `RIVASand02` and `RIVASandCustom02` accept the
   optional scalar `rivasand02_reversaltype = 1` in `parameters.in`; omission also means
-  type 1. The former `reversalType` and `rivasand02_reversalType` keys are
-  rejected; rename either while preserving its value. Type 1 compares adjacent valid increments. Set `rivasand02_reversaltype = 2`
+  type 1. Type 1 compares adjacent valid increments. Set `rivasand02_reversaltype = 2`
   to retain the previous accumulated loading-branch rule. Detection occurs
   once per host increment before substeps. Only the integers 1 and 2 are
   accepted, and only for the two 02 names; it is not a material-row column.
@@ -1634,12 +1633,7 @@ results are specific to the recorded configuration and implementation.
 	`type_of_damping`. For BKT-family runs (`bkt`, `bkt2`, `bkt3`,
 	`bkt3f`), this is the supported policy: the interior uses BKT damping,
 	while PML elements use native elastic stiffness plus the elastic CPML
-	correction. The previous experimental BKT-in-PML path was removed
-	because stretching the BKT memory variables inside CPML overdamped
-	large heterogeneous runs to numerical zero. Therefore `bkt`, `bkt2`,
-	`bkt3`, and `bkt3f` are not valid values for
-	`cpml_pml_material_damping`; use `none` with BKT-family
-	`type_of_damping`.
+	correction.
 
 	`rayleigh` enables the Rayleigh material-damping CPML path and is valid
 	only with `type_of_damping=rayleigh`. If `type_of_damping=rayleigh`,
@@ -2049,45 +2043,9 @@ are found within `base_force_tolerance_m`, source generation aborts clearly.
 
 ## Additional derivations and historical results
 
-This section retains explanations and benchmark details from the older
-Extended README that were abbreviated or absent in the former Technical
-README. Current input descriptions above govern new runs. The
-[complete pre-consolidation Extended README](https://github.com/zwyll/Hercules_GPU/blob/777e6d5160ce1dc5608db7fdde8a4b20eae0a70c/doc/Extended%20README.md) remains available
-for exact historical wording and experimental context.
-
-### Parameter comparison and retired names
-
-The pre-consolidation comparison found no currently documented
-`parameters.in` keys present only in Extended, and no Extended-only runtime
-environment controls. The only additional input names were these three
-experimental interface-filter settings. None is read by the current parser;
-they are not aliases for supported settings.
-
-| Retired input name | Former experiment |
-| --- | --- |
-| `acoustic_interface_filter` | Enabled an in-loop exponential-moving-average filter; formerly default `no`. |
-| `acoustic_interface_filter_alpha` | EMA coefficient in `filtered = old + alpha*(source-old)`; formerly `0.15`. |
-| `acoustic_interface_filter_strength` | Blend `source += strength*(filtered-source)`; formerly `1.0`. |
-
-The old report found the filter destabilizing: in the tested lossless
-flat-water case, `alpha=0.15` and `strength=1.0` gave roughly 25 seconds of
-bounded response followed by exponential growth, with an approximately
-1.5-second e-folding time. It attributed the failure to phase lag introduced
-inside the explicit fluid–solid feedback loop. This is preserved as an
-experimental observation, not an available solver option.
-
-`acoustic_interface_face_filter` is a current, different control: it selects
-which interface faces participate (`all`, `bottom_only`, or `bathymetry`).
-`acoustic_interface_projection` selects the interface projection. Neither
-implements that removed temporal filter.
-
-The older `cpml_pml_material_damping=bkt` advice is also obsolete. The current
-parser accepts `none` or `rayleigh`; BKT-family interiors use elastic CPML
-with `none`. The experimental stretching of BKT memory inside PML was removed
-after large heterogeneous runs were overdamped. Historical stability claims
-for that experiment do not establish the current policy. Rayleigh remains
-conditional on `type_of_damping=rayleigh`; omitting the CPML material-damping
-key in that combination selects `rayleigh` automatically.
+The following sections explain the current operators and preserve
+case-specific benchmark records. Current input descriptions above govern new
+runs; historical measurements are labeled with their implementation scope.
 
 ### CPML coefficient and operator details
 
@@ -2144,12 +2102,7 @@ higher modes. `reduced` uses the standalone reduced operator. The independent
 overridden. These choices share the coefficient and divergence-side pipeline.
 
 Membership and profiles use centroids: the first layer samples roughly
-`xi=h/2`, which can leave a bounded interface residual. The older comparison
-of commit `4a75279` shifted samples to the inner face and used
-`active_L=L-h`. It reported about 4% lower vertical L2 error and 7% lower
-vertical late-coda misfit, but a radial regression at 12/16 km as grazing
-absorption decreased. That alternate profile was not adopted. Its suggested
-compensated variant remains a historical proposal, not an input option.
+`xi=h/2`, which can leave a bounded interface residual.
 
 ### VT and BKT operator history
 

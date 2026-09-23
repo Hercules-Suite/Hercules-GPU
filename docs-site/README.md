@@ -39,5 +39,6 @@ The repository's [Technical README](../doc/Technical%20README.md) is the concise
 operational guide and variable index. Put lengthy engineering explanations,
 examples, numerical derivations, and implementation/validation notes in
 [Extended README](../doc/Extended%20README.md), keeping its current input
-descriptions synchronized with the site and parser. Clearly label retired
-controls and historical experiments; do not present them as current settings.
+descriptions synchronized with the site and parser. Omit retired or unused
+controls from both references. Label historical benchmark results with their
+implementation scope.

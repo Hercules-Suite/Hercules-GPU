@@ -59,15 +59,14 @@ Use SI units, solver X north, Y east, and Z/depth positive downward.
   newer key is absent.
 - CPML defaults to `cpml_pml_material_damping=none` for BKT-family interiors.
   `rayleigh` is the only supported material-damping option inside the PML and
-  requires matching interior damping. Older `bkt`-in-PML guidance is obsolete.
+  requires matching interior damping.
   Check [current CPML behavior](Extended%20README.md#absorbing-boundaries-and-cpml).
 
 ## Input-variable index
 
-These are the current `parameters.in` names discussed in either README before
-consolidation, retained here so shortening this file does not hide existing
-controls. This is an index, not a complete case template. Required/conditional
-status, defaults, units, ranges, and interactions are in the
+This index covers the current `parameters.in` controls discussed in the
+Extended README. Required/conditional status, defaults, units, ranges, and
+interactions are in the
 [full parameter catalog](../docs-site/app/docs/parameter-reference.ts) and the
 [Extended README](Extended%20README.md).
 
@@ -161,20 +160,6 @@ for defaults, supported combinations, and performance implications.
   `HERCULES_ADJUST_DIST_OMP`, `HERCULES_ALLOW_MULTI_RANK_PER_GPU`, `HERCULES_FORCE_GENERIC_DAMPING`,
   `HERCULES_FULL_CLEAR_OMP`, `HERCULES_REPRO_MODE`, `HERCULES_SPARSE_CLEAR_MODE`,
   `HERCULES_SPARSE_UPLOAD_MODE`, `HERCULES_SRC_DEBUG`, `HERCULES_TOPO_FORCE_MODE`.
-
-## Variables found only in the older Extended README
-
-No supported `parameters.in` key or runtime environment control was missing
-from the former Technical README. Three older input names were present only
-in Extended; all are absent from the current parser:
-
-- `acoustic_interface_filter`
-- `acoustic_interface_filter_alpha`
-- `acoustic_interface_filter_strength`
-
-They are recorded as **retired experimental controls**, not usable settings.
-The current `acoustic_interface_face_filter` selects faces and is not the old
-temporal filter. See the [comparison and history](Extended%20README.md#parameter-comparison-and-retired-names).
 
 ## Output and validation
 
