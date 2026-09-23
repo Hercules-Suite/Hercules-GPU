@@ -9,10 +9,10 @@ studies.
 ## Documentation
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.liling-dpim.chatgpt.site) — installation, input parameters, source models, running, output, and validation
-- [Technical README](doc/Technical%20README.md) — actively maintained detailed solver controls, runtime settings, performance notes, and development history moved from the former root README
+- [Technical README](doc/Technical%20README.md) — concise build/run guidance and input/runtime variable index
+- [Extended README](doc/Extended%20README.md) — comprehensive solver controls, formulations, examples, implementation details, and historical validation notes
 - [Plane velocity animations](doc/plane_velocity_animations.md) — rendering plane output, manual geometry and timing, MPI affinity, and GMT troubleshooting
 - [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, and output readers
-- [Legacy Extended README](doc/Extended%20README.md) — recovered historical reference retained separately from the current technical documentation
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 - [`docs-site/`](docs-site/README.md) — source code for the documentation website
 
@@ -108,3 +108,5 @@ Changes to parsers, input formats, source models, output formats, or benchmark
 workflows should update `docs-site/` in the same pull request. The documentation
 workflow builds the site and audits the documented `parameters.in` keys against
 the current parser sources.
+Keep detailed engineering documentation in `doc/Extended README.md` and the
+operational summary and variable index in `doc/Technical README.md`.
