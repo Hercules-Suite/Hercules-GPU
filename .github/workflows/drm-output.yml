@@ -31,6 +31,10 @@ jobs:
           c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm-points-test
           /tmp/drm-points-test
       - name: Check real MPI-IO ordering and batching
+        # Hosted runners do not expose usable RDMA devices. Keep this small
+        # host-buffer MPI-IO regression on TCP/self, independent of RDMA.
+        env:
+          UCX_TLS: tcp,self
         run: |
           mpicxx.mpich -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/mpi_writer_test.cc -o /tmp/drm-mpi-test
           mpirun.mpich -np 1 /tmp/drm-mpi-test /tmp/drm-one.bin
