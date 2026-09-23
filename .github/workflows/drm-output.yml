@@ -1,0 +1,38 @@
+name: DRM flat output
+
+on:
+  pull_request:
+    paths:
+      - "quake/forward/drm_output_*.h"
+      - "quake/forward/io_drm.*"
+      - "benchmark_inputs/drm_flat_output/**"
+      - ".github/workflows/drm-output.yml"
+  push:
+    branches: [main]
+    paths:
+      - "quake/forward/drm_output_*.h"
+      - "quake/forward/io_drm.*"
+      - "benchmark_inputs/drm_flat_output/**"
+      - ".github/workflows/drm-output.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  geometry-and-mpi-io:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev
+      - name: Check point parsing and generated geometry
+        run: |
+          c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm-points-test
+          /tmp/drm-points-test
+      - name: Check real MPI-IO ordering and batching
+        run: |
+          mpicxx.mpich -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/mpi_writer_test.cc -o /tmp/drm-mpi-test
+          mpirun.mpich -np 1 /tmp/drm-mpi-test /tmp/drm-one.bin
+          mpirun.mpich -np 4 /tmp/drm-mpi-test /tmp/drm-four.bin
+          cmp /tmp/drm-one.bin /tmp/drm-four.bin

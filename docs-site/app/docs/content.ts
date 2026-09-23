@@ -1811,6 +1811,7 @@ if __name__ == "__main__":
           rows: [
             ["Stations", "station.N; station_mediums.txt", "ASCII time histories and station ownership/material metadata"],
             ["Planes", "planedisplacements.N", "Raw float64 displacement snapshots on a regular plane grid"],
+            ["DRM point recorder", "drm_output_file", "One raw float64 displacement file for a point list or generated inner/outer box surfaces"],
             ["Selected mesh", "mesh_coordinates.RANK; mesh_data.RANK", "Binary coordinates and material properties for a Cartesian subdomain"],
             ["Checkpoints", "checkpoint.out0; checkpoint.out1; checkpoint.in", "Binary rotating solver states and restart input"],
             ["Monitor", "monitor_file, default monitor.txt", "Configuration, execution-path, timing, and diagnostic record"],
@@ -1871,6 +1872,42 @@ if __name__ == "__main__":
         codeLabel: "Python — script/read_planes.py",
         code: "# Runnable version from the repository root:\n# python3 script/read_planes.py output/planes/planedisplacements.0 --nx 101 --ny 81 --dt 0.02\n\nimport numpy as np\n\nn_strike = 101\nn_dip = 81\nprint_rate = 20\nsimulation_dt = 0.001\n\nraw = np.fromfile(\"output/planes/planedisplacements.0\", dtype=np.float64)\nvalues_per_snapshot = n_strike * n_dip * 3\nif raw.size % values_per_snapshot:\n    raise ValueError(\"file size does not match the configured plane grid\")\n\nu = raw.reshape(-1, n_strike, n_dip, 3)\ntime = np.arange(u.shape[0]) * print_rate * simulation_dt\nvertical = u[..., 2]\nprint(u.shape, time[-1], np.abs(vertical).max())",
         note: "reconstruct_acoustic_plane_displacements=yes reconstructs motion at scalar-acoustic plane points; elastic points continue to use the elastic displacement field in the same file.",
+      },
+      {
+        id: "drm-flat-output",
+        title: "Record a DRM box in one binary file",
+        paragraphs: [
+          "The independent recorder in quake/forward/io_drm.cc writes one headerless native-float64 file with shape [snapshot, point, XYZ]. Values are displacement in metres in solver X/north, Y/east, Z/down coordinates. It creates no station files, coordinate sidecars, or per-rank DRM files. Other outputs remain controlled by their own settings.",
+          "Set drm_output_file and drm_print_rate. Supply drm_points_file to use an existing latitude, longitude, depth list; input row order is preserved, including duplicate rows. The file accepts whitespace or comma separators, an optional latitude longitude depth header, blank lines, and # comments. Depth is nonnegative metres relative to the surface, with the same building/topography shifts and geographic conversion used by stations. A geodetic point list is not shifted by drm_offset_x/y.",
+          "Every point must have exactly one owning solid element inside the domain; missing, multiply owned, or scalar-acoustic points stop setup. The recorder samples the solid displacement field, including the skeleton in poroelastic elements. It uses the existing plane GPU interpolation kernel and collective MPI-IO on solver ranks, independent of the plane backend and I/O pool. It downloads only packed XYZ results at requested output steps and introduces no new field exchange.",
+          "drm_output_batch_size defaults to 16 snapshots per collective write. A partial final batch is flushed on normal completion. Set 1 to write every snapshot. The selected path, point count, sample interval, ordering, and physical interpretation are reported at setup. This recorder does not refine the mesh: closely spaced samples interpolate the existing finite-element solution.",
+        ],
+        codeLabel: "parameters.in — preserve the supplied point order",
+        code: "implement_drm        = no\ndrm_output_file      = output/drm_displacements.bin\ndrm_points_file      = input/drm_points_geodetic_1m.csv\ndrm_print_rate       = 20\ndrm_output_batch_size = 16\n\n# drm_points_geodetic_1m.csv may contain:\n# latitude longitude depth\n# 0.225629686430 0.089373315130 0.000000\n# 0.225629722044 0.089373329143 1.000000",
+        note: "Paths are relative to the run working directory; use a complete absolute path when needed (no ~ expansion). Each run truncates drm_output_file. For a checkpoint restart, choose a new file and retain the first saved step: the first multiple of drm_print_rate at or after the restart step. No timestamps or coordinates are embedded in the binary. CUDA/MPI solver comparisons are required before treating a new physics/backend combination as validated.",
+      },
+      {
+        id: "drm-generated-box",
+        title: "Generate inner and outer DRM sampling surfaces",
+        paragraphs: [
+          "Omit drm_points_file to reuse drm_boundary, drm_edgesize, drm_offset_x, and drm_offset_y. The boundary contains min_x min_y max_x max_y depth for the inner open-top box. Offsets translate X and Y into the simulation domain. drm_edgesize is both sampling spacing and shell thickness: the outer surface extends one spacing outward on each horizontal side and one spacing below the inner bottom. Both surfaces include four walls and the bottom, with no top lid.",
+          "Widths and depth must be positive integer multiples of drm_edgesize. Ordering is inner surface first, then outer; within each surface, X is the outer loop, Y is the middle loop, and Z increases fastest. Wall columns contain every depth including the bottom; other columns contain only the bottom point. This avoids duplicate edges/corners within each surface. For nx, ny, nz intervals on an inner box, its point count is (2*nx + 2*ny)*nz + (nx+1)*(ny+1); use nx+2, ny+2, nz+1 for the outer count. The example below produces 60,810 points and does not imply equivalence to a supplied CSV.",
+          "The older three-stage DRM workflow remains in quake/forward/drm.cc: implement_drm=yes and which_drm_part=part0 generate mesh-node coordinates, part1 records response, and part2 replays effective forces. It uses drm_directory and per-rank files. The independent flat file is an observation format and cannot be fed directly to the existing part2 reader; it requires neither which_drm_part nor part1_delta_t/part1_simulation_time when implement_drm=no.",
+        ],
+        codeLabel: "parameters.in — illustrative generated box (choose dimensions for your case)",
+        code: "implement_drm        = no\ndrm_output_file      = output/drm_displacements.bin\ndrm_print_rate       = 20\ndrm_edgesize         = 1.0\ndrm_offset_x         = 1000.0\ndrm_offset_y         = 2000.0\ndrm_boundary =\n  0.0 0.0 100.0 100.0 49.0\n# No drm_points_file: inner depth 49 m, outer depth 50 m.",
+        note: "Choose offsets so the outer surface also lies inside the domain. Topography adds the local surface elevation at each point, just as it does for station depths; in that case these are surface-relative sampling surfaces rather than a fixed horizontal-bottom Cartesian box. Sampling density is not mesh resolution.",
+      },
+      {
+        id: "read-drm",
+        title: "Read flat DRM displacements",
+        paragraphs: [
+          "Retain the original CSV or generated geometry and its ordering. For a 51,009-point input file, each snapshot occupies 1,224,216 bytes. The sample interval is drm_print_rate multiplied by simulation_delta_time_sec. A fresh run starts with the step-zero displacement snapshot. Read completed files; an in-progress file may be missing its buffered tail.",
+          "script/read_drm.py checks complete snapshots and finite values and reports peak XYZ displacement using only the Python standard library. The NumPy example below provides a memory-mapped array for processing large files without loading all snapshots into memory.",
+        ],
+        codeLabel: "Python — native byte order matching the writer",
+        code: "# python3 script/read_drm.py output/drm_displacements.bin --points 51009 --dt 0.02\nfrom pathlib import Path\nimport numpy as np\n\npath = Path(\"output/drm_displacements.bin\")\nnpoints = 51009\ndt_out = 20 * 0.001  # use your drm_print_rate and simulation_delta_time_sec\nframe_bytes = npoints * 3 * 8\nnt, remainder = divmod(path.stat().st_size, frame_bytes)\nif remainder or nt == 0:\n    raise ValueError(\"incomplete DRM snapshot or wrong point count\")\nu = np.memmap(path, dtype=np.float64, mode=\"r\", shape=(nt, npoints, 3))\ntime = np.arange(nt) * dt_out\n# u[:, i, :] is the XYZ displacement history of input row i.\nprint(u.shape, time[-1])",
+        note: "For restarted segments, add first_saved_step * simulation_delta_time_sec to time, or supply that value with --first-time to the reader. Displacement is the only stored field; velocity, acceleration, pressure, and stress are not included.",
       },
       {
         id: "animate-planes",

@@ -276,8 +276,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 232);
-  assert.equal(documented.length, 232, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 235);
+  assert.equal(documented.length, 235, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -288,6 +288,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
     "nonlinear.cc",
     "buildings.cc",
     "drm.cc",
+    "io_drm.cc",
     "drm_planewaves.cc",
     "meshformatlab.cc",
     "io_planes.cc",
@@ -1369,7 +1370,7 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /np\.loadtxt/);
   assert.match(html, /np\.fromfile/);
   assert.match(html, /raw\.reshape/);
-  for (const name of ["read_stations", "read_planes", "read_mesh"]) {
+  for (const name of ["read_stations", "read_planes", "read_drm", "read_mesh"]) {
     assert.ok(html.includes(`script/${name}.py`));
   }
   assert.match(html, /script\/animations_mpi\.py/);
@@ -1407,6 +1408,50 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /Ru remains nan during the ramp/);
   assert.match(html, /committed vertical skeleton stress/);
   assert.match(html, /output_displacement_file/);
+});
+
+test("documents the independent single-file DRM recorder and binary contract", async () => {
+  const response = await render("/docs/output-files");
+  const html = await response.text();
+  for (const key of ["drm_output_file", "drm_points_file", "drm_output_batch_size",
+    "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y"]) {
+    assert.ok(html.includes(key), `missing DRM configuration key ${key}`);
+  }
+  assert.match(html, /input row order is preserved/i);
+  assert.match(html, /including duplicate rows/);
+  assert.match(html, /inner surface first, then outer/);
+  assert.match(html, /60,810/);
+  assert.match(html, /1,224,216 bytes/);
+  assert.match(html, /cannot be fed directly to the existing part2 reader/);
+  assert.match(html, /Each run truncates drm_output_file/);
+  assert.match(html, /scalar-acoustic points stop setup/);
+  assert.match(html, /does not refine the mesh/);
+  assert.match(html, /shape=\(nt, npoints, 3\)/);
+});
+
+test("reads complete flat DRM snapshots and rejects incomplete or nonfinite data", () => {
+  const reader = fileURLToPath(new URL("../../script/read_drm.py", import.meta.url));
+  if (!existsSync(reader)) return;
+  const dir = mkdtempSync(join(tmpdir(), "hercules-drm-reader-"));
+  try {
+    const file = join(dir, "drm.bin");
+    const payload = new Float64Array([0, 0, 0, 1, 2, 3, 4, -5, 6, 7, 8, -9]);
+    writeFileSync(file, Buffer.from(payload.buffer));
+    const run = () => spawnSync("python3", [reader, file, "--points", "2", "--dt", "0.02",
+      "--first-time", "0.1"], { encoding: "utf8" });
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /layout=\(2, 2, 3\)/);
+    assert.match(result.stdout, /time range=0.1\.\.0.12 s/);
+    assert.match(result.stdout, /7.0 8.0 9.0/);
+    writeFileSync(file, Buffer.from(payload.buffer).subarray(0, 95));
+    assert.match(run().stderr, /complete 48-byte snapshots/);
+    payload[11] = Number.NaN;
+    writeFileSync(file, Buffer.from(payload.buffer));
+    assert.match(run().stderr, /snapshot 1, point 1 contains non-finite/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("reports the conventional BrickUP station pore-pressure ratio", () => {

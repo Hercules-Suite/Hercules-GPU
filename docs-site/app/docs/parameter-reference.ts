@@ -399,22 +399,25 @@ const parameterPages: ParameterPage[] = [
   {
     slug: "parameters-drm-waves",
     title: "DRM, incident-wave, and half-space parameters",
-    summary: "Domain Reduction Method stages, analytic or recorded incident plane waves, and the homogeneous half-space override.",
+    summary: "Single-file DRM displacement recording, Domain Reduction Method stages, incident plane waves, and the homogeneous half-space override.",
     sections: [
       {
         id: "drm",
         title: "Domain Reduction Method",
         parameters: [
           p("implement_drm", "Optional", "Yes/no", "Default: no", "Enable the three-part Domain Reduction Method workflow."),
+          p("drm_output_file", "Optional", "File path (maximum 240 bytes)", "Default: disabled (key absent)", "Enable an independent headerless native-float64 [snapshot][point][XYZ] displacement file. Parent directories are created; an existing file is truncated, including on restart. Works with implement_drm=no and does not refine the mesh or create replay files. Solid motion only (poroelastic skeleton where applicable); acoustic points are rejected. Paths resolve from the run working directory; shell tilde expansion is not performed."),
+          p("drm_points_file", "Conditional", "File path (maximum 255 bytes)", "Optional when drm_output_file is set", "Read latitude longitude depth rows in degrees/degrees/metres, separated by whitespace or commas, with an optional latitude longitude depth header. Blank lines and # comments are accepted. Finite coordinates, latitude in [-90,90], longitude in [-180,180], and nonnegative depth are required. Preserve row order, including duplicates. Uses station geographic conversion and surface-relative depths. When present, box geometry controls are ignored by the recorder; when absent, generate the box from drm_boundary, drm_edgesize and drm_offset_x/y."),
+          p("drm_output_batch_size", "Optional", "Positive integer snapshots", "Default: 16", "Snapshots buffered per collective MPI-IO write by the independent recorder. Set 1 for each snapshot to be written immediately; a partial final batch is flushed at completion. Local points × 3 × batch size must fit an MPI int count. No effect without drm_output_file."),
           p("drm_directory", "Conditional", "Directory path", "Required by the DRM module", "Root directory containing part0, part1, and part2 DRM data. Although the main parser initializes a conventional path, the DRM module currently requires the key to be present."),
           p("which_drm_part", "Conditional", "String", "part0 | part1 | part2", "Select coordinate generation, response recording, or effective-force replay."),
-          p("drm_edgesize", "Conditional", "Float (m)", "Required when implement_drm=yes", "Element edge size prescribed for the DRM box."),
-          p("drm_offset_x", "Conditional", "Float (m)", "Required when implement_drm=yes", "DRM-box offset from the domain origin along local X/north."),
-          p("drm_offset_y", "Conditional", "Float (m)", "Required when implement_drm=yes", "DRM-box offset from the domain origin along local Y/east."),
-          p("drm_print_rate", "Conditional", "Integer time steps", "Required when implement_drm=yes", "DRM output sampling interval."),
+          p("drm_edgesize", "Conditional", "Float (m)", "Required for legacy DRM or generated flat-output boxes", "Element edge size prescribed by legacy DRM. For the independent generated recorder, positive sampling spacing and inner-to-outer shell thickness; widths and depth must be integer multiples. Does not change mesh resolution."),
+          p("drm_offset_x", "Conditional", "Float (m)", "Required for legacy DRM or generated flat-output boxes", "Finite offset along solver X/north. The flat recorder adds it to drm_boundary X coordinates; ignored by the recorder when drm_points_file is supplied. Legacy part0 adds it when exporting coordinates and part1 removes it on export."),
+          p("drm_offset_y", "Conditional", "Float (m)", "Required for legacy DRM or generated flat-output boxes", "Finite offset along solver Y/east. The flat recorder adds it to drm_boundary Y coordinates; ignored by the recorder when drm_points_file is supplied. Legacy part0 adds it when exporting coordinates and part1 removes it on export."),
+          p("drm_print_rate", "Conditional", "Integer time steps", "Required for legacy DRM or drm_output_file", "DRM output sampling interval; must be positive for the flat recorder. Snapshots are taken before advancing steps divisible by this rate, starting at step 0 in a fresh run; interval is this rate times simulation_delta_time_sec."),
           p("part1_delta_t", "Conditional", "Float (s)", "Required when implement_drm=yes", "Time step used by the part1 data that part2 will read; normally matches the part1 simulation delta time."),
           p("part1_simulation_time", "Conditional", "Float (s)", "Required when implement_drm=yes", "Duration of the part1 data set that part2 will read."),
-          p("drm_boundary", "Conditional", "List of 5 floats (m)", "min_x min_y max_x max_y depth", "DRM boundary dimensions relative to the DRM offset box."),
+          p("drm_boundary", "Conditional", "List of 5 floats (m)", "Required for legacy DRM or generated flat-output boxes", "min_x min_y max_x max_y depth. For the flat recorder, the inner open-top box has positive widths and depth; the outer surface expands both horizontal bounds by drm_edgesize and extends the bottom by drm_edgesize. Four walls and bottom on each surface; no top lid. All points must lie inside the solver domain and have exactly one solid owner. Generated order: inner then outer, X outer loop, Y middle, Z fastest, without duplicate edges/corners within a surface. Ignored by the recorder with drm_points_file."),
         ],
       },
       {

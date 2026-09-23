@@ -12,6 +12,95 @@ Some general description of the core components in this directory are given as f
 | `systemdef.mk` | generic system-specific compile and linker settings. Tailored by entries in user.mk
 | `common.mk`    | system-independent settings
 
+## Single-file DRM displacement recorder
+
+The independent recorder is implemented in `quake/forward/io_drm.cc`.
+The existing `quake/forward/drm.cc` implements the separate three-part
+coordinate-generation / response-recording / effective-force-replay workflow.
+To record an arbitrary DRM point list without thousands of station files:
+
+```ini
+implement_drm         = no
+drm_output_file       = output/drm_displacements.bin
+drm_points_file       = input/drm_points_geodetic_1m.csv
+drm_print_rate        = 20
+drm_output_batch_size = 16
+```
+
+The point file contains `latitude longitude depth` in degrees/degrees/metres,
+with whitespace or commas as separators, an optional header with those exact
+names, blank lines, and optional `#` comments. Rows, including duplicates,
+retain their input order. Geographic conversion and nonnegative depth below
+the local surface follow station conventions (including building/topography
+shifts). Box offsets do not apply to geodetic point files. Paths resolve from
+the run directory; `~` is not expanded. The output path is limited to 240
+bytes and its parent directories are created; the input path to 255 bytes.
+
+Alternatively omit `drm_points_file` and supply `drm_edgesize`, `drm_offset_x`,
+`drm_offset_y`, and `drm_boundary = min_x min_y max_x max_y depth` (the five
+values belong on the following line, as for other parsed arrays). The boundary
+defines the inner open-top box; offsets translate X/north and Y/east. Spacing
+must be positive, and widths/depth must be positive integer multiples. The
+outer surface expands the horizontal bounds and bottom outward by one
+spacing. Both surfaces have four walls and a bottom, no top lid. Terrain shifts
+each sample by the local surface elevation, so a terrain-following generated
+bottom is not a horizontal Cartesian plane.
+
+Generated order is inner then outer, X outer loop, Y middle, Z fastest. For
+each (X,Y) column on a wall, all depths through the bottom are emitted; other
+columns emit only the bottom. Shared edges/corners occur once per surface.
+An inner box with nx, ny, nz intervals has
+`(2*nx+2*ny)*nz + (nx+1)*(ny+1)` points; the outer count uses nx+2, ny+2, nz+1.
+Keep this geometry or the original CSV to identify output rows. Generation is
+sampling only and does not refine the mesh or require sampling nodes to
+coincide with mesh nodes.
+
+The only output is headerless **native-endian float64** displacement in metres,
+ordered `[snapshot][point][XYZ]`, X north, Y east, Z down. For 51,009 points a
+snapshot occupies 1,224,216 bytes. Steps divisible by `drm_print_rate` are saved
+before the step advances, including step zero in a fresh run. Read a completed
+file with:
+
+```sh
+python3 script/read_drm.py output/drm_displacements.bin --points 51009 --dt 0.02
+```
+
+Use the actual `drm_print_rate * simulation_delta_time_sec` for `--dt`. In
+NumPy, reshape the native float64 payload to `(-1, npoints, 3)` or use a
+read-only `np.memmap` of that shape after checking file size. No timestamps,
+velocities, accelerations, or coordinate headers are embedded. Every run
+**truncates** the chosen output, including restarts: use a different path for
+a restart segment and pass `--first-time` equal to the first saved step times
+the simulation timestep. That step is the first multiple of `drm_print_rate`
+at or after the restart step.
+
+Setup validates finite/in-domain coordinates and exactly one owning solid
+element per point across `comm_solver`. Scalar-acoustic points are rejected;
+poroelastic points record skeleton displacement. Sampling reuses the existing
+plane GPU kernel (trilinear hex or supported topography tetrahedron), followed
+by a compact result download only on requested output steps. Precomputed MPI
+file views place each rank's samples directly in global point order, including
+ranks with no samples. There are no new field exchanges or full-field host
+copies, so this does not change the host or CUDA-aware synchronization paths.
+The plane output backend and plane I/O pool do not select the DRM writer.
+Batching defaults to 16 snapshots, requires `3 * local_points * batch_size`
+to fit an MPI int count, and uses 24 bytes per local point per buffered
+snapshot. Set `drm_output_batch_size=1` for writes at every saved step; the
+last partial batch is flushed before solver timing reductions. Monitor output
+states point ordering, interval, backend, and solid-motion assumptions.
+
+This file is an observation format, **not an input to the existing DRM part2
+reader**. The legacy `implement_drm=yes` workflow, mesh refinement, replay
+timesteps, and per-rank files retain their existing behavior. It may run
+alongside the independent recorder, but its own required parameters still
+apply. No legacy DRM stage/time parameters are required by the independent
+recorder with `implement_drm=no`.
+
+Input/geometry and actual MPI-IO payload regression commands are in
+`benchmark_inputs/drm_flat_output/README.md`. Full CUDA/MPI comparisons against
+station histories on the target machine remain required before calling a
+physics/backend combination validated.
+
 ## Octree-compatible domain sizing
 
 Hercules domains must be compatible with the dyadic octree grid. Define

@@ -83,6 +83,7 @@ extern "C" {
 
 #include "topography.h"
 #include "drm_planewaves.h"
+#include "io_drm.h"
 #include "basin.h"
 
 #include <cuda.h>
@@ -22011,6 +22012,7 @@ static void solver_run() {
     // solver_output_wavefield( step );
     solver_output_planes(Global.mySolver, Global.myID, step);
     solver_output_stations(step);
+    drm_output_print(Global.mySolver, step);
     solver_output_drm_nodes(Global.mySolver, step, Param.theTotalSteps);
     solver_read_source_forces(step, Param.theDeltaT);
     solver_read_drm_displacements_v2(step, Param.theDeltaT,
@@ -22207,6 +22209,9 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
   }
 
+  Timer_Start("Solver I/O");
+  drm_output_close();
+  Timer_Stop("Solver I/O");
   solver_drm_close();
   solver_output_wavefield_close();
   solver_run_collect_timers();
@@ -29744,6 +29749,11 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  drm_output_setup(Global.myID, Param.parameters_input_file, get_surface_shift(),
+                   Param.includeTopography == YES,
+                   Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+                   Param.theDomainX, Param.theDomainY, Param.theDomainZ,
+                   &Param.utmZone, Global.mySolver, Param.theDeltaT);
   solver_init_station_ve_stress_gpu(Global.myID);
   Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");
