@@ -1,6 +1,7 @@
 // Real collective I/O regression; no CUDA or solver build required.
 #include "../../quake/forward/flat_output_mpi.h"
 #include "../../quake/forward/drm_output_points.h"
+#include "../../quake/forward/drm_output_coordinates.h"
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -45,16 +46,19 @@ int main(int argc, char** argv) {
         }
         // Simultaneous differently sized/rotated boxes, each with its own
         // sample rate and partial final batch. The payload is an affine field.
-        const drm_output::BoxGeometry boxes[2] = {
+        drm_output::BoxGeometry boxes[2] = {
             drm_output::box_faces(drm_output::BoxSpec{{10,20,4,6,3,1,0}}),
             drm_output::box_faces(drm_output::BoxSpec{{30,50,6,4,4,1,37}})};
         flat_output::FlatWriter writers[2];
         std::vector<int> box_ids[2];
         const int rates[2] = {2, 3};
         for (int box = 0; box < 2; ++box) {
+            for (auto& point : boxes[box].points)
+                point[2] += 25.125 + 0.0125 * point[0] - 0.0025 * point[1];
             for (size_t id = 0; id < boxes[box].points.size(); ++id)
                 if (static_cast<int>(id) % active == rank) box_ids[box].push_back(id);
             const std::string path = std::string(argv[1]) + ".box" + std::to_string(box);
+            if (rank == 0) drm_output::write_coordinates(path + ".coords", boxes[box].points);
             writers[box].open(MPI_COMM_WORLD, path.c_str(), boxes[box].points.size(), box_ids[box], 2);
         }
         for (int step = 0; step < 14; ++step)
@@ -74,8 +78,21 @@ int main(int argc, char** argv) {
                 const size_t frames = 13 / rates[box] + 1;
                 assert(input.tellg() == static_cast<std::streamoff>(frames * boxes[box].points.size() * 3 * sizeof(double)));
                 input.seekg(0);
+                std::ifstream coordinates(path + ".coords");
+                std::vector<drm_output::Point> points;
+                std::string line;
+                while (std::getline(coordinates, line)) {
+                    if (!line.empty() && line[0] == '#') continue;
+                    std::istringstream row(line);
+                    drm_output::Point point;
+                    std::string extra;
+                    assert(row >> point[0] >> point[1] >> point[2]);
+                    assert(!(row >> extra));
+                    points.push_back(point);
+                }
+                assert(points == boxes[box].points);
                 for (int step = 0; step < 14; step += rates[box])
-                    for (const auto& point : boxes[box].points)
+                    for (const auto& point : points)
                         for (int axis = 0; axis < 3; ++axis) {
                             double value;
                             input.read(reinterpret_cast<char*>(&value), sizeof(value));

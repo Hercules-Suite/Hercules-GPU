@@ -82,6 +82,14 @@ tuples for slicing these faces. Center and strike affect coordinates, not shapes
 all output vectors retain global solver XYZ components. The saved interval is
 `output_drm_boxes_print_rate * simulation_delta_time_sec`.
 
+Each box also writes `drmcoordinates.N` once at setup. This ASCII file has
+comment headers (`#`) followed by three columns `X_m Y_m Z_m`, in solver
+north/east/down metres after rotation and building/topography depth shifts.
+Read it with `xyz = numpy.loadtxt("output/drmcoordinates.0", ndmin=2)`.
+Row i matches binary sample i, including repeated shared edges/corners;
+use the same `box_layout` slices to reshape coordinates into face grids.
+Coordinates use 17 significant digits and are overwritten on every run.
+
 With `station_binary=yes`, `station_output_binary_file` stores
 `(time, station, XYZ)` in `output_stations` row order. Run
 `python3 script/read_drm.py output/station_displacements.0 --points 2 --dt 0.01`

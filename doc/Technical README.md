@@ -195,4 +195,8 @@ interior dimensions are `(Lx-2h, Ly-2h, depth-h)`. Configure
 `output_drm_boxes_directory`. This sampling is independent of legacy DRM
 replay and does not refine the mesh.
 
+Each box also writes `drmcoordinates.N` once during setup: an ASCII table of
+solver X/north, Y/east, Z/down in metres, including terrain/building shifts.
+Its rows match binary sample order exactly, including repeated edges/corners.
+
 See [the complete geometry, layout, and reader examples](Extended%20README.md#structured-drm-box-output).

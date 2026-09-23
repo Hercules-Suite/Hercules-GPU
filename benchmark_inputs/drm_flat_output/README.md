@@ -8,7 +8,15 @@ Run the input/geometry regression without MPI or CUDA:
 ```sh
 c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm_points_test
 /tmp/drm_points_test
+c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/coordinates_test.cc -o /tmp/drm_coordinates_test
+/tmp/drm_coordinates_test /tmp/drmcoordinates-test.0
 ```
+
+The coordinate regression runs the production ASCII writer. It checks exact
+float64 round trips for rotated/fractional grids with synthetic terrain/depth
+shifts, binary sample order (including duplicate face edges), locale-independent
+formatting, truncation of an older file, and failed output paths. On Linux it
+also checks write/close failure with `/dev/full`.
 
 Run the actual MPI-IO writer on a machine with MPI (CUDA is not required):
 
@@ -19,6 +27,8 @@ mpirun -np 4 /tmp/drm_mpi_test /tmp/drm-four.bin
 cmp /tmp/drm-one.bin /tmp/drm-four.bin
 cmp /tmp/drm-one.bin.box0 /tmp/drm-four.bin.box0
 cmp /tmp/drm-one.bin.box1 /tmp/drm-four.bin.box1
+cmp /tmp/drm-one.bin.box0.coords /tmp/drm-four.bin.box0.coords
+cmp /tmp/drm-one.bin.box1.coords /tmp/drm-four.bin.box1.coords
 ```
 
 This checks an analytical payload in global point order, interleaved rank
@@ -26,7 +36,9 @@ ownership, an empty rank, multiple batches, a partial final batch, and
 truncation of an older file. It also writes two differently sized/rotated boxes
 simultaneously with different output rates, checks every XYZ value against an
 affine field, and verifies their independent file sizes and partial batches.
-Both runs must produce identical bytes for all three files. The geometry test
+Rank zero exports the shifted sample coordinates through the production ASCII
+writer; reading those rows back must recover every binary sample's location.
+Both runs must produce identical bytes for all five files. The geometry test
 checks the full row/column ordering of all ten faces, repeated shared edges,
 center offsets, rotations, exterior-to-interior dimensions, and table parsing.
 
@@ -69,4 +81,7 @@ comparison before claiming that combination validated.
 Also test two `output_drm_boxes` rows together with station binary output. Compare
 each generated face at coincident station locations, including common face
 edges, a nonzero strike, and the interior/exterior bottom separation. The
+`drmcoordinates.N` rows must match the solver interpolation points, including
+building/topography shifts and repeated shared edges/corners. Verify the ASCII
+and binary pair for each box and restart segment. The
 synthetic MPI regression does not compile or execute the CUDA solver path.

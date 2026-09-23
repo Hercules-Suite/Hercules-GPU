@@ -36,6 +36,10 @@ jobs:
         run: |
           c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm-points-test
           /tmp/drm-points-test
+      - name: Check DRM ASCII coordinates
+        run: |
+          c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/coordinates_test.cc -o /tmp/drm-coordinates-test
+          /tmp/drm-coordinates-test /tmp/drmcoordinates-test.0
       - name: Compile production station interpolation regression
         run: |
           python3 benchmark_inputs/drm_flat_output/extract_station_test.py /tmp/station_functions.inc
@@ -53,6 +57,8 @@ jobs:
           cmp /tmp/drm-one.bin /tmp/drm-four.bin
           cmp /tmp/drm-one.bin.box0 /tmp/drm-four.bin.box0
           cmp /tmp/drm-one.bin.box1 /tmp/drm-four.bin.box1
+          cmp /tmp/drm-one.bin.box0.coords /tmp/drm-four.bin.box0.coords
+          cmp /tmp/drm-one.bin.box1.coords /tmp/drm-four.bin.box1.coords
           mpirun.mpich -np 1 /tmp/station-test /tmp/station-one.bin
           mpirun.mpich -np 4 /tmp/station-test /tmp/station-four.bin
           cmp /tmp/station-one.bin /tmp/station-four.bin

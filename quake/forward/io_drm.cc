@@ -4,6 +4,7 @@
 #include <cstring>
 #include <memory>
 #include "drm_output_points.h"
+#include "drm_output_coordinates.h"
 #include "flat_output_mpi.h"
 #include "io_drm.h"
 #include "psolve_gpu_launch.h"
@@ -38,7 +39,8 @@ void upload(void** device, const void* host, size_t bytes) {
 // Setup one output at a time: only the largest global point array is retained
 // on the host. GPU metadata and MPI views persist independently for each file.
 void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
-                     const std::string& path, int print_rate, int batch_size,
+                     const std::string& path, const std::string& coordinate_path,
+                     int print_rate, int batch_size,
                      double surface_shift, int topography,
                      double domain_x, double domain_y, double domain_z,
                      mysolver_t* solver, double delta_t) {
@@ -128,6 +130,11 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
         const size_t slash = parent.find_last_of('/');
         if (slash != std::string::npos)
             createDir(parent.substr(0, slash ? slash : 1).c_str(), "drm_output_setup");
+        // Export exactly the validated, shifted points used for interpolation,
+        // retaining global sample order and duplicate face-edge/corner rows.
+        drm_output::write_coordinates(coordinate_path, points);
+        printf("DRM coordinates: %s; %d rows, solver XYZ in metres\n",
+               coordinate_path.c_str(), config[0]);
         printf("DRM flat backend: GPU plane interpolation + collective MPI-IO on solver ranks; "
                "solid displacement (poroelastic skeleton where applicable); no mesh refinement\n");
     }
@@ -142,6 +149,7 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
     int box_count = 0, box_rate = 0, batch_size = 16;
     char directory[256] = "";
     std::vector<drm_output::BoxSpec> boxes;
+    std::vector<std::string> output_paths;
     if (rank == 0) {
         FILE* fp = hu_fopen(parameters, "r");
         if (hu_config_get_int_opt(fp, "number_output_drm_boxes", &box_count) < 0 || box_count < 0)
@@ -159,14 +167,30 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
             boxes = drm_output::read_boxes(input, "output_drm_boxes", box_count);
         }
         fclose(fp);
+        // Check both files for every box before truncating any DRM output.
+        for (int index = 0; index < box_count; ++index) {
+            for (const char* prefix : {"drmdisplacements.", "drmcoordinates."}) {
+                const std::string path = std::string(directory) + "/" + prefix + std::to_string(index);
+                if (path.size() > 240)
+                    throw std::runtime_error("DRM output paths must contain 1 to 240 bytes");
+                if (flat_output::same_file(path, parameters))
+                    throw std::runtime_error("DRM output would overwrite the input file: " + path);
+                if (flat_output::same_file(path, station_binary_path))
+                    throw std::runtime_error("Station and DRM outputs must use distinct files: " + path);
+                for (const std::string& opened : output_paths)
+                    if (flat_output::same_file(path, opened))
+                        throw std::runtime_error("DRM outputs must use distinct files: " + path);
+                output_paths.push_back(path);
+            }
+        }
     }
     flat_output::mpi_check(MPI_Bcast(&box_count, 1, MPI_INT, 0, comm_solver), "DRM box count");
-    std::vector<std::string> opened_paths;
     for (int index = 0; index < box_count; ++index) {
         std::vector<drm_output::Point> points;
-        std::string path;
+        std::string path, coordinate_path;
         if (rank == 0) {
-            path = std::string(directory) + "/drmdisplacements." + std::to_string(index);
+            path = output_paths[static_cast<size_t>(index) * 2];
+            coordinate_path = output_paths[static_cast<size_t>(index) * 2 + 1];
             drm_output::BoxGeometry geometry = drm_output::box_faces(boxes[index]);
             printf("DRM box %d: top center=(%.17g,%.17g), exterior=(%.17g,%.17g,%.17g), "
                    "spacing=%.17g m, strike=%.17g deg clockwise from north\n", index,
@@ -176,16 +200,8 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
                 printf("  %s: rows=%d columns=%d point_offset=%zu\n",
                        face.name, face.rows, face.columns, face.offset);
             points.swap(geometry.points);
-            if (flat_output::same_file(path, parameters))
-                throw std::runtime_error("DRM output would overwrite the input file: " + path);
-            if (flat_output::same_file(path, station_binary_path))
-                throw std::runtime_error("Station and DRM outputs must use distinct files: " + path);
-            for (const std::string& opened : opened_paths)
-                if (flat_output::same_file(path, opened))
-                    throw std::runtime_error("DRM boxes must use distinct files: " + path);
-            opened_paths.push_back(path);
         }
-        setup_recording(rank, points, path, box_rate, batch_size,
+        setup_recording(rank, points, path, coordinate_path, box_rate, batch_size,
                         surface_shift, topography, domain_x, domain_y, domain_z, solver, delta_t);
     }
 }
