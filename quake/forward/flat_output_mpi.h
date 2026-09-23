@@ -1,6 +1,6 @@
 /* Rank-independent flat [snapshot][point][XYZ] native float64 output. */
-#ifndef DRM_OUTPUT_MPI_H
-#define DRM_OUTPUT_MPI_H
+#ifndef FLAT_OUTPUT_MPI_H
+#define FLAT_OUTPUT_MPI_H
 #include <mpi.h>
 #include <climits>
 #include <cstdint>
@@ -8,8 +8,16 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <sys/stat.h>
 
-namespace drm_output {
+namespace flat_output {
+inline bool same_file(const std::string& a, const std::string& b) {
+    if (a.empty() || b.empty()) return false;
+    if (a == b) return true;
+    struct stat first, second;
+    return stat(a.c_str(), &first) == 0 && stat(b.c_str(), &second) == 0 &&
+           first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
 inline void mpi_check(int code, const char* operation) {
     if (code == MPI_SUCCESS) return;
     char error[MPI_MAX_ERROR_STRING];
@@ -31,11 +39,11 @@ public:
               const std::vector<int>& ids, int capacity) {
         if (total_points <= 0 || capacity <= 0 ||
             ids.size() > static_cast<size_t>(INT_MAX / 3 / capacity))
-            throw std::runtime_error("DRM MPI batch exceeds int-count limits; reduce drm_output_batch_size");
+            throw std::runtime_error("Flat output batch exceeds MPI int-count limits");
         const int64_t snapshot_bytes = static_cast<int64_t>(total_points) * 3 * sizeof(double);
         if (snapshot_bytes > std::numeric_limits<MPI_Aint>::max() ||
             snapshot_bytes > std::numeric_limits<MPI_Offset>::max())
-            throw std::runtime_error("DRM snapshot exceeds MPI address/offset limits");
+            throw std::runtime_error("Flat output snapshot exceeds MPI address/offset limits");
         snapshot_bytes_ = static_cast<MPI_Offset>(snapshot_bytes);
         values_ = static_cast<int>(ids.size()) * 3;
         capacity_ = capacity;
@@ -45,50 +53,50 @@ public:
             std::vector<MPI_Aint> offsets(ids.size());
             for (size_t i = 0; i < ids.size(); ++i) {
                 if (ids[i] < 0 || ids[i] >= total_points || (i && ids[i] <= ids[i-1]))
-                    throw std::runtime_error("DRM point IDs must be increasing and in range");
+                    throw std::runtime_error("Flat output point IDs must be increasing and in range");
                 offsets[i] = static_cast<MPI_Aint>(ids[i]) * 3 * sizeof(double);
             }
             MPI_Datatype raw;
             mpi_check(MPI_Type_create_hindexed(static_cast<int>(ids.size()),
-                       lengths.data(), offsets.data(), MPI_DOUBLE, &raw), "DRM file layout");
-            mpi_check(MPI_Type_create_resized(raw, 0, snapshot_bytes_, &view_), "DRM frame extent");
-            mpi_check(MPI_Type_free(&raw), "DRM raw type free");
+                       lengths.data(), offsets.data(), MPI_DOUBLE, &raw), "Flat output file layout");
+            mpi_check(MPI_Type_create_resized(raw, 0, snapshot_bytes_, &view_), "Flat output frame extent");
+            mpi_check(MPI_Type_free(&raw), "Flat output raw type free");
         } else {
             // Empty ranks participate in every collective with count zero.
-            mpi_check(MPI_Type_contiguous(1, MPI_DOUBLE, &view_), "DRM empty view");
+            mpi_check(MPI_Type_contiguous(1, MPI_DOUBLE, &view_), "Flat output empty view");
         }
-        mpi_check(MPI_Type_commit(&view_), "DRM view commit");
+        mpi_check(MPI_Type_commit(&view_), "Flat output view commit");
         mpi_check(MPI_File_open(comm, path, MPI_MODE_CREATE | MPI_MODE_WRONLY,
-                               MPI_INFO_NULL, &file_), "DRM file open");
-        mpi_check(MPI_File_set_errhandler(file_, MPI_ERRORS_RETURN), "DRM error handler");
-        mpi_check(MPI_File_set_size(file_, 0), "DRM file truncate");
+                               MPI_INFO_NULL, &file_), "Flat output file open");
+        mpi_check(MPI_File_set_errhandler(file_, MPI_ERRORS_RETURN), "Flat output error handler");
+        mpi_check(MPI_File_set_size(file_, 0), "Flat output file truncate");
         mpi_check(MPI_File_set_view(file_, 0, MPI_DOUBLE, view_, "native", MPI_INFO_NULL),
-                  "DRM file view");
+                  "Flat output file view");
     }
     double* next_frame() { return buffer_.data() + static_cast<size_t>(buffered_) * values_; }
     void finish_frame() { if (++buffered_ == capacity_) flush(); }
     void flush() {
         if (!buffered_) return;
         if (frames_ > std::numeric_limits<MPI_Offset>::max() / snapshot_bytes_ - buffered_)
-            throw std::runtime_error("DRM file exceeds MPI offset limits");
+            throw std::runtime_error("Flat output file exceeds MPI offset limits");
         MPI_Status status;
         // Explicit offsets are etypes within this rank's view, not bytes.
         mpi_check(MPI_File_write_at_all(file_, frames_ * values_, buffer_.data(),
-                                       buffered_ * values_, MPI_DOUBLE, &status), "DRM write");
+                                       buffered_ * values_, MPI_DOUBLE, &status), "Flat output write");
         int written = 0;
-        mpi_check(MPI_Get_count(&status, MPI_DOUBLE, &written), "DRM write count");
-        if (written != buffered_ * values_) throw std::runtime_error("Short DRM write");
+        mpi_check(MPI_Get_count(&status, MPI_DOUBLE, &written), "Flat output write count");
+        if (written != buffered_ * values_) throw std::runtime_error("Short flat output write");
         frames_ += buffered_;
         buffered_ = 0;
     }
     void close() {
         if (file_ == MPI_FILE_NULL) return;
         flush();
-        mpi_check(MPI_File_set_size(file_, frames_ * snapshot_bytes_), "DRM final size");
-        mpi_check(MPI_File_close(&file_), "DRM close");
-        mpi_check(MPI_Type_free(&view_), "DRM view free");
+        mpi_check(MPI_File_set_size(file_, frames_ * snapshot_bytes_), "Flat output final size");
+        mpi_check(MPI_File_close(&file_), "Flat output close");
+        mpi_check(MPI_Type_free(&view_), "Flat output view free");
         std::vector<double>().swap(buffer_);
     }
 };
-} // namespace drm_output
+} // namespace flat_output
 #endif

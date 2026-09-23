@@ -1,6 +1,5 @@
 #include "../../quake/forward/drm_output_points.h"
 #include <cassert>
-#include <fstream>
 #include <iostream>
 #include <set>
 
@@ -10,22 +9,7 @@ template<class Function> void rejects(Function function) {
     assert(failed);
 }
 
-int main(int argc, char** argv) {
-    std::istringstream csv("latitude,longitude,depth\r\n34,-118,0\n35,-117,2\n34,-118,0 # repeat\n");
-    const auto points = drm_output::read_points(csv);
-    assert(points.size() == 3);
-    assert((points[0] == drm_output::Point{{34, -118, 0}}));
-    assert((points[1] == drm_output::Point{{35, -117, 2}}));
-    assert(points[0] == points[2]); // Input order and duplicate rows are intentional.
-    std::istringstream space("# comment\nlatitude longitude depth\r\n34 -118 0\n");
-    assert(drm_output::read_points(space).size() == 1);
-    std::istringstream headerless("34 -118 0\n");
-    assert(drm_output::read_points(headerless)[0] == points[0]);
-    for (const char* bad : {"", "latitude longitude depth\n", "34 -118", "34 -118 0 1",
-                            "nan -118 0", "34 inf 0", "91 0 0", "0 181 0", "0 0 -1",
-                            "1a 0 0", "latitude longitude depth\nlatitude longitude depth"}) {
-        rejects([bad]() { std::istringstream input(bad); drm_output::read_points(input); });
-    }
+int main() {
     // Unequal lengths catch swapped face axes; each face is a complete grid.
     const drm_output::BoxSpec spec{{10, 20, 4, 6, 3, 1, 0}};
     const auto box = drm_output::box_faces(spec);
@@ -111,10 +95,5 @@ int main(int argc, char** argv) {
         "output_drm_boxes =\n0 0 4 6 3 1", "output_drm_boxes =\n0 0 4 6 3 1 0 8",
         "output_drm_boxes =\n0 0 4 6 3 1 nan", "output_drm_boxes =\n0 0 4 6 3 1 0\n0 0 4 6 3 1 0"})
         rejects([bad]() { std::istringstream in(bad); drm_output::read_boxes(in, "output_drm_boxes", 1); });
-    if (argc == 2) {
-        std::ifstream input(argv[1]);
-        auto supplied = drm_output::read_points(input);
-        std::cout << "Supplied file: " << supplied.size() << " points\n";
-    }
     std::cout << "DRM geometry and input regressions passed\n";
 }

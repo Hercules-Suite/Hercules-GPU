@@ -1,5 +1,5 @@
 // Real collective I/O regression; no CUDA or solver build required.
-#include "../../quake/forward/drm_output_mpi.h"
+#include "../../quake/forward/flat_output_mpi.h"
 #include "../../quake/forward/drm_output_points.h"
 #include <cassert>
 #include <fstream>
@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
             if (id % active == rank) ids.push_back(id);
         // Opening twice verifies truncation of an older, longer file.
         for (int frames : {9, 5}) {
-            drm_output::FlatWriter writer;
+            flat_output::FlatWriter writer;
             writer.open(MPI_COMM_WORLD, argv[1], 7, ids, 2);
             for (int frame = 0; frame < frames; ++frame) {
                 double* out = writer.next_frame();
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
         const drm_output::BoxGeometry boxes[2] = {
             drm_output::box_faces(drm_output::BoxSpec{{10,20,4,6,3,1,0}}),
             drm_output::box_faces(drm_output::BoxSpec{{30,50,6,4,4,1,37}})};
-        drm_output::FlatWriter writers[2];
+        flat_output::FlatWriter writers[2];
         std::vector<int> box_ids[2];
         const int rates[2] = {2, 3};
         for (int box = 0; box < 2; ++box) {

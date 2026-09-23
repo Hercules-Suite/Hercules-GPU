@@ -14,7 +14,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [taper_topography.py](taper_topography.py) | Taper relief to a flat collar before lateral PML boundaries | Python standard library |
 | [read_stations.py](read_stations.py) | Show the station header, time range, and peak displacement | NumPy |
 | [read_planes.py](read_planes.py) | Inspect plane layout and scan all displacements for finite values and peak vertical motion | NumPy |
-| [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or CSV point output, time range, and peak XYZ displacements | Python standard library |
+| [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or single-file station output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
 
@@ -82,12 +82,14 @@ tuples for slicing these faces. Center and strike affect coordinates, not shapes
 all output vectors retain global solver XYZ components. The saved interval is
 `output_drm_boxes_print_rate * simulation_delta_time_sec`.
 
-The optional CSV recorder retains `(time, point, XYZ)` in input row order.
-For 51,009 rows, run `python3 script/read_drm.py output/drm.bin --points 51009 --dt 0.02`,
-using `drm_print_rate * simulation_delta_time_sec` as `--dt`. Neither format
-has headers or embedded point lists. Retain the input table/CSV. Use
-`--first-time` for restart segments. Read completed output; the writer buffers
-snapshots according to `drm_output_batch_size`.
+With `station_binary=yes`, `station_output_binary_file` stores
+`(time, station, XYZ)` in `output_stations` row order. Run
+`python3 script/read_drm.py output/station_displacements.0 --points 2 --dt 0.01`
+for two stations, using `output_stations_print_rate * simulation_delta_time_sec`
+as `--dt`. Neither format has headers or embedded point lists. Retain the
+input tables. Use `--first-time` for restart segments. Read completed output;
+DRM boxes buffer snapshots according to `drm_output_batch_size`, while station
+binary output writes every saved snapshot.
 
 For rendering and `mpirun` affinity settings, see the dedicated
 [plane velocity animation guide](../doc/plane_velocity_animations.md).

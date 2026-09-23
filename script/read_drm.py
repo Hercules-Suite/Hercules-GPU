@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect a flat native-float64 DRM displacement file (Python standard library)."""
+"""Inspect a flat native-float64 station or DRM displacement file (Python standard library)."""
 
 import argparse
 from array import array
@@ -40,7 +40,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("file", type=Path)
     geometry = parser.add_mutually_exclusive_group(required=True)
-    geometry.add_argument("--points", type=int, help="Number of CSV point rows per snapshot")
+    geometry.add_argument("--points", type=int, help="Number of output_stations rows per snapshot")
     geometry.add_argument("--box", type=float, nargs=4, metavar=("LX", "LY", "DEPTH", "SPACING"),
                           help="Exterior box dimensions and spacing in metres")
     parser.add_argument("--dt", type=float, required=True, help="Saved snapshot interval in seconds")

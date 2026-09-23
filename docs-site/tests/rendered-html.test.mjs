@@ -278,6 +278,10 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(documented).size, 239);
   assert.equal(documented.length, 239, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("station_binary"));
+  assert.ok(documented.includes("station_output_binary_file"));
+  assert.ok(!documented.includes("drm_points_file"));
+  assert.ok(!documented.includes("drm_output_file"));
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -1410,10 +1414,10 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /output_displacement_file/);
 });
 
-test("documents multiple structured DRM boxes and the CSV binary contract", async () => {
+test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();
-  for (const key of ["drm_output_file", "drm_points_file", "drm_output_batch_size",
+  for (const key of ["station_binary", "station_output_binary_file", "drm_output_batch_size",
     "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y",
     "number_output_drm_boxes", "output_drm_boxes_print_rate", "output_drm_boxes_directory",
     "output_drm_boxes"]) {
@@ -1432,12 +1436,16 @@ test("documents multiple structured DRM boxes and the CSV binary contract", asyn
   assert.match(html, /drmdisplacements\.1/);
   assert.match(html, /box_layout\(100, 100, 50, 1\)/);
   assert.match(html, /a box centered at \(0,0\) extends to negative X\/Y/i);
-  assert.match(html, /1,224,216 bytes/);
   assert.match(html, /cannot be fed directly to the existing part2 reader/);
-  assert.match(html, /Each run truncates drm_output_file/);
+  assert.match(html, /Each run truncates station_output_binary_file/);
   assert.match(html, /scalar-acoustic points stop setup/);
   assert.match(html, /does not refine the mesh/);
   assert.match(html, /shape=\(nt, npoints, 3\)/);
+  assert.match(html, /station_binary defaults to no/);
+  assert.match(html, /raw.reshape\(-1, nstations, 3\)/);
+  assert.match(html, /No per-station text files or station metadata sidecar/);
+  assert.match(html, /reconstructed scalar-acoustic motion/);
+  assert.doesNotMatch(html, /drm_points_file|drm_output_file|CSV recorder/);
 });
 
 test("reads structured DRM faces with exterior dimensions and rejects degenerate interiors", () => {

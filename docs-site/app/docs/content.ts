@@ -1809,9 +1809,9 @@ if __name__ == "__main__":
         table: {
           headers: ["Output", "Primary files", "Format and use"],
           rows: [
-            ["Stations", "station.N; station_mediums.txt", "ASCII time histories and station ownership/material metadata"],
+            ["Stations", "station.N; station_mediums.txt, or station_output_binary_file", "ASCII histories by default; station_binary=yes writes one float64 displacement file"],
             ["Planes", "planedisplacements.N", "Raw float64 displacement snapshots on a regular plane grid"],
-            ["DRM boxes / CSV recorder", "drmdisplacements.N; drm_output_file", "One raw float64 file per ten-face structured box, plus optional point-list output"],
+            ["DRM boxes", "drmdisplacements.N", "One raw float64 displacement file per ten-face structured box"],
             ["Selected mesh", "mesh_coordinates.RANK; mesh_data.RANK", "Binary coordinates and material properties for a Cartesian subdomain"],
             ["Checkpoints", "checkpoint.out0; checkpoint.out1; checkpoint.in", "Binary rotating solver states and restart input"],
             ["Monitor", "monitor_file, default monitor.txt", "Configuration, execution-path, timing, and diagnostic record"],
@@ -1823,7 +1823,7 @@ if __name__ == "__main__":
         id: "station-configuration",
         title: "Configure station output",
         paragraphs: [
-          "output_stations contains latitude, longitude, and depth in that order. Hercules writes one ASCII station.N file for each row. The sampling interval is output_stations_print_rate multiplied by simulation_delta_time_sec.",
+          "output_stations contains latitude, longitude, and depth in that order. With station_binary=no (the default), Hercules writes one ASCII station.N file for each row. The sampling interval is output_stations_print_rate multiplied by simulation_delta_time_sec.",
           "Displacement is always present. Velocity is appended when velocity or acceleration output is requested; acceleration, pressure, pore-pressure ratio, strain, and stress columns are then appended according to their switches. Strain and stress use XX, YY, ZZ, XY, YZ, XZ order.",
           "For nonlinear BrickUP runs, print_station_pore_pressure_ratios=yes appends the conventional experimental ratio Ru(-) = Δu/σ′v0. Δu is the same excess pore pressure used by the Pressure(Pa) column. With approximate geostatic initialization, σ′v0 is derived at the exact station depth from the integrated total-overburden column minus Biot-weighted hydrostatic pressure. With a ramped geostatic phase, Ru remains nan during the ramp because its numerical reference does not yet exist. On the last geostatic force evaluation, Hercules fixes σ′v0 from the committed vertical skeleton stress at the owning nonlinear element's station-output quadrature point—the same constitutive state used by its nonlinear stress columns and by RIVA-Sand initialization—before the first dynamic output row. The final denominator is recorded as sigma_v0_eff_pa in station_mediums.txt; other undefined ratios are also nan. Hercules rejects the ratio request when approximate_geostatic_state=no and both geostatic times are zero, because that configuration supplies no initial effective-stress reference. The ratio is not clipped, so dilation may produce negative values and values may exceed one.",
         ],
@@ -1832,10 +1832,32 @@ if __name__ == "__main__":
         note: "With topography enabled, station depth is shifted to the local topographic surface. Check station_mediums.txt to confirm the owning medium, MPI rank, element, local coordinates, Vp, Vs, density, and sigma_v0_eff_pa reference. Ru(-) is nan for acoustic, elastic, unsaturated, CPML, surface-zero-stress, or otherwise inadmissible station references.",
       },
       {
+        "id": "station-binary",
+        "title": "Write all station displacements to one binary file",
+        "paragraphs": [
+          "Set station_binary=yes and station_output_binary_file to record the existing output_stations list in one file. station_binary defaults to no, which preserves the existing station.N output functions. Binary mode requires number_output_stations>0 and a positive output_stations_print_rate. Coordinates still come from output_stations as latitude longitude depth, with the existing geographic conversion and surface-relative building/topography shifts.",
+          "The file is headerless native-endian float64 [snapshot, station, XYZ] displacement in metres, where XYZ means solver north, east, down. Input row order is preserved, including duplicate rows. Every station must have exactly one owner. The existing station interpolation handles solid/skeleton displacement, topography cut cells, and reconstructed scalar-acoustic motion.",
+          "Binary mode writes displacement only. It ignores print_station_* switches, nonlinear diagnostic columns, output_stations_directory, and station_mediums_output_file. No per-station text files or station metadata sidecar are created. The filename is required only with station_binary=yes and is ignored otherwise. Paths contain 1 to 240 bytes, resolve from the run directory without tilde expansion, and have parent directories created automatically."
+        ],
+        "codeLabel": "parameters.in — one displacement file, using the existing station table",
+        "code": "station_binary             = yes\nstation_output_binary_file = output/station_displacements.0\nnumber_output_stations     = 2\noutput_stations_print_rate = 10\n\n# latitude_deg longitude_deg depth_m\noutput_stations =\n  34.0000 -118.5000   0.0\n  34.0100 -118.4900 100.0",
+        "note": "One snapshot is 24 × number_output_stations bytes. Sampling uses output_stations_print_rate × simulation_delta_time_sec. Step zero is saved in a fresh run, followed by steps divisible by the print rate before they advance. Each run truncates station_output_binary_file, including checkpoint restarts; preserve earlier segments in a different path."
+      },
+      {
+        "id": "read-station-binary",
+        "title": "Read the station binary",
+        "paragraphs": [
+          "Use script/read_drm.py output/station_displacements.0 --points 2 --dt 0.01 for the configuration above with solver dt=0.001 s. This shared flat-displacement reader checks complete snapshots and finite values; --points is the station count. Retain parameters.in to identify coordinates and timing. Set --first-time for a restart segment to the first sampled step times solver dt.",
+          "The station binary path reuses existing sparse station GPU downloads and writes one collective MPI-IO snapshot at each requested step, including participation by ranks without stations. It is independent of drm_output_batch_size. Stations can run alongside multiple DRM boxes with separate sampling rates; their output paths must be distinct."
+        ],
+        "codeLabel": "Python — station order matches output_stations",
+        "code": "import numpy as np\n\nnstations = 2  # number_output_stations\nraw = np.fromfile(\"output/station_displacements.0\", dtype=np.float64)\nif not raw.size or raw.size % (nstations * 3):\n    raise ValueError(\"incomplete snapshot or wrong station count\")\nu = raw.reshape(-1, nstations, 3)\ntime = np.arange(u.shape[0]) * 10 * 0.001  # print rate * solver dt\n# u[:, 0, :] is displacement for the first output_stations row."
+      },
+      {
         id: "nonlinear-station-output",
         title: "Interpret nonlinear and plastic station output",
         paragraphs: [
-          "When include_nonlinear_analysis=yes, Hercules appends nonlinear solid-state columns to station files. These contain paired strain and stress tensor components plus volumetric strain/stress, yield-function state Fs, accumulated inelastic measure Kappa, one-dimensional strain/stress diagnostics Gamma1d and Tao1d, and GGmax.",
+          "When include_nonlinear_analysis=yes and station_binary=no, Hercules appends nonlinear solid-state columns to station files. These contain paired strain and stress tensor components plus volumetric strain/stress, yield-function state Fs, accumulated inelastic measure Kappa, one-dimensional strain/stress diagnostics Gamma1d and Tao1d, and GGmax.",
           "Use these histories to identify yield onset, hysteresis, stiffness reduction, and permanent/plastic response. Read the station header instead of assuming fixed column offsets because velocity, acceleration, pressure, pore-pressure ratio, linear strain/stress, and nonlinear columns are controlled independently.",
         ],
         codeLabel: "nonlinear station columns",
@@ -1949,16 +1971,12 @@ if __name__ == "__main__":
       },
       {
         "id": "drm-flat-output",
-        "title": "Optional CSV recorder and execution details",
+        "title": "DRM box execution details",
         "paragraphs": [
-          "The separate CSV mode remains available: set drm_output_file, drm_points_file, and drm_print_rate. Input row order is preserved, including duplicate rows. The latitude longitude depth file accepts whitespace or comma separators, an optional header with those names, blank lines, and # comments. Nonnegative depth below the surface and geographic conversion follow station conventions. It may run alongside any number of generated boxes, with its own rate. The earlier fallback that generated a single box from drm_boundary has been replaced by output_drm_boxes.",
-          "For a 51,009-row CSV, each snapshot remains 1,224,216 bytes, read as [snapshot, point, XYZ]. Use script/read_drm.py output/drm.bin --points 51009 --dt 0.02 with the actual drm_print_rate times the solver timestep. Each run truncates drm_output_file; preserve the input point list and use a new output path for restarted segments.",
-          "The recorder in quake/forward/io_drm.cc uses the existing plane GPU interpolation kernel and collective MPI-IO on solver ranks. Only compact sampled XYZ results are downloaded at requested steps, with independent file views and buffers per box or CSV file. It introduces no field exchanges and is independent of the plane output backend and plane I/O pool. drm_output_batch_size defaults to 16 snapshots per file; set 1 to write every snapshot. Partial final batches flush on normal completion.",
-          "Missing, multiply owned, or scalar-acoustic points stop setup. Poroelastic samples represent skeleton displacement. Close sample spacing does not refine the mesh. The existing three-stage implementation remains in quake/forward/drm.cc, controlled by implement_drm, which_drm_part, drm_directory, and its legacy geometry/time parameters. The new observation files cannot be fed directly to the existing part2 reader. Full CUDA/MPI station-history comparisons remain necessary before calling a physics/backend combination validated."
+          "The recorder in quake/forward/io_drm.cc uses the existing plane GPU interpolation kernel and collective MPI-IO on solver ranks. Only compact sampled XYZ results are downloaded at requested steps, with independent file views and buffers per box. It introduces no field exchanges and is independent of the plane output backend and plane I/O pool. drm_output_batch_size defaults to 16 snapshots per file; set 1 to write every snapshot. Partial final batches flush on normal completion.",
+          "Missing, multiply owned, or scalar-acoustic points stop setup. Poroelastic samples represent skeleton displacement. Close sample spacing does not refine the mesh. The existing three-stage implementation remains in quake/forward/drm.cc, controlled by implement_drm, which_drm_part, drm_directory, drm_print_rate, and its legacy geometry parameters. The new observation files cannot be fed directly to the existing part2 reader. Full CUDA/MPI station-history comparisons remain necessary before calling a physics/backend combination validated."
         ],
-        "codeLabel": "parameters.in — optional additional CSV output",
-        "code": "drm_output_file = output/drm.bin\ndrm_points_file = input/drm_points_geodetic_1m.csv\ndrm_print_rate = 20\n\n# Point-file example (latitude longitude depth):\n# 34.0000 -118.5000 0.0\n# 34.0100 -118.4900 10.0",
-        "note": "Paths resolve from the run working directory; use absolute paths when needed, without ~ expansion. Generated box files and the optional CSV file must use distinct paths. Other station and plane outputs remain controlled by their own settings."
+        "note": "Paths resolve from the run working directory; use absolute paths when needed, without ~ expansion. Generated box files and the station binary must use distinct paths. Station and plane outputs remain controlled by their own settings."
       },
       {
         id: "animate-planes",

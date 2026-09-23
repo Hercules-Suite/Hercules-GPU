@@ -19,48 +19,6 @@ typedef std::array<double, 3> Point;
 // Coordinates are broadcast as triples; MPI counts and local values use int.
 static const size_t max_points = INT_MAX / 3;
 
-inline std::vector<Point> read_points(std::istream& input) {
-    std::vector<Point> points;
-    std::string line;
-    size_t line_number = 0;
-    bool first_record = true;
-    while (std::getline(input, line)) {
-        ++line_number;
-        line = line.substr(0, line.find('#'));
-        std::replace(line.begin(), line.end(), ',', ' ');
-        std::istringstream row(line);
-        std::string a, b, c, extra;
-        if (!(row >> a)) continue;
-        if (!(row >> b >> c) || (row >> extra))
-            throw std::runtime_error("Expected three columns at points line " +
-                                     std::to_string(line_number));
-        if (first_record && a == "latitude" && b == "longitude" && c == "depth") {
-            first_record = false;
-            continue;
-        }
-        first_record = false;
-        Point point;
-        const std::string tokens[3] = {a, b, c};
-        for (int axis = 0; axis < 3; ++axis) {
-            size_t used = 0;
-            try { point[axis] = std::stod(tokens[axis], &used); }
-            catch (const std::exception&) { used = 0; }
-            if (used != tokens[axis].size() || !std::isfinite(point[axis]))
-                throw std::runtime_error("Invalid coordinate at points line " +
-                                         std::to_string(line_number));
-        }
-        if (std::abs(point[0]) > 90 || std::abs(point[1]) > 180 || point[2] < 0)
-            throw std::runtime_error("Invalid latitude/longitude/depth at points line " +
-                                     std::to_string(line_number));
-        if (points.size() == max_points)
-            throw std::runtime_error("Too many DRM points for MPI int counts");
-        points.push_back(point);
-    }
-    if (input.bad()) throw std::runtime_error("Error reading DRM points");
-    if (points.empty()) throw std::runtime_error("DRM points file is empty");
-    return points;
-}
-
 inline int edge_count(double length, double spacing) {
     const double count = length / spacing;
     const double rounded = std::round(count);
