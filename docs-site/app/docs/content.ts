@@ -1811,7 +1811,7 @@ if __name__ == "__main__":
           rows: [
             ["Stations", "station.N; station_mediums.txt", "ASCII time histories and station ownership/material metadata"],
             ["Planes", "planedisplacements.N", "Raw float64 displacement snapshots on a regular plane grid"],
-            ["DRM point recorder", "drm_output_file", "One raw float64 displacement file for a point list or generated inner/outer box surfaces"],
+            ["DRM boxes / CSV recorder", "drmdisplacements.N; drm_output_file", "One raw float64 file per ten-face structured box, plus optional point-list output"],
             ["Selected mesh", "mesh_coordinates.RANK; mesh_data.RANK", "Binary coordinates and material properties for a Cartesian subdomain"],
             ["Checkpoints", "checkpoint.out0; checkpoint.out1; checkpoint.in", "Binary rotating solver states and restart input"],
             ["Monitor", "monitor_file, default monitor.txt", "Configuration, execution-path, timing, and diagnostic record"],
@@ -1874,40 +1874,91 @@ if __name__ == "__main__":
         note: "reconstruct_acoustic_plane_displacements=yes reconstructs motion at scalar-acoustic plane points; elastic points continue to use the elastic displacement field in the same file.",
       },
       {
-        id: "drm-flat-output",
-        title: "Record a DRM box in one binary file",
-        paragraphs: [
-          "The independent recorder in quake/forward/io_drm.cc writes one headerless native-float64 file with shape [snapshot, point, XYZ]. Values are displacement in metres in solver X/north, Y/east, Z/down coordinates. It creates no station files, coordinate sidecars, or per-rank DRM files. Other outputs remain controlled by their own settings.",
-          "Set drm_output_file and drm_print_rate. Supply drm_points_file to use an existing latitude, longitude, depth list; input row order is preserved, including duplicate rows. The file accepts whitespace or comma separators, an optional latitude longitude depth header, blank lines, and # comments. Depth is nonnegative metres relative to the surface, with the same building/topography shifts and geographic conversion used by stations. A geodetic point list is not shifted by drm_offset_x/y.",
-          "Every point must have exactly one owning solid element inside the domain; missing, multiply owned, or scalar-acoustic points stop setup. The recorder samples the solid displacement field, including the skeleton in poroelastic elements. It uses the existing plane GPU interpolation kernel and collective MPI-IO on solver ranks, independent of the plane backend and I/O pool. It downloads only packed XYZ results at requested output steps and introduces no new field exchange.",
-          "drm_output_batch_size defaults to 16 snapshots per collective write. A partial final batch is flushed on normal completion. Set 1 to write every snapshot. The selected path, point count, sample interval, ordering, and physical interpretation are reported at setup. This recorder does not refine the mesh: closely spaced samples interpolate the existing finite-element solution.",
+        "id": "drm-box-configuration",
+        "title": "Record multiple DRM boxes",
+        "paragraphs": [
+          "Use number_output_drm_boxes, output_drm_boxes_print_rate, output_drm_boxes_directory, and the output_drm_boxes table, following the plane-output style. Each row writes one headerless native-float64 drmdisplacements.N file, numbered from zero in row order. Each file contains ten structured faces: front, back, left, right, and bottom on both exterior and interior sides. There is no top lid.",
+          "Each row has seven values: drm_offset_x drm_offset_y length_x length_y depth drm_edgesize strk. The offsets locate the top center in solver X/north and Y/east metres from the domain origin. The three dimensions describe the exterior box. With h=drm_edgesize, the interior dimensions are (length_x − 2h, length_y − 2h, depth − h), centered on the same X/Y location with the same top elevation. Spacing must be positive; lengths must exceed 2h and depth must exceed h; all dimensions must be integer multiples of h.",
+          "Strike rotates the box clockwise from north in degrees: for box-local horizontal coordinates (x,y), global X = center_x + x*cos(strk) − y*sin(strk), and global Y = center_y + x*sin(strk) + y*cos(strk). Zero strike aligns local X/Y with solver X/Y. The output displacement components remain solver X/Y/Z; they are not rotated into box-local components.",
+          "This independent recorder works with implement_drm=no. It requires no drm_boundary or standalone drm_offset_x/y/drm_edgesize keys. Sampling does not refine the mesh. All generated points must lie inside the simulation domain and have exactly one owning solid element. A box centered at (0,0) extends to negative X/Y at zero strike; choose a center that keeps the full rotated footprint inside the domain."
         ],
-        codeLabel: "parameters.in — preserve the supplied point order",
-        code: "implement_drm        = no\ndrm_output_file      = output/drm_displacements.bin\ndrm_points_file      = input/drm_points_geodetic_1m.csv\ndrm_print_rate       = 20\ndrm_output_batch_size = 16\n\n# drm_points_geodetic_1m.csv may contain:\n# latitude longitude depth\n# 0.225629686430 0.089373315130 0.000000\n# 0.225629722044 0.089373329143 1.000000",
-        note: "Paths are relative to the run working directory; use a complete absolute path when needed (no ~ expansion). Each run truncates drm_output_file. For a checkpoint restart, choose a new file and retain the first saved step: the first multiple of drm_print_rate at or after the restart step. No timestamps or coordinates are embedded in the binary. CUDA/MPI solver comparisons are required before treating a new physics/backend combination as validated.",
+        "codeLabel": "parameters.in — two boxes; all distances in metres, strike in degrees",
+        "code": "number_output_drm_boxes       = 2\noutput_drm_boxes_print_rate   = 10\noutput_drm_boxes_directory    = outputfiles/drm_boxes_fullDomain\n\n# center_x center_y length_x length_y depth spacing strike\noutput_drm_boxes =\n  1000.0 2000.0 100.0 100.0 50.0 1.0  0.0\n  2000.0 3000.0 200.0 100.0 80.0 2.0 30.0\n\n# Optional: buffered snapshots per file (default 16).\ndrm_output_batch_size = 16",
+        "note": "Files are outputfiles/drm_boxes_fullDomain/drmdisplacements.0 and drmdisplacements.1. On flat terrain, the first exterior box spans X=950..1050, Y=1950..2050, depth=0..50; its interior spans X=951..1049, Y=1951..2049, depth=0..49. Building/topography depth shifts follow plane conventions at each point; topography can therefore warp the otherwise planar grids. The geometry is case-specific and must be checked against the simulation domain."
       },
       {
-        id: "drm-generated-box",
-        title: "Generate inner and outer DRM sampling surfaces",
-        paragraphs: [
-          "Omit drm_points_file to reuse drm_boundary, drm_edgesize, drm_offset_x, and drm_offset_y. The boundary contains min_x min_y max_x max_y depth for the inner open-top box. Offsets translate X and Y into the simulation domain. drm_edgesize is both sampling spacing and shell thickness: the outer surface extends one spacing outward on each horizontal side and one spacing below the inner bottom. Both surfaces include four walls and the bottom, with no top lid.",
-          "Widths and depth must be positive integer multiples of drm_edgesize. Ordering is inner surface first, then outer; within each surface, X is the outer loop, Y is the middle loop, and Z increases fastest. Wall columns contain every depth including the bottom; other columns contain only the bottom point. This avoids duplicate edges/corners within each surface. For nx, ny, nz intervals on an inner box, its point count is (2*nx + 2*ny)*nz + (nx+1)*(ny+1); use nx+2, ny+2, nz+1 for the outer count. The example below produces 60,810 points and does not imply equivalence to a supplied CSV.",
-          "The older three-stage DRM workflow remains in quake/forward/drm.cc: implement_drm=yes and which_drm_part=part0 generate mesh-node coordinates, part1 records response, and part2 replays effective forces. It uses drm_directory and per-rank files. The independent flat file is an observation format and cannot be fed directly to the existing part2 reader; it requires neither which_drm_part nor part1_delta_t/part1_simulation_time when implement_drm=no.",
+        "id": "drm-box-face-layout",
+        "title": "Ten structured face grids in each snapshot",
+        "paragraphs": [
+          "Each snapshot concatenates the exterior front, back, left, right, bottom, then the interior front, back, left, right, bottom. Front/back mean negative/positive box-local X; left/right mean negative/positive box-local Y. All coordinates increase along each grid axis. Each face includes both endpoints of each axis, and shared edges/corners are repeated in each adjoining face so every face remains rectangular.",
+          "For exterior interval counts nx=length_x/h, ny=length_y/h, nz=depth/h, use the shapes below. Face data are C-order [row, column, XYZ], with the column index varying fastest. A snapshot contains N = 2*(ny+1)*(nz+1) + 2*(nx+1)*(nz+1) + (nx+1)*(ny+1) exterior samples plus the same formula with nx−2, ny−2, nz−1 for the interior. Faces are observation grids, not the solver octree mesh.",
+          "For a 100 × 100 × 50 m exterior box with h=1 m, the interior is 98 × 98 × 49 m. The ten faces contain 60,406 samples, or 1,449,744 bytes per displacement snapshot. The setup log prints each face name, row/column counts, and zero-based point offset. No extra face files or coordinate sidecars are created."
         ],
-        codeLabel: "parameters.in — illustrative generated box (choose dimensions for your case)",
-        code: "implement_drm        = no\ndrm_output_file      = output/drm_displacements.bin\ndrm_print_rate       = 20\ndrm_edgesize         = 1.0\ndrm_offset_x         = 1000.0\ndrm_offset_y         = 2000.0\ndrm_boundary =\n  0.0 0.0 100.0 100.0 49.0\n# No drm_points_file: inner depth 49 m, outer depth 50 m.",
-        note: "Choose offsets so the outer surface also lies inside the domain. Topography adds the local surface elevation at each point, just as it does for station depths; in that case these are surface-relative sampling surfaces rather than a fixed horizontal-bottom Cartesian box. Sampling density is not mesh resolution.",
+        "table": {
+          "headers": [
+            "Face (exterior, then interior)",
+            "Grid axes",
+            "Exterior rows × columns",
+            "Interior rows × columns"
+          ],
+          "rows": [
+            [
+              "front (−local X)",
+              "local Y, Z",
+              "(ny+1) × (nz+1)",
+              "(ny−1) × nz"
+            ],
+            [
+              "back (+local X)",
+              "local Y, Z",
+              "(ny+1) × (nz+1)",
+              "(ny−1) × nz"
+            ],
+            [
+              "left (−local Y)",
+              "local X, Z",
+              "(nx+1) × (nz+1)",
+              "(nx−1) × nz"
+            ],
+            [
+              "right (+local Y)",
+              "local X, Z",
+              "(nx+1) × (nz+1)",
+              "(nx−1) × nz"
+            ],
+            [
+              "bottom",
+              "local X, local Y",
+              "(nx+1) × (ny+1)",
+              "(nx−1) × (ny−1)"
+            ]
+          ]
+        },
+        "note": "The file stores global X/north, Y/east, Z/down displacement in metres, in native-endian float64 triples. Keep the input box row to reconstruct positions, shape, rotation, and face offsets. No timestamps, velocities, accelerations, pressure, or stress are embedded."
       },
       {
-        id: "read-drm",
-        title: "Read flat DRM displacements",
-        paragraphs: [
-          "Retain the original CSV or generated geometry and its ordering. For a 51,009-point input file, each snapshot occupies 1,224,216 bytes. The sample interval is drm_print_rate multiplied by simulation_delta_time_sec. A fresh run starts with the step-zero displacement snapshot. Read completed files; an in-progress file may be missing its buffered tail.",
-          "script/read_drm.py checks complete snapshots and finite values and reports peak XYZ displacement using only the Python standard library. The NumPy example below provides a memory-mapped array for processing large files without loading all snapshots into memory.",
+        "id": "read-drm",
+        "title": "Read a DRM box as ten arrays",
+        "paragraphs": [
+          "script/read_drm.py accepts --box length_x length_y depth spacing and reports the shape and offset of every face. It scans completed files for complete snapshots and finite displacement values using the Python standard library. Its box_layout helper also provides the face slices for NumPy processing, as shown below.",
+          "The saved interval is output_drm_boxes_print_rate multiplied by simulation_delta_time_sec. A fresh run saves step zero, then steps divisible by the print rate before advancing those steps. With batching enabled, an in-progress file may be missing its buffered tail. Each run truncates its output files, including on restart; choose a different directory for a restart segment and use --first-time for the time of its first saved step."
         ],
-        codeLabel: "Python — native byte order matching the writer",
-        code: "# python3 script/read_drm.py output/drm_displacements.bin --points 51009 --dt 0.02\nfrom pathlib import Path\nimport numpy as np\n\npath = Path(\"output/drm_displacements.bin\")\nnpoints = 51009\ndt_out = 20 * 0.001  # use your drm_print_rate and simulation_delta_time_sec\nframe_bytes = npoints * 3 * 8\nnt, remainder = divmod(path.stat().st_size, frame_bytes)\nif remainder or nt == 0:\n    raise ValueError(\"incomplete DRM snapshot or wrong point count\")\nu = np.memmap(path, dtype=np.float64, mode=\"r\", shape=(nt, npoints, 3))\ntime = np.arange(nt) * dt_out\n# u[:, i, :] is the XYZ displacement history of input row i.\nprint(u.shape, time[-1])",
-        note: "For restarted segments, add first_saved_step * simulation_delta_time_sec to time, or supply that value with --first-time to the reader. Displacement is the only stored field; velocity, acceleration, pressure, and stress are not included.",
+        "codeLabel": "From the repository root — reshape each face independently",
+        "code": "# python3 script/read_drm.py outputfiles/drm_boxes_fullDomain/drmdisplacements.0 --box 100 100 50 1 --dt 0.01\nfrom pathlib import Path\nimport numpy as np\nfrom script.read_drm import box_layout\n\nlayout = box_layout(100, 100, 50, 1)\nnpoints = sum(rows * cols for _, rows, cols, _ in layout)\npath = Path(\"outputfiles/drm_boxes_fullDomain/drmdisplacements.0\")\nnt, remainder = divmod(path.stat().st_size, npoints * 3 * 8)\nif remainder or nt == 0:\n    raise ValueError(\"incomplete snapshot or wrong box dimensions\")\nu = np.memmap(path, dtype=np.float64, mode=\"r\", shape=(nt, npoints, 3))\nfaces = {name: u[:, offset:offset + rows*cols, :].reshape(nt, rows, cols, 3)\n         for name, rows, cols, offset in layout}\nprint(faces[\"exterior_front\"].shape)  # (nt, 101, 51, 3)\nprint(faces[\"interior_bottom\"].shape) # (nt, 99, 99, 3)\ntime = np.arange(nt) * (10 * 0.001)  # use your print rate and solver dt",
+        "note": "For a restart, the first saved step is the first multiple of the print rate at or after the restart step. Add first_saved_step * simulation_delta_time_sec to time. The reader dimensions are exterior dimensions; center offsets and strike affect positions but not face shapes or the global XYZ component convention."
+      },
+      {
+        "id": "drm-flat-output",
+        "title": "Optional CSV recorder and execution details",
+        "paragraphs": [
+          "The separate CSV mode remains available: set drm_output_file, drm_points_file, and drm_print_rate. Input row order is preserved, including duplicate rows. The latitude longitude depth file accepts whitespace or comma separators, an optional header with those names, blank lines, and # comments. Nonnegative depth below the surface and geographic conversion follow station conventions. It may run alongside any number of generated boxes, with its own rate. The earlier fallback that generated a single box from drm_boundary has been replaced by output_drm_boxes.",
+          "For a 51,009-row CSV, each snapshot remains 1,224,216 bytes, read as [snapshot, point, XYZ]. Use script/read_drm.py output/drm.bin --points 51009 --dt 0.02 with the actual drm_print_rate times the solver timestep. Each run truncates drm_output_file; preserve the input point list and use a new output path for restarted segments.",
+          "The recorder in quake/forward/io_drm.cc uses the existing plane GPU interpolation kernel and collective MPI-IO on solver ranks. Only compact sampled XYZ results are downloaded at requested steps, with independent file views and buffers per box or CSV file. It introduces no field exchanges and is independent of the plane output backend and plane I/O pool. drm_output_batch_size defaults to 16 snapshots per file; set 1 to write every snapshot. Partial final batches flush on normal completion.",
+          "Missing, multiply owned, or scalar-acoustic points stop setup. Poroelastic samples represent skeleton displacement. Close sample spacing does not refine the mesh. The existing three-stage implementation remains in quake/forward/drm.cc, controlled by implement_drm, which_drm_part, drm_directory, and its legacy geometry/time parameters. The new observation files cannot be fed directly to the existing part2 reader. Full CUDA/MPI station-history comparisons remain necessary before calling a physics/backend combination validated."
+        ],
+        "codeLabel": "parameters.in — optional additional CSV output",
+        "code": "drm_output_file = output/drm.bin\ndrm_points_file = input/drm_points_geodetic_1m.csv\ndrm_print_rate = 20\n\n# Point-file example (latitude longitude depth):\n# 34.0000 -118.5000 0.0\n# 34.0100 -118.4900 10.0",
+        "note": "Paths resolve from the run working directory; use absolute paths when needed, without ~ expansion. Generated box files and the optional CSV file must use distinct paths. Other station and plane outputs remain controlled by their own settings."
       },
       {
         id: "animate-planes",

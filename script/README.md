@@ -14,7 +14,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [taper_topography.py](taper_topography.py) | Taper relief to a flat collar before lateral PML boundaries | Python standard library |
 | [read_stations.py](read_stations.py) | Show the station header, time range, and peak displacement | NumPy |
 | [read_planes.py](read_planes.py) | Inspect plane layout and scan all displacements for finite values and peak vertical motion | NumPy |
-| [read_drm.py](read_drm.py) | Check the single-file DRM layout, time range, and peak XYZ displacements | Python standard library |
+| [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or CSV point output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
 
@@ -71,14 +71,23 @@ Binary readers assume native byte order matching the machine that wrote the
 files. Mesh records are packed: 32 bytes per corner and 20 bytes per material
 record, with eight corner records per element.
 
-The independent DRM recorder writes `(time, point, XYZ)` using the same native
-float64 triples. For a 51,009-row input point list and a saved interval of
-0.02 s, run `python3 script/read_drm.py output/drm.bin --points 51009 --dt 0.02`.
-Pass the actual `drm_print_rate * simulation_delta_time_sec` as `--dt`.
-There is no header or embedded point list: retain the input rows in their
-original order, or regenerate the documented inner-then-outer box ordering.
-Use `--first-time` for restart segments. Read completed output; the writer
-buffers snapshots according to `drm_output_batch_size`.
+Each generated DRM box writes one `drmdisplacements.N` containing native
+float64 triples, ordered `(time, concatenated face sample, XYZ)`. Pass exterior
+dimensions and spacing to inspect its ten structured faces:
+`python3 script/read_drm.py output/drmdisplacements.0 --box 100 100 50 1 --dt 0.01`.
+Face order is exterior front/back/left/right/bottom, then the five interior
+faces. Shared edges/corners repeat to keep each grid rectangular. The helper
+`box_layout(lx, ly, depth, spacing)` returns `(name, rows, columns, point_offset)`
+tuples for slicing these faces. Center and strike affect coordinates, not shapes;
+all output vectors retain global solver XYZ components. The saved interval is
+`output_drm_boxes_print_rate * simulation_delta_time_sec`.
+
+The optional CSV recorder retains `(time, point, XYZ)` in input row order.
+For 51,009 rows, run `python3 script/read_drm.py output/drm.bin --points 51009 --dt 0.02`,
+using `drm_print_rate * simulation_delta_time_sec` as `--dt`. Neither format
+has headers or embedded point lists. Retain the input table/CSV. Use
+`--first-time` for restart segments. Read completed output; the writer buffers
+snapshots according to `drm_output_batch_size`.
 
 For rendering and `mpirun` affinity settings, see the dedicated
 [plane velocity animation guide](../doc/plane_velocity_animations.md).

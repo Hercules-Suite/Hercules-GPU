@@ -71,50 +71,124 @@ inline int edge_count(double length, double spacing) {
     return static_cast<int>(rounded);
 }
 
-inline size_t surface_count(int nx, int ny, int nz) {
-    // Four walls through nz-1 plus the entire bottom. No top lid.
-    const long double count = (2.0L * nx + 2.0L * ny) * nz +
-                              (static_cast<long double>(nx) + 1) * (ny + 1);
-    if (count > max_points)
-        throw std::runtime_error("DRM box exceeds MPI point-count limits");
-    return static_cast<size_t>(count);
-}
-
-inline void append_surface(std::vector<Point>& points, double x0, double y0,
-                           double spacing, int nx, int ny, int nz) {
-    // X outer, Y middle, Z fastest; shared wall edges appear only once.
-    for (int ix = 0; ix <= nx; ++ix)
-        for (int iy = 0; iy <= ny; ++iy) {
-            const bool wall = ix == 0 || ix == nx || iy == 0 || iy == ny;
-            for (int iz = wall ? 0 : nz; iz <= nz; ++iz)
-                points.push_back(Point{{x0 + ix * spacing, y0 + iy * spacing,
-                                        iz * spacing}});
-        }
-}
-
-inline std::vector<Point> box_points(const double boundary[5], double spacing,
-                                     double offset_x, double offset_y) {
-    if (!std::isfinite(spacing) || spacing <= 0 ||
-        !std::isfinite(offset_x) || !std::isfinite(offset_y))
-        throw std::runtime_error("DRM spacing must be positive and offsets finite");
-    for (int i = 0; i < 5; ++i)
-        if (!std::isfinite(boundary[i]))
-            throw std::runtime_error("DRM boundary must be finite");
-    const int nx = edge_count(boundary[2] - boundary[0], spacing);
-    const int ny = edge_count(boundary[3] - boundary[1], spacing);
-    const int nz = edge_count(boundary[4], spacing);
-    const size_t inner = surface_count(nx, ny, nz);
-    const size_t outer = surface_count(nx + 2, ny + 2, nz + 1);
-    if (inner > max_points - outer)
-        throw std::runtime_error("DRM box exceeds MPI point-count limits");
+// One row: top-center X/Y, exterior X/Y lengths, exterior depth, spacing,
+// clockwise strike from north (degrees). Box-local X/Y rotate about the center.
+typedef std::array<double, 7> BoxSpec;
+struct Face {
+    const char* name;
+    int rows, columns;
+    size_t offset;
+};
+struct BoxGeometry {
     std::vector<Point> points;
-    points.reserve(inner + outer);
-    const double x0 = boundary[0] + offset_x;
-    const double y0 = boundary[1] + offset_y;
-    append_surface(points, x0, y0, spacing, nx, ny, nz);
-    append_surface(points, x0 - spacing, y0 - spacing, spacing,
-                   nx + 2, ny + 2, nz + 1);
-    return points;
+    std::array<Face, 10> faces;
+};
+
+inline std::vector<BoxSpec> read_boxes(std::istream& input, const char* key, int count) {
+    if (count <= 0) throw std::runtime_error("DRM box count must be positive");
+    std::vector<BoxSpec> boxes;
+    std::string line;
+    bool found = false;
+    while (std::getline(input, line)) {
+        line = line.substr(0, line.find('#'));
+        if (!found) {
+            std::replace(line.begin(), line.end(), '=', ' ');
+            std::istringstream heading(line);
+            std::string name, extra;
+            if (!(heading >> name) || name != key) continue;
+            if (heading >> extra)
+                throw std::runtime_error("Put output_drm_boxes rows on the following lines");
+            found = true;
+            continue;
+        }
+        std::istringstream row(line);
+        std::string token;
+        if (!(row >> token)) continue;
+        if (boxes.size() == static_cast<size_t>(count)) {
+            // A following parameter is allowed, but another numeric row is not.
+            if (token.find_first_of("+-0123456789.") == 0)
+                throw std::runtime_error("More output_drm_boxes rows than number_output_drm_boxes");
+            break;
+        }
+        BoxSpec box;
+        for (int column = 0; column < 7; ++column) {
+            if (column && !(row >> token))
+                throw std::runtime_error("Each output_drm_boxes row needs exactly seven values");
+            size_t used = 0;
+            try { box[column] = std::stod(token, &used); }
+            catch (const std::exception&) { used = 0; }
+            if (used != token.size() || !std::isfinite(box[column]))
+                throw std::runtime_error("Invalid value in output_drm_boxes row " + std::to_string(boxes.size()));
+        }
+        if (row >> token)
+            throw std::runtime_error("Each output_drm_boxes row needs exactly seven values");
+        boxes.push_back(box);
+    }
+    if (input.bad() || boxes.size() != static_cast<size_t>(count))
+        throw std::runtime_error("Missing or incomplete output_drm_boxes table");
+    return boxes;
+}
+
+inline BoxGeometry box_faces(const BoxSpec& box) {
+    for (double value : box)
+        if (!std::isfinite(value)) throw std::runtime_error("DRM box values must be finite");
+    const double h = box[5];
+    if (h <= 0) throw std::runtime_error("DRM box spacing must be positive");
+    const int nx = edge_count(box[2], h), ny = edge_count(box[3], h), nz = edge_count(box[4], h);
+    if (nx < 3 || ny < 3 || nz < 2)
+        throw std::runtime_error("DRM exterior lengths must exceed 2*spacing and depth must exceed spacing");
+    const char* names[10] = {"exterior_front", "exterior_back", "exterior_left",
+        "exterior_right", "exterior_bottom", "interior_front", "interior_back",
+        "interior_left", "interior_right", "interior_bottom"};
+    BoxGeometry geometry;
+    size_t total = 0;
+    for (int side = 0; side < 2; ++side) {
+        const int x = nx - 2 * side, y = ny - 2 * side, z = nz - side;
+        for (int face = 0; face < 5; ++face) {
+            const int rows = face < 2 ? y + 1 : x + 1;
+            const int columns = face < 4 ? z + 1 : y + 1;
+            const long double size = static_cast<long double>(rows) * columns;
+            if (size > max_points - total)
+                throw std::runtime_error("DRM box faces exceed MPI point-count limits");
+            const int index = side * 5 + face;
+            geometry.faces[index] = Face{names[index], rows, columns, total};
+            total += static_cast<size_t>(size);
+        }
+    }
+    geometry.points.reserve(total);
+    const double angle = std::remainder(box[6], 360.0) * std::acos(-1.0) / 180.0;
+    double c = std::cos(angle), s = std::sin(angle);
+    // Cardinal strikes should not put a boundary point just outside the
+    // domain because sin(pi) or cos(pi/2) is a tiny nonzero value.
+    if (std::abs(c) < 4 * std::numeric_limits<double>::epsilon()) c = 0;
+    if (std::abs(s) < 4 * std::numeric_limits<double>::epsilon()) s = 0;
+    for (int side = 0; side < 2; ++side) {
+        const double hx = box[2] / 2 - side * h, hy = box[3] / 2 - side * h;
+        const double depth = box[4] - side * h;
+        for (int face = 0; face < 5; ++face) {
+            const Face& grid = geometry.faces[side * 5 + face];
+            for (int row = 0; row < grid.rows; ++row)
+                for (int column = 0; column < grid.columns; ++column) {
+                    double x, y, z;
+                    if (face < 2) { // front=-local X, back=+local X; [Y,Z]
+                        x = face == 0 ? -hx : hx;
+                        y = row == grid.rows - 1 ? hy : -hy + row * h;
+                        z = column == grid.columns - 1 ? depth : column * h;
+                    } else if (face < 4) { // left=-local Y, right=+local Y; [X,Z]
+                        x = row == grid.rows - 1 ? hx : -hx + row * h;
+                        y = face == 2 ? -hy : hy;
+                        z = column == grid.columns - 1 ? depth : column * h;
+                    } else { // bottom; [X,Y]
+                        x = row == grid.rows - 1 ? hx : -hx + row * h;
+                        y = column == grid.columns - 1 ? hy : -hy + column * h;
+                        z = depth;
+                    }
+                    geometry.points.push_back(Point{{box[0] + c*x - s*y,
+                                                     box[1] + s*x + c*y, z}});
+                }
+        }
+    }
+    return geometry;
 }
 } // namespace drm_output
 #endif

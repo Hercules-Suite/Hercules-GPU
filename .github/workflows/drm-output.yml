@@ -40,3 +40,5 @@ jobs:
           mpirun.mpich -np 1 /tmp/drm-mpi-test /tmp/drm-one.bin
           mpirun.mpich -np 4 /tmp/drm-mpi-test /tmp/drm-four.bin
           cmp /tmp/drm-one.bin /tmp/drm-four.bin
+          cmp /tmp/drm-one.bin.box0 /tmp/drm-four.bin.box0
+          cmp /tmp/drm-one.bin.box1 /tmp/drm-four.bin.box1

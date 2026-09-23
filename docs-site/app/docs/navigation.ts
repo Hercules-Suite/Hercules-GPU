@@ -116,7 +116,7 @@ export const navGroups: NavGroup[] = [
       {
         slug: "parameters-drm-waves",
         title: "DRM & incident waves",
-        description: "Single-file DRM output, DRM stages, incident waves, and half-space.",
+        description: "Structured DRM output boxes, DRM stages, incident waves, and half-space.",
       },
     ],
   },

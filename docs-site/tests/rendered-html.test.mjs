@@ -276,8 +276,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 235);
-  assert.equal(documented.length, 235, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 239);
+  assert.equal(documented.length, 239, "parameter definitions must not be duplicated");
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -303,7 +303,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
     "output_debug_file",
     "output_planes",
   ]);
-  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bparsedarray2?|\briva_read_reversal_type)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
+  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bparsedarray2?|\briva_read_reversal_type|\bread_boxes)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
   for (const filename of parserFiles) {
     const source = readFileSync(`${sourceRoot}${filename}`, "utf8");
     for (const match of source.matchAll(parserPattern)) parsed.add(match[1]);
@@ -1410,23 +1410,60 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /output_displacement_file/);
 });
 
-test("documents the independent single-file DRM recorder and binary contract", async () => {
+test("documents multiple structured DRM boxes and the CSV binary contract", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();
   for (const key of ["drm_output_file", "drm_points_file", "drm_output_batch_size",
-    "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y"]) {
+    "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y",
+    "number_output_drm_boxes", "output_drm_boxes_print_rate", "output_drm_boxes_directory",
+    "output_drm_boxes"]) {
     assert.ok(html.includes(key), `missing DRM configuration key ${key}`);
   }
   assert.match(html, /input row order is preserved/i);
   assert.match(html, /including duplicate rows/);
-  assert.match(html, /inner surface first, then outer/);
-  assert.match(html, /60,810/);
+  assert.match(html, /exterior front, back, left, right, bottom, then the interior/);
+  assert.match(html, /shared edges\/corners are repeated/);
+  assert.match(html, /60,406/);
+  assert.match(html, /1,449,744 bytes/);
+  assert.match(html, /top center/);
+  assert.match(html, /length_x − 2h, length_y − 2h, depth − h/);
+  assert.match(html, /clockwise from north/);
+  assert.match(html, /drmdisplacements\.0/);
+  assert.match(html, /drmdisplacements\.1/);
+  assert.match(html, /box_layout\(100, 100, 50, 1\)/);
+  assert.match(html, /a box centered at \(0,0\) extends to negative X\/Y/i);
   assert.match(html, /1,224,216 bytes/);
   assert.match(html, /cannot be fed directly to the existing part2 reader/);
   assert.match(html, /Each run truncates drm_output_file/);
   assert.match(html, /scalar-acoustic points stop setup/);
   assert.match(html, /does not refine the mesh/);
   assert.match(html, /shape=\(nt, npoints, 3\)/);
+});
+
+test("reads structured DRM faces with exterior dimensions and rejects degenerate interiors", () => {
+  const reader = fileURLToPath(new URL("../../script/read_drm.py", import.meta.url));
+  if (!existsSync(reader)) return;
+  const dir = mkdtempSync(join(tmpdir(), "hercules-drm-box-reader-"));
+  try {
+    const file = join(dir, "drmdisplacements.0");
+    // Analytically: exterior 131 + interior 63 = 194 grid samples for 4×6×3, h=1.
+    const payload = new Float64Array(2 * 194 * 3);
+    writeFileSync(file, Buffer.from(payload.buffer));
+    const run = (dimensions) => spawnSync("python3", [reader, file, "--box", ...dimensions,
+      "--dt", "0.01"], { encoding: "utf8" });
+    const result = run(["4", "6", "3", "1"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /layout=\(2, 194, 3\)/);
+    assert.match(result.stdout, /exterior_front: shape=\(2, 7, 4, 3\), point_offset=0/);
+    assert.match(result.stdout, /interior_front: shape=\(2, 5, 3, 3\), point_offset=131/);
+    assert.match(result.stdout, /interior_bottom: shape=\(2, 3, 5, 3\), point_offset=179/);
+    const bad = run(["2", "6", "3", "1"]);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /exterior lengths must exceed/);
+    assert.notEqual(run(["4", "6", "3", "0.7"]).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("reads complete flat DRM snapshots and rejects incomplete or nonfinite data", () => {
