@@ -34,3 +34,11 @@ pnpm run build
 Documentation navigation lives in `app/docs/navigation.ts`; page content lives
 in `app/docs/content.ts`. Add a navigation entry and a matching content record
 to publish another guide through the shared documentation layout.
+
+The repository's [Technical README](../doc/Technical%20README.md) is the concise
+operational guide and variable index. Put lengthy engineering explanations,
+examples, numerical derivations, and implementation/validation notes in
+[Extended README](../doc/Extended%20README.md), keeping its current input
+descriptions synchronized with the site and parser. Omit retired or unused
+controls from both references. Label historical benchmark results with their
+implementation scope.
