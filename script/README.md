@@ -14,6 +14,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [taper_topography.py](taper_topography.py) | Taper relief to a flat collar before lateral PML boundaries | Python standard library |
 | [read_stations.py](read_stations.py) | Show the station header, time range, and peak displacement | NumPy |
 | [read_planes.py](read_planes.py) | Inspect plane layout and scan all displacements for finite values and peak vertical motion | NumPy |
+| [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or single-file station output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
 
@@ -69,6 +70,26 @@ scans the entire file one snapshot at a time using a read-only memory mapping.
 Binary readers assume native byte order matching the machine that wrote the
 files. Mesh records are packed: 32 bytes per corner and 20 bytes per material
 record, with eight corner records per element.
+
+Each generated DRM box writes one `drmdisplacements.N` containing native
+float64 triples, ordered `(time, concatenated face sample, XYZ)`. Pass exterior
+dimensions and spacing to inspect its ten structured faces:
+`python3 script/read_drm.py output/drmdisplacements.0 --box 100 100 50 1 --dt 0.01`.
+Face order is exterior front/back/left/right/bottom, then the five interior
+faces. Shared edges/corners repeat to keep each grid rectangular. The helper
+`box_layout(lx, ly, depth, spacing)` returns `(name, rows, columns, point_offset)`
+tuples for slicing these faces. Center and strike affect coordinates, not shapes;
+all output vectors retain global solver XYZ components. The saved interval is
+`output_drm_boxes_print_rate * simulation_delta_time_sec`.
+
+With `station_binary=yes`, `station_output_binary_file` stores
+`(time, station, XYZ)` in `output_stations` row order. Run
+`python3 script/read_drm.py output/station_displacements.0 --points 2 --dt 0.01`
+for two stations, using `output_stations_print_rate * simulation_delta_time_sec`
+as `--dt`. Neither format has headers or embedded point lists. Retain the
+input tables. Use `--first-time` for restart segments. Read completed output;
+DRM boxes buffer snapshots according to `drm_output_batch_size`, while station
+binary output writes every saved snapshot.
 
 For rendering and `mpirun` affinity settings, see the dedicated
 [plane velocity animation guide](../doc/plane_velocity_animations.md).

@@ -83,11 +83,14 @@ extern "C" {
 
 #include "topography.h"
 #include "drm_planewaves.h"
+#include "io_drm.h"
+#include "flat_output_mpi.h"
 #include "basin.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+static flat_output::FlatWriter stationBinaryWriter;
 
 /* ONLY GLOBAL VARIABLES ALLOWED OUTSIDE OF PARAM. and GLOBAL. IN ALL OF
  * PSOLVE!! */
@@ -1111,6 +1114,8 @@ static struct Param_t {
 
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
+  int stationBinary; /* Default NO: existing ASCII station histories. */
+  char stationOutputBinaryFile[256];
   int theStationsPrintRate;
   double* theStationX;
   double* theStationY;
@@ -2223,7 +2228,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  63 /* Must adjust this if adding int params */
+  64 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2408,6 +2413,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[60] = Param.theAcousticPoroelasticInterface;
   int_message[61] = (int)Param.printStationPorePressureRatios;
   int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
+  int_message[63] = Param.stationBinary;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2476,6 +2482,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticPoroelasticInterface = int_message[60];
   Param.printStationPorePressureRatios = (noyesflag_t)int_message[61];
   Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
+  Param.stationBinary = int_message[63];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3169,6 +3176,30 @@ static int32_t parse_parameters(const char* numericalin) {
             &print_station_pore_pressure_ratios);
   parsetext(fp, "print_station_strains", 's', &print_station_strains);
   parsetext(fp, "print_station_stresses", 's', &print_station_stresses);
+  char station_binary[64] = "no";
+  char* stationBinaryText = station_binary;
+  size_t stationBinaryLength = sizeof(station_binary);
+  if (hu_config_get_string_opt(fp, "station_binary", &stationBinaryText,
+                               &stationBinaryLength) < 0 ||
+      (strcasecmp(station_binary, "yes") != 0 &&
+       strcasecmp(station_binary, "no") != 0)) {
+    solver_abort(__FUNCTION_NAME, NULL, "station_binary must be yes or no");
+  }
+  Param.stationBinary = (strcasecmp(station_binary, "yes") == 0) ? YES : NO;
+  if (Param.stationBinary == YES) {
+    if (number_output_stations <= 0 || number_output_stations > INT_MAX / 3) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "station_binary=yes requires 1..INT_MAX/3 output stations");
+    }
+    /* Binary output records displacement only. Avoid ancillary gathers and
+     * derivative/tensor histories even if ASCII print flags are supplied. */
+    strcpy(print_station_velocities, "no");
+    strcpy(print_station_accelerations, "no");
+    strcpy(print_station_pressures, "no");
+    strcpy(print_station_pore_pressure_ratios, "no");
+    strcpy(print_station_strains, "no");
+    strcpy(print_station_stresses, "no");
+  }
   parsetext(fp, "mesh_coordinates_for_matlab", 's',
             &mesh_coordinates_for_matlab);
   parsetext(fp, "include_buildings", 's', &include_buildings);
@@ -15650,6 +15681,14 @@ static void solver_output_planes(mysolver_t* solver, int my_id, int step) {
 }
 
 static void solver_close_station_outputs(void) {
+  if (Param.stationBinary == YES) {
+    try {
+      stationBinaryWriter.close(); // Collective, including ranks without stations.
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL, "%s", error.what());
+    }
+    return;
+  }
   if ((Param.theNumberOfStations == 0) || (Param.myStations == NULL)) {
     return;
   }
@@ -15668,8 +15707,10 @@ static void solver_output_stations(int step) {
   if (Param.theNumberOfStations != 0) {
     if (step % Param.theStationsPrintRate == 0) {
       Timer_Start("Print Stations");
-      solver_station_tensor_kick(step);
-      solver_sync_pore_pressure_station_values(Global.mySolver);
+      if (Param.stationBinary != YES) {
+        solver_station_tensor_kick(step);
+        solver_sync_pore_pressure_station_values(Global.mySolver);
+      }
       interpolate_station_displacements(step);
       Timer_Stop("Print Stations");
     }
@@ -15742,7 +15783,8 @@ static void solver_nonlinear_state(mysolver_t* solver, mesh_t* mesh,
       compute_bottom_reactions(mesh, solver, k1, k2, step, Param.theDeltaT);
       Timer_Stop("Compute Non-linear Reactions");
     }
-    if (!nonlinear_gpu_active() && Param.theNumberOfStations != 0) {
+    if (!nonlinear_gpu_active() && Param.theNumberOfStations != 0 &&
+        Param.stationBinary != YES) {
       Timer_Start("Print Stations");
       print_nonlinear_stations(mesh, solver, Param.myStations,
                                Param.myNumberOfStations, Param.theDeltaT, step,
@@ -16777,7 +16819,8 @@ static void solver_finish_nonlinear_gpu(mysolver_t* solver, mesh_t* mesh,
   }
   nonlinear_gpu_check_error(Global.myID);
   const int stationOutputDue =
-      Param.theNumberOfStations != 0 && Param.theStationsPrintRate > 0 &&
+      Param.stationBinary != YES && Param.theNumberOfStations != 0 &&
+      Param.theStationsPrintRate > 0 &&
       (step % Param.theStationsPrintRate) == 0;
   const int geostaticReferenceDue =
       Param.printStationPorePressureRatios == YES &&
@@ -22011,6 +22054,7 @@ static void solver_run() {
     // solver_output_wavefield( step );
     solver_output_planes(Global.mySolver, Global.myID, step);
     solver_output_stations(step);
+    drm_output_print(Global.mySolver, step);
     solver_output_drm_nodes(Global.mySolver, step, Param.theTotalSteps);
     solver_read_source_forces(step, Param.theDeltaT);
     solver_read_drm_displacements_v2(step, Param.theDeltaT,
@@ -22207,6 +22251,9 @@ static void solver_run() {
     Timer_Stop("Solver I/O");
   }
 
+  Timer_Start("Solver I/O");
+  drm_output_close();
+  Timer_Stop("Solver I/O");
   solver_drm_close();
   solver_output_wavefield_close();
   solver_run_collect_timers();
@@ -26872,8 +26919,12 @@ static void read_stations_info(const char* numericalin) {
   if (parsetext(fp, "output_stations_print_rate", 'i',
                 &Param.theStationsPrintRate) != 0) {
     solver_abort(fname, NULL,
-                 "Error parsing output_planes_print_rate field from %s\n",
+                 "Error parsing output_stations_print_rate field from %s\n",
                  numericalin);
+  }
+
+  if (Param.theStationsPrintRate <= 0) {
+    solver_abort(fname, NULL, "output_stations_print_rate must be positive");
   }
 
   auxiliar = (double*)malloc(sizeof(double) * Param.theNumberOfStations * 3);
@@ -26902,9 +26953,20 @@ static void read_stations_info(const char* numericalin) {
     lat = auxiliar[iStation * 3];
     lon = auxiliar[iStation * 3 + 1];
     depth = auxiliar[iStation * 3 + 2];
+    if (Param.stationBinary == YES &&
+        (!isfinite(lat) || !isfinite(lon) || !isfinite(depth) ||
+         fabs(lat) > 90.0 || fabs(lon) > 180.0 || depth < 0.0)) {
+      solver_abort(fname, NULL, "Invalid latitude/longitude/depth for station %d", iStation);
+    }
     coords = compute_domain_coords_linearinterp(
         lon, lat, Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
         Param.theDomainY, Param.theDomainX, &Param.utmZone);
+    if (Param.stationBinary == YES &&
+        (!isfinite(coords.x[0]) || !isfinite(coords.x[1]) ||
+         coords.x[0] < 0.0 || coords.x[0] >= Param.theDomainX ||
+         coords.x[1] < 0.0 || coords.x[1] >= Param.theDomainY)) {
+      solver_abort(fname, NULL, "Binary station %d lies outside the horizontal domain", iStation);
+    }
     Param.theStationX[iStation] = coords.x[0];
     Param.theStationY[iStation] = coords.x[1];
     Param.theStationZ[iStation] = depth;
@@ -26917,9 +26979,31 @@ static void read_stations_info(const char* numericalin) {
       /* Dorian: place stations on surface */
       Param.theStationZ[iStation] += point_elevation(coords.x[0], coords.x[1]);
     }
+    if (Param.stationBinary == YES &&
+        (!isfinite(Param.theStationZ[iStation]) ||
+         Param.theStationZ[iStation] < 0.0 ||
+         Param.theStationZ[iStation] >= Param.theDomainZ)) {
+      solver_abort(fname, NULL, "Binary station %d lies outside the vertical domain", iStation);
+    }
   }
 
   free(auxiliar);
+
+  if (Param.stationBinary == YES) {
+    char* path = Param.stationOutputBinaryFile;
+    size_t length = sizeof(Param.stationOutputBinaryFile);
+    if (hu_config_get_string_req(fp, "station_output_binary_file", &path, &length) != 1 ||
+        !path[0] || strlen(path) > 240) {
+      solver_abort(fname, NULL,
+                   "station_binary=yes requires station_output_binary_file (1..240 bytes)");
+    }
+    if (flat_output::same_file(path, numericalin)) {
+      solver_abort(fname, NULL, "Station binary output would overwrite parameters.in");
+    }
+    create_parent_dir_for_file(path, fname);
+    fclose(fp);
+    return;
+  }
 
   parsetext(fp, "output_stations_directory", 's', Param.theStationsDirOut);
   createDir(Param.theStationsDirOut, fname);
@@ -26966,6 +27050,8 @@ void broadcast_stations_info() {
             comm_solver);
   MPI_Bcast(&Param.theStationsPrintRate, 1, MPI_INT, 0, comm_solver);
 
+  broadcast_char_array(Param.stationOutputBinaryFile,
+                       sizeof(Param.stationOutputBinaryFile), 0, comm_solver);
   broadcast_char_array(Param.theStationsDirOut, sizeof(Param.theStationsDirOut),
                        0, comm_solver);
   broadcast_char_array(Param.theStationMediumsFile,
@@ -27073,6 +27159,7 @@ static void station_fill_medium_record(
 static void station_write_mediums_file(
     const station_medium_record_t* localRecords,
     int rampedReferenceFinalized) {
+  if (Param.stationBinary == YES) return;
   const int32_t localCount = Param.myNumberOfStations;
   const int64_t localBytes64 =
       (int64_t)localCount * (int64_t)sizeof(station_medium_record_t);
@@ -27370,8 +27457,11 @@ void setup_stations_data() {
       Param.myStations[iLCStation].mu = stMu;
       Param.myStations[iLCStation].lambda = stLambda;
     }
-    sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
-    Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+    Param.myStations[iLCStation].fpoutputfile = NULL;
+    if (Param.stationBinary != YES) {
+      sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
+      Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+    }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
     Param.myStations[iLCStation].prev_disp[2] = 0.0;
@@ -27384,6 +27474,7 @@ void setup_stations_data() {
             Param.myStations[iLCStation].pore_pressure_is_defined);
     station_fill_medium_record(iLCStation,
                                &stationMediumRecords[iLCStation]);
+    if (Param.stationBinary == YES) continue;
 
     /*
      * This section now enclosed in a DEBUG def because its information
@@ -27668,6 +27759,8 @@ static void solver_update_acoustic_station_kinematics(int32_t step) {
  */
 static int interpolate_station_displacements(int32_t step) {
   int iPhi;
+  double* binaryFrame = (Param.stationBinary == YES)
+                            ? stationBinaryWriter.next_frame() : NULL;
 
   /* Auxiliary array to handle shape functions in a loop */
   double xi[3][8] = {{-1, 1, -1, 1, -1, 1, -1, 1},
@@ -27724,6 +27817,12 @@ static int interpolate_station_displacements(int32_t step) {
       acc_y = Param.myStations[iStation].acoustic_acc[1];
       acc_z = Param.myStations[iStation].acoustic_acc[2];
 
+      if (binaryFrame != NULL) {
+        binaryFrame[3*iStation] = dis_x;
+        binaryFrame[3*iStation + 1] = dis_y;
+        binaryFrame[3*iStation + 2] = dis_z;
+        continue;
+      }
       fprintf(Param.myStations[iStation].fpoutputfile,
               "\n%10.6f % 8e % 8e % 8e", time, dis_x, dis_y, dis_z);
 
@@ -27748,6 +27847,12 @@ static int interpolate_station_displacements(int32_t step) {
                                     &vel_z, &acc_x, &acc_y, &acc_z,
                                     Param.theDeltaT, Param.theDeltaTSquared,
                                     iStation, Global.mySolver) == 1)) {
+      if (binaryFrame != NULL) {
+        binaryFrame[3*iStation] = dis_x;
+        binaryFrame[3*iStation + 1] = dis_y;
+        binaryFrame[3*iStation + 2] = dis_z;
+        continue;
+      }
       fprintf(Param.myStations[iStation].fpoutputfile,
               "\n%10.6f % 8e % 8e % 8e", time, dis_x, dis_y, dis_z);
 
@@ -27855,6 +27960,12 @@ static int interpolate_station_displacements(int32_t step) {
        * It has to be *this* one because it goes in hand with the printing
        * format for the nonlinear information.
        */
+      if (binaryFrame != NULL) {
+        binaryFrame[3*iStation] = dis_x;
+        binaryFrame[3*iStation + 1] = dis_y;
+        binaryFrame[3*iStation + 2] = dis_z;
+        continue;
+      }
       fprintf(Param.myStations[iStation].fpoutputfile,
               "\n%10.6f % 8e % 8e % 8e", time, dis_x, dis_y, dis_z);
 
@@ -27984,6 +28095,13 @@ static int interpolate_station_displacements(int32_t step) {
     }
   }
 
+  if (Param.stationBinary == YES) {
+    try {
+      stationBinaryWriter.finish_frame();
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL, "%s", error.what());
+    }
+  }
   return 1;
 }
 
@@ -28236,6 +28354,37 @@ void output_stations_init(const char* numericalin) {
   Timer_Stop("Stations Broadcast");
 
   setup_stations_data();
+
+  if (Param.stationBinary == YES) {
+    try {
+      std::vector<int> owners(Param.theNumberOfStations, 0), ids;
+      for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
+        const int id = Param.myStations[i].id;
+        owners[id] = 1;
+        ids.push_back(id);
+      }
+      flat_output::mpi_check(MPI_Allreduce(MPI_IN_PLACE, owners.data(),
+          Param.theNumberOfStations, MPI_INT, MPI_SUM, comm_solver), "Station ownership check");
+      for (int id = 0; id < Param.theNumberOfStations; ++id) {
+        if (owners[id] != 1) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "Binary station %d has %d owners; expected exactly one", id, owners[id]);
+        }
+      }
+      // One collective write per saved snapshot; local storage is only 3*N doubles.
+      stationBinaryWriter.open(comm_solver, Param.stationOutputBinaryFile,
+                               Param.theNumberOfStations, ids, 1);
+      if (Global.myID == 0) {
+        monitor_print("Station binary output: %s; %d stations in input order, "
+                      "native float64 XYZ displacement (m), dt_out=%.17g s. "
+                      "ASCII print flags and station metadata are disabled.\n",
+                      Param.stationOutputBinaryFile, Param.theNumberOfStations,
+                      Param.theStationsPrintRate * Param.theDeltaT);
+      }
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL, "%s", error.what());
+    }
+  }
 
   t1 = MPI_Wtime();
   setupSeconds = t1 - t0;
@@ -29744,6 +29893,11 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  drm_output_setup(Global.myID, Param.parameters_input_file, get_surface_shift(),
+                   Param.includeTopography == YES,
+                   Param.stationOutputBinaryFile,
+                   Param.theDomainX, Param.theDomainY, Param.theDomainZ,
+                   Global.mySolver, Param.theDeltaT);
   solver_init_station_ve_stress_gpu(Global.myID);
   Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");
@@ -29776,7 +29930,7 @@ int main(int argc, char** argv) {
               "Nonlinear/acoustic policy: acoustic elements are excluded "
               "from solid constitutive updates\n");
     }
-    if (Param.theNumberOfStations != 0) {
+    if (Param.theNumberOfStations != 0 && Param.stationBinary != YES) {
       nonlinear_stations_init(Global.myMesh, Param.myStations,
                               Param.myNumberOfStations);
       nonlinear_gpu_prepare_station_output(Global.myID);
