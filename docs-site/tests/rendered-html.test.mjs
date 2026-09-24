@@ -1434,6 +1434,14 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /clockwise from north/);
   assert.match(html, /drmdisplacements\.0/);
   assert.match(html, /drmdisplacements\.1/);
+  assert.match(html, /drmcoordinates\.0/);
+  assert.match(html, /drmcoordinates\.1/);
+  assert.match(html, /X_m Y_m Z_m/);
+  assert.match(html, /Data row i .* matches binary sample i/);
+  assert.match(html, /17 significant digits/);
+  assert.match(html, /once during setup after point ownership validation/);
+  assert.match(html, /np\.loadtxt/);
+  assert.doesNotMatch(html, /No extra face files or coordinate sidecars/);
   assert.match(html, /box_layout\(100, 100, 50, 1\)/);
   assert.match(html, /a box centered at \(0,0\) extends to negative X\/Y/i);
   assert.match(html, /cannot be fed directly to the existing part2 reader/);

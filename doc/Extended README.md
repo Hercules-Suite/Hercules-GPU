@@ -2252,7 +2252,8 @@ three-stage DRM replay workflow remains separate.
 ## Structured DRM box output
 
 `quake/forward/io_drm.cc` records any number of DRM boxes, with one flat binary
-file per box, using a plane-style input table:
+displacement file and one ASCII coordinate file per box, using a plane-style
+input table:
 
 ```ini
 number_output_drm_boxes       = 2
@@ -2268,7 +2269,9 @@ output_drm_boxes =
 Each row has exactly seven finite values. Blank lines and `#` comments are
 accepted. `number_output_drm_boxes` defaults to zero; a positive count requires
 the table, a positive print rate, and an output directory. Files are
-`drmdisplacements.0`, `drmdisplacements.1`, etc., in row order. Directories are
+`drmdisplacements.0` with `drmcoordinates.0`, `drmdisplacements.1` with
+`drmcoordinates.1`, etc., in row order. Coordinate output is automatic and
+requires no additional parameter. Directories are
 created automatically. The complete output path is limited to 240 bytes and
 resolves from the run working directory (`~` is not expanded).
 
@@ -2298,7 +2301,7 @@ nz=depth/h. Every face includes the endpoints of each grid axis:
 Rows and columns increase in their positive local directions. Columns vary
 fastest. **Shared edges/corners are repeated in adjoining faces**, so each face
 can be reshaped to a rectangle. The setup log prints face names, shapes, and
-zero-based point offsets. No coordinate sidecars or per-face files are created.
+zero-based point offsets. All ten faces share the same binary/ASCII file pair.
 For the 100 × 100 × 50 m example at h=1 m, the interior is 98 × 98 × 49 m and
 there are **60,406 samples / 1,449,744 bytes per snapshot**.
 
@@ -2313,7 +2316,32 @@ skeleton displacement. Sampling does not refine the solver mesh.
 
 Each snapshot concatenates the ten faces as native-endian float64 XYZ triples
 in metres. The full file is `[time, concatenated_face_sample, XYZ]` with no
-header or embedded timestamps. Keep the input box row to identify geometry.
+header or embedded timestamps. Keep the input box row to identify face shapes.
+
+The matching `drmcoordinates.N` contains three whitespace-separated columns:
+`X_m Y_m Z_m`. These are the actual solver sampling coordinates in metres:
+X north, Y east, Z positive downward, after strike rotation and the same
+building/topography depth shifts used for interpolation. Z is in the solver
+coordinate frame, including those shifts. Ignoring lines beginning with `#`,
+data row i (zero-based) gives the position of binary sample i in every
+snapshot. The exterior/interior face ordering and repeated edge/corner rows
+are identical to the binary layout; no points are sorted or deduplicated.
+Values use 17 significant digits, sufficient to round-trip float64 coordinates,
+with a decimal point independent of the host locale. The file begins with
+comment lines describing the axes, ordering, point count, and column names.
+For the first example on flat terrain with zero surface shift, its data begin:
+
+```text
+# X_m Y_m Z_m
+950 1950 0
+950 1950 1
+950 1950 2
+```
+
+Solver rank zero writes and closes the coordinate file once during setup,
+after validating point ownership. Each run overwrites it, including restarts,
+alongside the binary file. It adds no per-step I/O or GPU transfers.
+
 Inspect the first example (assuming solver dt=0.001 s) with:
 
 ```sh
@@ -2331,14 +2359,20 @@ from script.read_drm import box_layout
 layout = box_layout(100, 100, 50, 1)  # exterior dimensions and spacing
 npoints = sum(rows * cols for _, rows, cols, _ in layout)
 path = Path("outputfiles/drm_boxes_fullDomain/drmdisplacements.0")
+xyz = np.loadtxt(path.with_name("drmcoordinates.0"), comments="#", ndmin=2)
+if xyz.shape != (npoints, 3):
+    raise ValueError("coordinate count does not match box dimensions")
 nt, remainder = divmod(path.stat().st_size, npoints * 3 * 8)
 if remainder or nt == 0:
     raise ValueError("incomplete snapshot or wrong dimensions")
 u = np.memmap(path, dtype=np.float64, mode="r", shape=(nt, npoints, 3))
 faces = {name: u[:, start:start + rows*cols, :].reshape(nt, rows, cols, 3)
          for name, rows, cols, start in layout}
+face_xyz = {name: xyz[start:start + rows*cols].reshape(rows, cols, 3)
+            for name, rows, cols, start in layout}
 # faces["exterior_front"] -> (nt, 101, 51, 3)
 # faces["interior_bottom"] -> (nt, 99, 99, 3)
+# face_xyz["exterior_front"] -> (101, 51, 3), matching every time slice
 ```
 
 Snapshots are taken before advancing steps divisible by
