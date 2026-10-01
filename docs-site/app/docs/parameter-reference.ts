@@ -267,7 +267,7 @@ const parameterPages: ParameterPage[] = [
           p("output_planes_print_rate", "Conditional", "Integer time steps", "Required when number_output_planes>0", "Plane sampling interval."),
           p("output_planes_directory", "Optional", "Directory path", "Default: outputfiles/planes", "Destination for plane metadata and planedisplacements.N files."),
           p("output_planes", "Conditional", "Table: N rows × 9 values", "lat lon depth d_strike n_strike d_dip n_dip strike(deg) dip(deg)", "Plane origins and regular sampling geometry, required when number_output_planes>0."),
-          p("reconstruct_acoustic_plane_displacements", "Optional", "Yes/no", "Default: no", "Reconstruct scalar-acoustic plane motion; fully described with the acoustic parameters."),
+          p("reconstruct_acoustic_plane_displacements", "Optional", "Yes/no", "Default: no", "Integrate -grad(p)/rho at acoustic plane points. Requires include_acoustic=yes and pressure or velocity_potential formulation; the latter first forms p = -(phi[n] - phi[n-1])/dt, matching stations. Solid points retain elastic displacement interpolation."),
         ],
       },
       {

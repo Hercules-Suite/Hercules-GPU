@@ -20193,6 +20193,10 @@ static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {
 #pragma omp parallel for schedule(static) if(g_acousticPlanePressureNodeCount > 100000)
 #endif
   for (int32_t i = 0; i < g_acousticPlanePressureNodeCount; i++) {
+    /* Preserve the stored scalar (phi in velocity-potential mode). The host
+     * buffer swap retains this patch in pressure_tm2 at the next step, so
+     * plane reconstruction can form p = -(phi[n]-phi[n-1])/dt without another
+     * gather, device-to-host transfer, or field-buffer conversion. */
     solver->pressure_tm1[g_acousticPlanePressureNodesHost[i]] =
         g_acousticPlanePressureBufferHost[i];
   }
@@ -22044,7 +22048,8 @@ static void solver_run() {
     solver_sync_acoustic_plane_pressure_values(Global.mySolver);
     planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
                                       step, Param.theDeltaT,
-                                      Param.theDeltaTSquared);
+                                      Param.theDeltaTSquared,
+                                      Param.theAcousticVelocityPotential);
 
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
@@ -29887,6 +29892,12 @@ int main(int argc, char** argv) {
       monitor_print(
           "Plane setup complete: total=%d max-rank-time=%.2fs\n",
           Param.theNumberOfPlanes, planesSetupElapsedMax);
+      if (Param.reconstructAcousticPlaneDisplacements == YES) {
+        monitor_print("Acoustic plane reconstruction: %s\n",
+                      Param.theAcousticVelocityPotential
+                          ? "p = -(phi[n]-phi[n-1])/dt, acceleration = -grad(p)/rho"
+                          : "pressure field, acceleration = -grad(p)/rho");
+      }
     }
   }
 

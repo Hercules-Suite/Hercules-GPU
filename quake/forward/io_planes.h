@@ -24,7 +24,7 @@ extern int planes_print(int32_t myID, int IO_pool_pe_count, int theNumberOfPlane
 			mysolver_t* mySolver);
 extern void planes_update_acoustic_kinematics(mysolver_t* mySolver,
     int theNumberOfPlanes, int32_t step, double deltaT,
-    double deltaTSquared);
+    double deltaTSquared, int velocityPotential);
 extern int32_t planes_displacement_node_count(void);
 extern const int32_t* planes_displacement_nodes(void);
 extern int32_t planes_acoustic_pressure_node_count(void);

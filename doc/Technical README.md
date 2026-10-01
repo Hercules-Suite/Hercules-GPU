@@ -105,6 +105,10 @@ interactions are in the
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
 - **Plane output:** `output_planes_print_rate`, `reconstruct_acoustic_plane_displacements`.
+  Acoustic reconstruction uses physical pressure in both formulations; for
+  velocity potential it first computes `p = -(phi[n] - phi[n-1])/dt`.
+  See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)
+  for plane output from older executables.
 - **Topography:** `include_topography`, `topography_directory`, `maximum_octant_level`,
   `computation_method`, `topography_bkt_gpu_stabilize`.
 - **Nonlinear and plastic controls:** `include_nonlinear_analysis`, `geostatic_loading_time_sec`,

@@ -1308,7 +1308,7 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 
 static int plane_pressure_gradient(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
-		double grad[3]) {
+		double grad[3], double inverseDeltaT) {
 	int iPhi;
 	const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
 	const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
@@ -1324,13 +1324,20 @@ static int plane_pressure_gradient(const mysolver_t* mySolver,
 	grad[2] = 0.0;
 
 	if ((element->pressure_is_defined == 0) || (mySolver == NULL) ||
-	    (mySolver->pressure_tm1 == NULL) || (h <= 0.0)) {
+	    (mySolver->pressure_tm1 == NULL) || (h <= 0.0) ||
+	    ((inverseDeltaT > 0.0) && (mySolver->pressure_tm2 == NULL))) {
 		return 0;
 	}
 
 	for (iPhi = 0; iPhi < 8; iPhi++) {
 		const int32_t node = element->nodestointerpolate[iPhi];
-		const double pressure = mySolver->pressure_tm1[node];
+		/* As in station_pressure_gradient(), the stored scalar is phi in
+		 * velocity-potential mode. Differentiate it before taking grad(p).
+		 * inverseDeltaT == 0 selects the legacy pressure-valued field. */
+		const double pressure = (inverseDeltaT > 0.0)
+			? -(double)(mySolver->pressure_tm1[node] -
+			             mySolver->pressure_tm2[node]) * inverseDeltaT
+			: (double)mySolver->pressure_tm1[node];
 		const double dphidx =
 			sx[iPhi] * (1.0 + sy[iPhi] * eta) *
 			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -1353,13 +1360,14 @@ static void plane_update_acoustic_point(const mysolver_t* mySolver,
 		plane_strip_element_t* element,
 		int32_t step,
 		double deltaT,
-		double deltaTSquared) {
+		double deltaTSquared,
+		double inverseDeltaT) {
 	double grad[3];
 	double accel[3];
 
 	if ((element == NULL) || (element->pressure_is_defined == 0) ||
 	    (element->rho <= 0.0) ||
-	    (plane_pressure_gradient(mySolver, element, grad) == 0)) {
+	    (plane_pressure_gradient(mySolver, element, grad, inverseDeltaT) == 0)) {
 		return;
 	}
 
@@ -1510,7 +1518,7 @@ int planes_print(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes, myso
 
 void planes_update_acoustic_kinematics(mysolver_t* mySolver,
     int theNumberOfPlanes, int32_t step, double deltaT,
-    double deltaTSquared) {
+    double deltaTSquared, int velocityPotential) {
 	int iPlane, iStrip;
 
 	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
@@ -1518,6 +1526,13 @@ void planes_update_acoustic_kinematics(mysolver_t* mySolver,
 	    (mySolver == NULL) || (mySolver->pressure_tm1 == NULL)) {
 		return;
 	}
+	if (velocityPotential &&
+	    ((deltaT <= 0.0) || (mySolver->pressure_tm2 == NULL))) {
+		solver_abort("planes_update_acoustic_kinematics", NULL,
+		             "Velocity-potential plane output requires a positive dt "
+		             "and both scalar field histories");
+	}
+	const double inverseDeltaT = velocityPotential ? (1.0 / deltaT) : 0.0;
 
 	for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
 		for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
@@ -1534,7 +1549,7 @@ void planes_update_acoustic_kinematics(mysolver_t* mySolver,
 			for (elemnum = 0; elemnum < elemCount; elemnum++) {
 				plane_update_acoustic_point(mySolver,
 					&(thePlanes[iPlane].strip[iStrip][elemnum]),
-					step, deltaT, deltaTSquared);
+					step, deltaT, deltaTSquared, inverseDeltaT);
 			}
 		}
 	}

@@ -1453,6 +1453,28 @@ test("documents plane amplitude diagnostics without equating geometry with CPML 
   assert.match(await (await render("/docs/configuration")).text(), /HERCULES_PLANE_METADATA/);
 });
 
+test("converts velocity potential to pressure before reconstructing acoustic planes", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /p = -\(phi\[n\] - phi\[n-1\]\)\/dt/);
+  assert.match(html, /conversion adds no GPU transfers/);
+  assert.match(html, /old code gives -0\.6 m at 4 s/);
+  assert.match(html, /not validation of a complete CUDA\/MPI/);
+
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(solver, /planes_update_acoustic_kinematics\([\s\S]*?Param\.theDeltaTSquared,\s*Param\.theAcousticVelocityPotential\)/);
+  assert.match(solver, /Acoustic plane reconstruction:/);
+  // The sparse plane gather still patches the raw current scalar; pointer
+  // swaps retain its previous value instead of transferring another field.
+  const sync = solver.slice(solver.indexOf("static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {"),
+                            solver.indexOf("static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {"));
+  assert.equal((sync.match(/cudaMemcpyAsync\(/g) ?? []).length, 1);
+  assert.doesNotMatch(sync, /pressureTm2Device/);
+});
+
 test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();

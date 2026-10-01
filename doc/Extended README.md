@@ -1211,6 +1211,14 @@ Notes:
 	three-component displacement file. This requires `include_acoustic=yes` and
 	`acoustic_formulation=pressure` or `acoustic_formulation=velocity_potential`.
 	Default is `no`, which preserves the legacy plane-output behavior.
+	With `velocity_potential`, the stored scalar is first converted to physical
+	pressure, `p[n] = -(phi[n] - phi[n-1])/dt`, before evaluating `-grad(p)/rho`.
+	This matches station reconstruction in both formulations. The existing
+	per-step host buffer swap retains the previous plane-node scalar values,
+	so the resident GPU path needs no additional gather or device-to-host copy.
+	The startup log reports the selected reconstruction formula. See the
+	[acoustic correction note](#scalar-acoustic-corrections-and-limitations)
+	when interpreting plane files from older executables.
 - `basin_material_type`
 	Optional. Controls material assigned inside `basin_velocity_model` geometry.
 	Default is `elastic`, which preserves the historical hard-coded basin
@@ -1527,6 +1535,28 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 ## Scalar acoustic corrections and limitations
 
+- **Velocity-potential plane reconstruction correction.** Earlier plane
+	output treated the stored velocity potential as pressure when
+	`reconstruct_acoustic_plane_displacements=yes`. It therefore integrated
+	`-grad(phi)/rho` as acceleration instead of differentiating the potential
+	in time first. This introduces an incorrect sign/time integration and can
+	produce artificial drift in acoustic plane output with any I/O backend.
+	The corrected plane path uses the same physical-pressure conversion as
+	stations. Pressure-formulation plane output and solid displacement
+	interpolation retain their existing behavior; the wavefield evolution is
+	not changed by this output correction.
+	A host regression uses a two-second potential pulse whose X velocity is
+	`0.2*sin(pi*t/2)^2 m/s` during the pulse and zero afterward. Its final
+	displacement is 0.2 m. The old plane code instead gives -0.2 m at 2 s and
+	-0.6 m at 4 s, with a spurious -0.2 m/s residual velocity. The corrected
+	code gives 0.2 m with zero residual velocity, agrees with the production
+	station routine in all three components, and preserves the analytic
+	constant-acceleration pressure case. Run
+	`python3 -m unittest discover -s script/tests -p test_acoustic_plane_reconstruction.py`.
+	These checks exercise production host reconstruction with synthetic fields;
+	they do not validate an entire CUDA/MPI acoustic-gravity/CPML simulation.
+	Regenerate affected acoustic plane output with a rebuilt solver. Agreement
+	between two old I/O backends cannot detect this shared reconstruction error.
 - **Interior stiffness factor-of-2 correction.** An earlier acoustic
 	Laplacian coefficient was a factor of two too small, making the
 	discrete acoustic speed ~0.707·Vp everywhere in acoustic media. It is
@@ -2333,7 +2363,10 @@ without points write no file. Missing point metadata remains unknown.
 
 The current acoustic-plane routine evaluates `-grad(p)/rho` using the hex
 pressure stencil and integrates acceleration into velocity and displacement
-each solver step. That reconstruction routine does not apply a CPML memory
+each solver step. In velocity-potential mode it first forms
+`p[n] = -(phi[n] - phi[n-1])/dt`; older plane code omitted this conversion
+(see the [correction note](#scalar-acoustic-corrections-and-limitations)).
+That reconstruction routine does not apply a CPML memory
 correction. Large reconstructed motion in an acoustic CPML element therefore
 requires inspection of pressure/kinematic histories and comparison with nearby
 interior points; backend agreement by itself cannot establish physical accuracy.
