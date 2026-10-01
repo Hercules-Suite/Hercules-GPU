@@ -1437,6 +1437,22 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /output_displacement_file/);
 });
 
+test("documents plane amplitude diagnostics without equating geometry with CPML membership", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /diagnose_plane_output\.py/);
+  assert.match(html, /histories\.csv/);
+  assert.match(html, /frame_peaks\.csv/);
+  assert.match(html, /only a CPML candidate region/);
+  assert.match(html, /HERCULES_PLANE_METADATA=1/);
+  assert.match(html, /plane_point_metadata\.RANK\.csv/);
+  assert.match(html, /fresh output directories/);
+  assert.match(html, /missing ownership remains unknown/);
+  assert.match(html, /no per-step work/);
+  assert.match(await (await render("/docs/configuration")).text(), /HERCULES_PLANE_METADATA/);
+});
+
 test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();

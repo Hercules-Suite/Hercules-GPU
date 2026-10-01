@@ -29893,6 +29893,10 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  /* CPML membership is only available after solver_init(). This optional
+   * setup audit never enters the production time-stepping loop. */
+  planes_write_point_metadata(Global.myID, Param.theNumberOfPlanes,
+                              Param.thePlaneDirOut);
   drm_output_setup(Global.myID, Param.parameters_input_file, get_surface_shift(),
                    Param.includeTopography == YES,
                    Param.stationOutputBinaryFile,

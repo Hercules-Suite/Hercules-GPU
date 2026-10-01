@@ -198,6 +198,14 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Snapshots become visible in the output files when their batch is flushed;
 	use `1` when immediate per-snapshot visibility is required. This setting has
 	no effect unless the selected backend is MPI-IO (the default with `IO_PES=0`).
+- `HERCULES_PLANE_METADATA=0|1`
+	Optional setup-only point audit; default is `0` (disabled, also when unset
+	or empty). With `1`, each solver rank owning plane points writes
+	`plane_point_metadata.RANK.csv` in the plane output directory after
+	`solver_init()` has established CPML membership. This works with all plane
+	backends and adds no per-step transfers or work. See
+	[plane amplitude diagnostics](#diagnose-large-plane-displacements) for the
+	columns and how to join them to existing displacement files.
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_CONTRIB_UNPACK_OMP=1|0`
@@ -2248,6 +2256,88 @@ sampled XYZ values are buffered; the station mode does not use
 `drm_output_batch_size`. It can run alongside any number of structured DRM
 boxes, with distinct output paths and independent sampling rates. The legacy
 three-stage DRM replay workflow remains separate.
+
+## Diagnose large plane displacements
+
+`script/diagnose_plane_output.py` locates the largest **displacements**, which
+need not occur at the largest differences between two backends. It scans a
+completed file twice with Python 3 and NumPy, reading one snapshot at a time.
+It retains per-point peak statistics and per-snapshot group maxima, rather
+than the full displacement record. Run one Python process. For the illustrative
+90 km square, 361-by-361 surface plane, with zero strike/dip and origin (0,0):
+
+```bash
+python3 /path/to/Hercules_GPU/script/diagnose_plane_output.py planes/planedisplacements.0 \
+  --nx 361 --ny 361 --dt 0.1 --expected-snapshots 1000 \
+  --spacing 250 250 --xy-origin 0 0 --domain 90000 90000 \
+  --cpml-thickness 439.453125 --points 0,183 88,0 1,90 \
+  --output-dir plane_diagnostic
+```
+
+Here `--dt` is the saved interval (`200 * 0.0005 = 0.1 s`), not the solver
+time step. A fresh 1,000-snapshot run starts at 0 s and ends at 99.9 s. Use
+`--first-time` for a restart segment. Grid counts, time, geometry, and byte
+order cannot be recovered from the headerless file. `--endian` defaults to
+`native`; `little` and `big` are also accepted. `--spacing`, `--domain`, and
+`--cpml-thickness` must be supplied together and describe only horizontal,
+unrotated planes; omit them for other plane geometries. Coordinates from a
+metadata export support arbitrary plane geometry, and supplied X/Y geometry
+is checked against them.
+
+The new output directory contains:
+
+- `peak_points.csv`: signed peaks, absolute peaks, zero-based grid/snapshot
+  indices, times, coordinates when known, and available owner metadata. The
+  default `--top 5` selects five distinct points per component across the
+  entire plane, plus each diagnostic group's strongest point.
+- `histories.csv`: every saved XYZ displacement at those selected points and
+  any additional `--points I,J ...` probes. No detrending, filtering, or time
+  differentiation is applied.
+- `frame_peaks.csv`: XYZ peak envelopes for the whole plane and each available
+  geometric/material group, making growth onset and localization visible.
+- `summary.json`: layout, sample times, group peaks, and counts exceeding
+  `--threshold` (default 1 m). This threshold is a diagnostic choice, not a
+  physical acceptance criterion. The summary is written only on success.
+
+Incomplete snapshots, unexpected counts, nonfinite samples, and files detected
+changing during the scan are rejected. Existing diagnostic directories are not
+overwritten. A read failure during the second pass can leave partial CSV files;
+discard a diagnostic directory without its final `summary.json`.
+
+The geometric lateral boundary band is only a **CPML candidate** region.
+Actual CPML membership is assigned to elements and can differ near the inner
+edge or at the bottom boundary. The binary does not contain material labels.
+Unknown material and CPML labels remain explicit until metadata is supplied.
+
+For exact containing-element classification, rebuild the solver and enable
+`export HERCULES_PLANE_METADATA=1` in a run using the same mesh, topography,
+materials, and plane definitions. A separate short diagnostic run can reuse
+a saved mesh; use fresh output directories, since normal plane setup truncates
+its displacement files. Metadata is produced once before time stepping, so a
+full-duration rerun is unnecessary for this classification. Pass all rank files
+from that one run with `--metadata /path/to/new/planes/plane_point_metadata.*.csv
+--plane-id 0` to rescan the original completed displacement file. Do not mix
+rank files from different runs; duplicate point ownership is rejected.
+
+Each rank with points writes a CSV header followed by `plane,i,j,rank,element,
+x_m,y_m,z_m,medium,cpml,vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,
+acoustic_reconstruction,pressure_defined`. Indices are zero-based; element IDs
+are local to the recorded rank. Coordinates are the actual solver query
+positions after plane rotation and topography/building shifts. `medium` is
+`acoustic`, `solid`, `inactive`, or `unknown`; `solid` alone does not identify
+its constitutive law. `cpml` is the actual solver membership flag (0/1, or -1
+for unresolved ownership), independent of medium. The last two flags identify
+the configured acoustic reconstruction and availability of its full hex
+pressure stencil; acoustic topography tetrahedra lack that stencil. Ranks
+without points write no file. Missing point metadata remains unknown.
+
+The current acoustic-plane routine evaluates `-grad(p)/rho` using the hex
+pressure stencil and integrates acceleration into velocity and displacement
+each solver step. That reconstruction routine does not apply a CPML memory
+correction. Large reconstructed motion in an acoustic CPML element therefore
+requires inspection of pressure/kinematic histories and comparison with nearby
+interior points; backend agreement by itself cannot establish physical accuracy.
+Do not infer this cause from displacement peaks or geometric proximity alone.
 
 ## Compare plane output backends
 

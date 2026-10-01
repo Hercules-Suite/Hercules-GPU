@@ -149,9 +149,12 @@ for defaults, supported combinations, and performance implications.
   `OCTOR_IMPORT_PATH_CACHE`, `OCTOR_INIT_TASKS_PER_RANK`, `OCTOR_NODE_SORT_MODE`,
   `OCTOR_SETCOM_ALL2ALL`.
 - **Station and plane output:** `HERCULES_PLANE_IO_MODE`, `HERCULES_PLANE_IO_OMP`,
-  `HERCULES_PLANE_MPIIO_BATCH`, `HERCULES_STATION_IO_OMP`, `HERCULES_STATION_ROUTE_MODE`.
+  `HERCULES_PLANE_MPIIO_BATCH`, `HERCULES_PLANE_METADATA`, `HERCULES_STATION_IO_OMP`,
+  `HERCULES_STATION_ROUTE_MODE`.
   Plane output defaults to `mpiio`; `hybrid` and `legacy` remain explicit choices.
   Dedicated I/O ranks (`IO_PES>0`) select the legacy I/O-pool backend.
+  `HERCULES_PLANE_METADATA=1` optionally exports containing materials and actual
+  CPML membership once after solver setup (default: `0`).
 - **Nonlinear execution:** `HERCULES_NONLINEAR_BACKEND`, `HERCULES_NONLINEAR_STATS_INTERVAL`.
 - **Field synchronization and MPI:** `HERCULES_CONTRIB_PACK_OMP`, `HERCULES_CONTRIB_RECV_MODE`,
   `HERCULES_CONTRIB_UNPACK_OMP`, `HERCULES_DISP_SYNC_MODE`, `HERCULES_GPU_MPI_BACKEND`,
@@ -184,6 +187,11 @@ to compare completed plane directories. `--expected-snapshots` checks complete
 record counts; `--atol`/`--rtol` set comparison tolerances (both default to zero),
 `--chunk-points` bounds read size, and `--endian` selects input byte order.
 See [plane comparison details](Extended%20README.md#compare-plane-output-backends).
+Use `script/diagnose_plane_output.py FILE --nx NX --ny NY --dt SAVED_DT
+--output-dir NEW_DIR` to locate actual peaks and export full point histories.
+Optional `--metadata FILE ...` joins the setup audit; geometric boundary bands
+alone cannot identify acoustic or CPML elements. See
+[plane amplitude diagnostics](Extended%20README.md#diagnose-large-plane-displacements).
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

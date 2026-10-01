@@ -1184,6 +1184,91 @@ static int32_t plane_element_is_acoustic(const edata_t* edata) {
 	       (edata->Vs <= ACOUSTIC_VS_EPS);
 }
 
+/* Optional setup-only audit of the actual containing mesh elements. A material
+ * model lookup or distance to a domain face cannot replace CPML membership. */
+void planes_write_point_metadata(int32_t myID, int theNumberOfPlanes,
+                                 const char* planeDirOut) {
+    const char* env = getenv("HERCULES_PLANE_METADATA");
+    if ((env == NULL) || (env[0] == '\0') || (strcmp(env, "0") == 0)) {
+        return;
+    }
+    if (strcmp(env, "1") != 0) {
+        solver_abort("planes_write_point_metadata", NULL,
+                     "HERCULES_PLANE_METADATA must be 0 or 1");
+    }
+    if ((theNumberOfPlanes == 0) || (thePlanes == NULL)) return;
+
+    FILE* fp = NULL;
+    for (int p = 0; p < theNumberOfPlanes; ++p) {
+        const plane_t* plane = &thePlanes[p];
+        for (int strip = 0; strip < plane->numberofstripsthisplane; ++strip) {
+            for (int point = plane->stripstart[strip];
+                 point <= plane->stripend[strip]; ++point) {
+                const plane_strip_element_t* element =
+                    &plane->strip[strip][point - plane->stripstart[strip]];
+                const int i = point / plane->numberofstepsdowndip;
+                const int j = point % plane->numberofstepsdowndip;
+                vector3D_t local = {{i * plane->stepalongstrike,
+                                     j * plane->stepdowndip, 0.0}};
+                vector3D_t xyz = compute_global_coords(
+                    plane->origincoords, local, plane->dip, 0, plane->strike);
+                if (get_thebase_topo() != 0.0) {
+                    xyz.x[2] += point_elevation(xyz.x[0], xyz.x[1]);
+                }
+                edata_t material;
+                memset(&material, 0, sizeof(material));
+                material.Vp = material.Vs = material.rho = material.edgesize = NAN;
+                const char* medium = "unknown";
+                int32_t eindex = -1;
+                int cpml = -1;
+                if (element->point_is_valid) {
+                    octant_t* octant = NULL;
+                    if (search_point(xyz, &octant) != 1 ||
+                        (eindex = solver_get_octant_material(octant, &material)) < 0) {
+                        solver_abort("planes_write_point_metadata", NULL,
+                                     "Cannot resolve plane %d point (%d,%d)", p, i, j);
+                    }
+                    medium = plane_element_is_acoustic(&material) ? "acoustic" :
+                        ((material.Vp > 0.0 && material.rho > 0.0) ? "solid" : "inactive");
+                    cpml = cpml_pml_element(eindex);
+                }
+                if (fp == NULL) {
+                    char path[1024];
+                    int length = snprintf(path, sizeof(path),
+                                          "%s/plane_point_metadata.%d.csv", planeDirOut, myID);
+                    if (length < 0 || (size_t)length >= sizeof(path)) {
+                        solver_abort("planes_write_point_metadata", NULL,
+                                     "Plane metadata output path is too long");
+                    }
+                    fp = hu_fopen(path, "w");
+                    fprintf(fp, "plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml,"
+                                "vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,"
+                                "acoustic_reconstruction,pressure_defined\n");
+                }
+                fprintf(fp, "%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%s,%d,"
+                            "%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d\n",
+                        p, i, j, myID, eindex, xyz.x[0], xyz.x[1], xyz.x[2], medium, cpml,
+                        (double)material.Vp, (double)material.Vs, (double)material.rho,
+                        (double)material.edgesize, element->point_is_valid, element->topostrip,
+                        g_reconstructAcousticPlaneDisplacements && element->owner_is_acoustic,
+                        element->pressure_is_defined);
+            }
+        }
+    }
+    if (fp != NULL) {
+        const int writeError = ferror(fp);
+        const int closeError = fclose(fp);
+        if (writeError || closeError) {
+            solver_abort("planes_write_point_metadata", NULL,
+                         "Failed writing plane point metadata on rank %d", myID);
+        }
+    }
+    if (myID == 0) {
+        printf("Plane point metadata: %s/plane_point_metadata.RANK.csv "
+               "(setup only; containing material and CPML membership)\n", planeDirOut);
+    }
+}
+
 static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 		octant_t* octant) {
 	edata_t material;

@@ -930,6 +930,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
             ["HERCULES_DISP_SYNC_MODE", "auto | full | boundary", "Control elastic host/device synchronization"],
             ["HERCULES_MESH_IO_MODE", "mpiio | sharded | single", "Select Phase A mesh storage"],
             ["HERCULES_PLANE_IO_MODE", "mpiio | hybrid | legacy", "Select plane interpolation and writing; default: mpiio (dedicated I/O ranks select legacy)"],
+            ["HERCULES_PLANE_METADATA", "0 | 1", "Write plane point materials and actual CPML membership once after solver setup; default: 0"],
           ],
         },
       },
@@ -2016,6 +2017,20 @@ if __name__ == "__main__":
         codeLabel: "From outputfiles — compare all seven completed planes with exact equality",
         code: "python3 /path/to/Hercules_GPU/script/compare_plane_outputs.py planes planes_mpiio \\\n  --shapes 361x361 71x71 71x71 71x71 71x71 71x71 71x71 \\\n  --expected-snapshots 1000",
         note: "Run one Python process. --chunk-points defaults to 262144 XYZ points (6 MiB per input chunk plus working arrays). --endian native|little|big defaults to native. An optional --atol 1e-10 --rtol 1e-6 is an illustrative screening criterion, not a validated error budget. Wait for output buffers to flush on normal completion. Use set -o pipefail if piping the report through tee.",
+      },
+      {
+        id: "plane-amplitude-diagnostics",
+        title: "Diagnose large plane displacements",
+        paragraphs: [
+          "script/diagnose_plane_output.py scans a completed plane file twice, one snapshot at a time, using Python 3 and NumPy. It locates actual displacement peaks, which need not coincide with the largest differences between output backends. Indices are zero-based and displacements are solver X/north, Y/east, Z/down in metres.",
+          "The example is a horizontal, unrotated 361-by-361 surface plane spanning a 90 km square from solver origin (0,0). The saved interval is 200 steps times 0.0005 s = 0.1 s: 1,000 fresh-run snapshots cover 0 through 99.9 s. Use --first-time for restart segments. The binary has no timestamps or geometry. Omit spacing/domain/cpml-thickness for rotated or dipping planes; supplied X/Y geometry is checked against metadata when available.",
+          "A new output directory receives peak_points.csv (signed peaks, locations, times, and available material data), histories.csv (every saved XYZ displacement at selected points), frame_peaks.csv (group peak envelopes), and summary.json. It selects the top five distinct points per component by default, each group's strongest point, and additional --points I,J probes. --threshold defaults to 1 m for reporting counts, not physical acceptance. No filtering, detrending, or differentiation is applied. Partial files, nonfinite values, changing files, and unexpected snapshot counts are rejected; a final summary.json confirms both scans finished.",
+          "The geometric lateral boundary band is only a CPML candidate region. Exact containing-element classification requires HERCULES_PLANE_METADATA=1 in a rebuilt solver using the same mesh, topography, material, and plane configuration. After solver_init establishes CPML membership, each solver rank with plane points writes plane_point_metadata.RANK.csv once, before time stepping. It records plane/grid indices, owner rank/local element, actual XYZ query coordinates, Vp/Vs/density/element size, medium, CPML membership, point validity, tetrahedral interpolation, and acoustic reconstruction/stencil flags. Medium is acoustic, solid, inactive, or unknown; solid alone does not identify the constitutive law. CPML is a separate element flag. The export is disabled by default and adds no per-step work.",
+          "For existing displacement files, metadata can come from a separate short run with the same saved mesh and plane configuration; a full-duration rerun is unnecessary. Use fresh output directories because plane setup truncates displacement files. Add --metadata /path/to/new/planes/plane_point_metadata.*.csv --plane-id 0 to scan the original completed file. Do not mix metadata from different runs. Duplicate ownership is rejected and missing ownership remains unknown.",
+          "Acoustic plane displacement is reconstructed by integrating -grad(p)/rho every solver step; that routine has no CPML memory correction. This makes acoustic CPML points worth inspecting, but neither a large displacement nor proximity to a boundary proves the cause. Compare their histories with interior points and inspect pressure before changing the reconstruction or solver physics.",
+        ],
+        codeLabel: "From outputfiles — extract compact diagnostics without rerunning the solver",
+        code: "python3 /path/to/Hercules_GPU/script/diagnose_plane_output.py planes/planedisplacements.0 \\\n  --nx 361 --ny 361 --dt 0.1 --expected-snapshots 1000 \\\n  --spacing 250 250 --xy-origin 0 0 --domain 90000 90000 \\\n  --cpml-thickness 439.453125 --points 0,183 88,0 1,90 \\\n  --output-dir plane_diagnostic",
       },
       {
         id: "plane-animation-colours",
