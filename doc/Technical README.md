@@ -150,6 +150,8 @@ for defaults, supported combinations, and performance implications.
   `OCTOR_SETCOM_ALL2ALL`.
 - **Station and plane output:** `HERCULES_PLANE_IO_MODE`, `HERCULES_PLANE_IO_OMP`,
   `HERCULES_PLANE_MPIIO_BATCH`, `HERCULES_STATION_IO_OMP`, `HERCULES_STATION_ROUTE_MODE`.
+  Plane output defaults to `mpiio`; `hybrid` and `legacy` remain explicit choices.
+  Dedicated I/O ranks (`IO_PES>0`) select the legacy I/O-pool backend.
 - **Nonlinear execution:** `HERCULES_NONLINEAR_BACKEND`, `HERCULES_NONLINEAR_STATS_INTERVAL`.
 - **Field synchronization and MPI:** `HERCULES_CONTRIB_PACK_OMP`, `HERCULES_CONTRIB_RECV_MODE`,
   `HERCULES_CONTRIB_UNPACK_OMP`, `HERCULES_DISP_SYNC_MODE`, `HERCULES_GPU_MPI_BACKEND`,

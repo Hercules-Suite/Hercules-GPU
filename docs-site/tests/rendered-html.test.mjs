@@ -536,6 +536,25 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
     /reported to standard error at startup/);
 });
 
+test("documents MPI-IO as the default plane backend and the I/O-pool fallback", async () => {
+  const response = await render("/docs/gpu-execution");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Plane output defaults to mpiio/);
+  assert.match(html, /HERCULES_PLANE_IO_MODE is unset or empty/);
+  assert.match(html, /select the legacy I\/O-pool backend/);
+  assert.match(html, /MPI-IO batches 64 packed snapshots by default/);
+  assert.match(html, /The former auto value is no longer accepted/);
+  assert.match(html, /set legacy to retain CPU interpolation/);
+
+  const configuration = await render("/docs/configuration");
+  assert.equal(configuration.status, 200);
+  const config = await configuration.text();
+  assert.match(config, /mpiio \| hybrid \| legacy/);
+  assert.match(config, /default: mpiio \(dedicated I\/O ranks select legacy\)/);
+  assert.doesNotMatch(config, /auto \| hybrid \| mpiio \| legacy/);
+});
+
 test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;

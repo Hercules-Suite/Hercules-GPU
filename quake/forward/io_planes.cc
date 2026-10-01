@@ -216,13 +216,11 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
         PLANE_BACKEND_GPU_ROOT = 1,
         PLANE_BACKEND_GPU_MPIIO = 2
     };
-    int requestedBackend = PLANE_BACKEND_LEGACY;
+    int requestedBackend = PLANE_BACKEND_GPU_MPIIO;
 
     if ((env == NULL) || (env[0] == '\0') ||
-        (strcasecmp(env, "auto") == 0)) {
-        requestedBackend = PLANE_BACKEND_LEGACY;
-    } else if ((strcasecmp(env, "mpiio") == 0) ||
-               (strcasecmp(env, "mpi-io") == 0)) {
+        (strcasecmp(env, "mpiio") == 0) ||
+        (strcasecmp(env, "mpi-io") == 0)) {
         requestedBackend = PLANE_BACKEND_GPU_MPIIO;
     } else if ((strcasecmp(env, "hybrid") == 0) ||
                (strcasecmp(env, "gpu-root") == 0) ||
@@ -240,8 +238,8 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
     } else {
         if (myID == 0) {
             fprintf(stderr,
-                    "Invalid HERCULES_PLANE_IO_MODE=%s; expected auto, "
-                    "hybrid, mpiio, or legacy\n",
+                    "Invalid HERCULES_PLANE_IO_MODE=%s; expected mpiio "
+                    "(default), hybrid, or legacy\n",
                     env);
         }
         MPI_Abort(comm_solver, ERROR);

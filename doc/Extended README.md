@@ -173,16 +173,16 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	kinematics on each timestep, and legacy host-side plane interpolation.
 	Default is `1` (enabled). This setting does not control CUDA plane
 	interpolation, packed-result device-to-host transfer, or file writing.
-- `HERCULES_PLANE_IO_MODE=auto|hybrid|mpiio|legacy`
-	Selects the plane-output backend. Default is `auto`, which selects legacy CPU
+- `HERCULES_PLANE_IO_MODE=mpiio|hybrid|legacy`
+	Selects the plane-output backend. Default is `mpiio`, including when the
+	variable is unset or empty: fused GPU interpolation and a packed device-to-host
+	transfer feed the distributed MPI-IO writer, in which each rank writes its
+	owned strips through a precomputed file view. `hybrid` uses the same GPU
 	interpolation followed by the rank-0 strip gather and buffered `fwrite`
-	writer. `hybrid` explicitly selects fused GPU interpolation and one packed
-	device-to-host transfer followed by that same rank-0 writer. `mpiio`
-	selects the experimental distributed MPI-IO writer, in which each rank writes
-	its owned strips through a precomputed file view. `legacy` explicitly selects
-	the default CPU interpolation and rank-0 path. A configured dedicated
-	I/O pool continues to select the existing I/O-pool backend. All backends
-	preserve the `planedisplacements.N` binary layout. Plane nodes
+	writer. `legacy` selects CPU interpolation and the rank-0 writer. A configured
+	dedicated I/O pool (`IO_PES>0`) selects the existing legacy I/O-pool backend
+	and logs the fallback if a GPU backend was requested or selected by default.
+	All backends preserve the `planedisplacements.N` binary layout. Plane nodes
 	are excluded from the every-step displacement-output patch and are evaluated
 	only at `output_planes_print_rate` for the GPU backends. Timers report
 	`Plane GPU Interpolation`, `Plane Result D2H`, `Plane Host Patch` (only for
@@ -197,7 +197,7 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	reports the selected batch size and maximum buffer allocation per rank.
 	Snapshots become visible in the output files when their batch is flushed;
 	use `1` when immediate per-snapshot visibility is required. This setting has
-	no effect unless `HERCULES_PLANE_IO_MODE=mpiio` is selected explicitly.
+	no effect unless the selected backend is MPI-IO (the default with `IO_PES=0`).
 - `HERCULES_CONTRIB_PACK_OMP=1|0`
 	Enables or disables OpenMP parallelization while packing contribution messages for MPI communication. Default is `1` (enabled).
 - `HERCULES_CONTRIB_UNPACK_OMP=1|0`
@@ -225,7 +225,7 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	memory and performs the hanging-node adjustment on the GPU, eliminating the
 	host staging for that exchange.
 	Station and plane output no longer force a full displacement host path.
-	With an explicitly selected GPU plane backend (`hybrid` or `mpiio`),
+	With a GPU plane backend (`mpiio`, the default, or `hybrid`),
 	plane interpolation reads device-resident displacements directly and does
 	not enter the every-step host output patch. The legacy plane backend and station fallback paths patch
 	only their interpolation nodes, including the separate tetrahedral station
@@ -463,8 +463,8 @@ export PHASE_B_OMP_NUM_THREADS=64
 # export HERCULES_STATION_IO_OMP=0
 # export HERCULES_STATION_ROUTE_MODE=all
 # export HERCULES_PLANE_IO_OMP=0
+# Plane output defaults to mpiio; choose an alternative only if needed:
 # export HERCULES_PLANE_IO_MODE=hybrid
-# export HERCULES_PLANE_IO_MODE=mpiio
 # export HERCULES_PLANE_IO_MODE=legacy
 # export HERCULES_PLANE_MPIIO_BATCH=64
 # export HERCULES_SPARSE_UPLOAD_MODE=dense
