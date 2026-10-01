@@ -47,11 +47,12 @@ simulation_wave_max_freq_hz = 2
 simulation_node_per_wavelength = 8
 simulation_shear_velocity_min = 750
 
-number_output_planes = 1
+number_output_planes = 2
 output_planes_print_rate = 10
 output_planes_directory = output/planes
 output_planes =
  0 0 0 100 11 100 11 0 0
+ 0 0.004491576 25 1 1 1 1 0 0
 
 number_output_stations = 2
 output_stations_print_rate = 10
@@ -60,5 +61,5 @@ print_station_velocities = yes
 print_station_accelerations = yes
 print_station_pressures = yes
 output_stations =
- 0 0 0
+ 0 0.004491576 25
  0.004491576 0.004491576 0

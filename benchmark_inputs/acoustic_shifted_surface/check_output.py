@@ -17,12 +17,15 @@ if 'gravity (linearized' in log:
 output = re.search(r'Acoustic output CPML gradient correction: (\d+) stations, (\d+) plane points', log)
 assert output and int(output[1]) > 0 and int(output[2]) > 0, 'output CPML correction missing'
 plane = np.fromfile('output/planes/planedisplacements.0', dtype='=f8').reshape(800,11,11,3)
+probe = np.fromfile('output/planes/planedisplacements.1', dtype='=f8').reshape(800,3)
 station = np.loadtxt('output/stations/station.0')
 assert np.isfinite(plane).all() and np.isfinite(station).all(), 'nonfinite output'
 assert np.max(np.abs(plane)) > 1e-12, 'no excited plane motion'
 assert station.shape[0] == 800, 'incomplete station output'
 np.testing.assert_allclose(station[:,0], np.arange(800)*.01, atol=1e-8, rtol=0)
-# Both observations are exactly at (0,0,0 model depth), an acoustic CPML corner.
-np.testing.assert_allclose(station[:,1:4], plane[:,0,0,:], atol=1e-10, rtol=1e-5)
+# Both observations use the same latitude/longitude at x=0, y~500 m, depth=25 m.
+# Unlike a doubly clamped corner, the normal gradient here can be nonzero.
+assert np.max(np.abs(probe)) > 1e-12, 'no excited CPML probe motion'
+np.testing.assert_allclose(station[:,1:4], probe, atol=1e-10, rtol=1e-5)
 print('PASS: shifted surface and CPML enrolled; finite excited fields; station/plane parity')
 print('Plane peak XYZ (m):', np.max(np.abs(plane), axis=(0,1,2)))
