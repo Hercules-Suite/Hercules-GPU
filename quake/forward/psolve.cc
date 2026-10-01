@@ -10880,16 +10880,47 @@ static void gpu_init(int32_t myID) {
   return;
 }
 
-/**
- * Init matrices and constants, build comm schedule, allocate/init space
- * for the solver.
- */
+/* The octree starts at Z=0 even when air/buildings shift the physical
+ * surface downward. Acoustic water at sea level follows the topography
+ * datum, not nearendp[2]. Keep the unshifted global-top case unchanged. */
+static double acoustic_free_surface_z() {
+  if (Param.includeTopography == YES) return get_thebase_topo();
+  if (Param.includeBuildings == YES) return get_surface_shift();
+  return (double)Global.myOctree->nearendp[2] * Global.myOctree->ticksize;
+}
+
+static int acoustic_element_has_free_surface(const elem_t* element,
+                                             double surfaceZ) {
+  const double ticksize = Global.myOctree->ticksize;
+  const int32_t node = element->lnid[0];
+  const double topZ = (double)Global.myMesh->nodeTable[node].z * ticksize;
+  /* A fraction of one octree tick tolerates coordinate roundoff without
+   * selecting the next vertical element or a face crossing the datum. */
+  const double tol = 0.25 * ticksize;
+  if (fabs(topZ - surfaceZ) > tol) return 0;
+  if (Param.includeTopography == YES) {
+    const edata_t* material = (const edata_t*)element->data;
+    const double x = (double)Global.myMesh->nodeTable[node].x * ticksize +
+                     0.5 * material->edgesize;
+    const double y = (double)Global.myMesh->nodeTable[node].y * ticksize +
+                     0.5 * material->edgesize;
+    /* Do not impose a free surface on buried water beneath land. Mixed
+     * shoreline cells remain governed by the existing material classifier. */
+    if (fabs(point_elevation(x, y) - surfaceZ) > tol) return 0;
+  }
+  return 1;
+}
+
+/** Init matrices/constants, communication schedules, and solver storage. */
 static void solver_init() {
   /* local variables */
   int32_t eindex;
   int32_t c_outsize, c_insize, s_outsize, s_insize;
   int64_t localPressureElements = 0;
   int64_t globalPressureElements = 0;
+  int64_t localPressureSurfaceFaces = 0;
+  int64_t globalPressureSurfaceFaces = 0;
+  const double acousticSurfaceZ = acoustic_free_surface_z();
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
   int64_t localPoroelasticUndrainedFastPathElements = 0;
@@ -11467,8 +11498,7 @@ static void solver_init() {
           edata->edgesize * edata->edgesize * edata->edgesize;
       const double nodalPressureMass = volume / (8.0 * bulk);
       const int isTopAcousticSurface =
-          (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
-           Global.myOctree->nearendp[2]);
+          acoustic_element_has_free_surface(elemp, acousticSurfaceZ);
       const double gravitySurfaceMass =
           ((Param.theAcousticFreeSurfaceGravity == YES) &&
            isTopAcousticSurface)
@@ -11634,6 +11664,7 @@ static void solver_init() {
                            Param.theDeltaT);
       }
       if (isTopAcousticSurface) {
+        localPressureSurfaceFaces++;
         for (j = 0; j < 4; j++) {
           pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
           if (Param.theAcousticFreeSurfaceGravity == YES) {
@@ -13089,6 +13120,8 @@ static void solver_init() {
 
     MPI_Allreduce(&localPressureElements, &globalPressureElements, 1,
                   MPI_INT64_T, MPI_SUM, comm_solver);
+    MPI_Allreduce(&localPressureSurfaceFaces, &globalPressureSurfaceFaces, 1,
+                  MPI_INT64_T, MPI_SUM, comm_solver);
     MPI_Allreduce(&localPressureNodes, &globalPressureNodes, 1, MPI_INT64_T,
                   MPI_SUM, comm_solver);
     MPI_Allreduce(&localPressureFreeSurfaceNodes,
@@ -13101,6 +13134,11 @@ static void solver_init() {
           (double)globalPressureElements / 1.0e6,
           (double)globalPressureNodes / 1.0e6,
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
+      monitor_print(
+          "Acoustic free-surface geometry: solver Z=%.17g m, %lld exposed "
+          "acoustic top faces, %lld harbored surface-node copies\n",
+          acousticSurfaceZ, (long long)globalPressureSurfaceFaces,
+          (long long)globalPressureFreeSurfaceNodes);
     }
   } else {
     g_acousticPressureElementCount = 0;
@@ -24529,6 +24567,40 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
 }
 #endif /* BOUNDARY */
 
+void solver_init_acoustic_output_cpml(int32_t eindex,
+                                     acoustic_output_cpml_t* state) {
+  memset(state, 0, sizeof(*state));
+#ifdef BOUNDARY
+  if (!cpml_pml_element(eindex)) return;
+  const elem_t* element = &Global.myMesh->elemTable[eindex];
+  if (!element_is_acoustic((edata_t*)element->data)) return;
+  const int32_t n = element->lnid[0];
+  tick_t lo[3] = {Global.myMesh->nodeTable[n].x,
+                  Global.myMesh->nodeTable[n].y,
+                  Global.myMesh->nodeTable[n].z};
+  const tick_t h = (tick_t)1 << (PIXELLEVEL - element->level);
+  tick_t hi[3] = {lo[0] + h, lo[1] + h, lo[2] + h};
+  const uint8_t mask = compute_pml_face_mask(
+      lo, hi, Global.myOctree->nearendp, Global.myOctree->farendp,
+      Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+  double d[3], alpha[3], kappa[3];
+  /* These profile scalars survive the release of build-time arrays.
+   * Recompute only for observation points, once, using the exact solver
+   * profile. No GPU memory downloads or extra field exchanges are needed. */
+  compute_pml_profile_coeffs(
+      mask, lo, hi, Global.myOctree->nearendp, Global.myOctree->farendp,
+      Global.myOctree->ticksize, g_cpmlBuild.thickness_m,
+      g_cpmlBuild.reference_vp, Param.theDeltaT, Param.theCpmlPolyOrder,
+      Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+      g_cpmlBuild.alpha_max, Param.theCpmlMpmlCrossFraction,
+      Param.theCpmlAlphaFloorFraction, state->a, state->b,
+      state->inv_kappa, d, alpha, kappa);
+  state->active = 1;
+#else
+  (void)eindex;
+#endif
+}
+
 /**
  * compute_setab: the base a and b values will be scaled by zeta
  *                specific to each element.
@@ -27731,6 +27803,7 @@ static void solver_update_acoustic_station_kinematics(int32_t step) {
       continue;
     }
 
+    acoustic_output_stretch_gradient(&station->acoustic_cpml, grad);
     for (int axis = 0; axis < 3; axis++) {
       accel[axis] = -grad[axis] / station->rho;
     }
@@ -29904,6 +29977,25 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  /* Prepare the output-only CPML gradient memories after profile setup.
+   * All plane backends and both station gather paths use these memories. */
+  if (acoustic_pressure_enabled()) {
+    int64_t localCounts[2] = {0, planes_init_acoustic_cpml(Param.theNumberOfPlanes)};
+    int64_t globalCounts[2] = {0, 0};
+    for (int i = 0; i < Param.myNumberOfStations; ++i) {
+      station_t* station = &Param.myStations[i];
+      if (!station->pressure_is_defined) continue;
+      solver_init_acoustic_output_cpml(station->owningElementIndex,
+                                       &station->acoustic_cpml);
+      localCounts[0] += station->acoustic_cpml.active;
+    }
+    MPI_Allreduce(localCounts, globalCounts, 2, MPI_INT64_T, MPI_SUM, comm_solver);
+    if (Global.myID == 0) {
+      monitor_print("Acoustic output CPML gradient correction: %lld stations, "
+                    "%lld plane points (containing-element profiles)\n",
+                    (long long)globalCounts[0], (long long)globalCounts[1]);
+    }
+  }
   /* CPML membership is only available after solver_init(). This optional
    * setup audit never enters the production time-stepping loop. */
   planes_write_point_metadata(Global.myID, Param.theNumberOfPlanes,

@@ -102,6 +102,8 @@ typedef struct plane_strip_element_t {
 	int32_t owner_is_acoustic;
 	int32_t pressure_is_defined;
 	int32_t acoustic_kinematics_ready;
+	int32_t owningElementIndex;
+	acoustic_output_cpml_t acoustic_cpml;
 	double h;
 	double rho;
 	double acoustic_disp[3];
@@ -1280,6 +1282,8 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	element->owner_is_acoustic = 0;
 	element->pressure_is_defined = 0;
 	element->acoustic_kinematics_ready = 0;
+	element->owningElementIndex = -1;
+	memset(&element->acoustic_cpml, 0, sizeof(element->acoustic_cpml));
 	element->h = 0.0;
 	element->rho = 0.0;
 	memset(element->acoustic_disp, 0, sizeof(element->acoustic_disp));
@@ -1288,7 +1292,8 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	memset(element->acoustic_prev_acc, 0, sizeof(element->acoustic_prev_acc));
 
 	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
-	    (solver_get_octant_material(octant, &material) < 0) ||
+	    ((element->owningElementIndex =
+	        solver_get_octant_material(octant, &material)) < 0) ||
 	    !plane_element_is_acoustic(&material)) {
 		return;
 	}
@@ -1304,6 +1309,24 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	element->pressure_is_defined = 1;
 	element->h = material.edgesize;
 	element->rho = material.rho;
+}
+
+int64_t planes_init_acoustic_cpml(int theNumberOfPlanes) {
+    int64_t count = 0;
+    if (!g_reconstructAcousticPlaneDisplacements || thePlanes == NULL) return 0;
+    for (int p = 0; p < theNumberOfPlanes; ++p) {
+        for (int s = 0; s < thePlanes[p].numberofstripsthisplane; ++s) {
+            const int n = thePlanes[p].stripend[s] - thePlanes[p].stripstart[s] + 1;
+            for (int k = 0; k < n; ++k) {
+                plane_strip_element_t* point = &thePlanes[p].strip[s][k];
+                if (!point->pressure_is_defined) continue;
+                solver_init_acoustic_output_cpml(point->owningElementIndex,
+                                                 &point->acoustic_cpml);
+                count += point->acoustic_cpml.active;
+            }
+        }
+    }
+    return count;
 }
 
 static int plane_pressure_gradient(const mysolver_t* mySolver,
@@ -1371,6 +1394,7 @@ static void plane_update_acoustic_point(const mysolver_t* mySolver,
 		return;
 	}
 
+	acoustic_output_stretch_gradient(&element->acoustic_cpml, grad);
 	for (int axis = 0; axis < 3; axis++) {
 		accel[axis] = -grad[axis] / element->rho;
 	}

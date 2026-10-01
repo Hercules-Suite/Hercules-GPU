@@ -92,6 +92,9 @@ interactions are in the
   `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
+  The flat water surface follows `topographybase_zcoord` (or the building
+  `surface_shift_m`); check the exact exposed-face count in the startup log.
+  See [surface and CPML corrections](Extended%20README.md#scalar-acoustic-corrections-and-limitations).
 - **Poroelastic u-p formulation:** `include_poroelastic`, `poroelastic_formulation`,
   `poroelastic_depth_max_m`, `surface_groundwatertable`, `groundwaterlevel_file`,
   `poroelastic_surface_pressure_bc`, `poroelastic_surface_pressure_penalty_factor`,
@@ -105,6 +108,8 @@ interactions are in the
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
 - **Plane output:** `output_planes_print_rate`, `reconstruct_acoustic_plane_displacements`.
+  Acoustic station/plane output inside CPML includes the containing element's
+  gradient stretch and point memory; use interior samples for physical motion.
   Acoustic reconstruction uses physical pressure in both formulations; for
   velocity potential it first computes `p = -(phi[n] - phi[n-1])/dt`.
   See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)

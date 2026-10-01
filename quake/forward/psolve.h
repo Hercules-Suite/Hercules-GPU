@@ -49,6 +49,7 @@
 #include <cuda_runtime.h>
 
 #include "octor.h"
+#include "acoustic_output.h"
 
 #define ERROR       HERC_ERROR
 
@@ -814,6 +815,7 @@ struct station_t {
     double     acoustic_vel[3];
     double     acoustic_acc[3];
     double     acoustic_prev_acc[3];
+    acoustic_output_cpml_t acoustic_cpml;
     double     h; /* dorian: added size edge to compute station's strains */
     double     rho;
     double     mu;
@@ -874,6 +876,10 @@ int element_is_acoustic( const edata_t *edata );
  * retained as a compact setup-time bitset after the full face mask is freed.
  * Returns 0 for dashpot boundaries and invalid indices. */
 int cpml_pml_element( int32_t eindex );
+
+/* Setup only, after solver_init has established CPML membership/profile. */
+void solver_init_acoustic_output_cpml(int32_t eindex,
+                                     acoustic_output_cpml_t* state);
 
 /* SPECFEM-style flat/regular PML: returns 1 iff element `eindex` is a
  * VT-topography CPML PML solid element whose body-fitted deformation

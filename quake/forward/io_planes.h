@@ -43,6 +43,7 @@ extern int planes_print_gpu(int32_t myID, int theNumberOfPlanes,
 extern int planes_flush_gpu_mpiio(void);
 extern void planes_write_point_metadata(int32_t myID, int theNumberOfPlanes,
                                         const char* planeDirOut);
+extern int64_t planes_init_acoustic_cpml(int theNumberOfPlanes);
 extern void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut, 
     int IO_pool_pe_count, int theNumberOfPlanes, const char *numericalin, 
     double surfaceShift, double *theSurfaceCornersLong, double *theSurfaceCornersLat,

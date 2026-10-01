@@ -1,0 +1,64 @@
+# Synthetic smoke test: flat water at solver Z=250 m above elastic bedrock.
+# Run from a COPY of this directory with a rebuilt psolve and one GPU rank.
+region_origin_latitude_deg = 0
+region_origin_longitude_deg = 0
+region_depth_shallow_m = 0
+region_length_east_m = 1000
+region_length_north_m = 1000
+region_depth_deep_m = 1000
+region_azimuth_leftface_deg = 0
+
+cvmdb_input_file = profile
+number_profile_layers = 2
+profile_layers =
+ 0   1500 0   1025 1000000 1000000
+ 125 2400 750 2200 1000000 1000000
+
+include_acoustic = yes
+acoustic_formulation = velocity_potential
+acoustic_interface_coupling = yes
+acoustic_interface_face_filter = all
+acoustic_free_surface_gravity = yes
+acoustic_quality_factor = 0
+reconstruct_acoustic_plane_displacements = yes
+include_topography = yes
+computation_method = fem
+type_of_etree = sqd
+maximum_octant_level = 5
+topographybase_zcoord = 250
+topography_directory = topography
+
+type_of_damping = none
+abc_type = cpml
+cpml_thickness_m = 125
+cpml_clamp_outer = yes
+the_threshold_damping = 0.05
+the_threshold_Vp_over_Vs = 4
+do_damping_statistics = 0
+
+source_directory = sourcefiles
+source_directory_output = output/srctmp
+monitor_file = output/monitor.txt
+mesh_etree_output_file = output/mesh.e
+simulation_start_time_sec = 0
+simulation_end_time_sec = 8
+simulation_delta_time_sec = 0.001
+simulation_wave_max_freq_hz = 2
+simulation_node_per_wavelength = 8
+simulation_shear_velocity_min = 750
+
+number_output_planes = 1
+output_planes_print_rate = 10
+output_planes_directory = output/planes
+output_planes =
+ 0 0 0 100 11 100 11 0 0
+
+number_output_stations = 2
+output_stations_print_rate = 10
+output_stations_directory = output/stations
+print_station_velocities = yes
+print_station_accelerations = yes
+print_station_pressures = yes
+output_stations =
+ 0 0 0
+ 0.004491576 0.004491576 0

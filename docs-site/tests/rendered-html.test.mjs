@@ -197,6 +197,8 @@ test("renders the categorized parameter reference", async () => {
   const html = await response.text();
   assert.match(html, /Acoustic and poroelastic parameters/);
   assert.match(html, /acoustic_free_surface_gravity/);
+  assert.match(html, /Z=topographybase_zcoord/);
+  assert.match(html, /buried water beneath land is excluded/);
   assert.match(html, /acoustic_interface_face_filter/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
@@ -1461,6 +1463,12 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.match(html, /conversion adds no GPU transfers/);
   assert.match(html, /old code gives -0\.6 m at 4 s/);
   assert.match(html, /not validation of a complete CUDA\/MPI/);
+  assert.match(html, /inverse gradient stretch/);
+  assert.match(html, /separate memory at each observation point/);
+  assert.doesNotMatch(html, /routine has no CPML memory correction/);
+  const models = await (await render("/docs/physics")).text();
+  assert.match(models, /Acoustic free-surface geometry/);
+  assert.match(models, /missed shifted water surfaces/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;

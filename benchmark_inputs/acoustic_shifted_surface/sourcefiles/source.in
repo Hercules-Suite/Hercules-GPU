@@ -1,0 +1,16 @@
+# Synthetic double-couple in solid bedrock; coordinates are model metres.
+source_is_filtered = 0
+threshold_frequency = 2
+number_of_poles = 4
+type_of_source = point
+source_function_type = ricker
+ricker_Tp = 1
+ricker_Ts = 1.5
+moment_amplitude = 1e10
+lonlat_or_cartesian = 1
+hypocenter_x = 500
+hypocenter_y = 500
+hypocenter_depth_m = 500
+source_strike_deg = 0
+source_dip_deg = 45
+source_rake_deg = 90

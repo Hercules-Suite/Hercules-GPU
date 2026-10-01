@@ -34,12 +34,14 @@ class AcousticPlaneTests(unittest.TestCase):
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "acoustic_output.h"
 struct vector3D_t { double x[3]; };
 struct mysolver_t { double* pressure_tm1; double* pressure_tm2; };
 struct plane_strip_element_t {
     int pressure_is_defined, acoustic_kinematics_ready;
     int nodestointerpolate[8]; vector3D_t localcoords; double h, rho;
     double acoustic_disp[3], acoustic_vel[3], acoustic_acc[3], acoustic_prev_acc[3];
+    acoustic_output_cpml_t acoustic_cpml;
 };
 typedef plane_strip_element_t station_t;
 static struct { mysolver_t* mySolver; } Global;
@@ -58,7 +60,8 @@ static void close_value(double actual, double expected, const char* label) {
     }
 }
 int main(int argc, char** argv) {
-    const int potential = argc > 1 && strcmp(argv[1], "potential") == 0;
+    const int cpml = argc > 1 && strcmp(argv[1], "cpml") == 0;
+    const int potential = cpml || (argc > 1 && strcmp(argv[1], "potential") == 0);
     const int missing = argc > 1 && strcmp(argv[1], "missing") == 0;
     double field0[8] = {}, field1[8] = {};
     mysolver_t solver = {field0, field1}; Global.mySolver = &solver;
@@ -66,8 +69,21 @@ int main(int argc, char** argv) {
     plane.h = 10; plane.rho = 1000; plane.pressure_is_defined = 1;
     plane.localcoords = {{0.31, -0.2, 0.13}};
     for (int k=0; k<8; ++k) plane.nodestointerpolate[k] = k;
-    station_t station = plane; Param.myStations = &station; Param.myNumberOfStations = 1;
     const double dt = .001, period = 2;
+    if (cpml) {
+        // Three different stretches: CFS, unshifted PML, and an identity
+        // tangential axis. The integrated pulse gain is H(0)=alpha/(k*alpha+d).
+        const double d[3] = {4, 3, 0}, k[3] = {2, 1, 1}, alpha[3] = {1, 0, 0};
+        plane.acoustic_cpml.active = 1;
+        for (int c=0; c<3; ++c) {
+            const double lambda = d[c]/k[c] + alpha[c];
+            plane.acoustic_cpml.inv_kappa[c] = 1/k[c];
+            plane.acoustic_cpml.b[c] = exp(-lambda*dt);
+            plane.acoustic_cpml.a[c] = lambda > 0
+                ? d[c]/(k[c]*k[c]*lambda)*expm1(-lambda*dt) : 0;
+        }
+    }
+    station_t station = plane; Param.myStations = &station; Param.myNumberOfStations = 1;
     const double amplitude[3] = {.2, -.1, .05};
     Param.theDeltaT = dt; Param.theDeltaTSquared = dt*dt;
     Param.theAcousticVelocityPotential = potential;
@@ -78,7 +94,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (!potential) solver.pressure_tm2 = NULL; // pressure mode needs only p[n]
-    const int steps = potential ? 4000 : 1000;
+    const int steps = cpml ? 40000 : (potential ? 4000 : 1000);
     for (int n=0; n<=steps; ++n) {
         if (potential) {
             // Reproduce solver_swap_pressure_buffers + the current-field-only
@@ -105,10 +121,17 @@ int main(int argc, char** argv) {
             if (!potential) {
                 close_value(plane.acoustic_disp[c], .5*amplitude[c]*t*t, "pressure displacement");
                 close_value(plane.acoustic_vel[c], amplitude[c]*t, "pressure velocity");
-            } else if (t >= period + dt) {
+            } else if (!cpml && t >= period + dt) {
                 close_value(plane.acoustic_disp[c], amplitude[c]*period/2, "pulse final displacement");
                 close_value(plane.acoustic_vel[c], 0, "pulse residual velocity");
             }
+        }
+    }
+    if (cpml) {
+        const double gain[3] = {1.0/6, 0, 1};
+        for (int c=0; c<3; ++c) {
+            close_value(plane.acoustic_disp[c], amplitude[c]*period/2*gain[c], "CPML integrated pulse gain");
+            close_value(plane.acoustic_vel[c], 0, "CPML pulse residual velocity");
         }
     }
     printf("PASS %s: XYZ displacement %.12g %.12g %.12g m\n",
@@ -123,6 +146,7 @@ int main(int argc, char** argv) {
         cpp.write_text(source)
         subprocess.run(shlex.split(os.environ.get("CXX", "c++")) +
                        ["-std=c++11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-I", str(root / "quake/forward"),
                         str(cpp), "-o", str(cls.binary)], check=True)
 
     def run_case(self, mode):
@@ -137,6 +161,9 @@ int main(int argc, char** argv) {
 
     def test_missing_potential_history_does_not_fall_back_to_raw_field(self):
         self.run_case("missing")
+
+    def test_cpml_pulse_has_analytic_integrated_gain_and_no_residual_velocity(self):
+        self.run_case("cpml")
 
 
 if __name__ == "__main__":

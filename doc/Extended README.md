@@ -1140,8 +1140,16 @@ Notes:
 	`integral_Gamma N_i N_j/(rho g)` to the acoustic surface mass; the Hex8 top
 	face is lumped as `h^2/(4 rho g)` per node. This supports linear surface-
 	gravity waves without adding a bulk `rho g` load, a moving mesh, or a
-	hydrostatic prestress solve. It currently applies only to acoustic nodes on
-	the flat global top (`z_min`) external face. Where this face intersects a
+	hydrostatic prestress solve. The flat acoustic surface is at solver
+	`Z=topographybase_zcoord` with topography, `Z=surface_shift_m` with buildings,
+	or the octree top otherwise. A Hex8 top face must coincide with that datum;
+	with topography its center must also be exposed at the topographic surface,
+	so buried water beneath land is excluded. This supports flat water surfaces,
+	not a general curved or cut-cell fluid free-surface operator. The same
+	detection selects the pressure-release nodes when this option is `no`.
+	The startup `Acoustic free-surface geometry` line reports the solver datum,
+	exact exposed face count, and summed harbored surface-node copies (the last
+	count includes MPI replicas). Where this face intersects a
 	lateral acoustic CPML, the surface mass uses the tangential Jacobian
 	`kappa_x*kappa_y`; the solver also adds the paired `x/y` mass-proportional
 	damping and CFS restoring/memory terms on the four top-face nodes. The
@@ -1216,6 +1224,10 @@ Notes:
 	This matches station reconstruction in both formulations. The existing
 	per-step host buffer swap retains the previous plane-node scalar values,
 	so the resident GPU path needs no additional gather or device-to-host copy.
+	Inside CPML, both station and plane reconstruction apply the inverse
+	coordinate stretch to the pressure gradient before time integration. The
+	output point keeps its own three gradient memories, using coefficients from
+	its containing element's solver CPML profile; this adds no field exchange.
 	The startup log reports the selected reconstruction formula. See the
 	[acoustic correction note](#scalar-acoustic-corrections-and-limitations)
 	when interpreting plane files from older executables.
@@ -1535,6 +1547,38 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 ## Scalar acoustic corrections and limitations
 
+- **Shifted free surface and CPML output correction.** Earlier surface
+	detection only recognized the octree's `Z=0` face. Embedded water at a
+	nonzero topography datum therefore missed both pressure-release flags and
+	gravity surface inertia, including the lateral CPML surface terms. Detection
+	now follows the physical flat surface described above. This changes the
+	acoustic wavefield in affected models; it requires a new simulation, not
+	postprocessing of old output. In the Izmir diagnostic with datum 2812.5 m,
+	the old log reported zero gravity/CPML surface faces despite water at the
+	shifted surface. Check the new exact face count before interpreting results.
+	Acoustic station/plane reconstruction also now uses the same gradient-side
+	CPML stretch as the solver instead of the raw pressure gradient. For each
+	axis, `psi[n]=b*psi[n-1]+a*grad(p[n])` and
+	`grad_CPML(p[n])=grad(p[n])/kappa+psi[n]`; outside CPML this is an exact
+	identity. The existing host reconstruction applies it at each solver step
+	using setup-time coefficients, with no additional GPU transfer. The startup
+	`Acoustic output CPML gradient correction` line counts affected observations.
+	A host regression tests a compact potential pulse against the analytic
+	integrated stretch gain `alpha/(kappa*alpha+d)` and zero residual velocity,
+	including zero-alpha and unstretched axes. Another compiles the production
+	surface selection and mass assembly to check translation invariance,
+	pressure-release flags, tangential CPML mass/damping, and buried-water
+	exclusion. Run `python3 -m unittest discover -s script/tests -p 'test_acoustic*.py'`.
+	These are host operator checks; they do not validate the full Izmir wavefield.
+	`benchmark_inputs/acoustic_shifted_surface/` supplies a small CUDA/MPI smoke
+	case and checker for surface enrollment, finite excited fields, and
+	station/plane agreement inside CPML. Run fresh copies for each I/O backend
+	and gravity/pressure-release variant; see its README for the commands.
+- **CPML output interpretation.** Values inside the absorbing layer are
+	computed in its stretched coordinates and attenuated by its artificial
+	operator. Use interior observations for physical motion comparisons;
+	correcting the reconstruction does not turn CPML samples into physical
+	water or ground-motion observations.
 - **Velocity-potential plane reconstruction correction.** Earlier plane
 	output treated the stored velocity potential as pressure when
 	`reconstruct_acoustic_plane_displacements=yes`. It therefore integrated
@@ -2366,11 +2410,12 @@ pressure stencil and integrates acceleration into velocity and displacement
 each solver step. In velocity-potential mode it first forms
 `p[n] = -(phi[n] - phi[n-1])/dt`; older plane code omitted this conversion
 (see the [correction note](#scalar-acoustic-corrections-and-limitations)).
-That reconstruction routine does not apply a CPML memory
-correction. Large reconstructed motion in an acoustic CPML element therefore
-requires inspection of pressure/kinematic histories and comparison with nearby
-interior points; backend agreement by itself cannot establish physical accuracy.
-Do not infer this cause from displacement peaks or geometric proximity alone.
+For acoustic CPML points it applies the containing element's inverse gradient
+stretch and output-point memory before integrating acceleration. Older builds
+omitted this correction. Compare pressure/kinematic histories with interior
+points and check the free-surface geometry counts in the run log; backend
+agreement by itself cannot establish physical accuracy. Absorbing-layer samples
+remain artificial CPML fields, not physical interior motion observations.
 
 ## Compare plane output backends
 
