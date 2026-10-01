@@ -22038,6 +22038,15 @@ static void solver_run_collect_timers(void) {
  */
 static void solver_run() {
   int32_t step, startingStep;
+  const int acoustic_needs_synced_disp =
+      acoustic_pressure_enabled() && (g_acousticPressureElementCount > 0) &&
+      (Param.acousticInterfaceCoupling == YES);
+  /* Interface forcing consumes u[n+1]. Share anchored nodes and assign
+   * hanging nodes before sampling it, on every rank, even ranks without a
+   * local interface. Reuse the existing exchange before the pressure step
+   * rather than exchanging again after the displacement buffer swap. */
+  const int pressure_step_needs_synced_disp =
+      poroelastic_gpu_active() || acoustic_needs_synced_disp;
 
   solver_run_init_comm(Global.mySolver);
   solver_diag_reset();
@@ -22056,6 +22065,10 @@ static void solver_run() {
     /* print header for monitor file */
     monitor_print("solver_run() start\nStarting time step = %d\n\n",
                   startingStep);
+    if (acoustic_needs_synced_disp) {
+      monitor_print("Acoustic interface displacement: MPI sharing and "
+                    "hanging-node assignment before scalar update\n");
+    }
   }
 
   MPI_Barrier(comm_solver);
@@ -22063,7 +22076,6 @@ static void solver_run() {
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
     fvector_t* tmpvector;
-    int pressure_step_needs_synced_disp = poroelastic_gpu_active();
     int is_final_step = (step == Param.theTotalSteps - 1);
 
     /* prepare for a new iteration

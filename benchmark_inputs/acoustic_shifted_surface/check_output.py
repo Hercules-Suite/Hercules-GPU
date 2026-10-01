@@ -21,6 +21,8 @@ probe = np.fromfile('output/planes/planedisplacements.1', dtype='=f8').reshape(8
 station = np.loadtxt('output/stations/station.0')
 assert np.isfinite(plane).all() and np.isfinite(station).all(), 'nonfinite output'
 assert np.max(np.abs(plane)) > 1e-12, 'no excited plane motion'
+assert np.max(np.abs(plane)) < 1.0, 'gross wavefield growth in this weak-source fixture'
+assert np.max(np.abs(station[:,1:4])) < 1.0, 'gross station displacement growth'
 assert station.shape[0] == 800, 'incomplete station output'
 np.testing.assert_allclose(station[:,0], np.arange(800)*.01, atol=1e-8, rtol=0)
 # Both observations use the same latitude/longitude at x=0, y~500 m, depth=25 m.

@@ -1547,6 +1547,16 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 ## Scalar acoustic corrections and limitations
 
+- **Coupled displacement synchronization.** Acoustic interface forcing reads
+	new solid displacements only after MPI sharing and hanging-node assignment.
+	The existing displacement exchange runs before the scalar update, using
+	either CUDA-aware MPI or the host fallback; it is not repeated after the
+	buffer swap. Earlier builds sampled unsynchronized displacements and could
+	become unstable on adaptive meshes split across ranks even when a one-rank
+	run was stable. The startup line `Acoustic interface displacement` reports
+	this ordering. Test the shifted-surface fixture with one and four ranks;
+	finite output and agreement between I/O backends alone do not establish
+	stability.
 - **Shifted free surface and CPML output correction.** Earlier surface
 	detection only recognized the octree's `Z=0` face. Embedded water at a
 	nonzero topography datum therefore missed both pressure-release flags and

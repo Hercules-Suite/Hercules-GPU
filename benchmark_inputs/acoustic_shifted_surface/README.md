@@ -11,7 +11,7 @@ Use a fresh copy for each run and a rebuilt GPU executable. From that copy:
 export HERCULES_PLANE_METADATA=1
 export HERCULES_PLANE_IO_MODE=mpiio
 mkdir -p output/planes output/stations output/srctmp
-mpirun -np 1 "$PSOLVE_BIN" parameters.in
+mpirun -np 4 "$PSOLVE_BIN" parameters.in
 python3 check_output.py
 ```
 
@@ -22,9 +22,25 @@ acoustic CPML face probe with nonzero motion. Repeat in fresh copies with `HERCU
 and with `acoustic_free_surface_gravity=no`. The pressure-release variant
 must still enroll the shifted surface; its wavefield is intentionally different.
 MPI-IO and legacy output from otherwise identical cases should agree within
-roundoff. Try both supported GPU communication backends on allocated GPUs
-when testing multi-rank communication. This fixture does not validate the
+roundoff. Repeat with one MPI rank and compare against four ranks: this
+adaptive mesh exercises hanging-node and MPI sharing before acoustic
+interface forcing consumes the new solid displacements. Keep the default
+acoustic refinement factor; a uniform mesh can hide this ordering defect.
+Try both `HERCULES_GPU_MPI_BACKEND=cuda_aware` and `host` on allocated GPUs.
+For two completed case copies, compare their planes with:
+
+```bash
+python3 "$REPO/script/compare_plane_outputs.py" \
+  case-4-ranks/output/planes case-1-rank/output/planes \
+  --shapes 11x11 1x1 --expected-snapshots 800 --atol 1e-10 --rtol 1e-5
+```
+
+This fixture does not validate the
 large Izmir case, a gravity-wave dispersion relation, or CPML reflection levels.
+The checker also rejects displacement above 1 m for this deliberately weak
+synthetic source. That generous bound catches gross exponential growth; it is
+not an amplitude acceptance threshold for other cases. Backend agreement and
+finite numbers alone cannot establish stability.
 
 CPU-only regressions of the production surface assembly and output routines:
 
