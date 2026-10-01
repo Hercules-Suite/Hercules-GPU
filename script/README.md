@@ -14,6 +14,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [taper_topography.py](taper_topography.py) | Taper relief to a flat collar before lateral PML boundaries | Python standard library |
 | [read_stations.py](read_stations.py) | Show the station header, time range, and peak displacement | NumPy |
 | [read_planes.py](read_planes.py) | Inspect plane layout and scan all displacements for finite values and peak vertical motion | NumPy |
+| [compare_plane_outputs.py](compare_plane_outputs.py) | Compare every XYZ displacement in two completed sets of plane files, with bounded memory | NumPy |
 | [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or single-file station output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
@@ -70,6 +71,20 @@ scans the entire file one snapshot at a time using a read-only memory mapping.
 Binary readers assume native byte order matching the machine that wrote the
 files. Mesh records are packed: 32 bytes per corner and 20 bytes per material
 record, with eight corner records per element.
+
+Compare completed legacy and MPI-IO output from a case's `outputfiles` directory:
+
+```bash
+python3 /path/to/Hercules_GPU/script/compare_plane_outputs.py planes planes_mpiio \
+  --shapes 361x361 71x71 71x71 71x71 71x71 71x71 71x71 \
+  --expected-snapshots 1000
+```
+
+This scans all seven files and defaults to exact numerical equality. Optional
+`--atol` (metres) and `--rtol` apply a per-value acceptance criterion; NaN and
+infinity always fail. The report distinguishes byte identity from numerical
+agreement and locates maximum errors. It does not load whole files into RAM.
+See [comparison criteria and options](../doc/Extended%20README.md#compare-plane-output-backends).
 
 Each generated DRM box writes one `drmdisplacements.N` containing native
 float64 triples, ordered `(time, concatenated face sample, XYZ)`. Pass exterior

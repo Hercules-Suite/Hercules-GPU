@@ -177,6 +177,11 @@ order. See [station binary details](Extended%20README.md#single-file-station-bin
 Plane files are native float64 displacement grids; formats and readers are in
 the [output guide](https://hercules-gpu-docs.liling-dpim.chatgpt.site/docs/output-files)
 and [script index](../script/README.md).
+Use `script/compare_plane_outputs.py REFERENCE CANDIDATE --shapes NXxNY ...`
+to compare completed plane directories. `--expected-snapshots` checks complete
+record counts; `--atol`/`--rtol` set comparison tolerances (both default to zero),
+`--chunk-points` bounds read size, and `--endian` selects input byte order.
+See [plane comparison details](Extended%20README.md#compare-plane-output-backends).
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

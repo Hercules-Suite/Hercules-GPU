@@ -2003,6 +2003,18 @@ if __name__ == "__main__":
         note: "Relative paths resolve from the current working directory. Each worker retains one memory mapping and has its own temporary GMT directory and color table. Frame names encode time order even when workers finish out of order. --check-only checks complete snapshot sizes and samples the first, middle, and last velocity frames; it does not validate the source location or all snapshots. For restarted output, set --first-time to the time of its first stored snapshot (default: 0 s); restarts cannot be detected from the binary. Input byte order must match the machine reading the native float64 file.",
       },
       {
+        id: "compare-plane-outputs",
+        title: "Compare plane output backends",
+        paragraphs: [
+          "script/compare_plane_outputs.py uses Python 3 and NumPy to scan every saved XYZ displacement in two completed plane directories. It reads bounded chunks rather than loading whole files into RAM. Supply all grid shapes in plane-ID order starting at zero; the layout is [snapshot, along-strike point, down-dip point, XYZ] in native-endian float64 metres. Both runs must have matching geometry, sample times, and restart segments, which cannot be verified from the headerless binary files.",
+          "The default is exact finite numerical equality. Optional --atol in metres and dimensionless --rtol test abs(candidate-reference) <= atol + rtol*abs(reference) at every value. NaN and infinity always fail, even in byte-identical files. Reports distinguish byte identity from numerical agreement and include component peaks, maximum absolute errors and their zero-based snapshot/grid locations, counts outside tolerance, and non-finite counts. The err/ref_peak column is diagnostic only; it does not replace the per-value criterion.",
+          "Missing or extra numbered plane files, partial snapshots, inconsistent snapshot counts, and files detected changing during comparison are rejected. --expected-snapshots also catches equally truncated outputs. Exit status 0 means PASS under the chosen criterion, 1 means numerical differences or non-finite data, and 2 means an input/read error. This is a comparison of saved displacements, not validation of either simulation's physics or convergence.",
+        ],
+        codeLabel: "From outputfiles — compare all seven completed planes with exact equality",
+        code: "python3 /path/to/Hercules_GPU/script/compare_plane_outputs.py planes planes_mpiio \\\n  --shapes 361x361 71x71 71x71 71x71 71x71 71x71 71x71 \\\n  --expected-snapshots 1000",
+        note: "Run one Python process. --chunk-points defaults to 262144 XYZ points (6 MiB per input chunk plus working arrays). --endian native|little|big defaults to native. An optional --atol 1e-10 --rtol 1e-6 is an illustrative screening criterion, not a validated error budget. Wait for output buffers to flush on normal completion. Use set -o pipefail if piping the report through tee.",
+      },
+      {
         id: "plane-animation-colours",
         title: "Smooth the animation colours",
         paragraphs: [

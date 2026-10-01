@@ -2249,6 +2249,70 @@ sampled XYZ values are buffered; the station mode does not use
 boxes, with distinct output paths and independent sampling rates. The legacy
 three-stage DRM replay workflow remains separate.
 
+## Compare plane output backends
+
+`script/compare_plane_outputs.py` compares completed legacy, hybrid, or MPI-IO
+`planedisplacements.N` files using Python 3 and NumPy. It reads both sets without
+modifying them, in bounded chunks, and scans every saved XYZ displacement.
+Run one Python process; MPI is not required. Both runs must use the same plane
+geometry, point order, sampling times, and restart segment. The binary has no
+header or timestamps, so the comparator cannot verify those metadata.
+
+The storage order is `[snapshot, along-strike point, down-dip point, XYZ]` in
+C order, with native-endian float64 displacements in metres. For zero strike
+and dip, the two grid axes are solver X/north and Y/east; components always
+remain global X/north, Y/east, Z/down. Supply all plane shapes in numeric ID
+order starting at zero. From a case's `outputfiles` directory:
+
+```bash
+python3 /path/to/Hercules_GPU/script/compare_plane_outputs.py planes planes_mpiio \
+  --shapes 361x361 71x71 71x71 71x71 71x71 71x71 71x71 \
+  --expected-snapshots 1000
+```
+
+This illustrative seven-plane layout has 3,127,704 bytes per snapshot for
+plane 0 and 120,984 bytes per snapshot for each other plane. Consequently,
+3,127,704,000 and 120,984,000 bytes respectively represent 1,000 snapshots.
+Use `--expected-snapshots` to detect the case where both runs are equally
+truncated. Without it, the checker requires a common nonzero snapshot count
+across both directories and all planes. Missing/extra numbered plane files,
+partial snapshots, and files detected changing during their comparison are
+input errors. Wait for both simulations to finish and flush their output.
+
+The default `--atol 0 --rtol 0` checks exact finite numerical equality.
+Optionally select application-appropriate tolerances for each scalar value:
+
+```math
+|u_{candidate}-u_{reference}| \leq \mathrm{atol}
+  + \mathrm{rtol}\,|u_{reference}|.
+```
+
+For example, append `--atol 1e-10 --rtol 1e-6` to screen for small differences;
+these are illustrative comparison tolerances, not a validated error budget.
+`--atol` is in metres; `--rtol` is dimensionless and scales with each reference
+value, not the global peak. Near reference zeros the absolute tolerance governs.
+NaN or infinity in either input always fails, even if the two files have
+identical bytes. Matching signed zeros are numerically equal but may differ
+byte for byte. Finite subtraction overflow also fails.
+
+For each plane and component the report includes the reference/candidate peaks,
+maximum absolute error, maximum error divided by the reference component peak,
+number of differing finite values, number outside tolerance, non-finite counts,
+and the location and values of the maximum error and first failure. Locations
+are zero-based snapshot and grid indices. `err/ref_peak` is diagnostic only;
+the per-value criterion above determines PASS. All-zero matching data can pass
+and must still be interpreted in the context of the intended excitation.
+
+`--chunk-points` defaults to 262144 XYZ points per read (6 MiB per input chunk,
+plus temporary working arrays), independent of total file size. Reduce it to
+lower memory usage. `--endian native|little|big` defaults to `native`; choose
+the producing machine's byte order if different from the reading machine.
+Exit status 0 means every value passes the selected criterion, 1 means
+numerical differences or non-finite values, and 2 means an input/read error.
+When piping through `tee`, use `set -o pipefail` to preserve a failure status.
+These checks establish agreement of saved displacements under the stated
+criterion, not mesh/time convergence or physical validity of either simulation.
+
 ## Structured DRM box output
 
 `quake/forward/io_drm.cc` records any number of DRM boxes, with one flat binary
