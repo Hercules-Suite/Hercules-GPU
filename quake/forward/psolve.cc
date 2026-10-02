@@ -42,6 +42,8 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <map>
+#include <vector>
 #ifdef __linux__
 #include <sched.h>
 #endif
@@ -1212,7 +1214,7 @@ static struct Param_t {
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
-  int theAcousticInterfaceFaceFilter;        /* all or bottom-only diagnostic */
+  int theAcousticInterfaceFaceFilter;        /* bathymetry (default), all, bottom_only */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
   int theAcousticPoroelasticInterface;        /* no_flow or open_pore */
   double theAcousticPoroelasticPressurePenaltyFactor;
@@ -1289,7 +1291,7 @@ static struct Param_t {
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlPmlMaterialDamping = 0,
-           .theCpmlClampOuter = NO,
+           .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,
@@ -1299,7 +1301,7 @@ static struct Param_t {
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
            .theAcousticInterfaceFaceFilter =
-               ACOUSTIC_INTERFACE_FACE_FILTER_ALL,
+               ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY,
            .theAcousticQualityFactor = 0.0,
            .theAcousticPoroelasticInterface =
                ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW,
@@ -2767,7 +2769,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_face_filter[64] = "all",
+       acoustic_interface_face_filter[64] = "bathymetry",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        acoustic_free_surface_gravity[64] = "no",
@@ -2816,7 +2818,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticFreeSurfaceGravity = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
-  int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
+  int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY;
   noyesflag_t includePoroelastic = NO;
   noyesflag_t surfaceGroundwaterTable = NO;
   noyesflag_t includePlaneWaves = UNSET;
@@ -3643,8 +3645,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   if ((strcasecmp(acoustic_interface_face_filter, "all") == 0) ||
-      (strcasecmp(acoustic_interface_face_filter, "none") == 0) ||
-      (strcasecmp(acoustic_interface_face_filter, "default") == 0)) {
+      (strcasecmp(acoustic_interface_face_filter, "none") == 0)) {
     acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
   } else if ((strcasecmp(acoustic_interface_face_filter, "bottom_only") == 0) ||
              (strcasecmp(acoustic_interface_face_filter, "bottom") == 0) ||
@@ -3652,6 +3653,7 @@ static int32_t parse_parameters(const char* numericalin) {
     acousticInterfaceFaceFilter =
         ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY;
   } else if ((strcasecmp(acoustic_interface_face_filter, "bathymetry") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter, "default") == 0) ||
              (strcasecmp(acoustic_interface_face_filter,
                          "reconstructed_bathymetry") == 0) ||
              (strcasecmp(acoustic_interface_face_filter,
@@ -5163,6 +5165,53 @@ static void mesh_release_acoustic_interface_data(void) {
   Global.acousticPoroelasticInterfaceFragments = 0;
 }
 
+/* Remote octree entries can be aggregates, not the neighbor's final leaf.
+ * Resolve only requested neighbors at setup time, retaining the owner's
+ * corrected material and exact leaf bounds through CPML initialization. */
+struct acoustic_neighbor_t {
+  point_t lower;
+  int8_t level;
+  int64_t geid;
+  double vp, vs, rho, storage_modulus;
+  int poroelastic;
+};
+
+struct acoustic_point_less {
+  bool operator()(const point_t& a, const point_t& b) const {
+    return octor_zcompare(&a, &b) < 0;
+  }
+};
+
+static std::map<point_t, acoustic_neighbor_t, acoustic_point_less>
+    g_acousticNeighbors;
+static std::map<point_t, int, acoustic_point_less> g_acousticNeighborRequests;
+static int g_acousticCollectNeighbors = 0;
+static int32_t mesh_handoff_owner(const point_t*, int32_t, const point_t*);
+
+static const acoustic_neighbor_t* mesh_cached_acoustic_neighbor(
+    const point_t& point) {
+  auto it = g_acousticNeighbors.upper_bound(point);
+  if (it == g_acousticNeighbors.begin()) return NULL;
+  --it;
+  const acoustic_neighbor_t& neighbor = it->second;
+  const tick_t h = (tick_t)1 << (PIXELLEVEL - neighbor.level);
+  if (point.x < neighbor.lower.x || point.x >= neighbor.lower.x + h ||
+      point.y < neighbor.lower.y || point.y >= neighbor.lower.y + h ||
+      point.z < neighbor.lower.z || point.z >= neighbor.lower.z + h) {
+    return NULL;
+  }
+  return &neighbor;
+}
+
+static const acoustic_neighbor_t* mesh_cached_acoustic_neighbor_at(
+    const vector3D_t* point) {
+  const double ticksize = Global.myMesh->ticksize;
+  const point_t ticks = {(tick_t)(point->x[0] / ticksize),
+                         (tick_t)(point->x[1] / ticksize),
+                         (tick_t)(point->x[2] / ticksize)};
+  return mesh_cached_acoustic_neighbor(ticks);
+}
+
 static int mesh_find_octant_at_domain_point(const vector3D_t* point,
                                             tick_t ldb_out[3],
                                             tick_t ruf_out[3],
@@ -5197,11 +5246,35 @@ static int mesh_find_octant_at_domain_point(const vector3D_t* point,
 
   octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
                               AGGREGATE_SEARCH);
-  if (octant == NULL) {
-    if (eindex_out != NULL) {
-      *eindex_out = -1;
+  if (octant == NULL || octant->where == REMOTE) {
+    const point_t ticks = {xTick, yTick, zTick};
+    const acoustic_neighbor_t* neighbor = mesh_cached_acoustic_neighbor(ticks);
+    if (is_local_out != NULL) *is_local_out = 0;
+    if (eindex_out != NULL) *eindex_out = -1;
+    if (neighbor == NULL) {
+      if (g_acousticCollectNeighbors) {
+        const int owner = mesh_handoff_owner(
+            octor_getintervaltable(Global.myOctree), Global.theGroupSize,
+            &ticks);
+        /* A missing local octant is a carved void. Missing remote octants
+         * still need resolution on their owner, just like remote aggregates. */
+        if (owner != Global.myID) g_acousticNeighborRequests[ticks] = owner;
+      }
+      return 0;
     }
-    return 0;
+    const tick_t h = (tick_t)1 << (PIXELLEVEL - neighbor->level);
+    if (ldb_out != NULL) {
+      ldb_out[0] = neighbor->lower.x;
+      ldb_out[1] = neighbor->lower.y;
+      ldb_out[2] = neighbor->lower.z;
+    }
+    if (ruf_out != NULL) {
+      ruf_out[0] = neighbor->lower.x + h;
+      ruf_out[1] = neighbor->lower.y + h;
+      ruf_out[2] = neighbor->lower.z + h;
+    }
+    if (level_out != NULL) *level_out = neighbor->level;
+    return 1;
   }
 
   if (ldb_out != NULL) {
@@ -5256,6 +5329,86 @@ static int mesh_find_octant_at_domain_point(const vector3D_t* point,
   return 1;
 }
 
+static void mesh_exchange_acoustic_neighbors(void) {
+  const int ranks = Global.theGroupSize;
+  std::vector<int> send_counts(ranks, 0), recv_counts(ranks, 0);
+  std::vector<int> send_offsets(ranks, 0), recv_offsets(ranks, 0);
+  if (g_acousticNeighborRequests.size() > (size_t)INT_MAX) {
+    solver_abort(__FUNCTION_NAME, NULL, "Too many acoustic neighbor requests");
+  }
+  for (const auto& request : g_acousticNeighborRequests)
+    ++send_counts[request.second];
+  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1,
+                MPI_INT, comm_solver);
+  int64_t nsend = 0, nrecv = 0;
+  for (int rank = 0; rank < ranks; ++rank) {
+    send_offsets[rank] = (int)nsend;
+    recv_offsets[rank] = (int)nrecv;
+    nsend += send_counts[rank];
+    nrecv += recv_counts[rank];
+    if (nsend > INT_MAX || nrecv > INT_MAX)
+      solver_abort(__FUNCTION_NAME, NULL, "Acoustic neighbor MPI count overflow");
+  }
+  std::vector<point_t> outgoing((size_t)nsend), incoming((size_t)nrecv);
+  std::vector<int> cursor = send_offsets;
+  for (const auto& request : g_acousticNeighborRequests)
+    outgoing[cursor[request.second]++] = request.first;
+  MPI_Datatype point_type, neighbor_type;
+  MPI_Type_contiguous((int)sizeof(point_t), MPI_BYTE, &point_type);
+  MPI_Type_commit(&point_type);
+  MPI_Type_contiguous((int)sizeof(acoustic_neighbor_t), MPI_BYTE, &neighbor_type);
+  MPI_Type_commit(&neighbor_type);
+  MPI_Alltoallv(outgoing.data(), send_counts.data(), send_offsets.data(),
+                 point_type, incoming.data(), recv_counts.data(),
+                 recv_offsets.data(), point_type, comm_solver);
+  std::vector<acoustic_neighbor_t> answers((size_t)nrecv), replies((size_t)nsend);
+  for (size_t i = 0; i < incoming.size(); ++i) {
+    /* Sample within the requested tick, avoiding roundoff onto its low edge. */
+    const double ticksize = Global.myMesh->ticksize;
+    vector3D_t probe = {{(incoming[i].x + 0.25) * ticksize,
+                         (incoming[i].y + 0.25) * ticksize,
+                         (incoming[i].z + 0.25) * ticksize}};
+    int local = 0;
+    int32_t eindex = -1;
+    if (!mesh_find_octant_at_domain_point(&probe, NULL, NULL, NULL, &local,
+                                           &eindex)) {
+      /* Cache a void at the requested tick so discovery can terminate even
+       * when that part of the remote domain has been carved out. */
+      answers[i].lower = incoming[i];
+      answers[i].level = PIXELLEVEL;
+      answers[i].geid = -1;
+      continue;
+    }
+    if (!local) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Acoustic neighbor request did not reach its element owner");
+    }
+    const elem_t* element = &Global.myMesh->elemTable[eindex];
+    const edata_t* material = (edata_t*)element->data;
+    const node_t* node = &Global.myMesh->nodeTable[element->lnid[0]];
+    acoustic_neighbor_t& answer = answers[i];
+    answer.lower = {node->x, node->y, node->z};
+    answer.level = element->level;
+    answer.geid = element->geid;
+    answer.vp = material->Vp;
+    answer.vs = material->Vs;
+    answer.rho = material->rho;
+    answer.poroelastic = poroelastic_element_candidate(
+        Global.myMesh, eindex, 0, NULL, NULL);
+    if (answer.poroelastic)
+      answer.storage_modulus =
+          poroelastic_biot_storage_modulus_for_element(material, eindex);
+  }
+  MPI_Alltoallv(answers.data(), recv_counts.data(), recv_offsets.data(),
+                 neighbor_type, replies.data(), send_counts.data(),
+                 send_offsets.data(), neighbor_type, comm_solver);
+  MPI_Type_free(&point_type);
+  MPI_Type_free(&neighbor_type);
+  for (const auto& neighbor : replies)
+    g_acousticNeighbors[neighbor.lower] = neighbor;
+  g_acousticNeighborRequests.clear();
+}
+
 static int mesh_query_material_at_model_point(
     double north_m, double east_m, double depth_m,
     const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
@@ -5273,10 +5426,10 @@ static int mesh_probe_face_elastic_info(
   int found_local_neighbor = 0;
   int local_neighbor_is_elastic = 0;
   int8_t neighbor_level = -1;
-  cvmpayload_t g_props;
-  double north_m;
-  double east_m;
-  double depth_m;
+  (void)IstVelModel_origin;
+  (void)basinVelModel_origin;
+  (void)threeDVelModel_origin;
+  (void)h_for_tol;
 
   if (neighbor_eindex_out != NULL) {
     *neighbor_eindex_out = -1;
@@ -5344,37 +5497,20 @@ static int mesh_probe_face_elastic_info(
     return 1;
   }
 
-  north_m = Global.theXForMeshOrigin + domain_point->x[0];
-  east_m = Global.theYForMeshOrigin + domain_point->x[1];
-  depth_m = Global.theZForMeshOrigin + domain_point->x[2];
-
-  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
-                                         IstVelModel_origin, basinVelModel_origin,
-                                         threeDVelModel_origin, &g_props) == 0) {
-    int remote_neighbor_is_elastic =
-        material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho);
-    if (remote_neighbor_is_elastic && found_neighbor_octant &&
-        (neighbor_level_out != NULL)) {
-      *neighbor_level_out = neighbor_level;
-    }
-    if (remote_neighbor_is_elastic &&
-        (neighbor_is_poroelastic_out != NULL)) {
-      *neighbor_is_poroelastic_out =
-          poroelastic_enabled() &&
-          poroelastic_point_is_saturated(north_m, east_m, depth_m, h_for_tol);
-    }
-    if (remote_neighbor_is_elastic &&
-        (neighbor_storage_modulus_out != NULL) && poroelastic_enabled() &&
-        poroelastic_point_is_saturated(north_m, east_m, depth_m, h_for_tol)) {
-      *neighbor_storage_modulus_out =
-          poroelastic_biot_storage_modulus_from_values(
-              g_props.Vp, g_props.Vs, g_props.rho,
-              (neighbor_geid_out != NULL) ? *neighbor_geid_out : -1);
-    }
-    return remote_neighbor_is_elastic;
+  if (!found_neighbor_octant) return 0;
+  const acoustic_neighbor_t* neighbor =
+      mesh_cached_acoustic_neighbor_at(domain_point);
+  if (neighbor == NULL ||
+      !material_values_are_elastic(neighbor->vp, neighbor->vs, neighbor->rho)) {
+    return 0;
   }
-
-  return 0;
+  if (neighbor_level_out != NULL) *neighbor_level_out = neighbor->level;
+  if (neighbor_geid_out != NULL) *neighbor_geid_out = neighbor->geid;
+  if (neighbor_is_poroelastic_out != NULL)
+    *neighbor_is_poroelastic_out = neighbor->poroelastic;
+  if (neighbor_storage_modulus_out != NULL)
+    *neighbor_storage_modulus_out = neighbor->storage_modulus;
+  return 1;
 }
 
 static int mesh_query_material_at_model_point(
@@ -5593,10 +5729,11 @@ static int mesh_compute_elastic_side_pml_profile_at_domain_point(
     double* invKappa_out, uint8_t* face_mask_out) {
   tick_t ldb[3], ruf[3];
   uint8_t face_mask;
-  cvmpayload_t g_props;
-  double north_m, east_m, depth_m;
   double a3[3], b3[3], iK3[3], d3[3];
   double al3[3], ka3[3];
+  (void)IstVelModel_origin;
+  (void)basinVelModel_origin;
+  (void)threeDVelModel_origin;
 
   if ((domain_point == NULL) || (axis < 0) || (axis > 2) ||
       (a_out == NULL) || (b_out == NULL) || (invKappa_out == NULL)) {
@@ -5618,17 +5755,10 @@ static int mesh_compute_elastic_side_pml_profile_at_domain_point(
     return 0;
   }
 
-  north_m = Global.theXForMeshOrigin + domain_point->x[0];
-  east_m = Global.theYForMeshOrigin + domain_point->x[1];
-  depth_m = Global.theZForMeshOrigin + domain_point->x[2];
-  if (mesh_query_material_at_model_point(north_m, east_m, depth_m,
-                                         IstVelModel_origin,
-                                         basinVelModel_origin,
-                                         threeDVelModel_origin,
-                                         &g_props) != 0) {
-    return 0;
-  }
-  if (!material_values_are_elastic(g_props.Vp, g_props.Vs, g_props.rho)) {
+  const acoustic_neighbor_t* neighbor =
+      mesh_cached_acoustic_neighbor_at(domain_point);
+  if (neighbor == NULL ||
+      !material_values_are_elastic(neighbor->vp, neighbor->vs, neighbor->rho)) {
     return 0;
   }
 
@@ -6002,7 +6132,8 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
   }
   mesh_acoustic_face_normal(face, normal);
 
-  if ((Param.theAcousticInterfaceFaceFilter ==
+  if (!g_acousticCollectNeighbors &&
+      (Param.theAcousticInterfaceFaceFilter ==
        ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY) &&
       (face == ACOUSTIC_FACE_Z_PLUS)) {
     vector3D_t face_center;
@@ -6135,6 +6266,12 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
           }
           adjacent_halfwidth[tangent_axes[0]] = fragment_h / adjacent_h;
           adjacent_halfwidth[tangent_axes[1]] = fragment_h / adjacent_h;
+        } else {
+          const acoustic_neighbor_t* neighbor =
+              mesh_cached_acoustic_neighbor_at(&probe);
+          if (neighbor != NULL)
+            adjacent_h_for_scale = Global.myMesh->ticksize *
+                ((tick_t)1 << (PIXELLEVEL - neighbor->level));
         }
 
         if (adjacent_is_poroelastic) {
@@ -6220,6 +6357,8 @@ static void mesh_build_acoustic_interface_flags(
   }
 
   mesh_release_acoustic_interface_data();
+  g_acousticNeighbors.clear();
+  g_acousticNeighborRequests.clear();
 
   if ((Param.includeAcoustic != YES) ||
       (Param.acousticInterfaceCoupling != YES) || (Global.myMesh == NULL)) {
@@ -6238,6 +6377,33 @@ static void mesh_build_acoustic_interface_flags(
 
   if (poroelastic_enabled()) {
     poro_groundwater_grid_load();
+  }
+
+  /* Discover remote leaves in batches. A finer reply can expose additional
+   * fragment probes on the next pass. Every rank enters each exchange,
+   * including solid-only ranks that answer requests but have none to send. */
+  if (Global.theGroupSize > 1) {
+    for (int round = 0; ; ++round) {
+      if (round > PIXELLEVEL + 1)
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Acoustic neighbor discovery did not converge");
+      g_acousticCollectNeighbors = 1;
+      for (int32_t eindex = 0; eindex < Global.myMesh->lenum; ++eindex) {
+        if (!element_is_acoustic((edata_t*)Global.myMesh->elemTable[eindex].data))
+          continue;
+        for (int iface = 0; iface < 6; ++iface)
+          mesh_build_acoustic_interface_face_fragments(
+              eindex, face_bits[iface], 0, &table_count, &table_capacity,
+              IstVelModel_origin, basinVelModel_origin, threeDVelModel_origin,
+              NULL, NULL);
+      }
+      g_acousticCollectNeighbors = 0;
+      int pending = !g_acousticNeighborRequests.empty();
+      int any_pending = 0;
+      MPI_Allreduce(&pending, &any_pending, 1, MPI_INT, MPI_MAX, comm_solver);
+      if (!any_pending) break;
+      mesh_exchange_acoustic_neighbors();
+    }
   }
 
   for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
@@ -6348,6 +6514,9 @@ static void mesh_build_acoustic_interface_flags(
           (double)global_counts[1] / 1.0e6,
           (double)global_counts[2] / 1.0e6,
           (double)global_counts[0] / 1.0e6);
+      monitor_print("Acoustic interface geometry: %lld faces, %lld fragments "
+                    "(owner-resolved neighbor leaves)\n",
+                    (long long)global_counts[1], (long long)global_counts[2]);
     } else {
       monitor_print(
           "Acoustic interface coupling: normal-projected acoustic faces %.1fM, "
@@ -10880,16 +11049,47 @@ static void gpu_init(int32_t myID) {
   return;
 }
 
-/**
- * Init matrices and constants, build comm schedule, allocate/init space
- * for the solver.
- */
+/* The octree starts at Z=0 even when air/buildings shift the physical
+ * surface downward. Acoustic water at sea level follows the topography
+ * datum, not nearendp[2]. Keep the unshifted global-top case unchanged. */
+static double acoustic_free_surface_z() {
+  if (Param.includeTopography == YES) return get_thebase_topo();
+  if (Param.includeBuildings == YES) return get_surface_shift();
+  return (double)Global.myOctree->nearendp[2] * Global.myOctree->ticksize;
+}
+
+static int acoustic_element_has_free_surface(const elem_t* element,
+                                             double surfaceZ) {
+  const double ticksize = Global.myOctree->ticksize;
+  const int32_t node = element->lnid[0];
+  const double topZ = (double)Global.myMesh->nodeTable[node].z * ticksize;
+  /* A fraction of one octree tick tolerates coordinate roundoff without
+   * selecting the next vertical element or a face crossing the datum. */
+  const double tol = 0.25 * ticksize;
+  if (fabs(topZ - surfaceZ) > tol) return 0;
+  if (Param.includeTopography == YES) {
+    const edata_t* material = (const edata_t*)element->data;
+    const double x = (double)Global.myMesh->nodeTable[node].x * ticksize +
+                     0.5 * material->edgesize;
+    const double y = (double)Global.myMesh->nodeTable[node].y * ticksize +
+                     0.5 * material->edgesize;
+    /* Do not impose a free surface on buried water beneath land. Mixed
+     * shoreline cells remain governed by the existing material classifier. */
+    if (fabs(point_elevation(x, y) - surfaceZ) > tol) return 0;
+  }
+  return 1;
+}
+
+/** Init matrices/constants, communication schedules, and solver storage. */
 static void solver_init() {
   /* local variables */
   int32_t eindex;
   int32_t c_outsize, c_insize, s_outsize, s_insize;
   int64_t localPressureElements = 0;
   int64_t globalPressureElements = 0;
+  int64_t localPressureSurfaceFaces = 0;
+  int64_t globalPressureSurfaceFaces = 0;
+  const double acousticSurfaceZ = acoustic_free_surface_z();
   int64_t localPoroelasticElements = 0;
   int64_t localPoroelasticPmlCandidates = 0;
   int64_t localPoroelasticUndrainedFastPathElements = 0;
@@ -11467,8 +11667,7 @@ static void solver_init() {
           edata->edgesize * edata->edgesize * edata->edgesize;
       const double nodalPressureMass = volume / (8.0 * bulk);
       const int isTopAcousticSurface =
-          (Global.myMesh->nodeTable[elemp->lnid[0]].z ==
-           Global.myOctree->nearendp[2]);
+          acoustic_element_has_free_surface(elemp, acousticSurfaceZ);
       const double gravitySurfaceMass =
           ((Param.theAcousticFreeSurfaceGravity == YES) &&
            isTopAcousticSurface)
@@ -11634,6 +11833,7 @@ static void solver_init() {
                            Param.theDeltaT);
       }
       if (isTopAcousticSurface) {
+        localPressureSurfaceFaces++;
         for (j = 0; j < 4; j++) {
           pressureFreeSurfaceHost[elemp->lnid[j]] = 1.0;
           if (Param.theAcousticFreeSurfaceGravity == YES) {
@@ -12661,9 +12861,9 @@ static void solver_init() {
     /* --- Optional Dirichlet clamp at outer PML face --- */
     /* When cpml_clamp_outer=yes, mark every node that sits on a domain-
      * extent face touched by a PML (x_min, x_max, y_min, y_max, z_max).
-     * z_min is always the free surface so it is never clamped. The clamp
-     * is applied per-step in kernelDispCalc by zeroing tm2Disp at flagged
-     * nodes.
+     * The top is not selected by its Z coordinate, but its lateral rim
+     * can be flagged by X/Y. The displacement and acoustic scalar update
+     * kernels apply the mask at flagged nodes.
      *
      * The check is geometric (node coordinate equals nearendp / farendp on
      * the relevant axis) rather than element-based, so it correctly
@@ -13089,6 +13289,8 @@ static void solver_init() {
 
     MPI_Allreduce(&localPressureElements, &globalPressureElements, 1,
                   MPI_INT64_T, MPI_SUM, comm_solver);
+    MPI_Allreduce(&localPressureSurfaceFaces, &globalPressureSurfaceFaces, 1,
+                  MPI_INT64_T, MPI_SUM, comm_solver);
     MPI_Allreduce(&localPressureNodes, &globalPressureNodes, 1, MPI_INT64_T,
                   MPI_SUM, comm_solver);
     MPI_Allreduce(&localPressureFreeSurfaceNodes,
@@ -13101,6 +13303,11 @@ static void solver_init() {
           (double)globalPressureElements / 1.0e6,
           (double)globalPressureNodes / 1.0e6,
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
+      monitor_print(
+          "Acoustic free-surface geometry: solver Z=%.17g m, %lld exposed "
+          "acoustic top faces, %lld harbored surface-node copies\n",
+          acousticSurfaceZ, (long long)globalPressureSurfaceFaces,
+          (long long)globalPressureFreeSurfaceNodes);
     }
   } else {
     g_acousticPressureElementCount = 0;
@@ -20193,6 +20400,10 @@ static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {
 #pragma omp parallel for schedule(static) if(g_acousticPlanePressureNodeCount > 100000)
 #endif
   for (int32_t i = 0; i < g_acousticPlanePressureNodeCount; i++) {
+    /* Preserve the stored scalar (phi in velocity-potential mode). The host
+     * buffer swap retains this patch in pressure_tm2 at the next step, so
+     * plane reconstruction can form p = -(phi[n]-phi[n-1])/dt without another
+     * gather, device-to-host transfer, or field-buffer conversion. */
     solver->pressure_tm1[g_acousticPlanePressureNodesHost[i]] =
         g_acousticPlanePressureBufferHost[i];
   }
@@ -21996,6 +22207,15 @@ static void solver_run_collect_timers(void) {
  */
 static void solver_run() {
   int32_t step, startingStep;
+  const int acoustic_needs_synced_disp =
+      acoustic_pressure_enabled() && (g_acousticPressureElementCount > 0) &&
+      (Param.acousticInterfaceCoupling == YES);
+  /* Interface forcing consumes u[n+1]. Share anchored nodes and assign
+   * hanging nodes before sampling it, on every rank, even ranks without a
+   * local interface. Reuse the existing exchange before the pressure step
+   * rather than exchanging again after the displacement buffer swap. */
+  const int pressure_step_needs_synced_disp =
+      poroelastic_gpu_active() || acoustic_needs_synced_disp;
 
   solver_run_init_comm(Global.mySolver);
   solver_diag_reset();
@@ -22014,6 +22234,10 @@ static void solver_run() {
     /* print header for monitor file */
     monitor_print("solver_run() start\nStarting time step = %d\n\n",
                   startingStep);
+    if (acoustic_needs_synced_disp) {
+      monitor_print("Acoustic interface displacement: MPI sharing and "
+                    "hanging-node assignment before scalar update\n");
+    }
   }
 
   MPI_Barrier(comm_solver);
@@ -22021,7 +22245,6 @@ static void solver_run() {
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
     fvector_t* tmpvector;
-    int pressure_step_needs_synced_disp = poroelastic_gpu_active();
     int is_final_step = (step == Param.theTotalSteps - 1);
 
     /* prepare for a new iteration
@@ -22044,7 +22267,8 @@ static void solver_run() {
     solver_sync_acoustic_plane_pressure_values(Global.mySolver);
     planes_update_acoustic_kinematics(Global.mySolver, Param.theNumberOfPlanes,
                                       step, Param.theDeltaT,
-                                      Param.theDeltaTSquared);
+                                      Param.theDeltaTSquared,
+                                      Param.theAcousticVelocityPotential);
 
     Timer_Start("Solver I/O");
     solver_write_checkpoint(step, startingStep);
@@ -24523,6 +24747,40 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
   }
 }
 #endif /* BOUNDARY */
+
+void solver_init_acoustic_output_cpml(int32_t eindex,
+                                     acoustic_output_cpml_t* state) {
+  memset(state, 0, sizeof(*state));
+#ifdef BOUNDARY
+  if (!cpml_pml_element(eindex)) return;
+  const elem_t* element = &Global.myMesh->elemTable[eindex];
+  if (!element_is_acoustic((edata_t*)element->data)) return;
+  const int32_t n = element->lnid[0];
+  tick_t lo[3] = {Global.myMesh->nodeTable[n].x,
+                  Global.myMesh->nodeTable[n].y,
+                  Global.myMesh->nodeTable[n].z};
+  const tick_t h = (tick_t)1 << (PIXELLEVEL - element->level);
+  tick_t hi[3] = {lo[0] + h, lo[1] + h, lo[2] + h};
+  const uint8_t mask = compute_pml_face_mask(
+      lo, hi, Global.myOctree->nearendp, Global.myOctree->farendp,
+      Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+  double d[3], alpha[3], kappa[3];
+  /* These profile scalars survive the release of build-time arrays.
+   * Recompute only for observation points, once, using the exact solver
+   * profile. No GPU memory downloads or extra field exchanges are needed. */
+  compute_pml_profile_coeffs(
+      mask, lo, hi, Global.myOctree->nearendp, Global.myOctree->farendp,
+      Global.myOctree->ticksize, g_cpmlBuild.thickness_m,
+      g_cpmlBuild.reference_vp, Param.theDeltaT, Param.theCpmlPolyOrder,
+      Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+      g_cpmlBuild.alpha_max, Param.theCpmlMpmlCrossFraction,
+      Param.theCpmlAlphaFloorFraction, state->a, state->b,
+      state->inv_kappa, d, alpha, kappa);
+  state->active = 1;
+#else
+  (void)eindex;
+#endif
+}
 
 /**
  * compute_setab: the base a and b values will be scaled by zeta
@@ -27726,6 +27984,7 @@ static void solver_update_acoustic_station_kinematics(int32_t step) {
       continue;
     }
 
+    acoustic_output_stretch_gradient(&station->acoustic_cpml, grad);
     for (int axis = 0; axis < 3; axis++) {
       accel[axis] = -grad[axis] / station->rho;
     }
@@ -29887,12 +30146,42 @@ int main(int argc, char** argv) {
       monitor_print(
           "Plane setup complete: total=%d max-rank-time=%.2fs\n",
           Param.theNumberOfPlanes, planesSetupElapsedMax);
+      if (Param.reconstructAcousticPlaneDisplacements == YES) {
+        monitor_print("Acoustic plane reconstruction: %s\n",
+                      Param.theAcousticVelocityPotential
+                          ? "p = -(phi[n]-phi[n-1])/dt, acceleration = -grad(p)/rho"
+                          : "pressure field, acceleration = -grad(p)/rho");
+      }
     }
   }
 
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  g_acousticNeighbors.clear();
+  /* Prepare the output-only CPML gradient memories after profile setup.
+   * All plane backends and both station gather paths use these memories. */
+  if (acoustic_pressure_enabled()) {
+    int64_t localCounts[2] = {0, planes_init_acoustic_cpml(Param.theNumberOfPlanes)};
+    int64_t globalCounts[2] = {0, 0};
+    for (int i = 0; i < Param.myNumberOfStations; ++i) {
+      station_t* station = &Param.myStations[i];
+      if (!station->pressure_is_defined) continue;
+      solver_init_acoustic_output_cpml(station->owningElementIndex,
+                                       &station->acoustic_cpml);
+      localCounts[0] += station->acoustic_cpml.active;
+    }
+    MPI_Allreduce(localCounts, globalCounts, 2, MPI_INT64_T, MPI_SUM, comm_solver);
+    if (Global.myID == 0) {
+      monitor_print("Acoustic output CPML gradient correction: %lld stations, "
+                    "%lld plane points (containing-element profiles)\n",
+                    (long long)globalCounts[0], (long long)globalCounts[1]);
+    }
+  }
+  /* CPML membership is only available after solver_init(). This optional
+   * setup audit never enters the production time-stepping loop. */
+  planes_write_point_metadata(Global.myID, Param.theNumberOfPlanes,
+                              Param.thePlaneDirOut);
   drm_output_setup(Global.myID, Param.parameters_input_file, get_surface_shift(),
                    Param.includeTopography == YES,
                    Param.stationOutputBinaryFile,

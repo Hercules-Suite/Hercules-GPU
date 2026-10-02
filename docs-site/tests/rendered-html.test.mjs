@@ -197,7 +197,14 @@ test("renders the categorized parameter reference", async () => {
   const html = await response.text();
   assert.match(html, /Acoustic and poroelastic parameters/);
   assert.match(html, /acoustic_free_surface_gravity/);
+  assert.match(html, /Z=topographybase_zcoord/);
+  assert.match(html, /buried water beneath land is excluded/);
   assert.match(html, /acoustic_interface_face_filter/);
+  const faceFilterRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_face_filter"));
+  assert.ok(faceFilterRow, "the acoustic interface filter must appear in the parameter reference");
+  assert.match(faceFilterRow, /Default: bathymetry/);
+  assert.match(faceFilterRow, /Explicit all couples every detected face/);
+  assert.match(faceFilterRow, /default alias now follows bathymetry/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -282,9 +289,25 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(documented.includes("station_output_binary_file"));
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
+  assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
+  assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: bathymetry;/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
+
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
+  assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
+  assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  assert.match(solver, /acoustic_interface_face_filter\[64\]\s*=\s*"bathymetry"/);
+  assert.match(solver, /int acousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  const filterParser = solver.slice(
+    solver.indexOf('if ((strcasecmp(acoustic_interface_face_filter, "all")'),
+    solver.indexOf('if ((strcasecmp(acoustic_poroelastic_interface, "no_flow")'),
+  );
+  const bathymetryBranch = filterParser.slice(filterParser.indexOf('} else if ((strcasecmp(acoustic_interface_face_filter, "bathymetry")'));
+  assert.match(bathymetryBranch, /"default"[\s\S]*?ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  assert.doesNotMatch(filterParser.slice(0, filterParser.indexOf("} else if")), /"default"/);
 
   const parserFiles = [
     "psolve.cc",
@@ -536,6 +559,25 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
     /reported to standard error at startup/);
 });
 
+test("documents MPI-IO as the default plane backend and the I/O-pool fallback", async () => {
+  const response = await render("/docs/gpu-execution");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Plane output defaults to mpiio/);
+  assert.match(html, /HERCULES_PLANE_IO_MODE is unset or empty/);
+  assert.match(html, /select the legacy I\/O-pool backend/);
+  assert.match(html, /MPI-IO batches 64 packed snapshots by default/);
+  assert.match(html, /The former auto value is no longer accepted/);
+  assert.match(html, /set legacy to retain CPU interpolation/);
+
+  const configuration = await render("/docs/configuration");
+  assert.equal(configuration.status, 200);
+  const config = await configuration.text();
+  assert.match(config, /mpiio \| hybrid \| legacy/);
+  assert.match(config, /default: mpiio \(dedicated I\/O ranks select legacy\)/);
+  assert.doesNotMatch(config, /auto \| hybrid \| mpiio \| legacy/);
+});
+
 test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -571,6 +613,10 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
   assert.match(parameters, /Solid PML elements always use linear elasticity/);
   assert.match(parameters, /excluded from nonlinear constitutive updates/);
+  const clampRow = parameters.split("</tr>").find((row) => row.includes("cpml_clamp_outer"));
+  assert.ok(clampRow, "the CPML clamp must appear in the parameter reference");
+  assert.match(clampRow, /Default: yes/);
+  assert.match(clampRow, /Explicit no removes the clamp/);
 });
 
 test("keeps acoustic elements out of nonlinear constitutive maps", async () => {
@@ -1378,6 +1424,11 @@ test("provides configuration and reader examples for output files", async () => 
     assert.ok(html.includes(`script/${name}.py`));
   }
   assert.match(html, /script\/animations_mpi\.py/);
+  assert.match(html, /compare-plane-outputs/);
+  assert.match(html, /3,127,704,000 bytes/);
+  assert.match(html, /NaN and infinity always fail/);
+  assert.match(html, /equally truncated outputs/);
+  assert.doesNotMatch(html, /(?:compare_plane_outputs|diagnose_plane_output|diagnose_acoustic_stations|check_acoustic_gravity_mode)\.py/);
   assert.match(html, /does not read parameters\.in or any other configuration file/);
   assert.match(html, /--nx 201 --ny 126 --dx 500 --dy 325 --dt 0\.02/);
   assert.match(html, /mpirun -np 2/);
@@ -1412,6 +1463,71 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /Ru remains nan during the ramp/);
   assert.match(html, /committed vertical skeleton stress/);
   assert.match(html, /output_displacement_file/);
+});
+
+test("documents plane amplitude diagnostics without equating geometry with CPML membership", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml/);
+  assert.match(html, /The suffix is the rank, not the plane number/);
+  assert.match(html, /contains no pressure, velocity or displacement histories/);
+  assert.match(html, /only a CPML candidate region/);
+  assert.match(html, /HERCULES_PLANE_METADATA=1/);
+  assert.match(html, /plane_point_metadata\.RANK\.csv/);
+  assert.match(html, /fresh output directories/);
+  assert.match(html, /keep missing ownership unknown/);
+  assert.match(html, /no per-step work/);
+  assert.match(await (await render("/docs/configuration")).text(), /HERCULES_PLANE_METADATA/);
+});
+
+test("converts velocity potential to pressure before reconstructing acoustic planes", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /p = -\(phi\[n\] - phi\[n-1\]\)\/dt/);
+  assert.match(html, /conversion adds no GPU transfers/);
+  assert.match(html, /old code gives -0\.6 m at 4 s/);
+  assert.match(html, /not validation of a complete CUDA\/MPI/);
+  assert.match(html, /inverse gradient stretch/);
+  assert.match(html, /separate memory at each observation point/);
+  assert.doesNotMatch(html, /routine has no CPML memory correction/);
+  const models = await (await render("/docs/physics")).text();
+  assert.match(models, /Acoustic free-surface geometry/);
+  assert.match(models, /missed shifted water surfaces/);
+  assert.match(models, /MPI displacement sharing and hanging-node assignment/);
+  assert.match(models, /Compare one and four ranks/);
+  assert.match(models, /Acoustic interface geometry/);
+  assert.match(models, /current CFS memory uses a face average/);
+  assert.match(models, /zero-mean face modes/);
+  assert.match(models, /was not adopted/);
+
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(solver, /planes_update_acoustic_kinematics\([\s\S]*?Param\.theDeltaTSquared,\s*Param\.theAcousticVelocityPotential\)/);
+  assert.match(solver, /Acoustic plane reconstruction:/);
+  // The sparse plane gather still patches the raw current scalar; pointer
+  // swaps retain its previous value instead of transferring another field.
+  const sync = solver.slice(solver.indexOf("static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver) {"),
+                            solver.indexOf("static void solver_init_pore_pressure_station_sync(mysolver_t* solver) {"));
+  assert.equal((sync.match(/cudaMemcpyAsync\(/g) ?? []).length, 1);
+  assert.doesNotMatch(sync, /pressureTm2Device/);
+});
+
+test("documents controlled acoustic pressure and motion diagnostics", async () => {
+  const response = await render("/docs/output-files");
+  const html = await response.text();
+  assert.match(html, /acoustic-station-diagnostics/);
+  assert.match(html, /print_station_pressures = yes/);
+  assert.match(html, /output_stations_print_rate = 1/);
+  assert.match(html, /Recheck material ownership after coarsening/);
+  assert.match(html, /shared reconstruction error/);
+  assert.match(html, /CPML remains active in both runs/);
+  assert.match(html, /gravity-mode-diagnostics/);
+  assert.match(html, /Investigation scripts and smoke-test inputs are retained locally/);
+  assert.match(html, /without CPML, adaptive meshes, solid coupling or GPU\/MPI execution/);
+  assert.match(html, /does not filter the source/);
 });
 
 test("documents structured DRM boxes and generic station binary output", async () => {

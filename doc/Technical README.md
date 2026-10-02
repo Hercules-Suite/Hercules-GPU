@@ -87,11 +87,21 @@ interactions are in the
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
+  With `abc_type=cpml`, `cpml_clamp_outer` defaults to `yes`; set it explicitly
+  to `no` to disable the outer displacement/acoustic-scalar clamp.
 - **Acoustic material and acoustic–elastic coupling:** `include_acoustic`, `acoustic_formulation`,
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
   `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
+  `acoustic_interface_face_filter` defaults to `bathymetry`: couple Z+ bottom
+  faces using reconstructed normals and area weights. Explicit `all` restores
+  all detected faces; `bottom_only` uses vertical normals on Z+ faces.
+  See [interface geometry and aliases](Extended%20README.md#acoustic-and-elastic-coupling).
+  The flat water surface follows `topographybase_zcoord` (or the building
+  `surface_shift_m`); check the exact exposed-face count in the startup log.
+  Coupled scalar updates wait for MPI displacement sharing and hanging-node
+  assignment. See [acoustic corrections](Extended%20README.md#scalar-acoustic-corrections-and-limitations).
 - **Poroelastic u-p formulation:** `include_poroelastic`, `poroelastic_formulation`,
   `poroelastic_depth_max_m`, `surface_groundwatertable`, `groundwaterlevel_file`,
   `poroelastic_surface_pressure_bc`, `poroelastic_surface_pressure_penalty_factor`,
@@ -105,6 +115,12 @@ interactions are in the
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
 - **Plane output:** `output_planes_print_rate`, `reconstruct_acoustic_plane_displacements`.
+  Acoustic station/plane output inside CPML includes the containing element's
+  gradient stretch and point memory; use interior samples for physical motion.
+  Acoustic reconstruction uses physical pressure in both formulations; for
+  velocity potential it first computes `p = -(phi[n] - phi[n-1])/dt`.
+  See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)
+  for plane output from older executables.
 - **Topography:** `include_topography`, `topography_directory`, `maximum_octant_level`,
   `computation_method`, `topography_bkt_gpu_stabilize`.
 - **Nonlinear and plastic controls:** `include_nonlinear_analysis`, `geostatic_loading_time_sec`,
@@ -149,7 +165,12 @@ for defaults, supported combinations, and performance implications.
   `OCTOR_IMPORT_PATH_CACHE`, `OCTOR_INIT_TASKS_PER_RANK`, `OCTOR_NODE_SORT_MODE`,
   `OCTOR_SETCOM_ALL2ALL`.
 - **Station and plane output:** `HERCULES_PLANE_IO_MODE`, `HERCULES_PLANE_IO_OMP`,
-  `HERCULES_PLANE_MPIIO_BATCH`, `HERCULES_STATION_IO_OMP`, `HERCULES_STATION_ROUTE_MODE`.
+  `HERCULES_PLANE_MPIIO_BATCH`, `HERCULES_PLANE_METADATA`, `HERCULES_STATION_IO_OMP`,
+  `HERCULES_STATION_ROUTE_MODE`.
+  Plane output defaults to `mpiio`; `hybrid` and `legacy` remain explicit choices.
+  Dedicated I/O ranks (`IO_PES>0`) select the legacy I/O-pool backend.
+  `HERCULES_PLANE_METADATA=1` optionally exports containing materials and actual
+  CPML membership once after solver setup (default: `0`).
 - **Nonlinear execution:** `HERCULES_NONLINEAR_BACKEND`, `HERCULES_NONLINEAR_STATS_INTERVAL`.
 - **Field synchronization and MPI:** `HERCULES_CONTRIB_PACK_OMP`, `HERCULES_CONTRIB_RECV_MODE`,
   `HERCULES_CONTRIB_UNPACK_OMP`, `HERCULES_DISP_SYNC_MODE`, `HERCULES_GPU_MPI_BACKEND`,
@@ -177,6 +198,17 @@ order. See [station binary details](Extended%20README.md#single-file-station-bin
 Plane files are native float64 displacement grids; formats and readers are in
 the [output guide](https://hercules-gpu-docs.liling-dpim.chatgpt.site/docs/output-files)
 and [script index](../script/README.md).
+`HERCULES_PLANE_METADATA=1` writes `plane_point_metadata.RANK.csv` once during
+setup, with actual point coordinates, containing-element material and CPML
+membership. See [plane metadata and interpretation](Extended%20README.md#diagnose-large-plane-displacements).
+For acoustic observations, enable ASCII station velocity, acceleration and
+pressure output and verify ownership in `station_mediums.txt`. See
+[pressure and motion interpretation](Extended%20README.md#acoustic-pressure-and-motion-diagnostics)
+and [gravity-wave recovery limits](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
+The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
+records surface-gradient recovery errors, a face-average CPML inconsistency,
+and rejected full-model experiments. Small operator/smoke tests alone do not
+validate a replacement gravity-surface operator.
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

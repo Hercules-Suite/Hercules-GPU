@@ -102,6 +102,8 @@ typedef struct plane_strip_element_t {
 	int32_t owner_is_acoustic;
 	int32_t pressure_is_defined;
 	int32_t acoustic_kinematics_ready;
+	int32_t owningElementIndex;
+	acoustic_output_cpml_t acoustic_cpml;
 	double h;
 	double rho;
 	double acoustic_disp[3];
@@ -216,13 +218,11 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
         PLANE_BACKEND_GPU_ROOT = 1,
         PLANE_BACKEND_GPU_MPIIO = 2
     };
-    int requestedBackend = PLANE_BACKEND_LEGACY;
+    int requestedBackend = PLANE_BACKEND_GPU_MPIIO;
 
     if ((env == NULL) || (env[0] == '\0') ||
-        (strcasecmp(env, "auto") == 0)) {
-        requestedBackend = PLANE_BACKEND_LEGACY;
-    } else if ((strcasecmp(env, "mpiio") == 0) ||
-               (strcasecmp(env, "mpi-io") == 0)) {
+        (strcasecmp(env, "mpiio") == 0) ||
+        (strcasecmp(env, "mpi-io") == 0)) {
         requestedBackend = PLANE_BACKEND_GPU_MPIIO;
     } else if ((strcasecmp(env, "hybrid") == 0) ||
                (strcasecmp(env, "gpu-root") == 0) ||
@@ -240,8 +240,8 @@ static void planes_select_output_mode(int32_t myID, int io_pool_pe_count) {
     } else {
         if (myID == 0) {
             fprintf(stderr,
-                    "Invalid HERCULES_PLANE_IO_MODE=%s; expected auto, "
-                    "hybrid, mpiio, or legacy\n",
+                    "Invalid HERCULES_PLANE_IO_MODE=%s; expected mpiio "
+                    "(default), hybrid, or legacy\n",
                     env);
         }
         MPI_Abort(comm_solver, ERROR);
@@ -1186,6 +1186,91 @@ static int32_t plane_element_is_acoustic(const edata_t* edata) {
 	       (edata->Vs <= ACOUSTIC_VS_EPS);
 }
 
+/* Optional setup-only audit of the actual containing mesh elements. A material
+ * model lookup or distance to a domain face cannot replace CPML membership. */
+void planes_write_point_metadata(int32_t myID, int theNumberOfPlanes,
+                                 const char* planeDirOut) {
+    const char* env = getenv("HERCULES_PLANE_METADATA");
+    if ((env == NULL) || (env[0] == '\0') || (strcmp(env, "0") == 0)) {
+        return;
+    }
+    if (strcmp(env, "1") != 0) {
+        solver_abort("planes_write_point_metadata", NULL,
+                     "HERCULES_PLANE_METADATA must be 0 or 1");
+    }
+    if ((theNumberOfPlanes == 0) || (thePlanes == NULL)) return;
+
+    FILE* fp = NULL;
+    for (int p = 0; p < theNumberOfPlanes; ++p) {
+        const plane_t* plane = &thePlanes[p];
+        for (int strip = 0; strip < plane->numberofstripsthisplane; ++strip) {
+            for (int point = plane->stripstart[strip];
+                 point <= plane->stripend[strip]; ++point) {
+                const plane_strip_element_t* element =
+                    &plane->strip[strip][point - plane->stripstart[strip]];
+                const int i = point / plane->numberofstepsdowndip;
+                const int j = point % plane->numberofstepsdowndip;
+                vector3D_t local = {{i * plane->stepalongstrike,
+                                     j * plane->stepdowndip, 0.0}};
+                vector3D_t xyz = compute_global_coords(
+                    plane->origincoords, local, plane->dip, 0, plane->strike);
+                if (get_thebase_topo() != 0.0) {
+                    xyz.x[2] += point_elevation(xyz.x[0], xyz.x[1]);
+                }
+                edata_t material;
+                memset(&material, 0, sizeof(material));
+                material.Vp = material.Vs = material.rho = material.edgesize = NAN;
+                const char* medium = "unknown";
+                int32_t eindex = -1;
+                int cpml = -1;
+                if (element->point_is_valid) {
+                    octant_t* octant = NULL;
+                    if (search_point(xyz, &octant) != 1 ||
+                        (eindex = solver_get_octant_material(octant, &material)) < 0) {
+                        solver_abort("planes_write_point_metadata", NULL,
+                                     "Cannot resolve plane %d point (%d,%d)", p, i, j);
+                    }
+                    medium = plane_element_is_acoustic(&material) ? "acoustic" :
+                        ((material.Vp > 0.0 && material.rho > 0.0) ? "solid" : "inactive");
+                    cpml = cpml_pml_element(eindex);
+                }
+                if (fp == NULL) {
+                    char path[1024];
+                    int length = snprintf(path, sizeof(path),
+                                          "%s/plane_point_metadata.%d.csv", planeDirOut, myID);
+                    if (length < 0 || (size_t)length >= sizeof(path)) {
+                        solver_abort("planes_write_point_metadata", NULL,
+                                     "Plane metadata output path is too long");
+                    }
+                    fp = hu_fopen(path, "w");
+                    fprintf(fp, "plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml,"
+                                "vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,"
+                                "acoustic_reconstruction,pressure_defined\n");
+                }
+                fprintf(fp, "%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%s,%d,"
+                            "%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d\n",
+                        p, i, j, myID, eindex, xyz.x[0], xyz.x[1], xyz.x[2], medium, cpml,
+                        (double)material.Vp, (double)material.Vs, (double)material.rho,
+                        (double)material.edgesize, element->point_is_valid, element->topostrip,
+                        g_reconstructAcousticPlaneDisplacements && element->owner_is_acoustic,
+                        element->pressure_is_defined);
+            }
+        }
+    }
+    if (fp != NULL) {
+        const int writeError = ferror(fp);
+        const int closeError = fclose(fp);
+        if (writeError || closeError) {
+            solver_abort("planes_write_point_metadata", NULL,
+                         "Failed writing plane point metadata on rank %d", myID);
+        }
+    }
+    if (myID == 0) {
+        printf("Plane point metadata: %s/plane_point_metadata.RANK.csv "
+               "(setup only; containing material and CPML membership)\n", planeDirOut);
+    }
+}
+
 static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 		octant_t* octant) {
 	edata_t material;
@@ -1197,6 +1282,8 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	element->owner_is_acoustic = 0;
 	element->pressure_is_defined = 0;
 	element->acoustic_kinematics_ready = 0;
+	element->owningElementIndex = -1;
+	memset(&element->acoustic_cpml, 0, sizeof(element->acoustic_cpml));
 	element->h = 0.0;
 	element->rho = 0.0;
 	memset(element->acoustic_disp, 0, sizeof(element->acoustic_disp));
@@ -1205,7 +1292,8 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	memset(element->acoustic_prev_acc, 0, sizeof(element->acoustic_prev_acc));
 
 	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
-	    (solver_get_octant_material(octant, &material) < 0) ||
+	    ((element->owningElementIndex =
+	        solver_get_octant_material(octant, &material)) < 0) ||
 	    !plane_element_is_acoustic(&material)) {
 		return;
 	}
@@ -1223,9 +1311,27 @@ static void plane_init_acoustic_metadata(plane_strip_element_t* element,
 	element->rho = material.rho;
 }
 
+int64_t planes_init_acoustic_cpml(int theNumberOfPlanes) {
+    int64_t count = 0;
+    if (!g_reconstructAcousticPlaneDisplacements || thePlanes == NULL) return 0;
+    for (int p = 0; p < theNumberOfPlanes; ++p) {
+        for (int s = 0; s < thePlanes[p].numberofstripsthisplane; ++s) {
+            const int n = thePlanes[p].stripend[s] - thePlanes[p].stripstart[s] + 1;
+            for (int k = 0; k < n; ++k) {
+                plane_strip_element_t* point = &thePlanes[p].strip[s][k];
+                if (!point->pressure_is_defined) continue;
+                solver_init_acoustic_output_cpml(point->owningElementIndex,
+                                                 &point->acoustic_cpml);
+                count += point->acoustic_cpml.active;
+            }
+        }
+    }
+    return count;
+}
+
 static int plane_pressure_gradient(const mysolver_t* mySolver,
 		const plane_strip_element_t* element,
-		double grad[3]) {
+		double grad[3], double inverseDeltaT) {
 	int iPhi;
 	const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
 	const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
@@ -1241,13 +1347,20 @@ static int plane_pressure_gradient(const mysolver_t* mySolver,
 	grad[2] = 0.0;
 
 	if ((element->pressure_is_defined == 0) || (mySolver == NULL) ||
-	    (mySolver->pressure_tm1 == NULL) || (h <= 0.0)) {
+	    (mySolver->pressure_tm1 == NULL) || (h <= 0.0) ||
+	    ((inverseDeltaT > 0.0) && (mySolver->pressure_tm2 == NULL))) {
 		return 0;
 	}
 
 	for (iPhi = 0; iPhi < 8; iPhi++) {
 		const int32_t node = element->nodestointerpolate[iPhi];
-		const double pressure = mySolver->pressure_tm1[node];
+		/* As in station_pressure_gradient(), the stored scalar is phi in
+		 * velocity-potential mode. Differentiate it before taking grad(p).
+		 * inverseDeltaT == 0 selects the legacy pressure-valued field. */
+		const double pressure = (inverseDeltaT > 0.0)
+			? -(double)(mySolver->pressure_tm1[node] -
+			             mySolver->pressure_tm2[node]) * inverseDeltaT
+			: (double)mySolver->pressure_tm1[node];
 		const double dphidx =
 			sx[iPhi] * (1.0 + sy[iPhi] * eta) *
 			(1.0 + sz[iPhi] * zeta) / (4.0 * h);
@@ -1270,16 +1383,18 @@ static void plane_update_acoustic_point(const mysolver_t* mySolver,
 		plane_strip_element_t* element,
 		int32_t step,
 		double deltaT,
-		double deltaTSquared) {
+		double deltaTSquared,
+		double inverseDeltaT) {
 	double grad[3];
 	double accel[3];
 
 	if ((element == NULL) || (element->pressure_is_defined == 0) ||
 	    (element->rho <= 0.0) ||
-	    (plane_pressure_gradient(mySolver, element, grad) == 0)) {
+	    (plane_pressure_gradient(mySolver, element, grad, inverseDeltaT) == 0)) {
 		return;
 	}
 
+	acoustic_output_stretch_gradient(&element->acoustic_cpml, grad);
 	for (int axis = 0; axis < 3; axis++) {
 		accel[axis] = -grad[axis] / element->rho;
 	}
@@ -1427,7 +1542,7 @@ int planes_print(int32_t myID, int IO_pool_pe_count, int theNumberOfPlanes, myso
 
 void planes_update_acoustic_kinematics(mysolver_t* mySolver,
     int theNumberOfPlanes, int32_t step, double deltaT,
-    double deltaTSquared) {
+    double deltaTSquared, int velocityPotential) {
 	int iPlane, iStrip;
 
 	if ((g_reconstructAcousticPlaneDisplacements == 0) ||
@@ -1435,6 +1550,13 @@ void planes_update_acoustic_kinematics(mysolver_t* mySolver,
 	    (mySolver == NULL) || (mySolver->pressure_tm1 == NULL)) {
 		return;
 	}
+	if (velocityPotential &&
+	    ((deltaT <= 0.0) || (mySolver->pressure_tm2 == NULL))) {
+		solver_abort("planes_update_acoustic_kinematics", NULL,
+		             "Velocity-potential plane output requires a positive dt "
+		             "and both scalar field histories");
+	}
+	const double inverseDeltaT = velocityPotential ? (1.0 / deltaT) : 0.0;
 
 	for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
 		for (iStrip = 0; iStrip < thePlanes[iPlane].numberofstripsthisplane;
@@ -1451,7 +1573,7 @@ void planes_update_acoustic_kinematics(mysolver_t* mySolver,
 			for (elemnum = 0; elemnum < elemCount; elemnum++) {
 				plane_update_acoustic_point(mySolver,
 					&(thePlanes[iPlane].strip[iStrip][elemnum]),
-					step, deltaT, deltaTSquared);
+					step, deltaT, deltaTSquared, inverseDeltaT);
 			}
 		}
 	}
