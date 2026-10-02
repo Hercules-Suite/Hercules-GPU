@@ -2117,6 +2117,19 @@ the samples to peak 1 and carry the physical amplitude in
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
 
+The interpolator holds the final sample at and after
+`tinit + (nt1 - 1) * dt`. Its interval index is also bounded when
+floating-point division rounds a time just below that endpoint to the last
+sample index. For example, with 141 samples at 0.02 s, `2.8 / 0.02` can
+round to 140 while `2.8 < 140 * 0.02`; reading sample 141 would be outside
+the supplied history. Older builds could therefore generate an enormous
+force or NaN from otherwise valid discrete input. Rebuild and regenerate
+source-force files before repeating an affected simulation.
+
+SRFH force histories are generated at the common `slipfunction.in` interval
+and then interpolated at the solver timestep. Reducing
+`simulation_delta_time_sec` does not change that source-generation interval.
+
 ## Distributed compliant-base force source
 
 For OpenSees-style 1D site-response validation, Hercules also supports a

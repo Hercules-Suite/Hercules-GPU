@@ -1407,6 +1407,8 @@ test("documents every supported source model and its auxiliary inputs", async ()
   assert.match(html, /forcefunction\.in/);
   assert.match(html, /baseforcefunction\.in/);
   assert.match(html, /slipfunction\.in/);
+  assert.match(html, /hold the final sample/);
+  assert.match(html, /Reducing simulation_delta_time_sec does not change the source-history sample interval/);
   assert.match(html, /extended_number_of_kinks/);
   assert.match(html, /number_of_point_sources/);
   assert.match(html, /x north, y east, and z positive downward/);

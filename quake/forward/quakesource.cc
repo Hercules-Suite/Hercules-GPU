@@ -426,6 +426,14 @@ interpolate_linear( double time, int numsamples, double samplingtime,
 	/* locate the interval */
 	interval = floor(time/samplingtime);
 
+	/* Division can round up to the last sample even when time is just
+	 * below maxtime (e.g. 2.8 / 0.02 with 141 samples). There is no next
+	 * sample in that case; preserve the held-tail value without reading
+	 * discretefunction[numsamples]. */
+	if (interval >= numsamples - 1) {
+	    return discretefunction[numsamples-1];
+	}
+
 	/* y = mx +b */
 	m = discretefunction[interval + 1] - discretefunction[interval];
 	m = m / samplingtime;

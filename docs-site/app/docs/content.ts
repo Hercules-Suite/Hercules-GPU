@@ -1608,7 +1608,7 @@ if __name__ == "__main__":
         id: "time-functions",
         title: "Source-time functions",
         paragraphs: [
-          "Analytical functions scale from zero according to the selected rise-time or Ricker parameters. Tabulated discrete histories are linearly interpolated at solver time steps.",
+          "Analytical functions scale from zero according to the selected rise-time or Ricker parameters. Tabulated discrete histories use linear interpolation and hold the final sample after the tabulated interval. Endpoint indexing is bounded even when floating-point rounding places a time just below the endpoint in the final sample index.",
         ],
         table: {
           headers: ["source_function_type", "Additional keys or file", "Behavior"],
@@ -1761,6 +1761,7 @@ if __name__ == "__main__":
         title: "SRFH finite-fault source",
         paragraphs: [
           "srfh reads one record per rupture point from synchronized auxiliary files. Use source_function_type=discrete; each point carries its own onset time and tabulated slip history.",
+          "Hercules generates SRFH force histories at the common slipfunction.in sample interval, then interpolates those forces at solver time steps. Reducing simulation_delta_time_sec does not change the source-history sample interval. A cumulative slip history normally ends at its final slip fraction, which is held after tinit + (nt1 - 1) * dt.",
         ],
         table: {
           headers: ["File or key", "Entries per point", "Meaning"],
