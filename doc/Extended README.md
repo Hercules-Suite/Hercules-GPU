@@ -1155,8 +1155,9 @@ Notes:
 	damping and CFS restoring/memory terms on the four top-face nodes. The
 	vertical CPML stretch is intentionally excluded because `z` is normal to the
 	gravity surface. Corner PML faces include both tangential directions. This
-	keeps the optional surface-wave operator matched to the existing acoustic
-	CPML without adding per-step work to non-surface PML elements. Changing this
+	adds no per-step work to non-surface PML elements. The current face-average
+	memory has a discretization inconsistency described under
+	[scalar acoustic limitations](#scalar-acoustic-corrections-and-limitations). Changing this
 	option affects phase-B solver setup but not mesh generation, so an existing
 	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
@@ -1547,6 +1548,16 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 ## Scalar acoustic corrections and limitations
 
+- **Gravity-surface CPML consistency limitation.** Surface mass and damping
+	are lumped at the four face nodes, while the current restoring/memory
+	kernel uses a face average. A zero-mean face mode therefore receives nodal
+	damping but no matching restoring/memory force. A nodal-memory candidate
+	passed analytical CFS step-response checks and an 8 s shifted-surface
+	GPU/MPI smoke test, but its reduced Izmir run produced nonfinite pressure
+	at 4.833 s. It was rejected and is not included in the production solver.
+	The failed experiment does not establish the cause of the original slow
+	motion. See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md)
+	for scope, raw-output checks, and the separate CPML-thickness failure.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
 	new solid displacements only after MPI sharing and hanging-node assignment.
 	The existing displacement exchange runs before the scalar update, using

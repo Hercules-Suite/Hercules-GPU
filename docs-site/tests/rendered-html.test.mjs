@@ -1472,6 +1472,9 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.match(models, /MPI displacement sharing and hanging-node assignment/);
   assert.match(models, /Compare one and four ranks/);
   assert.match(models, /Acoustic interface geometry/);
+  assert.match(models, /current CFS memory uses a face average/);
+  assert.match(models, /zero-mean face modes/);
+  assert.match(models, /was not adopted/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;

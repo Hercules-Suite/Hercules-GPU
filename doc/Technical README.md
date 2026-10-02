@@ -212,6 +212,10 @@ host-only analytical check of production gravity dispersion and surface
 gradient recovery. Optional `--depth`, `--wavelengths`, and `--layers` choose
 the uniform reference problem; `CXX` selects the host C++ compiler. See
 [gravity-mode scope and defaults](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
+The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
+records surface-gradient recovery errors, a face-average CPML inconsistency,
+and rejected full-model experiments. Small operator/smoke tests alone do not
+validate a replacement gravity-surface operator.
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not
