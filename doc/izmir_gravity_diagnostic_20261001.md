@@ -24,6 +24,8 @@ source directory, and completed output directories were preserved.
 | Duration | 100 s |
 | Source | Original SRFH, 160 point sources, `source_is_filtered=0` |
 | Acoustic formulation | `velocity_potential` |
+| Acoustic interface faces | `bathymetry` |
+| Acoustic interface projection | `point` (parameter omitted) |
 | Acoustic numerical regularizer | `acoustic_quality_factor=100` |
 | Plane sampling | 361 × 361 surface grid, 250 m spacing, 1,000 frames at 0.1 s |
 | Station sampling | 200,000 rows at every solver step |

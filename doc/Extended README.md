@@ -1068,7 +1068,9 @@ Notes:
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
 - `acoustic_interface_face_filter`
-	Optional. `all` (default) couples every acoustic-elastic interface face.
+	Optional. `bathymetry` (default), `all`, or `bottom_only`. This applies when
+	acoustic interface coupling is enabled. Explicit `all` couples every
+	acoustic-elastic interface face using mesh-face normals.
 	`bottom_only` couples only acoustic `Z+` faces, which correspond to the
 	water-bottom interface in the depth-positive mesh. This is a diagnostic
 	option for bathymetry/shoreline cases: if `bottom_only` is stable while
@@ -1079,6 +1081,14 @@ Notes:
 	and scales each projected bottom patch by the reconstructed surface area.
 	This restores inclined-bottom normal coupling without reintroducing raw
 	stair-step side-wall faces.
+	Omitting the parameter now selects `bathymetry`; an existing explicit `all`
+	line still selects all faces. The `default` alias also now selects
+	`bathymetry`. Other accepted aliases are `reconstructed_bathymetry` and
+	`bathymetry_normal` for `bathymetry`, `none` for `all`, and `bottom` or
+	`z_plus` for `bottom_only`. Values are case-insensitive.
+	`bathymetry` omits lateral and upward-facing acoustic-solid interfaces, so
+	check that this representation is appropriate for the model geometry.
+	Stability with this filter does not by itself validate waveform accuracy.
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered. In `bathymetry` mode it also reports how many bottom faces

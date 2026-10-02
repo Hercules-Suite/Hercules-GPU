@@ -200,6 +200,11 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /Z=topographybase_zcoord/);
   assert.match(html, /buried water beneath land is excluded/);
   assert.match(html, /acoustic_interface_face_filter/);
+  const faceFilterRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_face_filter"));
+  assert.ok(faceFilterRow, "the acoustic interface filter must appear in the parameter reference");
+  assert.match(faceFilterRow, /Default: bathymetry/);
+  assert.match(faceFilterRow, /Explicit all couples every detected face/);
+  assert.match(faceFilterRow, /default alias now follows bathymetry/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -285,6 +290,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
   assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
+  assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: bathymetry;/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -292,6 +298,16 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
+  assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  assert.match(solver, /acoustic_interface_face_filter\[64\]\s*=\s*"bathymetry"/);
+  assert.match(solver, /int acousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  const filterParser = solver.slice(
+    solver.indexOf('if ((strcasecmp(acoustic_interface_face_filter, "all")'),
+    solver.indexOf('if ((strcasecmp(acoustic_poroelastic_interface, "no_flow")'),
+  );
+  const bathymetryBranch = filterParser.slice(filterParser.indexOf('} else if ((strcasecmp(acoustic_interface_face_filter, "bathymetry")'));
+  assert.match(bathymetryBranch, /"default"[\s\S]*?ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY/);
+  assert.doesNotMatch(filterParser.slice(0, filterParser.indexOf("} else if")), /"default"/);
 
   const parserFiles = [
     "psolve.cc",

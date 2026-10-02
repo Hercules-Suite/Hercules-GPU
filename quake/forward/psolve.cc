@@ -1214,7 +1214,7 @@ static struct Param_t {
    * pure-elastic is unaffected. */
   int theAcousticVelocityPotential;          /* 0 pressure, 1 vel-pot (DEFAULT) */
   int theAcousticInterfaceProjectionMode;    /* point or face-mass projection */
-  int theAcousticInterfaceFaceFilter;        /* all or bottom-only diagnostic */
+  int theAcousticInterfaceFaceFilter;        /* bathymetry (default), all, bottom_only */
   double theAcousticQualityFactor;           /* water Q; 0=lossless  */
   int theAcousticPoroelasticInterface;        /* no_flow or open_pore */
   double theAcousticPoroelasticPressurePenaltyFactor;
@@ -1301,7 +1301,7 @@ static struct Param_t {
            .theAcousticInterfaceProjectionMode =
                ACOUSTIC_INTERFACE_PROJECTION_POINT,
            .theAcousticInterfaceFaceFilter =
-               ACOUSTIC_INTERFACE_FACE_FILTER_ALL,
+               ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY,
            .theAcousticQualityFactor = 0.0,
            .theAcousticPoroelasticInterface =
                ACOUSTIC_POROELASTIC_INTERFACE_NO_FLOW,
@@ -2769,7 +2769,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_face_filter[64] = "all",
+       acoustic_interface_face_filter[64] = "bathymetry",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        acoustic_free_surface_gravity[64] = "no",
@@ -2818,7 +2818,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticFreeSurfaceGravity = NO;
   noyesflag_t reconstructAcousticPlaneDisplacements = NO;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
-  int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
+  int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_BATHYMETRY;
   noyesflag_t includePoroelastic = NO;
   noyesflag_t surfaceGroundwaterTable = NO;
   noyesflag_t includePlaneWaves = UNSET;
@@ -3645,8 +3645,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   if ((strcasecmp(acoustic_interface_face_filter, "all") == 0) ||
-      (strcasecmp(acoustic_interface_face_filter, "none") == 0) ||
-      (strcasecmp(acoustic_interface_face_filter, "default") == 0)) {
+      (strcasecmp(acoustic_interface_face_filter, "none") == 0)) {
     acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
   } else if ((strcasecmp(acoustic_interface_face_filter, "bottom_only") == 0) ||
              (strcasecmp(acoustic_interface_face_filter, "bottom") == 0) ||
@@ -3654,6 +3653,7 @@ static int32_t parse_parameters(const char* numericalin) {
     acousticInterfaceFaceFilter =
         ACOUSTIC_INTERFACE_FACE_FILTER_BOTTOM_ONLY;
   } else if ((strcasecmp(acoustic_interface_face_filter, "bathymetry") == 0) ||
+             (strcasecmp(acoustic_interface_face_filter, "default") == 0) ||
              (strcasecmp(acoustic_interface_face_filter,
                          "reconstructed_bathymetry") == 0) ||
              (strcasecmp(acoustic_interface_face_filter,
