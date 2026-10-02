@@ -14,3 +14,12 @@ quake/forward/qmesh
 quake/forward/single_query
 opensees_bae_comparison_output/
 /standalone/
+
+# Local investigation tools, regressions, and smoke-test inputs.
+/.local-diagnostics/
+/script/compare_plane_outputs.py
+/script/diagnose_plane_output.py
+/script/diagnose_acoustic_stations.py
+/script/check_acoustic_gravity_mode.py
+/script/tests/
+/benchmark_inputs/acoustic_shifted_surface/

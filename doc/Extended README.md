@@ -1565,7 +1565,7 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	buffer swap. Earlier builds sampled unsynchronized displacements and could
 	become unstable on adaptive meshes split across ranks even when a one-rank
 	run was stable. The startup line `Acoustic interface displacement` reports
-	this ordering. Test the shifted-surface fixture with one and four ranks;
+	this ordering. Compare one-rank and multi-rank wavefields when validating it;
 	finite output and agreement between I/O backends alone do not establish
 	stability.
 - **Remote interface geometry.** Setup requests final neighbor leaf bounds
@@ -1575,8 +1575,8 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	The startup `Acoustic interface geometry` line gives exact face/fragment
 	counts. Batched discovery also supplies the remote elastic CPML geometry;
 	its cache is released after solver initialization and adds no per-step
-	communication. The shifted-surface fixture checks all 1024 fragment centers
-	and areas, as well as comparing the one-rank and four-rank wavefields.
+	communication. A recorded local shifted-surface test checked all 1024
+	fragment centers and areas and compared one-rank and four-rank wavefields.
 - **Shifted free surface and CPML output correction.** Earlier surface
 	detection only recognized the octree's `Z=0` face. Embedded water at a
 	nonzero topography datum therefore missed both pressure-release flags and
@@ -1593,17 +1593,14 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	identity. The existing host reconstruction applies it at each solver step
 	using setup-time coefficients, with no additional GPU transfer. The startup
 	`Acoustic output CPML gradient correction` line counts affected observations.
-	A host regression tests a compact potential pulse against the analytic
-	integrated stretch gain `alpha/(kappa*alpha+d)` and zero residual velocity,
-	including zero-alpha and unstretched axes. Another compiles the production
-	surface selection and mass assembly to check translation invariance,
-	pressure-release flags, tangential CPML mass/damping, and buried-water
-	exclusion. Run `python3 -m unittest discover -s script/tests -p 'test_acoustic*.py'`.
-	These are host operator checks; they do not validate the full Izmir wavefield.
-	`benchmark_inputs/acoustic_shifted_surface/` supplies a small CUDA/MPI smoke
-	case and checker for surface enrollment, finite excited fields, and
-	station/plane agreement inside CPML. Run fresh copies for each I/O backend
-	and gravity/pressure-release variant; see its README for the commands.
+	Recorded local host checks covered a compact potential pulse's integrated
+	stretch gain `alpha/(kappa*alpha+d)` and zero residual velocity, including
+	zero-alpha and unstretched axes. Separate checks covered translated surface
+	selection, mass assembly, pressure-release flags and buried-water exclusion.
+	A local CUDA/MPI smoke case checked surface enrollment, finite excited
+	fields and station/plane agreement inside CPML. Those investigation tools
+	and inputs are not distributed with the repository; their results do not
+	validate the full Izmir wavefield.
 - **CPML output interpretation.** Values inside the absorbing layer are
 	computed in its stretched coordinates and attenuated by its artificial
 	operator. Use interior observations for physical motion comparisons;
@@ -1619,14 +1616,13 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	stations. Pressure-formulation plane output and solid displacement
 	interpolation retain their existing behavior; the wavefield evolution is
 	not changed by this output correction.
-	A host regression uses a two-second potential pulse whose X velocity is
+	A recorded local host regression used a two-second potential pulse whose X velocity is
 	`0.2*sin(pi*t/2)^2 m/s` during the pulse and zero afterward. Its final
 	displacement is 0.2 m. The old plane code instead gives -0.2 m at 2 s and
 	-0.6 m at 4 s, with a spurious -0.2 m/s residual velocity. The corrected
 	code gives 0.2 m with zero residual velocity, agrees with the production
 	station routine in all three components, and preserves the analytic
-	constant-acceleration pressure case. Run
-	`python3 -m unittest discover -s script/tests -p test_acoustic_plane_reconstruction.py`.
+	constant-acceleration pressure case.
 	These checks exercise production host reconstruction with synthetic fields;
 	they do not validate an entire CUDA/MPI acoustic-gravity/CPML simulation.
 	Regenerate affected acoustic plane output with a rebuilt solver. Agreement
@@ -1753,8 +1749,9 @@ results are specific to the recorded configuration and implementation.
 	auto-promotes it to `rayleigh`; explicit `none` is honored for
 	debugging/regression with a warning.
 - `cpml_clamp_outer`
-	Optional. `yes` or `no` (default `no`). `yes` pins displacement to
-	zero on the four outer lateral faces and bottom. It also clamps the
+	Optional. `yes` or `no` (default `yes`, effective with `abc_type=cpml`).
+	Omitting this key enables the clamp; explicit `no` disables it. `yes` pins
+	displacement to zero on the four outer lateral faces and bottom. It also clamps the
 	acoustic scalar: pressure in pressure mode, or density-scaled velocity
 	potential in velocity-potential mode. A zero potential does not require
 	zero reconstructed water velocity, which depends on its spatial gradient.
@@ -1960,7 +1957,7 @@ arrival from the coda dominated by boundary reflections.
 
 ```
 abc_type = cpml
-cpml_clamp_outer = yes      # single-pass absorption
+cpml_clamp_outer = yes      # default: clamp the outer lateral faces and bottom
 cpml_layers = 30            # raise to 30–50 to close the deep-corner Z residual
 # cpml_kappa_max:           leave at 1.0 (validated); 2–3 promising but unconfirmed
 # cpml_stiffness_mode:      leave at native (recommended)
@@ -2371,197 +2368,122 @@ three-stage DRM replay workflow remains separate.
 
 ## Diagnose large plane displacements
 
-`script/diagnose_plane_output.py` locates the largest **displacements**, which
-need not occur at the largest differences between two backends. It scans a
-completed file twice with Python 3 and NumPy, reading one snapshot at a time.
-It retains per-point peak statistics and per-snapshot group maxima, rather
-than the full displacement record. Run one Python process. For the illustrative
-90 km square, 361-by-361 surface plane, with zero strike/dip and origin (0,0):
+Use `script/read_planes.py` to check a completed displacement file's layout,
+finite values and vertical peak. Locate and compare motion using the actual
+plane geometry, saved sample times and containing-element classification.
+The largest displacements need not occur where two output backends differ
+most. Keep raw histories when investigating slow motion.
+
+The storage order is `[snapshot, along-strike point, down-dip point, XYZ]` in
+C order, with native-endian float64 displacements in metres. Indices are
+zero-based. For zero strike and dip, the grid axes are solver X/north and
+Y/east; vector components always remain global X/north, Y/east, Z/down.
+The saved interval is `output_planes_print_rate * simulation_delta_time_sec`,
+not the solver time step. Geometry, timestamps and byte order are not recorded
+in the headerless binary.
+
+For actual containing-element classification, enable:
 
 ```bash
-python3 /path/to/Hercules_GPU/script/diagnose_plane_output.py planes/planedisplacements.0 \
-  --nx 361 --ny 361 --dt 0.1 --expected-snapshots 1000 \
-  --spacing 250 250 --xy-origin 0 0 --domain 90000 90000 \
-  --cpml-thickness 439.453125 --points 0,183 88,0 1,90 \
-  --output-dir plane_diagnostic
+export HERCULES_PLANE_METADATA=1
 ```
 
-Here `--dt` is the saved interval (`200 * 0.0005 = 0.1 s`), not the solver
-time step. A fresh 1,000-snapshot run starts at 0 s and ends at 99.9 s. Use
-`--first-time` for a restart segment. Grid counts, time, geometry, and byte
-order cannot be recovered from the headerless file. `--endian` defaults to
-`native`; `little` and `big` are also accepted. `--spacing`, `--domain`, and
-`--cpml-thickness` must be supplied together and describe only horizontal,
-unrotated planes; omit them for other plane geometries. Coordinates from a
-metadata export support arbitrary plane geometry, and supplied X/Y geometry
-is checked against them.
+With `output_planes_directory=outputfiles/planes`, each solver MPI rank owning
+plane points writes `outputfiles/planes/plane_point_metadata.RANK.csv`. The
+filename suffix is the rank, not the plane number. Each file can contain
+points from multiple planes; ranks without points produce no file. The export
+runs once after solver setup establishes CPML membership, before time
+stepping, with every plane backend. It adds no per-step work and does not
+write pressure, velocity or displacement histories.
 
-The new output directory contains:
+Each CSV row has these columns:
 
-- `peak_points.csv`: signed peaks, absolute peaks, zero-based grid/snapshot
-  indices, times, coordinates when known, and available owner metadata. The
-  default `--top 5` selects five distinct points per component across the
-  entire plane, plus each diagnostic group's strongest point.
-- `histories.csv`: every saved XYZ displacement at those selected points and
-  any additional `--points I,J ...` probes. No detrending, filtering, or time
-  differentiation is applied.
-- `frame_peaks.csv`: XYZ peak envelopes for the whole plane and each available
-  geometric/material group, making growth onset and localization visible.
-- `summary.json`: layout, sample times, group peaks, and counts exceeding
-  `--threshold` (default 1 m). This threshold is a diagnostic choice, not a
-  physical acceptance criterion. The summary is written only on success.
+```text
+plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml,vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,acoustic_reconstruction,pressure_defined
+```
 
-Incomplete snapshots, unexpected counts, nonfinite samples, and files detected
-changing during the scan are rejected. Existing diagnostic directories are not
-overwritten. A read failure during the second pass can leave partial CSV files;
-discard a diagnostic directory without its final `summary.json`.
+Element IDs are local to the recorded rank. Coordinates are the actual solver
+query positions after plane rotation and topography/building shifts. `medium`
+is `acoustic`, `solid`, `inactive`, or `unknown`; `solid` alone does not
+identify its constitutive law. `cpml` is the actual element membership flag
+(0 outside, 1 inside, or -1 unresolved), independent of medium. Material
+speeds are m/s, density is kg/m³, and `h_m` is element width in metres.
+`valid` records point validity, `topostrip` identifies tetrahedral topography
+interpolation, and the last two flags identify configured acoustic
+reconstruction and availability of its full hex pressure stencil. Acoustic
+topography tetrahedra lack that stencil.
 
-The geometric lateral boundary band is only a **CPML candidate** region.
-Actual CPML membership is assigned to elements and can differ near the inner
-edge or at the bottom boundary. The binary does not contain material labels.
-Unknown material and CPML labels remain explicit until metadata is supplied.
+Join metadata to plane values using `(plane,i,j)`. Reject duplicate ownership
+and keep missing ownership unknown. Do not mix rank files from different
+runs. A geometric lateral boundary band is only a CPML candidate region;
+actual membership can differ near the inner edge or bottom. A short run with
+the same saved mesh, materials, topography and plane configuration can supply
+metadata for existing output. Use fresh output directories because plane
+setup truncates displacement files. A full-duration rerun is unnecessary for
+this setup-only classification.
 
-For exact containing-element classification, rebuild the solver and enable
-`export HERCULES_PLANE_METADATA=1` in a run using the same mesh, topography,
-materials, and plane definitions. A separate short diagnostic run can reuse
-a saved mesh; use fresh output directories, since normal plane setup truncates
-its displacement files. Metadata is produced once before time stepping, so a
-full-duration rerun is unnecessary for this classification. Pass all rank files
-from that one run with `--metadata /path/to/new/planes/plane_point_metadata.*.csv
---plane-id 0` to rescan the original completed displacement file. Do not mix
-rank files from different runs; duplicate point ownership is rejected.
-
-Each rank with points writes a CSV header followed by `plane,i,j,rank,element,
-x_m,y_m,z_m,medium,cpml,vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,
-acoustic_reconstruction,pressure_defined`. Indices are zero-based; element IDs
-are local to the recorded rank. Coordinates are the actual solver query
-positions after plane rotation and topography/building shifts. `medium` is
-`acoustic`, `solid`, `inactive`, or `unknown`; `solid` alone does not identify
-its constitutive law. `cpml` is the actual solver membership flag (0/1, or -1
-for unresolved ownership), independent of medium. The last two flags identify
-the configured acoustic reconstruction and availability of its full hex
-pressure stencil; acoustic topography tetrahedra lack that stencil. Ranks
-without points write no file. Missing point metadata remains unknown.
-
-The current acoustic-plane routine evaluates `-grad(p)/rho` using the hex
-pressure stencil and integrates acceleration into velocity and displacement
-each solver step. In velocity-potential mode it first forms
+Acoustic-plane output integrates `-grad(p)/rho` every solver step. In
+velocity-potential mode it first forms
 `p[n] = -(phi[n] - phi[n-1])/dt`; older plane code omitted this conversion
 (see the [correction note](#scalar-acoustic-corrections-and-limitations)).
-For acoustic CPML points it applies the containing element's inverse gradient
-stretch and output-point memory before integrating acceleration. Older builds
-omitted this correction. Compare pressure/kinematic histories with interior
-points and check the free-surface geometry counts in the run log; backend
-agreement by itself cannot establish physical accuracy. Absorbing-layer samples
-remain artificial CPML fields, not physical interior motion observations.
+For acoustic CPML points, reconstruction applies the containing element's
+inverse gradient stretch and output-point memory before integration. Older
+builds omitted that correction. Absorbing-layer samples remain artificial
+CPML fields, not physical interior water or ground-motion observations.
 
 ## Acoustic pressure and motion diagnostics
 
-After locating acoustic plane peaks, add stations at those same solver XYZ
-locations and at nearby submerged points. `output_stations` takes geographic
-latitude, longitude, and depth below the local topographic surface; plane
-indices are not geographic coordinates. In a PROJ-enabled build, invert the
-same WGS84 UTM zone and model origin used by the solver. Verify actual XYZ,
-density, and acoustic ownership in `station_mediums.txt`. Exact outer-edge
-coordinates can round outside the domain; record any small inward offset.
-Preserve existing station rows so their IDs remain stable.
+For selected plane locations, add stations at the surface and nearby submerged
+points. `output_stations` takes latitude, longitude and depth below the local
+topographic surface. Convert solver X/north and Y/east using the model's
+projection and origin, then verify the actual coordinates and acoustic
+ownership in `station_mediums.txt`. Retain existing station IDs and record
+any inward offset used at an exact domain boundary.
 
 ```ini
 station_binary = no
 print_station_velocities = yes
 print_station_accelerations = yes
 print_station_pressures = yes
-# Choose output_stations_print_rate to resolve the signals; reconstruction
-# itself still updates every solver step. Use 1 for integration diagnostics.
 output_stations_print_rate = 1
 ```
 
-Run separate copies with identical executable, mesh controls, source, time step,
-duration, damping, gravity and output settings. First compare
-`cpml_clamp_outer=yes` and `no`; only that physical control should differ.
-Keep all output and temporary-source paths separate. A further
-`acoustic_free_surface_gravity=no` run is a distinct physics comparison against
-the gravity-enabled baseline, not a CPML-only test. Changing CPML thickness
-also requires checking material extension, topography and point membership.
+Read ASCII column headers rather than assuming optional fields have fixed
+positions. Require complete finite samples, matching time axes and known
+material density before comparing pressure and motion. Recheck ownership
+after coarsening the mesh: a formerly acoustic observation can become solid.
+After changing CPML thickness, recheck membership separately for each case.
 
-```bash
-python3 script/diagnose_acoustic_stations.py \
-  --cases clamp_yes=case_yes clamp_no=case_no --probes probes.json \
-  --expected-samples 200000 --late-start 80 --gravity-cases clamp_yes clamp_no \
-  --history-stride 20 --output-dir acoustic_report
-```
+Use separate case copies with the same executable, source, mesh controls,
+time step, duration, damping, gravity and output settings. Compare the default
+`cpml_clamp_outer=yes` with explicit `no`, changing only that control. CPML
+remains active in both runs. A separate `acoustic_free_surface_gravity=no`
+case changes the physical free-surface condition; it is not a CPML-only test.
+Changing CPML thickness can also change material extension in the absorber.
 
-Here each case has `output/stations/`, and `probes.json` is a list of acoustic
-probes, for example:
-
-```json
-[{"station":18,"label":"p2_93_surface","x_m":500,"y_m":23250,
-  "z_m":2812.5,"surface":true,"cpml":0}]
-```
-
-These example coordinates apply to the Izmir surface datum, not to all models.
-The utility reads headers rather than assuming optional column offsets. It
-requires finite acoustic pressure and motion, checks sample counts, matching
-time axes and densities, and verifies supplied coordinates within 2 mm.
-Declare `surface` and actual containing-element `cpml` only when known. For
-thickness comparisons, a probe can contain
-`"cpml_by_case":{"thick_cpml":1}`; entries override its common `cpml` flag,
-and `null` means unknown. Both JSON/CSV metrics and plots use each case's
-membership. A probe that changes from acoustic to solid must be recorded as
-a material-classification change and excluded from this acoustic-only reader.
-Results
-are raw per-component peaks, final values, late-window displacement slopes,
-velocity/pressure means and RMS values, integrated-motion residuals, and
-maximum waveform differences from the first case. `summary.json` is written
-only after every probe succeeds; discard incomplete reports without it.
-`--plot` requires Matplotlib. `--history-stride` exports compact NPZ histories
-without altering metrics calculated from all saved samples.
-
-For a flat gravity surface outside CPML, the continuum linearized condition,
-with Z positive down and zero initial surface displacement, is:
+For a flat gravity surface outside CPML, positive-down coordinates give:
 
 ```math
-p = -\rho g u_z, \qquad g = 9.81\;\mathrm{m/s^2}.
+p=-\rho g u_z,\qquad g=9.81\;\mathrm{m/s^2}.
 ```
 
 This is the linearized dynamic free-surface condition with the vertical sign
 converted to Hercules coordinates; see the [MIT wave notes, section 1.2](https://web.mit.edu/fluids-modules/waves/www/material/chap-6.pdf).
 
-The report evaluates the residual $`u_z+p/(\rho g)`$ only for declared surface,
-non-CPML probes in `--gravity-cases`. Lumped surface mass, element-gradient
-recovery and the half-step pressure difference in velocity-potential mode
-limit pointwise agreement. This is a diagnostic, not a pass/fail criterion.
-The integrated velocity/displacement checks also depend on saved sampling
-and ASCII rounding; they cannot rule out a shared reconstruction error.
-Use interior pressure and motion together, confirm any gravity interpretation
-with spatial propagation/dispersion and convergence, and treat CPML values as
-artificial absorber fields. A reduced peak alone does not validate a boundary
-condition or demonstrate that a remaining slow signal is physical.
+The residual $`u_z+p/(\rho g)`$ is a diagnostic only for gravity-enabled,
+non-CPML surface points. Lumped surface mass, element-gradient recovery and
+the half-step pressure difference limit pointwise agreement. Integrated
+motion checks also depend on saved sampling and ASCII precision. Station and
+plane agreement cannot exclude a shared reconstruction error. Keep raw
+signals; smaller amplitudes alone do not validate a boundary setting.
 
 ## Check gravity-wave dispersion and reconstruction
 
-`script/check_acoustic_gravity_mode.py` isolates the flat, uniform gravity
-surface from CPML and acoustic-solid coupling. It compiles the current Hex8
-stiffness and surface/volume mass expressions from the production source with
-a host C++ compiler, verifies the stiffness against independent exact tensor
-quadrature, and assembles a horizontal Fourier mode with a rigid bottom.
-NumPy solves the vertical generalized eigenproblem; CUDA and MPI are not used.
-
-```bash
-python3 script/check_acoustic_gravity_mode.py \
-  --depth 175.78125 --wavelengths 250 500 1000 2000 \
-  --layers 8 16 32 64 --output gravity_modes.json
-```
-
-`--depth` and `--wavelengths` are in metres; `--layers` gives positive vertical
-element counts. The example values are the defaults. The element width is
-depth/layers, and wavelengths must exceed two element widths. `--output` is
-required and refuses to overwrite an existing report. `CXX` selects the
-compiler, defaulting to `c++`. This reference uses water sound speed
-$`c=1500`$ m/s and $`g=9.81`$ m/s². Density cancels from the comparisons.
-
-For depth $`H`$, horizontal wavenumber $`k=2\pi/\lambda`$, and depth-positive
-coordinate $`z`$, the compressible reference has
+A uniform, lossless water column with a rigid bottom separates surface-wave
+dispersion from motion recovered using the first element's gradient. This
+reference excludes CPML, adaptive meshes, solid coupling and GPU/MPI effects.
+For depth $`H`$, horizontal wavenumber $`k=2\pi/\lambda`$, water sound speed
+$`c`$ and depth-positive coordinate $`z`$, the compressible reference has
 $`\phi\propto\cosh[\mu(H-z)]`$ and:
 
 ```math
@@ -2573,27 +2495,24 @@ and $`\phi_{tt}=g\phi_z`$ at the surface. Its incompressible limit is the
 standard $`\omega^2=gk\tanh(kH)`$ relation in the
 [MIT surface-gravity-wave notes](https://ocw.mit.edu/courses/12-802-wave-motion-in-the-ocean-and-the-atmosphere-spring-2008/fca533a5edb5f5d3e975ec4c2e63019f_MIT12_802S08_lec03.pdf).
 
-The report distinguishes frequency error from motion recovered with the
-one-sided vertical derivative in the top element. For the default 250 m
-wavelength and 175.78125 m water depth, h=21.97265625 m gives about −1.253%
-frequency error but a recovered surface-motion amplitude about 19.65% below
-the pressure-based surface value. At h=10.986328125 m these become −0.316%
-and 11.58%. These are uniform-grid, lossless operator results, not validation
-of an Izmir waveform or the complete CUDA/MPI solver.
+The October 2026 local operator investigation extracted production Hex8
+stiffness and lumped volume/surface masses and checked exact tensor
+quadrature. With c=1500 m/s, depth 175.78125 m and wavelength 250 m,
+h=21.97265625 m gave about −1.253% frequency error but surface-gradient motion
+19.65% below the pressure-based value. At h=10.986328125 m these became
+−0.316% and 11.58%. These are historical uniform-grid operator results,
+not validation of an Izmir waveform or the complete CUDA/MPI solver.
 
-A separate static calculation integrates the potential equation after a
-unit sinusoidal permanent bottom displacement. The exact equilibrium
-surface vertical displacement is zero, while the horizontal particle
-displacement amplitude is $`1/\sinh(kH)`$ metres. The first-element gradient
-can retain a spurious vertical offset, converging with refinement. Thus a
-surface-motion mismatch may include spatial recovery error, and permanent
-horizontal particle displacement alone is not proof of instability.
+A static reference integrates the potential equation after a unit sinusoidal
+permanent bottom displacement. The exact equilibrium surface vertical
+displacement is zero, while horizontal particle displacement amplitude is
+$`1/\sinh(kH)`$ metres. The first-element gradient can retain a spurious
+vertical offset that converges with refinement. Permanent horizontal particle
+displacement alone is not proof of instability.
 
-The host reconstruction regression also compares the production station and
-plane routines with a direct potential-gradient history. With zero initial
-fields, let $`w_n=\nabla\phi_n/\rho`$ (or its causal CPML-filtered value, with
-zero initial memory). The current pressure difference and motion integrator
-give the discrete identities:
+With zero initial fields, let $`w_n=\nabla\phi_n/\rho`$ (or its causal
+CPML-filtered value with zero initial memory). The pressure difference and
+motion integrator give the discrete identities:
 
 ```math
 a_n=\frac{w_n-w_{n-1}}{\Delta t},\qquad
@@ -2601,86 +2520,43 @@ v_n=\frac{w_n+w_{n-1}}{2},\qquad
 u_n=\Delta t\sum_{j=0}^{n-1}w_j.
 ```
 
-`test_acoustic_plane_reconstruction.py` verifies these using a compact pulse,
-a 100 s slow potential ramp, and a pulse with three different CPML stretches.
-This isolates output time integration from spatial recovery and field
-evolution. It does not validate the potential field produced by a coupled
-simulation or justify detrending that field's resulting motion.
+Local checks of a compact pulse, a 100 s slow potential ramp and a CPML pulse
+confirmed these identities for the recorded implementation. They isolate
+output time integration from spatial recovery and field evolution; they do
+not validate the potential field in a coupled simulation. Investigation
+scripts and smoke-test inputs are retained locally, not distributed in this
+repository. See the [recorded investigation](izmir_gravity_diagnostic_20261001.md).
 
-For a reduced full-model investigation, changing
-`simulation_wave_max_freq_hz` changes meshing and frequency-dependent damping;
-it does not filter the source. Record whether the original source is retained
-or `source_is_filtered=1` is used in a separate source copy. Compare CPML
-variants within the same reduced configuration and keep the time step fixed
-unless conducting a separate time-convergence check. A coarser acoustic mesh
-also needs a gravity-wavelength check: gravity waves at a given frequency can
-be much shorter than acoustic waves. After changing CPML thickness, recheck
-material extension and actual point membership, and use `cpml_by_case` or
-separate manifests where a probe changes from interior to CPML.
+Changing `simulation_wave_max_freq_hz` changes meshing and frequency-dependent
+damping; it does not filter the source. Compare CPML variants within the same
+configuration and keep the time step fixed unless testing time convergence.
+Acoustic mesh resolution alone does not ensure gravity-wave resolution:
+gravity wavelengths at a given frequency can be much shorter. Recheck actual
+material and CPML membership after changing mesh or absorber settings.
 
 ## Compare plane output backends
 
-`script/compare_plane_outputs.py` compares completed legacy, hybrid, or MPI-IO
-`planedisplacements.N` files using Python 3 and NumPy. It reads both sets without
-modifying them, in bounded chunks, and scans every saved XYZ displacement.
-Run one Python process; MPI is not required. Both runs must use the same plane
-geometry, point order, sampling times, and restart segment. The binary has no
-header or timestamps, so the comparator cannot verify those metadata.
+Compare completed legacy, hybrid or MPI-IO output only when plane geometry,
+point order, sampling times and restart segments match. Wait for both runs
+to finish and flush output. Check file sizes and expected snapshot counts
+independently; equally truncated files do not establish complete output.
+A snapshot occupies `nx * ny * 3 * 8` bytes. Thus a 361-by-361 plane with
+1,000 snapshots occupies 3,127,704,000 bytes; a 71-by-71 plane with the same
+count occupies 120,984,000 bytes.
 
-The storage order is `[snapshot, along-strike point, down-dip point, XYZ]` in
-C order, with native-endian float64 displacements in metres. For zero strike
-and dip, the two grid axes are solver X/north and Y/east; components always
-remain global X/north, Y/east, Z/down. Supply all plane shapes in numeric ID
-order starting at zero. From a case's `outputfiles` directory:
-
-```bash
-python3 /path/to/Hercules_GPU/script/compare_plane_outputs.py planes planes_mpiio \
-  --shapes 361x361 71x71 71x71 71x71 71x71 71x71 71x71 \
-  --expected-snapshots 1000
-```
-
-This illustrative seven-plane layout has 3,127,704 bytes per snapshot for
-plane 0 and 120,984 bytes per snapshot for each other plane. Consequently,
-3,127,704,000 and 120,984,000 bytes respectively represent 1,000 snapshots.
-Use `--expected-snapshots` to detect the case where both runs are equally
-truncated. Without it, the checker requires a common nonzero snapshot count
-across both directories and all planes. Missing/extra numbered plane files,
-partial snapshots, and files detected changing during their comparison are
-input errors. Wait for both simulations to finish and flush their output.
-
-The default `--atol 0 --rtol 0` checks exact finite numerical equality.
-Optionally select application-appropriate tolerances for each scalar value:
+For finite values, an application-specific comparison may use:
 
 ```math
 |u_{candidate}-u_{reference}| \leq \mathrm{atol}
   + \mathrm{rtol}\,|u_{reference}|.
 ```
 
-For example, append `--atol 1e-10 --rtol 1e-6` to screen for small differences;
-these are illustrative comparison tolerances, not a validated error budget.
-`--atol` is in metres; `--rtol` is dimensionless and scales with each reference
-value, not the global peak. Near reference zeros the absolute tolerance governs.
-NaN or infinity in either input always fails, even if the two files have
-identical bytes. Matching signed zeros are numerically equal but may differ
-byte for byte. Finite subtraction overflow also fails.
-
-For each plane and component the report includes the reference/candidate peaks,
-maximum absolute error, maximum error divided by the reference component peak,
-number of differing finite values, number outside tolerance, non-finite counts,
-and the location and values of the maximum error and first failure. Locations
-are zero-based snapshot and grid indices. `err/ref_peak` is diagnostic only;
-the per-value criterion above determines PASS. All-zero matching data can pass
-and must still be interpreted in the context of the intended excitation.
-
-`--chunk-points` defaults to 262144 XYZ points per read (6 MiB per input chunk,
-plus temporary working arrays), independent of total file size. Reduce it to
-lower memory usage. `--endian native|little|big` defaults to `native`; choose
-the producing machine's byte order if different from the reading machine.
-Exit status 0 means every value passes the selected criterion, 1 means
-numerical differences or non-finite values, and 2 means an input/read error.
-When piping through `tee`, use `set -o pipefail` to preserve a failure status.
-These checks establish agreement of saved displacements under the stated
-criterion, not mesh/time convergence or physical validity of either simulation.
+The absolute tolerance is in metres; the relative tolerance is dimensionless
+and scales with each reference value. Reject nonfinite values even when the
+bytes match. Finite equality and byte identity differ for signed zeros.
+Compare complete histories and record maximum errors and their locations,
+not only global peaks. Agreement between backends cannot establish physical
+accuracy, mesh/time convergence or correctness of a shared reconstruction.
 
 ## Structured DRM box output
 

@@ -284,9 +284,14 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(documented.includes("station_output_binary_file"));
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
+  assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
+
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
+  assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
 
   const parserFiles = [
     "psolve.cc",
@@ -592,6 +597,10 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
   assert.match(parameters, /Solid PML elements always use linear elasticity/);
   assert.match(parameters, /excluded from nonlinear constitutive updates/);
+  const clampRow = parameters.split("</tr>").find((row) => row.includes("cpml_clamp_outer"));
+  assert.ok(clampRow, "the CPML clamp must appear in the parameter reference");
+  assert.match(clampRow, /Default: yes/);
+  assert.match(clampRow, /Explicit no removes the clamp/);
 });
 
 test("keeps acoustic elements out of nonlinear constitutive maps", async () => {
@@ -1399,10 +1408,11 @@ test("provides configuration and reader examples for output files", async () => 
     assert.ok(html.includes(`script/${name}.py`));
   }
   assert.match(html, /script\/animations_mpi\.py/);
-  assert.match(html, /script\/compare_plane_outputs\.py/);
-  assert.match(html, /--expected-snapshots 1000/);
+  assert.match(html, /compare-plane-outputs/);
+  assert.match(html, /3,127,704,000 bytes/);
   assert.match(html, /NaN and infinity always fail/);
   assert.match(html, /equally truncated outputs/);
+  assert.doesNotMatch(html, /(?:compare_plane_outputs|diagnose_plane_output|diagnose_acoustic_stations|check_acoustic_gravity_mode)\.py/);
   assert.match(html, /does not read parameters\.in or any other configuration file/);
   assert.match(html, /--nx 201 --ny 126 --dx 500 --dy 325 --dt 0\.02/);
   assert.match(html, /mpirun -np 2/);
@@ -1443,14 +1453,14 @@ test("documents plane amplitude diagnostics without equating geometry with CPML 
   const response = await render("/docs/output-files");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /diagnose_plane_output\.py/);
-  assert.match(html, /histories\.csv/);
-  assert.match(html, /frame_peaks\.csv/);
+  assert.match(html, /plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml/);
+  assert.match(html, /The suffix is the rank, not the plane number/);
+  assert.match(html, /contains no pressure, velocity or displacement histories/);
   assert.match(html, /only a CPML candidate region/);
   assert.match(html, /HERCULES_PLANE_METADATA=1/);
   assert.match(html, /plane_point_metadata\.RANK\.csv/);
   assert.match(html, /fresh output directories/);
-  assert.match(html, /missing ownership remains unknown/);
+  assert.match(html, /keep missing ownership unknown/);
   assert.match(html, /no per-step work/);
   assert.match(await (await render("/docs/configuration")).text(), /HERCULES_PLANE_METADATA/);
 });
@@ -1493,13 +1503,13 @@ test("documents controlled acoustic pressure and motion diagnostics", async () =
   const response = await render("/docs/output-files");
   const html = await response.text();
   assert.match(html, /acoustic-station-diagnostics/);
-  assert.match(html, /diagnose_acoustic_stations\.py/);
-  assert.match(html, /--gravity-cases/);
-  assert.match(html, /--history-stride/);
+  assert.match(html, /print_station_pressures = yes/);
+  assert.match(html, /output_stations_print_rate = 1/);
+  assert.match(html, /Recheck material ownership after coarsening/);
   assert.match(html, /shared reconstruction error/);
   assert.match(html, /CPML remains active in both runs/);
   assert.match(html, /gravity-mode-diagnostics/);
-  assert.match(html, /check_acoustic_gravity_mode\.py/);
+  assert.match(html, /Investigation scripts and smoke-test inputs are retained locally/);
   assert.match(html, /without CPML, adaptive meshes, solid coupling or GPU\/MPI execution/);
   assert.match(html, /does not filter the source/);
 });

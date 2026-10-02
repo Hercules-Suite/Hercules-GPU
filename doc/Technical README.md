@@ -87,6 +87,8 @@ interactions are in the
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
+  With `abc_type=cpml`, `cpml_clamp_outer` defaults to `yes`; set it explicitly
+  to `no` to disable the outer displacement/acoustic-scalar clamp.
 - **Acoustic material and acoustic–elastic coupling:** `include_acoustic`, `acoustic_formulation`,
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
   `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
@@ -192,26 +194,13 @@ order. See [station binary details](Extended%20README.md#single-file-station-bin
 Plane files are native float64 displacement grids; formats and readers are in
 the [output guide](https://hercules-gpu-docs.liling-dpim.chatgpt.site/docs/output-files)
 and [script index](../script/README.md).
-Use `script/compare_plane_outputs.py REFERENCE CANDIDATE --shapes NXxNY ...`
-to compare completed plane directories. `--expected-snapshots` checks complete
-record counts; `--atol`/`--rtol` set comparison tolerances (both default to zero),
-`--chunk-points` bounds read size, and `--endian` selects input byte order.
-See [plane comparison details](Extended%20README.md#compare-plane-output-backends).
-Use `script/diagnose_plane_output.py FILE --nx NX --ny NY --dt SAVED_DT
---output-dir NEW_DIR` to locate actual peaks and export full point histories.
-Optional `--metadata FILE ...` joins the setup audit; geometric boundary bands
-alone cannot identify acoustic or CPML elements. See
-[plane amplitude diagnostics](Extended%20README.md#diagnose-large-plane-displacements).
-For acoustic peaks, enable ASCII station velocity, acceleration and pressure
-columns and use `script/diagnose_acoustic_stations.py` to compare completed
-case copies with a probe manifest. Change one CPML control at a time and retain
-raw signals. The manifest's optional `cpml_by_case` overrides membership when
-CPML thickness changes; see [pressure and motion diagnostics](Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
-Use `script/check_acoustic_gravity_mode.py --output NEW_REPORT.json` for a
-host-only analytical check of production gravity dispersion and surface
-gradient recovery. Optional `--depth`, `--wavelengths`, and `--layers` choose
-the uniform reference problem; `CXX` selects the host C++ compiler. See
-[gravity-mode scope and defaults](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
+`HERCULES_PLANE_METADATA=1` writes `plane_point_metadata.RANK.csv` once during
+setup, with actual point coordinates, containing-element material and CPML
+membership. See [plane metadata and interpretation](Extended%20README.md#diagnose-large-plane-displacements).
+For acoustic observations, enable ASCII station velocity, acceleration and
+pressure output and verify ownership in `station_mediums.txt`. See
+[pressure and motion interpretation](Extended%20README.md#acoustic-pressure-and-motion-diagnostics)
+and [gravity-wave recovery limits](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
 The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
 records surface-gradient recovery errors, a face-average CPML inconsistency,
 and rejected full-model experiments. Small operator/smoke tests alone do not

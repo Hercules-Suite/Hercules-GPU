@@ -1291,7 +1291,7 @@ static struct Param_t {
            .theCpmlMpmlCrossFraction = 0.1,
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlPmlMaterialDamping = 0,
-           .theCpmlClampOuter = NO,
+           .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,

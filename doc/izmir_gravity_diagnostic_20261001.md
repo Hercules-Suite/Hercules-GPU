@@ -5,6 +5,10 @@ from surface-gradient recovery error and sensitivity to boundary settings.
 It does not establish that the remaining long-period water motion is physical.
 The source is unchanged and unfiltered in every case.
 
+The investigation scripts, regression harnesses and smoke-test inputs are
+retained locally and are not distributed in this repository. Results below
+refer to the recorded executables and test runs.
+
 ## Experiment and provenance
 
 Horizon job 40658 ran four cases sequentially on 128 nodes; job 40685 ran a
