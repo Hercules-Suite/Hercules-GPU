@@ -5246,23 +5246,19 @@ static int mesh_find_octant_at_domain_point(const vector3D_t* point,
 
   octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
                               AGGREGATE_SEARCH);
-  if (octant == NULL) {
-    if (eindex_out != NULL) {
-      *eindex_out = -1;
-    }
-    return 0;
-  }
-
-  if (octant->where == REMOTE) {
+  if (octant == NULL || octant->where == REMOTE) {
     const point_t ticks = {xTick, yTick, zTick};
     const acoustic_neighbor_t* neighbor = mesh_cached_acoustic_neighbor(ticks);
     if (is_local_out != NULL) *is_local_out = 0;
     if (eindex_out != NULL) *eindex_out = -1;
     if (neighbor == NULL) {
       if (g_acousticCollectNeighbors) {
-        g_acousticNeighborRequests[ticks] = mesh_handoff_owner(
+        const int owner = mesh_handoff_owner(
             octor_getintervaltable(Global.myOctree), Global.theGroupSize,
             &ticks);
+        /* A missing local octant is a carved void. Missing remote octants
+         * still need resolution on their owner, just like remote aggregates. */
+        if (owner != Global.myID) g_acousticNeighborRequests[ticks] = owner;
       }
       return 0;
     }
@@ -5375,7 +5371,15 @@ static void mesh_exchange_acoustic_neighbors(void) {
     int local = 0;
     int32_t eindex = -1;
     if (!mesh_find_octant_at_domain_point(&probe, NULL, NULL, NULL, &local,
-                                           &eindex) || !local) {
+                                           &eindex)) {
+      /* Cache a void at the requested tick so discovery can terminate even
+       * when that part of the remote domain has been carved out. */
+      answers[i].lower = incoming[i];
+      answers[i].level = PIXELLEVEL;
+      answers[i].geid = -1;
+      continue;
+    }
+    if (!local) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Acoustic neighbor request did not reach its element owner");
     }
