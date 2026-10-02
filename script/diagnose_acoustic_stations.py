@@ -96,8 +96,10 @@ def check_probe(probe, medium):
     if medium["owner_medium"] != "acoustic" or medium["pressure_defined"] != "yes":
         raise ValueError(f"station {probe['station']}: expected an acoustic owner with pressure")
     for key in ("x_m", "y_m", "z_m"):
-        if key in probe and abs(float(medium[key]) - float(probe[key])) > .002:
-            raise ValueError(f"station {probe['station']}: {key} disagrees with probe manifest")
+        if key in probe:
+            actual, expected = float(medium[key]), float(probe[key])
+            if not np.isfinite([actual, expected]).all() or abs(actual - expected) > .002:
+                raise ValueError(f"station {probe['station']}: {key} disagrees with probe manifest")
     rho = float(medium["rho_kgm3"])
     if not np.isfinite(rho) or rho <= 0:
         raise ValueError(f"station {probe['station']}: invalid density")
@@ -123,8 +125,11 @@ def plot_probe(output, probe, curves, gravity_cases):
             axes[3, 1].plot(time, pressure_depth, label=f"{name}: −p/(ρg)", color=color, ls="--", lw=1)
             axes[3, 2].plot(time, fields["u"][:, 2] - pressure_depth, color=color, lw=1)
     axes[3, 0].set_ylabel("Pressure (Pa)")
-    axes[3, 1].set_ylabel("Surface relation (m)")
+    eligible = probe.get("surface") and probe.get("cpml") == 0 and any(name in gravity_cases for name in curves)
+    axes[3, 1].set_ylabel("Surface relation (m)" if eligible else "uZ (m)")
     axes[3, 2].set_ylabel("uZ + p/(ρg) (m)")
+    if not eligible:
+        axes[3, 2].set_visible(False)
     for axis in axes.flat:
         axis.grid(alpha=.2)
     for axis in axes[-1]:

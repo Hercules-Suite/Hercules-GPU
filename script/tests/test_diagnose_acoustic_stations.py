@@ -54,6 +54,9 @@ class AcousticStationDiagnosticsTest(unittest.TestCase):
             diagnostics.check_probe(probe, medium)
         medium["z_m"] = "2812.5"
         self.assertEqual(diagnostics.check_probe(probe, medium), 1025)
+        medium["z_m"] = "nan"
+        with self.assertRaisesRegex(ValueError, "z_m disagrees"):
+            diagnostics.check_probe(probe, medium)
 
 
 if __name__ == "__main__":
