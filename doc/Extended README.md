@@ -1122,9 +1122,9 @@ Notes:
 	interpolates the scalar acoustic field on the acoustic element and
 	displacement acceleration on the adjacent elastic element, so refined elastic
 	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
-	`acoustic_interface_max_level` and finer local neighbors. When the
-	neighboring element is local, the table uses that element's mesh-level
-	acoustic/elastic classification, so mixed elements kept elastic still
+	`acoustic_interface_max_level` and finer neighboring leaves, including
+	remote leaves resolved on their MPI owner. The table uses the owner's
+	corrected mesh-level acoustic/elastic classification, so mixed elements kept elastic still
 	couple to adjacent acoustic elements. Subdivision has a per-face cap of
 	`32 x 32` fragments to avoid accidental table blow-up.
 	The legacy `acoustic_pressure_formulation` key is still accepted as a
