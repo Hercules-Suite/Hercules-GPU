@@ -1469,6 +1469,9 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   const models = await (await render("/docs/physics")).text();
   assert.match(models, /Acoustic free-surface geometry/);
   assert.match(models, /missed shifted water surfaces/);
+  assert.match(models, /MPI displacement sharing and hanging-node assignment/);
+  assert.match(models, /Compare one and four ranks/);
+  assert.match(models, /Acoustic interface geometry/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;

@@ -1557,6 +1557,15 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	this ordering. Test the shifted-surface fixture with one and four ranks;
 	finite output and agreement between I/O backends alone do not establish
 	stability.
+- **Remote interface geometry.** Setup requests final neighbor leaf bounds
+	and corrected material properties from their owning MPI ranks. Remote
+	octree aggregates can be coarser than those leaves; treating an aggregate
+	as the neighbor changed interface fragment quadrature with the partition.
+	The startup `Acoustic interface geometry` line gives exact face/fragment
+	counts. Batched discovery also supplies the remote elastic CPML geometry;
+	its cache is released after solver initialization and adds no per-step
+	communication. The shifted-surface fixture checks all 1024 fragment centers
+	and areas, as well as comparing the one-rank and four-rank wavefields.
 - **Shifted free surface and CPML output correction.** Earlier surface
 	detection only recognized the octree's `Z=0` face. Embedded water at a
 	nonzero topography datum therefore missed both pressure-release flags and

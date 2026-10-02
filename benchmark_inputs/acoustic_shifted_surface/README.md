@@ -18,7 +18,10 @@ python3 check_output.py
 The checker requires NumPy. It checks positive exposed surface and
 gravity/CPML face counts, CPML enrollment of stations and plane points,
 complete finite nonzero plane output, and station/plane agreement at an
-acoustic CPML face probe with nonzero motion. Repeat in fresh copies with `HERCULES_PLANE_IO_MODE=legacy`
+acoustic CPML face probe with nonzero motion. It also checks the 1024 equal-area
+interface fragments and their coordinates in `output/interface.txt`; checking
+total area alone misses incorrect subdivision at MPI partition boundaries.
+Repeat in fresh copies with `HERCULES_PLANE_IO_MODE=legacy`
 and with `acoustic_free_surface_gravity=no`. The pressure-release variant
 must still enroll the shifted surface; its wavefield is intentionally different.
 MPI-IO and legacy output from otherwise identical cases should agree within

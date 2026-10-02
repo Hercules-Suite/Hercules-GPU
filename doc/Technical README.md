@@ -94,7 +94,8 @@ interactions are in the
   `acoustic_quality_factor`.
   The flat water surface follows `topographybase_zcoord` (or the building
   `surface_shift_m`); check the exact exposed-face count in the startup log.
-  See [surface and CPML corrections](Extended%20README.md#scalar-acoustic-corrections-and-limitations).
+  Coupled scalar updates wait for MPI displacement sharing and hanging-node
+  assignment. See [acoustic corrections](Extended%20README.md#scalar-acoustic-corrections-and-limitations).
 - **Poroelastic u-p formulation:** `include_poroelastic`, `poroelastic_formulation`,
   `poroelastic_depth_max_m`, `surface_groundwatertable`, `groundwaterlevel_file`,
   `poroelastic_surface_pressure_bc`, `poroelastic_surface_pressure_penalty_factor`,

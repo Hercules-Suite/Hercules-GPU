@@ -16,6 +16,17 @@ if 'gravity (linearized' in log:
     assert pml and int(pml[1]) > 0, 'gravity/CPML surface correction missing'
 output = re.search(r'Acoustic output CPML gradient correction: (\d+) stations, (\d+) plane points', log)
 assert output and int(output[1]) > 0 and int(output[2]) > 0, 'output CPML correction missing'
+# The physical interface is a 32 x 32 set of equal-area fragments, regardless
+# of rank ownership. Remote aggregate octants used to produce only 988 on
+# four ranks, despite preserving total area, and changed the coupled field.
+rows = [line.split() for line in Path('output/interface.txt').read_text().splitlines()
+        if line and not line.startswith('#')]
+assert len(rows) == 1024, 'partition-dependent interface fragment count'
+geometry = np.array([[float(row[c]) for c in (17,18,19,10)] for row in rows])
+geometry = geometry[np.lexsort((geometry[:,1], geometry[:,0]))]
+expected = np.array([[(i+.5)*31.25, (j+.5)*31.25, 375, 31.25**2]
+                     for i in range(32) for j in range(32)])
+np.testing.assert_allclose(geometry, expected, atol=1e-8, rtol=0)
 plane = np.fromfile('output/planes/planedisplacements.0', dtype='=f8').reshape(800,11,11,3)
 probe = np.fromfile('output/planes/planedisplacements.1', dtype='=f8').reshape(800,3)
 station = np.loadtxt('output/stations/station.0')
@@ -29,5 +40,5 @@ np.testing.assert_allclose(station[:,0], np.arange(800)*.01, atol=1e-8, rtol=0)
 # Unlike a doubly clamped corner, the normal gradient here can be nonzero.
 assert np.max(np.abs(probe)) > 1e-12, 'no excited CPML probe motion'
 np.testing.assert_allclose(station[:,1:4], probe, atol=1e-10, rtol=1e-5)
-print('PASS: shifted surface and CPML enrolled; finite excited fields; station/plane parity')
+print('PASS: shifted surface, CPML and 1024 interface fragments; bounded fields; station/plane parity')
 print('Plane peak XYZ (m):', np.max(np.abs(plane), axis=(0,1,2)))
