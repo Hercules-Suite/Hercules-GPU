@@ -1068,27 +1068,31 @@ Notes:
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
 - `acoustic_interface_face_filter`
-	Optional. `bathymetry` (default), `all`, or `bottom_only`. This applies when
-	acoustic interface coupling is enabled. Explicit `all` couples every
+	Optional. `all` (default), `bathymetry`, or `bottom_only`. This applies when
+	acoustic interface coupling is enabled. `all` couples every
 	acoustic-elastic interface face using mesh-face normals.
 	`bottom_only` couples only acoustic `Z+` faces, which correspond to the
 	water-bottom interface in the depth-positive mesh. This is a diagnostic
-	option for bathymetry/shoreline cases: if `bottom_only` is stable while
-	`all` is not, the instability is likely coming from lateral wet/dry
-	stair-step shoreline coupling rather than from the water-bottom coupling.
+	option for bathymetry/shoreline cases. Differences between filters can help
+	isolate the effect of lateral wet/dry stair-step shoreline coupling, but
+	first verify that compared runs use identical, finite source forces.
 	`bathymetry` also couples only acoustic `Z+` faces, but reconstructs a
 	local bathymetry normal from nearby acoustic-to-elastic transition depths
 	and scales each projected bottom patch by the reconstructed surface area.
 	This restores inclined-bottom normal coupling without reintroducing raw
 	stair-step side-wall faces.
-	Omitting the parameter now selects `bathymetry`; an existing explicit `all`
-	line still selects all faces. The `default` alias also now selects
-	`bathymetry`. Other accepted aliases are `reconstructed_bathymetry` and
+	Omitting the parameter or using the `default` alias selects `all`.
+	Existing explicit `bathymetry` and `bottom_only` settings retain their
+	behavior. Other accepted aliases are `reconstructed_bathymetry` and
 	`bathymetry_normal` for `bathymetry`, `none` for `all`, and `bottom` or
 	`z_plus` for `bottom_only`. Values are case-insensitive.
 	`bathymetry` omits lateral and upward-facing acoustic-solid interfaces, so
 	check that this representation is appropriate for the model geometry.
 	Stability with this filter does not by itself validate waveform accuracy.
+	The source-corrected Izmir comparison completed 100 s with finite output
+	for all three filters using identical generated forces; slow acoustic
+	motion and reconstruction accuracy remain under investigation. See the
+	[corrected validation record](izmir_gravity_diagnostic_20261001.md).
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered. In `bathymetry` mode it also reports how many bottom faces
@@ -1563,11 +1567,15 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	kernel uses a face average. A zero-mean face mode therefore receives nodal
 	damping but no matching restoring/memory force. A nodal-memory candidate
 	passed analytical CFS step-response checks and an 8 s shifted-surface
-	GPU/MPI smoke test, but its reduced Izmir run produced nonfinite pressure
-	at 4.833 s. It was rejected and is not included in the production solver.
-	The failed experiment does not establish the cause of the original slow
-	motion. See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md)
-	for scope, raw-output checks, and the separate CPML-thickness failure.
+	GPU/MPI smoke test. Its original reduced Izmir run and the doubled-CPML
+	run contained NaNs in their generated source forces, traced to a
+	tabulated-source endpoint overread. Their nonfinite output cannot
+	establish an instability of either CPML variant. The source interpolator
+	now bounds that endpoint; reruns must regenerate the force files.
+	The nodal-memory candidate remains separate from the production solver.
+	See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md) for the
+	corrected-source comparisons and remaining absorption/reconstruction
+	validation limits. Finite output alone does not validate the slow motion.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
 	new solid displacements only after MPI sharing and hanging-node assignment.
 	The existing displacement exchange runs before the scalar update, using
@@ -2116,6 +2124,19 @@ the samples to peak 1 and carry the physical amplitude in
 `force_{x,y,z}_n`. Internally this reuses the existing `interpolate_linear`
 path that SRFH already uses for `slipfunction.in`, so it is bit-identical
 to the SRFH discrete-STF math.
+
+The interpolator holds the final sample at and after
+`tinit + (nt1 - 1) * dt`. Its interval index is also bounded when
+floating-point division rounds a time just below that endpoint to the last
+sample index. For example, with 141 samples at 0.02 s, `2.8 / 0.02` can
+round to 140 while `2.8 < 140 * 0.02`; reading sample 141 would be outside
+the supplied history. Older builds could therefore generate an enormous
+force or NaN from otherwise valid discrete input. Rebuild and regenerate
+source-force files before repeating an affected simulation.
+
+SRFH force histories are generated at the common `slipfunction.in` interval
+and then interpolated at the solver timestep. Reducing
+`simulation_delta_time_sec` does not change that source-generation interval.
 
 ## Distributed compliant-base force source
 
