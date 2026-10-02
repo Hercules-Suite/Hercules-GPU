@@ -380,23 +380,9 @@ void kernelStiffnessCalcLocal(int32_t lenum,
 
     eindex = myLinearElementsMapperDevice[lin_eindex];
 
-    /* CPML elastic PML stiffness mode (gpuData->pmlNativeStiffness):
-     *  - native (1, default): do NOT skip -- PML elements get the FULL
-     *    native effective stiffness here, byte-identical to interior;
-     *    kernelPMLElasticStep then adds only the CPML correction
-     *    -(sigma_pml - sigma_raw) + CFS (zero where d=0, so the
-     *    PML<->interior operator is continuous and PML elements keep the
-     *    native higher / hourglass-resisting modes).
-     *  - reduced (0): SKIP PML elements here; kernelPMLElasticStep then
-     *    supplies the full standalone 1-point reduced CPML stiffness.
-     * pmlFlagArrayDevice is NULL in dashpot mode (no skip either way),
-     * and is still used unconditionally by the acoustic-pressure and BKT
-     * kernels (their skips are unchanged). */
+    /* PML elements are integrated completely by their own modal kernel. */
     if (gpuData->pmlFlagArrayDevice != NULL &&
-        gpuData->pmlFlagArrayDevice[eindex] != 0 &&
-        gpuData->pmlNativeStiffness == 0) {
-      return;
-    }
+        gpuData->pmlFlagArrayDevice[eindex] != 0) return;
 
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
@@ -410,20 +396,12 @@ void kernelStiffnessCalcLocal(int32_t lenum,
      * for NONE/BKT/MASS) => sd_b_over_dt == 0 => u_eff == tm1 EXACTLY
      * (the else branch is the byte-identical original) => bit-identical
      * for all non-Rayleigh runs incl. every BKT/none CPML validation.
-     * For CPML, b*K is skipped on PML elements (5d91b09 material-damping-
-     * on-PML policy) UNLESS the viscoelastic Rayleigh PML is requested
-     * (cpmlPmlMaterialDamping==2) -- then PML gets the full native b*K
-     * and kernelPMLElasticStep adds the CPML stretch delta. */
+     * PML elements have already returned and use their own complete operator. */
     double sd_b_over_dt = 0.0;
     {
       const double c1v = gpuData->c1ArrayDevice[eindex];
       if (c1v != 0.0) sd_b_over_dt = gpuData->c3ArrayDevice[eindex] / c1v;
-      if (sd_b_over_dt != 0.0 &&
-          gpuData->pmlFlagArrayDevice != NULL &&
-          gpuData->pmlFlagArrayDevice[eindex] != 0 &&
-          gpuData->cpmlPmlMaterialDamping != 2) {
-        sd_b_over_dt = 0.0;
-      }
+
     }
 
     for (i = 0; i < 8; i++) {
@@ -498,6 +476,20 @@ void kernelStiffnessCalcLocal(int32_t lenum,
     return;
 }
 
+/* Stretch the interface flux by the cofactor J/S_j. */
+__device__ static inline void acoustic_cpml_interface_flux(gpu_data_t* gpu,
+    int face, int q, int side, double value[3]) {
+  if (gpu->acousticInterfacePmlSideMaskDevice == NULL ||
+      !(gpu->acousticInterfacePmlSideMaskDevice[face] & side)) return;
+  const size_t stride = (size_t)gpu->acousticInterfaceFaceCount;
+  const int solid = side == ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
+  const cpml_interface_t* coeff = solid ? gpu->acousticInterfacePmlElasticDevice
+                                       : gpu->acousticInterfacePmlAcousticDevice;
+  solver_float* state = solid ? gpu->acousticInterfacePsiPressureDevice
+                              : gpu->acousticInterfacePsiAccelDevice;
+  cpml_interface_apply(coeff[face], value, state+face+6*q*stride, stride);
+}
+
 __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                                                            gpu_data_t* gpuData,
                                                            double deltaT2,
@@ -543,13 +535,10 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           : center[2]};
   const int32_t force_eindex = (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* force_center = (adjacent_eindex >= 0) ? adjacent_center : center;
-  const int pml_face =
-      (gpuData->acousticInterfacePmlSideMaskDevice != NULL) &&
-      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] != 0);
 
   if ((gpuData->acousticInterfaceProjectionMode ==
        ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
-      (adjacent_eindex >= 0) && !pml_face &&
+      (adjacent_eindex >= 0) &&
       (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
       (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
     const double* half =
@@ -595,6 +584,11 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           }
         }
 
+        double traction[3] = {q_pressure*normal[0], q_pressure*normal[1],
+                              q_pressure*normal[2]};
+        acoustic_cpml_interface_flux(gpuData, faceIndex, 2*g0+g1,
+                                     ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE, traction);
+
         for (int i = 0; i < 8; i++) {
           const double weight =
               acoustic_shape_value_at(i, q_force_center[0],
@@ -607,14 +601,11 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
               gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
           fvector_t* nodalForce = gpuData->forceDevice + lnid;
           atomicAdd((solver_float*)&nodalForce->f[0],
-                    (solver_float)(q_coeff * weight * q_pressure *
-                                   normal[0]));
+                    (solver_float)(q_coeff * weight * traction[0]));
           atomicAdd((solver_float*)&nodalForce->f[1],
-                    (solver_float)(q_coeff * weight * q_pressure *
-                                   normal[1]));
+                    (solver_float)(q_coeff * weight * traction[1]));
           atomicAdd((solver_float*)&nodalForce->f[2],
-                    (solver_float)(q_coeff * weight * q_pressure *
-                                   normal[2]));
+                    (solver_float)(q_coeff * weight * traction[2]));
         }
       }
     }
@@ -640,27 +631,9 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     }
   }
 
-  /* CPML-aware interface correction for the pressure traction in the
-   * elastic equation. Use the elastic-side stretch only; using the
-   * acoustic-side profile here would apply water Vp/sigma coefficients to
-   * the solid PML interface flux. Identity on non-elastic-PML faces and
-   * at the PML inner edge. */
-  if (gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
-      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] &
-       ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE) != 0) {
-    const double a =
-        gpuData->acousticInterfacePmlElastic_aDevice[faceIndex];
-    const double b =
-        gpuData->acousticInterfacePmlElastic_bDevice[faceIndex];
-    const double iK =
-        gpuData->acousticInterfacePmlElastic_invKappaDevice[faceIndex];
-    const double psi_old =
-        (double)gpuData->acousticInterfacePsiPressureDevice[faceIndex];
-    const double psi_new = b * psi_old + a * pressure;
-    gpuData->acousticInterfacePsiPressureDevice[faceIndex] =
-        (solver_float)psi_new;
-    pressure = iK * pressure + psi_new;
-  }
+  double traction[3] = {pressure*normal[0], pressure*normal[1], pressure*normal[2]};
+  acoustic_cpml_interface_flux(gpuData, faceIndex, 0,
+                               ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE, traction);
 
   for (int i = 0; i < 8; i++) {
     const double weight =
@@ -674,11 +647,11 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
         gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
     fvector_t* nodalForce = gpuData->forceDevice + lnid;
     atomicAdd((solver_float*)&nodalForce->f[0],
-              (solver_float)(face_coeff * weight * pressure * normal[0]));
+              (solver_float)(face_coeff * weight * traction[0]));
     atomicAdd((solver_float*)&nodalForce->f[1],
-              (solver_float)(face_coeff * weight * pressure * normal[1]));
+              (solver_float)(face_coeff * weight * traction[1]));
     atomicAdd((solver_float*)&nodalForce->f[2],
-              (solver_float)(face_coeff * weight * pressure * normal[2]));
+              (solver_float)(face_coeff * weight * traction[2]));
   }
 }
 
@@ -697,24 +670,9 @@ __global__ void kernelAcousticPressureForce(int32_t lenum,
     return;
   }
 
-  /* CPML acoustic PML stiffness mode (mirror of the validated elastic
-   * native+correction in kernelStiffnessCalcLocal):
-   *  - native (1, default): do NOT skip -- PML acoustic elements get the
-   *    FULL consistent operator here, byte-identical to the interior (the
-   *    operator validated against CPS, commit 20180b6).
-   *    kernelPMLAcousticStep then adds only the CPML delta
-   *    -(P_pml - P_raw) + CFS, which is exactly zero where d=0, so the
-   *    PML<->interior operator is continuous and PML elements keep the
-   *    consistent, hourglass-free modes (the bare 1-pt reduced operator
-   *    is rank-deficient and rings undamped in the lossless fluid).
-   *  - reduced (0): SKIP here; kernelPMLAcousticStep then supplies the
-   *    full standalone 1-point reduced CPML stiffness (pre-restructure
-   *    behaviour, bit-identical). */
+  /* The PML kernel supplies the complete selected element operator. */
   if (gpuData->pmlFlagArrayDevice != NULL &&
-      gpuData->pmlFlagArrayDevice[eindex] != 0 &&
-      gpuData->pmlNativeStiffnessAcoustic == 0) {
-    return;
-  }
+      gpuData->pmlFlagArrayDevice[eindex] != 0) return;
 
   for (int i = 0; i < 8; i++) {
     const int32_t lnid = gpuData->lnidArrayDevice[eindex + i * lenum];
@@ -832,13 +790,10 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
   const double* accel_center =
       (adjacent_eindex >= 0) ? adjacent_center : center;
-  const int pml_face =
-      (gpuData->acousticInterfacePmlSideMaskDevice != NULL) &&
-      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] != 0);
 
   if ((gpuData->acousticInterfaceProjectionMode ==
        ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
-      (adjacent_eindex >= 0) && !pml_face &&
+      (adjacent_eindex >= 0) &&
       (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
       (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
     const double* half =
@@ -858,7 +813,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
         double q_center[3] = {center[0], center[1], center[2]};
         double q_accel_center[3] = {adjacent_center[0], adjacent_center[1],
                                     adjacent_center[2]};
-        double q_source_n = 0.0;
+        double q_source[3] = {0,0,0};
 
         q_center[tangent_axes[0]] += half[tangent_axes[0]] * gauss[g0];
         q_center[tangent_axes[1]] += half[tangent_axes[1]] * gauss[g1];
@@ -880,30 +835,16 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
               gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
           const fvector_t u_next = gpuData->tm2Device[lnid];
           const fvector_t u_curr = gpuData->tm1Device[lnid];
-          if (vp) {
-            q_source_n +=
-                weight *
-                (((double)u_next.f[0] - (double)u_curr.f[0]) * invDt *
-                     normal[0] +
-                 ((double)u_next.f[1] - (double)u_curr.f[1]) * invDt *
-                     normal[1] +
-                 ((double)u_next.f[2] - (double)u_curr.f[2]) * invDt *
-                     normal[2]);
-          } else {
-            const fvector_t u_prev = gpuData->tm3Device[lnid];
-            q_source_n +=
-                weight *
-                ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-                   (double)u_prev.f[0]) *
-                      invDeltaT2 * normal[0]) +
-                 (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-                   (double)u_prev.f[1]) *
-                      invDeltaT2 * normal[1]) +
-                 (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-                   (double)u_prev.f[2]) *
-                      invDeltaT2 * normal[2]));
+          const fvector_t u_prev = vp ? u_curr : gpuData->tm3Device[lnid];
+          for (int j=0; j<3; ++j) {
+            const double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
+                : ((double)u_next.f[j]-2.0*u_curr.f[j]+u_prev.f[j])*invDeltaT2;
+            q_source[j] += weight*motion*normal[j];
           }
         }
+        acoustic_cpml_interface_flux(gpuData, faceIndex, 2*g0+g1,
+                                     ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE, q_source);
+        const double q_source_n = q_source[0]+q_source[1]+q_source[2];
 
         for (int i = 0; i < 8; i++) {
           const double weight =
@@ -928,7 +869,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
    *    ~omega^2) -- the validated path (and the grid pump);
    *  - velocity_potential: solid normal VELOCITY (uⁿ⁺¹-uⁿ)/dt . n
    *    (1st time-difference, ~omega) -- the milder, stable coupling. */
-  double source_n = 0.0;
+  double source[3] = {0,0,0};
 
   for (int i = 0; i < 8; i++) {
     const double weight =
@@ -942,49 +883,16 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
         gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
     const fvector_t u_next = gpuData->tm2Device[lnid];
     const fvector_t u_curr = gpuData->tm1Device[lnid];
-    if (vp) {
-      source_n += weight *
-                  (((double)u_next.f[0] - (double)u_curr.f[0]) * invDt *
-                       normal[0] +
-                   ((double)u_next.f[1] - (double)u_curr.f[1]) * invDt *
-                       normal[1] +
-                   ((double)u_next.f[2] - (double)u_curr.f[2]) * invDt *
-                       normal[2]);
-    } else {
-      const fvector_t u_prev = gpuData->tm3Device[lnid];
-      source_n += weight *
-                  ((((double)u_next.f[0] - 2.0 * (double)u_curr.f[0] +
-                     (double)u_prev.f[0]) *
-                        invDeltaT2 * normal[0]) +
-                   (((double)u_next.f[1] - 2.0 * (double)u_curr.f[1] +
-                     (double)u_prev.f[1]) *
-                        invDeltaT2 * normal[1]) +
-                   (((double)u_next.f[2] - 2.0 * (double)u_curr.f[2] +
-                     (double)u_prev.f[2]) *
-                        invDeltaT2 * normal[2]));
+    const fvector_t u_prev = vp ? u_curr : gpuData->tm3Device[lnid];
+    for (int j=0; j<3; ++j) {
+      const double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
+          : ((double)u_next.f[j]-2.0*u_curr.f[j]+u_prev.f[j])*invDeltaT2;
+      source[j] += weight*motion*normal[j];
     }
   }
-
-  /* CPML-aware interface correction for the elastic normal-motion source in
-   * the acoustic equation. Use the acoustic-side stretch only; the acoustic
-   * RHS is the one being modified. Identity on non-acoustic-PML faces / at
-   * the PML inner edge. */
-  if (gpuData->acousticInterfacePmlSideMaskDevice != NULL &&
-      (gpuData->acousticInterfacePmlSideMaskDevice[faceIndex] &
-       ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE) != 0) {
-    const double a =
-        gpuData->acousticInterfacePmlAcoustic_aDevice[faceIndex];
-    const double b =
-        gpuData->acousticInterfacePmlAcoustic_bDevice[faceIndex];
-    const double iK =
-        gpuData->acousticInterfacePmlAcoustic_invKappaDevice[faceIndex];
-    const double psi_old =
-        (double)gpuData->acousticInterfacePsiAccelDevice[faceIndex];
-    const double psi_new = b * psi_old + a * source_n;
-    gpuData->acousticInterfacePsiAccelDevice[faceIndex] =
-        (solver_float)psi_new;
-    source_n = iK * source_n + psi_new;
-  }
+  acoustic_cpml_interface_flux(gpuData, faceIndex, 0,
+                               ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE, source);
+  const double source_n = source[0]+source[1]+source[2];
 
   /* pressure: acoustic RHS += -C u_s_ddot ; velocity_potential:
    * phi-RHS += +G v_s (sign flip; same |coeff|). */
@@ -2904,471 +2812,87 @@ __host__ __device__ void MultAddMatVecGPU( fmatrix_t* M, fvector_t* V1,
 }
 
 
-/* ------------------------------------------------------------------------- */
-/*                  C-PML (unsplit ADE) GPU kernels                          */
-/* ------------------------------------------------------------------------- */
-/*
- * Hex8 1-pt-rule node ordering: node n in [0..7] has corner bits
- *   (n & 1) -> +x face when 1, -x when 0       => s_x(n) = (n & 1) ? +1 : -1
- *   (n & 2) -> +y face when 1, -y when 0       => s_y(n) = ...
- *   (n & 4) -> +z face when 1, -z when 0       => s_z(n) = ...
- * At the element center (xi = eta = zeta = 0):
- *   dN_n/dx_j = s_j(n) / (4h).
- * The (1/(4h)) factor is absorbed into the stored per-element a and
- * 1/kappa coefficients (see solver_init), so the kernels work with the
- * raw signed displacement (or pressure) sums S_j = sum_n s_j(n) u_i^(n).
- * The dt^2 * h^2 / 4 volume/time factor is folded into muCoeff,
- * lambdaCoeff (elastic) and forceCoeff (acoustic).
- *
- * Force sign: the central-difference update in kernelDispCalc reads
- *   u^{n+1} = (force + 2M u^n - M u^{n-1}) / M
- * so "force" already encodes dt^2 * F_stiff; an elastic restoring force
- * F_stiff = -K u gives a negative sign in the assembly below.
- */
-
-__global__ void kernelPMLElasticStep(int32_t lenum,
-                                     gpu_data_t* gpuData,
-                                     int32_t pmlElasticCount)
-{
-    int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (pml_idx >= pmlElasticCount) return;
-
-    const int32_t eindex = gpuData->pmlElasticElemMapperDevice[pml_idx];
-    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
-
-    /* Read 8 nodal displacements (u_alpha at each node n in [0..7]). */
-    double u[8][3];
-    for (int n = 0; n < 8; n++) {
-        const int32_t lnid = lnid_base[n * lenum];
-        u[n][0] = gpuData->tm1Device[lnid].f[0];
-        u[n][1] = gpuData->tm1Device[lnid].f[1];
-        u[n][2] = gpuData->tm1Device[lnid].f[2];
-    }
-
-    /* === CPML stiffness CORRECTION (native + delta) ===
-     * The FULL native effective stiffness for this element is added
-     * separately by kernelStiffnessCalcLocal (its PML skip was removed),
-     * byte-identical to the interior. Here we add only the CPML delta
-     *   -(sigma_pml - sigma_raw)
-     * evaluated at the 1-point element centre in the SAME native
-     * normalization (mu = 9*c1, lambda = 9*c2, dN = 0.25*sign), so
-     * sigma_raw is exactly the constant-strain projection the native
-     * operator contains. Where d=0 the psi memory stays 0 and
-     * sigma_pml == sigma_raw, so the delta is exactly zero: no operator
-     * discontinuity at the PML inner edge, and PML elements keep the
-     * native higher (hourglass-resisting) modes. This mirrors the codex
-     * v3 reduced-correction (gradient-side psi only -- no stress
-     * convolution). */
-    const double mu     = 9.0 * gpuData->c1ArrayDevice[eindex];
-    const double lambda = 9.0 * gpuData->c2ArrayDevice[eindex];
-
-    /* Natural-coord gradient at the centre: dN_n,axis = 0.25 * sgn.
-     * grad[i][j] = sum_n u_i^(n) * dN_n,j  (= du_i/dx_j in this norm). */
-    double grad[3][3] = {{0.0, 0.0, 0.0},
-                         {0.0, 0.0, 0.0},
-                         {0.0, 0.0, 0.0}};
-    for (int n = 0; n < 8; n++) {
-        const double gN[3] = { (n & 1) ? 0.25 : -0.25,
-                               (n & 2) ? 0.25 : -0.25,
-                               (n & 4) ? 0.25 : -0.25 };
-        for (int i = 0; i < 3; i++) {
-            grad[i][0] += u[n][i] * gN[0];
-            grad[i][1] += u[n][i] * gN[1];
-            grad[i][2] += u[n][i] * gN[2];
+__global__ void kernelPMLElasticStep(int32_t lenum, gpu_data_t* gpuData,
+                                    int32_t count) {
+    const int32_t index=blockIdx.x*blockDim.x+threadIdx.x;
+    if (index>=count) return;
+    const int32_t e=gpuData->pmlElasticElemMapperDevice[index];
+    const cpml_element_t& c=gpuData->pmlElasticCoeffDevice[index];
+    const int native=gpuData->pmlNativeStiffness;
+    solver_float* state=gpuData->pmlElasticStateDevice+index;
+    double u[8][3],force[8][3];
+    fvector_t effective[8],stiff_force[8];
+    for (int n=0;n<8;++n) {
+        const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
+        for (int i=0;i<3;++i) {
+            u[n][i]=(double)gpuData->tm1Device[ln].f[i];
+            effective[n].f[i]=(solver_float)(u[n][i]+c.b_over_dt*
+                (u[n][i]-(double)gpuData->tm2Device[ln].f[i]));
         }
     }
-
-    /* Raw (un-stretched) stress. */
-    const double traceRaw = grad[0][0] + grad[1][1] + grad[2][2];
-    double sigmaRaw[3][3];
-    for (int a = 0; a < 3; a++) {
-        for (int b = 0; b < 3; b++) {
-            sigmaRaw[a][b] = mu * (grad[a][b] + grad[b][a]);
-        }
-        sigmaRaw[a][a] += lambda * traceRaw;
-    }
-
-    /* Gradient-side CPML psi memory (raw a / 1/kappa; b = exp decay).
-     * psi[i][j] convolves the j-axis gradient of u_i. */
-    const double aJ[3] = { gpuData->pml_elastic_a_xArrayDevice[pml_idx],
-                           gpuData->pml_elastic_a_yArrayDevice[pml_idx],
-                           gpuData->pml_elastic_a_zArrayDevice[pml_idx] };
-    const double bJ[3] = { gpuData->pml_elastic_b_xArrayDevice[pml_idx],
-                           gpuData->pml_elastic_b_yArrayDevice[pml_idx],
-                           gpuData->pml_elastic_b_zArrayDevice[pml_idx] };
-    const double invKJ[3] = {
-        gpuData->pml_elastic_invKappa_xArrayDevice[pml_idx],
-        gpuData->pml_elastic_invKappa_yArrayDevice[pml_idx],
-        gpuData->pml_elastic_invKappa_zArrayDevice[pml_idx] };
-    double gradPml[3][3];
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            const double psi_old =
-                (double)gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx];
-            const double psi_new = bJ[j] * psi_old + aJ[j] * grad[i][j];
-            gpuData->pml_elastic_psiArrayDevice[i][j][pml_idx] =
-                (solver_float)psi_new;
-            gradPml[i][j] = invKJ[j] * grad[i][j] + psi_new;
-        }
-    }
-    const double tracePml = gradPml[0][0] + gradPml[1][1] + gradPml[2][2];
-    double sigmaPml[3][3];
-    for (int a = 0; a < 3; a++) {
-        for (int b = 0; b < 3; b++) {
-            sigmaPml[a][b] = mu * (gradPml[a][b] + gradPml[b][a]);
-        }
-        sigmaPml[a][a] += lambda * tracePml;
-    }
-
-    /* BKT-family material damping is intentionally not stretched inside the
-     * elastic CPML. The PML zone uses native elastic stiffness plus this
-     * CPML correction; BKT memory/force kernels skip PML elements. */
-    /* Rayleigh stiffness-proportional (b*K) viscoelastic CPML, gradient
-     * side. Single effective displacement:
-     *   u_eff = (1 + b/dt) u^n - (b/dt) u^{n-1},   b/dt = c3/c1
-     * relaxed constant-strain stress is the plain elastic form on u_eff
-     *   sigma_re = mu*(g_e+g_e^T) + lambda*tr(g_e)*I,  g_e = grad(u_eff)
-     * which reduces EXACTLY to the elastic stress when b/dt==0
-     * (u_eff==u^n), so the d=0 delta cancellation against the native
-     * (now b*K-inclusive, kernelStiffnessCalcLocal) modal force holds ->
-     * inner edge reflectionless (v10-safe). Reuses the psiShear memory
-     * family.
-     * b/dt==0 (any non-Rayleigh, or zeta=0) -> block skipped, sigma
-     * stays elastic -> byte-identical. */
-    if (gpuData->cpmlPmlMaterialDamping == 2) {
-        double bod = 0.0;
-        const double c1v = gpuData->c1ArrayDevice[eindex];
-        if (c1v != 0.0) bod = gpuData->c3ArrayDevice[eindex] / c1v;
-        if (bod != 0.0) {
-            double gE[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
-            for (int n = 0; n < 8; n++) {
-                const int32_t ln = lnid_base[n * lenum];
-                const double ue[3] = {
-                    (double)gpuData->tm1Device[ln].f[0]*(1.0+bod) -
-                        bod*(double)gpuData->tm2Device[ln].f[0],
-                    (double)gpuData->tm1Device[ln].f[1]*(1.0+bod) -
-                        bod*(double)gpuData->tm2Device[ln].f[1],
-                    (double)gpuData->tm1Device[ln].f[2]*(1.0+bod) -
-                        bod*(double)gpuData->tm2Device[ln].f[2] };
-                const double gN[3] = { (n & 1) ? 0.25 : -0.25,
-                                       (n & 2) ? 0.25 : -0.25,
-                                       (n & 4) ? 0.25 : -0.25 };
-                for (int i = 0; i < 3; i++) {
-                    gE[i][0] += ue[i]*gN[0]; gE[i][1] += ue[i]*gN[1];
-                    gE[i][2] += ue[i]*gN[2];
-                }
-            }
-            const double trEr = gE[0][0] + gE[1][1] + gE[2][2];
-            for (int a = 0; a < 3; a++) {
-                for (int c = 0; c < 3; c++)
-                    sigmaRaw[a][c] = mu * (gE[a][c] + gE[c][a]);
-                sigmaRaw[a][a] += lambda * trEr;
-            }
-            double gEp[3][3];
-            for (int i = 0; i < 3; i++) {
-                for (int j = 0; j < 3; j++) {
-                    const double p_old = (double)
-                        gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx];
-                    const double p_new = bJ[j]*p_old + aJ[j]*gE[i][j];
-                    gpuData->pml_elastic_psiShearArrayDevice[i][j][pml_idx] =
-                        (solver_float)p_new;
-                    gEp[i][j] = invKJ[j]*gE[i][j] + p_new;
-                }
-            }
-            const double trEp = gEp[0][0] + gEp[1][1] + gEp[2][2];
-            for (int a = 0; a < 3; a++) {
-                for (int c = 0; c < 3; c++)
-                    sigmaPml[a][c] = mu * (gEp[a][c] + gEp[c][a]);
-                sigmaPml[a][a] += lambda * trEp;
-            }
-        }
-    }
-
-    /* Divergence-side CPML, correct 2nd-order displacement form (Matzen
-     * 2011; Xie et al. 2014, the SPECFEM3D FE-PML). Multiplying the
-     * momentum equation by s_j turns the divergence-side stretch into,
-     * per damping axis a:
-     *   rho*d_a du_i/dt           -> mass-prop. damping (mass arrays)
-     *   +rho*d_a*alpha_a u_i      -> CFS restoring     (HERE)
-     *   -rho*d_a*alpha_a^2 zeta_i -> CFS memory force  (HERE)
-     * The damping is injected at the node in solver_init (validated,
-     * stable in v9). The CFS restoring + memory are a pair that must
-     * cancel at DC; v10 applied the restoring per-node via mass2_minusaM
-     * while zeta was element-centroid based -- the discrete cancellation
-     * failed and PML corners grew exponentially. Both halves are now
-     * evaluated HERE from the SAME element-centroid displacement
-     *   ubar_i = (1/8) sum_n u_i^(n)   (exact for trilinear hex8)
-     * so the per-element net CFS force
-     *   cfs_i = restoreCoeff*ubar_i - sum_a memForce_a*zeta_i^(a)
-     * is an exact discrete null at DC (zeta_i^(a) -> ubar_i/alpha_a =>
-     * sum_a memForce_a*zeta_i -> restoreCoeff*ubar_i). zeta advances by
-     *   zeta_i^(a) = zetaDecay_a*zeta_i^(a) + zetaGain_a*ubar_i
-     * restoreCoeff = dt^2*(rho h^3/8)*sum_a d_a*alpha_a and
-     * memForce_a   = dt^2*(rho h^3/8)*d_a*alpha_a^2 are PER-NODE shares,
-     * so the same cfs_i is added to each of the 8 nodes. Strict no-op
-     * where d_a=0 (restoreCoeff=0, memForce_a=0). zeta state reuses
-     * pml_elastic_divPsiArrayDevice[i][a]. */
-    double ubar[3] = {0.0, 0.0, 0.0};
-    for (int n = 0; n < 8; n++) {
-        ubar[0] += u[n][0];
-        ubar[1] += u[n][1];
-        ubar[2] += u[n][2];
-    }
-    ubar[0] *= 0.125; ubar[1] *= 0.125; ubar[2] *= 0.125;
-
-    const double zDec[3] = {
-        gpuData->pml_elastic_zetaDecayArrayDevice[0][pml_idx],
-        gpuData->pml_elastic_zetaDecayArrayDevice[1][pml_idx],
-        gpuData->pml_elastic_zetaDecayArrayDevice[2][pml_idx] };
-    const double zGain[3] = {
-        gpuData->pml_elastic_zetaGainArrayDevice[0][pml_idx],
-        gpuData->pml_elastic_zetaGainArrayDevice[1][pml_idx],
-        gpuData->pml_elastic_zetaGainArrayDevice[2][pml_idx] };
-    const double memF[3] = {
-        gpuData->pml_elastic_memForceArrayDevice[0][pml_idx],
-        gpuData->pml_elastic_memForceArrayDevice[1][pml_idx],
-        gpuData->pml_elastic_memForceArrayDevice[2][pml_idx] };
-    const double restoreCoeff =
-        gpuData->pml_elastic_restoreCoeffArrayDevice[pml_idx];
-
-    /* Advance zeta_i^(a); net per-node CFS force
-     * cfs_i = restoreCoeff*ubar_i - sum_a memForce_a * zeta_i^(a). */
-    double cfs[3];
-    for (int i = 0; i < 3; i++) {
-        double fmem = 0.0;
-        for (int a = 0; a < 3; a++) {
-            const double z_old =
-                (double)gpuData->pml_elastic_divPsiArrayDevice[i][a][pml_idx];
-            const double z_new = zDec[a] * z_old + zGain[a] * ubar[i];
-            gpuData->pml_elastic_divPsiArrayDevice[i][a][pml_idx] =
-                (solver_float)z_new;
-            fmem += memF[a] * z_new;
-        }
-        cfs[i] = restoreCoeff * ubar[i] - fmem;
-    }
-
-    /* Assemble (centre derivatives dN_n,axis = 0.25*sgn) + CFS pair.
-     * Mode (gpuData->pmlNativeStiffness):
-     *  - native (1): add the CPML delta -(nodalPml - nodalRaw); the FULL
-     *    native stiffness was added by kernelStiffnessCalcLocal. At d=0
-     *    sigmaPml==sigmaRaw and cfs==0, so only the native operator
-     *    remains -> exact PML<->interior match.
-     *  - reduced (0): kernelStiffnessCalcLocal skipped this element, so
-     *    add the FULL standalone 1-point reduced CPML stiffness -nodalPml
-     *    (no native higher modes; the pre-a1c0fb8 behaviour). */
-    const int native = gpuData->pmlNativeStiffness;
-    for (int n = 0; n < 8; n++) {
-        const double gN[3] = { (n & 1) ? 0.25 : -0.25,
-                               (n & 2) ? 0.25 : -0.25,
-                               (n & 4) ? 0.25 : -0.25 };
-        const int32_t lnid = lnid_base[n * lenum];
-        fvector_t* nodalForce = gpuData->forceDevice + lnid;
-        for (int a = 0; a < 3; a++) {
-            const double nodalPml = gN[0] * sigmaPml[a][0] +
-                                    gN[1] * sigmaPml[a][1] +
-                                    gN[2] * sigmaPml[a][2];
-            double f;
-            if (native) {
-                const double nodalRaw = gN[0] * sigmaRaw[a][0] +
-                                        gN[1] * sigmaRaw[a][1] +
-                                        gN[2] * sigmaRaw[a][2];
-                f = -(nodalPml - nodalRaw) + cfs[a];
-            } else {
-                f = -nodalPml + cfs[a];
-            }
-            atomicAdd((solver_float*)&(nodalForce->f[a]), (solver_float)f);
+    const uint8_t faces=gpuData->acousticFaceFlagsArrayDevice[e];
+    if (faces) acoustic_project_interface_nodes(effective,faces);
+    double ue[8][3];
+    for (int n=0;n<8;++n)
+        for (int i=0;i<3;++i) ue[n][i]=(double)effective[n].f[i];
+    cpml_stiffness(c,3,native,ue,force,state,(size_t)count);
+    for (int n=0;n<8;++n)
+        for (int i=0;i<3;++i) stiff_force[n].f[i]=(solver_float)force[n][i];
+    if (faces) acoustic_project_interface_nodes(stiff_force,faces);
+    const int offset=cpml_stiffness_states(3,native);
+    for (int n=0;n<8;++n) {
+        const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
+        for (int i=0;i<3;++i) {
+            const size_t channel=(size_t)offset+3*(3*n+i);
+            const double inertia=c.nodal_mass_dt2*cpml_inertia_force(
+                c.inertia,u[n][i],state+channel*count,(size_t)count);
+            atomicAdd(&gpuData->forceDevice[ln].f[i],
+                (solver_float)((double)stiff_force[n].f[i]+inertia));
         }
     }
 }
 
-
-__global__ void kernelPMLAcousticStep(int32_t lenum,
-                                      gpu_data_t* gpuData,
-                                      int32_t pmlAcousticCount)
-{
-    int32_t pml_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (pml_idx >= pmlAcousticCount) return;
-
-    const int32_t eindex = gpuData->pmlAcousticElemMapperDevice[pml_idx];
-    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
-
-    /* Read 8 nodal pressures. */
-    double p[8];
-    for (int n = 0; n < 8; n++) {
-        const int32_t lnid = lnid_base[n * lenum];
-        p[n] = (double)gpuData->pressureTm1Device[lnid];
+__global__ void kernelPMLAcousticStep(int32_t lenum, gpu_data_t* gpuData,
+                                     int32_t count) {
+    const int32_t index=blockIdx.x*blockDim.x+threadIdx.x;
+    if (index>=count) return;
+    const int32_t e=gpuData->pmlAcousticElemMapperDevice[index];
+    const cpml_element_t& c=gpuData->pmlAcousticCoeffDevice[index];
+    const int native=gpuData->pmlNativeStiffnessAcoustic;
+    solver_float* state=gpuData->pmlAcousticStateDevice+index;
+    double u[8][3]={},force[8][3];
+    for (int n=0;n<8;++n) {
+        const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
+        u[n][0]=(double)gpuData->pressureTm1Device[ln];
     }
-
-    /* Signed sums S[j] = sum_n s_j(n) * p^(n).
-     * dp/dx_j = S[j] / (4h); 1/(4h) absorbed into a and 1/kappa. */
-    double S[3];
-    for (int j = 0; j < 3; j++) {
-        double s = 0.0;
-        for (int n = 0; n < 8; n++) {
-            const double sign = ((n >> j) & 1) ? 1.0 : -1.0;
-            s += sign * p[n];
-        }
-        S[j] = s;
-    }
-
-    const double aJ[3] = { gpuData->pml_acoustic_a_xArrayDevice[pml_idx],
-                           gpuData->pml_acoustic_a_yArrayDevice[pml_idx],
-                           gpuData->pml_acoustic_a_zArrayDevice[pml_idx] };
-    const double bJ[3] = { gpuData->pml_acoustic_b_xArrayDevice[pml_idx],
-                           gpuData->pml_acoustic_b_yArrayDevice[pml_idx],
-                           gpuData->pml_acoustic_b_zArrayDevice[pml_idx] };
-    const double invKJ[3] = {
-        gpuData->pml_acoustic_invKappa_xArrayDevice[pml_idx],
-        gpuData->pml_acoustic_invKappa_yArrayDevice[pml_idx],
-        gpuData->pml_acoustic_invKappa_zArrayDevice[pml_idx] };
-
-    /* ADE update and modified gradient: ~dp/dx_j = invK_j*S[j] + psi_new. */
-    double partial[3];
-    for (int j = 0; j < 3; j++) {
-        const double psi_old =
-            (double)gpuData->pml_acoustic_psiArrayDevice[j][pml_idx];
-        const double psi_new = bJ[j] * psi_old + aJ[j] * S[j];
-        gpuData->pml_acoustic_psiArrayDevice[j][pml_idx] =
-            (solver_float)psi_new;
-        partial[j] = invKJ[j] * S[j] + psi_new;
-    }
-
-    /* Step B -- divergence-side CFS (scalar mirror of the elastic
-     * kernelPMLElasticStep CFS pair). The gradient side is partial[j];
-     * the divergence-side mass-prop damping is applied to the nodal
-     * pressure mass (pressure_damp), and the CFS restoring + memory pair
-     * is evaluated here from the element-centroid pressure
-     *   pbar = (1/8) sum_n p^(n)
-     *   cfs  = restoreCoeff*pbar - sum_a memForce_a * zeta_p^(a)
-     *   zeta_p^(a) = zetaDecay_a*zeta_p^(a) + zetaGain_a*pbar
-     * restoreCoeff/memForce already pack dt^2 * nodalPressureMass *
-     * (d*alpha, d*alpha^2), i.e. the PER-NODE share, so the same cfs is
-     * added to each of the 8 nodes. At d=0 (inner edge / non-PML axis)
-     * restoreCoeff = memForce = 0 -> cfs = 0 (strict no-op), and the
-     * pair cancels at DC (zeta_p -> pbar/alpha). */
-    double pbar = 0.0;
-    for (int n = 0; n < 8; n++) pbar += p[n];
-    pbar *= 0.125;
-
-    const double zDec[3] = {
-        gpuData->pml_acoustic_zetaDecayArrayDevice[0][pml_idx],
-        gpuData->pml_acoustic_zetaDecayArrayDevice[1][pml_idx],
-        gpuData->pml_acoustic_zetaDecayArrayDevice[2][pml_idx] };
-    const double zGain[3] = {
-        gpuData->pml_acoustic_zetaGainArrayDevice[0][pml_idx],
-        gpuData->pml_acoustic_zetaGainArrayDevice[1][pml_idx],
-        gpuData->pml_acoustic_zetaGainArrayDevice[2][pml_idx] };
-    const double memF[3] = {
-        gpuData->pml_acoustic_memForceArrayDevice[0][pml_idx],
-        gpuData->pml_acoustic_memForceArrayDevice[1][pml_idx],
-        gpuData->pml_acoustic_memForceArrayDevice[2][pml_idx] };
-    const double restoreCoeff =
-        gpuData->pml_acoustic_restoreCoeffArrayDevice[pml_idx];
-
-    double fmem = 0.0;
-    for (int a = 0; a < 3; a++) {
-        const double z_old =
-            (double)gpuData->pml_acoustic_zetaPArrayDevice[a][pml_idx];
-        const double z_new = zDec[a] * z_old + zGain[a] * pbar;
-        gpuData->pml_acoustic_zetaPArrayDevice[a][pml_idx] =
-            (solver_float)z_new;
-        fmem += memF[a] * z_new;
-    }
-    const double cfs = restoreCoeff * pbar - fmem;
-
-    /* Pressure force -- native+correction mirror of kernelPMLElasticStep.
-     * Cstiff = dt^2 * h / (16 rho) is the corrected consistent interior
-     * acoustic stiffness coefficient (commit 20180b6), stored (raw a/b/
-     * invKappa, natural signed-sum normalization) exactly as the elastic
-     * path stores raw a/b/invKappa and folds the physical scaling into
-     * mu=9*c1. With  S[j] = sum_n s_j(n) p_n  (constant-gradient signed
-     * sum) and  partial[j] = invKappa*S[j] + psi  (CPML-stretched):
-     *   P_raw(n) = Cstiff * sum_j s_j(n) * S[j]        -- the constant-
-     *     gradient projection, exactly the content the consistent
-     *     interior operator already carries (1-pt Gauss is exact on the
-     *     linear subspace), and
-     *   P_pml(n) = Cstiff * sum_j s_j(n) * partial[j]  -- CPML-stretched.
-     * native (default): kernelAcousticPressureForce added the FULL
-     *   consistent operator for this element; here add only the CPML
-     *   delta  -(P_pml - P_raw) + cfs.  At d=0 partial==S so the delta
-     *   is exactly 0 and cfs==0 -> the element is purely the consistent
-     *   interior operator (validated, hourglass-free, inner-edge exact).
-     * reduced: interior skipped this element -> add the full standalone
-     *   1-point reduced CPML stiffness  -P_pml + cfs  (bit-identical to
-     *   the pre-restructure kernel; the raw/Cstiff rescaling is an exact
-     *   algebraic identity with the old inv4h / dt^2 h^2/4 form). */
-    const double Cstiff =
-        gpuData->pml_acoustic_forceCoeffArrayDevice[pml_idx];
-    const int native = gpuData->pmlNativeStiffnessAcoustic;
-    for (int n = 0; n < 8; n++) {
-        const double sx = (n & 1) ? 1.0 : -1.0;
-        const double sy = (n & 2) ? 1.0 : -1.0;
-        const double sz = (n & 4) ? 1.0 : -1.0;
-        const int32_t lnid = lnid_base[n * lenum];
-        const double Ppml = Cstiff *
-            (sx * partial[0] + sy * partial[1] + sz * partial[2]);
-        double f;
-        if (native) {
-            const double Praw = Cstiff *
-                (sx * S[0] + sy * S[1] + sz * S[2]);
-            f = -(Ppml - Praw) + cfs;
-        } else {
-            f = -Ppml + cfs;
-        }
-        atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                  (solver_float)f);
+    cpml_stiffness(c,1,native,u,force,state,(size_t)count);
+    const int offset=cpml_stiffness_states(1,native);
+    for (int n=0;n<8;++n) {
+        const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
+        const size_t channel=(size_t)offset+3*n;
+        const double inertia=c.nodal_mass_dt2*cpml_inertia_force(
+            c.inertia,u[n][0],state+channel*count,(size_t)count);
+        atomicAdd(gpuData->pressureForceDevice+ln,
+                  (solver_float)(force[n][0]+inertia));
     }
 }
-
 
 __global__ void kernelPMLAcousticGravitySurfaceStep(
-    int32_t lenum, gpu_data_t* gpuData, int32_t surfaceCount)
-{
-    const int32_t surface_idx =
-        (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (surface_idx >= surfaceCount) return;
-
-    const int32_t pml_idx =
-        gpuData->pml_acoustic_gravitySurfacePmlIndexArrayDevice[surface_idx];
-    const int32_t eindex =
-        gpuData->pmlAcousticElemMapperDevice[pml_idx];
-    const int32_t* lnid_base = &gpuData->lnidArrayDevice[eindex];
-
-    /* One-point face projection, consistent with the lumped gravity surface
-     * mass: qbar is the mean over the four z-min nodes. The host setup has
-     * already applied kappa_x*kappa_y to that mass and dt*(d_x+d_y) to its
-     * nodal damping. This kernel supplies the paired tangential CFS restoring
-     * and memory forces, including both axes in a corner PML. */
-    double qbar = 0.0;
-    for (int n = 0; n < 4; n++) {
-        const int32_t lnid = lnid_base[n * lenum];
-        qbar += (double)gpuData->pressureTm1Device[lnid];
-    }
-    qbar *= 0.25;
-
-    double fmem = 0.0;
-    for (int axis = 0; axis < 2; axis++) {
-        const double decay =
-            gpuData->pml_acoustic_zetaDecayArrayDevice[axis][pml_idx];
-        const double gain =
-            gpuData->pml_acoustic_zetaGainArrayDevice[axis][pml_idx];
-        solver_float* surface_zeta =
-            gpuData->pml_acoustic_gravitySurfaceZetaArrayDevice[axis];
-        const double z_old = (double)surface_zeta[surface_idx];
-        const double z_new = decay * z_old + gain * qbar;
-        surface_zeta[surface_idx] = (solver_float)z_new;
-        const double* surface_mem =
-            gpuData->pml_acoustic_gravitySurfaceMemForceArrayDevice[axis];
-        fmem += surface_mem[surface_idx] * z_new;
-    }
-    const double restore =
-        gpuData->pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice[surface_idx];
-    const double cfs = restore * qbar - fmem;
-
-    for (int n = 0; n < 4; n++) {
-        const int32_t lnid = lnid_base[n * lenum];
-        atomicAdd((solver_float*)(gpuData->pressureForceDevice + lnid),
-                  (solver_float)cfs);
+    int32_t lenum,gpu_data_t* gpuData,int32_t count) {
+    const int32_t index=blockIdx.x*blockDim.x+threadIdx.x;
+    if (index>=count) return;
+    const int32_t pml=gpuData->pml_acoustic_gravitySurfacePmlIndexArrayDevice[index];
+    const int32_t e=gpuData->pmlAcousticElemMapperDevice[pml];
+    const cpml_surface_t& c=gpuData->pmlGravityCoeffDevice[index];
+    /* Surface Jacobian S_x*S_y, with one history per lumped top node.
+     * Cross terms and coincident poles use the same inertia builder as bulk. */
+    for (int n=0;n<4;++n) {
+        const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
+        const double force=c.nodal_mass_dt2*cpml_inertia_force(
+            c.inertia,(double)gpuData->pressureTm1Device[ln],
+            gpuData->pmlGravityStateDevice+index+(size_t)(2*n)*count,
+            (size_t)count);
+        atomicAdd(gpuData->pressureForceDevice+ln,(solver_float)force);
     }
 }
 

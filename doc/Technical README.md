@@ -88,7 +88,12 @@ interactions are in the
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
   With `abc_type=cpml`, `cpml_clamp_outer` defaults to `yes`; set it explicitly
-  to `no` to disable the outer displacement/acoustic-scalar clamp.
+  to `no` to disable the outer displacement/acoustic-scalar clamp. The complete
+  operator defaults to `cpml_mpml_cross_fraction=0`; explicit older `0.1`
+  settings remain active. Use `native` Hex8 integration and the `effective`
+  GPU stiffness path. CPML requires `use_checkpoint=0` and `checkpointing_rate=0`
+  because the checkpoint format omits absorber histories. See the
+  [formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details).
 - **Acoustic material and acoustic–elastic coupling:** `include_acoustic`, `acoustic_formulation`,
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
   `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
@@ -207,7 +212,7 @@ pressure output and verify ownership in `station_mediums.txt`. See
 [pressure and motion interpretation](Extended%20README.md#acoustic-pressure-and-motion-diagnostics)
 and [gravity-wave recovery limits](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
 The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
-records surface-gradient recovery errors, a face-average CPML inconsistency,
+records surface-gradient recovery errors, the earlier face-average CPML inconsistency,
 and source-corrupted experiments with a corrected-source follow-up. Validate
 generated source forces before interpreting a failed boundary experiment.
 Small operator tests or finite field output alone do not validate CPML

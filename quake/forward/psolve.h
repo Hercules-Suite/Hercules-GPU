@@ -50,6 +50,7 @@
 
 #include "octor.h"
 #include "acoustic_output.h"
+#include "cpml.h"
 
 #define ERROR       HERC_ERROR
 
@@ -429,7 +430,7 @@ typedef struct gpu_data_t {
     solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
     solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
     solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
-                                       // (Step B; NULL/0 = no damping ->
+                                       // (NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
 
     solver_float* porePressureTm1Device;     /* GPU pore pressure at t */
@@ -475,18 +476,18 @@ typedef struct gpu_data_t {
      * abc_type=cpml AND at least one acoustic-elastic interface face has a
      * PML element on either side. Per-face sideMask bit 0 means the
      * acoustic side is in PML; bit 1 means the elastic side is in PML.
-     * Each side stores its own face-normal-axis ADE coefficients. The
+     * Each side stores its own cofactor (tangential product) coefficients. The
      * acoustic-side profile is used for the elastic->acoustic source term;
      * the elastic-side profile is used for the acoustic-pressure traction
      * on the solid. This avoids using water Vp/profile coefficients for an
      * elastic PML face, or vice versa. */
     uint8_t*     acousticInterfacePmlSideMaskDevice;
-    double*      acousticInterfacePmlAcoustic_aDevice;
-    double*      acousticInterfacePmlAcoustic_bDevice;
-    double*      acousticInterfacePmlAcoustic_invKappaDevice;
-    double*      acousticInterfacePmlElastic_aDevice;
-    double*      acousticInterfacePmlElastic_bDevice;
-    double*      acousticInterfacePmlElastic_invKappaDevice;
+    cpml_interface_t* acousticInterfacePmlAcousticDevice;
+
+
+    cpml_interface_t* acousticInterfacePmlElasticDevice;
+
+
     solver_float* acousticInterfacePsiPressureDevice;
     solver_float* acousticInterfacePsiAccelDevice;
     uint8_t*     pressureFreeSurfaceNodeFlagsDevice;
@@ -515,121 +516,20 @@ typedef struct gpu_data_t {
     fvector_t*   kappaVectorDevice;
     //edata_t*     matPropsDevice;
 
-    /* CPML state on device, partitioned by material type. Each PML element
-     * sits in exactly one mapper (elastic or acoustic); coefficient and
-     * memory-variable arrays are sized by the corresponding per-type count.
-     *
-     * Profile coefficients (a_j, b_j, 1/kappa_j) are precomputed per element
-     * from the element geometry plus a CPML-wide reference Vp and the
-     * per-face damping profile (d, kappa, alpha):
-     *   pml_b_j      = exp(-(d_j/kappa_j + alpha_j) * dt);
-     *   pml_a_j      = (d_j / (kappa_j * (d_j + kappa_j * alpha_j)))*(pml_b_j-1);
-     *   pml_invKappa = 1 / kappa_j.
-     * For axes outside the face mask the identity (b=1, a=0, invKappa=1) is
-     * stored so the recurrence ψ ← b·ψ + a·∂u acts as a no-op on that axis.
-     *
-     * Elastic psi has 9 components: psi[i][j] is ψ_{i}^{(j)} = j-axis
-     * convolution of ∂_j u_i. Acoustic psi has 3 components: psi[j] is the
-     * j-axis convolution of ∂_j p (scalar pressure field).
-     */
-    /* --- Elastic PML state ---
-     *
-     * a_eff_j  = a_j / (4h),     storage of pml_elastic_a_jArrayDevice
-     * invK_eff_j = (1/kappa_j) / (4h), storage of pml_elastic_invKappa_jArrayDevice
-     *   (pre-scaling by 1/(4h) absorbs the hex8 1-pt B-matrix factor so the
-     *    kernel just multiplies by the raw signed displacement sum.)
-     *
-     * muCoeff     = dt^2 * h^2 * mu / 4
-     * lambdaCoeff = dt^2 * h^2 * lambda / 4
-     *   (these combine the Galerkin volume factor h^2/4 with material and
-     *    time-step constants so the kernel only needs one multiply per term.)
-     */
-    int32_t       pmlElasticElemCount;
-    int32_t*      pmlElasticElemMapperDevice;
-    double*       pml_elastic_b_xArrayDevice;
-    double*       pml_elastic_b_yArrayDevice;
-    double*       pml_elastic_b_zArrayDevice;
-    double*       pml_elastic_a_xArrayDevice;        /* raw a (native norm) */
-    double*       pml_elastic_a_yArrayDevice;
-    double*       pml_elastic_a_zArrayDevice;
-    double*       pml_elastic_invKappa_xArrayDevice; /* raw 1/kappa */
-    double*       pml_elastic_invKappa_yArrayDevice;
-    double*       pml_elastic_invKappa_zArrayDevice;
-    double*       pml_elastic_muCoeffArrayDevice;    /* unused (cleanup) */
-    double*       pml_elastic_lambdaCoeffArrayDevice;/* unused (cleanup) */
-    solver_float* pml_elastic_psiArrayDevice[3][3];  /* [i_disp][j_axis] */
-    /* Extra gradient-side psi memory. psiShear is used by the Rayleigh b*K
-     * CPML branch; psiKappa is kept for symmetric allocation/free layout. */
-    solver_float* pml_elastic_psiShearArrayDevice[3][3];
-    solver_float* pml_elastic_psiKappaArrayDevice[3][3];
-    /* Divergence-side CPML, correct 2nd-order displacement form
-     * (Matzen 2011; Xie et al. 2014). Multiplying the momentum equation
-     * by s_j turns the divergence-side stretch into, per damping axis a:
-     *   rho*d_a du_i/dt           (mass-prop. damping, in the mass arrays)
-     *   + rho*d_a*alpha_a u_i     (CFS restoring)
-     *   - rho*d_a*alpha_a^2 zeta_i^(a)   (CFS displacement memory)
-     * The CFS restoring and memory are evaluated together in
-     * kernelPMLElasticStep from the element-centroid displacement
-     * ubar_i = (1/8) sum_n u_i^(n) so they cancel exactly at DC; the
-     * per-node net CFS force is
-     *   cfs_i = restoreCoeff*ubar_i - sum_a memForce_a*zeta_i^(a)
-     * zeta_i^(a) advances by the exact exponential integrator
-     *   zeta_new   = zetaDecay_a*zeta_old + zetaGain_a*ubar_i
-     *   zetaDecay_a = exp(-alpha_a*dt)
-     *   zetaGain_a  = (1 - exp(-alpha_a*dt)) / alpha_a
-     *   memForce_a  = dt^2 * (rho*h^3/8) * d_a * alpha_a^2
-     * divPsiArrayDevice is the zeta_i^(a) state (9 per element). */
-    solver_float* pml_elastic_divPsiArrayDevice[3][3];/* zeta_i^(a) state */
-    double*       pml_elastic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
-    double*       pml_elastic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
-    double*       pml_elastic_memForceArrayDevice[3]; /* dt^2 Mn d_a a_a^2 */
-    /* CFS restoring coeff = dt^2 * M_node * sum_a(d_a*alpha_a). The
-     * restoring +rho*d*alpha*u and the memory -rho*d*alpha^2*zeta are
-     * BOTH evaluated in-kernel from the element-centroid displacement so
-     * they cancel exactly at DC discretely (a per-node restoring vs a
-     * centroid zeta did NOT cancel and blew up at corners in v10). */
-    double*       pml_elastic_restoreCoeffArrayDevice;
-
-    /* --- Acoustic PML state ---
-     *
-     * Same pre-scaling for a and invKappa as elastic above.
-     * forceCoeff = dt^2 * h^2 / (4 * rho)
-     *   (combines volume integration and 1/rho for the acoustic Laplacian.)
-     */
-    int32_t       pmlAcousticElemCount;
-    int32_t*      pmlAcousticElemMapperDevice;
-    double*       pml_acoustic_b_xArrayDevice;
-    double*       pml_acoustic_b_yArrayDevice;
-    double*       pml_acoustic_b_zArrayDevice;
-    double*       pml_acoustic_a_xArrayDevice;        /* a / (4h) */
-    double*       pml_acoustic_a_yArrayDevice;
-    double*       pml_acoustic_a_zArrayDevice;
-    double*       pml_acoustic_invKappa_xArrayDevice; /* (1/kappa) / (4h) */
-    double*       pml_acoustic_invKappa_yArrayDevice;
-    double*       pml_acoustic_invKappa_zArrayDevice;
-    double*       pml_acoustic_forceCoeffArrayDevice;
-    solver_float* pml_acoustic_psiArrayDevice[3];    /* [j_axis], scalar field */
-    /* Step B -- acoustic divergence-side CFS-CPML (scalar mirror of the
-     * validated elastic two-sided). zetaP is the pressure-convolution
-     * memory (3 per element, one per stretch axis). restoreCoeff/memForce
-     * use the acoustic nodal mass (volume/(8*bulk)) in place of rho*h^3/8.
-     * The matched kappa-inertia and the mass-prop damping are applied to
-     * the nodal pressure mass / pressureDampDevice respectively. */
-    double*       pml_acoustic_zetaDecayArrayDevice[3];/* exp(-alpha_a dt) */
-    double*       pml_acoustic_zetaGainArrayDevice[3]; /* (1-decay)/alpha_a */
-    double*       pml_acoustic_memForceArrayDevice[3]; /* dt^2 Mp d_a a_a^2 */
-    double*       pml_acoustic_restoreCoeffArrayDevice;/* dt^2 Mp sum d_a a_a */
-    solver_float* pml_acoustic_zetaPArrayDevice[3];    /* [j_axis] zeta_p */
-
-    /* Gravity free-surface CPML correction. Only top-face acoustic PML
-     * elements are mapped, so gravity-free and non-surface PML elements pay
-     * no per-step cost. The surface inertia is stretched in tangential x/y;
-     * its CFS restoring/memory pair is assembled only to the four top nodes. */
-    int32_t       pmlAcousticGravitySurfaceCount;
-    int32_t*      pml_acoustic_gravitySurfacePmlIndexArrayDevice;
-    double*       pml_acoustic_gravitySurfaceMemForceArrayDevice[2];
-    double*       pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice;
-    solver_float* pml_acoustic_gravitySurfaceZetaArrayDevice[2];
+    /* Full second-order CPML. State is SoA by history channel and element;
+     * all histories are local, and assembled forces use the existing MPI path. */
+    int32_t pmlElasticElemCount;
+    int32_t* pmlElasticElemMapperDevice;
+    cpml_element_t* pmlElasticCoeffDevice;
+    solver_float* pmlElasticStateDevice;
+    int32_t pmlAcousticElemCount;
+    int32_t* pmlAcousticElemMapperDevice;
+    cpml_element_t* pmlAcousticCoeffDevice;
+    solver_float* pmlAcousticStateDevice;
+    int32_t pmlAcousticGravitySurfaceCount;
+    int32_t* pml_acoustic_gravitySurfacePmlIndexArrayDevice;
+    cpml_surface_t* pmlGravityCoeffDevice;
+    solver_float* pmlGravityStateDevice;
 
     /* Per-element (sized [lenum]) PML flag. NULL when abc_type != cpml; when
      * non-NULL, has value 1 for any element that lives in either PML pipeline
@@ -645,23 +545,9 @@ typedef struct gpu_data_t {
      * free surface and is never clamped. NULL otherwise. */
     uint8_t*      pmlClampNodeMaskDevice;
 
-    /* Elastic PML stiffness mode (set from Param.theCpmlNativeStiffness
-     * at CPML setup). 1 = native effective stiffness + CPML correction
-     * (kernelStiffnessCalcLocal processes PML elements; kernelPMLElastic-
-     * Step adds -(nodalPml-nodalRaw)). 0 = standalone 1-pt reduced
-     * (kernelStiffnessCalcLocal skips PML; kernelPMLElasticStep adds the
-     * full -nodalPml). Irrelevant in dashpot mode. */
+    /* Full Hex8 (1) or diagnostic one-point (0) integration. Both modes
+     * are assembled completely by the PML kernel; interior kernels skip PML. */
     int           pmlNativeStiffness;
-
-    /* Acoustic PML stiffness mode (set from
-     * Param.theCpmlNativeStiffnessAcoustic at CPML setup). Independent of
-     * pmlNativeStiffness so the acoustic PML can run native+correction
-     * while the elastic PML stays reduced (or vice versa). 1 = native
-     * (kernelAcousticPressureForce processes PML acoustic elements;
-     * kernelPMLAcousticStep adds -(P_pml-P_raw)+cfs). 0 = standalone
-     * 1-pt reduced (kernelAcousticPressureForce skips PML acoustic;
-     * kernelPMLAcousticStep adds full -P_pml+cfs). Irrelevant without
-     * acoustic CPML. */
     int           pmlNativeStiffnessAcoustic;
     /* Material damping inside the elastic PML zone. 0 none/conservative
      * elastic CPML, 2 rayleigh. BKT-family damping is not supported inside
@@ -739,7 +625,7 @@ struct mysolver_t {
     solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
     solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
     solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
-    solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (Step B;
+    solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (
                                    * 0 everywhere unless acoustic PML) */
     solver_float* pore_pressure_tm1;   /* Poroelastic pore pressure at t - 1 */
     solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
@@ -759,19 +645,6 @@ struct mysolver_t {
     fvector_t* conv_kappa_1;
     fvector_t* conv_kappa_2;
     fvector_t* conv_kappa_3;
-
-    /* CPML host-side state (used for checkpoint I/O only). NULL when
-     * abc_type != cpml or the respective count is zero. The psi host mirrors
-     * shadow the device arrays of the same name; the elem_list arrays are
-     * host copies of the device mappers so checkpoint writes don't need a
-     * device->host pull just to know which eindex each slot belongs to. */
-    int32_t       pmlElasticElemCount;
-    int32_t*      pmlElasticElemList;
-    solver_float* pml_elastic_psi[3][3];
-
-    int32_t       pmlAcousticElemCount;
-    int32_t*      pmlAcousticElemList;
-    solver_float* pml_acoustic_psi[3];
 
     /* GPU device data structures - should be declared in a separate struct */
     gpu_spec_t*  gpu_spec; // GPU device specifications
@@ -886,7 +759,7 @@ void solver_init_acoustic_output_cpml(int32_t eindex,
  * must be suppressed (abc_type=cpml AND include_topography=yes AND
  * computation_method=VT AND pml_face_mask!=0 AND not an air element).
  * VT body-fits/deforms surface elements (-> curvilinear topo kernel),
- * which mismatches the cube CPML delta; this re-routes them to the
+ * which mismatches the Cartesian CPML operator; this re-routes them to the
  * regular cube path. FEM topography is a regular Cartesian mesh + air
  * elements (no element deformation), so this is a strict NO-OP for FEM
  * -- and 0 whenever CPML or topography is off, so every flat-surface
