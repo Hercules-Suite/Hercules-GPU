@@ -207,8 +207,10 @@ pressure output and verify ownership in `station_mediums.txt`. See
 and [gravity-wave recovery limits](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
 The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
 records surface-gradient recovery errors, a face-average CPML inconsistency,
-and rejected full-model experiments. Small operator/smoke tests alone do not
-validate a replacement gravity-surface operator.
+and source-corrupted experiments with a corrected-source follow-up. Validate
+generated source forces before interpreting a failed boundary experiment.
+Small operator tests or finite field output alone do not validate CPML
+absorption or reconstructed gravity-surface motion.
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

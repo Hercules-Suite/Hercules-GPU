@@ -1503,6 +1503,8 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.match(models, /current CFS memory uses a face average/);
   assert.match(models, /zero-mean face modes/);
   assert.match(models, /was not adopted/);
+  assert.match(models, /Earlier candidate and doubled-CPML runs contained invalid source forces/);
+  assert.match(models, /nonfinite output cannot establish an operator instability/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;

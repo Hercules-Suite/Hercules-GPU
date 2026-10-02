@@ -1563,11 +1563,15 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	kernel uses a face average. A zero-mean face mode therefore receives nodal
 	damping but no matching restoring/memory force. A nodal-memory candidate
 	passed analytical CFS step-response checks and an 8 s shifted-surface
-	GPU/MPI smoke test, but its reduced Izmir run produced nonfinite pressure
-	at 4.833 s. It was rejected and is not included in the production solver.
-	The failed experiment does not establish the cause of the original slow
-	motion. See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md)
-	for scope, raw-output checks, and the separate CPML-thickness failure.
+	GPU/MPI smoke test. Its original reduced Izmir run and the doubled-CPML
+	run contained NaNs in their generated source forces, traced to a
+	tabulated-source endpoint overread. Their nonfinite output cannot
+	establish an instability of either CPML variant. The source interpolator
+	now bounds that endpoint; reruns must regenerate the force files.
+	The nodal-memory candidate remains separate from the production solver.
+	See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md) for the
+	corrected-source comparisons and remaining absorption/reconstruction
+	validation limits. Finite output alone does not validate the slow motion.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
 	new solid displacements only after MPI sharing and hanging-node assignment.
 	The existing displacement exchange runs before the scalar update, using
