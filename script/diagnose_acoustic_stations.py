@@ -106,6 +106,11 @@ def check_probe(probe, medium):
     return rho
 
 
+def probe_cpml(probe, case):
+    """Explicit containing-element membership may change with CPML thickness."""
+    return probe.get("cpml_by_case", {}).get(case, probe.get("cpml"))
+
+
 def plot_probe(output, probe, curves, gravity_cases):
     import matplotlib
     matplotlib.use("Agg")
@@ -120,12 +125,13 @@ def plot_probe(output, probe, curves, gravity_cases):
                 axes[row, component].set_ylabel(f"{key}{'XYZ'[component]} ({unit})")
         axes[3, 0].plot(time, fields["p"][:, 0], label=name, color=color, lw=1)
         axes[3, 1].plot(time, fields["u"][:, 2], label=f"{name}: uZ", color=color, lw=1)
-        if name in gravity_cases and probe.get("surface") and probe.get("cpml") == 0:
+        if name in gravity_cases and probe.get("surface") and probe_cpml(probe, name) == 0:
             pressure_depth = -fields["p"][:, 0] / (rho * 9.81)
             axes[3, 1].plot(time, pressure_depth, label=f"{name}: −p/(ρg)", color=color, ls="--", lw=1)
             axes[3, 2].plot(time, fields["u"][:, 2] - pressure_depth, color=color, lw=1)
     axes[3, 0].set_ylabel("Pressure (Pa)")
-    eligible = probe.get("surface") and probe.get("cpml") == 0 and any(name in gravity_cases for name in curves)
+    eligible = probe.get("surface") and any(
+        name in gravity_cases and probe_cpml(probe, name) == 0 for name in curves)
     axes[3, 1].set_ylabel("Surface relation (m)" if eligible else "uZ (m)")
     axes[3, 2].set_ylabel("uZ + p/(ρg) (m)")
     if not eligible:
@@ -136,7 +142,8 @@ def plot_probe(output, probe, curves, gravity_cases):
         axis.set_xlabel("Time (s)")
     axes[0, 0].legend(fontsize=8)
     axes[3, 1].legend(fontsize=7)
-    figure.suptitle(f"Station {probe['station']} · {probe['label']} · CPML={probe.get('cpml', 'unknown')}\n"
+    memberships = ", ".join(f"{name}:{probe_cpml(probe, name)}" for name in curves)
+    figure.suptitle(f"Station {probe['station']} · {probe['label']} · CPML={memberships}\n"
                    "Raw histories; surface relation is a diagnostic, not an acceptance test")
     figure.tight_layout()
     figure.savefig(output / f"station.{probe['station']}.png", dpi=140)
@@ -156,6 +163,12 @@ def run(args):
         cases[name] = Path(path)
     if set(args.gravity_cases) - set(cases):
         raise ValueError("Every gravity case must be present in --cases")
+    for probe in probes:
+        overrides = probe.get("cpml_by_case", {})
+        if not isinstance(overrides, dict) or any(not isinstance(k, str) for k in overrides):
+            raise ValueError("cpml_by_case must map case names to 0, 1 or null")
+        if any(value not in (None, 0, 1) for value in [probe.get("cpml"), *overrides.values()]):
+            raise ValueError("CPML membership must be 0, 1 or null (unknown)")
     if not np.isfinite(args.late_start):
         raise ValueError("late-start must be finite")
     if args.history_stride is not None and args.history_stride < 1:
@@ -190,14 +203,15 @@ def run(args):
                 record["differences_from_first_case"][name] = {
                     key + "_max_abs": np.max(np.abs(values - baseline[1][key]), axis=0).tolist()
                     for key, values in fields.items()}
+            cpml = probe_cpml(probe, name)
             values = metrics(time, fields, args.late_start, rho,
-                             name in args.gravity_cases and probe.get("surface") and probe.get("cpml") == 0)
+                             name in args.gravity_cases and probe.get("surface") and cpml == 0)
             values.update(samples=len(time), first_time_s=float(time[0]), last_time_s=float(time[-1]),
-                          rho_kgm3=rho, owner=metadata[name][station])
+                          rho_kgm3=rho, cpml=cpml, owner=metadata[name][station])
             record["cases"][name] = values
             curves[name] = time, fields, rho
             for axis, label in enumerate("XYZ"):
-                csv_rows.append([name, station, probe["label"], probe.get("cpml", "unknown"), label,
+                csv_rows.append([name, station, probe["label"], "unknown" if cpml is None else cpml, label,
                                  values["u_peak_abs"][axis], values["u_final"][axis],
                                  values["u_late_slope_m_s"][axis], values["v_late_mean"][axis],
                                  values["v_peak_abs"][axis], values["a_peak_abs"][axis],
@@ -226,7 +240,8 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="+", required=True, metavar="NAME=CASE_DIRECTORY")
-    parser.add_argument("--probes", type=Path, required=True, help="JSON list: station, label, optional XYZ, surface, cpml")
+    parser.add_argument("--probes", type=Path, required=True,
+                        help="JSON list: station, label, optional XYZ, surface, cpml, cpml_by_case")
     parser.add_argument("--expected-samples", type=int)
     parser.add_argument("--late-start", type=float, default=80., help="Start of late-time window in seconds (default 80)")
     parser.add_argument("--gravity-cases", nargs="*", default=[], help="Cases with gravity enabled for surface-relation diagnostics")

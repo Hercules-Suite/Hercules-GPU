@@ -1,4 +1,6 @@
 import importlib.util
+import argparse
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +14,32 @@ spec.loader.exec_module(diagnostics)
 
 
 class AcousticStationDiagnosticsTest(unittest.TestCase):
+    def test_changed_cpml_membership_excludes_surface_relation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probes = root / 'probes.json'
+            probes.write_text(json.dumps([dict(station=0, label='surface', surface=True,
+                                               cpml=0, cpml_by_case={'thick': 1})]))
+            names = ['Time(s)'] + [c for columns in diagnostics.FIELDS.values() for c in columns]
+            time = np.linspace(0, 4, 41)
+            data = np.zeros((len(time), len(names)))
+            data[:, 0] = time
+            for name in ('base', 'thick'):
+                folder = root/name/'output/stations'
+                folder.mkdir(parents=True)
+                (folder/'station_mediums.txt').write_text(
+                    '# station_id owner_medium pressure_defined rho_kgm3\n0 acoustic yes 1025\n')
+                np.savetxt(folder/'station.0', data, header=' '.join(names))
+            args = argparse.Namespace(cases=[f'base={root}/base', f'thick={root}/thick'],
+                probes=probes, gravity_cases=['base', 'thick'], late_start=3,
+                history_stride=None, output_dir=root/'report', expected_samples=len(time), plot=False)
+            diagnostics.run(args)
+            cases = json.loads((args.output_dir/'summary.json').read_text())['stations'][0]['cases']
+            self.assertIn('surface_relation_rms_m', cases['base'])
+            self.assertNotIn('surface_relation_rms_m', cases['thick'])
+            self.assertEqual(cases['thick']['cpml'], 1)
+            self.assertEqual(diagnostics.probe_cpml({'cpml': 0, 'cpml_by_case': {'thick': None}}, 'thick'), None)
+
     def test_constant_acceleration_and_positive_down_surface_sign(self):
         time = np.linspace(0., 4., 401)
         accel = np.array([.2, -.4, .1])

@@ -61,7 +61,8 @@ static void close_value(double actual, double expected, const char* label) {
 }
 int main(int argc, char** argv) {
     const int cpml = argc > 1 && strcmp(argv[1], "cpml") == 0;
-    const int potential = cpml || (argc > 1 && strcmp(argv[1], "potential") == 0);
+    const int ramp = argc > 1 && strcmp(argv[1], "ramp") == 0;
+    const int potential = cpml || ramp || (argc > 1 && strcmp(argv[1], "potential") == 0);
     const int missing = argc > 1 && strcmp(argv[1], "missing") == 0;
     double field0[8] = {}, field1[8] = {};
     mysolver_t solver = {field0, field1}; Global.mySolver = &solver;
@@ -94,7 +95,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (!potential) solver.pressure_tm2 = NULL; // pressure mode needs only p[n]
-    const int steps = cpml ? 40000 : (potential ? 4000 : 1000);
+    const int steps = ramp ? 100000 : (cpml ? 40000 : (potential ? 4000 : 1000));
+    double reference_memory[3] = {}, previous_w[3] = {}, reference_u[3] = {};
     for (int n=0; n<=steps; ++n) {
         if (potential) {
             // Reproduce solver_swap_pressure_buffers + the current-field-only
@@ -104,7 +106,7 @@ int main(int argc, char** argv) {
             solver.pressure_tm2 = previous;
         }
         const double t = n*dt;
-        const double pulse = t < period ? pow(sin(M_PI*t/period), 2) : 0;
+        const double pulse = ramp ? t/(100*period) : (t < period ? pow(sin(M_PI*t/period), 2) : 0);
         for (int k=0; k<8; ++k) {
             const double x = (k&1) ? plane.h : 0;
             const double y = (k&2) ? plane.h : 0;
@@ -121,9 +123,26 @@ int main(int argc, char** argv) {
             if (!potential) {
                 close_value(plane.acoustic_disp[c], .5*amplitude[c]*t*t, "pressure displacement");
                 close_value(plane.acoustic_vel[c], amplitude[c]*t, "pressure velocity");
-            } else if (!cpml && t >= period + dt) {
+            } else if (!cpml && !ramp && t >= period + dt) {
                 close_value(plane.acoustic_disp[c], amplitude[c]*period/2, "pulse final displacement");
                 close_value(plane.acoustic_vel[c], 0, "pulse residual velocity");
+            }
+            if (potential) {
+                // Independent potential-gradient route: no pressure differences
+                // or acceleration integration. With rest initial conditions,
+                // a[n]=(w[n]-w[n-1])/dt, v[n]=(w[n]+w[n-1])/2,
+                // u[n]=dt*sum(w[0:n]). CPML is a causal linear filter and
+                // commutes with time differencing for zero initial memory.
+                double w = amplitude[c]*pulse;
+                if (cpml) {
+                    reference_memory[c] = plane.acoustic_cpml.b[c]*reference_memory[c]
+                                           + plane.acoustic_cpml.a[c]*w;
+                    w = plane.acoustic_cpml.inv_kappa[c]*w + reference_memory[c];
+                }
+                if (n) reference_u[c] += dt*previous_w[c];
+                close_value(plane.acoustic_vel[c], .5*(w+previous_w[c]), "direct potential velocity");
+                close_value(plane.acoustic_disp[c], reference_u[c], "direct potential displacement");
+                previous_w[c] = w;
             }
         }
     }
@@ -164,6 +183,9 @@ int main(int argc, char** argv) {
 
     def test_cpml_pulse_has_analytic_integrated_gain_and_no_residual_velocity(self):
         self.run_case("cpml")
+
+    def test_slow_potential_ramp_matches_direct_gradient_motion(self):
+        self.run_case("ramp")
 
 
 if __name__ == "__main__":

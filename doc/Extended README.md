@@ -2492,7 +2492,13 @@ These example coordinates apply to the Izmir surface datum, not to all models.
 The utility reads headers rather than assuming optional column offsets. It
 requires finite acoustic pressure and motion, checks sample counts, matching
 time axes and densities, and verifies supplied coordinates within 2 mm.
-Declare `surface` and actual containing-element `cpml` only when known. Results
+Declare `surface` and actual containing-element `cpml` only when known. For
+thickness comparisons, a probe can contain
+`"cpml_by_case":{"thick_cpml":1}`; entries override its common `cpml` flag,
+and `null` means unknown. Both JSON/CSV metrics and plots use each case's
+membership. A probe that changes from acoustic to solid must be recorded as
+a material-classification change and excluded from this acoustic-only reader.
+Results
 are raw per-component peaks, final values, late-window displacement slopes,
 velocity/pressure means and RMS values, integrated-motion residuals, and
 maximum waveform differences from the first case. `summary.json` is written
@@ -2520,6 +2526,86 @@ Use interior pressure and motion together, confirm any gravity interpretation
 with spatial propagation/dispersion and convergence, and treat CPML values as
 artificial absorber fields. A reduced peak alone does not validate a boundary
 condition or demonstrate that a remaining slow signal is physical.
+
+## Check gravity-wave dispersion and reconstruction
+
+`script/check_acoustic_gravity_mode.py` isolates the flat, uniform gravity
+surface from CPML and acoustic-solid coupling. It compiles the current Hex8
+stiffness and surface/volume mass expressions from the production source with
+a host C++ compiler, verifies the stiffness against independent exact tensor
+quadrature, and assembles a horizontal Fourier mode with a rigid bottom.
+NumPy solves the vertical generalized eigenproblem; CUDA and MPI are not used.
+
+```bash
+python3 script/check_acoustic_gravity_mode.py \
+  --depth 175.78125 --wavelengths 250 500 1000 2000 \
+  --layers 8 16 32 64 --output gravity_modes.json
+```
+
+`--depth` and `--wavelengths` are in metres; `--layers` gives positive vertical
+element counts. The example values are the defaults. The element width is
+depth/layers, and wavelengths must exceed two element widths. `--output` is
+required and refuses to overwrite an existing report. `CXX` selects the
+compiler, defaulting to `c++`. This reference uses water sound speed
+$`c=1500`$ m/s and $`g=9.81`$ m/s². Density cancels from the comparisons.
+
+For depth $`H`$, horizontal wavenumber $`k=2\pi/\lambda`$, and depth-positive
+coordinate $`z`$, the compressible reference has
+$`\phi\propto\cosh[\mu(H-z)]`$ and:
+
+```math
+\omega^2=g\mu\tanh(\mu H),\qquad \mu^2=k^2-\omega^2/c^2.
+```
+
+This follows from the acoustic wave equation, the rigid-bottom condition,
+and $`\phi_{tt}=g\phi_z`$ at the surface. Its incompressible limit is the
+standard $`\omega^2=gk\tanh(kH)`$ relation in the
+[MIT surface-gravity-wave notes](https://ocw.mit.edu/courses/12-802-wave-motion-in-the-ocean-and-the-atmosphere-spring-2008/fca533a5edb5f5d3e975ec4c2e63019f_MIT12_802S08_lec03.pdf).
+
+The report distinguishes frequency error from motion recovered with the
+one-sided vertical derivative in the top element. For the default 250 m
+wavelength and 175.78125 m water depth, h=21.97265625 m gives about −1.253%
+frequency error but a recovered surface-motion amplitude about 19.65% below
+the pressure-based surface value. At h=10.986328125 m these become −0.316%
+and 11.58%. These are uniform-grid, lossless operator results, not validation
+of an Izmir waveform or the complete CUDA/MPI solver.
+
+A separate static calculation integrates the potential equation after a
+unit sinusoidal permanent bottom displacement. The exact equilibrium
+surface vertical displacement is zero, while the horizontal particle
+displacement amplitude is $`1/\sinh(kH)`$ metres. The first-element gradient
+can retain a spurious vertical offset, converging with refinement. Thus a
+surface-motion mismatch may include spatial recovery error, and permanent
+horizontal particle displacement alone is not proof of instability.
+
+The host reconstruction regression also compares the production station and
+plane routines with a direct potential-gradient history. With zero initial
+fields, let $`w_n=\nabla\phi_n/\rho`$ (or its causal CPML-filtered value, with
+zero initial memory). The current pressure difference and motion integrator
+give the discrete identities:
+
+```math
+a_n=\frac{w_n-w_{n-1}}{\Delta t},\qquad
+v_n=\frac{w_n+w_{n-1}}{2},\qquad
+u_n=\Delta t\sum_{j=0}^{n-1}w_j.
+```
+
+`test_acoustic_plane_reconstruction.py` verifies these using a compact pulse,
+a 100 s slow potential ramp, and a pulse with three different CPML stretches.
+This isolates output time integration from spatial recovery and field
+evolution. It does not validate the potential field produced by a coupled
+simulation or justify detrending that field's resulting motion.
+
+For a reduced full-model investigation, changing
+`simulation_wave_max_freq_hz` changes meshing and frequency-dependent damping;
+it does not filter the source. Record whether the original source is retained
+or `source_is_filtered=1` is used in a separate source copy. Compare CPML
+variants within the same reduced configuration and keep the time step fixed
+unless conducting a separate time-convergence check. A coarser acoustic mesh
+also needs a gravity-wavelength check: gravity waves at a given frequency can
+be much shorter than acoustic waves. After changing CPML thickness, recheck
+material extension and actual point membership, and use `cpml_by_case` or
+separate manifests where a probe changes from interior to CPML.
 
 ## Compare plane output backends
 

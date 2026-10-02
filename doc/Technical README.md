@@ -205,7 +205,13 @@ alone cannot identify acoustic or CPML elements. See
 For acoustic peaks, enable ASCII station velocity, acceleration and pressure
 columns and use `script/diagnose_acoustic_stations.py` to compare completed
 case copies with a probe manifest. Change one CPML control at a time and retain
-raw signals; see [pressure and motion diagnostics](Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
+raw signals. The manifest's optional `cpml_by_case` overrides membership when
+CPML thickness changes; see [pressure and motion diagnostics](Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
+Use `script/check_acoustic_gravity_mode.py --output NEW_REPORT.json` for a
+host-only analytical check of production gravity dispersion and surface
+gradient recovery. Optional `--depth`, `--wavelengths`, and `--layers` choose
+the uniform reference problem; `CXX` selects the host C++ compiler. See
+[gravity-mode scope and defaults](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

@@ -1495,6 +1495,10 @@ test("documents controlled acoustic pressure and motion diagnostics", async () =
   assert.match(html, /--history-stride/);
   assert.match(html, /shared reconstruction error/);
   assert.match(html, /CPML remains active in both runs/);
+  assert.match(html, /gravity-mode-diagnostics/);
+  assert.match(html, /check_acoustic_gravity_mode\.py/);
+  assert.match(html, /without CPML, adaptive meshes, solid coupling or GPU\/MPI execution/);
+  assert.match(html, /does not filter the source/);
 });
 
 test("documents structured DRM boxes and generic station binary output", async () => {

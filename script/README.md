@@ -17,6 +17,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [compare_plane_outputs.py](compare_plane_outputs.py) | Compare every XYZ displacement in two completed sets of plane files, with bounded memory | NumPy |
 | [diagnose_plane_output.py](diagnose_plane_output.py) | Locate displacement peaks, extract full point histories, and join optional material/CPML metadata | NumPy |
 | [diagnose_acoustic_stations.py](diagnose_acoustic_stations.py) | Compare acoustic pressure, velocity, acceleration, and displacement across controlled runs | NumPy; Matplotlib for plots |
+| [check_acoustic_gravity_mode.py](check_acoustic_gravity_mode.py) | Compare production Hex8 gravity dispersion and surface-gradient recovery with a flat-water analytical reference | NumPy; host C++ compiler (`CXX`) |
 | [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or single-file station output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
@@ -124,7 +125,10 @@ Each case directory contains `output/stations/station.N` and
 `[{"station":18,"label":"p2_93_surface","x_m":500,"y_m":23250,"z_m":2812.5,"surface":true,"cpml":0}]`.
 Use actual station IDs and solver XYZ coordinates from your own run. Surface
 and CPML flags must be established from the model and containing-element audit;
-omit unknown flags. The tool requires acoustic ownership and finite pressure,
+omit unknown flags. If thickness changes membership, add
+`"cpml_by_case":{"thick_cpml":1}` to that probe; a case entry overrides `cpml`,
+and `null` explicitly marks unknown membership. Metrics and plots use the
+case-specific flag. The tool requires acoustic ownership and finite pressure,
 reads columns by their header, and rejects mismatched coordinates, times,
 densities, sample counts, and files changing during reading. It writes
 `metrics.csv` and a final `summary.json`; optional NPZ files retain every Nth
@@ -139,6 +143,25 @@ mass, and staggered pressure time limit this continuum relation as a numerical
 check. It is not an acceptance threshold. Station and plane motion share
 reconstruction, so agreement alone does not rule out a shared error. See the
 [controlled comparison](../doc/Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
+
+Check the gravity operator independently of a full simulation:
+
+```bash
+python3 script/check_acoustic_gravity_mode.py \
+  --depth 175.78125 --wavelengths 250 500 1000 2000 \
+  --layers 8 16 32 64 --output gravity_modes.json
+```
+
+These are also the default depth, wavelengths (metres), and vertical layer
+counts. `--output` is required and must be a new file. The script compiles
+extracted production stiffness/mass expressions with `CXX` (default `c++`),
+checks exact Hex8 quadrature, and solves a uniform, lossless water column with
+periodic horizontal motion and a rigid bottom. It reports gravity frequency,
+surface-gradient motion recovery, and the spurious surface vertical offset
+recovered after unit sinusoidal permanent bottom displacement. Water sound
+speed is 1500 m/s and gravity is 9.81 m/s². This excludes CPML, adaptive meshes,
+solid coupling and GPU/MPI execution. See the
+[scope and equations](../doc/Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
 
 Each generated DRM box writes one `drmdisplacements.N` containing native
 float64 triples, ordered `(time, concatenated face sample, XYZ)`. Pass exterior
