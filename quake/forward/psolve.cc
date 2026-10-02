@@ -12861,9 +12861,9 @@ static void solver_init() {
     /* --- Optional Dirichlet clamp at outer PML face --- */
     /* When cpml_clamp_outer=yes, mark every node that sits on a domain-
      * extent face touched by a PML (x_min, x_max, y_min, y_max, z_max).
-     * z_min is always the free surface so it is never clamped. The clamp
-     * is applied per-step in kernelDispCalc by zeroing tm2Disp at flagged
-     * nodes.
+     * The top is not selected by its Z coordinate, but its lateral rim
+     * can be flagged by X/Y. The displacement and acoustic scalar update
+     * kernels apply the mask at flagged nodes.
      *
      * The check is geometric (node coordinate equals nearendp / farendp on
      * the relevant axis) rather than element-based, so it correctly

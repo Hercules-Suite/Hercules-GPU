@@ -1053,11 +1053,11 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   /* CPML outer-face Dirichlet clamp -- acoustic field. The clamp mask
    * is geometric (any node on an x_min/x_max/y_min/y_max/z_max domain-
    * extent face), so acoustic-PML outer-face nodes are already flagged;
-   * kernelDispCalc zeros u there, and we must likewise zero the acoustic
-   * pressure (the primary field in the fluid) so the outgoing wave is
-   * terminated single-pass instead of reflecting off the outer face.
-   * Mirrors the elastic clamp exactly; no-op when cpml_clamp_outer=no
-   * (mask NULL). */
+   * kernelDispCalc zeros u there. Here the clamped scalar is pressure or
+   * density-scaled velocity potential, depending on the formulation.
+   * Absorption is provided by the CPML layer; this outer termination can
+   * reflect residual waves. No-op when cpml_clamp_outer=no (mask NULL).
+   * Pressure-release top nodes return earlier; gravity top nodes reach here. */
   if (gpuData->pmlClampNodeMaskDevice != NULL &&
       gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
     p_new = 0.0;
@@ -2477,9 +2477,9 @@ __global__  void kernelDispCalc(int32_t nharbored,
     /* Optional CPML outer-face Dirichlet clamp. pmlClampNodeMaskDevice is
      * non-NULL only when cpml_clamp_outer=yes; it marks nodes lying on
      * x_min/x_max/y_min/y_max/z_max domain-extent faces touched by a PML
-     * element. Force u=0 at those nodes so the wave cannot reflect off
-     * the outer free surface of the PML zone. z_min (free surface) is
-     * never clamped. */
+     * element. Force u=0 at those nodes; the CPML layer attenuates waves
+     * before and after any reflection at this outer termination. The
+     * top face is not selected by Z, but its lateral rim can be flagged. */
     if (gpuData->pmlClampNodeMaskDevice != NULL &&
         gpuData->pmlClampNodeMaskDevice[nindex] != 0) {
       tm2Disp.f[0] = 0;

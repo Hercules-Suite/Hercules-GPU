@@ -202,6 +202,10 @@ Use `script/diagnose_plane_output.py FILE --nx NX --ny NY --dt SAVED_DT
 Optional `--metadata FILE ...` joins the setup audit; geometric boundary bands
 alone cannot identify acoustic or CPML elements. See
 [plane amplitude diagnostics](Extended%20README.md#diagnose-large-plane-displacements).
+For acoustic peaks, enable ASCII station velocity, acceleration and pressure
+columns and use `script/diagnose_acoustic_stations.py` to compare completed
+case copies with a probe manifest. Change one CPML control at a time and retain
+raw signals; see [pressure and motion diagnostics](Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
 
 Validate the chosen physics, mesh/time resolution, and GPU/MPI path with an
 appropriate analytical or before/after comparison. Documentation checks do not

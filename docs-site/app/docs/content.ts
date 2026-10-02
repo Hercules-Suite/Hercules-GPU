@@ -2035,6 +2035,19 @@ if __name__ == "__main__":
         code: "python3 /path/to/Hercules_GPU/script/diagnose_plane_output.py planes/planedisplacements.0 \\\n  --nx 361 --ny 361 --dt 0.1 --expected-snapshots 1000 \\\n  --spacing 250 250 --xy-origin 0 0 --domain 90000 90000 \\\n  --cpml-thickness 439.453125 --points 0,183 88,0 1,90 \\\n  --output-dir plane_diagnostic",
       },
       {
+        id: "acoustic-station-diagnostics",
+        title: "Compare acoustic pressure and motion",
+        paragraphs: [
+          "Add acoustic stations at the selected plane locations and nearby submerged points. output_stations takes latitude, longitude and depth below the local topographic surface. Convert solver X/north and Y/east using the same coordinate projection and origin as the solver, then verify the actual XYZ position and acoustic ownership in station_mediums.txt. Preserve existing station IDs and record any inward offset used to avoid roundoff at an exact domain edge.",
+          "Use station_binary=no with print_station_velocities=yes, print_station_accelerations=yes and print_station_pressures=yes. A print rate of 1 retains every solver step for integration diagnostics. Save a baseline and a separate cpml_clamp_outer=no case with the same executable, source, mesh controls, time step, duration, damping, gravity and output settings. Only the clamp setting should differ. CPML remains active in both runs. A separate acoustic_free_surface_gravity=no run changes the surface physics and must be interpreted separately.",
+          "script/diagnose_acoustic_stations.py reads column headers, requires finite acoustic pressure and motion, checks station ownership and supplied XYZ coordinates within 2 mm, and rejects mismatched sample counts, time axes or densities. Each case directory contains output/stations/station.N and output/stations/station_mediums.txt. Its probe manifest is a JSON list, for example [{\"station\":18,\"label\":\"p2_93_surface\",\"x_m\":500,\"y_m\":23250,\"z_m\":2812.5,\"surface\":true,\"cpml\":0}]. These coordinates are an Izmir example. Surface and CPML flags require independent geometry/containing-element verification; omit unknown flags.",
+          "A new report directory receives metrics.csv and a final summary.json containing raw peaks, final values, late-time displacement slopes, velocity/pressure statistics, integrated-motion residuals and waveform differences from the first case. --history-stride exports every Nth raw sample plus the last to compact NPZ files; all saved samples still contribute to metrics. --plot optionally adds per-station figures using Matplotlib. No filtering or detrending is applied. Discard reports without a final summary.json.",
+          "For declared flat gravity-surface stations outside CPML, the continuum positive-down relation is p = −ρg uZ. The tool reports uZ + p/(ρg) only for --gravity-cases. Lumped surface mass, element-gradient recovery and staggered pressure timing limit this pointwise check. Integrated-motion residuals also depend on saved sampling and ASCII precision. Station/plane agreement cannot exclude a shared reconstruction error. Smaller amplitudes alone do not validate a boundary setting; use interior observations, spatial propagation and convergence to assess physical gravity motion.",
+        ],
+        codeLabel: "Compare completed acoustic station runs — Python 3 and NumPy",
+        code: "python3 script/diagnose_acoustic_stations.py \\\n  --cases clamp_yes=case_yes clamp_no=case_no --probes probes.json \\\n  --expected-samples 200000 --late-start 80 --gravity-cases clamp_yes clamp_no \\\n  --history-stride 20 --output-dir acoustic_report",
+      },
+      {
         id: "plane-animation-colours",
         title: "Smooth the animation colours",
         paragraphs: [

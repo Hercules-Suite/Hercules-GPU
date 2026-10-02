@@ -1486,6 +1486,17 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.doesNotMatch(sync, /pressureTm2Device/);
 });
 
+test("documents controlled acoustic pressure and motion diagnostics", async () => {
+  const response = await render("/docs/output-files");
+  const html = await response.text();
+  assert.match(html, /acoustic-station-diagnostics/);
+  assert.match(html, /diagnose_acoustic_stations\.py/);
+  assert.match(html, /--gravity-cases/);
+  assert.match(html, /--history-stride/);
+  assert.match(html, /shared reconstruction error/);
+  assert.match(html, /CPML remains active in both runs/);
+});
+
 test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();

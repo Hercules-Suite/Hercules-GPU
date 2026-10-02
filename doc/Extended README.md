@@ -1743,10 +1743,18 @@ results are specific to the recorded configuration and implementation.
 	debugging/regression with a warning.
 - `cpml_clamp_outer`
 	Optional. `yes` or `no` (default `no`). `yes` pins displacement to
-	zero on the outer PML faces (never `z_min`, the free surface),
-	converting round-trip absorption into single-pass. Useful for very
-	thin PMLs or very long runs that leak round-trip reflections; default
-	`no` keeps the classic free outer face.
+	zero on the four outer lateral faces and bottom. It also clamps the
+	acoustic scalar: pressure in pressure mode, or density-scaled velocity
+	potential in velocity-potential mode. A zero potential does not require
+	zero reconstructed water velocity, which depends on its spatial gradient.
+	The top face is not selected by its Z coordinate, but its lateral rim
+	can belong to a clamped side face. Pressure-release acoustic top nodes
+	use their dedicated update before the clamp; gravity-enabled top nodes
+	use the ordinary update and are clamped at that rim. `no` removes this
+	mask for both media while retaining CPML absorption. Neither setting
+	guarantees zero reflection from the outer termination. Compare interior
+	waveforms with one setting changed at a time; smaller amplitudes alone
+	do not establish which setting is more accurate.
 - `cpml_stiffness_mode`
 	Optional. `native` (default) or `reduced`. How the elastic PML
 	element stiffness is formed.
@@ -2435,6 +2443,83 @@ omitted this correction. Compare pressure/kinematic histories with interior
 points and check the free-surface geometry counts in the run log; backend
 agreement by itself cannot establish physical accuracy. Absorbing-layer samples
 remain artificial CPML fields, not physical interior motion observations.
+
+## Acoustic pressure and motion diagnostics
+
+After locating acoustic plane peaks, add stations at those same solver XYZ
+locations and at nearby submerged points. `output_stations` takes geographic
+latitude, longitude, and depth below the local topographic surface; plane
+indices are not geographic coordinates. In a PROJ-enabled build, invert the
+same WGS84 UTM zone and model origin used by the solver. Verify actual XYZ,
+density, and acoustic ownership in `station_mediums.txt`. Exact outer-edge
+coordinates can round outside the domain; record any small inward offset.
+Preserve existing station rows so their IDs remain stable.
+
+```ini
+station_binary = no
+print_station_velocities = yes
+print_station_accelerations = yes
+print_station_pressures = yes
+# Choose output_stations_print_rate to resolve the signals; reconstruction
+# itself still updates every solver step. Use 1 for integration diagnostics.
+output_stations_print_rate = 1
+```
+
+Run separate copies with identical executable, mesh controls, source, time step,
+duration, damping, gravity and output settings. First compare
+`cpml_clamp_outer=yes` and `no`; only that physical control should differ.
+Keep all output and temporary-source paths separate. A further
+`acoustic_free_surface_gravity=no` run is a distinct physics comparison against
+the gravity-enabled baseline, not a CPML-only test. Changing CPML thickness
+also requires checking material extension, topography and point membership.
+
+```bash
+python3 script/diagnose_acoustic_stations.py \
+  --cases clamp_yes=case_yes clamp_no=case_no --probes probes.json \
+  --expected-samples 200000 --late-start 80 --gravity-cases clamp_yes clamp_no \
+  --history-stride 20 --output-dir acoustic_report
+```
+
+Here each case has `output/stations/`, and `probes.json` is a list of acoustic
+probes, for example:
+
+```json
+[{"station":18,"label":"p2_93_surface","x_m":500,"y_m":23250,
+  "z_m":2812.5,"surface":true,"cpml":0}]
+```
+
+These example coordinates apply to the Izmir surface datum, not to all models.
+The utility reads headers rather than assuming optional column offsets. It
+requires finite acoustic pressure and motion, checks sample counts, matching
+time axes and densities, and verifies supplied coordinates within 2 mm.
+Declare `surface` and actual containing-element `cpml` only when known. Results
+are raw per-component peaks, final values, late-window displacement slopes,
+velocity/pressure means and RMS values, integrated-motion residuals, and
+maximum waveform differences from the first case. `summary.json` is written
+only after every probe succeeds; discard incomplete reports without it.
+`--plot` requires Matplotlib. `--history-stride` exports compact NPZ histories
+without altering metrics calculated from all saved samples.
+
+For a flat gravity surface outside CPML, the continuum linearized condition,
+with Z positive down and zero initial surface displacement, is:
+
+```math
+p = -\rho g u_z, \qquad g = 9.81\;\mathrm{m/s^2}.
+```
+
+This is the linearized dynamic free-surface condition with the vertical sign
+converted to Hercules coordinates; see the [MIT wave notes, section 1.2](https://web.mit.edu/fluids-modules/waves/www/material/chap-6.pdf).
+
+The report evaluates the residual $`u_z+p/(\rho g)`$ only for declared surface,
+non-CPML probes in `--gravity-cases`. Lumped surface mass, element-gradient
+recovery and the half-step pressure difference in velocity-potential mode
+limit pointwise agreement. This is a diagnostic, not a pass/fail criterion.
+The integrated velocity/displacement checks also depend on saved sampling
+and ASCII rounding; they cannot rule out a shared reconstruction error.
+Use interior pressure and motion together, confirm any gravity interpretation
+with spatial propagation/dispersion and convergence, and treat CPML values as
+artificial absorber fields. A reduced peak alone does not validate a boundary
+condition or demonstrate that a remaining slow signal is physical.
 
 ## Compare plane output backends
 

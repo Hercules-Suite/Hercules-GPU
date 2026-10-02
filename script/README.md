@@ -16,6 +16,7 @@ are supplied manually; these utilities do not parse `parameters.in`.
 | [read_planes.py](read_planes.py) | Inspect plane layout and scan all displacements for finite values and peak vertical motion | NumPy |
 | [compare_plane_outputs.py](compare_plane_outputs.py) | Compare every XYZ displacement in two completed sets of plane files, with bounded memory | NumPy |
 | [diagnose_plane_output.py](diagnose_plane_output.py) | Locate displacement peaks, extract full point histories, and join optional material/CPML metadata | NumPy |
+| [diagnose_acoustic_stations.py](diagnose_acoustic_stations.py) | Compare acoustic pressure, velocity, acceleration, and displacement across controlled runs | NumPy; Matplotlib for plots |
 | [read_drm.py](read_drm.py) | Inspect ten structured DRM box faces or single-file station output, time range, and peak XYZ displacements | Python standard library |
 | [read_mesh.py](read_mesh.py) | Check paired mesh coordinates, material records, and element IDs | NumPy |
 | [animations_mpi.py](animations_mpi.py) | Render vertical-velocity PNG frames from plane displacements | NumPy, xarray, PyGMT/GMT, joblib |
@@ -106,6 +107,38 @@ containing-element materials and actual CPML flags exported at setup by
 configuration. Without it, acoustic/solid/CPML classification stays unknown;
 the geometric boundary band is only a candidate region. See the
 [diagnostic workflow](../doc/Extended%20README.md#diagnose-large-plane-displacements).
+
+For acoustic points, enable ASCII station velocity, acceleration, and pressure
+output in separate copies of a case. Preserve the same station list and sampling
+in each copy. Compare completed runs with:
+
+```bash
+python3 script/diagnose_acoustic_stations.py \
+  --cases clamp_yes=case_yes clamp_no=case_no --probes probes.json \
+  --expected-samples 200000 --late-start 80 --gravity-cases clamp_yes clamp_no \
+  --history-stride 20 --output-dir acoustic_report
+```
+
+Each case directory contains `output/stations/station.N` and
+`output/stations/station_mediums.txt`. The JSON manifest is a list such as
+`[{"station":18,"label":"p2_93_surface","x_m":500,"y_m":23250,"z_m":2812.5,"surface":true,"cpml":0}]`.
+Use actual station IDs and solver XYZ coordinates from your own run. Surface
+and CPML flags must be established from the model and containing-element audit;
+omit unknown flags. The tool requires acoustic ownership and finite pressure,
+reads columns by their header, and rejects mismatched coordinates, times,
+densities, sample counts, and files changing during reading. It writes
+`metrics.csv` and a final `summary.json`; optional NPZ files retain every Nth
+raw sample plus the last, while metrics always use all saved samples.
+`--plot` writes per-station figures when Matplotlib is available.
+
+Keep raw signals: the tool neither filters nor detrends them. Integrated
+velocity/acceleration residuals depend on saved sampling and text precision.
+For declared gravity-surface stations outside CPML it also reports
+`uZ + p/(rho*9.81)`, using positive-down Z. Pointwise recovery, lumped surface
+mass, and staggered pressure time limit this continuum relation as a numerical
+check. It is not an acceptance threshold. Station and plane motion share
+reconstruction, so agreement alone does not rule out a shared error. See the
+[controlled comparison](../doc/Extended%20README.md#acoustic-pressure-and-motion-diagnostics).
 
 Each generated DRM box writes one `drmdisplacements.N` containing native
 float64 triples, ordered `(time, concatenated face sample, XYZ)`. Pass exterior
