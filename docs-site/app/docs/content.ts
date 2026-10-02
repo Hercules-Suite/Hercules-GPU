@@ -780,7 +780,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
         codeLabel: "parameters.in — water over elastic solid",
         code: "include_acoustic = yes\nacoustic_formulation = velocity_potential\nacoustic_free_surface_gravity = no\nacoustic_interface_coupling = yes\nacoustic_interface_projection = point\nacoustic_interface_face_filter = all\nacoustic_interface_max_level = -1\nacoustic_mesh_refinement_factor = 1.0\nacoustic_quality_factor = 0\n\ncvmdb_input_file = profile\nnumber_profile_layers = 2\nprofile_layers =\n# z_top(m) Vp(m/s) Vs(m/s) rho(kg/m3) Qp Qs\n 0.0   1500.0    0.0 1000.0 1.0e6 1.0e6\n 100.0 2600.0 1400.0 2300.0 1.0e6 1.0e6",
-        note: "The default pressure-release surface is appropriate for the existing hydroacoustic path. Set acoustic_free_surface_gravity=yes when linear surface-gravity waves are part of the modeled physics; lateral acoustic CPML then includes the tangential gravity-surface correction. The current CFS memory uses a face average although mass and damping are nodal; zero-mean face modes receive damping without a matching restoring/memory force. A nodal-memory candidate passed host and small GPU/MPI tests and remains experimental; it was not adopted into production. Earlier candidate and doubled-CPML runs contained invalid source forces from a tabulated-source endpoint overread, so their nonfinite output cannot establish an operator instability. Regenerate and verify source forces with the corrected interpolator before comparing boundary or interface choices. Finite output alone does not establish CPML absorption or gravity-surface reconstruction accuracy. Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
+        note: "The default pressure-release surface is appropriate for the existing hydroacoustic path. Set acoustic_free_surface_gravity=yes when linear surface-gravity waves are part of the modeled physics; lateral acoustic CPML then includes the tangential gravity-surface correction. The complete operator now uses independent nodal surface memories and the full tangential x/y product, including corners. Earlier candidate and doubled-CPML runs contained invalid source forces from a tabulated-source endpoint overread, so their nonfinite output cannot establish an operator instability. Regenerate and verify source forces with the corrected interpolator before comparing boundary or interface choices. Finite output alone does not establish CPML absorption or gravity-surface reconstruction accuracy. Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
       },
       {
         id: "coupling-poroelastic",
@@ -880,15 +880,34 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "Perfectly matched layer rules",
         paragraphs: [
           "abc_type=dashpot selects the legacy Lysmer boundary. abc_type=cpml selects the unsplit convolutional PML on x_min, x_max, y_min, y_max, and z_max; z_min remains the free surface. CPML supports elastic and acoustic elements, while poroelastic and nonlinear candidates inside the PML are intentionally left as linear elastic CPML elements.",
-          "Choose either a positive cpml_thickness_m or a positive cpml_layers count. The baseline below uses the validated conservative kappa=1 native-stiffness path. Startup prints the realized thickness, reference wave speed, critical time-step estimate, and element counts; verify them before relying on absorption. With abc_type=cpml, cpml_clamp_outer defaults to yes: outer lateral and bottom nodes are clamped. Set cpml_clamp_outer=no explicitly to remove that clamp while keeping CPML active.",
+          "Choose either a positive cpml_thickness_m or a positive cpml_layers count. The baseline below uses kappa=1 and complete Hex8 CPML integration. Startup prints the realized thickness, reference wave speed, critical time-step estimate, and element counts; verify them before relying on absorption. With abc_type=cpml, cpml_clamp_outer defaults to yes: outer lateral and bottom nodes are clamped. Set cpml_clamp_outer=no explicitly to remove that clamp while keeping CPML active.",
+        ],
+      },
+      {
+        id: "pml-complete-operator",
+        title: "Complete second-order operator",
+        paragraphs: [
+          "Each coordinate stretch is S_j(s)=kappa_j+d_j/(s+alpha_j). The full Jacobian J=S_x S_y S_z multiplies inertia; elastic weak stiffness uses J/(S_j S_k), and scalar acoustic stiffness uses J/S_j². This includes tangential stiffness and edge/corner products omitted by the earlier gradient-only correction. Native mode integrates every Hex8 mode and equals the interior stiffness when unstretched. Reduced mode remains rank deficient and is diagnostic only.",
+          "Trapezoidal auxiliary equations implement the rational products without divided-pole singularities. Inertia memory is nodal, as is the leading lumped mass. Interface fluxes use J/S_normal with independent side and quadrature histories. The gravity surface uses the full tangential S_x S_y product at each top node. All histories stay on the GPU and use the existing force exchanges.",
+          "The default cpml_mpml_cross_fraction is now 0. Nonzero mixing breaks the separable coordinate mapping and can increase reflections substantially; an explicit 0.1 in an older input remains active. Use stiffness_calculation_method=effective for non-BKT CPML runs. CPML rejects checkpoint reads and writes because the legacy format omits absorber histories: use_checkpoint and checkpointing_rate must both be zero.",
+          "Native histories require 204 solver scalars per elastic PML element and 60 per acoustic element, plus coefficients. Gravity faces add eight scalars and coupled faces add 24 per side. Verify device memory and timing on the target mesh. Earlier published CPS numbers concern incomplete operators and do not validate arbitrary settings of this formulation.",
+        ],
+      },
+      {
+        id: "pml-horizon-validation",
+        title: "Horizon validation, October 2026",
+        paragraphs: [
+          "The 100 s homogeneous 10 km versus 20 km comparison preserves mesh spacing, source and physical receivers. With native integration and zero cross-axis mixing, the median/worst 1 Hz displacement errors over the same 25 interior receivers fell from 11.47%/32.99% in the earlier implementation to 1.10%/2.69%. Eight added side/bottom/corner receivers give 1.88%/4.98% over 33 interior receivers. The comparison retains DC and uses no amplitude or time fit. Raw velocity errors remain larger because the source contains unresolved high frequencies.",
+          "Coupled flat-water comparisons gave median/worst displacement errors of 0.65%/2.06% with gravity off and 1.68%/3.33% with gravity on. Separate CUDA tests of the production helpers cover P/S incidence through 80 degrees, Rayleigh packets and slow gravity waves. The full elastic solver remained finite through 1,000 s; late velocity RMS decreased at every recorded station. One/four-rank and host/CUDA-aware exchange comparisons remained finite. A matched single-run timing check increased total solver wall time from 14.13 to 17.16 seconds, about 21%; compute and absorber memory costs are higher. Detailed metrics, scope and retained local evidence are in doc/Extended README.md.",
+          "These results cover double-precision homogeneous cases, not arbitrary heterogeneous meshes, attenuation combinations or curved free surfaces. The investigation harnesses are local-only and unavailable in a clean checkout. CPML checkpoint/restart remains unsupported.",
         ],
       },
       {
         id: "pml-baseline",
         title: "Baseline CPML example",
         codeLabel: "parameters.in — conservative CPML configuration",
-        code: "abc_type = cpml\ncpml_thickness_m = 0.0\ncpml_layers = 10\ncpml_reflection_target = 1.0e-3\ncpml_poly_order = 2\ncpml_kappa_max = 1.0\ncpml_alpha_max_hz = -1.0\ncpml_cfl_safety = 0.9\ncpml_mpml_cross_fraction = 0.1\ncpml_alpha_floor_fraction = 0.1\ncpml_partition_weight = 1.0\ncpml_clamp_outer = yes\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_pml_material_damping = none",
-        note: "A smaller reflection target is not automatically better: it increases attenuation strength and can tighten stability. Prefer additional physical thickness before changing kappa from the validated value of 1.",
+        code: "abc_type = cpml\ncpml_thickness_m = 0.0\ncpml_layers = 10\ncpml_reflection_target = 1.0e-3\ncpml_poly_order = 2\ncpml_kappa_max = 1.0\ncpml_alpha_max_hz = -1.0\ncpml_cfl_safety = 0.9\ncpml_mpml_cross_fraction = 0\ncpml_alpha_floor_fraction = 0.1\ncpml_partition_weight = 1.0\ncpml_clamp_outer = yes\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_pml_material_damping = none",
+        note: "A smaller reflection target is not automatically better: it increases attenuation strength and can tighten stability. Prefer additional physical thickness before changing kappa from the default value of 1.",
       },
       {
         id: "pml-material-damping",
@@ -2094,7 +2113,7 @@ if __name__ == "__main__":
         ],
         codeLabel: "parameters.in",
         code: "use_checkpoint     = 0\ncheckpointing_rate = 5000\ncheckpoint_path    = output/checkpoints",
-        note: "Checkpoint output serializes solver state and activates host-visible compatibility paths. Include its cost when measuring production performance.",
+        note: "CPML rejects checkpoint reads and writes because its histories are absent from the legacy format. Other checkpoint output serializes solver state and activates host-visible compatibility paths. Include its cost when measuring production performance.",
       },
       {
         id: "checkpoints-restart",

@@ -650,7 +650,7 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
 
 /* CPML build-time context. Populated by solver_init() while iterating
  * elements; the contents are uploaded into Global.gpuData and then freed
- * (except elem_list, which is moved into mySolver for checkpoint I/O).
+ * (persistent classification/profile metadata is retained separately).
  *
  * PML elements are partitioned by material type (elastic vs acoustic) at
  * setup time using element_is_acoustic(edata). Each side has its own
@@ -660,51 +660,16 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
 typedef struct cpml_build_s {
   uint8_t* face_mask;            /* [lenum], NULL when abc_type != cpml */
 
-  /* Elastic PML build state. The elastic PML runs as native effective
-   * stiffness + a CPML correction in the native (c1,c2) normalization
-   * (mu=9*c1, lambda=9*c2, dN=0.25*sign), so:
-   *   a[j]        = raw a_j        (no 1/(4h) prescale)
-   *   invKappa[j] = raw 1/kappa_j  (no 1/(4h) prescale)
-   *   b[j]        = exp() decay, dimensionless (unchanged)
-   *   muCoeff/lambdaCoeff = unused now (kept allocated; cleanup later)
-   */
-  int32_t  elastic_count;
-  int32_t* elastic_elem_list;    /* sized [lenum] during build */
-  double*  elastic_a[3];         /* [lenum] each, used [0..elastic_count) */
-  double*  elastic_b[3];
-  double*  elastic_invKappa[3];
-  double*  elastic_muCoeff;
-  double*  elastic_lambdaCoeff;
-  /* CFS divergence-side coefficients (Matzen 2nd-order form), per axis. */
-  double*  elastic_zetaDecay[3]; /* exp(-alpha_a*dt) */
-  double*  elastic_zetaGain[3];  /* (1-exp(-alpha_a*dt))/alpha_a */
-  double*  elastic_memForce[3];  /* dt^2 * (rho*h^3/8) * d_a * alpha_a^2 */
-  double*  elastic_restoreCoeff; /* dt^2 * (rho*h^3/8) * sum_a d_a*alpha_a */
-
-  /* Acoustic PML build state. Same pre-scaling for a / invKappa.
-   *   forceCoeff = dt^2 * h^2 / (4 * rho)
-   */
-  int32_t  acoustic_count;
+  int32_t elastic_count;
+  int32_t* elastic_elem_list;
+  cpml_element_t* elastic_coeff;
+  int32_t acoustic_count;
   int32_t* acoustic_elem_list;
-  double*  acoustic_a[3];
-  double*  acoustic_b[3];
-  double*  acoustic_invKappa[3];
-  double*  acoustic_forceCoeff;
-  /* Step B divergence-side CFS coeffs (scalar mirror of elastic;
-   * memForce/restoreCoeff use the acoustic nodal mass volume/(8*bulk)
-   * in place of the elastic rho*h^3/8). */
-  double*  acoustic_zetaDecay[3]; /* exp(-alpha_a*dt) */
-  double*  acoustic_zetaGain[3];  /* (1-exp(-alpha_a*dt))/alpha_a */
-  double*  acoustic_memForce[3];  /* dt^2 * nodalPressureMass * d_a*alpha_a^2 */
-  double*  acoustic_restoreCoeff; /* dt^2 * nodalPressureMass * sum d_a*alpha_a */
-
-  /* Tangential CFS stretch of the gravity free-surface inertia. The mapper
-   * stores indices into acoustic_elem_list/coeff arrays, not mesh indices. */
-  int32_t  acoustic_gravity_surface_count;
-  int32_t  acoustic_gravity_surface_capacity;
+  cpml_element_t* acoustic_coeff;
+  int32_t acoustic_gravity_surface_count;
+  int32_t acoustic_gravity_surface_capacity;
   int32_t* acoustic_gravity_surface_pml_index;
-  double*  acoustic_gravity_surface_memForce[2];
-  double*  acoustic_gravity_surface_restoreCoeff;
+  cpml_surface_t* acoustic_gravity_surface_coeff;
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
@@ -736,17 +701,10 @@ static int cpml_reserve_acoustic_gravity_surface(int32_t required) {
   if (resized == NULL) return -1;
   g_cpmlBuild.acoustic_gravity_surface_pml_index = (int32_t*)resized;
 
-  for (int axis = 0; axis < 2; axis++) {
-    resized = realloc(g_cpmlBuild.acoustic_gravity_surface_memForce[axis],
-                      (size_t)new_capacity * sizeof(double));
-    if (resized == NULL) return -1;
-    g_cpmlBuild.acoustic_gravity_surface_memForce[axis] = (double*)resized;
-  }
-
-  resized = realloc(g_cpmlBuild.acoustic_gravity_surface_restoreCoeff,
-                    (size_t)new_capacity * sizeof(double));
+  resized = realloc(g_cpmlBuild.acoustic_gravity_surface_coeff,
+                    (size_t)new_capacity * sizeof(cpml_surface_t));
   if (resized == NULL) return -1;
-  g_cpmlBuild.acoustic_gravity_surface_restoreCoeff = (double*)resized;
+  g_cpmlBuild.acoustic_gravity_surface_coeff = (cpml_surface_t*)resized;
   g_cpmlBuild.acoustic_gravity_surface_capacity = (int32_t)new_capacity;
   return 0;
 }
@@ -1188,7 +1146,7 @@ static struct Param_t {
   double theCpmlAlphaFloorFraction;
   int theCpmlPmlMaterialDamping;        /* 0 none(default) 2 rayleigh */
   noyesflag_t theCpmlClampOuter;
-  /* YES = native effective stiffness + CPML correction (default);
+  /* YES = fully integrated Hex8 CPML stiffness (default);
    * NO  = standalone 1-point reduced CPML stiffness. Declared/initialised
    * AFTER theCpmlClampOuter to preserve C++ designated-init order. */
   noyesflag_t theCpmlNativeStiffness;
@@ -1288,7 +1246,7 @@ static struct Param_t {
            .theCpmlKappaMax = 1.0,
            .theCpmlAlphaMaxHz = -1.0,
            .theCpmlCflSafety = 0.9,
-           .theCpmlMpmlCrossFraction = 0.1,
+           .theCpmlMpmlCrossFraction = 0.0,
            .theCpmlAlphaFloorFraction = 0.1,
            .theCpmlPmlMaterialDamping = 0,
            .theCpmlClampOuter = YES,
@@ -1383,12 +1341,12 @@ static struct Global_t {
    * in solver_init while g_cpmlBuild.face_mask is still alive; uploaded
    * alongside the other interface arrays. NULL when not applicable. */
   uint8_t* acousticInterfacePmlSideMask;
-  double* acousticInterfacePmlAcoustic_a;
-  double* acousticInterfacePmlAcoustic_b;
-  double* acousticInterfacePmlAcoustic_invKappa;
-  double* acousticInterfacePmlElastic_a;
-  double* acousticInterfacePmlElastic_b;
-  double* acousticInterfacePmlElastic_invKappa;
+    cpml_interface_t* acousticInterfacePmlAcoustic;
+
+
+    cpml_interface_t* acousticInterfacePmlElastic;
+
+
   int64_t acousticInterfacePmlFaceCount;
 
 } Global = {.myID = -1,
@@ -2990,7 +2948,7 @@ static int32_t parse_parameters(const char* numericalin) {
       }
 
       /* Elastic PML stiffness mode (default native). 'native' = full
-       * native effective stiffness + CPML correction (exact interior
+       * fully integrated Hex8 CPML stiffness (exact interior
        * operator at the inner edge, native hourglass control). 'reduced'
        * = standalone 1-point reduced CPML stiffness (no higher modes;
        * the pre-a1c0fb8 behaviour, kept for comparison). */
@@ -3011,7 +2969,7 @@ static int32_t parse_parameters(const char* numericalin) {
       /* Acoustic PML stiffness mode. Defaults to the (resolved) elastic
        * value so existing configs are bit-unchanged, but can be set
        * independently via cpml_stiffness_mode_acoustic -- e.g. run the
-       * acoustic PML 'native' (consistent base + CPML correction, fixes
+       * acoustic PML 'native' (fully integrated Hex8 CPML, fixes
        * the lossless-fluid reduced-operator hourglass) while keeping the
        * elastic PML 'reduced'. */
       Param.theCpmlNativeStiffnessAcoustic = Param.theCpmlNativeStiffness;
@@ -4077,8 +4035,7 @@ static int32_t parse_parameters(const char* numericalin) {
 
   /* Auto-enable viscoelastic PML only for Rayleigh + CPML. BKT-family
    * damping is handled conservatively: BKT memory/force is skipped in the
-   * PML zone, native elastic stiffness is added there, and the elastic CPML
-   * correction is applied. The earlier stretched-BKT-memory CPML path was
+   * PML zone, where the complete elastic CPML operator is applied. The earlier stretched-BKT-memory CPML path was
    * observed to damp large heterogeneous runs to numerical zero. */
   if (Param.theAbcType == ABC_CPML &&
       Param.theCpmlPmlMaterialDamping == 0) {
@@ -4086,26 +4043,14 @@ static int32_t parse_parameters(const char* numericalin) {
     if (wouldPromote != 0 && !cpml_pml_damp_explicit) {
       Param.theCpmlPmlMaterialDamping = wouldPromote;
       if (Global.myID == 0) {
-        monitor_print(
-            "CPML: auto-enabled viscoelastic PML "
-            "(cpml_pml_material_damping=%s) -- type_of_damping is Rayleigh "
-            "with abc_type=cpml, which is numerically unstable "
-            "(material damping skipped on PML over an attenuating "
-            "interior, field -> NaN) without it; using the "
-            "viscoelastic CFS-CPML.\n",
-            "rayleigh");
+        monitor_print("CPML: continuing Rayleigh material damping inside the PML "
+                      "(cpml_pml_material_damping=rayleigh).\n");
       }
     } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
                Global.myID == 0) {
-      monitor_print(
-          "CPML WARNING: cpml_pml_material_damping=none was set "
-          "EXPLICITLY with type_of_damping=Rayleigh + abc_type=cpml. This "
-          "configuration is KNOWN NUMERICALLY UNSTABLE -- material "
-          "damping is skipped on PML over an attenuating interior and "
-          "the field may diverge to NaN. Honoring the explicit request as a "
-          "deliberate escape hatch (attribution / regression only). "
-          "OMIT the parameter to auto-use the validated viscoelastic "
-          "CFS-CPML.\n");
+      monitor_print("CPML WARNING: explicit cpml_pml_material_damping=none "
+                    "omits the interior Rayleigh law in the absorber; validate "
+                    "the resulting material-damping interface.\n");
     }
   }
 
@@ -4137,6 +4082,18 @@ static int32_t parse_parameters(const char* numericalin) {
 
   Param.includeNonlinearAnalysis = includeNonlinear;
   Param.theStiffness = stiffness_method;
+
+  if (Param.theAbcType == ABC_CPML) {
+    if (use_checkpoint || checkpointing_rate > 0) {
+      solver_abort(__FUNCTION_NAME, NULL,
+          "CPML checkpoint/restart is unsupported: the legacy checkpoint format "
+          "does not preserve absorber histories. Use use_checkpoint=0 and checkpointing_rate=0.\n");
+    }
+    if (stiffness_method != EFFECTIVE && Param.theTypeOfDamping < BKT) {
+      solver_abort(__FUNCTION_NAME, NULL,
+          "CPML requires stiffness_calculation_method=effective for GPU-resident force assembly.\n");
+    }
+  }
 
   Param.printK = printMatrixK;
   Param.printStationVelocities = printStationVels;
@@ -4360,16 +4317,20 @@ static int32_t parse_parameters(const char* numericalin) {
                       : "no");
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
+    if (Param.theCpmlMpmlCrossFraction > 0.0) {
+      monitor_print("CPML: nonzero cross-axis mixing is experimental and breaks "
+                    "separable matching; compare against cpml_mpml_cross_fraction=0.\n");
+    }
     monitor_print("PML stiffness mode (elastic):       %s\n",
                   (Param.theCpmlNativeStiffness == YES)
-                      ? "native+correction"
+                      ? "full Hex8 CPML"
                       : "reduced (standalone 1-pt)");
     monitor_print("PML stiffness mode (acoustic):      %s\n",
                   (Param.theCpmlNativeStiffnessAcoustic == YES)
-                      ? "native+correction"
+                      ? "full Hex8 CPML"
                       : "reduced (standalone 1-pt)");
     monitor_print("PML formulation:                    "
-                  "two-sided CFS-CPML (Matzen 2011)\n");
+                  "complete second-order CFS-CPML (full Jacobian products)\n");
   }
   monitor_print("Include Incident Plane Waves:       %s\n",
                 include_incident_planewaves);
@@ -5723,10 +5684,10 @@ static int mesh_reconstruct_bathymetry_normal_at_domain_point(
 
 #ifdef BOUNDARY
 static int mesh_compute_elastic_side_pml_profile_at_domain_point(
-    const vector3D_t* domain_point, int axis,
+    const vector3D_t* domain_point,
     const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
-    const vector3D_t* threeDVelModel_origin, double* a_out, double* b_out,
-    double* invKappa_out, uint8_t* face_mask_out) {
+    const vector3D_t* threeDVelModel_origin, cpml_interface_t* coeff_out,
+    uint8_t* face_mask_out) {
   tick_t ldb[3], ruf[3];
   uint8_t face_mask;
   double a3[3], b3[3], iK3[3], d3[3];
@@ -5735,8 +5696,7 @@ static int mesh_compute_elastic_side_pml_profile_at_domain_point(
   (void)basinVelModel_origin;
   (void)threeDVelModel_origin;
 
-  if ((domain_point == NULL) || (axis < 0) || (axis > 2) ||
-      (a_out == NULL) || (b_out == NULL) || (invKappa_out == NULL)) {
+  if ((domain_point == NULL) || (coeff_out == NULL)) {
     return 0;
   }
 
@@ -5771,9 +5731,7 @@ static int mesh_compute_elastic_side_pml_profile_at_domain_point(
       Param.theCpmlMpmlCrossFraction, Param.theCpmlAlphaFloorFraction,
       a3, b3, iK3, d3, al3, ka3);
 
-  *a_out = a3[axis];
-  *b_out = b3[axis];
-  *invKappa_out = iK3[axis];
+  *coeff_out = cpml_interface(d3, al3, ka3, Param.theDeltaT);
   return 1;
 }
 #endif /* BOUNDARY */
@@ -11542,67 +11500,15 @@ static void solver_init() {
         (int32_t*)malloc(Global.myMesh->lenum * sizeof(int32_t));
     g_cpmlBuild.acoustic_elem_list =
         (int32_t*)malloc(Global.myMesh->lenum * sizeof(int32_t));
-    g_cpmlBuild.elastic_muCoeff =
-        (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    g_cpmlBuild.elastic_lambdaCoeff =
-        (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    g_cpmlBuild.elastic_restoreCoeff =
-        (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    g_cpmlBuild.acoustic_forceCoeff =
-        (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    g_cpmlBuild.acoustic_restoreCoeff =
-        (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    for (int axis = 0; axis < 3; axis++) {
-      g_cpmlBuild.elastic_a[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.elastic_b[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.elastic_invKappa[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.elastic_zetaDecay[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.elastic_zetaGain[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.elastic_memForce[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_a[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_b[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_invKappa[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_zetaDecay[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_zetaGain[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-      g_cpmlBuild.acoustic_memForce[axis] =
-          (double*)malloc(Global.myMesh->lenum * sizeof(double));
-    }
-    if ((g_cpmlBuild.face_mask == NULL) ||
-        (g_cpmlBuild.elastic_elem_list == NULL) ||
-        (g_cpmlBuild.acoustic_elem_list == NULL) ||
-        (g_cpmlBuild.elastic_a[0] == NULL) ||
-        (g_cpmlBuild.elastic_b[0] == NULL) ||
-        (g_cpmlBuild.elastic_invKappa[0] == NULL) ||
-        (g_cpmlBuild.elastic_muCoeff == NULL) ||
-        (g_cpmlBuild.elastic_lambdaCoeff == NULL) ||
-        (g_cpmlBuild.elastic_zetaDecay[0] == NULL) ||
-        (g_cpmlBuild.elastic_zetaGain[0] == NULL) ||
-        (g_cpmlBuild.elastic_memForce[0] == NULL) ||
-        (g_cpmlBuild.elastic_restoreCoeff == NULL) ||
-        (g_cpmlBuild.acoustic_a[0] == NULL) ||
-        (g_cpmlBuild.acoustic_b[0] == NULL) ||
-        (g_cpmlBuild.acoustic_invKappa[0] == NULL) ||
-        (g_cpmlBuild.acoustic_forceCoeff == NULL) ||
-        (g_cpmlBuild.acoustic_zetaDecay[0] == NULL) ||
-        (g_cpmlBuild.acoustic_zetaGain[0] == NULL) ||
-        (g_cpmlBuild.acoustic_memForce[0] == NULL) ||
-        (g_cpmlBuild.acoustic_restoreCoeff == NULL)) {
-      fprintf(stderr,
-              "Thread %d: solver_init: out of memory for CPML build state\n",
-              Global.myID);
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
+    g_cpmlBuild.elastic_coeff = (cpml_element_t*)malloc(
+        (size_t)Global.myMesh->lenum*sizeof(cpml_element_t));
+    g_cpmlBuild.acoustic_coeff = (cpml_element_t*)malloc(
+        (size_t)Global.myMesh->lenum*sizeof(cpml_element_t));
+    if (Global.myMesh->lenum > 0 &&
+        (!g_cpmlBuild.face_mask || !g_cpmlBuild.elastic_elem_list ||
+         !g_cpmlBuild.acoustic_elem_list || !g_cpmlBuild.elastic_coeff ||
+         !g_cpmlBuild.acoustic_coeff)) {
+      solver_abort(__FUNCTION_NAME, NULL, "Out of memory for CPML setup\n");
     }
   }
 #endif /* BOUNDARY */
@@ -11619,17 +11525,8 @@ static void solver_init() {
     double mass, M, mu, lambda;
     int j;
 
-    /* Product of kappa over the element's active stretch axes
-     * (kappa_x*kappa_y*kappa_z; the two transverse factors are 1 for a
-     * face element). The matched kappa-scaled inertia: the gradient side
-     * stretches strain by 1/kappa, so the second-order displacement
-     * CFS-CPML requires rho*kappa_prod*d2u/dt2 (leading term of
-     * multiplying the momentum eq by s_x s_y s_z). 1.0 for non-PML and
-     * dashpot (exact no-op; kappa_max=1 -> kappa_prod=1 everywhere, so
-     * runs that never raised kappa are bit-identical). Elastic CPML
-     * only. Scaling inertia up also raises the local CFL margin.
-     * Declared OUTSIDE #ifdef BOUNDARY because it scales the
-     * unconditional nodal inertia accumulation below. */
+    /* Leading coefficient of J(s): kappa_x*kappa_y*kappa_z.
+     * Interior elements retain unit inertia scaling. */
     double cpml_kappa_prod = 1.0;
 
 #ifdef BOUNDARY
@@ -11639,9 +11536,7 @@ static void solver_init() {
     char flag;
     double dashpot[8][3];
     uint8_t pml_face_mask = 0;
-    /* Summed CPML damping rate sum_j d_j (1/s) for this element, used to
-     * build the Matzen second-order divergence-side mass-proportional
-     * damping rho*d*du/dt. Non-zero only for elastic CPML elements. */
+    /* Coefficient of s in J(s)*(s^2+a*s), including all kappa factors. */
     double cpml_damp_rate = 0.0;
 #endif
 
@@ -11693,13 +11588,7 @@ static void solver_init() {
       double gravity_surface_damp = 0.0;
 
 #ifdef BOUNDARY
-      /* Step A activation + Step B divergence-side coefficient build.
-       * Acoustic elements 'continue' below before the elastic-path CPML
-       * block, so this is where acoustic PML is enrolled (Step A) and
-       * its divergence-side coeffs are built (Step B). Relocated ABOVE
-       * the pressure-mass accumulation so the matched kappa-inertia can
-       * scale it. Strict no-op for dashpot / non-PML / non-BOUNDARY ->
-       * every previously-validated configuration is bit-identical. */
+      /* Enroll acoustic PML and build its full inertia before nodal assembly. */
       if (Param.theAbcType == ABC_CPML) {
         lnid0 = elemp->lnid[0];
         ldb[0] = Global.myMesh->nodeTable[lnid0].x;
@@ -11733,55 +11622,15 @@ static void solver_init() {
           const double dt2 = Param.theDeltaTSquared;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
-          /* Gradient side -- store RAW profile coeffs (natural signed-sum
-           * normalization), mirroring the validated elastic native+
-           * correction (elastic_a/b/invKappa = a/b/invKappa raw, the
-           * 1/(4h) folded into the single stiffness coeff below = the
-           * corrected consistent interior coeff dt^2*h/(16 rho), exactly
-           * as elastic folds it into mu=9*c1). kernelPMLAcousticStep then
-           * forms the native delta -(P_pml - P_raw), zero at d=0 -> exact
-           * match to the hourglass-free consistent interior operator. */
-          for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis];
-            g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
-            g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis];
-          }
-          const double rho = (double)edata->rho;
-          /* Cstiff = dt^2 * h / (16 rho): the SAME corrected consistent
-           * interior acoustic stiffness coefficient (commit 20180b6), so
-           * P_raw exactly equals the constant-gradient content of the
-           * interior operator and the native delta vanishes at the PML
-           * inner edge. rho > 0 guaranteed by mesh validation. (Array
-           * name kept; semantics are now the stiffness coeff, not the
-           * old dt^2 h^2/4 forceCoeff.) */
-          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
-
-          /* Step B divergence side -- scalar mirror of the validated
-           * elastic two-sided. memForce/restoreCoeff use the acoustic
-           * nodal mass (nodalPressureMass) in place of the elastic
-           * rho*h^3/8. */
-          acoustic_kprod =
-              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
-          double restore = 0.0;
-          for (int axis = 0; axis < 3; axis++) {
-            const double da = d_axis[axis];
-            const double aa = alpha_axis[axis];
-            const double decay = exp(-aa * dt);
-            g_cpmlBuild.acoustic_zetaDecay[axis][pml_idx] = decay;
-            g_cpmlBuild.acoustic_zetaGain[axis][pml_idx] =
-                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
-            g_cpmlBuild.acoustic_memForce[axis][pml_idx] =
-                dt2 * nodalPressureMass * da * aa * aa;
-            restore += da * aa;
-          }
-          g_cpmlBuild.acoustic_restoreCoeff[pml_idx] =
-              dt2 * nodalPressureMass * restore;
-          acoustic_damp = d_axis[0] + d_axis[1] + d_axis[2];
+          g_cpmlBuild.acoustic_coeff[pml_idx] = cpml_element(
+              d_axis, alpha_axis, kappa_axis, dt, 0.0, 0.0,
+              nodalPressureMass, dt2*h/(double)edata->rho, 0.0);
+          acoustic_kprod = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.mass;
+          acoustic_damp = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.damping;
 
           /* The gravity boundary is a top-face inertia. At lateral PML
            * intersections its coordinate Jacobian contains only the
-           * tangential x/y stretches. Mirror the bulk Matzen CFS pair with
+           * tangential x/y stretches. Include their full product with
            * a compact surface-only mapper; z is the face normal and must not
            * enter this surface operator. */
           const uint8_t lateral_mask =
@@ -11802,20 +11651,13 @@ static void solver_init() {
             g_cpmlBuild.acoustic_gravity_surface_count++;
             g_cpmlBuild.acoustic_gravity_surface_pml_index[surface_idx] =
                 pml_idx;
-            gravity_surface_kprod = kappa_axis[0] * kappa_axis[1];
-            gravity_surface_damp = d_axis[0] + d_axis[1];
-            double surface_restore = 0.0;
-            for (int axis = 0; axis < 2; axis++) {
-              const double da = d_axis[axis];
-              const double aa = alpha_axis[axis];
-              double* surface_mem =
-                  g_cpmlBuild.acoustic_gravity_surface_memForce[axis];
-              surface_mem[surface_idx] =
-                  dt2 * gravitySurfaceMass * da * aa * aa;
-              surface_restore += da * aa;
-            }
-            g_cpmlBuild.acoustic_gravity_surface_restoreCoeff[surface_idx] =
-                dt2 * gravitySurfaceMass * surface_restore;
+            cpml_surface_t* surface =
+                &g_cpmlBuild.acoustic_gravity_surface_coeff[surface_idx];
+            surface->inertia = cpml_inertia(d_axis, alpha_axis, kappa_axis,
+                                            2, 0.0, dt);
+            surface->nodal_mass_dt2 = dt2*gravitySurfaceMass;
+            gravity_surface_kprod = surface->inertia.mass;
+            gravity_surface_damp = surface->inertia.damping;
           }
         }
       }
@@ -11939,122 +11781,17 @@ static void solver_init() {
             Param.theCpmlAlphaFloorFraction,
             a_axis, b_axis, invKappa_axis, d_axis, alpha_axis, kappa_axis);
 
-        /* Native (c1,c2-style) normalization: store RAW profile a/b/
-         * invKappa; the physical scaling is folded into a single
-         * stiffness coeff per type (elastic: mu=9*c1, lambda=9*c2;
-         * acoustic: Cstiff = dt^2*h/(16 rho)). h2_over_4 is still used
-         * by the elastic muCoeff/lambdaCoeff below. */
+        /* Match the native cube stiffness normalization exactly. */
         const double h = (double)edata->edgesize;
-        const double dt2 = Param.theDeltaTSquared;
-        const double h2_over_4 = h * h * 0.25;
-
-        if (element_is_acoustic(edata)) {
-          int32_t pml_idx = g_cpmlBuild.acoustic_count++;
-          g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
-          /* RAW profile coeffs + Cstiff = dt^2*h/(16 rho): native+
-           * correction mirror of the elastic path (see the matching
-           * acoustic block above and kernelPMLAcousticStep). At d=0 the
-           * PML delta -(P_pml - P_raw) is exactly 0 -> the element is
-           * purely the validated consistent interior operator. */
-          for (int axis = 0; axis < 3; axis++) {
-            g_cpmlBuild.acoustic_a[axis][pml_idx] = a_axis[axis];
-            g_cpmlBuild.acoustic_b[axis][pml_idx] = b_axis[axis];
-            g_cpmlBuild.acoustic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis];
-          }
-          const double rho = (double)edata->rho;
-          /* rho > 0 guaranteed by mesh validation. (Array name kept;
-           * semantics now the stiffness coeff, not the old dt^2 h^2/4. */
-          g_cpmlBuild.acoustic_forceCoeff[pml_idx] = dt2 * h / (16.0 * rho);
-        } else {
-          int32_t pml_idx = g_cpmlBuild.elastic_count++;
-          g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;
-          for (int axis = 0; axis < 3; axis++) {
-            /* RAW a / 1/kappa (no 1/(4h) prescale). The elastic PML now
-             * runs as native effective stiffness + a CPML correction
-             * evaluated in the native (c1,c2) normalization with
-             * dN = 0.25*sign centre derivatives, so the psi recurrence
-             * convolves the natural-coord gradient with the raw a, and
-             * the modified gradient uses the raw 1/kappa -- matching the
-             * codex v3 reduced-correction (which is proven self-
-             * consistent with aTransposeU/firstVector/au). b is the
-             * dimensionless exp() decay, unchanged. (Acoustic PML still
-             * uses the 1-pt /(4h) form above.) */
-            g_cpmlBuild.elastic_a[axis][pml_idx] = a_axis[axis];
-            g_cpmlBuild.elastic_b[axis][pml_idx] = b_axis[axis];
-            g_cpmlBuild.elastic_invKappa[axis][pml_idx] =
-                invKappa_axis[axis];
-          }
-          /* muCoeff/lambdaCoeff are no longer read by kernelPMLElasticStep
-           * (it uses mu = 9*c1, lambda = 9*c2 like the native operator);
-           * kept allocated for now, slated for cleanup. */
-          g_cpmlBuild.elastic_muCoeff[pml_idx] = dt2 * h2_over_4 * mu;
-          g_cpmlBuild.elastic_lambdaCoeff[pml_idx] = dt2 * h2_over_4 * lambda;
-          /* Matzen second-order divergence-side term: total volumetric
-           * CPML damping rate sum_j d_j (1/s). Injected below as the
-           * mass-proportional damping rho*d*du/dt at this element's
-           * nodes, exactly mirroring the Lysmer dashpot discretization
-           * (mass_minusaM / mass2_minusaM -= dt * C). Elastic only;
-           * the acoustic-pressure update path is left gradient-side
-           * only for now (documented asymmetry). */
-          cpml_damp_rate = d_axis[0] + d_axis[1] + d_axis[2];
-          /* Matched kappa-scaled inertia (rho*kappa_prod*d2u/dt2). For a
-           * face element the two transverse kappa are 1; at the inner
-           * edge (xi=0) all kappa=1 so kappa_prod=1 -> reduces to the
-           * native operator (continuous interface). kappa_max=1 ->
-           * kappa_prod=1 everywhere (exact no-op, back-compat). */
-          cpml_kappa_prod =
-              kappa_axis[0] * kappa_axis[1] * kappa_axis[2];
-
-          /* CFS sub-terms (Matzen 2011; Xie et al. 2014). Per damping
-           * axis a the divergence-side stretch also contributes
-           *   +rho*d_a*alpha_a u_i           (restoring)
-           *   -rho*d_a*alpha_a^2 zeta_i^(a)  (displacement memory)
-           * with zeta the exact exponential convolution of the element
-           * displacement, d zeta/dt = -alpha_a zeta + u:
-           *   zetaDecay_a = exp(-alpha_a*dt)
-           *   zetaGain_a  = (1 - zetaDecay_a)/alpha_a   (alpha_a>0: floor)
-           *   memForce_a  = dt^2 * M_node * d_a * alpha_a^2
-           *   restoreCoeff= dt^2 * M_node * sum_a d_a*alpha_a
-           * M_node = rho*h^3/8 (per-node share). BOTH the restoring and
-           * the memory are applied in kernelPMLElasticStep from the
-           * element-centroid displacement so the CFS pair cancels
-           * exactly at DC discretely. (v10 applied the restoring per
-           * node via mass2_minusaM while zeta was centroid-based; the
-           * mismatch left a net anti-restoring forcing that grew
-           * exponentially at PML corners. Using ubar for both halves
-           * removes that net injection.) */
-          const double dt = Param.theDeltaT;
-          const double rho_e = (double)edata->rho;
-          const double M_node = rho_e * h * h * h / 8.0;
-          /* Stage 4b: stretch-consistent Rayleigh a*M cross-pair, FOLDED
-           * into the SAME CFS restore/memForce arrays -> reuses the
-           * validated centroid-zeta convolution in kernelPMLElasticStep
-           * (no new memory, no kernel change). The d^1 stretch of
-           * a*M*u_dot is  +a*M*sum(d_j)*u  - a*M*sum(d_j*alpha_j)*zeta,
-           * structurally identical to the rho-side pair (same d_j,
-           * alpha_j, same zeta). It cancels at DC by the SAME mechanism
-           * (zeta -> u/alpha => sum memForce_aM*zeta = restoreCoeff_aM*u),
-           * so it inherits the v10-safe exact DC cancellation. Gated on
-           * cpml_pml_material_damping==2; a==0 for BKT/none so all other
-           * runs are byte-identical regardless. */
-          const int aM_visco = (Param.theCpmlPmlMaterialDamping == 2);
-          double restore = 0.0;
-          for (int axis = 0; axis < 3; axis++) {
-            const double da = d_axis[axis];
-            const double aa = alpha_axis[axis];
-            const double decay = exp(-aa * dt);
-            g_cpmlBuild.elastic_zetaDecay[axis][pml_idx] = decay;
-            g_cpmlBuild.elastic_zetaGain[axis][pml_idx] =
-                (aa > 0.0) ? ((1.0 - decay) / aa) : dt;
-            double mf = dt2 * M_node * da * aa * aa;        /* rho-side  */
-            if (aM_visco) mf += dt2 * M_node * a * da * aa; /* a*M cross */
-            g_cpmlBuild.elastic_memForce[axis][pml_idx] = mf;
-            restore += da * aa;                              /* rho-side  */
-            if (aM_visco) restore += a * da;                 /* a*M cross */
-          }
-          g_cpmlBuild.elastic_restoreCoeff[pml_idx] = dt2 * M_node * restore;
-        }
+        const int32_t pml_idx = g_cpmlBuild.elastic_count++;
+        g_cpmlBuild.elastic_elem_list[pml_idx] = eindex;
+        const int rayleigh = (Param.theCpmlPmlMaterialDamping == 2);
+        g_cpmlBuild.elastic_coeff[pml_idx] = cpml_element(
+            d_axis, alpha_axis, kappa_axis, Param.theDeltaT,
+            rayleigh ? a : 0.0, rayleigh ? b/Param.theDeltaT : 0.0,
+            (double)edata->rho*h*h*h/8.0, 9.0*ep->c1, 9.0*ep->c2);
+        cpml_damp_rate = g_cpmlBuild.elastic_coeff[pml_idx].inertia.damping;
+        cpml_kappa_prod = g_cpmlBuild.elastic_coeff[pml_idx].inertia.mass;
       }
     }
 
@@ -12183,7 +11920,7 @@ static void solver_init() {
       /* Flat regular nodal mass. Includes SPECFEM-style flattened CPML
        * PML elements: their topographic deformation is suppressed so
        * they stay axis-aligned cubes (consistent with the cube stiffness
-       * path + CPML delta they are re-routed to). */
+       * path they are re-routed to). */
       for (j = 0; j < 8; j++) {
         nodesMass[j] = M;
       }
@@ -12220,44 +11957,16 @@ static void solver_init() {
 
       M = nodesMass[j];
 
-      /* Matched kappa-scaled inertia (rho*kappa_prod*d2u/dt2). Only the
-       * INERTIA contributions (mass_simple and the +M / +2M below) are
-       * scaled; the Rayleigh/dashpot/CPML-damping terms stay on plain M
-       * (they come from the d-part of s, not the kappa-part). For
-       * non-PML / dashpot / kappa_max=1, cpml_kappa_prod == 1.0 -> exact
-       * no-op (bit-identical). */
+      /* Leading nodal inertia; the remaining polynomial and memory terms
+       * use precisely the same lumped nodal mass in the PML kernel. */
       const double Mk = M * cpml_kappa_prod;
 
       np->mass_simple += Mk;
 
-      /* Material mass-proportional Rayleigh damping a*M. In CPML mode
-       * this is now skipped on PML elements, CONSISTENTLY with the BKT/Q,
-       * stiffness-proportional (b*K), and Lysmer-dashpot material-damping
-       * skips already applied there: the CPML ADE recurrence + the
-       * divergence-side mass-proportional damping/CFS provide the PML
-       * elements' attenuation, and layering physical Rayleigh damping
-       * into the same mass_minusaM/mass2_minusaM arrays double-counts
-       * decay and perturbs the delicate divergence-side/CFS DC balance.
-       * Predicate mirrors the adjacent dashpot skip exactly (minus the
-       * dashpot-only flag!=13). Dashpot mode, non-PML elements, and
-       * BOUNDARY-undefined builds are bit-identical; only attenuating-
-       * CPML PML elements change (and become consistent/correct).
-       * Acoustic elements have zeta=0 (a=0) so this is an elastic-PML
-       * concern; no-attenuation runs (a~0) are unaffected. */
       int apply_material_mass_damping = 1;
 #ifdef BOUNDARY
-      /* Stage 4a: the bare material Rayleigh a*M*u_dot is skipped on CPML
-       * PML elements (5d91b09) EXCEPT when the viscoelastic Rayleigh PML
-       * is active (cpml_pml_material_damping==2) -- then a*M IS carried
-       * into the PML. It is the leading (d^0) material-damping term; the
-       * d^1 stretch cross-pair is folded into the CFS restore/memForce
-       * below. a*M is a DC-safe velocity damping, Lysmer-discretised
-       * exactly like the stable cpml_C, and is distinct physics from
-       * cpml_C (material Q vs numerical absorption) -- not a double-count.
-       * a = zeta*theABase = 0 for BKT/none, so this changes only
-       * rayleigh+cpml+viscoelastic; everything else is bit-identical. */
-      if ((Param.theAbcType != ABC_DASHPOT) && (pml_face_mask != 0) &&
-          (Param.theCpmlPmlMaterialDamping != 2)) {
+      /* PML Rayleigh a is already included in the complete J inertia. */
+      if ((Param.theAbcType != ABC_DASHPOT) && (pml_face_mask != 0)) {
         apply_material_mass_damping = 0;
       }
 #endif
@@ -12277,32 +11986,16 @@ static void solver_init() {
           np->mass2_minusaM[axis] -= (Param.theDeltaT * dashpot[j][axis]);
         }
 
-        /* Matzen 2011 / Xie et al. 2014 second-order displacement CPML:
-         * the divergence-side coordinate stretch, obtained by multiplying
-         * the momentum equation by s_j, contributes (to leading order,
-         * kappa_max = 1 default) a mass-proportional volumetric damping
-         *     rho * d_j * du_i/dt
-         * Per node the damping coefficient is C = (rho * V_node) * sum_j d_j
-         * = M * cpml_damp_rate. It is discretized exactly like the Lysmer
-         * dashpot above (same backward-difference, mass_minusaM and
-         * mass2_minusaM each -= dt*C), so it inherits the dashpot path's
-         * stability. cpml_damp_rate > 0 only for elastic CPML elements;
-         * interior and acoustic elements are untouched. The gradient/
-         * strain side is handled separately in kernelPMLElasticStep via
-         * the psi memory (modified strain); the CFS restoring/memory
-         * sub-terms are added just below + in the kernel. */
+        /* Polynomial velocity term of J(s)*(s^2+a*s), using the solver's
+         * existing backward-difference damping convention. */
         if ((Param.theAbcType == ABC_CPML) && (cpml_damp_rate > 0.0)) {
           double cpml_C = M * cpml_damp_rate;
           np->mass_minusaM[axis]  -= (Param.theDeltaT * cpml_C);
           np->mass2_minusaM[axis] -= (Param.theDeltaT * cpml_C);
         }
 
-        /* (CFS restoring is NOT applied here. v10 added it as a per-node
-         * mass2_minusaM u^n coefficient while the paired zeta memory was
-         * element-centroid based; the discrete DC cancellation failed
-         * and corners grew exponentially. Both CFS halves are now
-         * evaluated together from the centroid displacement in
-         * kernelPMLElasticStep.) */
+        /* Restoring and proper-rational terms are paired per node in
+         * kernelPMLElasticStep, including edge/corner products. */
 #endif /* BOUNDARY */
 
         np->mass_minusaM[axis] += Mk;
@@ -12315,10 +12008,7 @@ static void solver_init() {
   } /* eindex for elements */
 
 #ifdef BOUNDARY
-  /* CPML post-loop: publish per-type counts, copy elem_lists to mySolver
-   * (for checkpoint I/O), allocate GPU coefficient/psi arrays per type,
-   * and upload. The GPU psi arrays are zero-initialized. Build-time host
-   * scratch is freed after upload. */
+  /* Publish counts and upload coefficients and zeroed device histories. */
   if (Param.theAbcType == ABC_CPML) {
     int64_t local_counts[2] = {(int64_t)g_cpmlBuild.elastic_count,
                                (int64_t)g_cpmlBuild.acoustic_count};
@@ -12344,470 +12034,45 @@ static void solver_init() {
       }
     }
 
-    /* --- Elastic PML upload --- */
-    {
-      int32_t pmlN = g_cpmlBuild.elastic_count;
-      Global.gpuData.pmlElasticElemCount = pmlN;
-      Global.mySolver->pmlElasticElemCount = pmlN;
-      if (pmlN > 0) {
-        Global.mySolver->pmlElasticElemList =
-            (int32_t*)malloc((size_t)pmlN * sizeof(int32_t));
-        if (Global.mySolver->pmlElasticElemList == NULL) {
-          fprintf(stderr,
-                  "Thread %d: solver_init: oom pmlElasticElemList\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        memcpy(Global.mySolver->pmlElasticElemList,
-               g_cpmlBuild.elastic_elem_list,
-               (size_t)pmlN * sizeof(int32_t));
-
-        for (int i = 0; i < 3; i++) {
-          for (int jx = 0; jx < 3; jx++) {
-            Global.mySolver->pml_elastic_psi[i][jx] = (solver_float*)calloc(
-                (size_t)pmlN, sizeof(solver_float));
-            if (Global.mySolver->pml_elastic_psi[i][jx] == NULL) {
-              fprintf(stderr,
-                      "Thread %d: solver_init: oom pml_elastic_psi[%d][%d]\n",
-                      Global.myID, i, jx);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-          }
-        }
-
-        if (cudaMalloc((void**)&(Global.gpuData.pmlElasticElemMapperDevice),
-                       (size_t)pmlN * sizeof(int32_t)) != cudaSuccess) {
-          fprintf(stderr, "Thread %d: cudaMalloc pmlElasticElemMapper failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        double** dev_a[3]   = {&Global.gpuData.pml_elastic_a_xArrayDevice,
-                               &Global.gpuData.pml_elastic_a_yArrayDevice,
-                               &Global.gpuData.pml_elastic_a_zArrayDevice};
-        double** dev_b[3]   = {&Global.gpuData.pml_elastic_b_xArrayDevice,
-                               &Global.gpuData.pml_elastic_b_yArrayDevice,
-                               &Global.gpuData.pml_elastic_b_zArrayDevice};
-        double** dev_invK[3]= {&Global.gpuData.pml_elastic_invKappa_xArrayDevice,
-                               &Global.gpuData.pml_elastic_invKappa_yArrayDevice,
-                               &Global.gpuData.pml_elastic_invKappa_zArrayDevice};
-        for (int axis = 0; axis < 3; axis++) {
-          if (cudaMalloc((void**)dev_a[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-              cudaMalloc((void**)dev_b[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-              cudaMalloc((void**)dev_invK[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMalloc elastic CPML coeff arrays failed\n",
-                    Global.myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-        }
-        for (int i = 0; i < 3; i++) {
-          for (int jx = 0; jx < 3; jx++) {
-            if (cudaMalloc(
-                    (void**)&(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]),
-                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
-              fprintf(stderr,
-                      "Thread %d: cudaMalloc pml_elastic_psi[%d][%d] failed\n",
-                      Global.myID, i, jx);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-            cudaMemset(Global.gpuData.pml_elastic_psiArrayDevice[i][jx], 0,
-                       (size_t)pmlN * sizeof(solver_float));
-          }
-        }
-        /* Extra CPML psi memory. psiShear is used by the Rayleigh b*K
-         * CPML branch; psiKappa is kept allocated so cudaFree and older
-         * checkpoints remain structurally symmetric. */
-        for (int i = 0; i < 3; i++) {
-          for (int jx = 0; jx < 3; jx++) {
-            if (cudaMalloc(
-                    (void**)&(Global.gpuData
-                                  .pml_elastic_psiShearArrayDevice[i][jx]),
-                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess ||
-                cudaMalloc(
-                    (void**)&(Global.gpuData
-                                  .pml_elastic_psiKappaArrayDevice[i][jx]),
-                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
-              fprintf(stderr,
-                      "Thread %d: cudaMalloc pml_elastic_psiShear/Kappa"
-                      "[%d][%d] failed\n",
-                      Global.myID, i, jx);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-            cudaMemset(Global.gpuData.pml_elastic_psiShearArrayDevice[i][jx],
-                       0, (size_t)pmlN * sizeof(solver_float));
-            cudaMemset(Global.gpuData.pml_elastic_psiKappaArrayDevice[i][jx],
-                       0, (size_t)pmlN * sizeof(solver_float));
-          }
-        }
-
-        if (cudaMemcpy(Global.gpuData.pmlElasticElemMapperDevice,
-                       g_cpmlBuild.elastic_elem_list,
-                       (size_t)pmlN * sizeof(int32_t),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMemcpy pmlElasticElemMapper failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        for (int axis = 0; axis < 3; axis++) {
-          if (cudaMemcpy(*dev_a[axis], g_cpmlBuild.elastic_a[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess ||
-              cudaMemcpy(*dev_b[axis], g_cpmlBuild.elastic_b[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess ||
-              cudaMemcpy(*dev_invK[axis], g_cpmlBuild.elastic_invKappa[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMemcpy elastic CPML coeffs failed\n",
-                    Global.myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-        }
-
-        /* Elastic material coefficients per PML element. */
-        if (cudaMalloc((void**)&(Global.gpuData.pml_elastic_muCoeffArrayDevice),
-                       (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-            cudaMalloc((void**)&(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice),
-                       (size_t)pmlN * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMalloc elastic CPML mu/lambda failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.pml_elastic_muCoeffArrayDevice,
-                       g_cpmlBuild.elastic_muCoeff,
-                       (size_t)pmlN * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice,
-                       g_cpmlBuild.elastic_lambdaCoeff,
-                       (size_t)pmlN * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMemcpy elastic CPML mu/lambda failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-
-        /* CFS divergence-side zeta state: 9 per-element arrays
-         * (zero-initialised; advanced in kernelPMLElasticStep). */
-        for (int i = 0; i < 3; i++) {
-          for (int jx = 0; jx < 3; jx++) {
-            if (cudaMalloc(
-                    (void**)&(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]),
-                    (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
-              fprintf(stderr,
-                      "Thread %d: cudaMalloc pml_elastic_divPsi[%d][%d] failed\n",
-                      Global.myID, i, jx);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-            cudaMemset(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx], 0,
-                       (size_t)pmlN * sizeof(solver_float));
-          }
-        }
-
-        /* CFS divergence-side coefficients (zetaDecay, zetaGain,
-         * memForce) per axis. divPsi above is reused as the zeta state
-         * (zero-initialised by the cudaMemset). */
-        double** cfs_dev[3] = {
-            Global.gpuData.pml_elastic_zetaDecayArrayDevice,
-            Global.gpuData.pml_elastic_zetaGainArrayDevice,
-            Global.gpuData.pml_elastic_memForceArrayDevice};
-        double* cfs_host[3][3] = {
-            {g_cpmlBuild.elastic_zetaDecay[0],
-             g_cpmlBuild.elastic_zetaDecay[1],
-             g_cpmlBuild.elastic_zetaDecay[2]},
-            {g_cpmlBuild.elastic_zetaGain[0],
-             g_cpmlBuild.elastic_zetaGain[1],
-             g_cpmlBuild.elastic_zetaGain[2]},
-            {g_cpmlBuild.elastic_memForce[0],
-             g_cpmlBuild.elastic_memForce[1],
-             g_cpmlBuild.elastic_memForce[2]}};
-        for (int k = 0; k < 3; k++) {
-          for (int axis = 0; axis < 3; axis++) {
-            if (cudaMalloc((void**)&(cfs_dev[k][axis]),
-                           (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-                cudaMemcpy(cfs_dev[k][axis], cfs_host[k][axis],
-                           (size_t)pmlN * sizeof(double),
-                           cudaMemcpyHostToDevice) != cudaSuccess) {
-              fprintf(stderr,
-                      "Thread %d: cudaMalloc/Memcpy elastic CPML CFS "
-                      "coeff [%d][%d] failed\n", Global.myID, k, axis);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-          }
-        }
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.pml_elastic_restoreCoeffArrayDevice),
-                (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.pml_elastic_restoreCoeffArrayDevice,
-                       g_cpmlBuild.elastic_restoreCoeff,
-                       (size_t)pmlN * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMalloc/Memcpy elastic CPML "
-                  "restoreCoeff failed\n", Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
+    /* Upload coefficient records once; histories remain device-resident. */
+    for (int type=0; type<2; ++type) {
+      const int32_t count = type ? g_cpmlBuild.acoustic_count : g_cpmlBuild.elastic_count;
+      const int native = type ? Global.gpuData.pmlNativeStiffnessAcoustic : Global.gpuData.pmlNativeStiffness;
+      int32_t** mapper = type ? &Global.gpuData.pmlAcousticElemMapperDevice : &Global.gpuData.pmlElasticElemMapperDevice;
+      cpml_element_t** coeff = type ? &Global.gpuData.pmlAcousticCoeffDevice : &Global.gpuData.pmlElasticCoeffDevice;
+      solver_float** state = type ? &Global.gpuData.pmlAcousticStateDevice : &Global.gpuData.pmlElasticStateDevice;
+      const int32_t* host_map = type ? g_cpmlBuild.acoustic_elem_list : g_cpmlBuild.elastic_elem_list;
+      const cpml_element_t* host_coeff = type ? g_cpmlBuild.acoustic_coeff : g_cpmlBuild.elastic_coeff;
+      if (type) Global.gpuData.pmlAcousticElemCount = count;
+      else Global.gpuData.pmlElasticElemCount = count;
+      if (count == 0) continue;
+      const size_t state_bytes = (size_t)count*cpml_element_states(type ? 1 : 3,native)*sizeof(solver_float);
+      if (cudaMalloc((void**)mapper,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
+          cudaMalloc((void**)coeff,(size_t)count*sizeof(cpml_element_t)) != cudaSuccess ||
+          cudaMalloc((void**)state,state_bytes) != cudaSuccess ||
+          cudaMemcpy(*mapper,host_map,(size_t)count*sizeof(int32_t),cudaMemcpyHostToDevice) != cudaSuccess ||
+          cudaMemcpy(*coeff,host_coeff,(size_t)count*sizeof(cpml_element_t),cudaMemcpyHostToDevice) != cudaSuccess ||
+          cudaMemset(*state,0,state_bytes) != cudaSuccess) {
+        solver_abort(__FUNCTION_NAME,NULL,"Failed to allocate/upload full CPML state\n");
       }
     }
-
-    /* --- Acoustic PML upload --- */
     {
-      int32_t pmlN = g_cpmlBuild.acoustic_count;
-      Global.gpuData.pmlAcousticElemCount = pmlN;
-      Global.mySolver->pmlAcousticElemCount = pmlN;
-      if (pmlN > 0) {
-        Global.mySolver->pmlAcousticElemList =
-            (int32_t*)malloc((size_t)pmlN * sizeof(int32_t));
-        if (Global.mySolver->pmlAcousticElemList == NULL) {
-          fprintf(stderr,
-                  "Thread %d: solver_init: oom pmlAcousticElemList\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        memcpy(Global.mySolver->pmlAcousticElemList,
-               g_cpmlBuild.acoustic_elem_list,
-               (size_t)pmlN * sizeof(int32_t));
-
-        for (int axis = 0; axis < 3; axis++) {
-          Global.mySolver->pml_acoustic_psi[axis] = (solver_float*)calloc(
-              (size_t)pmlN, sizeof(solver_float));
-          if (Global.mySolver->pml_acoustic_psi[axis] == NULL) {
-            fprintf(stderr,
-                    "Thread %d: solver_init: oom pml_acoustic_psi[%d]\n",
-                    Global.myID, axis);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-        }
-
-        if (cudaMalloc((void**)&(Global.gpuData.pmlAcousticElemMapperDevice),
-                       (size_t)pmlN * sizeof(int32_t)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMalloc pmlAcousticElemMapper failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        double** dev_a[3] = {&Global.gpuData.pml_acoustic_a_xArrayDevice,
-                             &Global.gpuData.pml_acoustic_a_yArrayDevice,
-                             &Global.gpuData.pml_acoustic_a_zArrayDevice};
-        double** dev_b[3] = {&Global.gpuData.pml_acoustic_b_xArrayDevice,
-                             &Global.gpuData.pml_acoustic_b_yArrayDevice,
-                             &Global.gpuData.pml_acoustic_b_zArrayDevice};
-        double** dev_invK[3] = {
-            &Global.gpuData.pml_acoustic_invKappa_xArrayDevice,
-            &Global.gpuData.pml_acoustic_invKappa_yArrayDevice,
-            &Global.gpuData.pml_acoustic_invKappa_zArrayDevice};
-        for (int axis = 0; axis < 3; axis++) {
-          if (cudaMalloc((void**)dev_a[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-              cudaMalloc((void**)dev_b[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-              cudaMalloc((void**)dev_invK[axis],
-                         (size_t)pmlN * sizeof(double)) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMalloc acoustic CPML coeff arrays failed\n",
-                    Global.myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-          if (cudaMalloc(
-                  (void**)&(Global.gpuData.pml_acoustic_psiArrayDevice[axis]),
-                  (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMalloc pml_acoustic_psi[%d] failed\n",
-                    Global.myID, axis);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-          cudaMemset(Global.gpuData.pml_acoustic_psiArrayDevice[axis], 0,
-                     (size_t)pmlN * sizeof(solver_float));
-        }
-
-        if (cudaMemcpy(Global.gpuData.pmlAcousticElemMapperDevice,
-                       g_cpmlBuild.acoustic_elem_list,
-                       (size_t)pmlN * sizeof(int32_t),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMemcpy pmlAcousticElemMapper failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        for (int axis = 0; axis < 3; axis++) {
-          if (cudaMemcpy(*dev_a[axis], g_cpmlBuild.acoustic_a[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess ||
-              cudaMemcpy(*dev_b[axis], g_cpmlBuild.acoustic_b[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess ||
-              cudaMemcpy(*dev_invK[axis], g_cpmlBuild.acoustic_invKappa[axis],
-                         (size_t)pmlN * sizeof(double),
-                         cudaMemcpyHostToDevice) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMemcpy acoustic CPML coeffs failed\n",
-                    Global.myID);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-        }
-
-        /* Acoustic per-element force coefficient (dt^2 * h^2 / (4 rho)). */
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.pml_acoustic_forceCoeffArrayDevice),
-                (size_t)pmlN * sizeof(double)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMalloc acoustic CPML forceCoeff failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-        if (cudaMemcpy(Global.gpuData.pml_acoustic_forceCoeffArrayDevice,
-                       g_cpmlBuild.acoustic_forceCoeff,
-                       (size_t)pmlN * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMemcpy acoustic CPML forceCoeff failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
-
-        /* Step B: divergence-side CFS coeffs (zetaDecay/Gain/memForce
-         * per axis + scalar restoreCoeff) and the zeta_p memory state
-         * (3 per element, zero-initialised; advanced in
-         * kernelPMLAcousticStep). Scalar mirror of the elastic CFS
-         * upload. */
-        double** cfs_dev[3] = {
-            Global.gpuData.pml_acoustic_zetaDecayArrayDevice,
-            Global.gpuData.pml_acoustic_zetaGainArrayDevice,
-            Global.gpuData.pml_acoustic_memForceArrayDevice};
-        double* cfs_host[3][3] = {
-            {g_cpmlBuild.acoustic_zetaDecay[0],
-             g_cpmlBuild.acoustic_zetaDecay[1],
-             g_cpmlBuild.acoustic_zetaDecay[2]},
-            {g_cpmlBuild.acoustic_zetaGain[0],
-             g_cpmlBuild.acoustic_zetaGain[1],
-             g_cpmlBuild.acoustic_zetaGain[2]},
-            {g_cpmlBuild.acoustic_memForce[0],
-             g_cpmlBuild.acoustic_memForce[1],
-             g_cpmlBuild.acoustic_memForce[2]}};
-        for (int k = 0; k < 3; k++) {
-          for (int axis = 0; axis < 3; axis++) {
-            if (cudaMalloc((void**)&(cfs_dev[k][axis]),
-                           (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-                cudaMemcpy(cfs_dev[k][axis], cfs_host[k][axis],
-                           (size_t)pmlN * sizeof(double),
-                           cudaMemcpyHostToDevice) != cudaSuccess) {
-              fprintf(stderr,
-                      "Thread %d: cudaMalloc/Memcpy acoustic CPML CFS "
-                      "coeff [%d][%d] failed\n", Global.myID, k, axis);
-              MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-            }
-          }
-          if (cudaMalloc(
-                  (void**)&(Global.gpuData.pml_acoustic_zetaPArrayDevice[k]),
-                  (size_t)pmlN * sizeof(solver_float)) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: cudaMalloc pml_acoustic_zetaP[%d] failed\n",
-                    Global.myID, k);
-            MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-          }
-          cudaMemset(Global.gpuData.pml_acoustic_zetaPArrayDevice[k], 0,
-                     (size_t)pmlN * sizeof(solver_float));
-        }
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice),
-                (size_t)pmlN * sizeof(double)) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice,
-                       g_cpmlBuild.acoustic_restoreCoeff,
-                       (size_t)pmlN * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: cudaMalloc/Memcpy acoustic CPML "
-                  "restoreCoeff failed\n", Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
-        }
+      const int32_t count = g_cpmlBuild.acoustic_gravity_surface_count;
+      Global.gpuData.pmlAcousticGravitySurfaceCount = count;
+      if (count > 0 &&
+          (cudaMalloc((void**)&Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
+           cudaMalloc((void**)&Global.gpuData.pmlGravityCoeffDevice,(size_t)count*sizeof(cpml_surface_t)) != cudaSuccess ||
+           cudaMalloc((void**)&Global.gpuData.pmlGravityStateDevice,(size_t)count*8*sizeof(solver_float)) != cudaSuccess ||
+           cudaMemcpy(Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice,g_cpmlBuild.acoustic_gravity_surface_pml_index,(size_t)count*sizeof(int32_t),cudaMemcpyHostToDevice) != cudaSuccess ||
+           cudaMemcpy(Global.gpuData.pmlGravityCoeffDevice,g_cpmlBuild.acoustic_gravity_surface_coeff,(size_t)count*sizeof(cpml_surface_t),cudaMemcpyHostToDevice) != cudaSuccess ||
+           cudaMemset(Global.gpuData.pmlGravityStateDevice,0,(size_t)count*8*sizeof(solver_float)) != cudaSuccess)) {
+        solver_abort(__FUNCTION_NAME,NULL,"Failed to allocate/upload CPML surface state\n");
       }
-    }
-
-    /* --- Gravity free-surface / lateral acoustic CPML upload --- */
-    {
-      const int32_t surfaceN =
-          g_cpmlBuild.acoustic_gravity_surface_count;
-      Global.gpuData.pmlAcousticGravitySurfaceCount = surfaceN;
-      if (surfaceN > 0) {
-        if (cudaMalloc(
-                (void**)&Global.gpuData
-                    .pml_acoustic_gravitySurfacePmlIndexArrayDevice,
-                (size_t)surfaceN * sizeof(int32_t)) != cudaSuccess ||
-            cudaMemcpy(
-                Global.gpuData
-                    .pml_acoustic_gravitySurfacePmlIndexArrayDevice,
-                g_cpmlBuild.acoustic_gravity_surface_pml_index,
-                (size_t)surfaceN * sizeof(int32_t),
-                cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: allocate/copy gravity-surface CPML mapper "
-                  "failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        for (int axis = 0; axis < 2; axis++) {
-          if (cudaMalloc(
-                  (void**)&Global.gpuData
-                      .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis],
-                  (size_t)surfaceN * sizeof(double)) != cudaSuccess ||
-              cudaMemcpy(
-                  Global.gpuData
-                      .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis],
-                  g_cpmlBuild.acoustic_gravity_surface_memForce[axis],
-                  (size_t)surfaceN * sizeof(double),
-                  cudaMemcpyHostToDevice) != cudaSuccess ||
-              cudaMalloc(
-                  (void**)&Global.gpuData
-                      .pml_acoustic_gravitySurfaceZetaArrayDevice[axis],
-                  (size_t)surfaceN * sizeof(solver_float)) != cudaSuccess) {
-            fprintf(stderr,
-                    "Thread %d: allocate/copy gravity-surface CPML axis %d "
-                    "failed\n",
-                    Global.myID, axis);
-            MPI_Abort(MPI_COMM_WORLD, ERROR);
-            exit(1);
-          }
-          cudaMemset(
-              Global.gpuData
-                  .pml_acoustic_gravitySurfaceZetaArrayDevice[axis],
-              0, (size_t)surfaceN * sizeof(solver_float));
-        }
-        if (cudaMalloc(
-                (void**)&Global.gpuData
-                    .pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice,
-                (size_t)surfaceN * sizeof(double)) != cudaSuccess ||
-            cudaMemcpy(
-                Global.gpuData
-                    .pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice,
-                g_cpmlBuild.acoustic_gravity_surface_restoreCoeff,
-                (size_t)surfaceN * sizeof(double),
-                cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: allocate/copy gravity-surface CPML restoring "
-                  "coefficient failed\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-      }
-
-      long long local_surface = (long long)surfaceN;
-      long long global_surface = 0;
-      MPI_Allreduce(&local_surface, &global_surface, 1, MPI_LONG_LONG, MPI_SUM,
-                    comm_solver);
-      if ((Global.myID == 0) &&
-          (Param.theAcousticFreeSurfaceGravity == YES)) {
-        monitor_print(
-            "CPML gravity free-surface correction: %lld top-face acoustic "
-            "PML elements (tangential x/y CFS stretch)\n",
-            global_surface);
+      long long local_surface=count,global_surface=0;
+      MPI_Allreduce(&local_surface,&global_surface,1,MPI_LONG_LONG,MPI_SUM,comm_solver);
+      if (Global.myID == 0) {
+        monitor_print("CPML operator: complete J inertia and J/(S_j S_k) stiffness; trapezoidal ADE; GPU-local histories\n");
+        monitor_print("CPML gravity free-surface correction: %lld top-face acoustic PML elements (full tangential x/y product)\n",global_surface);
       }
     }
 
@@ -12921,7 +12186,7 @@ static void solver_init() {
     }
 
     /* --- CPML-aware acoustic-elastic interface coupling correction --- */
-    /* For each interface face, precompute independent face-normal-axis ADE
+    /* For each interface face, precompute independent cofactor ADE
      * coefficients for the acoustic side and the elastic side. The
      * elastic-to-acoustic source term uses the acoustic-side profile; the
      * pressure traction on the solid uses the elastic-side profile. Keeping
@@ -12947,17 +12212,11 @@ static void solver_init() {
       int64_t nface = Global.acousticInterfaceFaces;
       uint8_t* iface_mask =
           (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
-      double* iface_ac_a =
-          (double*)calloc((size_t)nface, sizeof(double));
-      double* iface_el_a =
-          (double*)calloc((size_t)nface, sizeof(double));
-      double* iface_ac_b = (double*)malloc((size_t)nface * sizeof(double));
-      double* iface_ac_iK = (double*)malloc((size_t)nface * sizeof(double));
-      double* iface_el_b = (double*)malloc((size_t)nface * sizeof(double));
-      double* iface_el_iK = (double*)malloc((size_t)nface * sizeof(double));
-      if (iface_mask == NULL || iface_ac_a == NULL || iface_el_a == NULL ||
-          iface_ac_b == NULL || iface_ac_iK == NULL || iface_el_b == NULL ||
-          iface_el_iK == NULL) {
+      cpml_interface_t* iface_ac =
+          (cpml_interface_t*)calloc((size_t)nface, sizeof(cpml_interface_t));
+      cpml_interface_t* iface_el =
+          (cpml_interface_t*)calloc((size_t)nface, sizeof(cpml_interface_t));
+      if (iface_mask == NULL || iface_ac == NULL || iface_el == NULL) {
         fprintf(stderr,
                 "Thread %d: oom CPML interface-correction host arrays\n",
                 Global.myID);
@@ -12978,13 +12237,6 @@ static void solver_init() {
         cpmlIfaceThreeDVelModel_origin_ptr =
             &cpmlIfaceThreeDVelModel_origin;
       }
-      /* Default = identity (no-op): b=1, a=0, invKappa=1. */
-      for (int64_t i = 0; i < nface; i++) {
-        iface_ac_b[i] = 1.0;
-        iface_ac_iK[i] = 1.0;
-        iface_el_b[i] = 1.0;
-        iface_el_iK[i] = 1.0;
-      }
       for (int64_t i = 0; i < nface; i++) {
         int32_t ea = Global.acousticInterfaceElementIds[i];
         int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
@@ -12996,11 +12248,6 @@ static void solver_init() {
         uint8_t me = (ee >= 0 && ee < Global.myMesh->lenum)
                          ? g_cpmlBuild.face_mask[ee]
                          : 0;
-        double nx = fabs(Global.acousticInterfaceFaceNormals[3 * i + 0]);
-        double ny = fabs(Global.acousticInterfaceFaceNormals[3 * i + 1]);
-        double nz = fabs(Global.acousticInterfaceFaceNormals[3 * i + 2]);
-        int axis = (nx >= ny && nx >= nz) ? 0 : ((ny >= nz) ? 1 : 2);
-
         if (ee < 0) {
           remote_elastic_side_count++;
         }
@@ -13027,9 +12274,7 @@ static void solver_init() {
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
           iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE;
-          iface_ac_a[i] = a3[axis];
-          iface_ac_b[i] = b3[axis];
-          iface_ac_iK[i] = iK3[axis];
+          iface_ac[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
           pml_acoustic_side_count++;
         }
 
@@ -13055,9 +12300,7 @@ static void solver_init() {
               Param.theCpmlMpmlCrossFraction,
               Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
           iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
-          iface_el_a[i] = a3[axis];
-          iface_el_b[i] = b3[axis];
-          iface_el_iK[i] = iK3[axis];
+          iface_el[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
           pml_elastic_side_count++;
         } else if ((ee < 0) && (ea >= 0) && (ea < Global.myMesh->lenum)) {
           /* The elastic neighbor is remote on this MPI rank.  Do not let
@@ -13089,10 +12332,9 @@ static void solver_init() {
           }
 
           if (mesh_compute_elastic_side_pml_profile_at_domain_point(
-                  &elastic_probe, axis, cpmlIfaceIstVelModel_origin,
+                  &elastic_probe, cpmlIfaceIstVelModel_origin,
                   cpmlIfaceBasinVelModel_origin_ptr,
-                  cpmlIfaceThreeDVelModel_origin_ptr, &iface_el_a[i],
-                  &iface_el_b[i], &iface_el_iK[i], NULL)) {
+                  cpmlIfaceThreeDVelModel_origin_ptr, &iface_el[i], NULL)) {
             iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
             pml_elastic_side_count++;
             remote_elastic_pml_side_count++;
@@ -13110,23 +12352,23 @@ static void solver_init() {
 
       if (pml_face_count > 0) {
         Global.acousticInterfacePmlSideMask = iface_mask;
-        Global.acousticInterfacePmlAcoustic_a = iface_ac_a;
-        Global.acousticInterfacePmlAcoustic_b = iface_ac_b;
-        Global.acousticInterfacePmlAcoustic_invKappa = iface_ac_iK;
-        Global.acousticInterfacePmlElastic_a = iface_el_a;
-        Global.acousticInterfacePmlElastic_b = iface_el_b;
-        Global.acousticInterfacePmlElastic_invKappa = iface_el_iK;
+        Global.acousticInterfacePmlAcoustic = iface_ac;
+
+
+        Global.acousticInterfacePmlElastic = iface_el;
+
+
         Global.acousticInterfacePmlFaceCount = pml_face_count;
       } else {
         /* No interface face is in the PML: keep everything NULL so the
          * coupling kernels skip the correction entirely. */
         free(iface_mask);
-        free(iface_ac_a);
-        free(iface_ac_b);
-        free(iface_ac_iK);
-        free(iface_el_a);
-        free(iface_el_b);
-        free(iface_el_iK);
+        free(iface_ac);
+
+
+        free(iface_el);
+
+
       }
     }
 
@@ -13163,52 +12405,16 @@ static void solver_init() {
     g_cpmlBuild.elastic_elem_list = NULL;
     free(g_cpmlBuild.acoustic_elem_list);
     g_cpmlBuild.acoustic_elem_list = NULL;
-    free(g_cpmlBuild.elastic_muCoeff);
-    g_cpmlBuild.elastic_muCoeff = NULL;
-    free(g_cpmlBuild.elastic_lambdaCoeff);
-    g_cpmlBuild.elastic_lambdaCoeff = NULL;
-    free(g_cpmlBuild.elastic_restoreCoeff);
-    g_cpmlBuild.elastic_restoreCoeff = NULL;
-    free(g_cpmlBuild.acoustic_forceCoeff);
-    g_cpmlBuild.acoustic_forceCoeff = NULL;
-    free(g_cpmlBuild.acoustic_restoreCoeff);
-    g_cpmlBuild.acoustic_restoreCoeff = NULL;
+    free(g_cpmlBuild.elastic_coeff);
+    g_cpmlBuild.elastic_coeff = NULL;
+    free(g_cpmlBuild.acoustic_coeff);
+    g_cpmlBuild.acoustic_coeff = NULL;
     free(g_cpmlBuild.acoustic_gravity_surface_pml_index);
     g_cpmlBuild.acoustic_gravity_surface_pml_index = NULL;
-    free(g_cpmlBuild.acoustic_gravity_surface_restoreCoeff);
-    g_cpmlBuild.acoustic_gravity_surface_restoreCoeff = NULL;
+    free(g_cpmlBuild.acoustic_gravity_surface_coeff);
+    g_cpmlBuild.acoustic_gravity_surface_coeff = NULL;
     g_cpmlBuild.acoustic_gravity_surface_count = 0;
     g_cpmlBuild.acoustic_gravity_surface_capacity = 0;
-    for (int axis = 0; axis < 3; axis++) {
-      free(g_cpmlBuild.elastic_a[axis]);
-      g_cpmlBuild.elastic_a[axis] = NULL;
-      free(g_cpmlBuild.elastic_b[axis]);
-      g_cpmlBuild.elastic_b[axis] = NULL;
-      free(g_cpmlBuild.elastic_invKappa[axis]);
-      g_cpmlBuild.elastic_invKappa[axis] = NULL;
-      free(g_cpmlBuild.elastic_zetaDecay[axis]);
-      g_cpmlBuild.elastic_zetaDecay[axis] = NULL;
-      free(g_cpmlBuild.elastic_zetaGain[axis]);
-      g_cpmlBuild.elastic_zetaGain[axis] = NULL;
-      free(g_cpmlBuild.elastic_memForce[axis]);
-      g_cpmlBuild.elastic_memForce[axis] = NULL;
-      free(g_cpmlBuild.acoustic_a[axis]);
-      g_cpmlBuild.acoustic_a[axis] = NULL;
-      free(g_cpmlBuild.acoustic_b[axis]);
-      g_cpmlBuild.acoustic_b[axis] = NULL;
-      free(g_cpmlBuild.acoustic_invKappa[axis]);
-      g_cpmlBuild.acoustic_invKappa[axis] = NULL;
-      free(g_cpmlBuild.acoustic_zetaDecay[axis]);
-      g_cpmlBuild.acoustic_zetaDecay[axis] = NULL;
-      free(g_cpmlBuild.acoustic_zetaGain[axis]);
-      g_cpmlBuild.acoustic_zetaGain[axis] = NULL;
-      free(g_cpmlBuild.acoustic_memForce[axis]);
-      g_cpmlBuild.acoustic_memForce[axis] = NULL;
-      if (axis < 2) {
-        free(g_cpmlBuild.acoustic_gravity_surface_memForce[axis]);
-        g_cpmlBuild.acoustic_gravity_surface_memForce[axis] = NULL;
-      }
-    }
   }
 #endif /* BOUNDARY */
 
@@ -14668,86 +13874,33 @@ static void solver_init() {
         }
       }
 
-      /* CPML-aware interface coupling correction arrays. Only allocated
-       * when at least one interface face is inside the PML zone (host
-       * arrays non-NULL). Two psi memory variables per face, zero-init. */
+      /* Two cofactor histories per normal component at four Gauss points. */
       if (Global.acousticInterfacePmlSideMask != NULL) {
-        if (cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePmlSideMaskDevice),
-                face_count * sizeof(uint8_t)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePmlAcoustic_aDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePmlAcoustic_bDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData
-                    .acousticInterfacePmlAcoustic_invKappaDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePmlElastic_aDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePmlElastic_bDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData
-                    .acousticInterfacePmlElastic_invKappaDevice),
-                face_count * sizeof(double)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePsiPressureDevice),
-                face_count * sizeof(solver_float)) != cudaSuccess ||
-            cudaMalloc(
-                (void**)&(Global.gpuData.acousticInterfacePsiAccelDevice),
-                face_count * sizeof(solver_float)) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to allocate CPML interface-correction "
-                  "arrays\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
-        }
-        cudaMemset(Global.gpuData.acousticInterfacePsiPressureDevice, 0,
-                   face_count * sizeof(solver_float));
-        cudaMemset(Global.gpuData.acousticInterfacePsiAccelDevice, 0,
-                   face_count * sizeof(solver_float));
-        if (cudaMemcpy(Global.gpuData.acousticInterfacePmlSideMaskDevice,
-                       Global.acousticInterfacePmlSideMask,
-                       face_count * sizeof(uint8_t),
+        const size_t coeff_bytes = face_count*sizeof(cpml_interface_t);
+        const size_t state_bytes = 24*face_count*sizeof(solver_float);
+        if (cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlSideMaskDevice,
+                       face_count*sizeof(uint8_t)) != cudaSuccess ||
+            cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlAcousticDevice,
+                       coeff_bytes) != cudaSuccess ||
+            cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlElasticDevice,
+                       coeff_bytes) != cudaSuccess ||
+            cudaMalloc((void**)&Global.gpuData.acousticInterfacePsiPressureDevice,
+                       state_bytes) != cudaSuccess ||
+            cudaMalloc((void**)&Global.gpuData.acousticInterfacePsiAccelDevice,
+                       state_bytes) != cudaSuccess ||
+            cudaMemset(Global.gpuData.acousticInterfacePsiPressureDevice,0,state_bytes) != cudaSuccess ||
+            cudaMemset(Global.gpuData.acousticInterfacePsiAccelDevice,0,state_bytes) != cudaSuccess ||
+            cudaMemcpy(Global.gpuData.acousticInterfacePmlSideMaskDevice,
+                       Global.acousticInterfacePmlSideMask,face_count*sizeof(uint8_t),
                        cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.acousticInterfacePmlAcoustic_aDevice,
-                       Global.acousticInterfacePmlAcoustic_a,
-                       face_count * sizeof(double),
+            cudaMemcpy(Global.gpuData.acousticInterfacePmlAcousticDevice,
+                       Global.acousticInterfacePmlAcoustic,coeff_bytes,
                        cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.acousticInterfacePmlAcoustic_bDevice,
-                       Global.acousticInterfacePmlAcoustic_b,
-                       face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData
-                           .acousticInterfacePmlAcoustic_invKappaDevice,
-                       Global.acousticInterfacePmlAcoustic_invKappa,
-                       face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.acousticInterfacePmlElastic_aDevice,
-                       Global.acousticInterfacePmlElastic_a,
-                       face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData.acousticInterfacePmlElastic_bDevice,
-                       Global.acousticInterfacePmlElastic_b,
-                       face_count * sizeof(double),
-                       cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(Global.gpuData
-                           .acousticInterfacePmlElastic_invKappaDevice,
-                       Global.acousticInterfacePmlElastic_invKappa,
-                       face_count * sizeof(double),
+            cudaMemcpy(Global.gpuData.acousticInterfacePmlElasticDevice,
+                       Global.acousticInterfacePmlElastic,coeff_bytes,
                        cudaMemcpyHostToDevice) != cudaSuccess) {
-          fprintf(stderr,
-                  "Thread %d: Failed to copy CPML interface-correction "
-                  "arrays\n",
-                  Global.myID);
-          MPI_Abort(MPI_COMM_WORLD, ERROR);
-          exit(1);
+          fprintf(stderr,"Thread %d: failed to initialize CPML interface arrays\n",Global.myID);
+          MPI_Abort(MPI_COMM_WORLD,ERROR); exit(1);
         }
       }
     }
@@ -15261,28 +14414,24 @@ static void solver_delete() {
   cudaFree(Global.gpuData.acousticInterfaceAdjacentPoroelasticDevice);
   cudaFree(Global.gpuData.acousticInterfacePoroelasticBoundaryScalesDevice);
   cudaFree(Global.gpuData.acousticInterfacePmlSideMaskDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_aDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_bDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlAcoustic_invKappaDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlElastic_aDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlElastic_bDevice);
-  cudaFree(Global.gpuData.acousticInterfacePmlElastic_invKappaDevice);
+  cudaFree(Global.gpuData.acousticInterfacePmlAcousticDevice);
+
+
+  cudaFree(Global.gpuData.acousticInterfacePmlElasticDevice);
+
+
   cudaFree(Global.gpuData.acousticInterfacePsiPressureDevice);
   cudaFree(Global.gpuData.acousticInterfacePsiAccelDevice);
   free(Global.acousticInterfacePmlSideMask);
   Global.acousticInterfacePmlSideMask = NULL;
-  free(Global.acousticInterfacePmlAcoustic_a);
-  Global.acousticInterfacePmlAcoustic_a = NULL;
-  free(Global.acousticInterfacePmlAcoustic_b);
-  Global.acousticInterfacePmlAcoustic_b = NULL;
-  free(Global.acousticInterfacePmlAcoustic_invKappa);
-  Global.acousticInterfacePmlAcoustic_invKappa = NULL;
-  free(Global.acousticInterfacePmlElastic_a);
-  Global.acousticInterfacePmlElastic_a = NULL;
-  free(Global.acousticInterfacePmlElastic_b);
-  Global.acousticInterfacePmlElastic_b = NULL;
-  free(Global.acousticInterfacePmlElastic_invKappa);
-  Global.acousticInterfacePmlElastic_invKappa = NULL;
+  free(Global.acousticInterfacePmlAcoustic);
+  Global.acousticInterfacePmlAcoustic = NULL;
+
+
+  free(Global.acousticInterfacePmlElastic);
+  Global.acousticInterfacePmlElastic = NULL;
+
+
   Global.acousticInterfacePmlFaceCount = 0;
   cudaFree(Global.gpuData.acousticPressureCoeffArrayDevice);
   cudaFree(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice);
@@ -15317,75 +14466,14 @@ static void solver_delete() {
   cudaFree(Global.gpuData.pmlFlagArrayDevice);
   cudaFree(Global.gpuData.pmlClampNodeMaskDevice);
   cudaFree(Global.gpuData.pmlElasticElemMapperDevice);
-  cudaFree(Global.gpuData.pml_elastic_a_xArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_a_yArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_a_zArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_b_xArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_b_yArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_b_zArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_invKappa_xArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_invKappa_yArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_invKappa_zArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_muCoeffArrayDevice);
-  cudaFree(Global.gpuData.pml_elastic_lambdaCoeffArrayDevice);
-  for (int i = 0; i < 3; i++) {
-    for (int jx = 0; jx < 3; jx++) {
-      cudaFree(Global.gpuData.pml_elastic_psiArrayDevice[i][jx]);
-      cudaFree(Global.gpuData.pml_elastic_divPsiArrayDevice[i][jx]);
-      cudaFree(Global.gpuData.pml_elastic_psiShearArrayDevice[i][jx]);
-      cudaFree(Global.gpuData.pml_elastic_psiKappaArrayDevice[i][jx]);
-    }
-  }
-  for (int axis = 0; axis < 3; axis++) {
-    cudaFree(Global.gpuData.pml_elastic_zetaDecayArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_elastic_zetaGainArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_elastic_memForceArrayDevice[axis]);
-  }
-  cudaFree(Global.gpuData.pml_elastic_restoreCoeffArrayDevice);
+  cudaFree(Global.gpuData.pmlElasticCoeffDevice);
+  cudaFree(Global.gpuData.pmlElasticStateDevice);
   cudaFree(Global.gpuData.pmlAcousticElemMapperDevice);
-  cudaFree(Global.gpuData.pml_acoustic_a_xArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_a_yArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_a_zArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_b_xArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_b_yArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_b_zArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_invKappa_xArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_invKappa_yArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_invKappa_zArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_forceCoeffArrayDevice);
-  cudaFree(Global.gpuData.pml_acoustic_restoreCoeffArrayDevice);
-  for (int axis = 0; axis < 3; axis++) {
-    cudaFree(Global.gpuData.pml_acoustic_psiArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_acoustic_zetaDecayArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_acoustic_zetaGainArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_acoustic_memForceArrayDevice[axis]);
-    cudaFree(Global.gpuData.pml_acoustic_zetaPArrayDevice[axis]);
-  }
-  cudaFree(
-      Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice);
-  cudaFree(
-      Global.gpuData.pml_acoustic_gravitySurfaceRestoreCoeffArrayDevice);
-  for (int axis = 0; axis < 2; axis++) {
-    cudaFree(
-        Global.gpuData
-            .pml_acoustic_gravitySurfaceMemForceArrayDevice[axis]);
-    cudaFree(
-        Global.gpuData.pml_acoustic_gravitySurfaceZetaArrayDevice[axis]);
-  }
-  free(Global.mySolver->pmlElasticElemList);
-  Global.mySolver->pmlElasticElemList = NULL;
-  for (int i = 0; i < 3; i++) {
-    for (int jx = 0; jx < 3; jx++) {
-      free(Global.mySolver->pml_elastic_psi[i][jx]);
-      Global.mySolver->pml_elastic_psi[i][jx] = NULL;
-    }
-  }
-  free(Global.mySolver->pmlAcousticElemList);
-  Global.mySolver->pmlAcousticElemList = NULL;
-  for (int axis = 0; axis < 3; axis++) {
-    free(Global.mySolver->pml_acoustic_psi[axis]);
-    Global.mySolver->pml_acoustic_psi[axis] = NULL;
-  }
+  cudaFree(Global.gpuData.pmlAcousticCoeffDevice);
+  cudaFree(Global.gpuData.pmlAcousticStateDevice);
+  cudaFree(Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice);
+  cudaFree(Global.gpuData.pmlGravityCoeffDevice);
+  cudaFree(Global.gpuData.pmlGravityStateDevice);
 
   cudaFree(Global.mySolver->gpuDataDevice);
 
@@ -16756,35 +15844,8 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
     }
   }
 
-  /* BKT-family damping uses kernelDampingCalcLocal as the complete native
-   * viscoelastic force, so the regular stiffness launch above is skipped.
-   * BKT material damping is intentionally excluded from CPML PML elements;
-   * give those elements their native elastic stiffness here, then let
-   * kernelPMLElasticStep add only the CPML correction. */
-  if (Param.theTypeOfDamping >= BKT &&
-      Param.theAbcType == ABC_CPML &&
-      Param.theCpmlNativeStiffness != NO &&
-      solver->gpuData->pmlElasticElemCount > 0) {
-    const int32_t pmlN = solver->gpuData->pmlElasticElemCount;
-    int blocksize = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE].blocksize;
-    int gridsize = (pmlN + blocksize - 1) / blocksize;
-    int sharedmem = solver->gpu_kernel[CUDA_KERNEL_STIFFNESS_FORCE].sharedmem;
-    cudaGetLastError();
-    psolve_launch_stiffness(gridsize, blocksize, sharedmem,
-                               solver->streams[CUDA_STREAM_MAIN],
-        mesh->lenum, solver->gpuDataDevice, pmlN,
-        solver->gpuData->pmlElasticElemMapperDevice);
-    cudaError_t cerror = cudaGetLastError();
-    if (cerror != cudaSuccess) {
-      fprintf(stderr, "Thread %d: PML native stiffness kernel - %s\n",
-              Global.myID, cudaGetErrorString(cerror));
-      MPI_Abort(MPI_COMM_WORLD, ERROR);
-      exit(1);
-    }
-  }
-
   /* CPML elastic-side force (ADE memory-variable update fused with the
-   * modified-strain Galerkin assembly). */
+   * fully integrated weak-form stiffness and nodal inertia assembly). */
   if (Param.theAbcType == ABC_CPML &&
       solver->gpuData->pmlElasticElemCount > 0) {
     const int32_t pmlN = solver->gpuData->pmlElasticElemCount;
@@ -17123,7 +16184,7 @@ static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh) {
     }
     /* SPECFEM-style flat PML: a CPML PML element that also belongs to
      * topography is re-routed to the cube linear stiffness path
-     * (kernelStiffnessCalcLocal + CPML delta), so it must NOT also be
+     * (full Hex8 CPML kernel), so it must NOT also be
      * processed by the curvilinear topo kernel -- exclude it here. The
      * count is the PML-cap-topography overlap exposed at startup. */
     if (cpml_pml_flattened_element(eindex)) {
@@ -21760,9 +20821,9 @@ static void solver_cpml_rank_diag_collect(void) {
   localCounts[CPML_RANK_DIAG_LOCAL_ELEMS] =
       (long long)Global.myMesh->lenum;
   localCounts[CPML_RANK_DIAG_ELASTIC_ELEMS] =
-      (long long)Global.mySolver->pmlElasticElemCount;
+      (long long)Global.gpuData.pmlElasticElemCount;
   localCounts[CPML_RANK_DIAG_ACOUSTIC_ELEMS] =
-      (long long)Global.mySolver->pmlAcousticElemCount;
+      (long long)Global.gpuData.pmlAcousticElemCount;
   localCounts[CPML_RANK_DIAG_TOTAL_ELEMS] =
       localCounts[CPML_RANK_DIAG_ELASTIC_ELEMS] +
       localCounts[CPML_RANK_DIAG_ACOUSTIC_ELEMS];
@@ -24529,11 +23590,11 @@ int cpml_pml_element(int32_t eindex) {
 
 /* SPECFEM-style flat/regular PML. A CPML PML element that also belongs
  * to topography would otherwise get a curvilinear native force (topo
- * kernel) plus the cube-based CPML delta -- a native+delta mismatch.
+ * kernel), incompatible with the Cartesian CPML operator.
  * SPECFEM3D builds the C-PML as a regular axis-aligned extruded buffer
  * (topography not carried into it); we achieve the same by treating
  * such elements as flat regular cubes: re-routed into the linear cube
- * stiffness path (kernelStiffnessCalcLocal + the CPML delta), excluded
+ * stiffness path (full Hex8 CPML kernel), excluded
  * from the topo GPU mapper, and given flat nodal mass. This predicate
  * is the single source of truth. Returns 0 unless CPML is on AND
  * include_topography is on AND this is a PML element, so every
@@ -24546,7 +23607,7 @@ int cpml_pml_flattened_element(int32_t eindex) {
    * (Vp=-1) above the free surface (embedded boundary): solid PML
    * elements are ALREADY regular cubes in the linear path
    * (BelongstoTopography()==NO for FEM solid), so there is no
-   * native+delta mismatch to fix and this must be a strict no-op for
+   * curvilinear mismatch to fix and this must be a strict no-op for
    * FEM. Only VT body-fits/deforms surface elements
    * (BelongstoTopography()==YES, routed to the curvilinear topo kernel)
    * -- that is the case the flatten re-route targets. */
@@ -24589,7 +23650,8 @@ static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
 
 /* Compute per-axis CPML ADE recurrence coefficients for one element.
  * Output triples are indexed by stretching axis j in {x=0,y=1,z=2}.
- * For axes outside the mask, returns the no-PML identity:
+ * a/b/invKappa are the trapezoidal inverse section feed/decay/direct.
+ * Axes without direct or cross-mixed damping return the no-PML identity:
  *   b_j = 1, a_j = 0, invKappa_j = 1  (memory variable stays at 0).
  *
  * The damping profile uses a single reference Vp for the whole CPML region.
@@ -24659,49 +23721,16 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
     }
   }
 
-  /* Second pass: M-PML (Multi-axial PML) cross-coupling.
-   *
-   * Plain unsplit CPML for the elastic wave equation has a known long-time
-   * instability mode at PML corners (K&M 2007 Section 5.4). The alpha
-   * floor above prevents the immediate "alpha=0 at the outer edge"
-   * variant of the failure, but a slower-growing creeping instability
-   * remains, particularly when kappa_max > 1.
-   *
-   * M-PML (Meza-Fajardo & Papageorgiou 2008) cures this by replacing each
-   * axis's damping rate d_j with an effective rate
-   *     d_eff_j = d_j + p * (d_{k1} + d_{k2})
-   * where p ∈ [0.05, 0.20] is a small cross-coupling fraction. The
-   * per-axis psi recurrence then uses d_eff_j in the b and a coefficients,
-   * while the constitutive operator (1/kappa_j) is unchanged. Effect:
-   * every axis in a PML element gets at least *some* damping rate, even
-   * axes that have no own face-mask bit, which restores the symmetry the
-   * corner mode exploited.
-   *
-   * Axes that inherit damping only via cross-coupling have alpha=0 from
-   * the first pass; we floor alpha for those axes too so the ADE
-   * recurrence has a non-zero decay rate.
-   *
-   * mpml_cross_fraction is the runtime-tunable p value (default 0.1).
-   * Set to 0 to disable M-PML and run plain CPML; values in [0.05, 0.20]
-   * are the literature-recommended range. */
+  /* Optional cross-axis damping. This heuristic is not a separable
+   * coordinate stretch and introduces reflection; plain CPML (p=0) is the
+   * default for the complete weak-form operator. Retained for experiments. */
   const double mpml_p = mpml_cross_fraction;
 
   for (int j = 0; j < 3; j++) {
     int k1 = (j + 1) % 3;
     int k2 = (j + 2) % 3;
     double d_total = d_raw[j] + mpml_p * (d_raw[k1] + d_raw[k2]);
-    /* Formal-multiaxial kappa (Meza-Fajardo & Papageorgiou 2008; the
-     * same profile-cross-mixing the v3 "formal multiaxial PML" uses, and
-     * what SPECFEM-class codes ship -- the full Pi=s_x s_y s_z double/
-     * triple-delta cross-convolution form is theoretical and not used in
-     * production). The normalized profile is cross-mixed exactly like
-     * d_total, then kappa is derived from it, so at an edge/corner kappa_j
-     * reflects ALL active damping directions (consistent with the
-     * cross-coupled d_total and with the matched kappa-inertia). Clamp to
-     * [0,1] keeps kappa in [1, kappa_max]. Reduces EXACTLY to the per-axis
-     * profile when mpml_p = 0, kappa_max = 1, or on a face element
-     * (transverse poly = 0) -> the validated face/kappa=1 results are
-     * bit-identical. d_total and alpha_j keep their validated treatment. */
+    /* Apply the explicitly requested cross mixing to both profiles. */
     double prof_mix = poly_arr[j] + mpml_p * (poly_arr[k1] + poly_arr[k2]);
     if (prof_mix > 1.0) prof_mix = 1.0;
     double kappa_j = 1.0 + (kappa_max - 1.0) * prof_mix;
@@ -24713,36 +23742,15 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
       alpha_j = alpha_floor;
     }
 
-    double decay = d_total / kappa_j + alpha_j;
-    double b_j = exp(-decay * dt);
-    double a_j = 0.0;
-    double denom = d_total + kappa_j * alpha_j;
-    if (denom > 1.0e-30 && d_total > 0.0) {
-      a_j = (d_total / (kappa_j * denom)) * (b_j - 1.0);
-    }
-    a_out[j] = a_j;
-    b_out[j] = b_j;
-    invKappa_out[j] = 1.0 / kappa_j;
-    /* kappa_j itself, exported so the caller can apply the matched
-     * kappa-scaled inertia. The gradient side stretches the strain by
-     * 1/kappa_j (invKappa_out); the second-order displacement CFS-CPML
-     * requires the inertia to be scaled by the product of kappa over the
-     * element's active stretch axes (rho*kappa*d2u/dt2, the leading term
-     * of multiplying the momentum eq by s_x s_y s_z). Without it the
-     * effective impedance is rho*c0/sqrt(kappa) != rho*c0 -> a spurious
-     * reflection at the inner edge for kappa>1. kappa_j = 1 at the inner
-     * edge (xi=0) so the matched pair reduces to the native operator. */
+    /* Output-gradient section uses the same trapezoidal inverse stretch.
+     * Bulk/surface coefficient builders consume d, alpha, kappa directly. */
+    const cpml_filter_t inverse = cpml_filter(1.0/kappa_j,
+        -d_total/(kappa_j*kappa_j), alpha_j+d_total/kappa_j, dt);
+    a_out[j] = inverse.feed;
+    b_out[j] = inverse.decay;
+    invKappa_out[j] = inverse.direct;
     kappa_out[j] = kappa_j;
-    /* d_total (M-PML-coupled damping rate, units 1/s) is exported so the
-     * caller can build the Matzen second-order divergence-side term:
-     * the mass-proportional CPML damping rho * d_j * du/dt injected into
-     * the nodal mass arrays (mirroring the Lysmer dashpot path). */
     d_out[j] = d_total;
-    /* Floored alpha_a (CFS frequency, rad/s) for this axis. Exported so
-     * the caller can build the CFS restoring (-d*alpha*u) and the
-     * displacement-convolution memory (+d*alpha^2*zeta) terms. The floor
-     * (alpha_floor) already applied above guarantees alpha_a > 0, so the
-     * exact zeta integrator gain (1-exp(-alpha dt))/alpha is well-posed. */
     alpha_out[j] = alpha_j;
   }
 }

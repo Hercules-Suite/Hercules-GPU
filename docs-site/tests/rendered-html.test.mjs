@@ -354,7 +354,8 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
   const kernel = readFileSync(`${sourceRoot}kernel.cu`, "utf8");
   assert.match(psolve, /parsetext\(fp, "acoustic_free_surface_gravity"/);
   assert.match(psolve, /gravitySurfaceMass[\s\S]*?edgesize[\s\S]*?4\.0[\s\S]*?rho/);
-  assert.match(psolve, /gravity_surface_kprod = kappa_axis\[0\] \* kappa_axis\[1\]/);
+  assert.match(psolve, /gravity_surface_kprod = surface->inertia.mass/);
+  assert.match(psolve, /surface->inertia = cpml_inertia[\s\S]*?2, 0\.0, dt/);
   assert.match(psolve, /psolve_launch_pml_acoustic_gravity_surface/);
   assert.match(header, /ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9\.81/);
   assert.match(kernel, /pressureFreeSurfaceNodeFlagsDevice[\s\S]*?acousticFreeSurfaceGravity == 0/);
@@ -1501,9 +1502,8 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.match(models, /MPI displacement sharing and hanging-node assignment/);
   assert.match(models, /Compare one and four ranks/);
   assert.match(models, /Acoustic interface geometry/);
-  assert.match(models, /current CFS memory uses a face average/);
-  assert.match(models, /zero-mean face modes/);
-  assert.match(models, /was not adopted/);
+  assert.match(models, /independent nodal surface memories/);
+  assert.match(models, /full tangential x\/y product, including corners/);
   assert.match(models, /Earlier candidate and doubled-CPML runs contained invalid source forces/);
   assert.match(models, /nonfinite output cannot establish an operator instability/);
 
@@ -1842,4 +1842,17 @@ test("preserves explicit G0 and caches velocity-derived RIVA-Sand stiffness", ()
   assert.match(research, /reversal_type==2 \? 7u/);
   for (const verb of ["read", "write"])
     assert.match(gpu, new RegExp(`nonlinear_checkpoint_${verb}_device\\(\\s*fp,g_nl\\.riva_E_refs`));
+});
+
+
+test("documents complete CPML products and the plain-CPML default", async () => {
+  const html = await (await render("/docs/physics")).text();
+  assert.match(html, /Complete second-order operator/);
+  assert.match(html, /cpml_mpml_cross_fraction is now 0/);
+  assert.match(html, /checkpoint reads and writes/);
+  const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
+  if (!existsSync(sourceRoot)) return;
+  const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
+  assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
 });

@@ -1064,9 +1064,8 @@ Notes:
 	to weakly project the normal velocity/pressure traction over each fragment
 	before assembling nodal interface forces. This is an experimental diagnostic
 	option intended to reduce grid-scale interface forcing in
-	`acoustic_formulation=velocity_potential` runs. PML interface fragments
-	currently retain the `point` path so their one-memory-variable CPML
-	correction remains unchanged.
+	`acoustic_formulation=velocity_potential` runs. PML fragments retain the
+	selected quadrature, with independent cofactor histories at each point.
 - `acoustic_interface_face_filter`
 	Optional. `all` (default), `bathymetry`, or `bottom_only`. This applies when
 	acoustic interface coupling is enabled. `all` couples every
@@ -1169,9 +1168,8 @@ Notes:
 	damping and CFS restoring/memory terms on the four top-face nodes. The
 	vertical CPML stretch is intentionally excluded because `z` is normal to the
 	gravity surface. Corner PML faces include both tangential directions. This
-	adds no per-step work to non-surface PML elements. The current face-average
-	memory has a discretization inconsistency described under
-	[scalar acoustic limitations](#scalar-acoustic-corrections-and-limitations). Changing this
+	adds no per-step work to non-surface PML elements. Each top node has its
+	own memory, consistent with the lumped surface mass. Changing this
 	option affects phase-B solver setup but not mesh generation, so an existing
 	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
@@ -1562,20 +1560,14 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 
 ## Scalar acoustic corrections and limitations
 
-- **Gravity-surface CPML consistency limitation.** Surface mass and damping
-	are lumped at the four face nodes, while the current restoring/memory
-	kernel uses a face average. A zero-mean face mode therefore receives nodal
-	damping but no matching restoring/memory force. A nodal-memory candidate
-	passed analytical CFS step-response checks and an 8 s shifted-surface
-	GPU/MPI smoke test. Its original reduced Izmir run and the doubled-CPML
-	run contained NaNs in their generated source forces, traced to a
-	tabulated-source endpoint overread. Their nonfinite output cannot
-	establish an instability of either CPML variant. The source interpolator
-	now bounds that endpoint; reruns must regenerate the force files.
-	The nodal-memory candidate remains separate from the production solver.
-	See the [Izmir investigation](izmir_gravity_diagnostic_20261001.md) for the
-	corrected-source comparisons and remaining absorption/reconstruction
-	validation limits. Finite output alone does not validate the slow motion.
+- **Gravity-surface CPML nodal consistency.** The full second-order operator
+	now evaluates the tangential product `S_x*S_y` separately at each of the
+	four lumped top nodes, including its corner term. Earlier face-average
+	memories omitted zero-mean face modes. Historical source-corrupted tests
+	are retained in the [Izmir investigation](izmir_gravity_diagnostic_20261001.md);
+	they do not validate this formulation. Gravity-wave absorption and motion
+	reconstruction require separate checks, since surface-gradient recovery
+	error remains even with a consistent absorber.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
 	new solid displacements only after MPI sharing and hanging-node assignment.
 	The existing displacement exchange runs before the scalar update, using
@@ -1606,8 +1598,8 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	shifted surface. Check the new exact face count before interpreting results.
 	Acoustic station/plane reconstruction also now uses the same gradient-side
 	CPML stretch as the solver instead of the raw pressure gradient. For each
-	axis, `psi[n]=b*psi[n-1]+a*grad(p[n])` and
-	`grad_CPML(p[n])=grad(p[n])/kappa+psi[n]`; outside CPML this is an exact
+	axis, the trapezoidal inverse-stretch section is applied to `grad(p[n])`;
+	outside CPML this is an exact
 	identity. The existing host reconstruction applies it at each solver step
 	using setup-time coefficients, with no additional GPU transfer. The startup
 	`Acoustic output CPML gradient correction` line counts affected observations.
@@ -1667,8 +1659,7 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 Hercules supports two absorbing boundary conditions, selected at run
 time. The default is the legacy first-order Lysmer dashpot. The newer
 option is an unsplit Convolutional Perfectly Matched Layer (C-PML,
-Komatitsch & Martin 2007 — the same second-order displacement form
-SPECFEM3D's FE-PML uses). The C-PML is per-element, wraps the five
+second-order weak form with complex frequency shift and full Jacobian products). The C-PML is per-element, wraps the five
 absorbing faces (`x_min`, `x_max`, `y_min`, `y_max`, `z_max`) and leaves
 `z_min` as the free surface, and works for both elastic and
 acoustic-pressure elements. Earlier CPS comparisons are summarized below and in the
@@ -1721,13 +1712,10 @@ results are specific to the recorded configuration and implementation.
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
 	across the PML.
 - `cpml_kappa_max`
-	Optional. Default `1.0` — no extra coordinate stretch, and the
-	earlier reference setting. Values `> 1` improve grazing/evanescent absorption
-	and are now consistently implemented, but still need re-validation;
-	treat `2–3` as promising-but-unconfirmed and prefer a thicker PML
-	(`cpml_layers` ~30–50) for the deep-corner vertical residual. Values
-	above `3` are untested. `kappa = 1` keeps the PML↔interior interface
-	exact.
+	Optional. Default `1.0`; must be at least one. Higher values change the
+	real stretch in all stiffness, inertia and surface products. Validate
+	thickness, resolution and incidence angle together; increasing kappa is
+	not a substitute for a resolved layer.
 - `cpml_alpha_max_hz`
 	Optional. When `> 0`, sets the CFS frequency directly (Hz). When `< 0`
 	or unset (default), it is derived from `simulation_wave_max_freq_hz`.
@@ -1740,26 +1728,24 @@ results are specific to the recorded configuration and implementation.
 	factor when `abc_type=cpml`, for margin against the corner-element
 	instability. `1.0` disables the reduction; `< 0.5` is rarely needed.
 - `cpml_mpml_cross_fraction`
-	Optional. Default `0.1`. Strength of the M-PML cross-axis coupling
-	(Meza-Fajardo & Papageorgiou 2008) that stabilises long elastic runs.
-	`0` disables it (plain unsplit CPML, known to drift over long runs).
-	Recommended range `[0.05, 0.20]`; valid `[0, 0.5]`. Lower it if
-	receivers very close to the PML inner edge show extra coda; raise it
-	for stability margin in pathological cases.
+	Optional. Default **`0.0`**, changed from `0.1` with the complete operator.
+	Valid range `[0,0.5]`. Nonzero values mix each damping and kappa profile
+	into the other axes. This experimental stabilization breaks the separable
+	coordinate mapping and can increase reflections substantially. Existing
+	inputs explicitly setting `0.1` retain that behavior; remove the setting
+	or write `0` for plain CPML.
 - `cpml_alpha_floor_fraction`
-	Optional. Default `0.1`. The CFS profile otherwise reaches zero at
-	the outer PML edge, which destabilises corner elements; flooring it
-	at 10% of the maximum keeps a non-zero decay rate everywhere. Set to
-	`0` to disable (only safe with M-PML cross-coupling on). Valid
-	`[0, 1]`.
+	Optional. Default `0.1`; valid `[0,1]`. Lower bound on alpha relative to
+	its maximum. Zero and repeated poles are handled without divided-pole
+	singularities; their acceptance does not establish long-time stability
+	for every model.
 - `cpml_pml_material_damping`
 	Optional. `none` (default) | `rayleigh`. Whether material damping is
 	applied inside elastic PML elements. `none` means material damping is
 	skipped in the PML zone; non-PML elements still use the requested
 	`type_of_damping`. For BKT-family runs (`bkt`, `bkt2`, `bkt3`,
 	`bkt3f`), this is the supported policy: the interior uses BKT damping,
-	while PML elements use native elastic stiffness plus the elastic CPML
-	correction.
+	while PML elements use the complete elastic CPML operator.
 
 	`rayleigh` enables the Rayleigh material-damping CPML path and is valid
 	only with `type_of_damping=rayleigh`. If `type_of_damping=rayleigh`,
@@ -1784,14 +1770,11 @@ results are specific to the recorded configuration and implementation.
 - `cpml_stiffness_mode`
 	Optional. `native` (default) or `reduced`. How the elastic PML
 	element stiffness is formed.
-	* `native` — full native element stiffness plus a CPML correction
-		that is exactly zero where there is no damping, so the
-		PML↔interior operator is continuous and not rank-deficient.
-		Recommended.
-	* `reduced` — standalone reduced CPML stiffness only (legacy).
-		Differs from `native` by ~0.2–0.4% on the homogeneous CPS
-		benchmark; kept for comparison/debugging. `native` is preferred
-		for coarse/heterogeneous meshes and long runs.
+	* `native` — fully integrated trilinear Hex8 stiffness, including all
+		tangential and mixed terms. Its unstretched limit equals the existing
+		interior operator. Recommended.
+	* `reduced` — one-point integration, retaining only linear modes.
+		Rank deficient; kept as a diagnostic option.
 - `cpml_stiffness_mode_acoustic`
 	Optional. `native` or `reduced`. Independent override for **acoustic**
 	PML elements; if unset it inherits `cpml_stiffness_mode` (so existing
@@ -1942,64 +1925,25 @@ preprocessing step for any real topography + C-PML run):
 	to running the standalone utility on the un-tapered surface; the flag
 	is off by default so the committed example files stay reproducible.
 
-### CPML stability mechanisms
+### CPML setup and validation requirements
 
-These are automatic and tuned by the fractions above; you normally do
-not touch them.
+Use `stiffness_calculation_method=effective` for the GPU elastic path.
+Checkpoint reads and writes are rejected with CPML: the legacy checkpoint
+format does not preserve absorber histories. Set `use_checkpoint=0` and
+`checkpointing_rate=0`. Non-PML checkpoint behavior is unchanged.
 
-- **Alpha floor** (`cpml_alpha_floor_fraction`): keeps a non-zero decay
-	rate everywhere in the PML so corner elements can't lose all damping
-	at once. No-op at the inner edge.
-- **M-PML cross-axis coupling** (`cpml_mpml_cross_fraction`): mixes a
-	little of each axis's damping into the other two to stabilise long
-	elastic runs, at the cost of slightly more absorption leaking onto
-	auxiliary axes.
-- **Centroid-paired CFS terms**: the grazing-incidence CFS terms are
-	evaluated consistently at the element centroid so they cancel exactly
-	where there is no damping (otherwise PML corners grow exponentially).
-- **Inner-edge half-cell sampling**: the profile is sampled at the
-	element centroid, so the first PML layer carries a small, bounded,
-	well-characterised discrete reflection — shrink it with more
-	`cpml_layers` or a higher `cpml_poly_order` if needed. (An alternative
-	inner-face-shift refinement from another branch was evaluated and not
-	adopted here; the centroid baseline is already validation-grade.)
+Start with `cpml_stiffness_mode=native`, `cpml_kappa_max=1`,
+`cpml_mpml_cross_fraction=0`, and the default alpha floor. Keep source and
+receivers outside the absorbing layer, resolve the source bandwidth, and
+compare with a larger domain at identical mesh spacing and timestep. Measure
+P/S arrivals, surface waves, late coda, and the permanent displacement
+separately; neither finite output nor a quieter trace proves matching.
+The profile is sampled at element centers, so spatial refinement and a thicker
+layer can reduce the entrance discretization error.
 
-Earlier elastic half-space comparisons against CPS reported improved
-late-coda absorption for the tested CPML configurations. The
-[historical benchmark record](#historical-cpml-benchmark-record) retains the
-receiver-by-receiver table and its implementation caveat. Keep receivers
-outside the PML when judging physical seismograms, and distinguish the direct
-arrival from the coda dominated by boundary reflections.
-
-### CPML example from earlier validation
-
-```
-abc_type = cpml
-cpml_clamp_outer = yes      # default: clamp the outer lateral faces and bottom
-cpml_layers = 30            # raise to 30–50 to close the deep-corner Z residual
-# cpml_kappa_max:           leave at 1.0 (validated); 2–3 promising but unconfirmed
-# cpml_stiffness_mode:      leave at native (recommended)
-# cpml_alpha_max_hz:        leave default unless the source peak freq differs
-# cpml_mpml_cross_fraction / cpml_alpha_floor_fraction: leave at 0.1
-# cpml_partition_weight:    leave at 1.0 unless CPML rank/load diagnostics justify tuning
-```
-
-Notes:
-
-- The earlier reference configuration uses `cpml_kappa_max = 1`; the deep-corner
-	vertical residual is reduced most reliably by a thicker PML
-	(`cpml_layers` 30–50), not by `kappa`.
-- `cpml_clamp_outer = yes` is recommended for long runs / thinner PMLs.
-- `cpml_layers = 10` already beats the dashpot 2–5× on the horizontal
-	components; 30–50 helps the deep-corner vertical and low-frequency
-	absorption.
-- `cpml_partition_weight` affects only how elements are assigned to MPI
-	ranks. It is useful for diagnostics/tuning, but the default `1.0` is
-	the safest production setting unless a specific case shows CPML-heavy
-	ranks pacing the solve.
-- For double-precision correctness checks build with `solver_float =
-	double`; production single-precision runs are verified back-to-back.
-
+Historical CPS results below describe earlier incomplete operators and are
+not acceptance evidence for the full formulation. Current implementation and
+validation scope are described in [operator details](#cpml-coefficient-and-operator-details).
 
 ### Incident plane-wave controls
 
@@ -2197,60 +2141,141 @@ runs; historical measurements are labeled with their implementation scope.
 
 ### CPML coefficient and operator details
 
-The implementation uses a gradient-side ADE memory to modify strain (or the
-scalar acoustic gradient), plus divergence-side inertia, mass damping, and
-complex-frequency-shift restoring/memory terms. The absorbing faces are
-`x_min`, `x_max`, `y_min`, `y_max`, and `z_max`; `z_min` remains the free
-surface. Elastic and acoustic PML elements have separate execution maps.
+The production helpers are in `quake/forward/cpml.h`. For Laplace variable
+$s$, each axis has stretch $S_j$, and $J$ is their product:
 
-For layer thickness L, reference compressional speed Vp, target reflection R,
-polynomial order n, and centroid distance xi into the layer, the coefficient
-builder uses:
-
-```text
-r_j     = (xi_j / L)^n
-D       = -(n + 1) * Vp * ln(R) / (2 * L)
-d_j     = D * r_j
-alpha_j = max(alpha_max * (1 - xi_j/L), alpha_floor_fraction * alpha_max)
+```math
+S_j(s)=\kappa_j+\frac{d_j}{s+\alpha_j},\qquad J(s)=S_xS_yS_z.
 ```
 
-Before cross-axis mixing, an inactive axis has zero profile and alpha.
-`cpml_mpml_cross_fraction` supplies p for the M-PML coupling:
+The elastic weak stiffness multiplies $C_{ijkl}$ by $J/(S_jS_l)$; the
+scalar acoustic gradient term uses $J/S_j^2$. Thus an x-only PML includes
+both inverse x stiffness and forward tangential stiffness. The full inertia
+is $\rho J(s)s^2$. With Rayleigh material damping it becomes
+$\rho J(s)(s^2+a s)$, while stiffness acts on the usual effective displacement
+$u+b\dot u$. Edge/corner products are retained in every term.
 
-```text
-d_eff_j = d_j + p * (d_k1 + d_k2)
-r_mix_j = min(1, r_j + p * (r_k1 + r_k2))
-kappa_j = 1 + (cpml_kappa_max - 1) * r_mix_j
-b_j     = exp(-(d_eff_j/kappa_j + alpha_j) * dt)
-a_j     = d_eff_j * (b_j - 1) / (kappa_j * (d_eff_j + kappa_j*alpha_j))
+For normalized depth $r_j=\xi_j/L$, reference speed $V_p$, target $R$ and
+polynomial order $n$, the base profiles are:
+
+```math
+d_j=-\frac{(n+1)V_p\ln R}{2L}r_j^n,\qquad
+\kappa_j=1+(\kappa_{\max}-1)r_j^n,\qquad
+\alpha_j=\max\{\alpha_{\max}(1-r_j),f_\alpha\alpha_{\max}\}.
 ```
 
-The code handles zero denominators explicitly. Axes receiving damping only
-through cross-coupling also receive the alpha floor. These formulas are in
-`compute_pml_profile_coeffs` in `quake/forward/psolve.cc`; n and p above denote
-different controls. `cpml_alpha_max_hz>0` sets
-`alpha_max=2*pi*cpml_alpha_max_hz`; otherwise the implemented fallback is
-`alpha_max=pi*simulation_wave_max_freq_hz`. To match `pi*f_dominant` using the
-explicit Hz input, use `f_dominant/2`, not `f_dominant`.
+Inactive axes have $d=0$, $\kappa=1$, $\alpha=0$. Positive
+`cpml_alpha_max_hz` gives $\alpha_{max}=2\pi f$; otherwise the fallback is
+$\pi$ times `simulation_wave_max_freq_hz`. Optional cross mixing adds a
+fraction of the other two damping profiles and normalized kappa profiles;
+it defaults to zero because this is no longer a separable coordinate mapping.
 
-The gradient stretch `1/kappa_j` is paired with element inertia scaled by
-`kappa_x*kappa_y*kappa_z`. Earlier strain-only kappa experiments lacked that
-matched inertia; their results cannot establish the behavior of the current
-matched formulation. The restoring term `+rho*d*alpha*u` and memory term
-`-rho*d*alpha^2*zeta` use the same element-centroid displacement so they cancel
-at DC. The earlier rejected stress-convolution experiment changed even the
-direct arrival under reduced integration; it is not the current operator.
+A section $c+g/(s+p)$ uses a trapezoidal recurrence with one persistent value:
 
-With `cpml_stiffness_mode=native`, the full native element stiffness is
-retained and a center-evaluated correction based on `sigma_pml-sigma_raw` is
-added. The native normalization uses `mu=9*c1` and `lambda=9*c2`. At an
-unstretched, undamped point the correction vanishes, retaining the native
-higher modes. `reduced` uses the standalone reduced operator. The independent
-`cpml_stiffness_mode_acoustic` inherits the resolved elastic setting unless
-overridden. These choices share the coefficient and divergence-side pipeline.
+```math
+\beta=\frac{\Delta t}{2+p\Delta t},\qquad
+b=\frac{2-p\Delta t}{2+p\Delta t},\qquad
+y_n=(c+g\beta)x_n+m_n,\qquad
+m_{n+1}=b m_n+g\beta(1+b)x_n.
+```
 
-Membership and profiles use centroids: the first layer samples roughly
-`xi=h/2`, which can leave a bounded interface residual.
+Products are cascades of these sections. Polynomial division splits
+$J(s)(s^2+a s)$ into leading mass, velocity and restoring terms plus a
+proper-rational remainder. The remainder uses nested denominators, avoiding
+division by differences of poles. Inactive factors cancel before division;
+equal alpha values and zero poles are well defined. The leading velocity
+term retains Hercules' backward-difference damping convention; trapezoidal
+ADE sections alone do not make the entire time integrator second order.
+
+Native integration uses orthogonal Hex8 sign modes, algebraically equivalent
+to eight-point Gauss integration for element-constant profiles. All modes
+are stretched, and nodal inertia histories use the same lumping as the leading
+mass. Interior kernels skip PML elements to avoid double counting. The
+unmodified native normalization is $\mu\Delta t^2h=9c_1$ and
+$\lambda\Delta t^2h=9c_2$. Reduced integration retains only linear modes.
+
+An interface flux component normal to axis $j$ uses the cofactor $J/S_j$.
+Acoustic and elastic sides have independent coefficients; all normal
+components are retained, including bathymetry normals. `face_mass` retains
+four quadrature points in the PML, each with its own histories. A flat gravity
+surface uses $S_xS_y s^2/(\rho g)$ at each of its four lumped nodes, including
+the x/y corner product. Output reconstruction uses the same inverse stretch,
+with a separate history per observation point.
+
+Coefficients are prepared once on the host. Histories remain on the GPU and
+feed the existing force assembly and CUDA-aware or fallback MPI exchange;
+there is no new per-step exchange or bulk host transfer. Native bulk histories
+reserve 204 `solver_float` values per elastic PML element and 60 per acoustic
+PML element; gravity faces reserve eight, and each coupled face reserves 24
+per side. This increases absorber memory relative to the earlier incomplete
+operator. Kernel timing and total GPU memory must be checked for a target mesh.
+
+### Complete CPML validation on Horizon (2026-10-02)
+
+The development runs used double precision, CUDA 13.2/NVIDIA 26.5,
+Open MPI, and native Hex8 integration. The prepared homogeneous case has
+$V_p=2000$ m/s, $V_s=1000$ m/s, $\rho=2000$ kg/m³, $h=78.125$ m,
+$\Delta t=0.005$ s, and a 781.25 m PML. The 20 km reference preserves mesh
+spacing, source, and physical receiver locations from the 10 km case.
+Results use the unchanged tabulated dislocation source, no amplitude fitting,
+no time shifting, and an eighth-order zero-phase 1 Hz filter with DC retained.
+Stations 20–24 inside the small-domain PML are excluded.
+
+| 100 s displacement comparison, common 25 interior receivers | Median relative L2 | Worst relative L2 |
+| --- | ---: | ---: |
+| Earlier gradient-correction CPML, cross fraction 0.1 | 11.47% | 32.99% |
+| Complete CPML, cross fraction 0 | 1.10% | 2.69% |
+| Coupled flat water/elastic, gravity off, cross fraction 0 | 0.65% | 2.06% |
+| Coupled flat water/elastic, gravity on, cross fraction 0 | 1.68% | 3.33% |
+
+Eight additional elastic receivers near the sides, bottom and corners give
+1.88% median and 4.98% worst error across all 33 interior receivers. Keeping
+the old 0.1 cross fraction with the complete operator gave 185% median error;
+this is why the default changed. Raw elastic displacement gives 1.11% median
+and 3.15% worst error on the common set. Raw velocity has larger differences
+(8.57% median, 20.04% worst); the input source is not band-limited to the mesh
+frequency. These filtered results do not validate unresolved high frequencies.
+
+Separate CUDA packet tests call the production operator helpers on structured
+Hex8 meshes and compare against larger domains. P, SV and SH incidence at
+0°, 30°, 60° and 80° gives 0.13–3.47% relative L2 error with a 16-cell layer.
+A free-top Rayleigh packet gives 0.102% (0.071% with half the timestep),
+and a slow gravity-surface packet gives 0.228% (0.375% with half the timestep).
+The latter change is not monotone convergence; it bounds these two tested
+steps only. Kappa=3 remained finite in the tested grazing and surface cases,
+but is not uniformly more accurate. These harnesses test the shared operator,
+not the entire MPI solver.
+
+A 1,000 s, 200,000-step elastic run remained finite at all 38 stations,
+including absorbing-layer observations. Every station's velocity RMS over
+900–1,000 s was at most 0.513 times its RMS over 100–200 s. For a 30 s
+coupled gravity run, one versus four CUDA-aware ranks differed by 1.1e-9 in
+aggregate displacement L2; the host MPI fallback differed by 5.8e-5. Both
+backends remained finite. The experimental face_mass projection remained
+finite and differed from point projection by 0.15%; this is a compatibility
+check, not an independent accuracy result for face_mass.
+
+Host checks cover repeated/zero poles, full bulk/surface inertia transfer
+functions, independent Gauss-integrated elastic/acoustic stiffness, and the
+zero-damping limit against the existing native elastic operator (roundoff).
+The CUDA compiler reports no register spills in the new PML kernels.
+A matched 10 km timing run with 38 stations and planes disabled reported
+14.13 s total solver wall time for the earlier executable and 17.16 s for
+complete plain CPML (about 21% more). Maximum-rank solver compute rose from
+4.73 s to 11.10 s. These single runs on different nodes are indicative, not a
+performance distribution. The added memory and computation are the cost of
+retaining the previously omitted terms; production-size profiling remains
+necessary.
+Checkpoint/restart, single precision, arbitrary heterogeneous materials,
+curved surfaces and attenuation combinations are not validated by this suite.
+
+Investigation harnesses and results are local-only under
+`.local-diagnostics/cpml-completion-20261002/`; they are not shipped in a clean
+checkout. Horizon inputs, executable and results are retained under
+`/scratch/08458/wz_tacc/hercules/cpml-completion-20261002`. Principal jobs are
+42115–42123 (domain comparisons), 42117 (P/S packets), 42129 (gravity packet),
+42130 (long run), 42136–42139 (backend/rank/projection and Rayleigh checks),
+42145 (matched old-binary timing), and 42152 (final-default executable check).
 
 ### VT and BKT operator history
 
