@@ -1068,27 +1068,31 @@ Notes:
 	currently retain the `point` path so their one-memory-variable CPML
 	correction remains unchanged.
 - `acoustic_interface_face_filter`
-	Optional. `bathymetry` (default), `all`, or `bottom_only`. This applies when
-	acoustic interface coupling is enabled. Explicit `all` couples every
+	Optional. `all` (default), `bathymetry`, or `bottom_only`. This applies when
+	acoustic interface coupling is enabled. `all` couples every
 	acoustic-elastic interface face using mesh-face normals.
 	`bottom_only` couples only acoustic `Z+` faces, which correspond to the
 	water-bottom interface in the depth-positive mesh. This is a diagnostic
-	option for bathymetry/shoreline cases: if `bottom_only` is stable while
-	`all` is not, the instability is likely coming from lateral wet/dry
-	stair-step shoreline coupling rather than from the water-bottom coupling.
+	option for bathymetry/shoreline cases. Differences between filters can help
+	isolate the effect of lateral wet/dry stair-step shoreline coupling, but
+	first verify that compared runs use identical, finite source forces.
 	`bathymetry` also couples only acoustic `Z+` faces, but reconstructs a
 	local bathymetry normal from nearby acoustic-to-elastic transition depths
 	and scales each projected bottom patch by the reconstructed surface area.
 	This restores inclined-bottom normal coupling without reintroducing raw
 	stair-step side-wall faces.
-	Omitting the parameter now selects `bathymetry`; an existing explicit `all`
-	line still selects all faces. The `default` alias also now selects
-	`bathymetry`. Other accepted aliases are `reconstructed_bathymetry` and
+	Omitting the parameter or using the `default` alias selects `all`.
+	Existing explicit `bathymetry` and `bottom_only` settings retain their
+	behavior. Other accepted aliases are `reconstructed_bathymetry` and
 	`bathymetry_normal` for `bathymetry`, `none` for `all`, and `bottom` or
 	`z_plus` for `bottom_only`. Values are case-insensitive.
 	`bathymetry` omits lateral and upward-facing acoustic-solid interfaces, so
 	check that this representation is appropriate for the model geometry.
 	Stability with this filter does not by itself validate waveform accuracy.
+	The source-corrected Izmir comparison completed 100 s with finite output
+	for all three filters using identical generated forces; slow acoustic
+	motion and reconstruction accuracy remain under investigation. See the
+	[corrected validation record](izmir_gravity_diagnostic_20261001.md).
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered. In `bathymetry` mode it also reports how many bottom faces

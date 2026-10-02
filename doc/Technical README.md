@@ -94,9 +94,10 @@ interactions are in the
   `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
-  `acoustic_interface_face_filter` defaults to `bathymetry`: couple Z+ bottom
-  faces using reconstructed normals and area weights. Explicit `all` restores
-  all detected faces; `bottom_only` uses vertical normals on Z+ faces.
+  `acoustic_interface_face_filter` defaults to `all`: couple every detected
+  interface face using mesh-face normals. The `default` alias also selects
+  `all`. Explicit `bathymetry` uses reconstructed normals and area weights on
+  Z+ bottom faces; `bottom_only` uses vertical normals on Z+ faces.
   See [interface geometry and aliases](Extended%20README.md#acoustic-and-elastic-coupling).
   The flat water surface follows `topographybase_zcoord` (or the building
   `surface_shift_m`); check the exact exposed-face count in the startup log.
