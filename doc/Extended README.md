@@ -1059,8 +1059,8 @@ Notes:
 	acoustic element faces adjacent to elastic material. Default is `yes`, but
 	it is only active when `include_acoustic=yes`.
 - `acoustic_interface_method`
-	Optional, case-insensitive: `original-constraint` (default),
-	`fields-constraint`, or `local-matching`. Select the geometric constraints,
+	Optional, case-insensitive: `shared-geometric-constraints` (default),
+	`field-specific-constraints`, or `local-matching`. Select the geometric constraints,
 	experimental field-specific constraints, or experimental automatic face
 	matching during meshing. This is independent of quadrature, face filters,
 	gravity, and CPML. See [details and limits](#interface-constraints-and-local-matching).
@@ -1311,8 +1311,8 @@ existing solver behavior. It does not change `acoustic_interface_projection`
 
 | Value | Behavior |
 | --- | --- |
-| `original-constraint` | Default. Acoustic and solid fields share the geometric hanging-node constraints. |
-| `fields-constraint` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
+| `shared-geometric-constraints` | Default. Acoustic and solid fields share the geometric hanging-node constraints. |
+| `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
 | `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
 
 The two alternatives require `include_acoustic=yes`,
@@ -1355,8 +1355,8 @@ refinement band around the benchmark seabed.
 include_acoustic = yes
 acoustic_formulation = velocity_potential
 acoustic_interface_coupling = yes
-acoustic_interface_method = fields-constraint
-# Alternatives: original-constraint (default), local-matching
+acoustic_interface_method = field-specific-constraints
+# Alternatives: shared-geometric-constraints (default), local-matching
 acoustic_interface_projection = face_mass
 acoustic_interface_face_filter = all
 acoustic_free_surface_gravity = yes

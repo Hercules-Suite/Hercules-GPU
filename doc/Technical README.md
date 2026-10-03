@@ -99,8 +99,8 @@ interactions are in the
   `acoustic_interface_method`, `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
-  `acoustic_interface_method` defaults to `original-constraint`; experimental
-  `fields-constraint` separates acoustic/solid hanging-node maps, while
+  `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
+  `field-specific-constraints` separates acoustic/solid hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
   velocity-potential acoustics and full Hex8 linear solids (topography,

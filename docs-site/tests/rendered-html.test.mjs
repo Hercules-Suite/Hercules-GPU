@@ -207,8 +207,8 @@ test("renders the categorized parameter reference", async () => {
   assert.match(faceFilterRow, /default alias follows all/);
   const methodRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_method"));
   assert.ok(methodRow);
-  assert.match(methodRow, /Default: original-constraint/);
-  assert.match(methodRow, /fields-constraint/);
+  assert.match(methodRow, /Default: shared-geometric-constraints/);
+  assert.match(methodRow, /field-specific-constraints/);
   assert.match(methodRow, /local-matching/);
   assert.match(methodRow, /imported mismatched meshes abort/);
   assert.match(methodRow, /does not guarantee CPML stability/);
@@ -304,8 +304,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
 
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.ok(documented.includes("acoustic_interface_method"));
-  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"original-constraint"/);
-  for (const method of ["original-constraint", "fields-constraint", "local-matching"]) {
+  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"shared-geometric-constraints"/);
+  for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
     assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
   }
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
@@ -360,7 +360,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
 test("explains experimental constraints, remeshing and CPML limitations", async () => {
   const html = await (await render("/docs/physics")).text();
   assert.match(html, /id="acoustic-interface-method"/);
-  assert.match(html, /acoustic_interface_method = fields-constraint/);
+  assert.match(html, /acoustic_interface_method = field-specific-constraints/);
   assert.match(html, /Phase B imports do not refine/);
   assert.match(html, /unsupported mixed-corner stencil stops setup/);
   assert.match(html, /exponential growth with CPML/);

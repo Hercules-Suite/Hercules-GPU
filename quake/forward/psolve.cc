@@ -2742,7 +2742,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_method[64] = "original-constraint",
+       acoustic_interface_method[64] = "shared-geometric-constraints",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
@@ -3601,16 +3601,16 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_coupling);
   }
 
-  if (strcasecmp(acoustic_interface_method, "original-constraint") == 0) {
+  if (strcasecmp(acoustic_interface_method, "shared-geometric-constraints") == 0) {
     Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;
-  } else if (strcasecmp(acoustic_interface_method, "fields-constraint") == 0) {
+  } else if (strcasecmp(acoustic_interface_method, "field-specific-constraints") == 0) {
     Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS;
   } else if (strcasecmp(acoustic_interface_method, "local-matching") == 0) {
     Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_MATCHING;
   } else {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown acoustic_interface_method '%s': use original-constraint, "
-                 "fields-constraint, or local-matching\n", acoustic_interface_method);
+                 "Unknown acoustic_interface_method '%s': use shared-geometric-constraints, "
+                 "field-specific-constraints, or local-matching\n", acoustic_interface_method);
   }
 
   if ((strcasecmp(acoustic_interface_projection, "point") == 0) ||
@@ -4167,7 +4167,7 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Experimental acoustic_interface_method requires coupled "
                  "velocity_potential acoustics and full Hex8 linear solids; "
                  "topography, buildings, nonlinear and poroelastic modules "
-                 "are not supported. Use original-constraint for those paths.\n");
+                 "are not supported. Use shared-geometric-constraints for those paths.\n");
   }
 
   strcpy(Param.theCheckPointingDirOut, checkpoint_path);

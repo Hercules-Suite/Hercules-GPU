@@ -158,8 +158,8 @@ static void acoustic_constraints_build() {
       }
       if (!equal)
         solver_abort(__FUNCTION_NAME, NULL,
-                     "Unsupported fields-constraint stencil at (%g,%g,%g) m, field %d. "
-                     "Use original-constraint or remesh.\n",
+                     "Unsupported field-specific-constraints stencil at (%g,%g,%g) m, field %d. "
+                     "Use shared-geometric-constraints or remesh.\n",
                      node.x * mesh->ticksize, node.y * mesh->ticksize,
                      node.z * mesh->ticksize, field);
     }
