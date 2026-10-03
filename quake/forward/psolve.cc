@@ -44,6 +44,7 @@
 #include <unistd.h>
 #include <map>
 #include <vector>
+#include <algorithm>
 #ifdef __linux__
 #include <sched.h>
 #endif
@@ -784,7 +785,7 @@ static int32_t need_host_force_upload(void);
 static void solver_init_topography_gpu_mapper(int32_t myID, mesh_t* mesh);
 static void solver_init_topo_bkt_gpu(int32_t myID, mesh_t* mesh);
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
-                           int32_t how);
+                           int32_t how, int32_t field = -1);
 static void compute_adjust_cache_build(void);
 static void compute_adjust_cache_free(void);
 static void solver_diag_reset(void);
@@ -843,7 +844,7 @@ static void solver_scalar_device_schedule_senddata(
 static void solver_sync_acoustic_plane_pressure_values(mysolver_t* solver);
 static void solver_scalar_device_adjust(mysolver_t* solver,
                                         solver_float* valueDevice,
-                                        int32_t how);
+                                        int32_t how, int32_t field = -1);
 static void solver_vector_device_schedule_senddata(
     mysolver_t* solver, schedule_t* sched, fvector_t* valueDevice,
     int32_t direction, int32_t msgtag);
@@ -998,6 +999,16 @@ static void create_parent_dir_for_file(const char* path, const char* fname) {
   }
 }
 
+enum acoustic_interface_method_t {
+  ACOUSTIC_INTERFACE_ORIGINAL = 0,
+  ACOUSTIC_INTERFACE_FIELDS = 1,
+  ACOUSTIC_INTERFACE_MATCHING = 2
+};
+enum acoustic_constraint_field_t {
+  ACOUSTIC_CONSTRAINT_SCALAR = 0,
+  ACOUSTIC_CONSTRAINT_SOLID = 1
+};
+
 /* ---------- Static global variables ------------------------------------ */
 
 /* These are all of the input parameters - add new ones here */
@@ -1032,6 +1043,7 @@ static struct Param_t {
   double theSofteningFactor;
   int theStepMeshingFactor;
   int theAcousticInterfaceMaxLevel;
+  int theAcousticInterfaceMethod;
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
@@ -1209,6 +1221,7 @@ static struct Param_t {
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
+           .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -2188,7 +2201,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  64 /* Must adjust this if adding int params */
+  65 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2374,6 +2387,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[61] = (int)Param.printStationPorePressureRatios;
   int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
   int_message[63] = Param.stationBinary;
+  int_message[64] = Param.theAcousticInterfaceMethod;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2443,6 +2457,7 @@ static void read_parameters(int argc, char** argv) {
   Param.printStationPorePressureRatios = (noyesflag_t)int_message[61];
   Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
   Param.stationBinary = int_message[63];
+  Param.theAcousticInterfaceMethod = int_message[64];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2727,6 +2742,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
+       acoustic_interface_method[64] = "original-constraint",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
@@ -3170,6 +3186,7 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
+  parsetext(fp, "acoustic_interface_method", 's', &acoustic_interface_method);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
   parsetext(fp, "acoustic_interface_face_filter", 's',
@@ -3582,6 +3599,18 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_coupling (yes or no): "
                  "%s\n",
                  acoustic_interface_coupling);
+  }
+
+  if (strcasecmp(acoustic_interface_method, "original-constraint") == 0) {
+    Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;
+  } else if (strcasecmp(acoustic_interface_method, "fields-constraint") == 0) {
+    Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS;
+  } else if (strcasecmp(acoustic_interface_method, "local-matching") == 0) {
+    Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_MATCHING;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown acoustic_interface_method '%s': use original-constraint, "
+                 "fields-constraint, or local-matching\n", acoustic_interface_method);
   }
 
   if ((strcasecmp(acoustic_interface_projection, "point") == 0) ||
@@ -4129,6 +4158,18 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.basinMaterialType = basinMaterialType;
   Param.threeDVelocityModel = include3DVelModel;
 
+  if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
+      (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
+       Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential ||
+       Param.includeTopography == YES || Param.includeBuildings == YES ||
+       Param.includeNonlinearAnalysis == YES || Param.includePoroelastic == YES)) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Experimental acoustic_interface_method requires coupled "
+                 "velocity_potential acoustics and full Hex8 linear solids; "
+                 "topography, buildings, nonlinear and poroelastic modules "
+                 "are not supported. Use original-constraint for those paths.\n");
+  }
+
   strcpy(Param.theCheckPointingDirOut, checkpoint_path);
   if (Param.theCheckPointingRate != 0) {
     // Create the directory if it does not exist
@@ -4170,6 +4211,14 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.includeAcoustic == YES) {
     monitor_print("Acoustic interface coupling:        %s\n",
                   acoustic_interface_coupling);
+    monitor_print("Acoustic interface method:         %s%s\n",
+                  acoustic_interface_method,
+                  Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_ORIGINAL
+                      ? " (default constraints)" : " (experimental)");
+    if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING) {
+      monitor_print("Local matching: equal-size water/solid interface faces; "
+                    "CPML stability and convergence are not established.\n");
+    }
     monitor_print("Acoustic interface projection:      %s\n",
                   (Param.theAcousticInterfaceProjectionMode ==
                    ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS)
@@ -5147,6 +5196,10 @@ static std::map<point_t, acoustic_neighbor_t, acoustic_point_less>
     g_acousticNeighbors;
 static std::map<point_t, int, acoustic_point_less> g_acousticNeighborRequests;
 static int g_acousticCollectNeighbors = 0;
+static std::map<point_t, int, acoustic_point_less> g_acousticMatchingRequests;
+static void mesh_record_acoustic_mismatch(int32_t eindex,
+                                           const vector3D_t* probe,
+                                           int32_t adjacent_level);
 static int32_t mesh_handoff_owner(const point_t*, int32_t, const point_t*);
 
 static const acoustic_neighbor_t* mesh_cached_acoustic_neighbor(
@@ -6145,6 +6198,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
       vector3D_t fragment_point;
       vector3D_t probe;
       int32_t adjacent_eindex = -1;
+      int32_t adjacent_level = -1;
       int64_t adjacent_geid = -1;
       int adjacent_is_poroelastic = 0;
       double adjacent_storage_modulus = 0.0;
@@ -6168,7 +6222,7 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
 
       if (!mesh_probe_face_elastic_info(
               &probe, IstVelModel_origin, basinVelModel_origin,
-              threeDVelModel_origin, &adjacent_eindex, NULL, &adjacent_geid,
+              threeDVelModel_origin, &adjacent_eindex, &adjacent_level, &adjacent_geid,
               (poroelastic_fragment_count != NULL)
                   ? &adjacent_is_poroelastic
                   : NULL,
@@ -6177,6 +6231,10 @@ static int64_t mesh_build_acoustic_interface_face_fragments(
         continue;
       }
 
+      if (!g_acousticCollectNeighbors &&
+          Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING) {
+        mesh_record_acoustic_mismatch(eindex, &probe, adjacent_level);
+      }
       center[axis] = (double)sign;
       center[tangent_axes[0]] = -1.0 + 2.0 * u;
       center[tangent_axes[1]] = -1.0 + 2.0 * v;
@@ -6315,6 +6373,7 @@ static void mesh_build_acoustic_interface_flags(
   }
 
   mesh_release_acoustic_interface_data();
+  g_acousticMatchingRequests.clear();
   g_acousticNeighbors.clear();
   g_acousticNeighborRequests.clear();
 
@@ -7181,6 +7240,8 @@ static int mesh_partitiontree(const char* context) {
                              pushdowns_nodesearch);
 }
 
+#include "acoustic_interface_setup.h"
+
 /**
  * mesh_generate: Generate and partition an unstructured octree mesh.
  *
@@ -7453,6 +7514,7 @@ static void mesh_generate() {
   }
 
   mesh_correct_properties(Global.theCVMEp);
+  mesh_match_acoustic_interfaces();
 
   MPI_Barrier(comm_solver);
   Timer_Stop("Mesh correct properties");
@@ -11057,6 +11119,7 @@ static void solver_init() {
 
   /* Initialize the GPU */
   gpu_init(Global.myID);
+  acoustic_constraints_build();
 
   /* compute the damping parameters a/zeta and b/zeta */
   compute_setab(Param.theFreq, &Global.theABase, &Global.theBBase);
@@ -12448,7 +12511,7 @@ static void solver_init() {
 
   /* Distribute the mass from dangling nodes to anchored nodes. (local) */
   compute_adjust(Global.mySolver->nTable, sizeof(n_t) / sizeof(solver_float),
-                 DISTRIBUTION);
+                 DISTRIBUTION, ACOUSTIC_CONSTRAINT_SOLID);
 
   /* Send mass information of anchored nodes to their owner processors*/
   schedule_senddata(Global.mySolver->an_sched, Global.mySolver->nTable,
@@ -12463,7 +12526,7 @@ static void solver_init() {
 
     schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, DN_PRESSURE_MASS_MSG);
-    compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION);
+    compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, AN_PRESSURE_MASS_MSG);
     /* Step B: assemble the acoustic CPML nodal damping across ranks
@@ -12475,12 +12538,12 @@ static void solver_init() {
      * acoustic PML, so this is a strict no-op then). */
     schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->pressure_damp,
                       1, CONTRIBUTION, DN_PRESSURE_DAMP_MSG);
-    compute_adjust(Global.mySolver->pressure_damp, 1, DISTRIBUTION);
+    compute_adjust(Global.mySolver->pressure_damp, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_damp,
                       1, CONTRIBUTION, AN_PRESSURE_DAMP_MSG);
     schedule_senddata(Global.mySolver->dn_sched, pressureFreeSurfaceHost, 1,
                       CONTRIBUTION, DN_PRESSURE_SURFACE_MSG);
-    compute_adjust(pressureFreeSurfaceHost, 1, DISTRIBUTION);
+    compute_adjust(pressureFreeSurfaceHost, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(Global.mySolver->an_sched, pressureFreeSurfaceHost, 1,
                       CONTRIBUTION, AN_PRESSURE_SURFACE_MSG);
 
@@ -14346,6 +14409,7 @@ static void solver_delete() {
   }
 
   /* Free device memory */
+  acoustic_constraints_free();
   solver_free_plane_gpu_output();
   // cudaFree(Global.gpuData.elemTableDevice);
   // cudaFree(Global.gpuData.eTableDevice);
@@ -16550,7 +16614,7 @@ static void solver_adjust_forces(mysolver_t* solver) {
                                 DISTRIBUTION);
   } else {
     compute_adjust(solver->force, sizeof(fvector_t) / sizeof(solver_float),
-                   DISTRIBUTION);
+                   DISTRIBUTION, ACOUSTIC_CONSTRAINT_SOLID);
   }
   Timer_Stop("1st compute adjust (distribution)");
 }
@@ -16750,14 +16814,14 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
         solver, solver->dn_sched, solver->gpuData->pressureForceDevice,
         CONTRIBUTION, DN_PRESSURE_FORCE_MSG);
     solver_scalar_device_adjust(solver, solver->gpuData->pressureForceDevice,
-                                DISTRIBUTION);
+                                DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     solver_scalar_device_schedule_senddata(
         solver, solver->an_sched, solver->gpuData->pressureForceDevice,
         CONTRIBUTION, AN_PRESSURE_FORCE_MSG);
   } else {
     schedule_senddata(solver->dn_sched, solver->pressure_force, 1,
                       CONTRIBUTION, DN_PRESSURE_FORCE_MSG);
-    compute_adjust(solver->pressure_force, 1, DISTRIBUTION);
+    compute_adjust(solver->pressure_force, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(solver->an_sched, solver->pressure_force, 1,
                       CONTRIBUTION, AN_PRESSURE_FORCE_MSG);
   }
@@ -16810,14 +16874,14 @@ static void solver_run_acoustic_pressure_step(mysolver_t* solver,
         solver, solver->an_sched, solver->gpuData->pressureTm2Device, SHARING,
         AN_PRESSURE_MSG);
     solver_scalar_device_adjust(solver, solver->gpuData->pressureTm2Device,
-                                ASSIGNMENT);
+                                ASSIGNMENT, ACOUSTIC_CONSTRAINT_SCALAR);
     solver_scalar_device_schedule_senddata(
         solver, solver->dn_sched, solver->gpuData->pressureTm2Device, SHARING,
         DN_PRESSURE_MSG);
   } else {
     schedule_senddata(solver->an_sched, solver->pressure_tm2, 1, SHARING,
                       AN_PRESSURE_MSG);
-    compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT);
+    compute_adjust(solver->pressure_tm2, 1, ASSIGNMENT, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(solver->dn_sched, solver->pressure_tm2, 1, SHARING,
                       DN_PRESSURE_MSG);
   }
@@ -18948,7 +19012,8 @@ static void solver_scalar_device_schedule_senddata(
 
 static void solver_scalar_device_adjust(mysolver_t* solver,
                                         solver_float* valueDevice,
-                                        int32_t how) {
+                                        int32_t how, int32_t field) {
+  if (acoustic_constraints_device_adjust(solver, valueDevice, how, field)) return;
   const int32_t blocksize = 256;
 
   solver_init_scalar_device_sync(solver);
@@ -19085,6 +19150,8 @@ static void solver_vector_device_schedule_senddata(
 
 static void solver_vector_device_adjust(mysolver_t* solver,
                                         fvector_t* valueDevice, int32_t how) {
+  if (acoustic_constraints_device_adjust(solver, valueDevice, how,
+                                         ACOUSTIC_CONSTRAINT_SOLID)) return;
   const int32_t blocksize = 256;
 
   solver_init_vector_device_sync(solver);
@@ -20737,7 +20804,7 @@ static void solver_adjust_displacement(mysolver_t* solver,
     solver_vector_device_adjust(solver, valueDevice, ASSIGNMENT);
   } else {
     compute_adjust(solver->tm2, sizeof(fvector_t) / sizeof(solver_float),
-                   ASSIGNMENT);
+                   ASSIGNMENT, ACOUSTIC_CONSTRAINT_SOLID);
   }
   Timer_Stop("2nd compute adjust (assignment)");
 }
@@ -24173,7 +24240,8 @@ static void compute_adjust_cache_build(void) {
  *
  */
 static void compute_adjust(void* valuetable, int32_t itemsperentry,
-                           int32_t how) {
+                           int32_t how, int32_t field) {
+  if (acoustic_constraints_host_adjust(valuetable, itemsperentry, how, field)) return;
   solver_float* vtable = (solver_float*)valuetable;
   int32_t dnindex;
 
@@ -28972,6 +29040,14 @@ int main(int argc, char** argv) {
     mesh_generate_from_etree();
   } else {
     mesh_generate();
+  }
+
+  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING) {
+    int mismatch = !g_acousticMatchingRequests.empty(), any = 0;
+    MPI_Allreduce(&mismatch, &any, 1, MPI_INT, MPI_MAX, comm_solver);
+    if (any) solver_abort(__FUNCTION_NAME, NULL,
+                         "local-matching requires a matching mesh: regenerate "
+                         "Phase A with acoustic_interface_method=local-matching.\n");
   }
 
   if (getenv("HERCULES_UNIFIED_PHASE_B_RANKS") != NULL) {

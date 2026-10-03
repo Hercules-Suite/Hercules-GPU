@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 208 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 240 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -205,6 +205,13 @@ test("renders the categorized parameter reference", async () => {
   assert.match(faceFilterRow, /Default: all/);
   assert.match(faceFilterRow, /all couples every detected face/);
   assert.match(faceFilterRow, /default alias follows all/);
+  const methodRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_method"));
+  assert.ok(methodRow);
+  assert.match(methodRow, /Default: original-constraint/);
+  assert.match(methodRow, /fields-constraint/);
+  assert.match(methodRow, /local-matching/);
+  assert.match(methodRow, /imported mismatched meshes abort/);
+  assert.match(methodRow, /does not guarantee CPML stability/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -283,8 +290,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 239);
-  assert.equal(documented.length, 239, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 240);
+  assert.equal(documented.length, 240, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("station_binary"));
   assert.ok(documented.includes("station_output_binary_file"));
   assert.ok(!documented.includes("drm_points_file"));
@@ -296,6 +303,11 @@ test("documents every parameters.in key parsed by the current source tree", () =
   if (!existsSync(sourceRoot)) return;
 
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.ok(documented.includes("acoustic_interface_method"));
+  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"original-constraint"/);
+  for (const method of ["original-constraint", "fields-constraint", "local-matching"]) {
+    assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
+  }
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -343,6 +355,16 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("explains experimental constraints, remeshing and CPML limitations", async () => {
+  const html = await (await render("/docs/physics")).text();
+  assert.match(html, /id="acoustic-interface-method"/);
+  assert.match(html, /acoustic_interface_method = fields-constraint/);
+  assert.match(html, /Phase B imports do not refine/);
+  assert.match(html, /unsupported mixed-corner stencil stops setup/);
+  assert.match(html, /exponential growth with CPML/);
+  assert.match(html, /not a prescribed uniform-width refinement band/);
 });
 
 test("wires the optional acoustic gravity free surface through setup and CUDA", () => {

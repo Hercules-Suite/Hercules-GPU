@@ -96,9 +96,17 @@ interactions are in the
   [formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details).
 - **Acoustic material and acoustic–elastic coupling:** `include_acoustic`, `acoustic_formulation`,
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
-  `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
+  `acoustic_interface_method`, `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
+  `acoustic_interface_method` defaults to `original-constraint`; experimental
+  `fields-constraint` separates acoustic/solid hanging-node maps, while
+  `local-matching` refines the coarser interface neighbors during Phase A.
+  Imported mismatched meshes are rejected. Both alternatives require coupled
+  velocity-potential acoustics and full Hex8 linear solids (topography,
+  buildings, nonlinear and poroelastic modules off). CPML, gravity and
+  `face_mass` remain independent; local matching does not guarantee CPML
+  stability. See [constraints and matching](Extended%20README.md#interface-constraints-and-local-matching).
   `acoustic_interface_face_filter` defaults to `all`: couple every detected
   interface face using mesh-face normals. The `default` alias also selects
   `all`. Explicit `bathymetry` uses reconstructed normals and area weights on
