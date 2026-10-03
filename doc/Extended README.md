@@ -1058,6 +1058,12 @@ Notes:
 	Optional. `yes` enables the current normal-projected coupling treatment on
 	acoustic element faces adjacent to elastic material. Default is `yes`, but
 	it is only active when `include_acoustic=yes`.
+- `acoustic_interface_method`
+	Optional, case-insensitive: `shared-geometric-constraints` (default),
+	`field-specific-constraints`, or `local-matching`. Select the geometric constraints,
+	experimental field-specific constraints, or experimental automatic face
+	matching during meshing. This is independent of quadrature, face filters,
+	gravity, and CPML. See [details and limits](#interface-constraints-and-local-matching).
 - `acoustic_interface_projection`
 	Optional. `point` (default) uses the legacy one-point quadrature on each
 	acoustic-elastic interface fragment. `face_mass` uses a 2x2 face quadrature
@@ -1295,6 +1301,92 @@ Notes:
 	used by `acoustic_poroelastic_interface=open_pore`. The target exchange
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
+
+### Interface constraints and local matching
+
+`acoustic_interface_method` accepts three values. Omitting it preserves the
+existing solver behavior. It does not change `acoustic_interface_projection`
+(`point` or `face_mass`), `acoustic_interface_face_filter`,
+`acoustic_free_surface_gravity`, or `abc_type`.
+
+| Value | Behavior |
+| --- | --- |
+| `shared-geometric-constraints` | Default. Acoustic and solid fields share the geometric hanging-node constraints. |
+| `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
+| `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
+
+The two alternatives require `include_acoustic=yes`,
+`acoustic_interface_coupling=yes`, `acoustic_formulation=velocity_potential`,
+and full Hex8 linear solids. `include_topography`, `include_buildings`,
+`include_nonlinear_analysis` and `include_poroelastic` must all be `no`.
+Stepped or sloping **material-defined** seabeds can be used within that scope;
+cut-cell and squashed topography are not supported by these experimental modes.
+Unknown values and unsupported combinations abort with an explanatory message.
+
+Field maps resolve the actual incident leaves through batched MPI owner
+queries. Every retained stencil must equal the corresponding same-field Hex8
+trace; unsupported mixed-corner stencils abort rather than approximate it.
+The same maps handle mass, damping, free-surface flags, force distribution and
+field assignment. Device arrays are uploaded once at setup. Existing CUDA
+adjustment kernels, CUDA-aware exchanges, host-staged fallback and owner
+schedules remain in use. The monitor reports acoustic and solid
+keep/release/absent counts. This is a constrained experimental implementation,
+not a general mortar method.
+
+Local matching inspects all detected water–solid faces, including those omitted
+by a force face filter, and resolves refinement requests on their MPI owners.
+There is no hardcoded seabed, band width, or extra target-level parameter.
+`acoustic_interface_max_level` still refines mixed material cells and
+`acoustic_mesh_refinement_factor` still controls the acoustic volume target.
+Matching only adds refinement, and matching passes can propagate along an
+interface and through octree balancing. Memory, setup and solver costs can
+increase substantially. A 128-pass guard rejects failure to reach a matching
+mesh. Reclassification of refined mixed cells can change the represented
+interface geometry; compare material volumes and resolution as well as traces.
+
+Set `local-matching` before **Phase A**, regenerate the mesh and source caches,
+and use the same setting for Phase B. An imported mesh is checked and rejected
+if detected interface neighbors differ in size; import does not remesh.
+Matching-pass counts and completion are printed in the monitor. This automatic
+face-matching method differs from the earlier experimental fixed-width
+refinement band around the benchmark seabed.
+
+```ini
+include_acoustic = yes
+acoustic_formulation = velocity_potential
+acoustic_interface_coupling = yes
+acoustic_interface_method = field-specific-constraints
+# Alternatives: shared-geometric-constraints (default), local-matching
+acoustic_interface_projection = face_mass
+acoustic_interface_face_filter = all
+acoustic_free_surface_gravity = yes
+abc_type = cpml
+cpml_clamp_outer = yes
+include_topography = no
+include_buildings = no
+include_nonlinear_analysis = no
+include_poroelastic = no
+```
+
+**Validation scope:** the preceding isolated, fixed-geometry sloping-seabed
+prototype with separate field maps, `face_mass`, gravity and CPML remained
+bounded for 80 s at two resolutions. That establishes observed boundedness,
+not waveform accuracy. Separate dashpot comparisons did not establish improved
+accuracy for those maps. Earlier band-matched sloping runs developed exponential
+growth with CPML, including `face_mass`; stable flat-water results do not
+establish general CPML stability. Neither experimental mode is a validated
+replacement for every geometry. Keep source, timestep, absorber thickness in
+metres, gravity and receivers fixed in comparisons, and recheck the timestep
+after remeshing. Integration checks on Horizon (2026-10-03) exercised both
+water-finer and solid-finer meshes with CPML, gravity and `face_mass`: all three
+methods completed 8 s, matching removed the detected size mismatches, a matching
+mesh imported successfully, and an incompatible mesh was rejected. Host and
+CUDA-aware field-map histories agreed within $5.8\times10^{-9}$ relative L2
+across displacement, velocity, acceleration and pressure. An 80 s replay of the
+coarse sloping prototype through the new parameter reproduced its constraint
+counts and pressure to $1.4\times10^{-9}$ relative L2. These are implementation
+comparisons, not independent accuracy references. Investigation helpers and
+their raw outputs remain local-only.
 
 ## Basin-bottom grid
 
