@@ -2082,6 +2082,42 @@ SRFH force histories are generated at the common `slipfunction.in` interval
 and then interpolated at the solver timestep. Reducing
 `simulation_delta_time_sec` does not change that source-generation interval.
 
+### Source-force filtering
+
+In `source.in`, `source_is_filtered` is required (`0` or `1`). When it is `1`,
+`threshold_frequency` (cutoff in Hz) and `number_of_poles` (integer Butterworth
+order) are required; both are ignored when filtering is disabled. For example:
+
+```ini
+source_is_filtered = 1
+threshold_frequency = 1.0
+number_of_poles = 14
+```
+
+Filtering is applied by the `plane`, `planewithkinks`, and `srfh` source-generation
+paths. It uses the interval of the generated force samples: the common
+`slipfunction.in` interval for SRFH, and the solver timestep for `plane` and
+`planewithkinks`. An SRFH source sampled every 0.01 s uses
+a 100 Hz sampling frequency even if `simulation_delta_time_sec = 0.005`.
+Changing only the solver timestep must not change its physical filter cutoff.
+Older builds instead used the solver interval for SRFH filtering, making the
+effective cutoff `threshold_frequency * solver_dt / source_dt`. Rebuild and
+regenerate source-force files after the correction; remove any compensation
+for that old ratio and specify the desired physical cutoff directly.
+
+Filtering differentiates the force, applies a zero-phase FFT Butterworth
+magnitude, then integrates from time zero. The filtered response extends
+before the nominal source start. If the source starts too early, truncating
+this prehistory can leave a startup transient and change the final applied
+force. Leave sufficient pre-source time and check generated force histories
+and final force while increasing the buffer. The required duration depends
+on cutoff, order, source history and the tolerated residual; it is not a
+universal number of seconds. For SRFH, set the second value of each
+`slipfunction.in` source block to its start time in seconds. A delay does not
+make this zero-phase operation strictly causal relative to that start time.
+Filtering changes the physical source spectrum, so choose a cutoff consistent
+with both the desired bandwidth and mesh resolution.
+
 ## Distributed compliant-base force source
 
 For OpenSees-style 1D site-response validation, Hercules also supports a

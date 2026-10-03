@@ -149,10 +149,19 @@ The source-specific names covered by the detailed force-source examples are:
 `base_force_direction_z`, `base_force_rho_kgm3`, `base_force_scale`, `base_force_tolerance_m`,
 `base_force_vs_mps`, `force_x_n`, `force_y_n`, `force_z_n`, `hypocenter_depth_m`,
 `hypocenter_lat_deg`, `hypocenter_long_deg`, `lonlat_or_cartesian`, `ricker_Tp`, `ricker_Ts`,
-`source_function_type`, `type_of_source`.
+`source_function_type`, `type_of_source`, `source_is_filtered`,
+`threshold_frequency`, `number_of_poles`.
 
 See [point-force configuration](Extended%20README.md#single-point-body-force-source)
 and [compliant-base input](Extended%20README.md#distributed-compliant-base-force-source).
+
+`source_is_filtered` is required (`0` or `1`); cutoff `threshold_frequency`
+(Hz) and integer Butterworth `number_of_poles` are required when enabled and
+ignored otherwise. SRFH filtering uses the `slipfunction.in` sample interval,
+independently of the solver timestep. Allow pre-source time for the zero-phase
+filter and check startup and final force; there is no universal source delay.
+See [source-force filtering](Extended%20README.md#source-force-filtering) for
+sampling, regeneration after the SRFH cutoff correction, and timing details.
 
 ## Runtime-variable index
 
