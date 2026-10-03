@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 #ifdef STATION_TEST_MPI
@@ -80,7 +81,21 @@ int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &ranks);
-    assert(argc == 2);
+    // Reject independent singleton worlds before any shared output is opened.
+    const int expected_ranks = argc == 3 && std::strcmp(argv[2], "1") == 0 ? 1 :
+                               argc == 3 && std::strcmp(argv[2], "4") == 0 ? 4 : 0;
+    if (!expected_ranks || ranks != expected_ranks) {
+        if (rank == 0) {
+            if (!expected_ranks)
+                fprintf(stderr, "Usage: %s OUTPUT_PATH EXPECTED_RANKS(1|4)\n", argv[0]);
+            else
+                fprintf(stderr, "MPI world size mismatch: expected %d, got %d; check the MPI compiler and launcher\n",
+                        expected_ranks, ranks);
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+        return 1;
+    }
+    if (rank == 0) printf("Station output: verified MPI world size %d\n", ranks);
 #else
     (void)argc; (void)argv;
 #endif

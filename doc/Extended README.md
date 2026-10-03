@@ -2764,3 +2764,12 @@ directly to the existing part2 reader. CPU geometry/reader and real MPI-IO
 regressions are in `benchmark_inputs/drm_flat_output/README.md`; target-system
 CUDA builds and station-history comparisons are still required before claiming
 a physics/backend combination validated.
+
+The DRM/station MPI regression executables require `OUTPUT_PATH EXPECTED_RANKS`
+(`1` or `4`) and reject a mismatched `MPI_COMM_WORLD` before opening files.
+CI uses matching Open MPI compiler/launcher commands on Ubuntu 24.04, verifies
+that rejection leaves an existing output file intact, and compares all output
+bytes from the one- and four-rank runs. The former Ubuntu MPICH package/Hydra
+combination could start independent singleton worlds; green jobs before the
+rank-count guard did not establish multi-rank coverage. These are host output
+regressions, not CUDA propagation or physics validation.

@@ -3,6 +3,7 @@
 #include "../../quake/forward/drm_output_points.h"
 #include "../../quake/forward/drm_output_coordinates.h"
 #include <cassert>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 
@@ -11,7 +12,22 @@ int main(int argc, char** argv) {
     int rank, ranks;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &ranks);
-    if (argc != 2) MPI_Abort(MPI_COMM_WORLD, 1);
+    // Require an explicit count: an incompatible MPI launcher can silently
+    // start multiple singleton worlds that race to truncate the same files.
+    const int expected_ranks = argc == 3 && std::strcmp(argv[2], "1") == 0 ? 1 :
+                               argc == 3 && std::strcmp(argv[2], "4") == 0 ? 4 : 0;
+    if (!expected_ranks || ranks != expected_ranks) {
+        if (rank == 0) {
+            if (!expected_ranks)
+                std::cerr << "Usage: " << argv[0] << " OUTPUT_PATH EXPECTED_RANKS(1|4)\n";
+            else
+                std::cerr << "MPI world size mismatch: expected " << expected_ranks
+                          << ", got " << ranks << "; check the MPI compiler and launcher\n";
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+        return 1;
+    }
+    if (rank == 0) std::cout << "DRM writer: verified MPI world size " << ranks << '\n';
     try {
         // Four ranks exercise a rank with zero points and interleaved views.
         const int active = ranks == 1 ? 1 : ranks - 1;

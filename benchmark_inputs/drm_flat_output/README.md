@@ -22,8 +22,8 @@ Run the actual MPI-IO writer on a machine with MPI (CUDA is not required):
 
 ```sh
 mpicxx -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/mpi_writer_test.cc -o /tmp/drm_mpi_test
-mpirun -np 1 /tmp/drm_mpi_test /tmp/drm-one.bin
-mpirun -np 4 /tmp/drm_mpi_test /tmp/drm-four.bin
+mpirun -np 1 /tmp/drm_mpi_test /tmp/drm-one.bin 1
+mpirun -np 4 /tmp/drm_mpi_test /tmp/drm-four.bin 4
 cmp /tmp/drm-one.bin /tmp/drm-four.bin
 cmp /tmp/drm-one.bin.box0 /tmp/drm-four.bin.box0
 cmp /tmp/drm-one.bin.box1 /tmp/drm-four.bin.box1
@@ -41,6 +41,25 @@ writer; reading those rows back must recover every binary sample's location.
 Both runs must produce identical bytes for all five files. The geometry test
 checks the full row/column ordering of all ten faces, repeated shared edges,
 center offsets, rotations, exterior-to-interior dimensions, and table parsing.
+
+Both MPI executables require `OUTPUT_PATH EXPECTED_RANKS`, with `EXPECTED_RANKS`
+equal to `1` or `4`. They compare it with `MPI_COMM_WORLD` before opening output
+and abort on a mismatch, even if compiled with `NDEBUG`. A launcher that starts
+four independent singleton worlds must not pass as a four-rank test. Successful
+setup prints the verified world size once from rank zero. The output path and
+the DRM `.box0`, `.box1`, and `.coords` companions are overwritten by valid runs.
+
+The GitHub Actions job uses Ubuntu 24.04 with `openmpi-bin`/`libopenmpi-dev`,
+explicit `mpic++.openmpi` and `mpirun.openmpi` commands, `--oversubscribe` for
+four ranks on a small runner, and the Open MPI `ob1`/`self,tcp` host transports.
+Use a compatible MPI compiler and launcher on other systems. Ubuntu's MPICH
+4.2.0-5build3 package links an external PMIx library incompatible with its
+Hydra launcher; see [MPICH issue #7064](https://github.com/pmodels/mpich/issues/7064#issuecomment-2301026290).
+The CI job also deliberately launches each test with one rank while requiring
+four, checks the specific failure diagnostic, and verifies that an existing
+output file remains unchanged. It then checks the full one-/four-rank payloads.
+Earlier green jobs without a world-size check did not establish multi-rank
+coverage: independent singleton processes could race on identical output files.
 
 Test the production station interpolation, sampling dispatch, and close paths
 against an analytical field without a CUDA build:
@@ -62,8 +81,8 @@ with interleaved ownership, an empty rank, and OpenMP interpolation:
 
 ```sh
 mpicxx -std=c++11 -Wall -Wextra -pedantic -fopenmp -DSTATION_TEST_MPI -I/tmp benchmark_inputs/drm_flat_output/station_test.cc -o /tmp/station-mpi-test
-OMP_NUM_THREADS=2 mpirun -np 1 /tmp/station-mpi-test /tmp/station-one.bin
-OMP_NUM_THREADS=2 mpirun -np 4 /tmp/station-mpi-test /tmp/station-four.bin
+OMP_NUM_THREADS=2 mpirun -np 1 /tmp/station-mpi-test /tmp/station-one.bin 1
+OMP_NUM_THREADS=2 mpirun -np 4 /tmp/station-mpi-test /tmp/station-four.bin 4
 cmp /tmp/station-one.bin /tmp/station-four.bin
 ```
 
