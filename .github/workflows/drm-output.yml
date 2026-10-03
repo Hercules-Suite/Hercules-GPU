@@ -27,11 +27,23 @@ permissions:
 
 jobs:
   geometry-and-mpi-io:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # Use host TCP/self transports; these tests need neither RDMA nor CUDA.
+      OMPI_MCA_pml: ob1
+      OMPI_MCA_btl: self,tcp
+      OMP_NUM_THREADS: 2
     steps:
       - uses: actions/checkout@v4
-      - name: Install MPI
-        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev
+      - name: Install matching MPI compiler and launcher
+        # Noble's MPICH 4.2.0 package links PMIx but ships Hydra, which can
+        # launch independent singleton worlds (pmodels/mpich#7064).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openmpi-bin libopenmpi-dev
+          mpic++.openmpi --showme
+          mpirun.openmpi --version
       - name: Check DRM box parsing and generated geometry
         run: |
           c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm-points-test
@@ -43,22 +55,32 @@ jobs:
       - name: Compile production station interpolation regression
         run: |
           python3 benchmark_inputs/drm_flat_output/extract_station_test.py /tmp/station_functions.inc
-          mpicxx.mpich -std=c++11 -Wall -Wextra -pedantic -fopenmp -DSTATION_TEST_MPI -I/tmp benchmark_inputs/drm_flat_output/station_test.cc -o /tmp/station-test
-      - name: Check real MPI-IO ordering and batching
-        # Hosted runners do not expose usable RDMA devices. Keep this small
-        # host-buffer MPI-IO regression on TCP/self, independent of RDMA.
-        env:
-          UCX_TLS: tcp,self
-          OMP_NUM_THREADS: 2
+          mpic++.openmpi -std=c++11 -Wall -Wextra -pedantic -fopenmp -DSTATION_TEST_MPI -I/tmp benchmark_inputs/drm_flat_output/station_test.cc -o /tmp/station-test
+      - name: Compile MPI writer regression
+        run: mpic++.openmpi -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/mpi_writer_test.cc -o /tmp/drm-mpi-test
+      - name: Reject incorrect MPI world sizes before opening output
         run: |
-          mpicxx.mpich -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/mpi_writer_test.cc -o /tmp/drm-mpi-test
-          mpirun.mpich -np 1 /tmp/drm-mpi-test /tmp/drm-one.bin
-          mpirun.mpich -np 4 /tmp/drm-mpi-test /tmp/drm-four.bin
+          printf 'rank-count sentinel\n' > "$RUNNER_TEMP/mpi-guard-expected.bin"
+          for program in /tmp/drm-mpi-test /tmp/station-test; do
+            cp "$RUNNER_TEMP/mpi-guard-expected.bin" "$RUNNER_TEMP/mpi-guard.bin"
+            if timeout 20s mpirun.openmpi --oversubscribe -np 1 "$program" "$RUNNER_TEMP/mpi-guard.bin" 4 > "$RUNNER_TEMP/mpi-guard.log" 2>&1; then
+              cat "$RUNNER_TEMP/mpi-guard.log"
+              echo "Expected the MPI world-size guard to reject a singleton launch"
+              exit 1
+            fi
+            grep -F 'MPI world size mismatch: expected 4, got 1' "$RUNNER_TEMP/mpi-guard.log"
+            cmp "$RUNNER_TEMP/mpi-guard-expected.bin" "$RUNNER_TEMP/mpi-guard.bin"
+          done
+      - name: Check real MPI-IO ordering and batching
+        timeout-minutes: 3
+        run: |
+          mpirun.openmpi --oversubscribe -np 1 /tmp/drm-mpi-test /tmp/drm-one.bin 1
+          mpirun.openmpi --oversubscribe -np 4 /tmp/drm-mpi-test /tmp/drm-four.bin 4
           cmp /tmp/drm-one.bin /tmp/drm-four.bin
           cmp /tmp/drm-one.bin.box0 /tmp/drm-four.bin.box0
           cmp /tmp/drm-one.bin.box1 /tmp/drm-four.bin.box1
           cmp /tmp/drm-one.bin.box0.coords /tmp/drm-four.bin.box0.coords
           cmp /tmp/drm-one.bin.box1.coords /tmp/drm-four.bin.box1.coords
-          mpirun.mpich -np 1 /tmp/station-test /tmp/station-one.bin
-          mpirun.mpich -np 4 /tmp/station-test /tmp/station-four.bin
+          mpirun.openmpi --oversubscribe -np 1 /tmp/station-test /tmp/station-one.bin 1
+          mpirun.openmpi --oversubscribe -np 4 /tmp/station-test /tmp/station-four.bin 4
           cmp /tmp/station-one.bin /tmp/station-four.bin

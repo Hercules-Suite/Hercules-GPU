@@ -1574,6 +1574,9 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /raw.reshape\(-1, nstations, 3\)/);
   assert.match(html, /No per-station text files or station metadata sidecar/);
   assert.match(html, /reconstructed scalar-acoustic motion/);
+  assert.match(html, /OUTPUT_PATH EXPECTED_RANKS/);
+  assert.match(html, /check MPI_COMM_WORLD before opening output/);
+  assert.match(html, /did not establish multi-rank coverage/);
   assert.doesNotMatch(html, /drm_points_file|drm_output_file|CSV recorder/);
 });
 
