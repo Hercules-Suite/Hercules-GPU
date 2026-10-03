@@ -1433,6 +1433,11 @@ test("documents every supported source model and its auxiliary inputs", async ()
   assert.match(html, /slipfunction\.in/);
   assert.match(html, /hold the final sample/);
   assert.match(html, /Reducing simulation_delta_time_sec does not change the source-history sample interval/);
+  assert.match(html, /Source-filter sampling and start time/);
+  assert.match(html, /common slipfunction\.in interval, not simulation_delta_time_sec/);
+  assert.match(html, /Changing the solver timestep must not change an SRFH filter/);
+  assert.match(html, /there is no universal delay in seconds/);
+  assert.match(html, /change the final applied force/);
   assert.match(html, /extended_number_of_kinks/);
   assert.match(html, /number_of_point_sources/);
   assert.match(html, /x north, y east, and z positive downward/);
