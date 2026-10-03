@@ -1624,6 +1624,18 @@ if __name__ == "__main__":
         note: "Existing examples often retain threshold_frequency and number_of_poles when filtering is disabled. They are ignored when source_is_filtered=0.",
       },
       {
+        id: "source-filter-sampling",
+        title: "Source-filter sampling and start time",
+        paragraphs: [
+          "The source-force filter is applied by the plane, planewithkinks, and srfh source-generation paths. It uses the sampling interval of the generated force history: the common slipfunction.in interval, not simulation_delta_time_sec, for SRFH, and the solver timestep for plane and planewithkinks. Changing the solver timestep must not change an SRFH filter's physical cutoff.",
+          "Older SRFH builds used the solver timestep to label source-frequency bins. If source samples were 0.01 s apart and the solver timestep was 0.005 s, a configured 1 Hz cutoff acted at 0.5 Hz. Rebuild and regenerate source-force files after updating; use the intended physical cutoff without compensating for the timestep ratio.",
+          "Filtering differentiates the force history, applies a zero-phase FFT Butterworth magnitude, and integrates the retained result from time zero. Its response extends before the nominal source start. Starting a source at time zero can truncate that response, create a startup transient, and change the final applied force. Provide enough pre-source time and compare generated force histories as the buffer increases; there is no universal delay in seconds. In slipfunction.in, the second value of each source block is its start time in seconds.",
+        ],
+        codeLabel: "source.in: cutoff in physical hertz",
+        code: "source_is_filtered = 1\nthreshold_frequency = 1.0\nnumber_of_poles = 14\n# Choose source start times with enough room for the filtered prehistory.",
+        note: "Filtering changes the source spectrum. Choose a cutoff that the mesh resolves, retain the intended physical bandwidth, and check final force and startup behavior. Delaying a source does not make the zero-phase filter strictly causal relative to its nominal start.",
+      },
+      {
         id: "time-functions",
         title: "Source-time functions",
         paragraphs: [

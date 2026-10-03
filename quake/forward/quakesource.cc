@@ -1256,11 +1256,12 @@ int FilterSignal ( double *signal, int signalsize,
 
 
 /**
- * filter_myForce:
+ * filter_myForce: filter at the sampling interval of the generated force
+ * histories, which can differ from the solver timestep for SRFH sources.
  *
  */
 static void
-filter_myForce()
+filter_myForce(double sampleInterval)
 {
     int32_t lnid, i, j;
     double* signal;
@@ -1281,7 +1282,7 @@ filter_myForce()
 		    signal[ j ] = myForces[ lnid ][ j ].x[ i ];
 		}
 
-		FilterSignal( signal, theNumberOfTimeSteps, 1/theDeltaT,
+		FilterSignal( signal, theNumberOfTimeSteps, 1.0/sampleInterval,
 			      theThresholdFrequency, theNumberOfPoles );
 		for (j = 0; j < theNumberOfTimeSteps; j++) {
 		    myForces[ lnid ][ j ].x[ i ] = signal[ j ];
@@ -3455,7 +3456,7 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 
     fill_myForces_cycle(iCycle);
 
-    if ( theSourceIsFiltered == 1 ) filter_myForce();
+    if ( theSourceIsFiltered == 1 ) filter_myForce(theDeltaT);
 
     const char* local_forces_filename = source_get_local_forces_filename();
     print_myForces_filepercycle(local_forces_filename, iCycle);
@@ -4247,7 +4248,7 @@ static int  compute_myForces_srfh(const char *physicsin, UTMZone_t* utmZone){
     fill_myForces_cycle(iCycle);
 
     if (theSourceIsFiltered == 1) {
-	filter_myForce();
+	filter_myForce(theSRFHdt);
     }
 
     if(ActivePE){
