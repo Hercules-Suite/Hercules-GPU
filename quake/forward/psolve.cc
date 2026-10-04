@@ -4161,13 +4161,20 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
       (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
        Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential ||
-       Param.includeTopography == YES || Param.includeBuildings == YES ||
+       Param.includeBuildings == YES ||
        Param.includeNonlinearAnalysis == YES || Param.includePoroelastic == YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Experimental acoustic_interface_method requires coupled "
                  "velocity_potential acoustics and full Hex8 linear solids; "
-                 "topography, buildings, nonlinear and poroelastic modules "
+                 "buildings, nonlinear and poroelastic modules "
                  "are not supported. Use shared-geometric-constraints for those paths.\n");
+  }
+  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING &&
+      Param.includeTopography == YES) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "acoustic_interface_method=local-matching does not support "
+                 "include_topography=yes. Use shared-geometric-constraints, or "
+                 "field-specific-constraints with computation_method=fem.\n");
   }
 
   strcpy(Param.theCheckPointingDirOut, checkpoint_path);
@@ -7241,6 +7248,7 @@ static int mesh_partitiontree(const char* context) {
 }
 
 #include "acoustic_interface_setup.h"
+#include "acoustic_interface_trace.h"
 
 /**
  * mesh_generate: Generate and partition an unstructured octree mesh.
@@ -11120,6 +11128,8 @@ static void solver_init() {
   /* Initialize the GPU */
   gpu_init(Global.myID);
   acoustic_constraints_build();
+  acoustic_constraint_upload(&Global.gpuData.acousticInterfaceSolidNodesDevice,
+                              g_acousticSolidTraceNodes);
 
   /* compute the damping parameters a/zeta and b/zeta */
   compute_setab(Param.theFreq, &Global.theABase, &Global.theBBase);
@@ -14410,6 +14420,11 @@ static void solver_delete() {
 
   /* Free device memory */
   acoustic_constraints_free();
+  cudaFree(Global.gpuData.acousticInterfaceSolidNodesDevice);
+  Global.gpuData.acousticInterfaceSolidNodesDevice = NULL;
+  g_acousticSolidTraceNodes.clear();
+  for (auto* link : g_acousticTraceShares) free(link);
+  g_acousticTraceShares.clear();
   solver_free_plane_gpu_output();
   // cudaFree(Global.gpuData.elemTableDevice);
   // cudaFree(Global.gpuData.eTableDevice);
@@ -22146,6 +22161,18 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
+  /* Additional solid-trace ghosts are appended after octree extraction.
+   * Match sender/receiver packing by global ID, independent of local order. */
+  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS) {
+    messenger_t* lists[] = {dnsched->first_c, dnsched->first_s,
+                            ansched->first_c, ansched->first_s};
+    for (auto* head : lists)
+      for (auto* m = head; m; m = m->next)
+        std::sort(m->mapping, m->mapping + m->nidx,
+                  [mesh](int32_t a, int32_t b) {
+                    return mesh->nodeTable[a].gnid < mesh->nodeTable[b].gnid;
+                  });
+  }
   return;
 }
 
@@ -29012,6 +29039,20 @@ int main(int argc, char** argv) {
 
   if (Param.includeTopography == YES) {
     topo_init(Global.myID, Param.parameters_input_file, Param.theTopoDir);
+    if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS) {
+      if (get_topo_meth() != FEM) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "acoustic_interface_method=field-specific-constraints "
+                     "with topography requires computation_method=fem "
+                     "(regular Hex8 cells); VT cut-tetrahedron constraints "
+                     "are not supported. Use shared-geometric-constraints "
+                     "for computation_method=vt.\n");
+      }
+      if (Global.myID == 0) {
+        monitor_print("Field constraints: FEM topography, regular Hex8 traces; "
+                      "air and carved voids carry neither field.\n");
+      }
+    }
   }
 
   if (Param.includeIncidentPlaneWaves == YES) {
@@ -29061,6 +29102,8 @@ int main(int argc, char** argv) {
       return 0;
     }
   }
+
+  if (!Param.theMeshOnlyMode) acoustic_solid_trace_build();
 
   if (Param.includeBuildings == YES) {
     if (get_fixedbase_flag() == YES) {

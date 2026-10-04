@@ -4,6 +4,8 @@
 /* Private psolve.cc implementation: include after material/neighbor discovery.
  * The original geometric constraints remain the default. Both alternatives
  * are opt-in experiments for full Hex8 acoustic/linear-solid meshes.
+ * Field maps also support FEM topography: retained cells have the same Hex8
+ * traces, while air cells and carved voids carry neither physical field.
  */
 struct acoustic_constraint_map_t {
   std::vector<int32_t> node_base3, offsets, parent_base3, order;
@@ -61,8 +63,16 @@ static int acoustic_constraint_probe(const node_t& node, int octant,
   int local = 0;
   int32_t element = -1;
   if (!mesh_find_octant_at_domain_point(&p, low, high, NULL, &local, &element)) {
-    if (!g_acousticCollectNeighbors)
-      solver_abort(__FUNCTION_NAME, NULL, "Unresolved incident field element\n");
+    if (g_acousticCollectNeighbors) return 0;
+    const point_t ticks = {(tick_t)(p.x[0] / tick),
+                           (tick_t)(p.x[1] / tick),
+                           (tick_t)(p.x[2] / tick)};
+    // An absent octant on its owner is a carved void. A missing remote
+    // reply remains an error: discovery must resolve it before map assembly.
+    if (mesh_handoff_owner(octor_getintervaltable(Global.myOctree),
+                           Global.theGroupSize, &ticks) == Global.myID)
+      return 0;
+    solver_abort(__FUNCTION_NAME, NULL, "Unresolved incident field element\n");
     return 0;
   }
   double vp, vs, rho;
@@ -73,10 +83,15 @@ static int acoustic_constraint_probe(const node_t& node, int octant,
     vp = data->Vp; vs = data->Vs; rho = data->rho;
   } else {
     const acoustic_neighbor_t* neighbor = mesh_cached_acoustic_neighbor_at(&p);
-    if (!neighbor || neighbor->geid < 0)
+    if (!neighbor)
       solver_abort(__FUNCTION_NAME, NULL, "Missing remote field element\n");
+    // The remote owner explicitly resolved this probe to a carved void.
+    if (neighbor->geid < 0) return 0;
     vp = neighbor->vp; vs = neighbor->vs; rho = neighbor->rho;
   }
+  // get_airprops_topo() uses this exact sentinel. Do not treat air as an
+  // elastic neighbor or retain a hanging-node constraint on its behalf.
+  if (Param.includeTopography == YES && vp == -1.0 && rho == 0.0) return 0;
   if (material_values_are_acoustic(vp, vs, rho)) *field = ACOUSTIC_CONSTRAINT_SCALAR;
   else if (material_values_are_elastic(vp, vs, rho)) *field = ACOUSTIC_CONSTRAINT_SOLID;
   else solver_abort(__FUNCTION_NAME, NULL, "Unsupported material in field constraint\n");

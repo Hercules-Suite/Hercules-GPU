@@ -1317,11 +1317,30 @@ existing solver behavior. It does not change `acoustic_interface_projection`
 
 The two alternatives require `include_acoustic=yes`,
 `acoustic_interface_coupling=yes`, `acoustic_formulation=velocity_potential`,
-and full Hex8 linear solids. `include_topography`, `include_buildings`,
-`include_nonlinear_analysis` and `include_poroelastic` must all be `no`.
-Stepped or sloping **material-defined** seabeds can be used within that scope;
-cut-cell and squashed topography are not supported by these experimental modes.
+and full Hex8 linear solids. `include_buildings`, `include_nonlinear_analysis`
+and `include_poroelastic` must all be `no`. Field-specific constraints also
+support `include_topography=yes` with `computation_method=fem`: retained
+material cells still use regular Hex8 traces. Air cells (`Vp=-1`, zero density)
+and carved voids carry neither field, including when their MPI owner is remote.
+Both `type_of_etree=sqd` and `full` retain their existing material-query meaning;
+the constraint map uses the actual mesh cells, not a new terrain interpolation.
+VT cut-tetrahedron topography remains unsupported by field-specific constraints.
+Local matching still requires `include_topography=no`. Stepped or sloping
+**material-defined** seabeds can be used within the full-Hex8 scope.
 Unknown values and unsupported combinations abort with an explanatory message.
+
+For an existing FEM-topography case such as Izmir, keep its topography datum,
+directory, etree type and other physical inputs, and select:
+
+```ini
+include_topography = yes
+computation_method = fem
+acoustic_interface_method = field-specific-constraints
+```
+
+This choice does not remesh an imported mesh. Acoustic volume refinement remains
+optional and also works with shared geometric constraints. Changing the volume
+refinement factor requires fresh meshing to change the existing resolution.
 
 Field maps resolve the actual incident leaves through batched MPI owner
 queries. Every retained stencil must equal the corresponding same-field Hex8
@@ -1330,8 +1349,35 @@ The same maps handle mass, damping, free-surface flags, force distribution and
 field assignment. Device arrays are uploaded once at setup. Existing CUDA
 adjustment kernels, CUDA-aware exchanges, host-staged fallback and owner
 schedules remain in use. The monitor reports acoustic and solid
-keep/release/absent counts. This is a constrained experimental implementation,
+keep/release/absent counts and identifies FEM topography when selected. Missing
+remote replies still abort; only an owner-confirmed carved void is omitted.
+Coupling uses the actual solid face vertices on both sides of MPI partitions.
+Missing remote vertices are added as non-owned harbored nodes during setup;
+their global IDs order the existing force-contribution and displacement-sharing
+schedules. Both `point` and `face_mass` use the solid trace. In particular,
+independent fine-solid nodes must not be replaced by a coarse acoustic trace
+when the neighboring solid element is remote. This also applies without
+topography. The monitor reports remote fragments and additional harbored nodes.
+The default shared-geometric path keeps its previous coupling behavior.
+This is a constrained experimental implementation,
 not a general mortar method.
+
+Horizon checks on 2026-10-04 covered an 8 s FEM case with the water surface
+shifted below an air region, CPML, gravity on/off, both refinement directions,
+`point`/`face_mass`, and mesh import. One versus eight GPU ranks and host versus
+CUDA-aware MPI agreed within $2\times10^{-11}$ relative L2 across the tested
+plane and station histories. The previous remote-solid fallback produced a
+1.43% plane-history difference between one and eight ranks in the solid-finer
+case. The corrected implementation also reproduced the original one-rank
+topography-free operator and the shared-geometric baseline. These comparisons
+check implementation consistency; they do not establish continuum accuracy or
+long-time stability for arbitrary coastlines.
+The same build imported the existing 1,179,872,281-element Izmir mesh on 512
+Horizon GPUs and completed 4 s with FEM topography, gravity and the original
+physical/source controls. Its 18 station histories and generated source forces
+passed finite-value and output-integrity checks; setup resolved 34,534 remote
+solid fragments using 12,310 additional harbored nodes. This is a short-run
+integration check, not validation of the full 100 s production simulation.
 
 Local matching inspects all detected water–solid faces, including those omitted
 by a force face filter, and resolves refinement requests on their MPI owners.
@@ -1385,7 +1431,8 @@ CUDA-aware field-map histories agreed within $5.8\times10^{-9}$ relative L2
 across displacement, velocity, acceleration and pressure. An 80 s replay of the
 coarse sloping prototype through the new parameter reproduced its constraint
 counts and pressure to $1.4\times10^{-9}$ relative L2. These are implementation
-comparisons, not independent accuracy references. Investigation helpers and
+comparisons, not independent accuracy references. They predate the remote-solid
+trace correction and did not establish MPI partition invariance. Investigation helpers and
 their raw outputs remain local-only.
 
 ## Basin-bottom grid

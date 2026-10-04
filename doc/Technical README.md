@@ -103,8 +103,11 @@ interactions are in the
   `field-specific-constraints` separates acoustic/solid hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
-  velocity-potential acoustics and full Hex8 linear solids (topography,
-  buildings, nonlinear and poroelastic modules off). CPML, gravity and
+  velocity-potential acoustics and full Hex8 linear solids (buildings,
+  nonlinear and poroelastic modules off). Field-specific constraints also
+  support FEM topography (`include_topography=yes`, `computation_method=fem`),
+  excluding air and carved voids from both fields. VT cut-tetrahedron topography
+  remains unsupported; local matching still requires topography off. CPML, gravity and
   `face_mass` remain independent; local matching does not guarantee CPML
   stability. See [constraints and matching](Extended%20README.md#interface-constraints-and-local-matching).
   `acoustic_interface_face_filter` defaults to `all`: couple every detected
