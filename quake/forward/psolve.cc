@@ -1006,7 +1006,8 @@ enum acoustic_interface_method_t {
 };
 enum acoustic_constraint_field_t {
   ACOUSTIC_CONSTRAINT_SCALAR = 0,
-  ACOUSTIC_CONSTRAINT_SOLID = 1
+  ACOUSTIC_CONSTRAINT_SOLID = 1,
+  ACOUSTIC_CONSTRAINT_PORE = 2
 };
 
 /* ---------- Static global variables ------------------------------------ */
@@ -1681,6 +1682,9 @@ static double poro_ground_surface_shift(double north_m, double east_m) {
   if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
     return point_elevation(north_m, east_m);
   }
+  // Building headroom is above the physical ground/water datum. It must not
+  // turn above-ground building cells into saturated BrickUP material.
+  if (Param.includeBuildings == YES) return get_surface_shift();
   return 0.0;
 }
 
@@ -1954,6 +1958,8 @@ static double poro_shape_value_at(int node, double csi, double eta,
          (1.0 + sz * dzeta);
 }
 
+static const int32_t* acoustic_solid_trace_nodes(int64_t face);
+
 static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
   if (!acoustic_poroelastic_open_pore_enabled() || (solver == NULL) ||
       (solver->pore_pressure_open_pore_mass == NULL) ||
@@ -1975,11 +1981,12 @@ static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
 
     const int32_t adjacent_eindex =
         Global.acousticInterfaceAdjacentElementIndexes[i];
+    const int32_t* solid_nodes = acoustic_solid_trace_nodes(i);
     const int32_t target_eindex =
         (adjacent_eindex >= 0) ? adjacent_eindex
                                : Global.acousticInterfaceElementIds[i];
     const double* target_center =
-        (adjacent_eindex >= 0)
+        (solid_nodes != NULL || adjacent_eindex >= 0)
             ? (Global.acousticInterfaceAdjacentCenters + 3 * i)
             : (Global.acousticInterfaceFaceCenters + 3 * i);
 
@@ -1996,7 +2003,7 @@ static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
         continue;
       }
 
-      const int32_t lnid = elemp->lnid[j];
+      const int32_t lnid = solid_nodes ? solid_nodes[j] : elemp->lnid[j];
       if ((lnid >= 0) && (lnid < Global.myMesh->nharbored)) {
         solver->pore_pressure_open_pore_mass[lnid] +=
             (solver_float)(scale * weight);
@@ -4160,14 +4167,10 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
       (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
-       Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential ||
-       Param.includeBuildings == YES ||
-       Param.includeNonlinearAnalysis == YES || Param.includePoroelastic == YES)) {
+       Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Experimental acoustic_interface_method requires coupled "
-                 "velocity_potential acoustics and full Hex8 linear solids; "
-                 "buildings, nonlinear and poroelastic modules "
-                 "are not supported. Use shared-geometric-constraints for those paths.\n");
+                 "velocity_potential acoustics and full Hex8 solids.\n");
   }
   if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING &&
       Param.includeTopography == YES) {
@@ -5191,6 +5194,9 @@ struct acoustic_neighbor_t {
   int64_t geid;
   double vp, vs, rho, storage_modulus;
   int poroelastic;
+  /* Final solver activity excludes elastic-only CPML cells. Before solver
+   * initialization this is unknown; candidate classification stays separate. */
+  int poroelastic_active;
 };
 
 struct acoustic_point_less {
@@ -5416,6 +5422,8 @@ static void mesh_exchange_acoustic_neighbors(void) {
     answer.rho = material->rho;
     answer.poroelastic = poroelastic_element_candidate(
         Global.myMesh, eindex, 0, NULL, NULL);
+    answer.poroelastic_active = g_poroelasticElementFlags
+        ? (g_poroelasticElementFlags[eindex] != 0u) : -1;
     if (answer.poroelastic)
       answer.storage_modulus =
           poroelastic_biot_storage_modulus_for_element(material, eindex);
@@ -6658,10 +6666,17 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
   }
 
   /* Check for buildings and proceed according to the buildings setrec */
-  if ((Param.includeBuildings == YES) && (Param.useProfile == NO)) {
+  if (Param.includeBuildings == YES) {
+    cvmpayload_t surface;
+    const cvmpayload_t* profile_surface = NULL;
+    if (Param.useProfile == YES) {
+      if (profile_query(0.0, &surface) != 0)
+        solver_abort(__FUNCTION_NAME, NULL, "Building profile must define depth zero\n");
+      profile_surface = &surface;
+    }
     if (bldgs_setrec(leaf, ticksize, edata, Global.theCVMEp,
                      Global.theXForMeshOrigin, Global.theYForMeshOrigin,
-                     Global.theZForMeshOrigin)) {
+                     Global.theZForMeshOrigin, profile_surface)) {
       return;
     }
   }
@@ -9620,6 +9635,11 @@ static void mesh_output(void) {
 
 static int32_t mesh_handoff_owner(const point_t* intervals, int32_t count,
                                   const point_t* point) {
+  // Octor has no communication manager or interval table on a single rank.
+  // This also covers local-matching requests and probes into carved voids.
+  if (count == 1) return 0;
+  if (count <= 0 || intervals == NULL)
+    solver_abort(__FUNCTION_NAME, NULL, "Missing mesh ownership intervals\n");
   int32_t low = 0;
   int32_t high = count - 1;
   int32_t owner = 0;
@@ -11127,7 +11147,6 @@ static void solver_init() {
 
   /* Initialize the GPU */
   gpu_init(Global.myID);
-  acoustic_constraints_build();
   acoustic_constraint_upload(&Global.gpuData.acousticInterfaceSolidNodesDevice,
                               g_acousticSolidTraceNodes);
 
@@ -12491,6 +12510,10 @@ static void solver_init() {
   }
 #endif /* BOUNDARY */
 
+  /* Field maps need the final pore-pressure element flags, including CPML
+   * exclusions. Build once before any nodal mass is distributed. */
+  acoustic_constraints_build();
+
   /* Build the communication schedules */
   schedule_build(Global.myMesh, Global.mySolver->dn_sched,
                  Global.mySolver->an_sched);
@@ -12611,7 +12634,7 @@ static void solver_init() {
     schedule_senddata(Global.mySolver->dn_sched,
                       Global.mySolver->pore_pressure_mass, 1, CONTRIBUTION,
                       DN_PORE_PRESSURE_MASS_MSG);
-    compute_adjust(Global.mySolver->pore_pressure_mass, 1, DISTRIBUTION);
+    compute_adjust(Global.mySolver->pore_pressure_mass, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     schedule_senddata(Global.mySolver->an_sched,
                       Global.mySolver->pore_pressure_mass, 1, CONTRIBUTION,
                       AN_PORE_PRESSURE_MASS_MSG);
@@ -12619,7 +12642,7 @@ static void solver_init() {
     schedule_senddata(Global.mySolver->dn_sched,
                       Global.mySolver->pore_pressure_surface, 1, CONTRIBUTION,
                       DN_PORE_PRESSURE_SURFACE_MSG);
-    compute_adjust(Global.mySolver->pore_pressure_surface, 1, DISTRIBUTION);
+    compute_adjust(Global.mySolver->pore_pressure_surface, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     schedule_senddata(Global.mySolver->an_sched,
                       Global.mySolver->pore_pressure_surface, 1, CONTRIBUTION,
                       AN_PORE_PRESSURE_SURFACE_MSG);
@@ -12630,7 +12653,7 @@ static void solver_init() {
                         Global.mySolver->pore_pressure_open_pore_mass, 1,
                         CONTRIBUTION, DN_PORE_PRESSURE_OPEN_PORE_MASS_MSG);
       compute_adjust(Global.mySolver->pore_pressure_open_pore_mass, 1,
-                     DISTRIBUTION);
+                     DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
       schedule_senddata(Global.mySolver->an_sched,
                         Global.mySolver->pore_pressure_open_pore_mass, 1,
                         CONTRIBUTION, AN_PORE_PRESSURE_OPEN_PORE_MASS_MSG);
@@ -17021,7 +17044,7 @@ static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
         DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
     solver_scalar_device_adjust(
         solver, solver->gpuData->porePressureOpenPoreTargetDevice,
-        DISTRIBUTION);
+        DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     solver_scalar_device_schedule_senddata(
         solver, solver->an_sched,
         solver->gpuData->porePressureOpenPoreTargetDevice, CONTRIBUTION,
@@ -17030,7 +17053,7 @@ static void solver_accumulate_acoustic_open_pore_target(mysolver_t* solver,
     schedule_senddata(solver->dn_sched, solver->pore_pressure_open_pore_target,
                       1, CONTRIBUTION,
                       DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
-    compute_adjust(solver->pore_pressure_open_pore_target, 1, DISTRIBUTION);
+    compute_adjust(solver->pore_pressure_open_pore_target, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     schedule_senddata(solver->an_sched, solver->pore_pressure_open_pore_target,
                       1, CONTRIBUTION,
                       AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG);
@@ -17131,14 +17154,14 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
         solver, solver->dn_sched, solver->gpuData->porePressureForceDevice,
         CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
     solver_scalar_device_adjust(
-        solver, solver->gpuData->porePressureForceDevice, DISTRIBUTION);
+        solver, solver->gpuData->porePressureForceDevice, DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     solver_scalar_device_schedule_senddata(
         solver, solver->an_sched, solver->gpuData->porePressureForceDevice,
         CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
   } else {
     schedule_senddata(solver->dn_sched, solver->pore_pressure_force, 1,
                       CONTRIBUTION, DN_PORE_PRESSURE_FORCE_MSG);
-    compute_adjust(solver->pore_pressure_force, 1, DISTRIBUTION);
+    compute_adjust(solver->pore_pressure_force, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_PORE);
     schedule_senddata(solver->an_sched, solver->pore_pressure_force, 1,
                       CONTRIBUTION, AN_PORE_PRESSURE_FORCE_MSG);
   }
@@ -17210,14 +17233,14 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* solver,
         solver, solver->an_sched, solver->gpuData->porePressureTm2Device,
         SHARING, AN_PORE_PRESSURE_MSG);
     solver_scalar_device_adjust(
-        solver, solver->gpuData->porePressureTm2Device, ASSIGNMENT);
+        solver, solver->gpuData->porePressureTm2Device, ASSIGNMENT, ACOUSTIC_CONSTRAINT_PORE);
     solver_scalar_device_schedule_senddata(
         solver, solver->dn_sched, solver->gpuData->porePressureTm2Device,
         SHARING, DN_PORE_PRESSURE_MSG);
   } else {
     schedule_senddata(solver->an_sched, solver->pore_pressure_tm2, 1,
                       SHARING, AN_PORE_PRESSURE_MSG);
-    compute_adjust(solver->pore_pressure_tm2, 1, ASSIGNMENT);
+    compute_adjust(solver->pore_pressure_tm2, 1, ASSIGNMENT, ACOUSTIC_CONSTRAINT_PORE);
     schedule_senddata(solver->dn_sched, solver->pore_pressure_tm2, 1,
                       SHARING, DN_PORE_PRESSURE_MSG);
   }
@@ -22163,7 +22186,7 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
 
   /* Additional solid-trace ghosts are appended after octree extraction.
    * Match sender/receiver packing by global ID, independent of local order. */
-  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS) {
+  if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL) {
     messenger_t* lists[] = {dnsched->first_c, dnsched->first_s,
                             ansched->first_c, ansched->first_s};
     for (auto* head : lists)
@@ -24835,7 +24858,7 @@ static void print_timing_stat() {
     TotalMeshingTime += Timer_Value("Mesh Out", (TimerKind)0);
   }
 
-  if (Param.includeBuildings == YES) {
+  if (Param.includeBuildings == YES && Timer_Exists("Carve Buildings")) {
     TotalMeshingTime += Timer_Value("Carve Buildings", (TimerKind)0);
   }
 
@@ -29050,7 +29073,7 @@ int main(int argc, char** argv) {
       }
       if (Global.myID == 0) {
         monitor_print("Field constraints: FEM topography, regular Hex8 traces; "
-                      "air and carved voids carry neither field.\n");
+                      "air and carved voids carry no field.\n");
       }
     }
   }

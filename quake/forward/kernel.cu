@@ -1255,6 +1255,7 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
           : -1;
   const int32_t target_eindex =
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const int32_t* solid_nodes = gpuData->acousticInterfaceSolidNodesDevice;
   const double center[3] = {
       gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 1],
@@ -1270,7 +1271,7 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
           ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
           : center[2]};
   const double* target_center =
-      (adjacent_eindex >= 0) ? adjacent_center : center;
+      (solid_nodes != NULL || adjacent_eindex >= 0) ? adjacent_center : center;
   double pressure = 0.0;
 
   for (int i = 0; i < 8; i++) {
@@ -1298,7 +1299,8 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
     }
 
     const int32_t lnid =
-        gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
+        solid_nodes ? solid_nodes[8 * faceIndex + j]
+                    : gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
     atomicAdd((solver_float*)(gpuData->porePressureOpenPoreTargetDevice +
                               lnid),
               (solver_float)(scale * weight * pressure));

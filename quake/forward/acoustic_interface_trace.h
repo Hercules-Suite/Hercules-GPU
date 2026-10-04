@@ -6,9 +6,15 @@
  * acoustic face. Add missing vertices as ordinary non-owned harbored nodes
  * before solver allocation. Existing force-contribution/displacement-sharing
  * schedules then carry the trace on both host and CUDA-aware MPI paths.
- * No new per-step exchange or host staging is needed. */
+ * Local matching also needs this trace: face_mass must use the same quadrature
+ * on local and remote faces. No new per-step exchange or host staging is needed. */
 static std::vector<int32_t> g_acousticSolidTraceNodes;
 static std::vector<int32link_t*> g_acousticTraceShares;
+
+static const int32_t* acoustic_solid_trace_nodes(int64_t face) {
+  return g_acousticSolidTraceNodes.empty() ? NULL
+                                         : g_acousticSolidTraceNodes.data() + 8 * face;
+}
 
 template <class T>
 static std::vector<T> acoustic_trace_exchange(
@@ -59,7 +65,7 @@ struct acoustic_trace_reply_t {
 struct acoustic_trace_share_t { int64_t gnid; int rank; };
 
 static void acoustic_solid_trace_build() {
-  if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_FIELDS) return;
+  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_ORIGINAL) return;
   mesh_t* mesh = Global.myMesh;
   const int ranks = Global.theGroupSize;
   const int64_t faces = Global.acousticInterfaceFaces;
@@ -198,7 +204,7 @@ static void acoustic_solid_trace_build() {
   int64_t local[2] = {(int64_t)replies.size(), (int64_t)added.size()}, total[2];
   MPI_Allreduce(local, total, 2, MPI_INT64_T, MPI_SUM, comm_solver);
   if (Global.myID == 0)
-    monitor_print("Field-specific solid traces: %lld remote fragments, %lld additional harbored nodes; existing force/field MPI schedules.\n",
+    monitor_print("Acoustic interface solid traces: %lld remote fragments, %lld additional harbored nodes; existing force/field MPI schedules.\n",
                   (long long)total[0], (long long)total[1]);
 }
 #endif

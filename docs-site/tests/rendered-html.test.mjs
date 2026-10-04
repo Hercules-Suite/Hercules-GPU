@@ -214,6 +214,8 @@ test("renders the categorized parameter reference", async () => {
   assert.match(methodRow, /Field-specific constraints support FEM topography/);
   assert.match(methodRow, /computation_method=fem/);
   assert.match(methodRow, /owner-confirmed carved voids/);
+  assert.match(methodRow, /separate acoustic, solid and pore-pressure maps/);
+  assert.match(methodRow, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
   assert.match(methodRow, /Local matching requires include_topography=no/);
   assert.match(methodRow, /does not guarantee CPML stability/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
@@ -315,6 +317,13 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.match(solver, /get_topo_meth\(\) != FEM/);
   assert.match(solver, /VT cut-tetrahedron constraints/);
   assert.match(solver, /acoustic_interface_method=local-matching does not support/);
+  const interfaceGuard = solver.slice(
+    solver.indexOf("if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&"),
+    solver.indexOf('strcpy(Param.theCheckPointingDirOut'),
+  );
+  assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
+  assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
+  assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
