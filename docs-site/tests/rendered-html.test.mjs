@@ -222,6 +222,15 @@ test("renders the categorized parameter reference", async () => {
   assert.ok(projectionRow);
   assert.match(projectionRow, /All three constraint methods resolve actual remote solid vertices for face_mass/);
   assert.match(projectionRow, /default shared-geometric point path is unchanged/);
+  const qualityRow = html.split("</tr>").find((row) => row.includes("acoustic_quality_factor"));
+  assert.ok(qualityRow);
+  assert.match(qualityRow, /Float \(dimensionless\)/);
+  assert.match(qualityRow, /Default: 0 \(lossless\)/);
+  assert.match(qualityRow, /0 is an off switch/);
+  assert.match(qualityRow, /Use 0 as the baseline for validation/);
+  assert.match(qualityRow, /500 is a weaker damping trial than 100/);
+  assert.match(qualityRow, /older flat-water benchmark/);
+  assert.match(qualityRow, /not physical ocean-attenuation calibrations/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -308,11 +317,13 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(!documented.includes("drm_output_file"));
   assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
   assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: all;/);
+  assert.match(reference, /p\("acoustic_quality_factor", "Optional", "Float \(dimensionless\)", "Default: 0 \(lossless\)"/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
 
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  assert.match(solver, /\.theAcousticQualityFactor\s*=\s*0\.0\s*,/);
   assert.ok(documented.includes("acoustic_interface_method"));
   assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"shared-geometric-constraints"/);
   for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
@@ -375,6 +386,21 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("explains acoustic damping trials and their validation scope", async () => {
+  const response = await render("/docs/physics");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /id="acoustic-quality-factor"/);
+  assert.match(html, /Recommended baseline and validation setting/);
+  assert.match(html, /Weaker positive-damping trial than 100/);
+  assert.match(html, /Stronger damping trial; useful in an older flat-water benchmark/);
+  assert.match(html, /not a general production calibration/);
+  assert.match(html, /referenced to simulation_wave_max_freq_hz/);
+  assert.match(html, /skipped in CPML elements/);
+  assert.match(html, /independent of the material-profile Qp and Qs/);
+  assert.match(html, /Compare unfiltered responses against 0/);
 });
 
 test("explains experimental constraints, remeshing and CPML limitations", async () => {

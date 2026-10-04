@@ -783,6 +783,25 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "The default pressure-release surface is appropriate for the existing hydroacoustic path. Set acoustic_free_surface_gravity=yes when linear surface-gravity waves are part of the modeled physics; lateral acoustic CPML then includes the tangential gravity-surface correction. The complete operator now uses independent nodal surface memories and the full tangential x/y product, including corners. Earlier candidate and doubled-CPML runs contained invalid source forces from a tabulated-source endpoint overread, so their nonfinite output cannot establish an operator instability. Regenerate and verify source forces with the corrected interpolator before comparing boundary or interface choices. Finite output alone does not establish CPML absorption or gravity-surface reconstruction accuracy. Use face_mass projection only as an experimental comparison path. A positive acoustic_quality_factor is a numerical high-frequency regularizer, not a physical ocean attenuation law.",
       },
       {
+        id: "acoustic-quality-factor",
+        title: "Choose acoustic numerical damping",
+        paragraphs: [
+          "acoustic_quality_factor is optional and dimensionless, with default 0. Omitting it or setting any value <=0 disables the interior acoustic damping term. Here 0 is an off switch, not a physical material with zero quality factor. Use 0 as the lossless baseline for validation; CPML absorption and energy transfer into coupled solids remain separate.",
+          "Positive values enable stiffness-proportional numerical damping referenced to simulation_wave_max_freq_hz, with stronger damping at higher frequencies. This applies to interior acoustic elements in both pressure and velocity_potential formulations and is skipped in CPML elements. The scalar-acoustic damping is independent of the material-profile Qp and Qs columns.",
+        ],
+        table: {
+          headers: ["acoustic_quality_factor", "Use and scope"],
+          rows: [
+            ["0 (default)", "Recommended baseline and validation setting; interior acoustic damping disabled."],
+            ["500", "Weaker positive-damping trial than 100, with other settings fixed."],
+            ["100", "Stronger damping trial; useful in an older flat-water benchmark, not a general production calibration."],
+          ],
+        },
+        codeLabel: "parameters.in — lossless acoustic baseline",
+        code: "acoustic_quality_factor = 0",
+        note: "Positive trial values are numerical regularizers, not physical ocean-attenuation calibrations. Compare unfiltered responses against 0 and check amplitudes and phases in the frequency band of interest. Reduced high-frequency ringing alone does not establish improved accuracy.",
+      },
+      {
         id: "acoustic-interface-method",
         title: "Choose interface constraints or local mesh matching",
         paragraphs: [

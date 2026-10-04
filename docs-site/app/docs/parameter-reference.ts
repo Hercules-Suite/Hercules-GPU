@@ -189,7 +189,7 @@ const parameterPages: ParameterPage[] = [
           p("acoustic_interface_max_level", "Optional", "Integer octree level", "Default: -1; -1 to PIXELLEVEL", "Maximum level for extra refinement of mixed acoustic/elastic octants; -1 disables this refinement rule."),
           p("acoustic_mesh_refinement_factor", "Optional", "Float", "Default: 1; >= 1", "Additional refinement multiplier for fully acoustic elements during fresh mesh generation."),
           p("acoustic_interface_diagnostics_file", "Optional", "File path", "Default: unset", "Write one diagnostic row per local acoustic–solid interface fragment. The file may be very large."),
-          p("acoustic_quality_factor", "Optional", "Float", "Default: 0 (lossless)", "Positive Q adds a numerical, high-frequency-selective regularizer to interior acoustic elements; it is not a physical ocean-attenuation model."),
+          p("acoustic_quality_factor", "Optional", "Float (dimensionless)", "Default: 0 (lossless)", "Omitting the parameter or setting Q<=0 disables interior acoustic damping; 0 is an off switch, not a physical zero quality factor. Use 0 as the baseline for validation. Positive Q enables stiffness-proportional numerical damping referenced to simulation_wave_max_freq_hz: 500 is a weaker damping trial than 100, which was useful in an older flat-water benchmark. These are case-specific trials, not physical ocean-attenuation calibrations. Works for pressure and velocity_potential, skips CPML elements, and is independent of material-profile Qp/Qs. Compare unfiltered responses against 0 and check signal-band amplitudes and phases."),
         ],
       },
       {

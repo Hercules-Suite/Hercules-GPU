@@ -99,6 +99,12 @@ interactions are in the
   `acoustic_interface_method`, `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
+  `acoustic_quality_factor` defaults to `0`, disabling the interior acoustic
+  damping term; use this lossless setting for baseline and validation comparisons.
+  Positive values are numerical damping trials: `500` gives weaker damping than
+  `100`, which was useful in an older flat-water benchmark. These are not physical
+  water-attenuation calibrations. See [damping controls](Extended%20README.md#acoustic-and-elastic-coupling)
+  and the [historical scope](Extended%20README.md#historical-acoustic-experiments).
   `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
   `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.

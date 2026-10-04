@@ -1272,20 +1272,27 @@ Notes:
 	by optional `Ru(-)` output; it is `nan` where the initial effective-stress
 	reference itself is unavailable or nonpositive.
 - `acoustic_quality_factor`
-	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
-	bit-identical to the validated baseline. A positive quality factor
-	`Q` adds a small, high-frequency-selective damping to acoustic
-	(water) elements that attenuates the synthetic lossless-cavity grid
-	ring while barely touching the physical signal. Applies to interior
-	acoustic elements only (skipped in the CPML zone); works for both
-	`pressure` and `velocity_potential`. **This is a numerical
-	regularizer for a low-order-discretisation artifact, not physical
-	ocean attenuation** (and is non-SPECFEM) — use it only to clean the
-	synthetic no-attenuation benchmark; runs with a realistically
-	attenuating Earth do not need it. The older flat-water benchmark reported
-	`acoustic_quality_factor = 100` as a useful tradeoff; the
-	[historical record](#historical-acoustic-experiments) gives its scope.
-	That case-specific observation is not a general production calibration.
+	Optional, dimensionless. Default `0`; omitting the parameter or setting
+	it to any value `<= 0` disables the interior acoustic damping term.
+	Here `0` is an off switch, not a physical material with zero quality
+	factor. **Use `acoustic_quality_factor = 0` as the recommended lossless
+	baseline for validation.** CPML absorption and energy transfer into
+	coupled solids remain separate from this control.
+	A positive `Q` enables stiffness-proportional numerical damping,
+	with stronger damping at higher frequencies. It applies to interior
+	acoustic elements only (skipped in the CPML zone) and works for both
+	`pressure` and `velocity_potential`. The specified `Q` is referenced to
+	`simulation_wave_max_freq_hz`; this scalar-acoustic damping is independent
+	of the material-profile `Qp` and `Qs` columns.
+	For controlled positive-damping trials, `500` gives weaker damping than
+	`100` with other settings fixed. The older flat-water benchmark reported
+	`100` as a useful tradeoff; the
+	[historical record](#historical-acoustic-experiments) gives its scope and
+	frequency-dependent formulation. **These trial values describe a numerical
+	regularizer, not physical ocean attenuation or a general production
+	calibration.** Compare each trial with `0` using unfiltered responses and
+	check amplitudes and phases in the frequency band of interest; reduced
+	high-frequency ringing alone does not establish improved accuracy.
 - `acoustic_poroelastic_interface`
 	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
 	sealed for the pore fluid while the existing acoustic pressure traction
@@ -2570,8 +2577,9 @@ include subsequent interface changes.
 
 For positive `acoustic_quality_factor=Q`, the implemented acoustic damping
 coefficient is `beta=1/(Q*2*pi*f_ref*dt)`, from
-`acoustic_stiffness_damping_beta`. In the modal interpretation of the discrete
-force term, `zeta(omega)=beta*omega*dt/2` and
+`acoustic_stiffness_damping_beta`, with `f_ref` set by
+`simulation_wave_max_freq_hz` and `dt` the simulation timestep. In the modal
+interpretation of the discrete force term, `zeta(omega)=beta*omega*dt/2` and
 `Q(omega)=1/(beta*omega*dt)`. This is stiffness-proportional damping: it is
 stronger at higher frequencies. It is independent of the elastic `theBBase`
 coefficient, which an earlier implementation incorrectly used, leaving the
