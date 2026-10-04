@@ -6,10 +6,17 @@
  * acoustic face. Add missing vertices as ordinary non-owned harbored nodes
  * before solver allocation. Existing force-contribution/displacement-sharing
  * schedules then carry the trace on both host and CUDA-aware MPI paths.
- * Local matching also needs this trace: face_mass must use the same quadrature
- * on local and remote faces. No new per-step exchange or host staging is needed. */
+ * Every constraint method needs this trace for face_mass: quadrature must not
+ * depend on which rank owns the solid. No new per-step exchange or host staging
+ * is needed. The default method's point projection retains its existing path. */
 static std::vector<int32_t> g_acousticSolidTraceNodes;
 static std::vector<int32link_t*> g_acousticTraceShares;
+
+static bool acoustic_solid_trace_enabled() {
+  return acoustic_pressure_enabled() && Param.acousticInterfaceCoupling == YES &&
+      (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL ||
+       Param.theAcousticInterfaceProjectionMode == ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS);
+}
 
 static const int32_t* acoustic_solid_trace_nodes(int64_t face) {
   return g_acousticSolidTraceNodes.empty() ? NULL
@@ -65,7 +72,7 @@ struct acoustic_trace_reply_t {
 struct acoustic_trace_share_t { int64_t gnid; int rank; };
 
 static void acoustic_solid_trace_build() {
-  if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_ORIGINAL) return;
+  if (!acoustic_solid_trace_enabled()) return;
   mesh_t* mesh = Global.myMesh;
   const int ranks = Global.theGroupSize;
   const int64_t faces = Global.acousticInterfaceFaces;

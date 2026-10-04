@@ -22186,7 +22186,7 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
 
   /* Additional solid-trace ghosts are appended after octree extraction.
    * Match sender/receiver packing by global ID, independent of local order. */
-  if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL) {
+  if (acoustic_solid_trace_enabled()) {
     messenger_t* lists[] = {dnsched->first_c, dnsched->first_s,
                             ansched->first_c, ansched->first_s};
     for (auto* head : lists)

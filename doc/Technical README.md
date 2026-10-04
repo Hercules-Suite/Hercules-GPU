@@ -107,7 +107,10 @@ interactions are in the
   constitutive models and BrickUP poroelasticity can be enabled with either method;
   existing module-specific restrictions and material calibration requirements apply.
   Both methods use actual remote solid traces, including `face_mass` quadrature
-  and open-pore pressure loads. Field-specific constraints also
+  and open-pore pressure loads. The default shared-geometric method also resolves
+  actual remote solid traces when `face_mass` is selected, so local and remote
+  faces use the same four-point quadrature; its `point` path is unchanged.
+  Field-specific constraints also
   support FEM topography (`include_topography=yes`, `computation_method=fem`),
   excluding air and carved voids from the field maps. VT cut-tetrahedron topography
   remains unsupported; local matching still requires topography off. CPML, gravity and

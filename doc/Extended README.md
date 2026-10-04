@@ -1365,16 +1365,21 @@ Coupling uses the actual solid face vertices on both sides of MPI partitions.
 Missing remote vertices are added as non-owned harbored nodes during setup;
 their global IDs order the existing force-contribution and displacement-sharing
 schedules. Both alternative methods use the solid trace for `point` and
-`face_mass`. In particular, local matching uses the same four-point face
-quadrature on local and remote neighbors; it no longer falls back to point
-integration on remote faces. Open-pore boundary mass and water-pressure target
-loads also use actual solid vertices and their shape functions. The existing
+`face_mass`. All three methods, including `shared-geometric-constraints`,
+resolve actual remote solid vertices when `face_mass` is selected and use the
+same four-point face quadrature on local and remote neighbors. They no longer
+fall back to point integration on remote faces. Open-pore boundary mass and
+water-pressure target loads also use actual solid vertices and their shape functions. The existing
 weak hydraulic projection remains centered on each interface fragment,
 independently of the mechanical `point`/`face_mass` selection. In particular,
 independent fine-solid nodes must not be replaced by a coarse acoustic trace
 when the neighboring solid element is remote. This also applies without
 topography. The monitor reports remote fragments and additional harbored nodes.
-The default shared-geometric path keeps its previous coupling behavior.
+The default shared-geometric method retains its geometric hanging-node
+constraints and its existing `point` projection path. Its `face_mass` correction
+uses the same trace and global-ID schedule ordering as the alternatives,
+including on ranks that only own nodes requested by another rank. Coupling-off
+and non-acoustic cases do not build these traces.
 This is a constrained experimental implementation,
 not a general mortar method.
 
@@ -1421,6 +1426,30 @@ follow-up change only guards the absent carving timer when printing timing
 for imported building meshes; six import checks and the two FEM/gravity
 regressions passed with that final build. Earlier failed or incorrectly
 specified test attempts were excluded and replaced by corrected runs.
+
+The later default-method correction explicitly compared
+`shared-geometric-constraints + face_mass` on one/eight Horizon GPUs. In 4 s
+flat-water cases, the worst plane-component relative L2 discrepancy changed
+from 3.33% to $1.93\times10^{-13}$ on a matching interface, from 2.78% to
+$1.81\times10^{-13}$ with the solid twice as fine, and from 1.54% to
+$7.67\times10^{-14}$ with water twice as fine. The corrected one-rank results
+reproduced the previous one-rank operator. These are raw, unfiltered outputs.
+Checks also covered host/CUDA-aware exchanges, the unchanged default `point`
+path, matching and nonmatching building/nonlinear/open-pore combinations,
+8 s FEM/gravity cases, the legacy pressure formulation, coupling disabled,
+and regressions of both alternative methods. The default-method correction
+was not part of the earlier production-sized Izmir check.
+
+One combined yielding/open-pore case with finer solids exceeded the strict
+host/CUDA comparison tolerance in host performance mode: plane displacement
+differed by $4.67\times10^{-8}$ relative L2, and the largest station-column
+difference was $3.84\times10^{-5}$ in acceleration. Host repeats also varied;
+the previous solver showed a host/CUDA difference on the same one-rank model.
+With the existing `HERCULES_REPRO_MODE=strict`, host/CUDA and one/eight-rank
+plane comparisons agreed within $1.5\times10^{-12}$, and station comparisons
+within $4.6\times10^{-9}$. The original performance-mode failures are retained
+as a repeatability limitation, not counted as strict passes. No host execution
+defaults were changed by the face-integration correction.
 
 Local matching inspects all detected water–solid faces, including those omitted
 by a force face filter, and resolves refinement requests on their MPI owners.

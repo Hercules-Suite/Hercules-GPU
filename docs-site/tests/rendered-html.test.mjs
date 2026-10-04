@@ -218,6 +218,10 @@ test("renders the categorized parameter reference", async () => {
   assert.match(methodRow, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
   assert.match(methodRow, /Local matching requires include_topography=no/);
   assert.match(methodRow, /does not guarantee CPML stability/);
+  const projectionRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_projection"));
+  assert.ok(projectionRow);
+  assert.match(projectionRow, /All three constraint methods resolve actual remote solid vertices for face_mass/);
+  assert.match(projectionRow, /default shared-geometric point path is unchanged/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
