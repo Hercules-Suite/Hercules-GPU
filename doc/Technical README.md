@@ -100,11 +100,20 @@ interactions are in the
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
   `acoustic_quality_factor`.
   `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
-  `field-specific-constraints` separates acoustic/solid hanging-node maps, while
+  `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
-  velocity-potential acoustics and full Hex8 linear solids (topography,
-  buildings, nonlinear and poroelastic modules off). CPML, gravity and
+  velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
+  constitutive models and BrickUP poroelasticity can be enabled with either method;
+  existing module-specific restrictions and material calibration requirements apply.
+  Both methods use actual remote solid traces, including `face_mass` quadrature
+  and open-pore pressure loads. The default shared-geometric method also resolves
+  actual remote solid traces when `face_mass` is selected, so local and remote
+  faces use the same four-point quadrature; its `point` path is unchanged.
+  Field-specific constraints also
+  support FEM topography (`include_topography=yes`, `computation_method=fem`),
+  excluding air and carved voids from the field maps. VT cut-tetrahedron topography
+  remains unsupported; local matching still requires topography off. CPML, gravity and
   `face_mass` remain independent; local matching does not guarantee CPML
   stability. See [constraints and matching](Extended%20README.md#interface-constraints-and-local-matching).
   `acoustic_interface_face_filter` defaults to `all`: couple every detected
@@ -124,6 +133,8 @@ interactions are in the
   `poroelastic_fluid_viscosity_pa_s`, `poroelastic_permeability_x_m2`,
   `poroelastic_permeability_y_m2`, `poroelastic_permeability_z_m2`,
   `acoustic_poroelastic_interface`, `acoustic_poroelastic_pressure_penalty_factor`.
+  Building cases measure ground and groundwater depths from `surface_shift_m`;
+  above-ground building cells remain outside the saturated region.
 - **Station output:** `number_output_stations`, `station_binary`, `station_output_binary_file`,
   `output_stations_print_rate`, `output_stations_directory`, `output_stations`,
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,

@@ -533,12 +533,14 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
       (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
           ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
           : center[2]};
+  const int32_t* solid_nodes = gpuData->acousticInterfaceSolidNodesDevice;
+  const bool solid_trace = (solid_nodes != NULL) || (adjacent_eindex >= 0);
   const int32_t force_eindex = (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
-  const double* force_center = (adjacent_eindex >= 0) ? adjacent_center : center;
+  const double* force_center = solid_trace ? adjacent_center : center;
 
   if ((gpuData->acousticInterfaceProjectionMode ==
        ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
-      (adjacent_eindex >= 0) &&
+      solid_trace &&
       (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
       (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
     const double* half =
@@ -598,6 +600,7 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
           }
 
           const int32_t lnid =
+              solid_nodes ? solid_nodes[8 * faceIndex + i] :
               gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
           fvector_t* nodalForce = gpuData->forceDevice + lnid;
           atomicAdd((solver_float*)&nodalForce->f[0],
@@ -644,6 +647,7 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     }
 
     const int32_t lnid =
+        solid_nodes ? solid_nodes[8 * faceIndex + i] :
         gpuData->lnidArrayDevice[force_eindex + i * gpuData->lenum];
     fvector_t* nodalForce = gpuData->forceDevice + lnid;
     atomicAdd((solver_float*)&nodalForce->f[0],
@@ -788,12 +792,14 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
           : center[2]};
   const int32_t accel_eindex =
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const int32_t* solid_nodes = gpuData->acousticInterfaceSolidNodesDevice;
+  const bool solid_trace = (solid_nodes != NULL) || (adjacent_eindex >= 0);
   const double* accel_center =
-      (adjacent_eindex >= 0) ? adjacent_center : center;
+      solid_trace ? adjacent_center : center;
 
   if ((gpuData->acousticInterfaceProjectionMode ==
        ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS) &&
-      (adjacent_eindex >= 0) &&
+      solid_trace &&
       (gpuData->acousticInterfaceFaceHalfWidthsDevice != NULL) &&
       (gpuData->acousticInterfaceAdjacentHalfWidthsDevice != NULL)) {
     const double* half =
@@ -832,6 +838,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
           }
 
           const int32_t lnid =
+              solid_nodes ? solid_nodes[8 * faceIndex + i] :
               gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
           const fvector_t u_next = gpuData->tm2Device[lnid];
           const fvector_t u_curr = gpuData->tm1Device[lnid];
@@ -880,6 +887,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     }
 
     const int32_t lnid =
+        solid_nodes ? solid_nodes[8 * faceIndex + i] :
         gpuData->lnidArrayDevice[accel_eindex + i * gpuData->lenum];
     const fvector_t u_next = gpuData->tm2Device[lnid];
     const fvector_t u_curr = gpuData->tm1Device[lnid];
@@ -1247,6 +1255,7 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
           : -1;
   const int32_t target_eindex =
       (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
+  const int32_t* solid_nodes = gpuData->acousticInterfaceSolidNodesDevice;
   const double center[3] = {
       gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 0],
       gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 1],
@@ -1262,7 +1271,7 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
           ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
           : center[2]};
   const double* target_center =
-      (adjacent_eindex >= 0) ? adjacent_center : center;
+      (solid_nodes != NULL || adjacent_eindex >= 0) ? adjacent_center : center;
   double pressure = 0.0;
 
   for (int i = 0; i < 8; i++) {
@@ -1290,7 +1299,8 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
     }
 
     const int32_t lnid =
-        gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
+        solid_nodes ? solid_nodes[8 * faceIndex + j]
+                    : gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
     atomicAdd((solver_float*)(gpuData->porePressureOpenPoreTargetDevice +
                               lnid),
               (solver_float)(scale * weight * pressure));

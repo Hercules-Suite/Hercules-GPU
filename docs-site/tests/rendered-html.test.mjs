@@ -211,7 +211,17 @@ test("renders the categorized parameter reference", async () => {
   assert.match(methodRow, /field-specific-constraints/);
   assert.match(methodRow, /local-matching/);
   assert.match(methodRow, /imported mismatched meshes abort/);
+  assert.match(methodRow, /Field-specific constraints support FEM topography/);
+  assert.match(methodRow, /computation_method=fem/);
+  assert.match(methodRow, /owner-confirmed carved voids/);
+  assert.match(methodRow, /separate acoustic, solid and pore-pressure maps/);
+  assert.match(methodRow, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
+  assert.match(methodRow, /Local matching requires include_topography=no/);
   assert.match(methodRow, /does not guarantee CPML stability/);
+  const projectionRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_projection"));
+  assert.ok(projectionRow);
+  assert.match(projectionRow, /All three constraint methods resolve actual remote solid vertices for face_mass/);
+  assert.match(projectionRow, /default shared-geometric point path is unchanged/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -308,6 +318,16 @@ test("documents every parameters.in key parsed by the current source tree", () =
   for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
     assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
   }
+  assert.match(solver, /get_topo_meth\(\) != FEM/);
+  assert.match(solver, /VT cut-tetrahedron constraints/);
+  assert.match(solver, /acoustic_interface_method=local-matching does not support/);
+  const interfaceGuard = solver.slice(
+    solver.indexOf("if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&"),
+    solver.indexOf('strcpy(Param.theCheckPointingDirOut'),
+  );
+  assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
+  assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
+  assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -365,6 +385,9 @@ test("explains experimental constraints, remeshing and CPML limitations", async 
   assert.match(html, /unsupported mixed-corner stencil stops setup/);
   assert.match(html, /exponential growth with CPML/);
   assert.match(html, /not a prescribed uniform-width refinement band/);
+  assert.match(html, /Field-specific constraints also support FEM topography/);
+  assert.match(html, /Unresolved remote neighbors still abort/);
+  assert.match(html, /VT cut-tetrahedron topography remains unsupported/);
 });
 
 test("wires the optional acoustic gravity free surface through setup and CUDA", () => {

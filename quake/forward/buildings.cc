@@ -130,7 +130,7 @@ bounds_t get_pushdownbounds( int i );
 void get_airprops( octant_t *leaf, double ticksize,
                    edata_t *edata, etree_t *cvm,
                    double xoriginm,double yoriginm,
-                   double zoriginm);
+                   double zoriginm, const cvmpayload_t *profile_surface);
 
 int inclusivesearch  ( double x, double y, double z, bounds_t bounds );
 int exclusivesearch  ( double x, double y, double z, bounds_t bounds );
@@ -246,7 +246,7 @@ cvmpayload_t get_props( int i, double z ) {
 
 void get_airprops( octant_t *leaf, double ticksize, edata_t *edata,
 				   etree_t *cvm ,double xoriginm, double yoriginm,
-                   double zoriginm)
+                   double zoriginm, const cvmpayload_t *profile_surface)
 {
 	int    res;
 	double x, y, z;
@@ -264,19 +264,27 @@ void get_airprops( octant_t *leaf, double ticksize, edata_t *edata,
 
 
 	/* Get the Vs at that location on the surface (z = 0) */
-	if ( belongs2hmgHalfspace( y, x, 0 ) )
+	if ( profile_surface != NULL ) {
+		props = *profile_surface;
+		res = 0;
+	} else if ( belongs2hmgHalfspace( y, x, 0 ) )
 		res = get_halfspaceproperties( &props );
 	else
 		res = cvm_query( cvm, y, x, 0, &props );
 
 	if ( res != 0 ) {
-		return;
 		solver_abort ( __FUNCTION_NAME, "Error from cvm_query: ",
 				"No properties at east = %f, north = %f", y, x);
 	}
 
     /* Increase Vs as it gets far from the surface */
-    edata->Vs  = 2.0 * props.Vs * ( theSurfaceShift - z ) / ticksize;
+    // This is a meshing surrogate for air, not a physical shear velocity.
+    // A water surface has Vs=0: use its positive compressional speed so air
+    // does not trigger unbounded wavespeed refinement before building carving.
+    const double speed = props.Vs > 0.0 ? props.Vs : props.Vp;
+    if (!(speed > 0.0) || !isfinite(speed))
+        solver_abort(__FUNCTION_NAME, NULL, "Invalid building surface meshing speed\n");
+    edata->Vs  = 2.0 * speed * ( theSurfaceShift - z ) / ticksize;
 
     /* Assign a negative Vp to identify the octants to carve */
     edata->Vp  = -1;
@@ -659,8 +667,6 @@ int bldgs_nodesearch ( tick_t x, tick_t y, tick_t z, double ticksize ) {
    Return 1 if data is assigned to the octant, 0 otherwise.
 
 
-   Note: z_m is initialized to 0 to avoid warnings.
-
    TODO: This function assumes the domain origin is 0,0,0. If this is not true
          as it will be for DRM implementation, one will need to consider
          theXForMeshOrigin, theYForMeshOrigin, (and theXForMeshOrigin ?)
@@ -668,10 +674,11 @@ int bldgs_nodesearch ( tick_t x, tick_t y, tick_t z, double ticksize ) {
 
 int bldgs_setrec ( octant_t *leaf, double ticksize,
                    edata_t *edata, etree_t *cvm,double xoriginm,
-                   double yoriginm, double zoriginm)
+                   double yoriginm, double zoriginm,
+                   const cvmpayload_t *profile_surface)
 {
     int          res;
-    double       z_m = 0;
+    double       z_m = leaf->lz * ticksize;
     cvmpayload_t props;
 
     res = bldgs_search( leaf, ticksize, edata );
@@ -686,7 +693,8 @@ int bldgs_setrec ( octant_t *leaf, double ticksize,
     z_m = leaf->lz * ticksize;
 
     if ( z_m < theSurfaceShift ) {
-        get_airprops( leaf, ticksize, edata, cvm,xoriginm,yoriginm,zoriginm);
+        get_airprops( leaf, ticksize, edata, cvm,xoriginm,yoriginm,zoriginm,
+                      profile_surface);
         return 1;
     }
 
@@ -1656,4 +1664,3 @@ void bldgs_finalize() {
 //
 //    return 0;
 //}
-

@@ -468,6 +468,8 @@ typedef struct gpu_data_t {
     double*      acousticInterfaceFaceNormalsDevice;
     double*      acousticInterfaceFaceHalfWidthsDevice;
     int32_t*     acousticInterfaceAdjacentElementIndexesDevice;
+    /* Optional actual solid trace [fragment][8], including remote ghosts. */
+    int32_t*     acousticInterfaceSolidNodesDevice;
     double*      acousticInterfaceAdjacentCentersDevice;
     double*      acousticInterfaceAdjacentHalfWidthsDevice;
     uint8_t*     acousticInterfaceAdjacentPoroelasticDevice;

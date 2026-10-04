@@ -122,7 +122,7 @@ single_query: single_query.o q4.o
 output.o: output.cc output.h psolve.h
 io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h flat_output_mpi.h psolve.h psolve_gpu_launch.h
 io_checkpoint.o: io_checkpoint.cc io_checkpoint.h psolve.h nonlinear_gpu.h
-psolve.o: psolve.cc acoustic_interface_setup.h psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
+psolve.o: psolve.cc acoustic_interface_setup.h acoustic_interface_trace.h psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
           io_checkpoint.h io_drm.h flat_output_mpi.h stiffness.h damping.h quake_util.h timers.h \
 		  buildings.h meshformatlab.h drm.h topography.h drm_planewaves.h \
 		  basin.h kernel.h
@@ -137,7 +137,7 @@ quakesource.o: quakesource.cc quakesource.h psolve.h
 nonlinear.o: nonlinear.cc nonlinear.h nonlinear_gpu.h nonlinear_pdmy03.h \
 	nonlinear_riva_sand.h nonlinear_riva_sand_intermediate_bias_research.h
 
-stiffness.o: stiffness.cu stiffness.h
+stiffness.o: stiffness.cu stiffness.h psolve.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 NONLINEAR_GPU_DEPS = nonlinear/nonlinear_gpu_implementation.cuh \
@@ -148,7 +148,7 @@ NONLINEAR_GPU_DEPS = nonlinear/nonlinear_gpu_implementation.cuh \
 nonlinear/nonlinear_gpu_%.o: nonlinear/nonlinear_gpu_%.cu $(NONLINEAR_GPU_DEPS)
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
-kernel.o: kernel.cu kernel.h
+kernel.o: kernel.cu kernel.h psolve.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 all: $(TARGET)
