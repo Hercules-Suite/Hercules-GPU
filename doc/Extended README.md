@@ -1373,9 +1373,10 @@ topography-free operator and the shared-geometric baseline. These comparisons
 check implementation consistency; they do not establish continuum accuracy or
 long-time stability for arbitrary coastlines.
 The same build imported the existing 1,179,872,281-element Izmir mesh on 512
-Horizon GPUs and completed 4 s with FEM topography, gravity and the original
-physical/source controls. Its 18 station histories and generated source forces
-passed finite-value and output-integrity checks; setup resolved 34,534 remote
+Horizon GPUs and completed 20 s with FEM topography, gravity and the original
+physical/source controls. All 18 stations recorded nonzero, finite motion
+(largest displacement component 0.1384 m); station histories and generated
+source forces passed output-integrity checks. Setup resolved 34,534 remote
 solid fragments using 12,310 additional harbored nodes. This is a short-run
 integration check, not validation of the full 100 s production simulation.
 
