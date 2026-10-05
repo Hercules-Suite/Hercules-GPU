@@ -5791,60 +5791,6 @@ static int mesh_reconstruct_bathymetry_normal_at_domain_point(
   return has_center || has_x_minus || has_x_plus || has_y_minus || has_y_plus;
 }
 
-#ifdef BOUNDARY
-static int mesh_compute_elastic_side_pml_profile_at_domain_point(
-    const vector3D_t* domain_point,
-    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
-    const vector3D_t* threeDVelModel_origin, cpml_interface_t* coeff_out,
-    uint8_t* face_mask_out) {
-  tick_t ldb[3], ruf[3];
-  uint8_t face_mask;
-  double a3[3], b3[3], iK3[3], d3[3];
-  double al3[3], ka3[3];
-  (void)IstVelModel_origin;
-  (void)basinVelModel_origin;
-  (void)threeDVelModel_origin;
-
-  if ((domain_point == NULL) || (coeff_out == NULL)) {
-    return 0;
-  }
-
-  if (!mesh_find_octant_at_domain_point(domain_point, ldb, ruf, NULL, NULL,
-                                        NULL)) {
-    return 0;
-  }
-
-  face_mask = compute_pml_face_mask(
-      ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
-      Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
-  if (face_mask_out != NULL) {
-    *face_mask_out = face_mask;
-  }
-  if (face_mask == 0) {
-    return 0;
-  }
-
-  const acoustic_neighbor_t* neighbor =
-      mesh_cached_acoustic_neighbor_at(domain_point);
-  if (neighbor == NULL ||
-      !material_values_are_elastic(neighbor->vp, neighbor->vs, neighbor->rho)) {
-    return 0;
-  }
-
-  compute_pml_profile_coeffs(
-      face_mask, ldb, ruf, Global.myOctree->nearendp,
-      Global.myOctree->farendp, Global.myOctree->ticksize,
-      g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp, Param.theDeltaT,
-      Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
-      Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-      Param.theCpmlMpmlCrossFraction, Param.theCpmlAlphaFloorFraction,
-      a3, b3, iK3, d3, al3, ka3);
-
-  *coeff_out = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-  return 1;
-}
-#endif /* BOUNDARY */
-
 static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
                                                       int64_t current_count,
                                                       int64_t* capacity) {
@@ -12319,30 +12265,18 @@ static void solver_init() {
     }
 
     /* --- CPML-aware acoustic-elastic interface coupling correction --- */
-    /* For each interface face, precompute independent cofactor ADE
-     * coefficients for the acoustic side and the elastic side. The
-     * elastic-to-acoustic source term uses the acoustic-side profile; the
-     * pressure traction on the solid uses the elastic-side profile. Keeping
-     * the two sides separate matters because the side geometry/mask can
-     * differ; the damping amplitude itself uses the global CPML reference
-     * Vp, matching the main PML element profiles. */
+    /* The two weak coupling terms integrate over the same physical face
+     * fragment and must use the same cofactor J/S_j. Sampling the separate
+     * containing elements can assign different profiles on a nonmatching
+     * interface. Evaluate once at the fragment center, independently of
+     * neighbor size or MPI ownership. Each side/quadrature point retains
+     * its own history; this only changes setup-time coefficients. */
     Global.acousticInterfacePmlFaceCount = 0;
     int64_t pml_face_count = 0;
-    int64_t pml_acoustic_side_count = 0;
-    int64_t pml_elastic_side_count = 0;
-    int64_t pml_both_side_count = 0;
     int64_t remote_elastic_side_count = 0;
     int64_t remote_elastic_pml_side_count = 0;
     if (Global.acousticInterfaceFaces > 0) {
-      vector3D_t cpmlIfaceBasinVelModel_origin;
-      vector3D_t cpmlIfaceThreeDVelModel_origin;
-      const vector3D_t* cpmlIfaceIstVelModel_origin =
-          (Param.IstanbulVelocityModel == YES && g_hasIstanbulVelModelOrigin)
-              ? &g_istanbulVelModelOrigin
-              : NULL;
-      const vector3D_t* cpmlIfaceBasinVelModel_origin_ptr = NULL;
-      const vector3D_t* cpmlIfaceThreeDVelModel_origin_ptr = NULL;
-      int64_t nface = Global.acousticInterfaceFaces;
+      const int64_t nface = Global.acousticInterfaceFaces;
       uint8_t* iface_mask =
           (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
       cpml_interface_t* iface_ac =
@@ -12355,131 +12289,51 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
       }
-      if (Param.basinVelocityModel == YES) {
-        cpmlIfaceBasinVelModel_origin = compute_domain_coords_linearinterp(
-            Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-            Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-            &Param.utmZone);
-        cpmlIfaceBasinVelModel_origin_ptr = &cpmlIfaceBasinVelModel_origin;
-      }
-      if (Param.threeDVelocityModel == YES) {
-        cpmlIfaceThreeDVelModel_origin = compute_domain_coords_linearinterp(
-            Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-            Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-            Param.theDomainY, Param.theDomainX, &Param.utmZone);
-        cpmlIfaceThreeDVelModel_origin_ptr =
-            &cpmlIfaceThreeDVelModel_origin;
-      }
       for (int64_t i = 0; i < nface; i++) {
-        int32_t ea = Global.acousticInterfaceElementIds[i];
-        int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
-                         ? Global.acousticInterfaceAdjacentElementIndexes[i]
-                         : -1;
-        uint8_t ma = (ea >= 0 && ea < Global.myMesh->lenum)
-                         ? g_cpmlBuild.face_mask[ea]
-                         : 0;
-        uint8_t me = (ee >= 0 && ee < Global.myMesh->lenum)
-                         ? g_cpmlBuild.face_mask[ee]
-                         : 0;
+        const int32_t ea = Global.acousticInterfaceElementIds[i];
+        const int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
+                              ? Global.acousticInterfaceAdjacentElementIndexes[i]
+                              : -1;
         if (ee < 0) {
           remote_elastic_side_count++;
         }
-
-        if (ma != 0) {
-          elem_t* pe = &Global.myMesh->elemTable[ea];
-          int32_t pln0 = pe->lnid[0];
-          tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
-                           Global.myMesh->nodeTable[pln0].y,
-                           Global.myMesh->nodeTable[pln0].z};
-          tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
-          tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
-                           ldb[2] + edgeticks};
-          double a3[3], b3[3], iK3[3], d3[3];
-          double al3[3], ka3[3];
-
-          compute_pml_profile_coeffs(
-              ma, ldb, ruf, Global.myOctree->nearendp,
-              Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
-              Param.theDeltaT, Param.theCpmlPolyOrder,
-              Param.theCpmlReflectionTarget,
-              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-              Param.theCpmlMpmlCrossFraction,
-              Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
-          iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE;
-          iface_ac[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-          pml_acoustic_side_count++;
+        if (ea < 0 || ea >= Global.myMesh->lenum) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "Invalid acoustic element for CPML interface fragment.\n");
         }
-
-        if (me != 0) {
-          elem_t* pe = &Global.myMesh->elemTable[ee];
-          int32_t pln0 = pe->lnid[0];
-          tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
-                           Global.myMesh->nodeTable[pln0].y,
-                           Global.myMesh->nodeTable[pln0].z};
-          tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
-          tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
-                           ldb[2] + edgeticks};
-          double a3[3], b3[3], iK3[3], d3[3];
-          double al3[3], ka3[3];
-
-          compute_pml_profile_coeffs(
-              me, ldb, ruf, Global.myOctree->nearendp,
-              Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
-              Param.theDeltaT, Param.theCpmlPolyOrder,
-              Param.theCpmlReflectionTarget,
-              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-              Param.theCpmlMpmlCrossFraction,
-              Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
-          iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
-          iface_el[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-          pml_elastic_side_count++;
-        } else if ((ee < 0) && (ea >= 0) && (ea < Global.myMesh->lenum)) {
-          /* The elastic neighbor is remote on this MPI rank.  Do not let
-           * that make the elastic-side CPML correction silently disappear:
-           * reconstruct the fragment's physical location from the local
-           * acoustic element, nudge it to the elastic side, then use the
-           * remote octant geometry plus a material query to compute the
-           * elastic-side coefficients. */
-          elem_t* pe = &Global.myMesh->elemTable[ea];
-          edata_t* ped = (edata_t*)pe->data;
-          int32_t pln0 = pe->lnid[0];
-          double ldb_m[3] = {
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].x,
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].y,
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].z};
-          double h = (double)ped->edgesize;
-          double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
-          vector3D_t elastic_probe;
-
-          for (int dim = 0; dim < 3; dim++) {
-            elastic_probe.x[dim] =
-                ldb_m[dim] +
-                0.5 * h *
-                    (Global.acousticInterfaceFaceCenters[3 * i + dim] + 1.0) +
-                Global.acousticInterfaceFaceNormals[3 * i + dim] * eps;
-          }
-
-          if (mesh_compute_elastic_side_pml_profile_at_domain_point(
-                  &elastic_probe, cpmlIfaceIstVelModel_origin,
-                  cpmlIfaceBasinVelModel_origin_ptr,
-                  cpmlIfaceThreeDVelModel_origin_ptr, &iface_el[i], NULL)) {
-            iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
-            pml_elastic_side_count++;
-            remote_elastic_pml_side_count++;
-          }
+        const elem_t* pe = &Global.myMesh->elemTable[ea];
+        const int32_t pln0 = pe->lnid[0];
+        const tick_t edge = (tick_t)1 << (PIXELLEVEL - pe->level);
+        const tick_t origin[3] = {Global.myMesh->nodeTable[pln0].x,
+                                  Global.myMesh->nodeTable[pln0].y,
+                                  Global.myMesh->nodeTable[pln0].z};
+        tick_t point[3];
+        for (int j = 0; j < 3; j++) {
+          point[j] = origin[j] + (tick_t)llround(
+              0.5 * (double)edge *
+              (Global.acousticInterfaceFaceCenters[3 * i + j] + 1.0));
         }
-
-        if (iface_mask[i] != 0) {
-          pml_face_count++;
-          if ((iface_mask[i] & ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE) &&
-              (iface_mask[i] & ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE)) {
-            pml_both_side_count++;
-          }
+        const uint8_t mask = compute_pml_face_mask(
+            point, point, Global.myOctree->nearendp, Global.myOctree->farendp,
+            Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+        if (mask == 0) {
+          continue;
+        }
+        double a3[3], b3[3], iK3[3], d3[3], al3[3], ka3[3];
+        compute_pml_profile_coeffs(
+            mask, point, point, Global.myOctree->nearendp,
+            Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+            Param.theDeltaT, Param.theCpmlPolyOrder,
+            Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+            g_cpmlBuild.alpha_max, Param.theCpmlMpmlCrossFraction,
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
+        iface_ac[i] = iface_el[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
+        iface_mask[i] = ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE |
+                        ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
+        pml_face_count++;
+        if (ee < 0) {
+          remote_elastic_pml_side_count++;
         }
       }
 
@@ -12509,25 +12363,20 @@ static void solver_init() {
      * ranks with no local water-solid interface faces, especially for a flat
      * water layer, and letting those ranks skip the reduction deadlocks the
      * interface-owning ranks during Phase B startup. */
-    int64_t local_iface_diag[6] = {
-        pml_face_count, pml_acoustic_side_count, pml_elastic_side_count,
-        pml_both_side_count, remote_elastic_side_count,
+    int64_t local_iface_diag[3] = {
+        pml_face_count, remote_elastic_side_count,
         remote_elastic_pml_side_count};
-    int64_t global_iface_diag[6] = {0, 0, 0, 0, 0, 0};
-    MPI_Reduce(local_iface_diag, global_iface_diag, 6, MPI_LONG_LONG,
+    int64_t global_iface_diag[3] = {0, 0, 0};
+    MPI_Reduce(local_iface_diag, global_iface_diag, 3, MPI_LONG_LONG,
                MPI_SUM, 0, comm_solver);
     if (Global.myID == 0 && global_iface_diag[0] > 0) {
       fprintf(stdout,
-              "CPML: %lld acoustic-elastic interface faces lie inside the "
-              "PML zone; side-specific correction acoustic=%lld, "
-              "elastic=%lld, both=%lld, remote-elastic=%lld "
-              "(elastic-PML recovered=%lld)\n",
+              "CPML: %lld acoustic-elastic interface fragments use a common "
+              "physical-face profile on both sides; remote-elastic=%lld "
+              "(remote fragments in PML=%lld)\n",
               (long long)global_iface_diag[0],
               (long long)global_iface_diag[1],
-              (long long)global_iface_diag[2],
-              (long long)global_iface_diag[3],
-              (long long)global_iface_diag[4],
-              (long long)global_iface_diag[5]);
+              (long long)global_iface_diag[2]);
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
