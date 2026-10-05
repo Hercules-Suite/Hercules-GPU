@@ -947,6 +947,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "CPML with 3-D materials, water, and topography",
         paragraphs: [
           "Keep cpml_3d_material_extension=yes when a finite 3-D material grid or water classification should be extended from the nearest interior column through the absorber. This avoids sampling outside the model footprint and creating a false coastline or basin boundary inside CPML corners.",
+          "For SQD topography, extension clamps the query point in mesh coordinates before converting back to depth below the queried surface. This keeps the bottom and lateral CPML limits consistent even when the topography datum is nonzero. Material extension does not itself guarantee CPML stability.",
           "When topography reaches a lateral PML, taper it to the flat boundary datum before running. script/taper_topography.py provides the repository workflow. The material extension controls properties, while the taper controls geometry; both are needed for a clean heterogeneous PML interface.",
         ],
         codeLabel: "parameters.in — heterogeneous acoustic/elastic CPML additions",
@@ -1682,6 +1683,7 @@ if __name__ == "__main__":
         title: "Point moment-tensor source",
         paragraphs: [
           "The point model represents a double-couple source at one location. Supply either scalar moment moment_amplitude in N m or moment_magnitude Mw. When moment_magnitude is present Hercules computes M0 = 10^(1.5 Mw + 9.1) N m.",
+          "Point and single-point body-force histories preserve every loaded node when source generation needs multiple memory batches. The binary force file stores one complete node list followed by all time samples in that same node order; a longer simulation must not change the earlier source samples.",
         ],
         table: {
           headers: ["Key", "Requirement", "Meaning"],

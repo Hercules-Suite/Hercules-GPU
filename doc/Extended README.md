@@ -2028,7 +2028,13 @@ results are specific to the recorded configuration and implementation.
 	For `3D_velocity_model=yes`, `cpml_3d_material_extension=yes`
 	(default) makes that classification come from the corresponding
 	inner-PML material column/row, matching the usual flat-PML material
-	extension used by spectral-element PML setups.
+	extension used by spectral-element PML setups. For SQD topography,
+	query depth is measured below the local surface, while CPML bounds
+	use mesh coordinates. The extension clamps the physical query point
+	in mesh coordinates, including the bottom limit, then converts back
+	to depth below the surface at the extended horizontal location.
+	This handles a nonzero topography datum consistently; it does not
+	by itself establish stability for a heterogeneous CPML model.
 - Material damping on PML elements follows `cpml_pml_material_damping`
 	(see that flag). With the default `none`, material damping is skipped
 	on PML elements, but non-PML elements always use material damping as
@@ -2303,6 +2309,13 @@ source-force files before repeating an affected simulation.
 SRFH force histories are generated at the common `slipfunction.in` interval
 and then interpolated at the solver timestep. Reducing
 `simulation_delta_time_sec` does not change that source-generation interval.
+
+Point and single-point body-force source generation writes all loaded nodes,
+including when a long time history spans multiple memory batches. The binary
+force-file header contains the complete node list, and each time sample uses
+that same ordering. Increasing the simulation duration must preserve the
+previously generated early-time forces. This batching is part of source setup;
+it does not change the GPU time-stepping path.
 
 ### Source-force filtering
 

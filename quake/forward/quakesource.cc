@@ -1394,7 +1394,7 @@ load_myForces_with_point_source(
 	    pointSource->M0 = pow( 10, 1.5 * theMomentMagnitude + 9.1);
 	}
 
-	myM0		     += pointSource->M0;
+        if (cycle == 0) myM0 += pointSource->M0;
 	pointSource->muArea   = pointSource->M0;
 	/* notice that this is a fake slip to obtain the M0 given as data */
 	pointSource->maxSlip  = 1;
@@ -3725,48 +3725,56 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
     }
 
 
-    int32_t memoryRequiredPerNode, nodesPerCycle, iCycle,
-	iInternal, iNode;
-    // int32_t myNumberOfCycles, memoryPerCycle;
-
-    memoryRequiredPerNode = 3 * sizeof (vector3D_t) * theNumberOfTimeSteps;
-    if (memoryRequiredPerNode > theForcesBufferSize) {
-	fputs ("\n ERROR: Not enough memory in the theForcesBufferSize to "
-	       "create the source", stderr);
-	return -1;
+    /* A point/body-force source can still span several memory cycles when
+     * its time history is long. Keep the header's complete node order and
+     * write every cycle into that same time-major layout. */
+    const int64_t memoryRequiredPerNode =
+        3 * (int64_t)sizeof(vector3D_t) * theNumberOfTimeSteps;
+    if (memoryRequiredPerNode <= 0 ||
+        memoryRequiredPerNode > theForcesBufferSize) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Point-source history exceeds the source buffer per node");
+    }
+    const int32_t nodesPerCycle =
+        (int32_t)(theForcesBufferSize / memoryRequiredPerNode);
+    int32_t sourceNodes[8], totalLoadedNodeCount = 0;
+    for (int32_t iNode = 0; iNode < myMesh->nharbored; iNode++) {
+        if (myForcesCycle[iNode] != -1) {
+            if (totalLoadedNodeCount == 8) {
+                solver_abort(__FUNCTION_NAME, NULL,
+                             "Point source has more than eight element nodes");
+            }
+            myForcesCycle[iNode] = totalLoadedNodeCount / nodesPerCycle;
+            sourceNodes[totalLoadedNodeCount++] = iNode;
+        }
     }
 
-    /* note: the following ops are done using integer arithmetic */
-    nodesPerCycle    = theForcesBufferSize / memoryRequiredPerNode;
-    // memoryPerCycle   = nodesPerCycle * memoryRequiredPerNode;
-    // myNumberOfCycles = ((myNumberOfNodesLoaded - 1) / nodesPerCycle) + 1;
-
-    /* go through myForceTag and put the cycle for each node loaded */
-    iCycle    = 0;
-    iInternal = 0;
-
-    for (iNode = 0; iNode <  myMesh->nharbored; iNode++) {
-	if (myForcesCycle[iNode] != -1) {
-	    myForcesCycle[iNode] = iCycle;
-	    iInternal++;
-
-	    if (iInternal == nodesPerCycle) {
-		iCycle++;
-		iInternal = 0;
-	    }
-	}
-    }
-
-    compute_source_function( &pntSrc );
+    compute_source_function(&pntSrc);
+    FILE* fptmpsrc = source_open_forces_file("w");
+    print_header_myForces(fptmpsrc, totalLoadedNodeCount);
+    const int64_t dataStartOffset =
+        (int64_t)(1 + totalLoadedNodeCount) * sizeof(int32_t);
+    double cycleWriteBuffer[24];
     myNumberOfNodesLoaded = 0;
-    load_myForces_with_point_source( octant, &pntSrc, &is_force_in_processor,
-				     0, 0, -1 );
-
-    FILE* fptmpsrc = source_open_forces_file( "w" );
-
-    print_header_myForces( fptmpsrc, myNumberOfNodesLoaded );
-    print_myForces_transposed( fptmpsrc );
-    close_file( &fptmpsrc );
+    int32_t cycle = 0;
+    for (int32_t offset = 0; offset < totalLoadedNodeCount;
+         offset += nodesPerCycle, ++cycle) {
+        const int32_t remaining = totalLoadedNodeCount - offset;
+        const int32_t count = remaining < nodesPerCycle
+            ? remaining : nodesPerCycle;
+        load_myForces_with_point_source(octant, &pntSrc,
+                                       &is_force_in_processor, cycle, 0, -1);
+        write_myForces_cycle_direct(fptmpsrc, dataStartOffset,
+                                   totalLoadedNodeCount, offset,
+                                   sourceNodes + offset, count,
+                                   cycleWriteBuffer);
+        free_myForces();
+    }
+    if (myNumberOfNodesLoaded != totalLoadedNodeCount) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Point-source header and loaded node counts differ");
+    }
+    close_file(&fptmpsrc);
 
     /* cleanup */
     free( pntSrc.displacement );

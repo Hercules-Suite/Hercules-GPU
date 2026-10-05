@@ -5020,6 +5020,15 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
 
   const double old_north = *north_m;
   const double old_east = *east_m;
+  const bool surface_relative_depth =
+      (Param.includeTopography == YES) && (get_theetree_type() == SQD);
+  /* SQD material queries use depth below the local surface, whereas the
+   * CPML bounds use mesh coordinates. Clamp the physical point first, then
+   * express its depth below the surface at the extended query location. */
+  const double old_surface = surface_relative_depth
+      ? point_elevation(old_north, old_east) : 0.0;
+  const double old_mesh_depth = *depth_m + old_surface;
+  double mesh_depth = old_mesh_depth;
 
   if ((domain_lo[0] + L) < (domain_hi[0] - L)) {
     if (*north_m < domain_lo[0] + L) {
@@ -5036,18 +5045,22 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
     }
   }
   if (domain_lo[2] < (domain_hi[2] - L)) {
-    if (*depth_m > domain_hi[2] - L) {
-      *depth_m = domain_hi[2] - L;
+    if (mesh_depth > domain_hi[2] - L) {
+      mesh_depth = domain_hi[2] - L;
     }
   }
 
-  if (((*north_m != old_north) || (*east_m != old_east)) &&
-      (Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
-    *depth_m += point_elevation(old_north, old_east) -
-                point_elevation(*north_m, *east_m);
-    if (*depth_m < 0.0) {
-      *depth_m = 0.0;
+  if (surface_relative_depth) {
+    if ((*north_m != old_north) || (*east_m != old_east) ||
+        (mesh_depth != old_mesh_depth)) {
+      *depth_m += (mesh_depth - old_mesh_depth) + old_surface -
+                  point_elevation(*north_m, *east_m);
+      if (*depth_m < 0.0) {
+        *depth_m = 0.0;
+      }
     }
+  } else {
+    *depth_m = mesh_depth;
   }
 #else
   (void)north_m;
