@@ -2612,18 +2612,33 @@ convention (including “Z up”); Hercules still stores solver Z positive down.
 
 ## ASCII station buffering
 
-With the default `station_binary=no`, each MPI rank allocates a **64 KiB** stdio
-buffer for each station it owns. Memory use is 64 KiB times the local station
-count, plus small stream/container overhead; ranks without stations allocate
-no station buffers. Buffers are installed before writing file headers and remain
-valid until the files close. This is automatic and requires no input change.
+With the default `station_binary=no`, `station_ascii_buffer_kib` sets the stdio
+buffer size for each station owned by an MPI rank. This optional `parameters.in`
+integer defaults to **64 KiB** (1 KiB = 1024 bytes). Accepted values are
+1..2097151 (`INT_MAX / 1024`); zero, negative, fractional and overflowing values
+are rejected during input parsing. The value is validated but unused with
+`station_binary=yes`. Existing inputs retain the 64 KiB default.
+
+```ini
+# CPU buffer per ASCII station, shared by all its output columns.
+station_ascii_buffer_kib = 64
+```
+
+Buffer memory per rank is `station_ascii_buffer_kib * 1024 * local_station_count`
+bytes, plus small stream/container overhead. For example, 1,000 stations owned
+by one rank use 62.5 MiB at the default or 15.625 MiB with a value of 16. A larger
+buffer allows less frequent writes but uses more CPU RAM and delays live-file
+visibility. A smaller buffer reduces memory use and writes more frequently.
+Ranks without stations and binary mode allocate no ASCII station buffers.
+Buffers are installed before writing file headers and remain valid until the
+files close; allocation failure stops setup with an error.
 
 The writer retains the existing ASCII formatting, timestamps, sample cadence
 (`output_stations_print_rate * simulation_delta_time_sec`), and all requested
 motion, pressure, strain/stress and nonlinear columns. There is no filtering,
 averaging or downsampling. Writes occur as the byte buffer fills rather than
 forcing a flush every ten samples. The number of rows per write depends on the
-enabled columns and their formatted values; 64 KiB is a byte limit, not a fixed
+enabled columns and their formatted values; the buffer size is a byte limit, not a fixed
 sample count. The policy covers acoustic, topography and ordinary solid station
 writers. Binary station output uses its separate existing MPI-IO path.
 

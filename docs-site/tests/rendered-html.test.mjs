@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 240 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 241 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -300,9 +300,11 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 240);
-  assert.equal(documented.length, 240, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 241);
+  assert.equal(documented.length, 241, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("station_binary"));
+  assert.ok(documented.includes("station_ascii_buffer_kib"));
+  assert.match(reference, /p\("station_ascii_buffer_kib", "Optional", "Integer KiB \(1024 bytes\)", "Default: 64; 1\.\.2097151/);
   assert.ok(documented.includes("station_output_binary_file"));
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
@@ -1588,7 +1590,7 @@ test("documents controlled acoustic pressure and motion diagnostics", async () =
 test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();
-  for (const key of ["station_binary", "station_output_binary_file", "drm_output_batch_size",
+  for (const key of ["station_binary", "station_ascii_buffer_kib", "station_output_binary_file", "drm_output_batch_size",
     "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y",
     "number_output_drm_boxes", "output_drm_boxes_print_rate", "output_drm_boxes_directory",
     "output_drm_boxes"]) {
@@ -1622,6 +1624,9 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /shape=\(nt, npoints, 3\)/);
   assert.match(html, /station_binary defaults to no/);
   assert.match(html, /64 KiB buffer per locally owned station/);
+  assert.match(html, /default 64, accepted range 1\.\.2097151/);
+  assert.match(html, /validated but unused with station_binary=yes/);
+  assert.match(html, /62\.5 MiB; setting 16 uses 15\.625 MiB/);
   assert.match(html, /Every requested sample and column is retained without filtering/);
   assert.match(html, /includes the final flush in the Print Stations and Solver I\/O timers/);
   assert.match(html, /interrupted or aborted run can lose the unflushed tail/);

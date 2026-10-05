@@ -94,7 +94,6 @@ extern "C" {
 #include <cuda_runtime.h>
 
 static flat_output::FlatWriter stationBinaryWriter;
-static const size_t kStationAsciiBufferBytes = 64 * 1024;
 // Own explicit stdio buffers until the corresponding station files are closed.
 static std::vector<std::vector<char> > stationAsciiBuffers;
 
@@ -1091,6 +1090,7 @@ static struct Param_t {
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
   int stationBinary; /* Default NO: existing ASCII station histories. */
+  int stationAsciiBufferKiB; /* Per locally owned ASCII station; default 64. */
   char stationOutputBinaryFile[256];
   int theStationsPrintRate;
   double* theStationX;
@@ -2211,7 +2211,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  65 /* Must adjust this if adding int params */
+  66 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2398,6 +2398,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
   int_message[63] = Param.stationBinary;
   int_message[64] = Param.theAcousticInterfaceMethod;
+  int_message[65] = Param.stationAsciiBufferKiB;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2468,6 +2469,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
   Param.stationBinary = int_message[63];
   Param.theAcousticInterfaceMethod = int_message[64];
+  Param.stationAsciiBufferKiB = int_message[65];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3172,6 +3174,26 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL, "station_binary must be yes or no");
   }
   Param.stationBinary = (strcasecmp(station_binary, "yes") == 0) ? YES : NO;
+  char station_ascii_buffer_kib[64] = "64";
+  char* stationBufferText = station_ascii_buffer_kib;
+  size_t stationBufferLength = sizeof(station_ascii_buffer_kib);
+  if (hu_config_get_string_opt(fp, "station_ascii_buffer_kib", &stationBufferText,
+                               &stationBufferLength) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to read station_ascii_buffer_kib");
+  }
+  char* stationBufferEnd = NULL;
+  errno = 0;
+  const long stationBufferKiB = strtol(stationBufferText, &stationBufferEnd, 10);
+  /* Bound the byte count to INT_MAX on both 32-bit and 64-bit hosts. */
+  if (errno != 0 || stationBufferEnd == stationBufferText ||
+      *stationBufferEnd != '\0' || stationBufferKiB < 1 ||
+      stationBufferKiB > INT_MAX / 1024) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "station_ascii_buffer_kib must be an integer in 1..%d KiB",
+                 INT_MAX / 1024);
+  }
+  Param.stationAsciiBufferKiB = (int)stationBufferKiB;
   if (Param.stationBinary == YES) {
     if (number_output_stations <= 0 || number_output_stations > INT_MAX / 3) {
       solver_abort(__FUNCTION_NAME, NULL,
@@ -26800,10 +26822,11 @@ void setup_stations_data() {
 
   Timer_Start("Stations Local Init");
   if (Param.stationBinary != YES) {
+    const size_t stationBufferBytes = (size_t)Param.stationAsciiBufferKiB * 1024;
     try {
       stationAsciiBuffers.resize(Param.myNumberOfStations);
       for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
-        stationAsciiBuffers[i].resize(kStationAsciiBufferBytes);
+        stationAsciiBuffers[i].resize(stationBufferBytes);
       }
     } catch (const std::exception& error) {
       solver_abort(__FUNCTION_NAME, NULL,
@@ -26877,7 +26900,7 @@ void setup_stations_data() {
       // writes the stream. No per-sample allocation or extra field transfer.
       if (setvbuf(Param.myStations[iLCStation].fpoutputfile,
                   stationAsciiBuffers[iLCStation].data(), _IOFBF,
-                  kStationAsciiBufferBytes) != 0) {
+                  stationAsciiBuffers[iLCStation].size()) != 0) {
         solver_abort(__FUNCTION_NAME, NULL,
                      "Unable to buffer ASCII station output %s", stationFile);
       }
@@ -27806,10 +27829,10 @@ void output_stations_init(const char* numericalin) {
 
   if (Global.myID == 0) {
     if (Param.stationBinary != YES) {
-      monitor_print("Station ASCII buffering: %zu KiB per locally owned station; "
+      monitor_print("Station ASCII buffering: %d KiB per locally owned station; "
                     "write on buffer fill and flush at normal close; "
                     "all requested samples and columns retained.\n",
-                    kStationAsciiBufferBytes / 1024);
+                    Param.stationAsciiBufferKiB);
     }
     monitor_print(
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
