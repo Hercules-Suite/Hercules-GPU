@@ -26,6 +26,7 @@ struct fvector_t { double f[3]; };
 struct tensor_t { double xx, yy, zz, xy, yz, xz; };
 struct mysolver_t { fvector_t tm1[8], tm2[8]; } solver;
 struct Station {
+    int id;
     vector3D_t localcoords;
     int nodestointerpolate[8];
     int pressure_is_defined;
@@ -38,6 +39,7 @@ struct TopoStation {
     double local_coord[3], prev_disp[3];
 };
 static std::vector<TopoStation> myTopoStations;
+static std::vector<std::vector<char> > stationAsciiBuffers;
 static int theTopoMethod = 1;
 static struct {
     int stationBinary, myNumberOfStations, theNumberOfStations;
@@ -45,6 +47,7 @@ static struct {
     int printStationStrains, printStationStresses, theStationsPrintRate;
     double theDeltaT, theDeltaTSquared;
     Station* myStations;
+    const char* theStationsDirOut;
 } Param;
 static struct { mysolver_t* mySolver; } Global = {&solver};
 static std::atomic<int> ancillaryCalls(0);

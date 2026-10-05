@@ -94,6 +94,9 @@ extern "C" {
 #include <cuda_runtime.h>
 
 static flat_output::FlatWriter stationBinaryWriter;
+static const size_t kStationAsciiBufferBytes = 64 * 1024;
+// Own explicit stdio buffers until the corresponding station files are closed.
+static std::vector<std::vector<char> > stationAsciiBuffers;
 
 /* ONLY GLOBAL VARIABLES ALLOWED OUTSIDE OF PARAM. and GLOBAL. IN ALL OF
  * PSOLVE!! */
@@ -15093,11 +15096,16 @@ static void solver_close_station_outputs(void) {
   for (int32_t iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
     FILE* fp = Param.myStations[iStation].fpoutputfile;
     if (fp != NULL) {
-      fflush(fp);
+      if (fflush(fp) != 0 || ferror(fp)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to write ASCII station %d in %s",
+                     Param.myStations[iStation].id, Param.theStationsDirOut);
+      }
       hu_fclose(fp);
       Param.myStations[iStation].fpoutputfile = NULL;
     }
   }
+  stationAsciiBuffers.clear();
 }
 
 static void solver_output_stations(int step) {
@@ -21627,6 +21635,15 @@ static void solver_run() {
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
 
+  // Include the final partial station buffers in solver I/O timing.
+  if (Param.theNumberOfStations != 0) {
+    Timer_Start("Solver I/O");
+    Timer_Start("Print Stations");
+    solver_close_station_outputs();
+    Timer_Stop("Print Stations");
+    Timer_Stop("Solver I/O");
+  }
+
   /* Flush a partial plane MPI-IO batch while Solver/Print Planes timers are
    * still active and before their collective reductions. Full batches are
    * written at their output steps. */
@@ -26782,6 +26799,17 @@ void setup_stations_data() {
   }
 
   Timer_Start("Stations Local Init");
+  if (Param.stationBinary != YES) {
+    try {
+      stationAsciiBuffers.resize(Param.myNumberOfStations);
+      for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
+        stationAsciiBuffers[i].resize(kStationAsciiBufferBytes);
+      }
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to allocate ASCII station buffers: %s", error.what());
+    }
+  }
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
 #pragma omp parallel for if(useOmp) schedule(static) \
@@ -26845,6 +26873,14 @@ void setup_stations_data() {
     if (Param.stationBinary != YES) {
       sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
       Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+      // Set the buffer before writing the header; only this station's owner
+      // writes the stream. No per-sample allocation or extra field transfer.
+      if (setvbuf(Param.myStations[iLCStation].fpoutputfile,
+                  stationAsciiBuffers[iLCStation].data(), _IOFBF,
+                  kStationAsciiBufferBytes) != 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to buffer ASCII station output %s", stationFile);
+      }
     }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
@@ -27223,10 +27259,6 @@ static int interpolate_station_displacements(int32_t step) {
       }
 
       station_write_pressure_columns(iStation);
-
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else if ((Param.includeTopography == YES) &&
                (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y,
                                     &vel_z, &acc_x, &acc_y, &acc_z,
@@ -27323,9 +27355,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else {
       for (iPhi = 0; iPhi < 8; iPhi++) {
         phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0]) *
@@ -27473,10 +27502,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      /* TODO: Have this 10 as a parameter with a default value */
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     }
   }
 
@@ -27780,6 +27805,12 @@ void output_stations_init(const char* numericalin) {
              comm_solver);
 
   if (Global.myID == 0) {
+    if (Param.stationBinary != YES) {
+      monitor_print("Station ASCII buffering: %zu KiB per locally owned station; "
+                    "write on buffer fill and flush at normal close; "
+                    "all requested samples and columns retained.\n",
+                    kStationAsciiBufferBytes / 1024);
+    }
     monitor_print(
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
         totalStations, setupSecondsMax);
@@ -29490,9 +29521,6 @@ int main(int argc, char** argv) {
   solver_run();
   Timer_Stop("Solver");
 
-  if (Param.theNumberOfStations != 0) {
-    solver_close_station_outputs();
-  }
   if (Param.theNumberOfPlanes != 0) {
     planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
   }

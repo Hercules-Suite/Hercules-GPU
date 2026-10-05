@@ -1621,6 +1621,10 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /does not refine the mesh/);
   assert.match(html, /shape=\(nt, npoints, 3\)/);
   assert.match(html, /station_binary defaults to no/);
+  assert.match(html, /64 KiB buffer per locally owned station/);
+  assert.match(html, /Every requested sample and column is retained without filtering/);
+  assert.match(html, /includes the final flush in the Print Stations and Solver I\/O timers/);
+  assert.match(html, /interrupted or aborted run can lose the unflushed tail/);
   assert.match(html, /raw.reshape\(-1, nstations, 3\)/);
   assert.match(html, /No per-station text files or station metadata sidecar/);
   assert.match(html, /reconstructed scalar-acoustic motion/);

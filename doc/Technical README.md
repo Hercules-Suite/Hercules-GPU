@@ -219,6 +219,11 @@ for defaults, supported combinations, and performance implications.
 ## Output and validation
 
 `station_binary=no` is the default and preserves ASCII station histories.
+ASCII output uses a 64 KiB buffer per locally owned station, retaining every
+requested sample and column. Buffers are written when full and flushed at normal
+completion; live files can lag the simulation. The final flush is included in
+the station and solver I/O timers. See
+[ASCII station buffering](Extended%20README.md#ascii-station-buffering).
 To record displacement from the existing `output_stations` list in one file:
 
 ```ini

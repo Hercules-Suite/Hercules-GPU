@@ -2610,6 +2610,36 @@ misfits 0.151 versus 0.154 for Lysmer, and whole-record (0–40 s) misfits
 to layer thickness. Receiver labels above retain the original plotting
 convention (including “Z up”); Hercules still stores solver Z positive down.
 
+## ASCII station buffering
+
+With the default `station_binary=no`, each MPI rank allocates a **64 KiB** stdio
+buffer for each station it owns. Memory use is 64 KiB times the local station
+count, plus small stream/container overhead; ranks without stations allocate
+no station buffers. Buffers are installed before writing file headers and remain
+valid until the files close. This is automatic and requires no input change.
+
+The writer retains the existing ASCII formatting, timestamps, sample cadence
+(`output_stations_print_rate * simulation_delta_time_sec`), and all requested
+motion, pressure, strain/stress and nonlinear columns. There is no filtering,
+averaging or downsampling. Writes occur as the byte buffer fills rather than
+forcing a flush every ten samples. The number of rows per write depends on the
+enabled columns and their formatted values; 64 KiB is a byte limit, not a fixed
+sample count. The policy covers acoustic, topography and ordinary solid station
+writers. Binary station output uses its separate existing MPI-IO path.
+
+At normal completion, the solver flushes each remaining partial buffer, checks
+write errors, closes the station files and releases the buffer memory. Final
+station output is included in the `Print Stations` and `Solver I/O` timers.
+The startup monitor reports the selected ASCII buffering policy. No per-step
+allocation, field exchange or GPU transfer is added.
+
+Live station files may lag the current simulation time and may end in a partial
+text row until more data is written. An interrupted or aborted run can lose the
+unflushed tail; inspect completed files for the full requested history. Larger
+writes reduce small-write frequency but cannot guarantee fast output on a
+congested filesystem. Plane output and the ETA estimator are independent of
+this station-buffering change.
+
 ## Single-file station binary output
 
 `station_binary` defaults to `no`, preserving the existing ASCII `station.N`
