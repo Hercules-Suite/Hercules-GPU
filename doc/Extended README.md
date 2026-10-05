@@ -1922,8 +1922,17 @@ results are specific to the recorded configuration and implementation.
 	classification are extended normally into the absorber instead of
 	letting a coarse `materialfiles` grid create a new coastline or
 	bathymetry inside the PML. Corners clamp along every active PML
-	normal. This changes sampled element material properties, so rebuild
-	or re-correct an imported etree for the PML element values to change;
+	normal in absolute model coordinates. For SQD topography, restore
+	model Z from depth below the original local surface before clamping
+	at the bottom, then convert back using the surface at the clamped
+	X/Y location. Building surface offsets are also restored and removed.
+	For example, a surface at model Z = 2000 m and a bottom-PML entrance
+	at Z = 9000 m map a point at Z = 9500 m (relative depth 7500 m)
+	to Z = 9000 m (relative depth 7000 m). At bottom/lateral corners,
+	the final relative depth uses the clamped column's surface.
+	This changes sampled element material properties, so rebuild
+	or re-correct an imported etree after changing this setting or
+	adopting the corrected topographic bottom/corner conversion;
 	Phase B imports that reuse baked properties keep those existing
 	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`
@@ -2028,7 +2037,13 @@ results are specific to the recorded configuration and implementation.
 	For `3D_velocity_model=yes`, `cpml_3d_material_extension=yes`
 	(default) makes that classification come from the corresponding
 	inner-PML material column/row, matching the usual flat-PML material
-	extension used by spectral-element PML setups.
+	extension used by spectral-element PML setups. For SQD topography,
+	query depth is measured below the local surface, while CPML bounds
+	use mesh coordinates. The extension clamps the physical query point
+	in mesh coordinates, including the bottom limit, then converts back
+	to depth below the surface at the extended horizontal location.
+	This handles a nonzero topography datum consistently; it does not
+	by itself establish stability for a heterogeneous CPML model.
 - Material damping on PML elements follows `cpml_pml_material_damping`
 	(see that flag). With the default `none`, material damping is skipped
 	on PML elements, but non-PML elements always use material damping as
@@ -2303,6 +2318,13 @@ source-force files before repeating an affected simulation.
 SRFH force histories are generated at the common `slipfunction.in` interval
 and then interpolated at the solver timestep. Reducing
 `simulation_delta_time_sec` does not change that source-generation interval.
+
+Point and single-point body-force source generation writes all loaded nodes,
+including when a long time history spans multiple memory batches. The binary
+force-file header contains the complete node list, and each time sample uses
+that same ordering. Increasing the simulation duration must preserve the
+previously generated early-time forces. This batching is part of source setup;
+it does not change the GPU time-stepping path.
 
 ### Source-force filtering
 
