@@ -1922,8 +1922,17 @@ results are specific to the recorded configuration and implementation.
 	classification are extended normally into the absorber instead of
 	letting a coarse `materialfiles` grid create a new coastline or
 	bathymetry inside the PML. Corners clamp along every active PML
-	normal. This changes sampled element material properties, so rebuild
-	or re-correct an imported etree for the PML element values to change;
+	normal in absolute model coordinates. For SQD topography, restore
+	model Z from depth below the original local surface before clamping
+	at the bottom, then convert back using the surface at the clamped
+	X/Y location. Building surface offsets are also restored and removed.
+	For example, a surface at model Z = 2000 m and a bottom-PML entrance
+	at Z = 9000 m map a point at Z = 9500 m (relative depth 7500 m)
+	to Z = 9000 m (relative depth 7000 m). At bottom/lateral corners,
+	the final relative depth uses the clamped column's surface.
+	This changes sampled element material properties, so rebuild
+	or re-correct an imported etree after changing this setting or
+	adopting the corrected topographic bottom/corner conversion;
 	Phase B imports that reuse baked properties keep those existing
 	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`

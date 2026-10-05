@@ -1918,3 +1918,14 @@ test("documents complete CPML products and the plain-CPML default", async () => 
   assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
   assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
 });
+
+test("explains CPML material extension in model coordinates and mesh regeneration", async () => {
+  const html = await (await render("/docs/physics")).text();
+  assert.match(html, /Material extension clamps in absolute model coordinates/);
+  assert.match(html, /depth below the surface at the clamped X\/Y location/);
+  assert.match(html, /Building surface offsets/);
+  assert.match(html, /input depth of 7500 m/);
+  assert.match(html, /depth 7000 m below that surface/);
+  assert.match(html, /Rebuild or recorrect an imported mesh/);
+  assert.match(html, /corrected topographic bottom\/corner extension/);
+});

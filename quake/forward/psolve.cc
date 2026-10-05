@@ -5020,15 +5020,17 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
 
   const double old_north = *north_m;
   const double old_east = *east_m;
-  const bool surface_relative_depth =
+  const int topography_relative =
       (Param.includeTopography == YES) && (get_theetree_type() == SQD);
-  /* SQD material queries use depth below the local surface, whereas the
-   * CPML bounds use mesh coordinates. Clamp the physical point first, then
-   * express its depth below the surface at the extended query location. */
-  const double old_surface = surface_relative_depth
-      ? point_elevation(old_north, old_east) : 0.0;
-  const double old_mesh_depth = *depth_m + old_surface;
-  double mesh_depth = old_mesh_depth;
+  const double building_shift =
+      (Param.includeBuildings == YES) ? get_surface_shift() : 0.0;
+  const double old_surface_z =
+      topography_relative ? point_elevation(old_north, old_east) : 0.0;
+  /* Callers have already subtracted the building/surface offsets from depth.
+   * The PML box uses absolute model coordinates, so restore model Z before
+   * the bottom clamp. At corners, convert back using the clamped X/Y below. */
+  const double old_model_z = *depth_m + building_shift + old_surface_z;
+  double model_z = old_model_z;
 
   if ((domain_lo[0] + L) < (domain_hi[0] - L)) {
     if (*north_m < domain_lo[0] + L) {
@@ -5045,22 +5047,23 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
     }
   }
   if (domain_lo[2] < (domain_hi[2] - L)) {
-    if (mesh_depth > domain_hi[2] - L) {
-      mesh_depth = domain_hi[2] - L;
+    if (model_z > domain_hi[2] - L) {
+      model_z = domain_hi[2] - L;
     }
   }
 
-  if (surface_relative_depth) {
-    if ((*north_m != old_north) || (*east_m != old_east) ||
-        (mesh_depth != old_mesh_depth)) {
-      *depth_m += (mesh_depth - old_mesh_depth) + old_surface -
-                  point_elevation(*north_m, *east_m);
-      if (*depth_m < 0.0) {
-        *depth_m = 0.0;
-      }
+  const int lateral_clamp =
+      (*north_m != old_north) || (*east_m != old_east);
+  /* Leave untouched queries bit-for-bit unchanged: avoid an offset
+   * round trip unless the sampled depth or topographic column changed. */
+  if ((model_z != old_model_z) || (topography_relative && lateral_clamp)) {
+    const double surface_z = (topography_relative && lateral_clamp)
+                                 ? point_elevation(*north_m, *east_m)
+                                 : old_surface_z;
+    *depth_m = model_z - building_shift - surface_z;
+    if (topography_relative && *depth_m < 0.0) {
+      *depth_m = 0.0;
     }
-  } else {
-    *depth_m = mesh_depth;
   }
 #else
   (void)north_m;
