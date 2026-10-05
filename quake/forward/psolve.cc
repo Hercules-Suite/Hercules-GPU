@@ -1160,6 +1160,7 @@ static struct Param_t {
   double theCpmlCflSafety;
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
+  double theCpmlAcousticSpongeFraction; /* acoustic bulk only; 0 disables */
   int theCpmlPmlMaterialDamping;        /* 0 none(default) 2 rayleigh */
   noyesflag_t theCpmlClampOuter;
   /* YES = fully integrated Hex8 CPML stiffness (default);
@@ -1265,6 +1266,7 @@ static struct Param_t {
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.0,
            .theCpmlAlphaFloorFraction = 0.1,
+           .theCpmlAcousticSpongeFraction = 0.0,
            .theCpmlPmlMaterialDamping = 0,
            .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
@@ -2209,7 +2211,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  49 /* Must adjust this if adding double params */
+  50 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   66 /* Must adjust this if adding int params */
 
@@ -2278,6 +2280,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[47] = Param.thePoroelasticSurfacePressurePenaltyFactor;
   double_message[48] =
       Param.theAcousticPoroelasticPressurePenaltyFactor;
+  double_message[49] = Param.theCpmlAcousticSpongeFraction;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2318,6 +2321,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlCflSafety = double_message[33];
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
+  Param.theCpmlAcousticSpongeFraction = double_message[49];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
   Param.thePoroelasticDepthMaxM = double_message[38];
@@ -2931,6 +2935,7 @@ static int32_t parse_parameters(const char* numericalin) {
       double cpml_cfl_safety = Param.theCpmlCflSafety;
       double cpml_mpml_cross_fraction = Param.theCpmlMpmlCrossFraction;
       double cpml_alpha_floor_fraction = Param.theCpmlAlphaFloorFraction;
+      double cpml_acoustic_sponge_fraction = Param.theCpmlAcousticSpongeFraction;
       double cpml_partition_weight = Param.theCpmlPartitionWeight;
 
       (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
@@ -2945,6 +2950,8 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_mpml_cross_fraction);
       (void)parsetext(fp, "cpml_alpha_floor_fraction", 'd',
                       &cpml_alpha_floor_fraction);
+      (void)parsetext(fp, "cpml_acoustic_sponge_fraction", 'd',
+                      &cpml_acoustic_sponge_fraction);
       (void)parsetext(fp, "cpml_partition_weight", 'd',
                       &cpml_partition_weight);
 
@@ -3051,6 +3058,12 @@ static int32_t parse_parameters(const char* numericalin) {
                      "cpml_alpha_floor_fraction=%g must be in [0, 1].\n",
                      cpml_alpha_floor_fraction);
       }
+      if (!isfinite(cpml_acoustic_sponge_fraction) ||
+          cpml_acoustic_sponge_fraction < 0.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_acoustic_sponge_fraction=%g must be finite and >= 0.\n",
+                     cpml_acoustic_sponge_fraction);
+      }
       if (cpml_partition_weight < 1.0) {
         solver_abort(__FUNCTION_NAME, NULL,
                      "cpml_partition_weight=%g must be >= 1.0.\n",
@@ -3066,6 +3079,7 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlCflSafety = cpml_cfl_safety;
       Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
+      Param.theCpmlAcousticSpongeFraction = cpml_acoustic_sponge_fraction;
       Param.theCpmlPartitionWeight = cpml_partition_weight;
 
       /* Optional material damping inside the elastic PML zone. Rayleigh uses
@@ -4391,6 +4405,13 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlMpmlCrossFraction);
     monitor_print("PML alpha floor fraction:           %f\n",
                   Param.theCpmlAlphaFloorFraction);
+    monitor_print("PML acoustic bulk sponge fraction:  %f\n",
+                  Param.theCpmlAcousticSpongeFraction);
+    if (Param.theCpmlAcousticSpongeFraction > 0.0) {
+      monitor_print("CPML: experimental acoustic bulk mass damping "
+                    "a=gamma*sum(d_j); no added gravity-surface damping. "
+                    "Validate reflections and long-time stability.\n");
+    }
     monitor_print("PML CFL safety factor:              %f\n",
                   Param.theCpmlCflSafety);
     monitor_print("PML partition weight:               %f\n",
@@ -11701,8 +11722,16 @@ static void solver_init() {
           const double dt2 = Param.theDeltaTSquared;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+          /* Optional volume-only numerical damping. The separately built
+           * gravity-surface inertia retains only its coordinate stretching. */
+          const double sponge_a = Param.theCpmlAcousticSpongeFraction *
+              (d_axis[0] + d_axis[1] + d_axis[2]);
+          if (!isfinite(sponge_a)) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "Nonfinite acoustic CPML sponge coefficient");
+          }
           g_cpmlBuild.acoustic_coeff[pml_idx] = cpml_element(
-              d_axis, alpha_axis, kappa_axis, dt, 0.0, 0.0,
+              d_axis, alpha_axis, kappa_axis, dt, sponge_a, 0.0,
               nodalPressureMass, dt2*h/(double)edata->rho, 0.0);
           acoustic_kprod = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.mass;
           acoustic_damp = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.damping;
