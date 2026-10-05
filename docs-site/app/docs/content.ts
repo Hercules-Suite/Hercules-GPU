@@ -913,6 +913,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           "Each coordinate stretch is S_j(s)=kappa_j+d_j/(s+alpha_j). The full Jacobian J=S_x S_y S_z multiplies inertia; elastic weak stiffness uses J/(S_j S_k), and scalar acoustic stiffness uses J/S_j². This includes tangential stiffness and edge/corner products omitted by the earlier gradient-only correction. Native mode integrates every Hex8 mode and equals the interior stiffness when unstretched. Reduced mode remains rank deficient and is diagnostic only.",
           "Trapezoidal auxiliary equations implement the rational products without divided-pole singularities. Inertia memory is nodal, as is the leading lumped mass. Interface fluxes use J/S_normal with common coefficients sampled at the physical fragment center on both sides, independent of neighbor size or MPI owner. Side and quadrature histories remain independent. This prevents differing cofactors on a nonmatching face; it does not establish long-time stability for arbitrary heterogeneous CPML. The gravity surface uses the full tangential S_x S_y product at each top node. All histories stay on the GPU and use the existing force exchanges.",
           "The default cpml_mpml_cross_fraction is now 0. Nonzero mixing breaks the separable coordinate mapping and can increase reflections substantially; an explicit 0.1 in an older input remains active. Use stiffness_calculation_method=effective for non-BKT CPML runs. CPML rejects checkpoint reads and writes because the legacy format omits absorber histories: use_checkpoint and checkpointing_rate must both be zero.",
+          "cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber and defaults to 0 (off). It adds a=gamma*(d_x+d_y+d_z) to acoustic volume inertia for either scalar formulation, independently of acoustic_quality_factor. This option leaves gravity-surface stretching, interface cofactors and interior coefficients unchanged. It adds no static force and no GPU state or exchanges. Nonzero values change matching and require separate accuracy and long-time stability checks.",
           "Native histories require 204 solver scalars per elastic PML element and 60 per acoustic element, plus coefficients. Gravity faces add eight scalars and coupled faces add 24 per side. Verify device memory and timing on the target mesh. Earlier published CPS numbers concern incomplete operators and do not validate arbitrary settings of this formulation.",
         ],
       },
@@ -929,7 +930,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "pml-baseline",
         title: "Baseline CPML example",
         codeLabel: "parameters.in — conservative CPML configuration",
-        code: "abc_type = cpml\ncpml_thickness_m = 0.0\ncpml_layers = 10\ncpml_reflection_target = 1.0e-3\ncpml_poly_order = 2\ncpml_kappa_max = 1.0\ncpml_alpha_max_hz = -1.0\ncpml_cfl_safety = 0.9\ncpml_mpml_cross_fraction = 0\ncpml_alpha_floor_fraction = 0.1\ncpml_partition_weight = 1.0\ncpml_clamp_outer = yes\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_pml_material_damping = none",
+        code: "abc_type = cpml\ncpml_thickness_m = 0.0\ncpml_layers = 10\ncpml_reflection_target = 1.0e-3\ncpml_poly_order = 2\ncpml_kappa_max = 1.0\ncpml_alpha_max_hz = -1.0\ncpml_cfl_safety = 0.9\ncpml_mpml_cross_fraction = 0\ncpml_acoustic_sponge_fraction = 0\ncpml_alpha_floor_fraction = 0.1\ncpml_partition_weight = 1.0\ncpml_clamp_outer = yes\ncpml_3d_material_extension = yes\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_pml_material_damping = none",
         note: "A smaller reflection target is not automatically better: it increases attenuation strength and can tighten stability. Prefer additional physical thickness before changing kappa from the default value of 1.",
       },
       {
@@ -1057,7 +1058,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "groups",
         title: "Complete parameter reference",
         paragraphs: [
-          "The categorized pages below document all 241 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
+          "The categorized pages below document all 242 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
         ],
         table: {
           headers: ["Reference page", "Documented entries"],
