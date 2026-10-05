@@ -2475,9 +2475,14 @@ unmodified native normalization is $\mu\Delta t^2h=9c_1$ and
 $\lambda\Delta t^2h=9c_2$. Reduced integration retains only linear modes.
 
 An interface flux component normal to axis $j$ uses the cofactor $J/S_j$.
-Acoustic and elastic sides have independent coefficients; all normal
-components are retained, including bathymetry normals. `face_mass` retains
-four quadrature points in the PML, each with its own histories. A flat gravity
+Both coupling directions use the same coefficients evaluated at the physical
+interface-fragment center, independently of the adjacent solid element size
+or MPI owner. Sampling each containing element separately can give different
+cofactors for the same nonmatching fragment. Histories remain independent for
+each direction, and all normal components are retained, including bathymetry
+normals. `face_mass` retains four quadrature points in the PML, each with its
+own histories. This corrects coefficient consistency across the interface;
+it does not establish long-time stability for arbitrary heterogeneous CPML. A flat gravity
 surface uses $S_xS_y s^2/(\rho g)$ at each of its four lumped nodes, including
 the x/y corner product. Output reconstruction uses the same inverse stretch,
 with a separate history per observation point.
