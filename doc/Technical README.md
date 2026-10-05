@@ -136,6 +136,7 @@ interactions are in the
   Building cases measure ground and groundwater depths from `surface_shift_m`;
   above-ground building cells remain outside the saturated region.
 - **Station output:** `number_output_stations`, `station_binary`, `station_output_binary_file`,
+  `station_ascii_buffer_kib`,
   `output_stations_print_rate`, `output_stations_directory`, `output_stations`,
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
@@ -219,6 +220,13 @@ for defaults, supported combinations, and performance implications.
 ## Output and validation
 
 `station_binary=no` is the default and preserves ASCII station histories.
+`station_ascii_buffer_kib` sets the CPU buffer size per locally owned ASCII
+station: optional integer KiB (1 KiB = 1024 bytes), default **64**, range
+1..2097151. It is validated but unused in binary mode. All requested samples and
+columns are retained. Buffers are written when full and flushed at normal
+completion; live files can lag the simulation. The final flush is included in
+the station and solver I/O timers. See
+[ASCII station buffering](Extended%20README.md#ascii-station-buffering).
 To record displacement from the existing `output_stations` list in one file:
 
 ```ini

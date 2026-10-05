@@ -94,6 +94,8 @@ extern "C" {
 #include <cuda_runtime.h>
 
 static flat_output::FlatWriter stationBinaryWriter;
+// Own explicit stdio buffers until the corresponding station files are closed.
+static std::vector<std::vector<char> > stationAsciiBuffers;
 
 /* ONLY GLOBAL VARIABLES ALLOWED OUTSIDE OF PARAM. and GLOBAL. IN ALL OF
  * PSOLVE!! */
@@ -1088,6 +1090,7 @@ static struct Param_t {
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
   int stationBinary; /* Default NO: existing ASCII station histories. */
+  int stationAsciiBufferKiB; /* Per locally owned ASCII station; default 64. */
   char stationOutputBinaryFile[256];
   int theStationsPrintRate;
   double* theStationX;
@@ -2208,7 +2211,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   49 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  65 /* Must adjust this if adding int params */
+  66 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2395,6 +2398,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
   int_message[63] = Param.stationBinary;
   int_message[64] = Param.theAcousticInterfaceMethod;
+  int_message[65] = Param.stationAsciiBufferKiB;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2465,6 +2469,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
   Param.stationBinary = int_message[63];
   Param.theAcousticInterfaceMethod = int_message[64];
+  Param.stationAsciiBufferKiB = int_message[65];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3169,6 +3174,26 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL, "station_binary must be yes or no");
   }
   Param.stationBinary = (strcasecmp(station_binary, "yes") == 0) ? YES : NO;
+  char station_ascii_buffer_kib[64] = "64";
+  char* stationBufferText = station_ascii_buffer_kib;
+  size_t stationBufferLength = sizeof(station_ascii_buffer_kib);
+  if (hu_config_get_string_opt(fp, "station_ascii_buffer_kib", &stationBufferText,
+                               &stationBufferLength) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to read station_ascii_buffer_kib");
+  }
+  char* stationBufferEnd = NULL;
+  errno = 0;
+  const long stationBufferKiB = strtol(stationBufferText, &stationBufferEnd, 10);
+  /* Bound the byte count to INT_MAX on both 32-bit and 64-bit hosts. */
+  if (errno != 0 || stationBufferEnd == stationBufferText ||
+      *stationBufferEnd != '\0' || stationBufferKiB < 1 ||
+      stationBufferKiB > INT_MAX / 1024) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "station_ascii_buffer_kib must be an integer in 1..%d KiB",
+                 INT_MAX / 1024);
+  }
+  Param.stationAsciiBufferKiB = (int)stationBufferKiB;
   if (Param.stationBinary == YES) {
     if (number_output_stations <= 0 || number_output_stations > INT_MAX / 3) {
       solver_abort(__FUNCTION_NAME, NULL,
@@ -15093,11 +15118,16 @@ static void solver_close_station_outputs(void) {
   for (int32_t iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
     FILE* fp = Param.myStations[iStation].fpoutputfile;
     if (fp != NULL) {
-      fflush(fp);
+      if (fflush(fp) != 0 || ferror(fp)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to write ASCII station %d in %s",
+                     Param.myStations[iStation].id, Param.theStationsDirOut);
+      }
       hu_fclose(fp);
       Param.myStations[iStation].fpoutputfile = NULL;
     }
   }
+  stationAsciiBuffers.clear();
 }
 
 static void solver_output_stations(int step) {
@@ -21627,6 +21657,15 @@ static void solver_run() {
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
 
+  // Include the final partial station buffers in solver I/O timing.
+  if (Param.theNumberOfStations != 0) {
+    Timer_Start("Solver I/O");
+    Timer_Start("Print Stations");
+    solver_close_station_outputs();
+    Timer_Stop("Print Stations");
+    Timer_Stop("Solver I/O");
+  }
+
   /* Flush a partial plane MPI-IO batch while Solver/Print Planes timers are
    * still active and before their collective reductions. Full batches are
    * written at their output steps. */
@@ -26782,6 +26821,18 @@ void setup_stations_data() {
   }
 
   Timer_Start("Stations Local Init");
+  if (Param.stationBinary != YES) {
+    const size_t stationBufferBytes = (size_t)Param.stationAsciiBufferKiB * 1024;
+    try {
+      stationAsciiBuffers.resize(Param.myNumberOfStations);
+      for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
+        stationAsciiBuffers[i].resize(stationBufferBytes);
+      }
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to allocate ASCII station buffers: %s", error.what());
+    }
+  }
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
 #pragma omp parallel for if(useOmp) schedule(static) \
@@ -26845,6 +26896,14 @@ void setup_stations_data() {
     if (Param.stationBinary != YES) {
       sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
       Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+      // Set the buffer before writing the header; only this station's owner
+      // writes the stream. No per-sample allocation or extra field transfer.
+      if (setvbuf(Param.myStations[iLCStation].fpoutputfile,
+                  stationAsciiBuffers[iLCStation].data(), _IOFBF,
+                  stationAsciiBuffers[iLCStation].size()) != 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to buffer ASCII station output %s", stationFile);
+      }
     }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
@@ -27223,10 +27282,6 @@ static int interpolate_station_displacements(int32_t step) {
       }
 
       station_write_pressure_columns(iStation);
-
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else if ((Param.includeTopography == YES) &&
                (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y,
                                     &vel_z, &acc_x, &acc_y, &acc_z,
@@ -27323,9 +27378,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else {
       for (iPhi = 0; iPhi < 8; iPhi++) {
         phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0]) *
@@ -27473,10 +27525,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      /* TODO: Have this 10 as a parameter with a default value */
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     }
   }
 
@@ -27780,6 +27828,12 @@ void output_stations_init(const char* numericalin) {
              comm_solver);
 
   if (Global.myID == 0) {
+    if (Param.stationBinary != YES) {
+      monitor_print("Station ASCII buffering: %d KiB per locally owned station; "
+                    "write on buffer fill and flush at normal close; "
+                    "all requested samples and columns retained.\n",
+                    Param.stationAsciiBufferKiB);
+    }
     monitor_print(
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
         totalStations, setupSecondsMax);
@@ -29490,9 +29544,6 @@ int main(int argc, char** argv) {
   solver_run();
   Timer_Stop("Solver");
 
-  if (Param.theNumberOfStations != 0) {
-    solver_close_station_outputs();
-  }
   if (Param.theNumberOfPlanes != 0) {
     planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
   }
