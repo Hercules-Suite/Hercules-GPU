@@ -903,6 +903,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "Perfectly matched layer rules",
         paragraphs: [
           "abc_type=dashpot selects the legacy Lysmer boundary. abc_type=cpml selects the unsplit convolutional PML on x_min, x_max, y_min, y_max, and z_max; z_min remains the free surface. CPML supports elastic and acoustic elements, while poroelastic and nonlinear candidates inside the PML are intentionally left as linear elastic CPML elements.",
+          "Without a positive cpml_thickness_m, the thickness is cpml_layers times the largest non-air element edge touching any lateral or bottom boundary, using an MPI-wide maximum. Air elements (negative Vp) are excluded from both this scan and the global fallback used if no non-air element touches those faces. This is one physical thickness, not an exact cell count everywhere on an adaptive mesh. Material extension and optional CPML partition weighting use the same exclusion rule.",
           "Choose either a positive cpml_thickness_m or a positive cpml_layers count. The baseline below uses kappa=1 and complete Hex8 CPML integration. Startup prints the realized thickness, reference wave speed, critical time-step estimate, and element counts; verify them before relying on absorption. With abc_type=cpml, cpml_clamp_outer defaults to yes: outer lateral and bottom nodes are clamped. Set cpml_clamp_outer=no explicitly to remove that clamp while keeping CPML active.",
         ],
       },

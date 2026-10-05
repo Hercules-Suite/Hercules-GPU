@@ -4938,6 +4938,8 @@ static double cpml_material_extension_thickness(void) {
   for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     elem_t* elemp = &Global.myMesh->elemTable[eindex];
     edata_t* edata = (edata_t*)elemp->data;
+    /* Negative Vp marks air; exclude it from boundary and fallback maxima. */
+    if (edata->Vp < 0.0f) continue;
     node_t* node0 = &Global.myMesh->nodeTable[elemp->lnid[0]];
     const double h = edata->edgesize;
     const double c0[3] = {(double)node0->x * ticksize,
@@ -7210,6 +7212,7 @@ static int mesh_prepare_cpml_partition_weight(void) {
 
     for (octant_t* leaf = octor_getfirstleaf(Global.myOctree); leaf != NULL;
          leaf = octor_getnextleaf(leaf)) {
+      if (leaf->where != LOCAL) continue;
       const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
       const double h = (double)edgeticks * ticksize;
       const double c0[3] = {(double)leaf->lx * ticksize,
@@ -7218,13 +7221,22 @@ static int mesh_prepare_cpml_partition_weight(void) {
       int on_face = 0;
 
       if (h <= 0.0) continue;
-      if (h > local_any_h) local_any_h = h;
 
       for (int ax = 0; ax < 2; ax++) {
         if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
         if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
       }
       if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
+      /* Read material only when this leaf can increase either maximum. */
+      if ((h <= local_any_h) && (!on_face || h <= local_bnd_h)) continue;
+      edata_t edata;
+      if (octor_getleafrec(Global.myOctree, leaf, &edata) != 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Cannot read octree material for CPML thickness.\n");
+      }
+      /* Match material extension and solver sizing, including the fallback. */
+      if (edata.Vp < 0.0f) continue;
+      if (h > local_any_h) local_any_h = h;
       if (on_face && h > local_bnd_h) local_bnd_h = h;
     }
 
@@ -11511,14 +11523,14 @@ static void solver_init() {
     Global.gpuData.cpmlPmlMaterialDamping = Param.theCpmlPmlMaterialDamping;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
-     * cpml_layers × (max edgesize among elements ON an absorbing face).
+     * cpml_layers × (max non-air edgesize ON an absorbing face).
      *
      * Octree meshes refine by local Vs, so the global max element size is
      * usually a coarse *interior* element (deep fast rock) that is NOT
      * representative of the boundary. Sizing the PML from the global max
      * over-thickens it and pushes the inner edge deep into the model.
-     * The PML thickness should instead span cpml_layers element layers
-     * AT THE BOUNDARY, so the max is taken only over elements touching
+     * Use a single reference size from non-air boundary elements; finer
+     * regions can span more than cpml_layers cells. Include elements touching
      * one of the five absorbing faces (x_min, x_max, y_min, y_max,
      * z_max); z_min is the free surface and is excluded. The MPI max-
      * reduce keeps the realized thickness identical on every rank, which
@@ -11537,11 +11549,13 @@ static void solver_init() {
           (double)Global.myOctree->farendp[0] * ticksize,
           (double)Global.myOctree->farendp[1] * ticksize,
           (double)Global.myOctree->farendp[2] * ticksize};
-      double local_bnd_h = 0.0;   /* max edgesize on an absorbing face */
-      double local_any_h = 0.0;   /* global max (defensive fallback)   */
+      double local_bnd_h = 0.0;   /* non-air max on an absorbing face */
+      double local_any_h = 0.0;   /* non-air max (defensive fallback)  */
       for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
         elem_t* ep = &Global.myMesh->elemTable[ei];
         edata_t* ed = (edata_t*)ep->data;
+        /* Air must not set the thickness, even through the fallback. */
+        if (ed->Vp < 0.0f) continue;
         double h = (double)ed->edgesize;
         if (h <= 0.0) continue;
         if (h > local_any_h) local_any_h = h;
@@ -11565,9 +11579,8 @@ static void solver_init() {
                     comm_solver);
       MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
                     comm_solver);
-      /* Defensive: a non-empty domain always has boundary elements, but
-       * if the boundary scan somehow found none, fall back to the global
-       * element max rather than abort with a zero-thickness PML. */
+      /* If no non-air element touches an absorbing face, use the global
+       * non-air maximum. An all-air mesh leaves both maxima at zero. */
       int used_fallback = (global_bnd_h <= 0.0);
       double basis_h = used_fallback ? global_any_h : global_bnd_h;
       g_cpmlBuild.thickness_m = (double)Param.theCpmlLayers * basis_h;
@@ -11577,7 +11590,7 @@ static void solver_init() {
       if (Global.myID == 0) {
         fprintf(stderr,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
-                "(%s max element edgesize)\n",
+                "(%s max element edgesize; air excluded)\n",
                 g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
                 used_fallback ? "global-fallback" : "boundary");
       }

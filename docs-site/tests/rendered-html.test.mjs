@@ -1929,3 +1929,20 @@ test("explains CPML material extension in model coordinates and mesh regeneratio
   assert.match(html, /Rebuild or recorrect an imported mesh/);
   assert.match(html, /corrected topographic bottom\/corner extension/);
 });
+
+
+test("documents CPML automatic thickness excluding air", async () => {
+  const physics = await (await render("/docs/physics")).text();
+  assert.match(physics, /largest non-air element edge/);
+  assert.match(physics, /Air elements \(negative Vp\) are excluded/);
+  assert.match(physics, /global fallback/);
+  assert.match(physics, /not an exact cell count everywhere/);
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const thickness = parameters.split("</tr>").find((row) => row.includes("cpml_thickness_m"));
+  const layers = parameters.split("</tr>").find((row) => row.includes(">cpml_layers</td>"));
+  assert.ok(thickness);
+  assert.ok(layers);
+  assert.match(thickness, /largest non-air element edge/);
+  assert.match(thickness, /Air is also excluded from the global fallback/);
+  assert.match(layers, /finer regions contain more than this many cells/);
+});
