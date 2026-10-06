@@ -1786,6 +1786,9 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /index\.in does not define one ordered profile/);
   assert.match(html, /topography\.in — 3 × 3 grid/);
   assert.match(html, /flat_index = x_index \* n_east \+ y_index/);
+  assert.match(html, /one bilinear topography grid for mesh air\/solid classification/);
+  assert.match(html, /Regenerate topographic meshes.*mesh_input_mode=0/);
+  assert.match(html, /region_depth_deep_m controls the domain extent, not this surface datum/);
   assert.match(html, /np\.meshgrid/);
   assert.match(html, /values\.reshape\(nx, ny\)/);
   assert.match(html, /perimeter range/);
