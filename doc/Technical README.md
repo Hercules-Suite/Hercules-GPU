@@ -85,6 +85,8 @@ interactions are in the
 - **Absorbing boundary and CPML:** `abc_type`, `cpml_thickness_m`, `cpml_layers`,
   `cpml_reflection_target`, `cpml_poly_order`, `cpml_kappa_max`, `cpml_alpha_max_hz`,
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
+  `cpml_acoustic_sponge_fraction` (optional, default `0`: experimental acoustic
+  bulk CPML damping; leaves gravity-surface coefficients unchanged),
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
   Automatic thickness is `cpml_layers` times the largest non-air element

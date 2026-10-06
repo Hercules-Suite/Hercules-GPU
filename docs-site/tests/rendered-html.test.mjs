@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 241 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 242 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -300,8 +300,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 241);
-  assert.equal(documented.length, 241, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 242);
+  assert.equal(documented.length, 242, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("station_binary"));
   assert.ok(documented.includes("station_ascii_buffer_kib"));
   assert.match(reference, /p\("station_ascii_buffer_kib", "Optional", "Integer KiB \(1024 bytes\)", "Default: 64; 1\.\.2097151/);
@@ -1911,11 +1912,16 @@ test("documents complete CPML products and the plain-CPML default", async () => 
   const html = await (await render("/docs/physics")).text();
   assert.match(html, /Complete second-order operator/);
   assert.match(html, /cpml_mpml_cross_fraction is now 0/);
+  assert.match(html, /cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber/);
+  assert.match(html, /defaults to 0 \(off\)/);
   assert.match(html, /checkpoint reads and writes/);
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
+  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.0/);
+  assert.match(psolve, /parsetext\(fp, "cpml_acoustic_sponge_fraction"/);
+  assert.match(psolve, /!isfinite\(cpml_acoustic_sponge_fraction\)/);
   assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
 });
 

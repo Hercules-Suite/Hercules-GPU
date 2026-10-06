@@ -1976,6 +1976,29 @@ results are specific to the recorded configuration and implementation.
 	coordinate mapping and can increase reflections substantially. Existing
 	inputs explicitly setting `0.1` retain that behavior; remove the setting
 	or write `0` for plain CPML.
+- `cpml_acoustic_sponge_fraction`
+	Optional. Default `0` (off); finite, dimensionless and nonnegative.
+	Adds an experimental acoustic bulk damping coefficient only in CPML:
+
+```math
+a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
+\gamma_{\mathrm{ac}}=\texttt{cpml\_acoustic\_sponge\_fraction}.
+```
+
+	The acoustic volume inertia becomes `$J(s)(s^2+a_{\mathrm{ac}}s)$`;
+	`$a_{\mathrm{ac}}$` has units of inverse seconds. This applies to pressure
+	and velocity-potential acoustics. It adds no static force and does not
+	change `acoustic_quality_factor`, which remains a separate attenuation
+	control. Elastic and interior coefficients are unaffected by this option.
+	The gravity-surface inertia retains its ordinary tangential stretching,
+	with no additional sponge term; interface cofactors are also unchanged.
+	Coupled waveforms can nevertheless change.
+
+	This is independent of `cpml_mpml_cross_fraction`. Setup reuses existing inertia coefficients
+	and GPU histories, without additional kernels, exchanges or per-step
+	branches. Keep the default `0` for baseline validation. Nonzero values
+	alter matching and require raw-waveform accuracy and long-time stability
+	checks; they are not a universal remedy for heterogeneous CPML growth.
 - `cpml_alpha_floor_fraction`
 	Optional. Default `0.1`; valid `[0,1]`. Lower bound on alpha relative to
 	its maximum. Zero and repeated poles are handled without divided-pole
@@ -2048,7 +2071,13 @@ results are specific to the recorded configuration and implementation.
 	For `3D_velocity_model=yes`, `cpml_3d_material_extension=yes`
 	(default) makes that classification come from the corresponding
 	inner-PML material column/row, matching the usual flat-PML material
-	extension used by spectral-element PML setups.
+	extension used by spectral-element PML setups. For SQD topography,
+	query depth is measured below the local surface, while CPML bounds
+	use mesh coordinates. The extension clamps the physical query point
+	in mesh coordinates, including the bottom limit, then converts back
+	to depth below the surface at the extended horizontal location.
+	This handles a nonzero topography datum consistently; it does not
+	by itself establish stability for a heterogeneous CPML model.
 - Material damping on PML elements follows `cpml_pml_material_damping`
 	(see that flag). With the default `none`, material damping is skipped
 	on PML elements, but non-PML elements always use material damping as
@@ -2324,6 +2353,13 @@ SRFH force histories are generated at the common `slipfunction.in` interval
 and then interpolated at the solver timestep. Reducing
 `simulation_delta_time_sec` does not change that source-generation interval.
 
+Point and single-point body-force source generation writes all loaded nodes,
+including when a long time history spans multiple memory batches. The binary
+force-file header contains the complete node list, and each time sample uses
+that same ordering. Increasing the simulation duration must preserve the
+previously generated early-time forces. This batching is part of source setup;
+it does not change the GPU time-stepping path.
+
 ### Source-force filtering
 
 In `source.in`, `source_is_filtered` is required (`0` or `1`). When it is `1`,
@@ -2473,9 +2509,14 @@ unmodified native normalization is $\mu\Delta t^2h=9c_1$ and
 $\lambda\Delta t^2h=9c_2$. Reduced integration retains only linear modes.
 
 An interface flux component normal to axis $j$ uses the cofactor $J/S_j$.
-Acoustic and elastic sides have independent coefficients; all normal
-components are retained, including bathymetry normals. `face_mass` retains
-four quadrature points in the PML, each with its own histories. A flat gravity
+Both coupling directions use the same coefficients evaluated at the physical
+interface-fragment center, independently of the adjacent solid element size
+or MPI owner. Sampling each containing element separately can give different
+cofactors for the same nonmatching fragment. Histories remain independent for
+each direction, and all normal components are retained, including bathymetry
+normals. `face_mass` retains four quadrature points in the PML, each with its
+own histories. This corrects coefficient consistency across the interface;
+it does not establish long-time stability for arbitrary heterogeneous CPML. A flat gravity
 surface uses $S_xS_y s^2/(\rho g)$ at each of its four lumped nodes, including
 the x/y corner product. Output reconstruction uses the same inverse stretch,
 with a separate history per observation point.
