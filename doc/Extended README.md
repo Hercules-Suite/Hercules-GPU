@@ -1893,14 +1893,25 @@ results are specific to the recorded configuration and implementation.
 	unsplit C-PML. If unset, behavior is unchanged from earlier versions.
 - `cpml_thickness_m`
 	Target PML thickness in metres. When `> 0`, used directly. When `0`
-	or unset (default), the solver uses `cpml_layers ×` the element size
-	at the absorbing boundary and logs the realized thickness to standard error
-	at startup. The PML element counts and optional outer-clamp count use the
-	same startup stream.
+	or unset (default), the solver uses `cpml_layers ×` the largest non-air
+	element edge touching any of the four lateral faces or the bottom face,
+	taking an MPI-wide maximum. Air elements (`Vp < 0`) are excluded, including
+	from the global non-air fallback used if no material element touches an
+	absorbing face. Material extension and optional CPML partition weighting
+	use the same exclusion rule. The realized thickness is logged to standard
+	error at startup with `air excluded`; PML element counts and the optional
+	outer-clamp count use the same startup stream.
 - `cpml_layers`
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is
-	`0` — "this many element layers deep" at the boundary, without needing
-	to know the local mesh resolution.
+	nonpositive. This multiplies one reference edge length to give a uniform
+	physical thickness; finer parts of an adaptive boundary contain more than
+	`cpml_layers` cells. For example, if a 90 km model has level-8 boundary air
+	cells (351.5625 m) but its largest non-air boundary edge is level 9
+	(175.78125 m), `cpml_layers=10` gives 1757.8125 m, excluding the air cells.
+	This example does not establish the active-material maximum of a particular
+	mesh; check its startup log. Automatic thickness can decrease after this
+	fix, changing absorption and material-extension bounds. A positive
+	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
 	Optional. Default `1.0`, which preserves the standard equal-leaf-count
 	octree partition. Values `> 1.0` make the partitioner count future

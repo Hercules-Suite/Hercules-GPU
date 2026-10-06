@@ -89,6 +89,10 @@ interactions are in the
   bulk CPML damping; leaves gravity-surface coefficients unchanged),
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
+  Automatic thickness is `cpml_layers` times the largest non-air element
+  edge on a lateral or bottom boundary (MPI-wide maximum); air is also
+  excluded from the global fallback. Finer boundary regions contain more
+  cells; use positive `cpml_thickness_m` to specify the physical width.
   With `abc_type=cpml`, `cpml_clamp_outer` defaults to `yes`; set it explicitly
   to `no` to disable the outer displacement/acoustic-scalar clamp. The complete
   operator defaults to `cpml_mpml_cross_fraction=0`; explicit older `0.1`
