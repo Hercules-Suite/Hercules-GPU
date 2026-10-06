@@ -2063,6 +2063,58 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	Flat-PML topography cells stay on the cube-stiffness + CPML path
 	exactly as before.
 
+### Topographic surface geometry and sampling
+
+The topography grid defines a bilinear height field shared by mesh air/solid
+classification, material-depth queries, VT volume sampling, sources, stations,
+and planes. For file height $h(X,Y)$ and station depth $d$:
+
+```math
+Z_{\mathrm{surface}}(X,Y) = \mathtt{topographybase\_zcoord} - h(X,Y),
+\qquad Z_{\mathrm{station}} = Z_{\mathrm{surface}} + d.
+```
+
+Solver Z is positive downward. `region_depth_deep_m` sets the domain extent;
+it does not replace the surface datum. FEM retains whole Hex8 staircase
+elements, so this consistency correction does not remove terrain-discretization
+error or provide a fitted surface mesh.
+
+Earlier builds used two triangles per grid cell in the mesh air/solid test,
+but bilinear heights for material and receiver queries. On nonplanar terrain
+those surfaces differ: a surface receiver could lie several fine cells above
+the mesh's solid boundary. Its trace could be zero, or nonzero through a few
+shared active nodes without being a valid material interpolation. Refinement
+can expose this mismatch. The discrepancy predates the shifted acoustic
+free-surface correction; changing the datum does not fix it.
+
+**Regenerate affected topographic meshes with `mesh_input_mode=0` and rerun.**
+Importing an older mesh preserves its stored air/solid labels, even with a
+rebuilt executable. Existing output cannot recover samples missing for this
+reason. Verify positive `Vp_mps` and `rho_kgm3` in the new `station_mediums.txt`
+for land stations. Use `HERCULES_PLANE_METADATA=1` to generate fresh plane
+ownership metadata; an older run's metadata is not evidence of current owners.
+
+The final grid row/column uses its actual edge heights. Out-of-grid material
+queries clamp to the nearest edge. For meshing proximity, `point_PlaneDist`
+returns $(Z_{\mathrm{surface}}-Z)/\sqrt{1+h_X^2+h_Y^2}$: positive in air,
+negative in material. This is a local tangent-normal offset, not an exact
+shortest distance to a curved bilinear patch. It preserves the planar normal
+distance and the existing refinement thresholds while aligning their zero
+surface with all other topography queries. The startup message identifies this
+shared bilinear geometry. No time-stepping exchange or GPU kernel is added.
+
+Local regression on 2026-10-06 replayed the production classifier at four
+air-owned Izmir stations and 4,806 zero-valued interior plane locations; all
+containing fine cells became material with the shared surface. A separate
+1 km terrain crop with homogeneous elastic material and a synthetic source
+reproduced and removed the zero station trace and 431 missing histories in a
+1,521-point plane. One/eight GPU ranks and host/CUDA-aware MPI agreed within
+`2.3e-13` relative L2 in raw plane histories. An 8 s flat-water control with
+gravity, CPML and field-specific constraints agreed with the previous build
+within `3.7e-12` relative L2 in plane output. The local-only investigation
+fixtures are not shipped. These checks establish geometry/output consistency,
+not continuum accuracy or full-Izmir long-time stability.
+
 ### CPML execution and topography
 
 - Each PML element is automatically classified as elastic or acoustic

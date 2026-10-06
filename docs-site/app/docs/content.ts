@@ -1483,6 +1483,17 @@ if __name__ == "__main__":
         note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
       },
       {
+        id: "topography-surface-consistency",
+        title: "Surface geometry and receiver sampling",
+        paragraphs: [
+          "Hercules uses one bilinear topography grid for mesh air/solid classification, material depths, VT volume sampling, sources, stations, and planes. If the interpolated height is h, solver Z = topographybase_zcoord - h. A station depth d is placed at Z + d; d=0 samples the local surface. region_depth_deep_m controls the domain extent, not this surface datum. FEM still uses whole Hex8 staircase elements; sharing the height field does not turn it into a fitted surface mesh.",
+          "Earlier builds used a triangular surface for the mesh air/solid test while receivers and material queries used bilinear heights. Nonplanar grid cells could therefore put surface receivers inside air elements, yielding zero traces or interpolation from only a few active nodes. A finer mesh can expose this discrepancy even when a coarser run appeared usable. This predates the shifted acoustic free-surface correction.",
+          "Regenerate topographic meshes made with the earlier classifier using mesh_input_mode=0, then rerun the simulation. Importing an old mesh retains its stored air/solid labels; rebuilding only the executable cannot repair those labels or recover missing output samples. Check the new station_mediums.txt for positive Vp and density at land stations. For plane ownership checks, generate fresh metadata with HERCULES_PLANE_METADATA=1; metadata from an earlier mesh cannot establish current ownership.",
+          "At the last grid row or column, interpolation uses that edge's heights. Material queries outside the grid use the nearest edge. The mesh proximity test divides the vertical offset by the local bilinear normal length; its sign classifies air versus material, while its magnitude is a tangent-normal offset rather than an exact shortest distance to a curved patch.",
+          "The 2026-10-06 local regression reproduced an all-zero station in a 1 km real-terrain crop with a synthetic elastic source. Regenerating the mesh with the shared surface restored that station and all 431 missing histories in a 1,521-point surface plane. Raw plane histories agreed within 2.3e-13 relative L2 across one/eight GPU ranks and host/CUDA-aware MPI. An 8 s flat-water control with gravity, CPML and field-specific constraints agreed with the previous build within 3.7e-12 relative L2 in plane output. These local-only fixtures are not distributed with the repository. They test geometry and output consistency, not continuum accuracy or full-model long-time stability.",
+        ],
+      },
+      {
         id: "topography-maximum-level",
         title: "Choose maximum_octant_level",
         paragraphs: [

@@ -154,7 +154,11 @@ interactions are in the
   See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)
   for plane output from older executables.
 - **Topography:** `include_topography`, `topography_directory`, `maximum_octant_level`,
-  `computation_method`, `topography_bkt_gpu_stabilize`.
+  `topographybase_zcoord`, `computation_method`, `topography_bkt_gpu_stabilize`.
+  Mesh air/solid classification and receiver/material queries share a bilinear
+  surface, `Z = topographybase_zcoord - height`. Regenerate meshes made with
+  the earlier triangular classifier before rerunning affected surface outputs;
+  see [surface sampling](Extended%20README.md#topographic-surface-geometry-and-sampling).
 - **Nonlinear and plastic controls:** `include_nonlinear_analysis`, `geostatic_loading_time_sec`,
   `geostatic_cushion_time_sec`, `approximate_geostatic_state`, `error_tolerance`, `backbone_errTol`,
   `material_model`, `material_properties_list`, `no_substeps`, `rivasand02_reversaltype`,
