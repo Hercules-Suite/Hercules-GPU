@@ -806,6 +806,18 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "For a controlled comparison, keep source, timestep, absorber thickness in metres, gravity and output locations fixed. Inspect matching-pass counts and the resulting element count; local matching can increase memory and setup cost substantially. Recheck the stable timestep after remeshing.",
       },
       {
+        id: "acoustic-station-gradient",
+        title: "Recover acoustic motion at station coordinates",
+        paragraphs: [
+          "Acoustic station displacement, velocity and acceleration are reconstructed from pressure gradients. A single Hex8 derivative is constant along the differentiated direction within its element, so a near-bed station can show a large relative motion error even when the nodal potential is accurate. Refining the mesh changes the station's position within its containing cell and need not improve that pointwise derivative monotonically.",
+          "acoustic_station_gradient=recovered is the default. At setup it combines the containing cell derivative with an adjacent same-material water-cell derivative to estimate the gradient at the actual station coordinate. It prefers the neighbor toward the station from the containing cell center, and uses one-sided extrapolation when only the opposite neighbor is suitable. This recovery is exact for quadratic scalar fields sampled at Cartesian nodes, including unequal cell sizes; it is an output approximation, not a higher-order propagation scheme or a correction of constraint-induced field errors.",
+          "No recovery crosses a water material jump (Vp or density), solid or void. If no suitable neighbor exists for a component, that component keeps the element derivative. CPML stations retain the existing element gradient and its inverse-stretch memory, and interior stencils exclude CPML neighbors. Remote stencil vertices use existing host or CUDA-aware field-sharing schedules; weights are precomputed and GPU station gathers remain device-resident.",
+          "Select element to reproduce the historical station gradient or to compare methods on an identical mesh and source. Pressure columns, plane reconstruction, elastic/poroelastic station processing, and the physical operators do not change. ASCII and binary acoustic station displacements use the same reconstructed motion. A station and a colocated acoustic plane point can therefore differ in recovered mode. Check raw observables against a physical reference; the receiver-formula prediction is a separate diagnostic.",
+        ],
+        codeLabel: "parameters.in — acoustic station motion",
+        code: "acoustic_station_gradient = recovered\n# Historical single-element gradient: acoustic_station_gradient = element",
+      },
+      {
         id: "coupling-poroelastic",
         title: "Poroelastic–elastic example",
         paragraphs: [
@@ -1059,7 +1071,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "groups",
         title: "Complete parameter reference",
         paragraphs: [
-          "The categorized pages below document all 242 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
+          "The categorized pages below document all 243 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
         ],
         table: {
           headers: ["Reference page", "Documented entries"],

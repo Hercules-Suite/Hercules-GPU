@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 242 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 243 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -296,12 +296,31 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   assert.match(html, /PTX assembly/);
 });
 
+test("documents acoustic station recovery and its historical fallback", async () => {
+  const html = await (await render("/docs/parameters-coupled-physics")).text();
+  const row = html.split("</tr>").find((part) => part.includes("acoustic_station_gradient"));
+  assert.ok(row);
+  assert.match(row, /Default: recovered/);
+  assert.match(row, /recovered \| element/);
+  assert.match(row, /inside CPML/);
+  assert.match(row, /plane output/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (existsSync(source)) {
+    const solver = readFileSync(source, "utf8");
+    assert.match(solver, /acoustic_station_gradient\[64\]\s*=\s*"recovered"/);
+    for (const mode of ["recovered", "element"])
+      assert.ok(solver.includes(`strcasecmp(acoustic_station_gradient, "${mode}")`));
+    assert.match(solver, /int_message\[66\] = Param\.acousticStationGradientRecovered/);
+    assert.match(solver, /Param\.acousticStationGradientRecovered = int_message\[66\]/);
+  }
+});
+
 test("documents every parameters.in key parsed by the current source tree", () => {
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 242);
-  assert.equal(documented.length, 242, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 243);
+  assert.equal(documented.length, 243, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("station_binary"));
   assert.ok(documented.includes("station_ascii_buffer_kib"));

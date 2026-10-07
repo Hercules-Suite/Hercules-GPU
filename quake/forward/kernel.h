@@ -126,7 +126,9 @@ __global__ void kernelAcousticStationInterpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput);
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights);
 
 __global__ void kernelPorePressureStationInterpolate(
     int32_t stationCount, const int32_t* stationNodes,

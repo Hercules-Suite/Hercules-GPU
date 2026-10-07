@@ -1200,6 +1200,16 @@ Notes:
 	pressure. CUDA-aware resident runs report the rank-reduced
 	`Acoustic Station Gather` and `Pore-pressure Station Gather`
 	kernel-plus-copy timings when those paths are active.
+- `acoustic_station_gradient`
+	Optional, case-insensitive `recovered` (default) or `element`. Applies to
+	acoustic station motion in both `pressure` and `velocity_potential` modes.
+	`recovered` combines adjacent same-material water-cell derivatives to recover
+	the pressure gradient at the actual station position before the existing
+	acceleration and time integration. `element` keeps the historical single-cell
+	Hex8 derivative. Pressure interpolation and solver propagation are unchanged.
+	ASCII/binary station displacement and requested velocity/acceleration share
+	this setting. Plane reconstruction does not use it; see
+	[Acoustic station gradient recovery](#acoustic-station-gradient-recovery).
 - `print_station_pore_pressure_ratios`
 	Optional; default `no`. With `include_poroelastic=yes` and
 	`include_nonlinear_analysis=yes`, `yes` appends `Ru(-)` to every normal
@@ -3029,6 +3039,64 @@ bytes match. Finite equality and byte identity differ for signed zeros.
 Compare complete histories and record maximum errors and their locations,
 not only global peaks. Agreement between backends cannot establish physical
 accuracy, mesh/time convergence or correctness of a shared reconstruction.
+
+## Acoustic station gradient recovery
+
+With `acoustic_station_gradient=recovered`, each component uses the owning
+Hex8 derivative and one adjacent water-cell derivative evaluated at the same
+transverse station coordinates. For direction $a$, let $x_a$ be the station
+coordinate and $c_0$, $c_1$ the owning and adjacent cell centers along that axis:
+
+```math
+t = \frac{x_a-c_0}{c_1-c_0}, \qquad
+(\partial_a p)_{\mathrm{rec}} = (1-t)(\partial_a p)_0 + t(\partial_a p)_1.
+```
+
+The neighbor toward the receiver from its cell center is preferred. If it is
+unavailable, the opposite neighbor gives a one-sided extrapolation. The formula
+reproduces the gradient of any quadratic scalar polynomial sampled at the mesh
+nodes, including mixed terms and unequal Cartesian cell sizes. It does not
+change the approximation space or the physical time-step operators.
+
+Setup resolves actual local or remote leaves and registers missing vertices as
+non-owned harbored nodes before solver allocation. Existing anchored/dangling
+field exchanges, after field-specific assignment, supply those samples on both
+host and CUDA-aware paths. Stencils are sorted by global node ID and uploaded
+once; the fused GPU station kernel returns only the existing four values per
+acoustic station. There is no new per-step MPI exchange or full-field download.
+
+Stencils only use acoustic cells with matching Vp and density (relative
+comparison tolerance 1e-6). Solid, air, void and different water materials are
+excluded. An unavailable neighbor on both sides retains the element derivative
+for that component. CPML stations retain the original derivative and output
+stretch memories, and an interior stencil excludes CPML neighbors. Startup
+reports added halo nodes, recovered components, fallbacks and CPML stations.
+
+This setting changes acoustic station motion, including binary displacement.
+It leaves pressure interpolation, plane reconstruction, elastic/poroelastic
+station motion, stresses/strains, sources and propagation operators unchanged.
+Use `element` for comparisons to historical station output or a colocated plane
+point using the original gradient. Recovery cannot repair a distorted nodal
+field, suppress physical high-frequency content, or establish CPML accuracy.
+A local 2026-10-07 gravity-packet comparison used the same 10 km model,
+600 s duration, independent acoustic constraints and unfiltered analytical
+reference for both settings. At the center station 20 m above the bed, the
+coarse-water (39.0625 m) vertical-displacement L2 error over 0.1--150 s decreased
+from 2.247% to 0.423%; the fine-water (19.53125 m) error decreased from 48.106%
+to 0.239%. Surface-displacement median errors decreased from 5.856% to 0.987%
+and 3.024% to 0.278%, respectively. Pressure differences between paired runs
+were at most about 1e-7 Pa (below 8e-8% relative L2), and the late surface-pressure errors
+remained 16.761% and 9.271% for those CPML settings. These are output-recovery
+results for a specific smooth, lossless packet, not general propagation or
+absorber tolerances. A separate 24-station check at heights 1--100 m above
+the bed still found median vertical-displacement errors of 14.91% (coarse)
+and 3.85% (fine) at 1 m, where the reference vertical motion is small; recovery
+does not guarantee uniform relative accuracy arbitrarily close to the
+interface. The local fixture and results are not in a clean checkout.
+
+Analytically initialized benchmarks must seed their initial receiver velocity
+with the selected observation formula; ordinary runs initialized at rest need
+no additional initialization.
 
 ## Structured DRM box output
 
