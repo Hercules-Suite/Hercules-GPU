@@ -226,7 +226,7 @@ static void acoustic_receiver_build_weights() {
     g_acousticReceiverOffsets.push_back((int32_t)g_acousticReceiverNodes.size());
   }
   MPI_Allreduce(counts, totals, 3, MPI_INT64_T, MPI_SUM, comm_solver);
-  if (Global.myID == 0) monitor_print("Acoustic station gradient: recovered; %lld recovered / %lld element-fallback components, %lld CPML stations retain element gradients; pressure interpolation unchanged\n",
+  if (Global.myID == 0) monitor_print("Acoustic station gradient: linear; %lld reconstructed / %lld element-fallback components, %lld CPML stations retain element gradients; pressure interpolation unchanged\n",
       (long long)totals[0], (long long)totals[1], (long long)totals[2]);
   std::vector<acoustic_receiver_cell_t>().swap(g_acousticReceiverCells);
   std::vector<int32_t>().swap(g_acousticReceiverCellSlots);

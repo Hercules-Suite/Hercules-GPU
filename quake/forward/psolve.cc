@@ -2763,7 +2763,7 @@ static int32_t parse_parameters(const char* numericalin) {
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
        acoustic_interface_method[64] = "shared-geometric-constraints",
-       acoustic_station_gradient[64] = "recovered",
+       acoustic_station_gradient[64] = "linear",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
@@ -3653,13 +3653,13 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_interface_coupling);
   }
 
-  if (strcasecmp(acoustic_station_gradient, "recovered") == 0) {
+  if (strcasecmp(acoustic_station_gradient, "linear") == 0) {
     Param.acousticStationGradientRecovered = 1;
   } else if (strcasecmp(acoustic_station_gradient, "element") == 0) {
     Param.acousticStationGradientRecovered = 0;
   } else {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "Unknown acoustic_station_gradient '%s': use recovered or element\n",
+                 "Unknown acoustic_station_gradient '%s': use linear or element\n",
                  acoustic_station_gradient);
   }
 

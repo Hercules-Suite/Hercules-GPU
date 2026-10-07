@@ -300,15 +300,15 @@ test("documents acoustic station recovery and its historical fallback", async ()
   const html = await (await render("/docs/parameters-coupled-physics")).text();
   const row = html.split("</tr>").find((part) => part.includes("acoustic_station_gradient"));
   assert.ok(row);
-  assert.match(row, /Default: recovered/);
-  assert.match(row, /recovered \| element/);
+  assert.match(row, /Default: linear/);
+  assert.match(row, /linear \| element/);
   assert.match(row, /inside CPML/);
   assert.match(row, /plane output/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (existsSync(source)) {
     const solver = readFileSync(source, "utf8");
-    assert.match(solver, /acoustic_station_gradient\[64\]\s*=\s*"recovered"/);
-    for (const mode of ["recovered", "element"])
+    assert.match(solver, /acoustic_station_gradient\[64\]\s*=\s*"linear"/);
+    for (const mode of ["linear", "element"])
       assert.ok(solver.includes(`strcasecmp(acoustic_station_gradient, "${mode}")`));
     assert.match(solver, /int_message\[66\] = Param\.acousticStationGradientRecovered/);
     assert.match(solver, /Param\.acousticStationGradientRecovered = int_message\[66\]/);

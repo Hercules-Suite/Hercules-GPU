@@ -1201,9 +1201,9 @@ Notes:
 	`Acoustic Station Gather` and `Pore-pressure Station Gather`
 	kernel-plus-copy timings when those paths are active.
 - `acoustic_station_gradient`
-	Optional, case-insensitive `recovered` (default) or `element`. Applies to
+	Optional, case-insensitive `linear` (default) or `element`. Applies to
 	acoustic station motion in both `pressure` and `velocity_potential` modes.
-	`recovered` combines adjacent same-material water-cell derivatives to recover
+	`linear` combines adjacent same-material water-cell derivatives to recover
 	the pressure gradient at the actual station position before the existing
 	acceleration and time integration. `element` keeps the historical single-cell
 	Hex8 derivative. Pressure interpolation and solver propagation are unchanged.
@@ -3042,7 +3042,7 @@ accuracy, mesh/time convergence or correctness of a shared reconstruction.
 
 ## Acoustic station gradient recovery
 
-With `acoustic_station_gradient=recovered`, each component uses the owning
+With `acoustic_station_gradient=linear`, each component uses the owning
 Hex8 derivative and one adjacent water-cell derivative evaluated at the same
 transverse station coordinates. For direction $a$, let $x_a$ be the station
 coordinate and $c_0$, $c_1$ the owning and adjacent cell centers along that axis:
@@ -3093,6 +3093,16 @@ the bed still found median vertical-displacement errors of 14.91% (coarse)
 and 3.85% (fine) at 1 m, where the reference vertical motion is small; recovery
 does not guarantee uniform relative accuracy arbitrarily close to the
 interface. The local fixture and results are not in a clean checkout.
+
+For the same 110-station, 600 s runs, rank-maximum acoustic station gathering
+(kernel plus result copy) increased from 1.994 to 2.852 s on the coarse case
+and 1.929 to 2.787 s on the fine case: about 0.86 s extra per run. Total solver
+time changed from 105.16 to 111.64 s and 195.78 to 195.05 s, respectively.
+These are single runs on different allocations, not repeated measurements
+on fixed nodes, so their overall runtime differences cannot be attributed
+solely to reconstruction. The cases added 192 halo nodes; communication uses
+existing exchanges with a larger payload. Cost depends on station count,
+placement and the frequency at which station gradients are evaluated.
 
 Analytically initialized benchmarks must seed their initial receiver velocity
 with the selected observation formula; ordinary runs initialized at rest need
