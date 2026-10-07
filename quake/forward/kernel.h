@@ -105,6 +105,15 @@ __global__  void kernelDampingCalcLocal(int32_t lenum,
 					int32_t dampingElemCount,
 					int32_t* dampingElemMapperDevice);
 
+/* BKT2 with matching shear/bulk relaxation rates. Histories in the shear
+ * slots are shared; material weights and transformed vectors remain distinct.
+ * The mapper must exclude VT cut cells, which retain their tetrahedral path. */
+__global__ void kernelDampingBkt2Fused(
+    int32_t lenum, gpu_data_t* gpuData, double rmax,
+    double coef1, double coef2, double expCoef0,
+    double coef3, double coef4, double expCoef1,
+    int32_t elementCount, const int32_t* elementMapper, int saveVectors);
+
 __global__  void kernelDispCalc(int32_t nharbored,
 					gpu_data_t* gpuData,
 	                                noyesflag_t printAccel);

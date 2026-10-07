@@ -120,6 +120,12 @@ static int32_t*          g_topoBktElemMapperDevice = NULL;
 static topo_bkt_const_t* g_topoBktConstDevice = NULL;
 static int32_t           g_dampingForceCountGPU = -1;
 static int32_t*          g_dampingForceMapperDevice = NULL;
+/* Complement of the cube-force mapper: retain all legacy convolution-only
+ * slots (including any cells with no force contribution), not just VT forces. */
+static int32_t g_bkt2ConvOnlyCount = 0;
+static int32_t* g_bkt2ConvOnlyMapperDevice = NULL;
+static int g_bkt2FusedActive = 0;
+static int g_bkt2SharedUseShear = 0;
 static int g_unifiedMeshHandoffEnabled = 0;
 static int g_unifiedMeshHandoffActive = 1;
 static int g_unifiedReleaseRootWorld = -1;
@@ -2715,6 +2721,17 @@ static int damping_force_generic(void) {
   if (v < 0) {
     const char* e = getenv("HERCULES_FORCE_GENERIC_DAMPING");
     v = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return v;
+}
+
+/* Fixed for the entire run: optimized cube histories use the shear slots
+ * for both sectors. Unset/1 enables it; 0 retains the old two-kernel path. */
+static int damping_bkt2_fused_requested(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("HERCULES_BKT2_FUSED");
+    v = (e == NULL || e[0] != '0');
   }
   return v;
 }
@@ -14415,6 +14432,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.conv_kappa_1Device);
   cudaFree(Global.gpuData.conv_kappa_2Device);
   cudaFree(Global.gpuData.conv_kappa_3Device);
+  cudaFree(g_bkt2ConvOnlyMapperDevice);
+  g_bkt2ConvOnlyMapperDevice = NULL;
   /* GPU station tensor gather (all NULL when inactive). */
   cudaFree(Global.gpuData.stationGatherEindexDevice);
   cudaFree(Global.gpuData.stationGatherCsiDevice);
@@ -15302,6 +15321,17 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
     } else {
       g_dampingBkt2CoeffsReady = 1;
     }
+    /* Inactive sectors have zero weights and need no history. For active
+     * sectors, require exact equality of both rates before sharing. */
+    g_bkt2SharedUseShear = have_ref_shear;
+    /* Restrict the optimized dispatch to the validated resident path. A
+     * host-staged comparison exceeded the waveform tolerance; preserve its
+     * existing kernels without adding synchronization to the hot loop. */
+    g_bkt2FusedActive = dtype == BKT2 && damping_bkt2_fused_requested() &&
+        !damping_force_generic() && elastic_force_device_sync_enabled() &&
+        displacement_device_sync_enabled() && g_dampingGUniform &&
+        (!have_ref_shear || !have_ref_kappa ||
+         (ref_g0_shear == ref_g0_kappa && ref_g1_shear == ref_g1_kappa));
   }
 
   g_dampingElemCountGPU = count;
@@ -15908,17 +15938,135 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
   Timer_Stop("Compute addforces e");
 }
 
+static void solver_init_bkt2_fused_dispatch(mysolver_t* solver, mesh_t* mesh) {
+  static int initialized = 0;
+  if (initialized || Param.theTypeOfDamping != BKT2) return;
+  initialized = 1;
+  if (g_bkt2FusedActive && g_topoBktElemCountGPU > 0) {
+    const int32_t capacity = g_dampingElemCountGPU - g_dampingForceCountGPU;
+    int32_t* host = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
+    if (capacity > 0 && host == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper allocation failed");
+    }
+    for (int32_t e = 0; e < mesh->lenum; ++e) {
+      const edata_t* data = (const edata_t*)mesh->elemTable[e].data;
+      if (data->topoBkt != 0 && isThisElementNonLinear(mesh, e) == NO &&
+          IsDampingElement(mesh, e) == YES) {
+        if (g_bkt2ConvOnlyCount >= capacity)
+          solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper mismatch");
+        host[g_bkt2ConvOnlyCount++] = e;
+      }
+    }
+    if (g_bkt2ConvOnlyCount != capacity)
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper incomplete");
+    if (capacity > 0 &&
+        (cudaMalloc((void**)&g_bkt2ConvOnlyMapperDevice,
+                    sizeof(int32_t) * (size_t)capacity) != cudaSuccess ||
+         cudaMemcpy(g_bkt2ConvOnlyMapperDevice, host,
+                    sizeof(int32_t) * (size_t)capacity,
+                    cudaMemcpyHostToDevice) != cudaSuccess)) {
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper upload failed");
+    }
+    free(host);
+  }
+  /* All solver ranks participate once, including ranks with no damping work.
+   * Counts describe actual dispatch, not just the optimistic kernel specs. */
+  const long long cubes = g_topoBktElemCountGPU > 0 ? g_dampingForceCountGPU
+                                                  : g_dampingElemCountGPU;
+  long long local[4] = {g_bkt2FusedActive ? 1LL : 0LL,
+                       g_bkt2FusedActive ? cubes : 0LL,
+                       g_bkt2ConvOnlyCount,
+                       g_bkt2FusedActive ? 0LL : g_dampingElemCountGPU};
+  long long total[4] = {0, 0, 0, 0};
+  MPI_Reduce(local, total, 4, MPI_LONG_LONG_INT, MPI_SUM, 0, comm_solver);
+  if (Global.myID == 0) {
+    monitor_print("BKT2 GPU: fused/shared-history ranks=%lld, cube slots=%lld, "
+                  "legacy convolution-only slots=%lld, fallback slots=%lld; "
+                  "station stress vectors=%s. CPML remains elastic; VT "
+                  "retains the tetrahedral force. Host-staged execution "
+                  "retains the reference kernels.\n",
+                  total[0], total[1], total[2], total[3],
+                  Param.printStationStresses == YES ? "saved" : "not requested");
+    monitor_print("BKT2 GPU: HERCULES_BKT2_FUSED=%d, generic override=%d. "
+                  "Fused work is charged to Force damping local wait only.\n",
+                  damping_bkt2_fused_requested(), damping_force_generic());
+  }
+  (void)solver;
+}
+
+static void solver_compute_force_bkt2_fused(mysolver_t* solver, mesh_t* mesh,
+                                           double dt, double dt2) {
+  /* Update only the excluded slots with the unchanged convolution kernel.
+   * This preserves VT/other consumers without updating cube histories twice. */
+  if (g_bkt2ConvOnlyCount > 0) {
+    const int block = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].blocksize;
+    psolve_launch_damping_bkt2((g_bkt2ConvOnlyCount + block - 1) / block,
+        block, 0, solver->streams[CUDA_STREAM_MAIN], mesh->lenum,
+        mesh->lenum * 8, solver->gpuDataDevice, dt,
+        g_dampingBkt2ShearCoef1, g_dampingBkt2ShearCoef2,
+        g_dampingBkt2ShearExpCoef0, g_dampingBkt2ShearCoef3,
+        g_dampingBkt2ShearCoef4, g_dampingBkt2ShearExpCoef1,
+        g_dampingBkt2KappaCoef1, g_dampingBkt2KappaCoef2,
+        g_dampingBkt2KappaExpCoef0, g_dampingBkt2KappaCoef3,
+        g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
+        g_bkt2ConvOnlyCount, g_bkt2ConvOnlyMapperDevice);
+  }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                          "BKT2 legacy convolution subset");
+  const int32_t count = g_topoBktElemCountGPU > 0 ? g_dampingForceCountGPU
+                                                : g_dampingElemCountGPU;
+  const int32_t* mapper = g_topoBktElemCountGPU > 0 ? g_dampingForceMapperDevice
+                                                  : g_dampingElemMapperDevice;
+  if (count > 0) {
+    const int s = g_bkt2SharedUseShear;
+    /* Bound the block size for the fused operator's larger register set. */
+    const int block = 128;
+    psolve_launch_damping_bkt2_fused((count + block - 1) / block, block,
+        solver->streams[CUDA_STREAM_MAIN], mesh->lenum, solver->gpuDataDevice, dt,
+        s ? g_dampingBkt2ShearCoef1 : g_dampingBkt2KappaCoef1,
+        s ? g_dampingBkt2ShearCoef2 : g_dampingBkt2KappaCoef2,
+        s ? g_dampingBkt2ShearExpCoef0 : g_dampingBkt2KappaExpCoef0,
+        s ? g_dampingBkt2ShearCoef3 : g_dampingBkt2KappaCoef3,
+        s ? g_dampingBkt2ShearCoef4 : g_dampingBkt2KappaCoef4,
+        s ? g_dampingBkt2ShearExpCoef1 : g_dampingBkt2KappaExpCoef1,
+        count, mapper, Param.printStationStresses == YES);
+  }
+  if (g_topoBktElemCountGPU > 0) {
+    psolve_launch_topography_bkt((g_topoBktElemCountGPU + 127) / 128, 128, 0,
+        solver->streams[CUDA_STREAM_MAIN], mesh->lenum, solver->gpuDataDevice,
+        g_topoBktElemCountGPU, g_topoBktElemMapperDevice, g_topoBktConstDevice, dt2);
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess)
+    solver_abort(__FUNCTION_NAME, NULL, "BKT2 fused launch: %s", cudaGetErrorString(error));
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                          "BKT2 fused force and VT force");
+  /* Existing counters are analytical estimates, not measured GPU traffic. */
+  solver->gpu_spec->numflops +=
+      (kernel_flops_per_thread(FLOP_CALCCONV_KERNEL) +
+       kernel_flops_per_thread(FLOP_DAMPING_KERNEL)) * g_dampingElemCountGPU;
+  solver->gpu_spec->numbytes +=
+      (kernel_mem_per_thread(FLOP_CALCCONV_KERNEL) +
+       kernel_mem_per_thread(FLOP_DAMPING_KERNEL)) * g_dampingElemCountGPU;
+}
+
 static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
                                              mesh_t* mesh, double theFreq,
                                              double theDeltaT,
                                              double theDeltaTSquared) {
   solver_init_damping_gpu_mapper(myID, mesh);
   solver_init_topo_bkt_gpu(myID, mesh);
+  solver_init_bkt2_fused_dispatch(solver, mesh);
   if (g_dampingElemCountGPU <= 0) {
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
                             "force damping conv");
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
                             "force damping local");
+    return;
+  }
+
+  if (g_bkt2FusedActive) {
+    solver_compute_force_bkt2_fused(solver, mesh, theDeltaT, theDeltaTSquared);
     return;
   }
 
