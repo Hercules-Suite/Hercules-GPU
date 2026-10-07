@@ -3061,7 +3061,11 @@ change the approximation space or the physical time-step operators.
 Setup resolves actual local or remote leaves and registers missing vertices as
 non-owned harbored nodes before solver allocation. Existing anchored/dangling
 field exchanges, after field-specific assignment, supply those samples on both
-host and CUDA-aware paths. Stencils are sorted by global node ID and uploaded
+host and CUDA-aware paths. Sender and receiver MPI mappings are sorted by
+global node ID for every interface method, including
+`shared-geometric-constraints` with point projection. This ordering is required
+when receiver-only vertices are appended after mesh extraction. Stencils are
+sorted by global node ID and uploaded
 once; the fused GPU station kernel returns only the existing four values per
 acoustic station. There is no new per-step MPI exchange or full-field download.
 

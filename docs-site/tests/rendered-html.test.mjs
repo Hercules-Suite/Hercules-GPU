@@ -304,6 +304,8 @@ test("documents acoustic station recovery and its historical fallback", async ()
   assert.match(row, /linear \| element/);
   assert.match(row, /inside CPML/);
   assert.match(row, /plane output/);
+  const guide = await (await render("/docs/physics")).text();
+  assert.match(guide, /Sender and receiver mappings use global node ID order for every interface method/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (existsSync(source)) {
     const solver = readFileSync(source, "utf8");
