@@ -1066,8 +1066,8 @@ Notes:
 	acoustic element faces adjacent to elastic material. Default is `yes`, but
 	it is only active when `include_acoustic=yes`.
 - `acoustic_interface_method`
-	Optional, case-insensitive: `shared-geometric-constraints` (default),
-	`field-specific-constraints`, or `local-matching`. Select the geometric constraints,
+	Optional, case-insensitive: `field-specific-constraints` (default for coupled
+	scalar acoustics), `shared-geometric-constraints`, or `local-matching`. Select the geometric constraints,
 	experimental field-specific constraints, or experimental automatic face
 	matching during meshing. This is independent of quadrature, face filters,
 	gravity, and CPML. See [details and limits](#interface-constraints-and-local-matching).
@@ -1322,15 +1322,19 @@ Notes:
 
 ### Interface constraints and local matching
 
-`acoustic_interface_method` accepts three values. Omitting it preserves the
-existing solver behavior. It does not change `acoustic_interface_projection`
+`acoustic_interface_method` accepts three values. Omitting it selects
+`field-specific-constraints` for coupled pressure or velocity-potential acoustics.
+If acoustics, scalar acoustics or interface coupling is disabled, an omitted method
+uses `shared-geometric-constraints`; explicit unsupported choices still abort.
+Coupled VT topography requires explicit `shared-geometric-constraints`.
+Selecting a constraint method does not change `acoustic_interface_projection`
 (`point` or `face_mass`), `acoustic_interface_face_filter`,
 `acoustic_free_surface_gravity`, or `abc_type`.
 
 | Value | Behavior |
 | --- | --- |
-| `shared-geometric-constraints` | Default. Acoustic and solid fields share the geometric hanging-node constraints. |
-| `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
+| `shared-geometric-constraints` | Acoustic and solid fields share the geometric hanging-node constraints. |
+| `field-specific-constraints` | Default for coupled scalar acoustics. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
 | `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
 
 Both alternatives accept either scalar acoustic formulation. In `pressure`
@@ -1429,7 +1433,7 @@ independently of the mechanical `point`/`face_mass` selection. In particular,
 independent fine-solid nodes must not be replaced by a coarse acoustic trace
 when the neighboring solid element is remote. This also applies without
 topography. The monitor reports remote fragments and additional harbored nodes.
-The default shared-geometric method retains its geometric hanging-node
+The shared-geometric method retains its geometric hanging-node
 constraints and its existing `point` projection path. Its `face_mass` correction
 uses the same trace and global-ID schedule ordering as the alternatives,
 including on ranks that only own nodes requested by another rank. Coupling-off
@@ -1539,7 +1543,7 @@ include_acoustic = yes
 acoustic_formulation = velocity_potential
 acoustic_interface_coupling = yes
 acoustic_interface_method = field-specific-constraints
-# Alternatives: shared-geometric-constraints (default), local-matching
+# Default: field-specific-constraints; alternatives: shared-geometric-constraints, local-matching
 acoustic_interface_projection = face_mass
 acoustic_interface_face_filter = all
 acoustic_free_surface_gravity = yes
@@ -2054,22 +2058,26 @@ results are specific to the recorded configuration and implementation.
 	Phase B imports that reuse baked properties keep those existing
 	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`
-	Optional. Target theoretical reflection coefficient. Default `1.0e-3`.
-	Smaller = stronger absorption but tighter stability margins.
+	Optional. Target theoretical reflection coefficient. Default `0.1`; valid `(0,1)`.
+	Smaller values increase damping strength but do not guarantee smaller
+	numerical reflection or better stability.
 - `cpml_poly_order`
 	Optional integer in `[1, 4]`. Default `2` (the standard
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
 	across the PML.
 - `cpml_kappa_max`
-	Optional. Default `1.0`; must be at least one. Higher values change the
+	Optional. Default `10.0`; must be at least one. Higher values change the
 	real stretch in all stiffness, inertia and surface products. Validate
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
 - `cpml_alpha_max_hz`
-	Optional. When `> 0`, sets the CFS frequency directly (Hz). When `< 0`
-	or unset (default), it is derived from `simulation_wave_max_freq_hz`.
-	The explicit value becomes `alpha_max=2*pi*cpml_alpha_max_hz`,
-	whereas the fallback is `pi*simulation_wave_max_freq_hz`; see the
+	Optional. Default: `simulation_wave_max_freq_hz/2` in Hz. Omitted or
+	nonpositive inputs retain automatic selection (internal sentinel `-1`).
+	A positive numeric value overrides the automatic frequency; arithmetic
+	expressions are not evaluated in the input file. For `simulation_wave_max_freq_hz=4.36`,
+	the automatic value is `2.18` Hz. The angular coefficient is
+	`alpha_max=2*pi*cpml_alpha_max_hz`, giving `pi*simulation_wave_max_freq_hz`
+	for automatic selection. This automatic behavior is unchanged; see the
 	[coefficient formulas](#cpml-coefficient-and-operator-details) before
 	matching a source reference frequency.
 - `cpml_cfl_safety`
@@ -2084,8 +2092,8 @@ results are specific to the recorded configuration and implementation.
 	inputs explicitly setting `0.1` retain that behavior; remove the setting
 	or write `0` for plain CPML.
 - `cpml_acoustic_sponge_fraction`
-	Optional. Default `0` (off); finite, dimensionless and nonnegative.
-	Adds an experimental acoustic bulk damping coefficient only in CPML:
+	Optional. Default `0.3`; finite, dimensionless and nonnegative.
+	Set `0` to disable this experimental acoustic bulk damping, applied only in CPML:
 
 ```math
 a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
@@ -2365,8 +2373,15 @@ Checkpoint reads and writes are rejected with CPML: the legacy checkpoint
 format does not preserve absorber histories. Set `use_checkpoint=0` and
 `checkpointing_rate=0`. Non-PML checkpoint behavior is unchanged.
 
-Start with `cpml_stiffness_mode=native`, `cpml_kappa_max=1`,
-`cpml_mpml_cross_fraction=0`, and the default alpha floor. Keep source and
+The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=10`,
+`cpml_reflection_target=0.1`, `cpml_acoustic_sponge_fraction=0.3`,
+automatic alpha in Hz equal to `simulation_wave_max_freq_hz/2`,
+`cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These candidate settings
+are not a universal stability or accuracy guarantee; slow gravity packets can
+require a lower alpha. Explicit input values always take precedence. To reproduce
+the previous defaults, explicitly set `acoustic_interface_method=shared-geometric-constraints`,
+`cpml_kappa_max=1`, `cpml_reflection_target=0.001`, and
+`cpml_acoustic_sponge_fraction=0`; automatic alpha is unchanged. Keep source and
 receivers outside the absorbing layer, resolve the source bandwidth, and
 compare with a larger domain at identical mesh spacing and timestep. Measure
 P/S arrivals, surface waves, late coda, and the permanent displacement
