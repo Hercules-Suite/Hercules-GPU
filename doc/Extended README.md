@@ -2770,9 +2770,20 @@ fallback) retains the previous kernels: an initial host-backend fused comparison
 exceeded the waveform tolerance, so that path is not enabled. No extra per-step
 synchronization is added to make it eligible. An initialization scan requires
 spatially uniform relaxation rates
-and exact agreement between active shear and bulk spectra. Inactive sectors
-need no history; bulk-only elements can use the shared slots. Other BKT variants
-and nonmatching spectra retain the previous kernels.
+and exact agreement between active shear and bulk spectra. In BKT/BKT2, a sector
+needs relaxation history only when `a0` or `a1` is nonzero; the unused `a2/g2`
+fields cannot make it active. Generated element records initialize all damping
+fields, and two-mechanism material assignment explicitly zeros `a2/g2`. The
+eligibility scan also ignores these unused fields in imported records. BKT3/BKT3F
+still include their third mechanism in the scan.
+
+Inactive sectors need no history and are excluded from rate comparisons, so
+active, shear-only, bulk-only and inactive elements can coexist on a fused rank.
+Different Q-dependent weights remain per element and are compatible with fusion
+when the active rates match. The existing BKT2 `Qs >= 1000` and `Qk >= 1000`
+cutoffs, and `use_infinite_qk`, retain their previous physical behavior; this
+eligibility fix does not change those attenuation approximations. Other BKT
+variants and nonmatching spectra retain the previous kernels.
 
 The shared histories occupy the shear slots for eligible cubes. This halves
 history update traffic when both sectors attenuate. Transformed shear/bulk
@@ -2793,7 +2804,13 @@ reference switch for comparisons on other systems.
 
 Set `HERCULES_BKT2_FUSED=0` in the launch environment to compare with the old
 two-kernel BKT2 path. `HERCULES_FORCE_GENERIC_DAMPING=1` overrides both optimized
-paths. The setup log reports actual fused/fallback ranks and element slots.
+paths. The setup log reports actual fused ranks and fused/fallback element slots,
+then rank counts for each fallback reason: fusion disabled, generic override,
+force or displacement synchronization not device-resident, nonuniform active
+shear or bulk rates, and a shear/bulk rate mismatch. Reason counts may overlap.
+Ranks with no damping slots are reported separately and excluded from fused and
+fallback-reason rank counts. Slots describe mapper entries, which can include
+inactive, acoustic or CPML elements; they are not a count of attenuating work.
 For the fused path, `Force damping local wait only` includes convolution and
 cube force plus any VT force; `Force damping conv wait only` covers only the
 remaining legacy convolution subset. Compare total solver time or a GPU
@@ -2839,6 +2856,24 @@ The corresponding Horizon directory is
 contain the final CUDA-kernel checks and final guarded solver comparisons,
 respectively. The latter solver source includes the independent acoustic
 receiver-halo ordering fix from `5fd3d7e`.
+
+The inactive-sector eligibility fix was checked against unmodified `42b55a7`
+on the same Horizon toolchain with 24 ASCII and eight float64-displacement runs.
+One- and four-rank cases included mixed active/shear-only/bulk-only/inactive
+layers, different active Q weights, CPML, VT, acoustic--elastic coupling and the
+host backend, with fused, separate and generic dispatch comparisons. Eight
+additional runs deliberately seeded unused `a2` weights in isolated test builds:
+the old four-rank solver fell back on all ranks, while the fixed solver fused
+on all four. Across all 40 runs, maximum peak-scaled errors were `2.33e-9` for
+ASCII fields and `7.94e-14` for binary displacements, below the same acceptance
+limits above. Setup reason counts matched the requested overrides/backends.
+Extracted production-code checks also covered nonzero/NaN unused fields,
+genuine active-rate mismatches and BKT3/BKT3F third-mechanism mismatches.
+These checks establish small-case equivalence, not full-size Izmir timing or
+512-rank eligibility. Local-only evidence is under
+`.local-diagnostics/bkt2-inactive-20261007/` (unavailable in a clean checkout),
+with Horizon build/test jobs 51728, 51739 and 51744 under
+`/scratch/08458/wz_tacc/hercules/bkt2-inactive-20261007/`.
 
 ### VT and BKT operator history
 

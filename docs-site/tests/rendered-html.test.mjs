@@ -548,6 +548,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Host-staged execution retains the reference kernels/);
   assert.match(physics, /HERCULES_BKT2_FUSED=0/);
   assert.match(physics, /HERCULES_FORCE_GENERIC_DAMPING=1 takes precedence/);
+  assert.match(physics, /Inactive sectors are excluded from rate comparisons/);
+  assert.match(physics, /BKT3\/BKT3F still check their third mechanism/);
+  assert.match(physics, /fallback reason rank counts/);
+  assert.match(physics, /Reason counts may overlap/);
   assert.match(physics, /not allocated GPU memory/);
   assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);

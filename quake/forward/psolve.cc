@@ -126,6 +126,18 @@ static int32_t g_bkt2ConvOnlyCount = 0;
 static int32_t* g_bkt2ConvOnlyMapperDevice = NULL;
 static int g_bkt2FusedActive = 0;
 static int g_bkt2SharedUseShear = 0;
+/* Setup-only reasons; a rank may have more than one. */
+enum {
+  BKT2_FALLBACK_DISABLED,
+  BKT2_FALLBACK_GENERIC,
+  BKT2_FALLBACK_FORCE_HOST,
+  BKT2_FALLBACK_DISP_HOST,
+  BKT2_FALLBACK_SHEAR_RATES,
+  BKT2_FALLBACK_BULK_RATES,
+  BKT2_FALLBACK_SHARED_RATES,
+  BKT2_FALLBACK_REASON_COUNT
+};
+static unsigned int g_bkt2FallbackReasons = 0;
 static int g_unifiedMeshHandoffEnabled = 0;
 static int g_unifiedMeshHandoffActive = 1;
 static int g_unifiedReleaseRootWorld = -1;
@@ -2054,7 +2066,7 @@ static void poroelastic_build_gpu_geometry(mesh_t* mesh, int32_t elemCount,
   }
 }
 
-static void acoustic_zero_damping(edata_t* edata) {
+static void element_zero_damping(edata_t* edata) {
   if (edata == NULL) {
     return;
   }
@@ -2081,7 +2093,7 @@ static void acoustic_sanitize_element(edata_t* edata) {
   }
 
   edata->Vs = 0.0f;
-  acoustic_zero_damping(edata);
+  element_zero_damping(edata);
 }
 
 /* Setup-only checks. No extra material queries or element traversal. */
@@ -6798,6 +6810,9 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
 
   int res = 0;
   edata_t* edata = (edata_t*)data;
+  /* Octant record storage is recycled. Initialize every damping field before
+   * material assignment, including unused mechanisms and early-return cells. */
+  element_zero_damping(edata);
 
   points[0] = 0.01;
   points[1] = 1;
@@ -7253,6 +7268,7 @@ void setrec(octant_t* leaf, double ticksize, void* data) {
   point_t searchpoint;
 
   edata = (edata_t*)data;
+  element_zero_damping(edata);
 
   halfticks = (tick_t)1 << (PIXELLEVEL - leaf->level - 1);
 
@@ -15355,6 +15371,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   if (need_conv_coeffs) {
     g_dampingGUniform = 1;
+    g_bkt2FallbackReasons = 0;
     g_dampingBkt2ShearCoef1 = 0.0;
     g_dampingBkt2ShearCoef2 = 0.0;
     g_dampingBkt2ShearExpCoef0 = 0.0;
@@ -15398,15 +15415,15 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
       if (need_conv_coeffs) {
         const int shear_q =
             ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f) ||
-             (edata->a2_shear != 0.0f));
+             (is_3mech && (edata->a2_shear != 0.0f)));
         const int kappa_q =
             ((edata->a0_kappa != 0.0f) || (edata->a1_kappa != 0.0f) ||
-             (edata->a2_kappa != 0.0f));
+             (is_3mech && (edata->a2_kappa != 0.0f)));
         if (shear_q) {
           if (!have_ref_shear) {
             ref_g0_shear = edata->g0_shear;
             ref_g1_shear = edata->g1_shear;
-            ref_g2_shear = edata->g2_shear;
+            ref_g2_shear = is_3mech ? edata->g2_shear : 0.0f;
             const double g0 = (double)edata->g0_shear * conv_rmax;
             const double g1 = (double)edata->g1_shear * conv_rmax;
             g_dampingBkt2ShearCoef1 = g0 / 2.0;
@@ -15432,13 +15449,14 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
                      (edata->g1_shear != ref_g1_shear) ||
                      (is_3mech && (edata->g2_shear != ref_g2_shear))) {
             g_dampingGUniform = 0;
+            g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_SHEAR_RATES;
           }
         }
         if (kappa_q) {
           if (!have_ref_kappa) {
             ref_g0_kappa = edata->g0_kappa;
             ref_g1_kappa = edata->g1_kappa;
-            ref_g2_kappa = edata->g2_kappa;
+            ref_g2_kappa = is_3mech ? edata->g2_kappa : 0.0f;
             const double g0 = (double)edata->g0_kappa * conv_rmax;
             const double g1 = (double)edata->g1_kappa * conv_rmax;
             g_dampingBkt2KappaCoef1 = g0 / 2.0;
@@ -15464,6 +15482,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
                      (edata->g1_kappa != ref_g1_kappa) ||
                      (is_3mech && (edata->g2_kappa != ref_g2_kappa))) {
             g_dampingGUniform = 0;
+            g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_BULK_RATES;
           }
         }
       }
@@ -15483,11 +15502,22 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
     /* Restrict the optimized dispatch to the validated resident path. A
      * host-staged comparison exceeded the waveform tolerance; preserve its
      * existing kernels without adding synchronization to the hot loop. */
-    g_bkt2FusedActive = dtype == BKT2 && damping_bkt2_fused_requested() &&
-        !damping_force_generic() && elastic_force_device_sync_enabled() &&
-        displacement_device_sync_enabled() && g_dampingGUniform &&
-        (!have_ref_shear || !have_ref_kappa ||
-         (ref_g0_shear == ref_g0_kappa && ref_g1_shear == ref_g1_kappa));
+    if (dtype == BKT2) {
+      if (!damping_bkt2_fused_requested())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_DISABLED;
+      if (damping_force_generic())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_GENERIC;
+      if (!elastic_force_device_sync_enabled())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_FORCE_HOST;
+      if (!displacement_device_sync_enabled())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_DISP_HOST;
+      if (have_ref_shear && have_ref_kappa &&
+          (ref_g0_shear != ref_g0_kappa || ref_g1_shear != ref_g1_kappa))
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_SHARED_RATES;
+      g_bkt2FusedActive = g_bkt2FallbackReasons == 0;
+    } else {
+      g_bkt2FusedActive = 0;
+    }
   }
 
   g_dampingElemCountGPU = count;
@@ -16129,12 +16159,17 @@ static void solver_init_bkt2_fused_dispatch(mysolver_t* solver, mesh_t* mesh) {
    * Counts describe actual dispatch, not just the optimistic kernel specs. */
   const long long cubes = g_topoBktElemCountGPU > 0 ? g_dampingForceCountGPU
                                                   : g_dampingElemCountGPU;
-  long long local[4] = {g_bkt2FusedActive ? 1LL : 0LL,
+  const int has_work = g_dampingElemCountGPU > 0;
+  const int count_size = 5 + BKT2_FALLBACK_REASON_COUNT;
+  long long local[count_size] = {g_bkt2FusedActive && has_work ? 1LL : 0LL,
                        g_bkt2FusedActive ? cubes : 0LL,
                        g_bkt2ConvOnlyCount,
-                       g_bkt2FusedActive ? 0LL : g_dampingElemCountGPU};
-  long long total[4] = {0, 0, 0, 0};
-  MPI_Reduce(local, total, 4, MPI_LONG_LONG_INT, MPI_SUM, 0, comm_solver);
+                       g_bkt2FusedActive ? 0LL : g_dampingElemCountGPU,
+                       has_work ? 0LL : 1LL};
+  for (int r = 0; r < BKT2_FALLBACK_REASON_COUNT; ++r)
+    local[5 + r] = has_work && (g_bkt2FallbackReasons & (1U << r)) ? 1LL : 0LL;
+  long long total[count_size] = {};
+  MPI_Reduce(local, total, count_size, MPI_LONG_LONG_INT, MPI_SUM, 0, comm_solver);
   if (Global.myID == 0) {
     monitor_print("BKT2 GPU: fused/shared-history ranks=%lld, cube slots=%lld, "
                   "legacy convolution-only slots=%lld, fallback slots=%lld; "
@@ -16143,6 +16178,19 @@ static void solver_init_bkt2_fused_dispatch(mysolver_t* solver, mesh_t* mesh) {
                   "retains the reference kernels.\n",
                   total[0], total[1], total[2], total[3],
                   Param.printStationStresses == YES ? "saved" : "not requested");
+    monitor_print("BKT2 GPU: fallback reason ranks (counts may overlap): "
+                  "fusion disabled=%lld, generic override=%lld, "
+                  "force not device-resident=%lld, displacement not device-resident=%lld, "
+                  "nonuniform active shear rates=%lld, nonuniform active bulk rates=%lld, "
+                  "shear/bulk rate mismatch=%lld; no damping slots ranks=%lld. "
+                  "Inactive sectors are excluded from rate comparisons.\n",
+                  total[5 + BKT2_FALLBACK_DISABLED],
+                  total[5 + BKT2_FALLBACK_GENERIC],
+                  total[5 + BKT2_FALLBACK_FORCE_HOST],
+                  total[5 + BKT2_FALLBACK_DISP_HOST],
+                  total[5 + BKT2_FALLBACK_SHEAR_RATES],
+                  total[5 + BKT2_FALLBACK_BULK_RATES],
+                  total[5 + BKT2_FALLBACK_SHARED_RATES], total[4]);
     monitor_print("BKT2 GPU: HERCULES_BKT2_FUSED=%d, generic override=%d. "
                   "Fused work is charged to Force damping local wait only.\n",
                   damping_bkt2_fused_requested(), damping_force_generic());
@@ -28870,6 +28918,13 @@ static void mesh_correct_properties(etree_t* cvm) {
         attenuation_record_error(&attenuation, eindex, attenuation_error,
                                   Qs, Qp, Qk);
         continue; /* Do not evaluate fractional powers of invalid Q. */
+      }
+
+      /* Two-mechanism models never use a2/g2. Keep their stored payload
+       * deterministic even when material properties are reassigned. */
+      if (Param.theTypeOfDamping == BKT || Param.theTypeOfDamping == BKT2) {
+        edata->a2_shear = edata->g2_shear = 0.0f;
+        edata->a2_kappa = edata->g2_kappa = 0.0f;
       }
 
       if (Param.theTypeOfDamping == BKT) {
