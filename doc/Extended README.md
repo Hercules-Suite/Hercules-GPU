@@ -1692,16 +1692,69 @@ in `quake/forward/psolve.cc`.
 	Each file uses the same count-prefixed layout, contains one value for every
 	entry in `z.in`, and follows the same `index.in` column/layer ordering.
 	Hercules selects the same vertical layer at each of the four surrounding
-	horizontal columns and interpolates `Qs` and `Qp` with the same shape
-	functions used for `Vs`, `Vp`, and density. With parametric Q disabled,
+	horizontal columns. For `Qs` and `Qp`, it excludes acoustic samples
+	(`Vs <= 1e-6 m/s`) and renormalizes the remaining bilinear weights. An
+	entirely solid stencil retains the previous interpolation arithmetic;
+	an all-water query returns zero solid Q. Velocity, density, topography,
+	and acoustic/solid classification are unchanged. With parametric Q disabled,
 	the BKT-family damping setup uses these interpolated values independently
 	of the fallback `cvmdb_input_file` mode.
 - `qs.in` and `qp.in` must either both be present or both be absent, and their
-	value counts must match `z.in`. If both are absent, Hercules preserves the
+	value counts must match `z.in`. Each solid sample must have finite,
+	positive Qs and Qp. Acoustic placeholders may be zero but must be finite
+	and nonnegative. These checks run as the files are read, even if solid
+	attenuation is disabled. If both files are absent, Hercules preserves the
 	legacy behavior `Qs = 0.1*Vs` and `Qp = 2*Qs`. If only one is present or a
-	count differs, initialization stops with an explicit error. Because Q values
-	are stored in element material data, regenerate or re-correct the mesh after
-	adding or changing these files.
+	count differs, initialization stops with an explicit error.
+- Raising a queried solid Vs to `simulation_shear_velocity_min` does **not**
+	rescale explicitly supplied Qs or Qp. For example, `Vs=80 m/s`, `Qs=16`,
+	and `Qp=32` retain Qs=16 and Qp=32 if Vs is raised to 120 m/s. Update the
+	Q model explicitly if a velocity-dependent Q law is intended for the
+	modified velocities. The optional parametric-Q path remains separate.
+
+For either supplied Q, the mixed-stencil rule is
+
+```math
+Q_{\mathrm{solid}} = \frac{\sum_{i\in S} N_i Q_i}{\sum_{i\in S} N_i},
+\qquad S=\{i:V_{s,i}>10^{-6}\ \mathrm{m/s},\ N_i>0\}.
+```
+
+For example, 10% weight on solid Qs=40 and 90% on water Qs=0 gives
+solid Qs=40, not 4. This prevents water placeholders from introducing
+artificially strong solid attenuation; it does not change the velocity mixture.
+
+#### Setup-time attenuation validation
+
+During the existing material-assignment loop, BKT-family setup requires finite,
+positive solid Qs/Qp, velocities, density, and reference frequency, with a
+positive bulk modulus. Unless `use_infinite_qk=yes`, it derives
+
+```math
+L=\frac{4V_s^2}{3V_p^2},\qquad
+Q_\kappa=\frac{1-L}{1/Q_p-L/Q_s}.
+```
+
+A negative denominator beyond floating-point roundoff is rejected. Zero
+inverse bulk Q, including cancellation within roundoff, selects the existing
+lossless-bulk limit. `use_infinite_qk=yes` deliberately suppresses bulk
+attenuation, while still requiring valid solid Q inputs.
+
+BKT2 additionally requires finite, nonnegative stored coefficients and positive
+relaxed stiffness, `1-a0-a1 > 0`, in both shear and bulk branches. Active
+relaxation mechanisms must have positive rates. Invalid values stop setup with
+a global invalid-element count and one example giving rank, element center,
+material values and Q values; Q is not silently clipped and the timestep is not
+changed. These are admissibility checks, not a guarantee of stability for an
+arbitrary timestep or model.
+
+The checks reuse values already read or computed: no additional material
+queries, mesh refinement, full mesh traversal, or time-step checks. Successful
+material validation adds one small MPI reduction per material-assignment call.
+Imported BKT2 meshes have their stored coefficients checked during the existing
+critical-timestep traversal. They do not retain the original Q inputs, so that
+diagnostic reports unavailable Q values as NaN. Regenerate a persisted mesh to
+apply this corrected interpolation, or after changing Q files; a coefficient
+check cannot repair an older, admissible but incorrectly interpolated Q model.
 
 ## Poroelastic U-P formulation
 

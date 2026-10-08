@@ -897,6 +897,8 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "BKT-family example with material Q",
         paragraphs: [
           "All BKT variants require use_parametric_q_factor and use_infinite_qk. With use_parametric_q_factor=no, profile or 3-D material Qp/Qs values are used. bkt and bkt2 use two relaxation mechanisms; bkt3 and bkt3f use three. Keep the selected variant consistent with the validation used for the project.",
+          "BKT setup rejects nonfinite or nonpositive solid Q, invalid bulk modulus, and Qp/Qs combinations that imply negative bulk attenuation. Zero inverse bulk Q is treated as lossless bulk; use_infinite_qk=yes also suppresses bulk attenuation. BKT2 checks finite, nonnegative coefficients and positive relaxed stiffness (1-a0-a1 > 0) in both branches. An error reports a global count and one element location without silently clipping Q or changing the timestep.",
+          "Validation reuses the existing input-reading, material-assignment and imported-mesh setup loops. It adds no material queries, mesh refinement, extra full mesh traversal, or time-step work. Imported BKT2 meshes have their stored coefficients checked, but must be regenerated to apply changed Q interpolation. These admissibility checks do not establish stability for every timestep.",
         ],
         codeLabel: "parameters.in — BKT2 with explicit Qp and Qs",
         code: "type_of_damping = bkt2\nsimulation_velocity_profile_freq_hz = 1.0\nuse_parametric_q_factor = no\nuse_infinite_qk = no\nthe_threshold_damping = 0.05\ndo_damping_statistics = 1\n\ncvmdb_input_file = profile\nnumber_profile_layers = 1\nprofile_layers =\n# z_top Vp Vs rho Qp Qs\n 0.0 2000.0 1000.0 2000.0 200.0 100.0",
@@ -1142,7 +1144,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
         codeLabel: "directory tree",
         code: "case/\n├── parameters.in\n├── sourcefiles/\n│   └── source.in\n├── materialfiles/\n│   ├── x.in\n│   ├── y.in\n│   ├── z.in\n│   ├── vs.in\n│   ├── vp.in\n│   ├── rho.in\n│   ├── qs.in\n│   ├── qp.in\n│   └── index.in\n├── topography/\n│   └── topography.in\n└── output/",
-        note: "For a 3-D material model, provide qs.in and qp.in as a matched pair with the same number of samples as z.in. If both files are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs.",
+        note: "For a 3-D material model, provide qs.in and qp.in as a matched pair with the same number of samples as z.in. Solid-only interpolation excludes water placeholders and renormalizes the remaining weights. Supplied Q is independent of the Vs minimum. If both files are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs.",
       },
       {
         id: "sources",
@@ -1223,6 +1225,8 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           "The first value in every file is a count, not model data. It must equal the number of values that follow.",
           "x.in has nx coordinates and y.in has ny coordinates; index.in has nx * ny zero-based profile starts.",
           "z.in, vs.in, vp.in, and rho.in must have the same total sample count. If used, qs.in and qp.in must both exist and have that same count.",
+          "Each solid sample (Vs > 1e-6 m/s) needs finite, positive Qs and Qp. Acoustic placeholders may be zero, but must be finite and nonnegative. Q files are checked while reading, even when solid attenuation is disabled. At a mixed horizontal stencil, only solid samples contribute to Q, with renormalized weights: 10% solid Qs=40 plus 90% water Qs=0 gives solid Qs=40. Velocity and density interpolation are unchanged.",
+          "Explicit Qs/Qp are not scaled when Vs is raised to simulation_shear_velocity_min. For example, Vs=80 m/s with Qs=16 and Qp=32 keeps those Q values if Vs is raised to 120 m/s. Regenerate persisted meshes after changing these files or to apply corrected Q interpolation; imported coefficient checks cannot recover the original Q inputs.",
           "index.in contains starts only—do not append a final end offset. The end of the last profile is the total sample count from z.in.",
         ],
         table: {

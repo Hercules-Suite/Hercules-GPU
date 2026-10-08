@@ -82,6 +82,11 @@ interactions are in the
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.
+  Optional 3-D `qs.in`/`qp.in` use solid-only interpolation at water/solid
+  stencils; supplied Q is independent of the Vs minimum. Setup rejects invalid
+  solid Q and inadmissible BKT2 coefficients without another mesh traversal.
+  Regenerate persisted meshes to apply the correction; see
+  [Quality-factor files](Extended%20README.md#quality-factor-files).
 - **Absorbing boundary and CPML:** `abc_type`, `cpml_thickness_m`, `cpml_layers`,
   `cpml_reflection_target`, `cpml_poly_order`, `cpml_kappa_max`, `cpml_alpha_max_hz`,
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
