@@ -350,6 +350,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
     solver.indexOf('strcpy(Param.theCheckPointingDirOut'),
   );
   assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
+  assert.doesNotMatch(interfaceGuard, /Param\.theAcousticVelocityPotential/);
+  assert.match(interfaceGuard, /Param\.acousticPressureFormulation != YES/);
+  assert.match(reference, /Both alternatives require include_acoustic=yes, acoustic_interface_coupling=yes, pressure or velocity_potential, and full Hex8 solids/);
   assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
   assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
@@ -410,6 +413,8 @@ test("explains experimental constraints, remeshing and CPML limitations", async 
   assert.match(html, /exponential growth with CPML/);
   assert.match(html, /not a prescribed uniform-width refinement band/);
   assert.match(html, /Field-specific constraints also support FEM topography/);
+  assert.match(html, /acoustic_formulation=pressure or velocity_potential/);
+  assert.match(html, /Pressure mode couples solid normal acceleration/);
   assert.match(html, /Unresolved remote neighbors still abort/);
   assert.match(html, /VT cut-tetrahedron topography remains unsupported/);
 });

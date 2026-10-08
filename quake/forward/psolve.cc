@@ -4239,10 +4239,10 @@ static int32_t parse_parameters(const char* numericalin) {
 
   if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
       (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
-       Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential)) {
+       Param.acousticPressureFormulation != YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Experimental acoustic_interface_method requires coupled "
-                 "velocity_potential acoustics and full Hex8 solids.\n");
+                 "pressure or velocity_potential acoustics and full Hex8 solids.\n");
   }
   if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING &&
       Param.includeTopography == YES) {
