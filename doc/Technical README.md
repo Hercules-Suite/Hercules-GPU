@@ -118,7 +118,7 @@ interactions are in the
   `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
-  velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
+  pressure or velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
   constitutive models and BrickUP poroelasticity can be enabled with either method;
   existing module-specific restrictions and material calibration requirements apply.
   Both methods use actual remote solid traces, including `face_mass` quadrature

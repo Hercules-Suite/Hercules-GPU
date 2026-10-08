@@ -1144,9 +1144,10 @@ Notes:
 	scalar acoustic formulations build an explicit acoustic-solid interface table. In octree
 	meshes, nonconforming interface faces are split into area-weighted fragments
 	with fragment centers and normals, and CUDA kernels apply the normal
-	traction/acceleration coupling only on those fragments. Each fragment
-	interpolates the scalar acoustic field on the acoustic element and
-	displacement acceleration on the adjacent elastic element, so refined elastic
+	traction and normal-motion coupling only on those fragments. Each fragment
+	interpolates the scalar acoustic field on the acoustic element and solid
+	normal acceleration (`pressure`) or velocity (`velocity_potential`) on the
+	adjacent solid element, so refined solid
 	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
 	`acoustic_interface_max_level` and finer neighboring leaves, including
 	remote leaves resolved on their MPI owner. The table uses the owner's
@@ -1332,8 +1333,44 @@ existing solver behavior. It does not change `acoustic_interface_projection`
 | `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
 | `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
 
+Both alternatives accept either scalar acoustic formulation. In `pressure`
+mode the interface applies pressure traction to the solid and solid normal
+acceleration to the acoustic equation. In `velocity_potential` mode it obtains
+traction from the potential time difference and drives the acoustic equation
+with solid normal velocity. The field constraints and matching rules are the
+same for both. Selecting pressure does not remove the need to check time-step,
+mesh and interface accuracy; it does not change what `acoustic_station_gradient`
+affects (station motion, not the pressure column). Velocity potential remains
+the default.
+
+Pressure-formulation validation (2026-10-08 UTC): a local 58-run CUDA/MPI
+comparison exercised all three methods. Fourteen 110 s flat-water runs covered
+coarse/fine meshes, both formulations and two half-time-step pressure controls.
+Forty 4 s source-excited checks covered `point`/`face_mass`, gravity, finer water,
+buildings combined with synthetic `vonMises_ep` nonlinear elastoplastic and
+BrickUP open-pore coupling, one/eight ranks, both MPI backends and existing
+pressure controls. Four 6 s real-terrain Izmir crop runs checked field-specific
+FEM topography with gravity, eight/sixteen ranks and both backends. Matched
+MPI/backend/formulation comparisons agreed below $10^{-6}$ aggregate relative
+L2 in motion and acoustic pressure; available pore-pressure, strain, stress and
+nonlinear station-state columns were also checked. Undefined elastic pressure
+NaNs were excluded, not other output components.
+
+Against the independent source-matched CPS reference, median submerged-receiver
+pressure errors over $10 \le t < 100$ s were about 18.38% on the coarse mesh and
+8.34% on the fine mesh for both newly enabled methods and both formulations.
+Halving the coarse time step from 0.005 to 0.0025 s changed pressure error to
+about 18.40%; changing the evolved variable did not improve pressure accuracy
+in these zero-initialized tests. No simulated response was filtered, fitted or
+shifted; the benchmark's prescribed source filter was retained. These local-only
+fixtures are unavailable in a clean checkout. Gravity/module/topography checks
+establish implementation consistency within the stated durations, not
+independent gravity-wave accuracy, calibrated constitutive response, or
+full-duration Izmir stability. Existing geometric restrictions below still apply.
+
 The two alternatives require `include_acoustic=yes`,
-`acoustic_interface_coupling=yes`, `acoustic_formulation=velocity_potential`,
+`acoustic_interface_coupling=yes`, `acoustic_formulation=pressure` or
+`acoustic_formulation=velocity_potential`,
 and full Hex8 solids. Both alternatives accept `include_buildings=yes`,
 `include_nonlinear_analysis=yes` and `include_poroelastic=yes`, separately or
 together, subject to the existing restrictions of those modules. Nonlinear
