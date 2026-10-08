@@ -207,8 +207,10 @@ test("renders the categorized parameter reference", async () => {
   assert.match(faceFilterRow, /default alias follows all/);
   const methodRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_method"));
   assert.ok(methodRow);
-  assert.match(methodRow, /Default: shared-geometric-constraints/);
-  assert.match(methodRow, /field-specific-constraints/);
+  assert.match(methodRow, /Default: field-specific-constraints for coupled scalar acoustics/);
+  assert.match(methodRow, /When omitted, uses shared-geometric-constraints if acoustics, scalar acoustics or interface coupling is disabled/);
+  assert.match(methodRow, /Explicit unsupported choices still abort/);
+  assert.match(methodRow, /Coupled VT topography must explicitly select shared-geometric-constraints/);
   assert.match(methodRow, /local-matching/);
   assert.match(methodRow, /imported mismatched meshes abort/);
   assert.match(methodRow, /Field-specific constraints support FEM topography/);
@@ -221,7 +223,7 @@ test("renders the categorized parameter reference", async () => {
   const projectionRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_projection"));
   assert.ok(projectionRow);
   assert.match(projectionRow, /All three constraint methods resolve actual remote solid vertices for face_mass/);
-  assert.match(projectionRow, /default shared-geometric point path is unchanged/);
+  assert.match(projectionRow, /shared-geometric point path is unchanged/);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -338,7 +340,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
 
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.ok(documented.includes("acoustic_interface_method"));
-  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"shared-geometric-constraints"/);
+  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"field-specific-constraints"/);
   for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
     assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
   }
@@ -555,8 +557,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /not allocated GPU memory/);
   assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
-  assert.match(physics, /Baseline CPML example/);
-  assert.match(physics, /cpml_reflection_target = 1\.0e-3/);
+  assert.match(physics, /Default CPML example/);
+  assert.match(physics, /cpml_reflection_target = 0\.1/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
   assert.match(physics, /script\/taper_topography\.py/);
 
@@ -1960,16 +1962,44 @@ test("documents complete CPML products and the plain-CPML default", async () => 
   assert.match(html, /Complete second-order operator/);
   assert.match(html, /cpml_mpml_cross_fraction is now 0/);
   assert.match(html, /cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber/);
-  assert.match(html, /defaults to 0 \(off\)/);
+  assert.match(html, /defaults to 0\.3; set 0 to disable it/);
   assert.match(html, /checkpoint reads and writes/);
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
-  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.0/);
+  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.3/);
   assert.match(psolve, /parsetext\(fp, "cpml_acoustic_sponge_fraction"/);
   assert.match(psolve, /!isfinite\(cpml_acoustic_sponge_fraction\)/);
   assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
+});
+
+test("keeps requested CPML defaults and alpha Hz units synchronized with the parser", async () => {
+  const html = await (await render("/docs/parameters-damping-cpml")).text();
+  for (const [key, value] of [
+    ["cpml_reflection_target", "0.1"],
+    ["cpml_kappa_max", "10"],
+    ["cpml_acoustic_sponge_fraction", "0.3"],
+  ]) {
+    const row = html.split("</tr>").find((part) => part.includes(`>${key}</td>`));
+    assert.ok(row?.includes(`Default: ${value};`), `${key} default`);
+  }
+  const alpha = html.split("</tr>").find((part) => part.includes(">cpml_alpha_max_hz</td>"));
+  assert.match(alpha, /Default: simulation_wave_max_freq_hz \/ 2/);
+  assert.match(alpha, /Omitted or nonpositive values/);
+  assert.match(alpha, /positive numeric value overrides/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /\.theCpmlReflectionTarget = 0\.1,/);
+  assert.match(solver, /\.theCpmlKappaMax = 10\.0,/);
+  assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
+  assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.3,/);
+  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);
+  assert.match(solver, /auto: simulation_wave_max_freq_hz \/ 2\)\\n",\s*0\.5 \* Param\.theFreq/);
+  assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
+  assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
+  assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
 });
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {

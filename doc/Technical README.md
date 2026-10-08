@@ -90,10 +90,14 @@ interactions are in the
 - **Absorbing boundary and CPML:** `abc_type`, `cpml_thickness_m`, `cpml_layers`,
   `cpml_reflection_target`, `cpml_poly_order`, `cpml_kappa_max`, `cpml_alpha_max_hz`,
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
-  `cpml_acoustic_sponge_fraction` (optional, default `0`: experimental acoustic
+  `cpml_acoustic_sponge_fraction` (optional, default `0.3`; `0` disables experimental acoustic
   bulk CPML damping; leaves gravity-surface coefficients unchanged),
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
+  CPML defaults are `cpml_reflection_target=0.1`, `cpml_kappa_max=10`, and
+  automatic `cpml_alpha_max_hz=simulation_wave_max_freq_hz/2` in Hz (omit it or
+  use a nonpositive numeric value; positive numeric values override it).
+  Existing explicit inputs take precedence.
   Automatic thickness is `cpml_layers` times the largest non-air element
   edge on a lateral or bottom boundary (MPI-wide maximum); air is also
   excluded from the global fallback. Finer boundary regions contain more
@@ -114,21 +118,24 @@ interactions are in the
   actual point using same-material neighboring water cells; `element` retains
   the historical gradient. CPML and unavailable-neighbor fallbacks are described
   in [the detailed reference](Extended%20README.md#acoustic-station-gradient-recovery).
-  `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
-  `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
-  `local-matching` refines the coarser interface neighbors during Phase A.
+  `acoustic_interface_method` defaults to `field-specific-constraints` for coupled
+  scalar acoustics, separating acoustic, solid and pore-pressure hanging-node maps.
+  When the method is omitted and acoustics, scalar acoustics or coupling is disabled,
+  shared geometric constraints remain active. Explicit unsupported choices still abort.
+  The alternative `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
   pressure or velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
   constitutive models and BrickUP poroelasticity can be enabled with either method;
   existing module-specific restrictions and material calibration requirements apply.
   Both methods use actual remote solid traces, including `face_mass` quadrature
-  and open-pore pressure loads. The default shared-geometric method also resolves
+  and open-pore pressure loads. The shared-geometric method also resolves
   actual remote solid traces when `face_mass` is selected, so local and remote
   faces use the same four-point quadrature; its `point` path is unchanged.
   Field-specific constraints also
   support FEM topography (`include_topography=yes`, `computation_method=fem`),
   excluding air and carved voids from the field maps. VT cut-tetrahedron topography
-  remains unsupported; local matching still requires topography off. CPML, gravity and
+  requires explicit `shared-geometric-constraints` for coupled acoustics; local matching
+  still requires topography off. CPML, gravity and
   `face_mass` remain independent; local matching does not guarantee CPML
   stability. See [constraints and matching](Extended%20README.md#interface-constraints-and-local-matching).
   `acoustic_interface_face_filter` defaults to `all`: couple every detected

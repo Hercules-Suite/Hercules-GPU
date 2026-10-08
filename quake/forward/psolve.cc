@@ -1245,7 +1245,7 @@ static struct Param_t {
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
-           .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL,
+           .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,
            .acousticStationGradientRecovered = 1,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
@@ -1279,14 +1279,14 @@ static struct Param_t {
            .theAbcType = ABC_DASHPOT,
            .theCpmlThicknessM = 0.0,
            .theCpmlLayers = 10,
-           .theCpmlReflectionTarget = 1.0e-3,
+           .theCpmlReflectionTarget = 0.1,
            .theCpmlPolyOrder = 2,
-           .theCpmlKappaMax = 1.0,
+           .theCpmlKappaMax = 10.0,
            .theCpmlAlphaMaxHz = -1.0,
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.0,
            .theCpmlAlphaFloorFraction = 0.1,
-           .theCpmlAcousticSpongeFraction = 0.0,
+           .theCpmlAcousticSpongeFraction = 0.3,
            .theCpmlPmlMaterialDamping = 0,
            .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
@@ -2910,7 +2910,7 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_method[64] = "shared-geometric-constraints",
+       acoustic_interface_method[64] = "field-specific-constraints",
        acoustic_station_gradient[64] = "linear",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
@@ -2939,6 +2939,7 @@ static int32_t parse_parameters(const char* numericalin) {
    * "unset" from explicit "none". */
   int cpml_pml_damp_explicit = 0;
   int acoustic_formulation_explicit = 0;
+  int acoustic_interface_method_explicit = 0;
   int legacy_acoustic_pressure_formulation_explicit = 0;
   noyesflag_t have_buildings = UNSET;
   noyesflag_t have_parametricq = UNSET;
@@ -3385,7 +3386,9 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
-  parsetext(fp, "acoustic_interface_method", 's', &acoustic_interface_method);
+  acoustic_interface_method_explicit =
+      (parsetext(fp, "acoustic_interface_method", 's',
+                 &acoustic_interface_method) == 0);
   parsetext(fp, "acoustic_station_gradient", 's', &acoustic_station_gradient);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
@@ -4368,6 +4371,15 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.basinMaterialType = basinMaterialType;
   Param.threeDVelocityModel = include3DVelModel;
 
+  /* Field-specific maps apply to coupled scalar acoustics. Keep the geometric
+   * maps for inactive/legacy acoustic paths when no method was requested;
+   * explicit unsupported choices still fail the guard below. */
+  if (!acoustic_interface_method_explicit &&
+      (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
+       Param.acousticPressureFormulation != YES)) {
+    Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;
+    strcpy(acoustic_interface_method, "shared-geometric-constraints");
+  }
   if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
       (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
        Param.acousticPressureFormulation != YES)) {
@@ -4426,8 +4438,9 @@ static int32_t parse_parameters(const char* numericalin) {
                   acoustic_interface_coupling);
     monitor_print("Acoustic interface method:         %s%s\n",
                   acoustic_interface_method,
-                  Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_ORIGINAL
-                      ? " (default constraints)" : " (experimental)");
+                  acoustic_interface_method_explicit ? " (explicit)"
+                      : (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS
+                             ? " (default)" : " (inactive coupling fallback)"));
     if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING) {
       monitor_print("Local matching: equal-size water/solid interface faces; "
                     "CPML stability and convergence are not established.\n");
@@ -4562,8 +4575,9 @@ static int32_t parse_parameters(const char* numericalin) {
       monitor_print("PML alpha max (Hz):                 %f\n",
                     Param.theCpmlAlphaMaxHz);
     } else {
-      monitor_print("PML alpha max (Hz):                 auto "
-                    "(pi * simulation_wave_max_freq_hz)\n");
+      monitor_print("PML alpha max (Hz):                 %g "
+                    "(auto: simulation_wave_max_freq_hz / 2)\n",
+                    0.5 * Param.theFreq);
     }
     monitor_print("PML multiaxial cross fraction:      %f\n",
                   Param.theCpmlMpmlCrossFraction);
@@ -11751,7 +11765,8 @@ static void solver_init() {
       }
     }
 
-    /* Default alpha_max = pi * f_max if user didn't specify */
+    /* Automatic Hz value is f_max / 2; alpha_max uses angular units (pi*f_max).
+     * Nonpositive inputs retain the legacy automatic selection. */
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
                                 : (M_PI * Param.theFreq);
