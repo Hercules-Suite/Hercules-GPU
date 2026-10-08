@@ -228,6 +228,9 @@ for defaults, supported combinations, and performance implications.
   `HERCULES_PRESSURE_FORCE_SYNC_MODE`.
 - **Other performance and diagnostic controls:** `HERCULES_ADJUST_ASSIGN_OMP`,
   `HERCULES_ADJUST_DIST_OMP`, `HERCULES_ALLOW_MULTI_RANK_PER_GPU`, `HERCULES_FORCE_GENERIC_DAMPING`,
+  `HERCULES_BKT2_FUSED` (default `1` for eligible device-resident runs; host-staged
+  execution retains the reference path; `0` selects separate BKT2 convolution/force
+  kernels for comparison; see [BKT2 GPU execution](Extended%20README.md#bkt2-gpu-execution)),
   `HERCULES_FULL_CLEAR_OMP`, `HERCULES_REPRO_MODE`, `HERCULES_SPARSE_CLEAR_MODE`,
   `HERCULES_SPARSE_UPLOAD_MODE`, `HERCULES_SRC_DEBUG`, `HERCULES_TOPO_FORCE_MODE`.
 

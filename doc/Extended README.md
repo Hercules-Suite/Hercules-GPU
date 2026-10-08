@@ -351,9 +351,8 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	targeted sleep/poll loop. Set `1` only for an intentional diagnostic run.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
-	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
-	hoisted-coefficient convolution kernels (bit-identical to leaving it
-	unset). Set to `1` to force the generic per-element
+	Default unset/`0`: allow the optimized BKT-family kernels, including
+	the fused BKT2 path below. Set to `1` to force the generic per-element
 	`kernelDampingCalcConv` for all BKT-family damping, bypassing the
 	fast kernels. Use it to produce a generic-kernel reference from an
 	otherwise-identical run and verify the fast kernels — they must match
@@ -362,6 +361,14 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	case). A one-time rank-0 line is printed to the monitor/stderr when
 	the override is active so a forced run cannot be mistaken for a
 	normal one. Read once at startup; production runs leave it unset.
+- `HERCULES_BKT2_FUSED=0|1`
+	Default unset/`1`: use shared histories and fused convolution/force
+	for eligible BKT2 cube elements with device-resident force and displacement
+	synchronization. Host-staged paths retain the reference kernels. `0` retains
+	the previous separate
+	hoisted-coefficient convolution and force kernels. The generic override
+	above takes precedence. Both switches are read once; never switch history
+	layouts during a run. See [BKT2 GPU execution](#bkt2-gpu-execution).
 - `HERCULES_SRC_DEBUG=0|1`
 	Diagnostic logging for the source-application path (POINT, FORCE,
 	SRFH, PLANE, PLANEWITHKINKS). Default unset/`0`: no output. Set to
@@ -2148,7 +2155,10 @@ not continuum accuracy or full-Izmir long-time stability.
 	`rayleigh` is the only supported material-damping mode inside PML
 	elements.
 - **Viscoelastic damping runs on the GPU for all BKT-family models**
-	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). When the relaxation spectrum is
+	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). BKT2 cube elements with matching
+	uniform shear/bulk relaxation rates use the shared-history fused path
+	described in [BKT2 GPU execution](#bkt2-gpu-execution). For the separate
+	convolution/force paths, when the relaxation spectrum is
 	spatially uniform — the usual case: fixed relaxation frequencies,
 	per-element weights vary with Q — the solver uses fast convolution
 	kernels with the spectral coefficients hoisted to scalars (computed
@@ -2163,8 +2173,8 @@ not continuum accuracy or full-Izmir long-time stability.
 	not applied inside PML elements. **Behavior change:**
 	a heterogeneous-spectrum `bkt2` model now uses the generic kernel —
 	previously it silently applied the first element's coefficients to
-	all elements (a latent bug). Spatially-uniform `bkt2` (every
-	validated run) is bit-identical to before and unaffected.
+	all elements (a latent bug). `HERCULES_BKT2_FUSED=0` retains the
+	previous hoisted BKT2 path for comparisons with the fused implementation.
 - The startup log prints how many elastic/acoustic PML elements were
 	found and the realized PML thickness — use it to confirm the PML zone
 	is non-empty and split between materials as expected.
@@ -2657,6 +2667,88 @@ checkout. Horizon inputs, executable and results are retained under
 42115–42123 (domain comparisons), 42117 (P/S packets), 42129 (gravity packet),
 42130 (long run), 42136–42139 (backend/rank/projection and Rayleigh checks),
 42145 (matched old-binary timing), and 42152 (final-default executable check).
+
+### BKT2 GPU execution
+
+The default BKT2 cube path shares the two displacement-history recurrences
+between shear and bulk, then evaluates their force in the same kernel. This
+preserves the existing relaxation rates, Q-dependent weights, reference-frequency
+correction, timestep, arithmetic precision, underflow threshold and force
+operator. The optimized dispatch requires device-resident force and displacement
+synchronization. Host-staged execution (including checkpoint-driven backend
+fallback) retains the previous kernels: an initial host-backend fused comparison
+exceeded the waveform tolerance, so that path is not enabled. No extra per-step
+synchronization is added to make it eligible. An initialization scan requires
+spatially uniform relaxation rates
+and exact agreement between active shear and bulk spectra. Inactive sectors
+need no history; bulk-only elements can use the shared slots. Other BKT variants
+and nonmatching spectra retain the previous kernels.
+
+The shared histories occupy the shear slots for eligible cubes. This halves
+history update traffic when both sectors attenuate. Transformed shear/bulk
+vectors stay local to the fused kernel unless station stresses are requested;
+then they are saved every step so the existing previous-step station gather
+remains correct, including decimated output. VT cut cells retain the original
+convolution and tetrahedral force. CPML elements retain their elastic CPML
+operator. This change adds no field exchange, host staging or per-step allocation.
+The legacy GPU buffer allocations remain in place for compatibility; reduced
+traffic must not be reported as reduced allocated GPU memory.
+
+The fused kernel launches 128-thread blocks with a six-block occupancy target.
+This deliberately permits compiler spills to increase the number of resident
+warps. The setting was selected by alternating CUDA-event measurements on
+Horizon GB200 GPUs; the unconstrained register allocation was slower than the
+separate kernels. Performance depends on the GPU and compiler, so retain the
+reference switch for comparisons on other systems.
+
+Set `HERCULES_BKT2_FUSED=0` in the launch environment to compare with the old
+two-kernel BKT2 path. `HERCULES_FORCE_GENERIC_DAMPING=1` overrides both optimized
+paths. The setup log reports actual fused/fallback ranks and element slots.
+For the fused path, `Force damping local wait only` includes convolution and
+cube force plus any VT force; `Force damping conv wait only` covers only the
+remaining legacy convolution subset. Compare total solver time or a GPU
+profiler's combined force region, not individual timer names between paths.
+Host wait timers are not isolated kernel timings, and per-rank maxima are not
+additive. Atomic nodal accumulation can change floating-point summation order,
+so full waveform comparisons require a precision-appropriate tolerance rather
+than a universal bitwise-identity claim.
+
+Horizon GB200 validation (CUDA 13.2, NVIDIA HPC SDK 26.5): an isolated CUDA
+regression compared the unchanged two kernels with the fused kernel over 128
+steps and 263 independently assembled elements. Forces and saved transformed
+vectors matched bitwise in both double- and single-precision builds, including
+different shear/bulk weights, inactive sectors, bulk-only history, interface
+projection flags and PML skips. A 2,097,152-element shared-node assembly check
+had a peak-scaled force difference of `3.12e-16` in double precision.
+
+For that larger synthetic assembly with both sectors active, no CPML/VT and
+station-vector stores disabled, four alternating 1,000-step CUDA-event timing
+pairs after warm-up gave median combined damping times of `1.110192 ms`
+(separate kernels) and `0.854177 ms` (fused): **1.30x faster**, or 23.1% less
+damping-kernel time. This is a kernel benchmark, not a full-solver or Izmir
+speedup. It does not establish production-scale waveform accuracy or stability.
+
+The small-solver regression comprised 31 ASCII-output runs and 12 float64
+binary-displacement runs against the unmodified `2e1492a` executable, including
+the updated executable's reference mode. Cases used one or four GPU/MPI ranks,
+heterogeneous Q, shear-only/bulk-only/infinite-Q sectors, acoustic--elastic
+coupling, CPML, VT cut cells and decimated strain/stress output. The final host
+backend check exercises the retained reference kernels. Maximum errors scaled
+by each station/field group's peak were `7.51e-7` for ASCII outputs (acceptance
+limit `2e-6`, accounting for the text precision) and `1.72e-13` for binary
+displacements (limit `1e-10`). Undefined solid-station pressure retained its
+documented `nan` marker; finite physical fields were checked separately.
+
+Single-pass small-solver reference/fused time ratios ranged from `0.917` to
+`1.039`, including slower VT timing. These runs show no consistent end-to-end
+speedup; use a matched production benchmark before assigning an Izmir speedup.
+The local-only harness and retained results are under
+`.local-diagnostics/bkt2-shared-fused-20261007/` (unavailable in a clean checkout).
+The corresponding Horizon directory is
+`/scratch/08458/wz_tacc/hercules/bkt2-shared-fused-20261007/`; jobs 50973 and 51046
+contain the final CUDA-kernel checks and final guarded solver comparisons,
+respectively. The latter solver source includes the independent acoustic
+receiver-halo ordering fix from `5fd3d7e`.
 
 ### VT and BKT operator history
 

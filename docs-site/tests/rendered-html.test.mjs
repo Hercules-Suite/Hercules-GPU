@@ -535,6 +535,12 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /type_of_damping = rayleigh/);
   assert.match(physics, /type_of_damping = mass/);
   assert.match(physics, /type_of_damping = bkt2/);
+  assert.match(physics, /BKT2 GPU execution and comparison/);
+  assert.match(physics, /Host-staged execution retains the reference kernels/);
+  assert.match(physics, /HERCULES_BKT2_FUSED=0/);
+  assert.match(physics, /HERCULES_FORCE_GENERIC_DAMPING=1 takes precedence/);
+  assert.match(physics, /not allocated GPU memory/);
+  assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
   assert.match(physics, /Baseline CPML example/);
   assert.match(physics, /cpml_reflection_target = 1\.0e-3/);

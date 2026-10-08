@@ -901,6 +901,17 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "simulation_velocity_profile_freq_hz must not exceed simulation_wave_max_freq_hz. Change bkt2 to bkt, bkt3, or bkt3f only when that formulation has been validated for the case.",
       },
       {
+        id: "damping-bkt2-gpu",
+        title: "BKT2 GPU execution and comparison",
+        paragraphs: [
+          "BKT2 uses a fused convolution and force kernel for cube elements with device-resident force and displacement synchronization when an initialization scan confirms uniform, matching shear and bulk relaxation rates. Host-staged execution retains the reference kernels because its initial fused comparison exceeded the waveform tolerance. The two sectors share displacement histories while retaining their distinct Q-dependent weights. The equations, timestep and precision are unchanged. VT cut cells retain the existing tetrahedral path, CPML remains elastic, and other BKT variants or nonmatching spectra retain the previous kernels.",
+          "HERCULES_BKT2_FUSED defaults to 1. Set it to 0 in the launch environment to retain the previous separate BKT2 convolution and force kernels. HERCULES_FORCE_GENERIC_DAMPING=1 takes precedence and selects the generic reference. The setup log reports the selected paths. Station stress vectors are saved every step when requested, including with decimated station output. Buffer allocations are retained; the optimization reduces memory traffic, not allocated GPU memory.",
+          "Compare total solver time with identical inputs and MPI/GPU settings. The fused work appears in Force damping local wait only; the convolution timer covers only the remaining legacy subset. These host wait timers are not isolated GPU kernel timings. Atomic force accumulation may change roundoff, so compare waveforms with a precision-appropriate tolerance. Small-case equivalence or timing does not establish a production Izmir speedup.",
+        ],
+        codeLabel: "Launch environment — use separate output directories for each run",
+        code: "# Default optimized BKT2\nexport HERCULES_BKT2_FUSED=1\n\n# Reference run with the same parameters.in and executable\n# export HERCULES_BKT2_FUSED=0",
+      },
+      {
         id: "damping-bkt-parametric-q",
         title: "BKT-family example with parametric Q",
         paragraphs: [

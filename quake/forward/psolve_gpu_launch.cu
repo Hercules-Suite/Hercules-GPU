@@ -853,6 +853,8 @@ static char* kernel_handle(psolve_gpu_kernel_id_t kernel) {
       return (char*)kernelStiffnessCalcLocal;
     case PSOLVE_GPU_KERNEL_DAMPING_BKT2:
       return (char*)kernelDampingCalcConvBkt2;
+    case PSOLVE_GPU_KERNEL_DAMPING_BKT2_FUSED:
+      return (char*)kernelDampingBkt2Fused;
     case PSOLVE_GPU_KERNEL_DAMPING_BKT3:
       return (char*)kernelDampingCalcConvBkt3;
     case PSOLVE_GPU_KERNEL_DAMPING_GENERIC:
@@ -1078,6 +1080,17 @@ void psolve_launch_damping_generic(
   kernelDampingCalcConv<<<grid, block, shared, stream>>>(
       lenum, numcomp, gpuData, rmax, dampingType, elementCount,
       elementMapper);
+}
+
+void psolve_launch_damping_bkt2_fused(
+    int grid, int block, cudaStream_t stream, int32_t lenum,
+    gpu_data_t* gpuData, double rmax,
+    double coef1, double coef2, double expCoef0,
+    double coef3, double coef4, double expCoef1,
+    int32_t elementCount, const int32_t* elementMapper, int saveVectors) {
+  kernelDampingBkt2Fused<<<grid, block, 0, stream>>>(
+      lenum, gpuData, rmax, coef1, coef2, expCoef0, coef3, coef4,
+      expCoef1, elementCount, elementMapper, saveVectors);
 }
 
 void psolve_launch_damping_force(
