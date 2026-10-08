@@ -2084,6 +2084,125 @@ static void acoustic_sanitize_element(edata_t* edata) {
   acoustic_zero_damping(edata);
 }
 
+/* Setup-only checks. No extra material queries or element traversal. */
+typedef struct attenuation_check_t {
+  int64_t checked;
+  int64_t invalid;
+  char first_error[1024];
+} attenuation_check_t;
+
+static const char* attenuation_bulk_quality(double Qs, double Qp, double L,
+                                            int infinite_bulk, double* Qk) {
+  *Qk = NAN;
+  if (!isfinite(Qs) || Qs <= 0.0 || !isfinite(Qp) || Qp <= 0.0)
+    return "solid Qs and Qp must be finite and positive";
+  if (!isfinite(L) || L < 0.0 || L >= 1.0)
+    return "Vp/Vs gives nonpositive or nonfinite bulk modulus";
+  if (infinite_bulk) {
+    *Qk = 1000.0;
+    return NULL;
+  }
+  const double p_loss = 1.0 / Qp;
+  const double s_loss = L / Qs;
+  const double denominator = p_loss - s_loss;
+  if (!isfinite(p_loss) || !isfinite(s_loss))
+    return "bulk inverse-Q calculation overflowed";
+  /* Material payloads and stored velocities are single precision. Allow
+   * their roundoff when a supplied Qp represents lossless bulk. */
+  const double tolerance = 8.0 * FLT_EPSILON * fmax(p_loss, s_loss);
+  if (denominator < -tolerance)
+    return "Qp, Qs and Vp/Vs imply negative bulk attenuation";
+  /* Exact cancellation (or only roundoff) means lossless bulk. Preserve the
+   * existing high-Q cutoff rather than divide by zero or evaluate pow(-Q). */
+  if (denominator <= tolerance) {
+    *Qk = 1000.0;
+  } else {
+    *Qk = (1.0 - L) / denominator;
+    if (isinf(*Qk)) *Qk = 1000.0; /* positive high-Q overflow is lossless */
+  }
+  return (*Qk > 0.0 && isfinite(*Qk)) ? NULL : "invalid bulk quality factor";
+}
+
+static int attenuation_bkt2_branch_valid(double a0, double a1, double g0,
+                                         double g1, double b) {
+  return isfinite(a0) && a0 >= 0.0 && isfinite(a1) && a1 >= 0.0 &&
+         isfinite(g0) && g0 >= 0.0 && isfinite(g1) && g1 >= 0.0 &&
+         isfinite(b) && b >= 0.0 &&
+         (a0 == 0.0 || g0 > 0.0) && (a1 == 0.0 || g1 > 0.0) &&
+         1.0 - a0 - a1 > 0.0;
+}
+
+static const char* attenuation_bkt2_error(const edata_t* edata) {
+  if (!isfinite(edata->Vp) || edata->Vp <= 0.0f ||
+      !isfinite(edata->Vs) || edata->Vs <= 0.0f ||
+      !isfinite(edata->rho) || edata->rho <= 0.0f ||
+      (double)edata->Vp * edata->Vp <= (4.0 / 3.0) * edata->Vs * edata->Vs)
+    return "invalid BKT2 solid velocities, density or bulk modulus";
+  if (!attenuation_bkt2_branch_valid(edata->a0_shear, edata->a1_shear,
+                                     edata->g0_shear, edata->g1_shear,
+                                     edata->b_shear))
+    return "invalid BKT2 shear coefficients or nonpositive relaxed stiffness";
+  if (!attenuation_bkt2_branch_valid(edata->a0_kappa, edata->a1_kappa,
+                                     edata->g0_kappa, edata->g1_kappa,
+                                     edata->b_kappa))
+    return "invalid BKT2 bulk coefficients or nonpositive relaxed stiffness";
+  return NULL;
+}
+
+static void attenuation_record_error(attenuation_check_t* check,
+                                      int32_t eindex, const char* reason,
+                                      double Qs, double Qp, double Qk,
+                                      int have_coefficients = 0) {
+  ++check->invalid;
+  if (check->first_error[0] != '\0') return;
+  const elem_t* elem = &Global.myMesh->elemTable[eindex];
+  const edata_t* ed = (const edata_t*)elem->data;
+  const node_t* node = &Global.myMesh->nodeTable[elem->lnid[0]];
+  const double half_h = 0.5 * ed->edgesize;
+  snprintf(check->first_error, sizeof(check->first_error),
+           "%s; rank=%d local_element=%d center_XYZ_m=(%.12g,%.12g,%.12g) "
+           "h_m=%.12g Vp=%.12g Vs=%.12g rho=%.12g "
+           "Qs=%.12g Qp=%.12g Qk=%.12g "
+           "BKT2_a_shear=(%.9g,%.9g) BKT2_a_bulk=(%.9g,%.9g)",
+           reason, Global.myID, eindex,
+           node->x * Global.myMesh->ticksize + Global.theXForMeshOrigin + half_h,
+           node->y * Global.myMesh->ticksize + Global.theYForMeshOrigin + half_h,
+           node->z * Global.myMesh->ticksize + Global.theZForMeshOrigin + half_h,
+           (double)ed->edgesize, (double)ed->Vp, (double)ed->Vs, (double)ed->rho,
+           Qs, Qp, Qk,
+           have_coefficients ? (double)ed->a0_shear : NAN,
+           have_coefficients ? (double)ed->a1_shear : NAN,
+           have_coefficients ? (double)ed->a0_kappa : NAN,
+           have_coefficients ? (double)ed->a1_kappa : NAN);
+}
+
+static void attenuation_finish_check(attenuation_check_t* check,
+                                      const char* stage) {
+  int64_t local[2] = {check->checked, check->invalid}, global[2];
+  MPI_Allreduce(local, global, 2, MPI_INT64_T, MPI_SUM, comm_solver);
+  if (Global.myID == 0) {
+    monitor_print("Attenuation validation (%s): %" PRId64
+                  " solid elements checked, %" PRId64 " invalid\n",
+                  stage, global[0], global[1]);
+  }
+  if (global[1] == 0) return;
+  int owner = check->invalid ? Global.myID : INT_MAX, first_owner;
+  MPI_Allreduce(&owner, &first_owner, 1, MPI_INT, MPI_MIN, comm_solver);
+  MPI_Bcast(check->first_error, sizeof(check->first_error), MPI_CHAR,
+            first_owner, comm_solver);
+  if (Global.myID == 0) {
+    fprintf(stderr, "Invalid attenuation during %s: %s\n"
+                    "Correct the solid Q model and regenerate the mesh. "
+                    "No Q clipping or timestep adjustment was applied.\n",
+            stage, check->first_error);
+    fflush(stderr);
+  }
+  /* Only on failure: ensure the bounded diagnostic is printed before abort. */
+  MPI_Barrier(comm_solver);
+  MPI_Abort(comm_solver, ERROR);
+  exit(1);
+}
+
 static int acoustic_has_damping(const edata_t* edata) {
   return (edata != NULL) &&
          ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f) ||
@@ -10545,6 +10664,9 @@ static void damping_statistics(double min_xi, double max_xi, double min_zeta,
  */
 static void solver_set_critical_T() {
   int32_t eindex; /* element index */
+  attenuation_check_t imported_attenuation = {};
+  const int check_imported_bkt2 =
+      Param.theMeshInputMode != 0 && Param.theTypeOfDamping == BKT2;
 
   double min_h_over_Vp = 1e32; /* the min h/Vp group */
   double min_h_over_Vp_global;
@@ -10601,6 +10723,19 @@ static void solver_set_critical_T() {
 
     elemp = &Global.myMesh->elemTable[eindex];
     edata = (edata_t*)elemp->data;
+
+    /* Persisted meshes bypass material correction. Reuse this existing
+     * setup traversal to validate their stored BKT2 coefficients too. */
+    if (check_imported_bkt2 && edata->Vp > 0.0f &&
+        !element_is_acoustic(edata)) {
+      ++imported_attenuation.checked;
+      const char* error = attenuation_bkt2_error(edata);
+      if (error != NULL) {
+        attenuation_record_error(&imported_attenuation, eindex, error,
+                                  NAN, NAN, NAN, 1);
+        continue;
+      }
+    }
 
     /* Calculate the clue quantities */
 
@@ -10715,6 +10850,9 @@ static void solver_set_critical_T() {
     }
 
   } /* End of the loop over the mesh elements */
+
+  if (check_imported_bkt2)
+    attenuation_finish_check(&imported_attenuation, "imported BKT2 coefficients");
 
   /* Reducing to global values */
   MPI_Reduce(&min_h_over_Vp, &min_h_over_Vp_global, 1, MPI_DOUBLE, MPI_MIN, 0,
@@ -28362,6 +28500,7 @@ static void mesh_correct_properties(etree_t* cvm) {
   int32_t lnid0;
   int64_t acoustic_elements = 0;
   int64_t mixed_elements = 0;
+  attenuation_check_t attenuation = {};
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
@@ -28669,6 +28808,7 @@ static void mesh_correct_properties(etree_t* cvm) {
      * Definition of BTK-Family Damping parameters
      */
     if (Param.theTypeOfDamping >= BKT) {
+      ++attenuation.checked;
       double vs_vp_Ratio, vksquared;
       double vs_kms = edata->Vs * 0.001; /* Vs in km/s */
       const int use_material_quality_factors =
@@ -28718,10 +28858,18 @@ static void mesh_correct_properties(etree_t* cvm) {
       // edata->Qs = Qs;  // update Qs and Qp
       // edata->Qp = Qp;
 
-      if (Param.useInfQk == YES) {
-        Qk = 1000;
-      } else {
-        Qk = (1. - L) / (1. / Qp - L / Qs);
+      const char* attenuation_error = attenuation_bulk_quality(
+          Qs, Qp, L, Param.useInfQk == YES, &Qk);
+      if (!isfinite(edata->Vs) || edata->Vs <= 0.0f ||
+          !isfinite(edata->Vp) || edata->Vp <= 0.0f ||
+          !isfinite(edata->rho) || edata->rho <= 0.0f ||
+          !isfinite(Param.theFreq) || Param.theFreq <= 0.0) {
+        attenuation_error = "solid velocities, density and frequency must be finite and positive";
+      }
+      if (attenuation_error != NULL) {
+        attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                  Qs, Qp, Qk);
+        continue; /* Do not evaluate fractional powers of invalid Q. */
       }
 
       if (Param.theTypeOfDamping == BKT) {
@@ -28951,6 +29099,15 @@ static void mesh_correct_properties(etree_t* cvm) {
                      Param.theTypeOfDamping);
       }
 
+      if (Param.theTypeOfDamping == BKT2) {
+        attenuation_error = attenuation_bkt2_error(edata);
+        if (attenuation_error != NULL) {
+          attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                    Qs, Qp, Qk, 1);
+          continue;
+        }
+      }
+
       /*
        * Phase velocity adjustment
        */
@@ -29010,9 +29167,18 @@ static void mesh_correct_properties(etree_t* cvm) {
         edata->Vp =
             sqrt(kappa_vel_corr_factor * kappa_vel_corr_factor * vksquared +
                  4. / 3. * edata->Vs * edata->Vs);
+        if (Param.theTypeOfDamping == BKT2) {
+          attenuation_error = attenuation_bkt2_error(edata);
+          if (attenuation_error != NULL)
+            attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                      Qs, Qp, Qk, 1);
+        }
       }
     }
   }
+
+  if (Param.theTypeOfDamping >= BKT)
+    attenuation_finish_check(&attenuation, "material assignment");
 
   if (Param.includeAcoustic == YES) {
     int64_t local_counts[2];

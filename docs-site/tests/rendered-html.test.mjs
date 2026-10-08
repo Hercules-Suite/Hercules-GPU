@@ -535,6 +535,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /type_of_damping = rayleigh/);
   assert.match(physics, /type_of_damping = mass/);
   assert.match(physics, /type_of_damping = bkt2/);
+  assert.match(physics, /BKT setup rejects nonfinite or nonpositive solid Q/);
+  assert.match(physics, /positive relaxed stiffness/);
+  assert.match(physics, /no material queries, mesh refinement, extra full mesh traversal, or time-step work/);
+  assert.match(physics, /Imported BKT2 meshes have their stored coefficients checked/);
   assert.match(physics, /BKT2 GPU execution and comparison/);
   assert.match(physics, /Host-staged execution retains the reference kernels/);
   assert.match(physics, /HERCULES_BKT2_FUSED=0/);
@@ -1793,6 +1797,10 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /qs\.in and qp\.in/);
   assert.match(html, /rho\.in.*qs\.in.*qp\.in.*index\.in/s);
   assert.match(html, /provide qs\.in and qp\.in as a matched pair/i);
+  assert.match(html, /Solid-only interpolation excludes water placeholders/);
+  assert.match(html, /Supplied Q is independent of the Vs minimum/);
+  assert.match(html, /10% solid Qs=40 plus 90% water Qs=0 gives solid Qs=40/);
+  assert.match(html, /Acoustic placeholders may be zero, but must be finite and nonnegative/);
   assert.match(html, /CSV is only a preparation format|CSV directly/);
   assert.match(html, /profile_id = j \* nx \+ i/);
   assert.match(html, /y as the outer loop and x as the inner loop/i);
