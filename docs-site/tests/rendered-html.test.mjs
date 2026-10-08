@@ -350,6 +350,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
     solver.indexOf('strcpy(Param.theCheckPointingDirOut'),
   );
   assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
+  assert.doesNotMatch(interfaceGuard, /Param\.theAcousticVelocityPotential/);
+  assert.match(interfaceGuard, /Param\.acousticPressureFormulation != YES/);
+  assert.match(reference, /Both alternatives require include_acoustic=yes, acoustic_interface_coupling=yes, pressure or velocity_potential, and full Hex8 solids/);
   assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
   assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
@@ -410,6 +413,8 @@ test("explains experimental constraints, remeshing and CPML limitations", async 
   assert.match(html, /exponential growth with CPML/);
   assert.match(html, /not a prescribed uniform-width refinement band/);
   assert.match(html, /Field-specific constraints also support FEM topography/);
+  assert.match(html, /acoustic_formulation=pressure or velocity_potential/);
+  assert.match(html, /Pressure mode couples solid normal acceleration/);
   assert.match(html, /Unresolved remote neighbors still abort/);
   assert.match(html, /VT cut-tetrahedron topography remains unsupported/);
 });
@@ -535,6 +540,10 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /type_of_damping = rayleigh/);
   assert.match(physics, /type_of_damping = mass/);
   assert.match(physics, /type_of_damping = bkt2/);
+  assert.match(physics, /BKT setup rejects nonfinite or nonpositive solid Q/);
+  assert.match(physics, /positive relaxed stiffness/);
+  assert.match(physics, /no material queries, mesh refinement, extra full mesh traversal, or time-step work/);
+  assert.match(physics, /Imported BKT2 meshes have their stored coefficients checked/);
   assert.match(physics, /BKT2 GPU execution and comparison/);
   assert.match(physics, /Host-staged execution retains the reference kernels/);
   assert.match(physics, /HERCULES_BKT2_FUSED=0/);
@@ -1797,6 +1806,10 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /qs\.in and qp\.in/);
   assert.match(html, /rho\.in.*qs\.in.*qp\.in.*index\.in/s);
   assert.match(html, /provide qs\.in and qp\.in as a matched pair/i);
+  assert.match(html, /Solid-only interpolation excludes water placeholders/);
+  assert.match(html, /Supplied Q is independent of the Vs minimum/);
+  assert.match(html, /10% solid Qs=40 plus 90% water Qs=0 gives solid Qs=40/);
+  assert.match(html, /Acoustic placeholders may be zero, but must be finite and nonnegative/);
   assert.match(html, /CSV is only a preparation format|CSV directly/);
   assert.match(html, /profile_id = j \* nx \+ i/);
   assert.match(html, /y as the outer loop and x as the inner loop/i);

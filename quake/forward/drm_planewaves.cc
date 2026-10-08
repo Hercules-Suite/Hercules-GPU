@@ -1861,8 +1861,32 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     zi_vp = N1 * zd_vp[0] + N2 * zd_vp[1] + N3 * zd_vp[2] + N4 * zd_vp[3];
     zi_rho = N1 * zd_rho[0] + N2 * zd_rho[1] + N3 * zd_rho[2] + N4 * zd_rho[3];
     if (Params_soil.hasQualityFactors) {
-        zi_qs = N1 * zd_qs[0] + N2 * zd_qs[1] + N3 * zd_qs[2] + N4 * zd_qs[3];
-        zi_qp = N1 * zd_qp[0] + N2 * zd_qp[1] + N3 * zd_qp[2] + N4 * zd_qp[3];
+        /* Q belongs to the solid phase. Water's zero placeholders must not
+         * dilute solid Q before the queried Vs is raised to the Vs minimum.
+         * Keep the established arithmetic for an entirely solid stencil. */
+        if (zd_vs[0] > ACOUSTIC_VS_EPS && zd_vs[1] > ACOUSTIC_VS_EPS &&
+            zd_vs[2] > ACOUSTIC_VS_EPS && zd_vs[3] > ACOUSTIC_VS_EPS) {
+            zi_qs = N1 * zd_qs[0] + N2 * zd_qs[1] + N3 * zd_qs[2] + N4 * zd_qs[3];
+            zi_qp = N1 * zd_qp[0] + N2 * zd_qp[1] + N3 * zd_qp[2] + N4 * zd_qp[3];
+        } else {
+            const double weights[4] = {N1, N2, N3, N4};
+            double solid_weight = 0.0;
+            zi_qs = zi_qp = 0.0;
+            for (i = 0; i < 4; ++i) {
+                if (zd_vs[i] > ACOUSTIC_VS_EPS && weights[i] > 0.0) {
+                    solid_weight += weights[i];
+                    zi_qs += weights[i] * zd_qs[i];
+                    zi_qp += weights[i] * zd_qp[i];
+                }
+            }
+            if (solid_weight > 0.0) {
+                zi_qs /= solid_weight;
+                zi_qp /= solid_weight;
+            }
+            /* An all-water query retains zero Q and bypasses solid BKT
+             * damping. Geometry, velocity and density interpolation are
+             * deliberately unchanged. */
+        }
     }
 
     output[0] = zi_vs;
@@ -1878,34 +1902,61 @@ int general3DVelocityModel_hasQualityFactors(void) {
     return Params_soil.hasQualityFactors;
 }
 
-void loadDoubleArrayDynamically(const char *filename, double **numbers, int *count) {
+static int loadDoubleArrayDynamically(const char *filename, double **numbers,
+                                     int *count, int expected_count = -1,
+                                     const double *quality_vs = NULL) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         fprintf(stderr, "Error opening file %s\n", filename);
-        exit(1);
+        return -1;
     }
     // Read the count of numbers
-    if (fscanf(file, "%d", count) != 1) {
-        fprintf(stderr, "Error reading the count from the file %s.\n", filename);
+    if (fscanf(file, "%d", count) != 1 || *count <= 0 ||
+        (expected_count >= 0 && *count != expected_count)) {
+        if (expected_count < 0)
+            fprintf(stderr, "Invalid material count in %s; expected a positive integer.\n",
+                    filename);
+        else
+            fprintf(stderr, "Invalid material count in %s; expected %d values.\n",
+                    filename, expected_count);
         fclose(file);
-        exit(1);
+        return -1;
     }
     // Allocate memory dynamically based on the count
-    *numbers = (double *)malloc(*count * sizeof(double));
+    *numbers = (double *)malloc((size_t)*count * sizeof(double));
     if (*numbers == NULL) {
         perror("Memory allocation error");
         fclose(file);
-        exit(1);
+        return -1;
     }
     // Read and store each number
     for (int i = 0; i < *count; i++) {
         if (fscanf(file, "%lf", &(*numbers)[i]) != 1) {
             fprintf(stderr, "Error reading number at index %d.\n", i);
             fclose(file);
-            exit(1);
+            free(*numbers);
+            *numbers = NULL;
+            return -1;
+        }
+        if (quality_vs != NULL) {
+            const double q = (*numbers)[i];
+            const double vs = quality_vs[i];
+            if (!isfinite(vs) || vs < 0.0 || !isfinite(q) || q < 0.0 ||
+                (vs > ACOUSTIC_VS_EPS && q == 0.0)) {
+                fprintf(stderr,
+                        "Invalid quality factor in %s at sample %d "
+                        "(zero-based): Vs=%.17g, Q=%.17g. Solid Q must be "
+                        "finite and positive; acoustic placeholders may be zero.\n",
+                        filename, i, vs, q);
+                fclose(file);
+                free(*numbers);
+                *numbers = NULL;
+                return -1;
+            }
         }
     }
     fclose(file);
+    return 0;
 }
 
 void loadIntArrayDynamically(const char *filename, int **numbers, int *count) {
@@ -1953,19 +2004,11 @@ static int optionalMaterialFileStatus(const char *filename) {
 }
 
 static int load3DMaterialProperty(const char *filename, double **values,
-                                  int expected_count) {
+                                  int expected_count,
+                                  const double *quality_vs = NULL) {
     int count = 0;
-    loadDoubleArrayDynamically(filename, values, &count);
-    if (count != expected_count) {
-        fprintf(stderr,
-                "3D material file %s contains %d values; expected %d to "
-                "match z.in\n",
-                filename, count, expected_count);
-        free(*values);
-        *values = NULL;
-        return -1;
-    }
-    return 0;
+    return loadDoubleArrayDynamically(filename, values, &count,
+                                      expected_count, quality_vs);
 }
 
 int32_t
@@ -1999,9 +2042,11 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     Params_soil.hasQualityFactors = qs_status;
     /* Load the data from the files */
     loadIntArrayDynamically(layerID_file, &Layer_start_ID, &Params_soil.numLayerID);
-    loadDoubleArrayDynamically(x_file, &Soil_point_x, &Params_soil.numPointX);
-    loadDoubleArrayDynamically(y_file, &Soil_point_y, &Params_soil.numPointY);
-    loadDoubleArrayDynamically(z_file, &Soil_point_z, &Params_soil.numData);
+    if (loadDoubleArrayDynamically(x_file, &Soil_point_x, &Params_soil.numPointX) != 0 ||
+        loadDoubleArrayDynamically(y_file, &Soil_point_y, &Params_soil.numPointY) != 0 ||
+        loadDoubleArrayDynamically(z_file, &Soil_point_z, &Params_soil.numData) != 0) {
+        return -1;
+    }
     Params_soil.minPointZ = min(Soil_point_z, Params_soil.numData);
     Params_soil.maxPointZ = max(Soil_point_z, Params_soil.numData);
     if ((load3DMaterialProperty(soilVs_file, &Soil_Vs_data,
@@ -2014,9 +2059,9 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     }
     if (Params_soil.hasQualityFactors &&
         ((load3DMaterialProperty(soilQs_file, &Soil_Qs_data,
-                                 Params_soil.numData) != 0) ||
+                                 Params_soil.numData, Soil_Vs_data) != 0) ||
          (load3DMaterialProperty(soilQp_file, &Soil_Qp_data,
-                                 Params_soil.numData) != 0))) {
+                                 Params_soil.numData, Soil_Vs_data) != 0))) {
         return -1;
     }
     return 0;
@@ -2096,7 +2141,8 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     if (myID == 0) {
         fprintf(stderr, "3D velocity model quality factors: %s\n",
                 Params_soil.hasQualityFactors
-                    ? "interpolated from qs.in and qp.in"
+                    ? "solid-only interpolation from qs.in and qp.in; "
+                      "supplied Q is independent of the Vs minimum"
                     : "legacy Qs=0.1*Vs and Qp=2*Qs (qs.in/qp.in absent)");
     }
 

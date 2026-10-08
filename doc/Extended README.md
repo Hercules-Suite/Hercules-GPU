@@ -1144,9 +1144,10 @@ Notes:
 	scalar acoustic formulations build an explicit acoustic-solid interface table. In octree
 	meshes, nonconforming interface faces are split into area-weighted fragments
 	with fragment centers and normals, and CUDA kernels apply the normal
-	traction/acceleration coupling only on those fragments. Each fragment
-	interpolates the scalar acoustic field on the acoustic element and
-	displacement acceleration on the adjacent elastic element, so refined elastic
+	traction and normal-motion coupling only on those fragments. Each fragment
+	interpolates the scalar acoustic field on the acoustic element and solid
+	normal acceleration (`pressure`) or velocity (`velocity_potential`) on the
+	adjacent solid element, so refined solid
 	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
 	`acoustic_interface_max_level` and finer neighboring leaves, including
 	remote leaves resolved on their MPI owner. The table uses the owner's
@@ -1332,8 +1333,44 @@ existing solver behavior. It does not change `acoustic_interface_projection`
 | `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
 | `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
 
+Both alternatives accept either scalar acoustic formulation. In `pressure`
+mode the interface applies pressure traction to the solid and solid normal
+acceleration to the acoustic equation. In `velocity_potential` mode it obtains
+traction from the potential time difference and drives the acoustic equation
+with solid normal velocity. The field constraints and matching rules are the
+same for both. Selecting pressure does not remove the need to check time-step,
+mesh and interface accuracy; it does not change what `acoustic_station_gradient`
+affects (station motion, not the pressure column). Velocity potential remains
+the default.
+
+Pressure-formulation validation (2026-10-08 UTC): a local 58-run CUDA/MPI
+comparison exercised all three methods. Fourteen 110 s flat-water runs covered
+coarse/fine meshes, both formulations and two half-time-step pressure controls.
+Forty 4 s source-excited checks covered `point`/`face_mass`, gravity, finer water,
+buildings combined with synthetic `vonMises_ep` nonlinear elastoplastic and
+BrickUP open-pore coupling, one/eight ranks, both MPI backends and existing
+pressure controls. Four 6 s real-terrain Izmir crop runs checked field-specific
+FEM topography with gravity, eight/sixteen ranks and both backends. Matched
+MPI/backend/formulation comparisons agreed below $10^{-6}$ aggregate relative
+L2 in motion and acoustic pressure; available pore-pressure, strain, stress and
+nonlinear station-state columns were also checked. Undefined elastic pressure
+NaNs were excluded, not other output components.
+
+Against the independent source-matched CPS reference, median submerged-receiver
+pressure errors over $10 \le t < 100$ s were about 18.38% on the coarse mesh and
+8.34% on the fine mesh for both newly enabled methods and both formulations.
+Halving the coarse time step from 0.005 to 0.0025 s changed pressure error to
+about 18.40%; changing the evolved variable did not improve pressure accuracy
+in these zero-initialized tests. No simulated response was filtered, fitted or
+shifted; the benchmark's prescribed source filter was retained. These local-only
+fixtures are unavailable in a clean checkout. Gravity/module/topography checks
+establish implementation consistency within the stated durations, not
+independent gravity-wave accuracy, calibrated constitutive response, or
+full-duration Izmir stability. Existing geometric restrictions below still apply.
+
 The two alternatives require `include_acoustic=yes`,
-`acoustic_interface_coupling=yes`, `acoustic_formulation=velocity_potential`,
+`acoustic_interface_coupling=yes`, `acoustic_formulation=pressure` or
+`acoustic_formulation=velocity_potential`,
 and full Hex8 solids. Both alternatives accept `include_buildings=yes`,
 `include_nonlinear_analysis=yes` and `include_poroelastic=yes`, separately or
 together, subject to the existing restrictions of those modules. Nonlinear
@@ -1655,16 +1692,69 @@ in `quake/forward/psolve.cc`.
 	Each file uses the same count-prefixed layout, contains one value for every
 	entry in `z.in`, and follows the same `index.in` column/layer ordering.
 	Hercules selects the same vertical layer at each of the four surrounding
-	horizontal columns and interpolates `Qs` and `Qp` with the same shape
-	functions used for `Vs`, `Vp`, and density. With parametric Q disabled,
+	horizontal columns. For `Qs` and `Qp`, it excludes acoustic samples
+	(`Vs <= 1e-6 m/s`) and renormalizes the remaining bilinear weights. An
+	entirely solid stencil retains the previous interpolation arithmetic;
+	an all-water query returns zero solid Q. Velocity, density, topography,
+	and acoustic/solid classification are unchanged. With parametric Q disabled,
 	the BKT-family damping setup uses these interpolated values independently
 	of the fallback `cvmdb_input_file` mode.
 - `qs.in` and `qp.in` must either both be present or both be absent, and their
-	value counts must match `z.in`. If both are absent, Hercules preserves the
+	value counts must match `z.in`. Each solid sample must have finite,
+	positive Qs and Qp. Acoustic placeholders may be zero but must be finite
+	and nonnegative. These checks run as the files are read, even if solid
+	attenuation is disabled. If both files are absent, Hercules preserves the
 	legacy behavior `Qs = 0.1*Vs` and `Qp = 2*Qs`. If only one is present or a
-	count differs, initialization stops with an explicit error. Because Q values
-	are stored in element material data, regenerate or re-correct the mesh after
-	adding or changing these files.
+	count differs, initialization stops with an explicit error.
+- Raising a queried solid Vs to `simulation_shear_velocity_min` does **not**
+	rescale explicitly supplied Qs or Qp. For example, `Vs=80 m/s`, `Qs=16`,
+	and `Qp=32` retain Qs=16 and Qp=32 if Vs is raised to 120 m/s. Update the
+	Q model explicitly if a velocity-dependent Q law is intended for the
+	modified velocities. The optional parametric-Q path remains separate.
+
+For either supplied Q, the mixed-stencil rule is
+
+```math
+Q_{\mathrm{solid}} = \frac{\sum_{i\in S} N_i Q_i}{\sum_{i\in S} N_i},
+\qquad S=\{i:V_{s,i}>10^{-6}\ \mathrm{m/s},\ N_i>0\}.
+```
+
+For example, 10% weight on solid Qs=40 and 90% on water Qs=0 gives
+solid Qs=40, not 4. This prevents water placeholders from introducing
+artificially strong solid attenuation; it does not change the velocity mixture.
+
+#### Setup-time attenuation validation
+
+During the existing material-assignment loop, BKT-family setup requires finite,
+positive solid Qs/Qp, velocities, density, and reference frequency, with a
+positive bulk modulus. Unless `use_infinite_qk=yes`, it derives
+
+```math
+L=\frac{4V_s^2}{3V_p^2},\qquad
+Q_\kappa=\frac{1-L}{1/Q_p-L/Q_s}.
+```
+
+A negative denominator beyond floating-point roundoff is rejected. Zero
+inverse bulk Q, including cancellation within roundoff, selects the existing
+lossless-bulk limit. `use_infinite_qk=yes` deliberately suppresses bulk
+attenuation, while still requiring valid solid Q inputs.
+
+BKT2 additionally requires finite, nonnegative stored coefficients and positive
+relaxed stiffness, `1-a0-a1 > 0`, in both shear and bulk branches. Active
+relaxation mechanisms must have positive rates. Invalid values stop setup with
+a global invalid-element count and one example giving rank, element center,
+material values and Q values; Q is not silently clipped and the timestep is not
+changed. These are admissibility checks, not a guarantee of stability for an
+arbitrary timestep or model.
+
+The checks reuse values already read or computed: no additional material
+queries, mesh refinement, full mesh traversal, or time-step checks. Successful
+material validation adds one small MPI reduction per material-assignment call.
+Imported BKT2 meshes have their stored coefficients checked during the existing
+critical-timestep traversal. They do not retain the original Q inputs, so that
+diagnostic reports unavailable Q values as NaN. Regenerate a persisted mesh to
+apply this corrected interpolation, or after changing Q files; a coefficient
+check cannot repair an older, admissible but incorrectly interpolated Q model.
 
 ## Poroelastic U-P formulation
 
