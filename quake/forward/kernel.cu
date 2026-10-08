@@ -3317,7 +3317,9 @@ __global__ void kernelAcousticStationInterpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput)
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights)
 {
     const int32_t station = blockIdx.x * blockDim.x + threadIdx.x;
     if (station >= stationCount) return;
@@ -3350,6 +3352,19 @@ __global__ void kernelAcousticStationInterpolate(
         gradX += sx[corner] * oneY * oneZ * inv4h * value;
         gradY += sy[corner] * oneX * oneZ * inv4h * value;
         gradZ += sz[corner] * oneX * oneY * inv4h * value;
+    }
+
+    if (gradientOffsets != NULL && gradientOffsets[station+1] > gradientOffsets[station]) {
+        gradX = gradY = gradZ = 0.0;
+        for (int k = gradientOffsets[station]; k < gradientOffsets[station+1]; ++k) {
+            const int32_t node = gradientNodes[k];
+            const double value = velocityPotential
+                ? -(double)(pressureTm1[node]-pressureTm2[node])*inverseDt
+                : (double)pressureTm1[node];
+            gradX += gradientWeights[3*(size_t)k]*value;
+            gradY += gradientWeights[3*(size_t)k+1]*value;
+            gradZ += gradientWeights[3*(size_t)k+2]*value;
+        }
     }
 
     double* const out = stationOutput + (size_t)station * 4;

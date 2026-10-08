@@ -218,7 +218,9 @@ void psolve_launch_acoustic_station_interpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput);
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights);
 void psolve_launch_pore_pressure_station_interpolate(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t stationCount, const int32_t* stationNodes,

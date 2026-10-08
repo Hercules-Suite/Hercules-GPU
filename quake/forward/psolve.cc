@@ -1053,6 +1053,7 @@ static struct Param_t {
   int theStepMeshingFactor;
   int theAcousticInterfaceMaxLevel;
   int theAcousticInterfaceMethod;
+  int acousticStationGradientRecovered;
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
@@ -1233,6 +1234,7 @@ static struct Param_t {
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
            .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL,
+           .acousticStationGradientRecovered = 1,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -2219,7 +2221,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   50 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  66 /* Must adjust this if adding int params */
+  67 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2409,6 +2411,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[63] = Param.stationBinary;
   int_message[64] = Param.theAcousticInterfaceMethod;
   int_message[65] = Param.stationAsciiBufferKiB;
+  int_message[66] = Param.acousticStationGradientRecovered;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2480,6 +2483,7 @@ static void read_parameters(int argc, char** argv) {
   Param.stationBinary = int_message[63];
   Param.theAcousticInterfaceMethod = int_message[64];
   Param.stationAsciiBufferKiB = int_message[65];
+  Param.acousticStationGradientRecovered = int_message[66];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2776,6 +2780,7 @@ static int32_t parse_parameters(const char* numericalin) {
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
        acoustic_interface_method[64] = "shared-geometric-constraints",
+       acoustic_station_gradient[64] = "linear",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
@@ -3250,6 +3255,7 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
   parsetext(fp, "acoustic_interface_method", 's', &acoustic_interface_method);
+  parsetext(fp, "acoustic_station_gradient", 's', &acoustic_station_gradient);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
   parsetext(fp, "acoustic_interface_face_filter", 's',
@@ -3662,6 +3668,16 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_coupling (yes or no): "
                  "%s\n",
                  acoustic_interface_coupling);
+  }
+
+  if (strcasecmp(acoustic_station_gradient, "linear") == 0) {
+    Param.acousticStationGradientRecovered = 1;
+  } else if (strcasecmp(acoustic_station_gradient, "element") == 0) {
+    Param.acousticStationGradientRecovered = 0;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown acoustic_station_gradient '%s': use linear or element\n",
+                 acoustic_station_gradient);
   }
 
   if (strcasecmp(acoustic_interface_method, "shared-geometric-constraints") == 0) {
@@ -7301,6 +7317,7 @@ static int mesh_partitiontree(const char* context) {
 
 #include "acoustic_interface_setup.h"
 #include "acoustic_interface_trace.h"
+#include "acoustic_receiver_setup.h"
 
 /**
  * mesh_generate: Generate and partition an unstructured octree mesh.
@@ -14392,6 +14409,7 @@ static void solver_delete() {
 
   /* Free device memory */
   acoustic_constraints_free();
+  acoustic_receiver_free();
   cudaFree(Global.gpuData.acousticInterfaceSolidNodesDevice);
   Global.gpuData.acousticInterfaceSolidNodesDevice = NULL;
   g_acousticSolidTraceNodes.clear();
@@ -19423,6 +19441,16 @@ static void solver_init_acoustic_pressure_station_sync(mysolver_t* solver) {
   free(coords);
   free(h);
 
+  if (!g_acousticReceiverOffsets.empty()) {
+    std::vector<int32_t> offsets;
+    for (int i = 0; i < Param.myNumberOfStations; ++i)
+      if (Param.myStations[i].pressure_is_defined)
+        offsets.push_back(g_acousticReceiverOffsets[i]);
+    offsets.push_back(g_acousticReceiverOffsets.back());
+    acoustic_constraint_upload(&g_acousticReceiverOffsetsDevice, offsets);
+    acoustic_constraint_upload(&g_acousticReceiverNodesDevice, g_acousticReceiverNodes);
+    acoustic_constraint_upload(&g_acousticReceiverWeightsDevice, g_acousticReceiverWeights);
+  }
   g_acousticPressureStationSyncReady = 1;
 }
 
@@ -19452,7 +19480,8 @@ static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
       g_acousticPressureStationCoordsDevice,
       g_acousticPressureStationHDevice, solver->gpuData->pressureTm1Device,
       solver->gpuData->pressureTm2Device, velocityPotential, inverseDt,
-      g_acousticPressureStationResultsDevice);
+      g_acousticPressureStationResultsDevice, g_acousticReceiverOffsetsDevice,
+      g_acousticReceiverNodesDevice, g_acousticReceiverWeightsDevice);
   solver_pore_pressure_device_check(cudaGetLastError(),
                                     "acoustic station interpolation");
   solver_pore_pressure_device_check(
@@ -22278,9 +22307,12 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
-  /* Additional solid-trace ghosts are appended after octree extraction.
-   * Match sender/receiver packing by global ID, independent of local order. */
-  if (acoustic_solid_trace_enabled()) {
+  /* Solid-trace and receiver-stencil ghosts are appended after octree
+   * extraction. Match packing by global ID even with the original interface
+   * method: receiver ghosts need the same ordering on sender and receiver. */
+  if (acoustic_solid_trace_enabled() ||
+      (acoustic_pressure_enabled() && Param.acousticStationGradientRecovered &&
+       Param.theNumberOfStations > 0)) {
     messenger_t* lists[] = {dnsched->first_c, dnsched->first_s,
                             ansched->first_c, ansched->first_s};
     for (auto* head : lists)
@@ -27163,6 +27195,23 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
     return 0;
   }
 
+  if (!g_acousticReceiverOffsets.empty()) {
+    const int begin = g_acousticReceiverOffsets[iStation];
+    const int end = g_acousticReceiverOffsets[iStation+1];
+    const bool vp = Param.theAcousticVelocityPotential == 1 && Param.theDeltaT > 0;
+    if (end > begin) {
+      for (int k = begin; k < end; ++k) {
+        const int n = g_acousticReceiverNodes[k];
+        const double p = vp ? -(double)(Global.mySolver->pressure_tm1[n] -
+            Global.mySolver->pressure_tm2[n])/Param.theDeltaT
+                           : (double)Global.mySolver->pressure_tm1[n];
+        for (int axis = 0; axis < 3; ++axis)
+          grad[axis] += g_acousticReceiverWeights[3*(size_t)k+axis]*p;
+      }
+      return 1;
+    }
+  }
+
   for (iPhi = 0; iPhi < 8; iPhi++) {
     nodesToInterpolate[iPhi] =
         Param.myStations[iStation].nodestointerpolate[iPhi];
@@ -27842,6 +27891,7 @@ void output_stations_init(const char* numericalin) {
   Timer_Stop("Stations Broadcast");
 
   setup_stations_data();
+  acoustic_receiver_prepare();
 
   if (Param.stationBinary == YES) {
     try {
@@ -29417,6 +29467,7 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  acoustic_receiver_build_weights();
   g_acousticNeighbors.clear();
   /* Prepare the output-only CPML gradient memories after profile setup.
    * All plane backends and both station gather paths use these memories. */

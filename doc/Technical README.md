@@ -104,7 +104,11 @@ interactions are in the
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
   `acoustic_interface_method`, `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
-  `acoustic_quality_factor`.
+  `acoustic_quality_factor`, `acoustic_station_gradient`.
+  `acoustic_station_gradient=linear` (default) recovers station motion at the
+  actual point using same-material neighboring water cells; `element` retains
+  the historical gradient. CPML and unavailable-neighbor fallbacks are described
+  in [the detailed reference](Extended%20README.md#acoustic-station-gradient-recovery).
   `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
   `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
   `local-matching` refines the coarser interface neighbors during Phase A.

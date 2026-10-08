@@ -1203,10 +1203,13 @@ void psolve_launch_acoustic_station_interpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput) {
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights) {
   kernelAcousticStationInterpolate<<<grid, block, shared, stream>>>(
       stationCount, stationNodes, stationCoords, stationH, pressureTm1,
-      pressureTm2, velocityPotential, inverseDt, stationOutput);
+      pressureTm2, velocityPotential, inverseDt, stationOutput,
+      gradientOffsets, gradientNodes, gradientWeights);
 }
 
 void psolve_launch_pore_pressure_station_interpolate(
