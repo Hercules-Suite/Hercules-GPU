@@ -67,6 +67,7 @@ extern "C" {
 }
 #endif
 #include "psolve.h"
+#include "acoustic_open_pore_quadrature.h"
 #include "nrutila.h"
 #include "quakesource.h"
 #include "output.h"
@@ -1973,25 +1974,26 @@ static void poroelastic_add_groundwater_drain_mass(
   }
 }
 
-static double poro_shape_value_at(int node, double csi, double eta,
-                                  double dzeta) {
-  const double sx = poro_node_sign(node, 0);
-  const double sy = poro_node_sign(node, 1);
-  const double sz = poro_node_sign(node, 2);
-
-  return 0.125 * (1.0 + sx * csi) * (1.0 + sy * eta) *
-         (1.0 + sz * dzeta);
-}
-
 static const int32_t* acoustic_solid_trace_nodes(int64_t face);
+static int mesh_acoustic_face_axis(uint8_t face, int* axis, int* sign,
+                                   int tangent_axes[2]);
 
 static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
   if (!acoustic_poroelastic_open_pore_enabled() || (solver == NULL) ||
       (solver->pore_pressure_open_pore_mass == NULL) ||
-      (Global.myMesh == NULL) || (Global.acousticInterfaceFaces <= 0) ||
-      (Global.acousticInterfaceAdjacentPoroelastic == NULL) ||
-      (Global.acousticInterfacePoroelasticBoundaryScales == NULL)) {
+      (Global.myMesh == NULL) || (Global.acousticInterfaceFaces <= 0)) {
     return;
+  }
+  if (Global.acousticInterfaceAdjacentPoroelastic == NULL ||
+      Global.acousticInterfacePoroelasticBoundaryScales == NULL ||
+      Global.acousticInterfaceFaceIds == NULL ||
+      Global.acousticInterfaceFaceCenters == NULL ||
+      Global.acousticInterfaceFaceHalfWidths == NULL ||
+      Global.acousticInterfaceAdjacentCenters == NULL ||
+      Global.acousticInterfaceAdjacentHalfWidths == NULL ||
+      acoustic_solid_trace_nodes(0) == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Open-pore quadrature requires interface geometry and solid traces\n");
   }
 
   for (int64_t i = 0; i < Global.acousticInterfaceFaces; i++) {
@@ -2004,35 +2006,32 @@ static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
       continue;
     }
 
-    const int32_t adjacent_eindex =
-        Global.acousticInterfaceAdjacentElementIndexes[i];
     const int32_t* solid_nodes = acoustic_solid_trace_nodes(i);
-    const int32_t target_eindex =
-        (adjacent_eindex >= 0) ? adjacent_eindex
-                               : Global.acousticInterfaceElementIds[i];
-    const double* target_center =
-        (solid_nodes != NULL || adjacent_eindex >= 0)
-            ? (Global.acousticInterfaceAdjacentCenters + 3 * i)
-            : (Global.acousticInterfaceFaceCenters + 3 * i);
-
-    if ((target_eindex < 0) || (target_eindex >= Global.myMesh->lenum)) {
-      continue;
+    const double* center = Global.acousticInterfaceAdjacentCenters + 3 * i;
+    const double* half = Global.acousticInterfaceAdjacentHalfWidths + 3 * i;
+    int axis, sign, tangent_axes[2];
+    if (!mesh_acoustic_face_axis(Global.acousticInterfaceFaceIds[i],
+                                 &axis, &sign, tangent_axes)) {
+      solver_abort(__FUNCTION_NAME, NULL, "Invalid open-pore interface face\n");
     }
-
-    elem_t* elemp = &Global.myMesh->elemTable[target_eindex];
+    double weights[8] = {};
+    for (int q = 0; q < 4; ++q) {
+      double shape[8];
+      acoustic_open_pore_shape_values(center, half, tangent_axes, q, shape);
+      for (int j = 0; j < 8; ++j) weights[j] += 0.25 * shape[j];
+    }
     for (int j = 0; j < 8; j++) {
-      const double weight =
-          poro_shape_value_at(j, target_center[0], target_center[1],
-                              target_center[2]);
+      const double weight = weights[j];
       if (weight == 0.0) {
         continue;
       }
 
-      const int32_t lnid = solid_nodes ? solid_nodes[j] : elemp->lnid[j];
-      if ((lnid >= 0) && (lnid < Global.myMesh->nharbored)) {
-        solver->pore_pressure_open_pore_mass[lnid] +=
-            (solver_float)(scale * weight);
+      const int32_t lnid = solid_nodes[j];
+      if ((lnid < 0) || (lnid >= Global.myMesh->nharbored)) {
+        solver_abort(__FUNCTION_NAME, NULL, "Invalid open-pore solid trace node\n");
       }
+      solver->pore_pressure_open_pore_mass[lnid] +=
+          (solver_float)(scale * weight);
     }
   }
 }
@@ -12906,7 +12905,8 @@ static void solver_init() {
         monitor_print(
             "Acoustic-poroelastic open-pore pressure continuity: %.1fM nodes "
             "from %.3fM fragments (weak compliance-projected, factor %.6g; "
-            "undrained fast path disabled)\n",
+            "2x2 Gauss hydraulic quadrature independent of mechanical "
+            "point/face_mass; undrained fast path disabled)\n",
             (double)globalPoroelasticOpenPoreNodes / 1.0e6,
             (double)globalAcousticPoroelasticFragments / 1.0e6,
             Param.theAcousticPoroelasticPressurePenaltyFactor);

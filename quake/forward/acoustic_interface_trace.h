@@ -8,8 +8,9 @@
  * schedules then carry the trace on both host and CUDA-aware MPI paths.
  * Every constraint method needs this trace for face_mass: quadrature must not
  * depend on which rank owns the solid. No new per-step exchange or host staging
- * is needed. Independent open-pore nodes also require the solid trace for
- * point projection; a coarse acoustic trace cannot carry their pressure load. */
+ * is needed. Open-pore hydraulic quadrature also requires the solid trace for
+ * mechanical point projection; a coarse acoustic trace cannot carry the
+ * solid-side shape weights, including independent fine-solid pressure nodes. */
 static std::vector<int32_t> g_acousticSolidTraceNodes;
 static std::vector<int32link_t*> g_acousticTraceShares;
 
@@ -17,8 +18,7 @@ static bool acoustic_solid_trace_enabled() {
   return acoustic_pressure_enabled() && Param.acousticInterfaceCoupling == YES &&
       (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL ||
        Param.theAcousticInterfaceProjectionMode == ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS ||
-       (acoustic_poroelastic_open_pore_enabled() &&
-        poroelastic_field_constraints_enabled()));
+       acoustic_poroelastic_open_pore_enabled());
 }
 
 static const int32_t* acoustic_solid_trace_nodes(int64_t face) {

@@ -1310,7 +1310,8 @@ Notes:
 	still acts on the solid skeleton. Set to `open_pore` to add weak
 	compliance-projected pressure continuity on detected acoustic-poroelastic
 	interface fragments, driving pore pressure toward the adjacent acoustic
-	pressure. The interface weight uses the adjacent poroelastic element's
+	pressure using four-point (2x2 Gauss) hydraulic quadrature, independently of
+	`acoustic_interface_projection`. The interface weight uses the adjacent poroelastic element's
 	`1/M`, matching the heterogeneous interior pressure capacity. This requires
 	`include_acoustic=yes`, the acoustic scalar formulation, and
 	`include_poroelastic=yes`.
@@ -1319,6 +1320,59 @@ Notes:
 	used by `acoustic_poroelastic_interface=open_pore`. The target exchange
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
+
+### Open-pore hydraulic quadrature
+
+`acoustic_poroelastic_interface=open_pore` always uses four-point (2x2 Gauss)
+integration on each detected rectangular interface fragment. No new input is
+required. `acoustic_interface_projection=point|face_mass` still selects only the
+mechanical traction/motion quadrature. At each hydraulic point, the acoustic
+Hex8 trace supplies pressure and the poroelastic Hex8 trace supplies the nodal
+load weights. Each side uses its own fragment center and half widths, so
+nonmatching elements sample the same physical points. Remote solid vertices
+are resolved at setup for every open-pore path; missing trace geometry aborts
+instead of falling back to acoustic nodes or centroid integration.
+
+For fragment $f$, let $A_f$ be its existing effective area, $h_s$ the adjacent
+solid edge length, $M_s$ its storage modulus, and $\gamma$ the existing positive
+`acoustic_poroelastic_pressure_penalty_factor`. With four equal normalized
+weights, the boundary capacity $b_j$ and pressure target $r_j$ receive
+
+```math
+c_f = \frac{\gamma A_f h_s}{2M_s}, \qquad
+b_j \mathrel{+}= \frac{c_f}{4}\sum_{q=1}^{4}N_j^s(x_q), \qquad
+r_j \mathrel{+}= \frac{c_f}{4}\sum_{q=1}^{4}N_j^s(x_q)
+                 \sum_i N_i^a(x_q)p_i^a.
+```
+
+The setup capacity and runtime target share the same quadrature rule. For a
+constant pressure, $r_j=p^a b_j$; on a rectangular fragment the capacity agrees
+with the former midpoint capacity within roundoff. Varying pressure now changes
+the nodal targets: on a matching face with $p^a=200+100\xi$ Pa, the two nodes
+at $\xi=-1$ have $r_j/b_j=166.666\ldots$ Pa and those at $\xi=+1$ have
+$233.333\ldots$ Pa, instead of assigning every node the 200 Pa centroid value.
+For bilinear face traces and constant fragment compliance, 2x2 Gauss integrates
+the shape-pressure product exactly on the represented rectangle.
+
+The pressure formulation supplies its existing acoustic pressure time level;
+velocity potential still uses $p_i^a=-(\phi_i^{\mathrm{Tm2}}-
+\phi_i^{\mathrm{Tm1}})/\Delta t$. The pressure update, penalty scaling,
+material parameters and time integration are unchanged. The kernel reads each
+acoustic nodal value once and accumulates the four points before one atomic
+addition per loaded solid node. It uses the existing CUDA-aware or host-staged
+scalar exchange without extra per-step MPI rounds. The startup monitor names
+the 2x2 Gauss hydraulic rule separately from mechanical projection.
+
+This changes the spatial integration of the existing weak pressure-continuity
+operator; it does not introduce a new fluid-inertia or Darcy interface law.
+It uses the existing mesh-face geometry and area convention, without adding a
+cut-face or curved-surface reconstruction. VT pressure constraints still retain
+their documented geometric fallback. Earlier Horizon open-pore comparisons
+below used centroid hydraulic integration and do not validate this upgrade.
+Local analytical host checks cover the production capacity/target algebra,
+constant and varying pressure, both acoustic formulations, six face orientations,
+nonmatching fragments and reordered remote trace indices. CUDA/MPI propagation
+and performance validation on the target system are still required.
 
 ### Interface constraints and local matching
 
@@ -1430,9 +1484,9 @@ schedules. Both alternative methods use the solid trace for `point` and
 resolve actual remote solid vertices when `face_mass` is selected and use the
 same four-point face quadrature on local and remote neighbors. They no longer
 fall back to point integration on remote faces. Open-pore boundary mass and
-water-pressure target loads also use actual solid vertices and their shape functions. The existing
-weak hydraulic projection remains centered on each interface fragment,
-independently of the mechanical `point`/`face_mass` selection. In particular,
+water-pressure target loads also use actual solid vertices and their shape functions.
+The [hydraulic projection](#open-pore-hydraulic-quadrature) uses four-point
+quadrature independently of the mechanical `point`/`face_mass` selection. In particular,
 independent fine-solid nodes must not be replaced by a coarse acoustic trace
 when the neighboring solid element is remote. This also applies without
 topography. The monitor reports remote fragments and additional harbored nodes.
@@ -1441,8 +1495,8 @@ constraints for acoustic and solid fields. Its `face_mass` correction
 uses the same trace and global-ID schedule ordering as the alternatives,
 including on ranks that only own nodes requested by another rank. Coupling-off
 and non-acoustic cases do not build these traces.
-On regular Hex8/FEM meshes, `open_pore` also builds actual solid traces with
-`shared-geometric-constraints + point`: independent pore nodes require their
+`open_pore` also builds actual solid traces with
+`shared-geometric-constraints + point`: hydraulic quadrature requires its
 own solid-side load weights on remote faces. This uses the existing global-ID
 MPI schedules. Sealed shared-geometric `point` coupling keeps its existing path.
 This is a constrained experimental implementation,

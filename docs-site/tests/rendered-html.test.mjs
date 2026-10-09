@@ -1791,6 +1791,20 @@ test("documents independent BrickUP constraints and final station eligibility", 
   assert.match(reference, /Coarse dry\/CPML cells do not constrain pore pressure/);
 });
 
+test("documents four-point open-pore hydraulic integration and its validation scope", async () => {
+  const physics = await (await render("/docs/physics")).text();
+  assert.match(physics, /four-point \(2x2 Gauss\) hydraulic integration/);
+  assert.match(physics, /acoustic_interface_projection still controls mechanical traction\/motion only/);
+  assert.match(physics, /Capacity and target share the same rule/);
+  assert.match(physics, /166\.666… Pa/);
+  assert.match(physics, /233\.333… Pa/);
+  assert.match(physics, /Earlier Horizon open-pore benchmarks used centroid hydraulic integration/);
+  assert.match(physics, /Target-system CUDA\/MPI propagation and performance checks remain required/);
+  const reference = await (await render("/docs/parameters-coupled-physics")).text();
+  assert.match(reference, /Open-pore hydraulic capacity and pressure targets always use four-point/);
+  assert.match(reference, /same quadrature for boundary capacity/);
+});
+
 test("documents the basin-bottom grid format and renders a usable numeric example", async () => {
   const response = await render("/docs/input-files");
   assert.equal(response.status, 200);

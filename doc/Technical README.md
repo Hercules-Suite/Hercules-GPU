@@ -136,7 +136,7 @@ interactions are in the
   Both methods use actual remote solid traces, including `face_mass` quadrature
   and open-pore pressure loads. The shared-geometric method also resolves
   actual remote solid traces when `face_mass` is selected, so local and remote
-  faces use the same four-point quadrature. Regular Hex8/FEM `open_pore` coupling
+  faces use the same four-point quadrature. `open_pore` coupling
   also uses actual solid traces with shared-geometric `point` projection so
   remote pressure loads reach independent pore nodes.
   Field-specific constraints also
@@ -163,6 +163,12 @@ interactions are in the
   `poroelastic_fluid_viscosity_pa_s`, `poroelastic_permeability_x_m2`,
   `poroelastic_permeability_y_m2`, `poroelastic_permeability_z_m2`,
   `acoustic_poroelastic_interface`, `acoustic_poroelastic_pressure_penalty_factor`.
+  `open_pore` always uses four-point (2x2 Gauss) hydraulic integration for both
+  the pressure target and boundary capacity, independently of mechanical
+  `point`/`face_mass`. No new parameter is required; the penalty factor and
+  material inputs are unchanged. Earlier centroid-based benchmark results do
+  not validate this upgrade; target-system CUDA/MPI checks remain required.
+  See [hydraulic quadrature](Extended%20README.md#open-pore-hydraulic-quadrature).
   Building cases measure ground and groundwater depths from `surface_shift_m`;
   above-ground building cells remain outside the saturated region.
   Regular Hex8 and FEM-topography models automatically use a separate pressure
