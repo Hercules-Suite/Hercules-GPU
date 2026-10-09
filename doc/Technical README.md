@@ -125,7 +125,9 @@ interactions are in the
   `acoustic_interface_method` defaults to `field-specific-constraints` for coupled
   scalar acoustics, separating acoustic, solid and pore-pressure hanging-node maps.
   When the method is omitted and acoustics, scalar acoustics or coupling is disabled,
-  shared geometric constraints remain active. Explicit unsupported choices still abort.
+  shared geometric constraints remain active for acoustic and solid fields.
+  Pore-pressure constraints are independent as described below.
+  Explicit unsupported choices still abort.
   The alternative `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
   pressure or velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
@@ -134,7 +136,9 @@ interactions are in the
   Both methods use actual remote solid traces, including `face_mass` quadrature
   and open-pore pressure loads. The shared-geometric method also resolves
   actual remote solid traces when `face_mass` is selected, so local and remote
-  faces use the same four-point quadrature; its `point` path is unchanged.
+  faces use the same four-point quadrature. Regular Hex8/FEM `open_pore` coupling
+  also uses actual solid traces with shared-geometric `point` projection so
+  remote pressure loads reach independent pore nodes.
   Field-specific constraints also
   support FEM topography (`include_topography=yes`, `computation_method=fem`),
   excluding air and carved voids from the field maps. VT cut-tetrahedron topography
@@ -161,11 +165,20 @@ interactions are in the
   `acoustic_poroelastic_interface`, `acoustic_poroelastic_pressure_penalty_factor`.
   Building cases measure ground and groundwater depths from `surface_shift_m`;
   above-ground building cells remain outside the saturated region.
+  Regular Hex8 and FEM-topography models automatically use a separate pressure
+  constraint map from final active BrickUP cells, including `include_acoustic=no`.
+  Solid displacement retains its selected constraints; VT cut-cell pressure
+  retains geometric constraints with a startup notice. See
+  [poroelastic controls](Extended%20README.md#poroelastic-u-p-formulation).
 - **Station output:** `number_output_stations`, `station_binary`, `station_output_binary_file`,
   `station_ascii_buffer_kib`,
   `output_stations_print_rate`, `output_stations_directory`, `output_stations`,
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
+  Pressure eligibility and `station_mediums.txt` are finalized after solver
+  setup. A poroelastic receiver must lie in saturated, active BrickUP material;
+  elastic-only CPML receivers have undefined pressure/`Ru` (`nan`), even when
+  adjacent active soil shares their nodes. Skeleton motion is unchanged.
 - **Plane output:** `output_planes_print_rate`, `reconstruct_acoustic_plane_displacements`.
   Acoustic station/plane output inside CPML includes the containing element's
   gradient stretch and point memory; use interior samples for physical motion.

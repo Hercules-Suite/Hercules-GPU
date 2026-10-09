@@ -1280,14 +1280,19 @@ Notes:
 - `station_mediums_output_file`
 	Optional ASCII station diagnostic output path; ignored with
 	`station_binary=yes`. The solver writes this metadata
-	file during station setup and rewrites it after a ramped geostatic reference
-	refresh. It records each station's owning medium
-	(`acoustic` or `elastic`), whether pressure is defined there, owner rank,
+	file after solver setup finalizes BrickUP and CPML membership, and rewrites
+	it after a ramped geostatic reference refresh. It records each station's
+	owning medium (`acoustic`, `poroelastic` or `elastic`), pressure eligibility, owner rank,
 	element id/level, local coordinates, and material properties. If unset, it
 	defaults to `output_stations_directory/station_mediums.txt`. The metadata
 	includes `sigma_v0_eff_pa`, the positive station-specific denominator used
 	by optional `Ru(-)` output; it is `nan` where the initial effective-stress
 	reference itself is unavailable or nonpositive.
+	Poroelastic pressure is defined only when the owning element belongs to the
+	final active BrickUP map and the receiver is saturated. Elastic-only CPML
+	cells are labeled `elastic` with pressure undefined, even if shared nodes
+	carry pressure from adjacent active soil. Their `Pressure(Pa)` and `Ru(-)`
+	columns are `nan`; skeleton motion still uses the normal solid output path.
 - `acoustic_quality_factor`
 	Optional, dimensionless. Default `0`; omitting the parameter or setting
 	it to `<= 0` disables interior acoustic damping. This default was verified
@@ -1330,7 +1335,7 @@ Selecting a constraint method does not change `acoustic_interface_projection`
 | --- | --- |
 | `shared-geometric-constraints` | Acoustic and solid fields share the geometric hanging-node constraints. |
 | `field-specific-constraints` | Default for coupled scalar acoustics. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
-| `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
+| `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use geometric acoustic/solid constraints on the resulting mesh; pore pressure retains its independent map. |
 
 Both alternatives accept either scalar acoustic formulation. In `pressure`
 mode the interface applies pressure traction to the solid and solid normal
@@ -1407,8 +1412,10 @@ trace; unsupported mixed-corner stencils abort rather than approximate it.
 The same maps handle mass, damping, free-surface flags, force distribution and
 field assignment. Device arrays are uploaded once at setup. Existing CUDA
 adjustment kernels, CUDA-aware exchanges, host-staged fallback and owner
-schedules remain in use. A separate pore-pressure map uses the final active
-BrickUP cells, including the exclusion of elastic-only CPML cells. It handles
+schedules remain in use. Independently of `acoustic_interface_method`, a separate
+pore-pressure map is built for regular Hex8 and FEM-topography BrickUP models,
+including standalone poroelastic–elastic runs with `include_acoustic=no`.
+It uses final active BrickUP cells, excluding elastic-only CPML cells, and handles
 pore-pressure capacity, drained and open-pore boundary weights, pressure RHS
 distribution and pressure assignment on both MPI backends. Saturated solids
 carry both displacement and pore pressure; dry solids and buildings still carry
@@ -1430,10 +1437,14 @@ independent fine-solid nodes must not be replaced by a coarse acoustic trace
 when the neighboring solid element is remote. This also applies without
 topography. The monitor reports remote fragments and additional harbored nodes.
 The shared-geometric method retains its geometric hanging-node
-constraints and its existing `point` projection path. Its `face_mass` correction
+constraints for acoustic and solid fields. Its `face_mass` correction
 uses the same trace and global-ID schedule ordering as the alternatives,
 including on ranks that only own nodes requested by another rank. Coupling-off
 and non-acoustic cases do not build these traces.
+On regular Hex8/FEM meshes, `open_pore` also builds actual solid traces with
+`shared-geometric-constraints + point`: independent pore nodes require their
+own solid-side load weights on remote faces. This uses the existing global-ID
+MPI schedules. Sealed shared-geometric `point` coupling keeps its existing path.
 This is a constrained experimental implementation,
 not a general mortar method.
 
@@ -1857,6 +1868,23 @@ check cannot repair an older, admissible but incorrectly interpolated Q model.
 	pressure exists only on poroelastic elements/nodes; Darcy diffusion is
 	assembled only through poroelastic elements, giving a no-flow
 	poroelastic-elastic boundary in V1.
+	On regular Hex8 meshes (including FEM topography), pore-pressure hanging-node
+	constraints are built automatically from final active BrickUP elements,
+	independent of acoustic enablement and `acoustic_interface_method`. A node
+	constrained only by a coarser dry or elastic-only CPML cell remains independent
+	for pore pressure. A coarser active BrickUP cell retains its exact Hex8 trace
+	constraint; unsupported stencils abort setup. This applies to capacity,
+	drained/open-pore boundary weights, pressure RHS and field assignment on both
+	host and CUDA-aware MPI paths. Solid displacement keeps its selected map.
+	The startup monitor reports pore-pressure keep/release/absent counts.
+	VT cut-cell topography retains geometric pressure constraints and reports
+	that limitation; the Hex8 change does not extend to cut-cell pressure traces.
+	No new input switch is required. For example, `include_acoustic=no` with
+	`include_poroelastic=yes` and `poroelastic_elastic_interface=no_flow` enables
+	the independent pore map on a regular Hex8 mesh.
+	The standalone extension requires new CUDA/MPI propagation and refinement
+	comparisons on the target system; earlier acoustic-module benchmarks do not
+	validate this newly enabled path.
 - Poroelastic material constants:
 	`poroelastic_porosity` (default `0.4`),
 	`poroelastic_biot_alpha` (default `1.0`; values below `1.0` derive

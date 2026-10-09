@@ -2,12 +2,13 @@
 #define HERCULES_ACOUSTIC_INTERFACE_SETUP_H
 
 /* Private psolve.cc implementation: include after material/neighbor discovery.
- * The original geometric constraints remain the default. Both alternatives
- * are opt-in experiments for full Hex8 acoustic/solid meshes.
+ * Acoustic/solid maps follow acoustic_interface_method. The pore-pressure
+ * map is independent of acoustics on regular Hex8 meshes.
  * Field maps also support FEM topography: retained cells have the same Hex8
  * traces, while air cells and carved voids carry no physical field.
  */
 struct acoustic_constraint_map_t {
+  bool enabled = false;
   std::vector<int32_t> node_base3, offsets, parent_base3, order;
   std::vector<int32_t> edges, runs, run_parent_base3;
   std::vector<solver_float> weights;
@@ -120,8 +121,25 @@ static void acoustic_constraint_upload(T** device, const std::vector<T>& host) {
     solver_abort(__FUNCTION_NAME, NULL, "Field constraint upload: %s\n", cudaGetErrorString(error));
 }
 
+static bool poroelastic_field_constraints_enabled() {
+  return poroelastic_enabled() &&
+      (Param.includeTopography != YES || get_topo_meth() == FEM);
+}
+
 static void acoustic_constraints_build() {
-  if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_FIELDS) return;
+  const bool acoustic_fields =
+      Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS;
+  const bool pore_fields = poroelastic_field_constraints_enabled();
+  if (Global.myID == 0 && poroelastic_enabled() && !pore_fields)
+    monitor_print("Pore-pressure constraints: shared geometric (VT cut-cell "
+                  "topography; field-specific Hex8 traces are unsupported).\n");
+  if (!acoustic_fields && !pore_fields) return;
+  const int field_mask =
+      (acoustic_fields ? (1 << ACOUSTIC_CONSTRAINT_SCALAR) |
+                         (1 << ACOUSTIC_CONSTRAINT_SOLID) : 0) |
+      (pore_fields ? (1 << ACOUSTIC_CONSTRAINT_PORE) : 0);
+  for (int field = 0; field < 3; ++field)
+    g_acousticConstraintMaps[field].enabled = (field_mask & (1 << field)) != 0;
   mesh_t* mesh = Global.myMesh;
   if (mesh->nharbored > INT_MAX / 3)
     solver_abort(__FUNCTION_NAME, NULL, "Field constraint node index overflow\n");
@@ -169,6 +187,10 @@ static void acoustic_constraints_build() {
     for (int o = 0; o < 8; ++o) {
       tick_t low[3], high[3]; int fields;
       if (!acoustic_constraint_probe(node, o, low, high, &fields)) continue;
+      fields &= field_mask;
+      // A coarse dry/CPML neighbor must not constrain pore pressure, nor
+      // impose its trace-stencil requirements on an independent pore map.
+      if (fields == 0) continue;
       for (int field = 0; field < 3; ++field)
         if (fields & (1 << field)) active[field] = true;
       const tick_t pos[3] = {node.x, node.y, node.z};
@@ -199,16 +221,18 @@ static void acoustic_constraints_build() {
       if (!equal)
         solver_abort(__FUNCTION_NAME, NULL,
                      "Unsupported field-specific-constraints stencil at (%g,%g,%g) m, field mask %d. "
-                     "Use shared-geometric-constraints or remesh.\n",
+                     "Remesh to provide an exact same-field Hex8 trace.\n",
                      node.x * mesh->ticksize, node.y * mesh->ticksize,
                      node.z * mesh->ticksize, fields);
     }
     for (int field = 0; field < 3; ++field) {
+      if (!g_acousticConstraintMaps[field].enabled) continue;
       ++counts[3 * field + (keep[field] ? 0 : (active[field] ? 1 : 2))];
       if (keep[field]) acoustic_constraint_append(g_acousticConstraintMaps[field], dangling);
     }
   }
   for (auto& map : g_acousticConstraintMaps) {
+    if (!map.enabled) continue;
     acoustic_constraint_finish(map);
     acoustic_constraint_upload(&map.d_node, map.node_base3);
     acoustic_constraint_upload(&map.d_offsets, map.offsets);
@@ -220,14 +244,15 @@ static void acoustic_constraints_build() {
     acoustic_constraint_upload(&map.d_weights, map.weights);
   }
   MPI_Allreduce(counts, total, 9, MPI_INT64_T, MPI_SUM, comm_solver);
-  if (Global.myID == 0)
+  if (Global.myID == 0 && acoustic_fields)
     monitor_print("Field constraints (keep/release/absent): acoustic %lld/%lld/%lld; "
                   "solid %lld/%lld/%lld. Same-field Hex8 traces checked.\n",
                   (long long)total[0], (long long)total[1], (long long)total[2],
                   (long long)total[3], (long long)total[4], (long long)total[5]);
-  if (Global.myID == 0 && poroelastic_enabled())
+  if (Global.myID == 0 && pore_fields)
     monitor_print("Field constraints (keep/release/absent): pore pressure %lld/%lld/%lld. "
-                  "Final active poroelastic Hex8 cells; CPML remains elastic-only.\n",
+                  "Final active poroelastic Hex8 cells; independent of acoustic "
+                  "interface method; CPML remains elastic-only.\n",
                   (long long)total[6], (long long)total[7], (long long)total[8]);
   g_acousticConstraintsReady = true;
 }
@@ -243,7 +268,8 @@ static void acoustic_constraints_free() {
 }
 
 static int acoustic_constraints_host_adjust(void* values, int width, int how, int field) {
-  if (!g_acousticConstraintsReady || field < 0) return 0;
+  if (!g_acousticConstraintsReady || field < 0 || field >= 3 ||
+      !g_acousticConstraintMaps[field].enabled) return 0;
   const auto& map = g_acousticConstraintMaps[field];
   solver_float* v = (solver_float*)values;
   for (int32_t i = 0; i < (int32_t)map.node_base3.size(); ++i) {
@@ -262,7 +288,8 @@ static int acoustic_constraints_host_adjust(void* values, int width, int how, in
 
 static int acoustic_constraints_device_adjust(mysolver_t* solver, void* values,
                                                int how, int field) {
-  if (!g_acousticConstraintsReady || field < 0) return 0;
+  if (!g_acousticConstraintsReady || field < 0 || field >= 3 ||
+      !g_acousticConstraintMaps[field].enabled) return 0;
   const auto& map = g_acousticConstraintMaps[field];
   const int32_t count = (int32_t)(how == DISTRIBUTION ? map.run_parent_base3.size()
                                                          : map.node_base3.size());

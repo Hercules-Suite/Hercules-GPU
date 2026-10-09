@@ -1771,10 +1771,24 @@ test("reports the conventional BrickUP station pore-pressure ratio", () => {
   assert.match(psolve, /\? pressure \/ sigmaV0[\s\S]{0,80}: NAN/);
   assert.match(psolve, /sigma_v0_eff_pa/);
   assert.match(psolve, /step == get_geostatic_final_step\(\)/);
-  assert.match(psolve, /station_rewrite_mediums_file_from_current_state\(\)/);
+  assert.match(psolve, /station_rewrite_mediums_file_from_current_state\(1\)/);
   assert.match(psolve, /return \(Param\.printStationPressures == YES\) \|\|[\s\S]{0,100}\(Param\.printStationPorePressureRatios == YES\)/);
   assert.match(nonlinear, /-myNonlinSolver->stresses\[nl_eindex\]\.qp\[4\]\.zz/);
   assert.match(header, /initial_vertical_effective_stress/);
+});
+
+test("documents independent BrickUP constraints and final station eligibility", async () => {
+  const coupling = await (await render("/docs/physics")).text();
+  assert.match(coupling, /include_acoustic=no still builds the pore-pressure map automatically/);
+  assert.match(coupling, /VT cut-cell models keep geometric pressure constraints/);
+  assert.match(coupling, /standalone extension still requires target-system CUDA\/MPI/);
+  assert.match(coupling, /open_pore also builds actual solid traces with shared-geometric point projection/);
+  const output = await (await render("/docs/output-files")).text();
+  assert.match(output, /Station pressure eligibility is finalized after solver setup/);
+  assert.match(output, /Elastic-only CPML receivers are labeled elastic with pressure undefined/);
+  assert.match(output, /Their Pressure\(Pa\) and Ru\(-\) values are nan/);
+  const reference = await (await render("/docs/parameters-coupled-physics")).text();
+  assert.match(reference, /Coarse dry\/CPML cells do not constrain pore pressure/);
 });
 
 test("documents the basin-bottom grid format and renders a usable numeric example", async () => {
