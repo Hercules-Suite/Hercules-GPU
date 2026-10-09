@@ -30,7 +30,7 @@ inline int edge_count(double length, double spacing) {
 }
 
 // One row: top-center X/Y, exterior X/Y lengths, exterior depth, spacing,
-// clockwise strike from north (degrees). Box-local X/Y rotate about the center.
+// clockwise strike from solver +X (degrees). Box-local X/Y rotate about the center.
 typedef std::array<double, 7> BoxSpec;
 struct Face {
     const char* name;

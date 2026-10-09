@@ -1661,6 +1661,12 @@ static double *Soil_surface_z = NULL;
 static int Soil_surface_count = 0;
 static double Soil_surface_swx = NAN;
 static double Soil_surface_swy = NAN;
+static horizontal_frame_t Soil_frame = {1.0, 0.0};
+
+void general3DVelocityModel_set_rotation(double relative_azimuth_deg) {
+    Soil_frame = horizontal_frame(relative_azimuth_deg);
+    Soil_surface_swx = Soil_surface_swy = NAN;
+}
 static struct Params_soil_t {
     int numLayerID;
     int numPointX;
@@ -1703,9 +1709,12 @@ static int update_3d_surface_cache(double DRM_southwest_x,
     for (int y = 0; y < Params_soil.numPointY; y++) {
         for (int x = 0; x < Params_soil.numPointX; x++) {
             int node_id = y * Params_soil.numPointX + x;
+            double solver_x, solver_y;
+            horizontal_to_parent(Soil_frame, Soil_point_x[x], Soil_point_y[y],
+                                 &solver_x, &solver_y);
             Soil_surface_z[node_id] =
-                thebase_zcoord - point_elevation(Soil_point_x[x] + DRM_southwest_x,
-                                                 Soil_point_y[y] + DRM_southwest_y);
+                thebase_zcoord - point_elevation(solver_x + DRM_southwest_x,
+                                                 solver_y + DRM_southwest_y);
         }
     }
 
@@ -1739,6 +1748,12 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
                                    double DRM_southwest_x,
                                    double DRM_southwest_y,
                                    int *has_quality_factors) {
+    /* Inputs are solver-frame offsets from the material origin. CPML clamps
+     * have already been applied in solver coordinates by get3DMaterial. */
+    double grid_x, grid_y;
+    horizontal_to_local(Soil_frame, x_input, y_input, &grid_x, &grid_y);
+    x_input = grid_x;
+    y_input = grid_y;
     /* The z_input is the depth from the surface. If the topography is considered, 
     it should has been corrected before calling this function. */
     int i, k;

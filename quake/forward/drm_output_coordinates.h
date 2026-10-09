@@ -14,7 +14,7 @@ inline void write_coordinates(const std::string& path, const std::vector<Point>&
     if (!output) throw std::runtime_error("Cannot open DRM coordinate file: " + path);
     output.imbue(std::locale::classic());
     output << "# Hercules DRM sample coordinates\n"
-           << "# Solver X north, Y east, Z positive down; metres.\n"
+           << "# Solver-local X/Y, Z positive down; metres; see coordinate_frame.txt for PROJ mapping.\n"
            << "# Includes rotation and building/topography depth shifts.\n"
            << "# Data row i matches binary sample i (zero-based); shared face edges/corners repeat.\n"
            << "# point_count = " << points.size() << "\n"

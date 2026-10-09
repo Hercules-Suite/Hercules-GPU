@@ -89,6 +89,10 @@ OBJECTS = qmesh.o q4.o single_query.o ${PSOLVE_OBJECTS}
 
 all: move_cxx_repository $(TARGET)
 
+# These translation units share UTMZone_t and the horizontal frame helpers.
+psolve.o geometrics.o quakesource.o io_planes.o io_drm.o topography.o \
+drm_planewaves.o nonlinear.o: geometrics.h horizontal_frame.h
+
 TARGET = qmesh psolve single_query q4showmeta
 
 
