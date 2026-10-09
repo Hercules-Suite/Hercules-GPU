@@ -23,6 +23,7 @@
 #include <math.h>
 
 #include "psolve.h"
+#include "acoustic_open_pore_quadrature.h"
 #include "kernel.h"
 #include "quake_util.h"
 #include "damping.h"
@@ -1249,61 +1250,49 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
 
   const int32_t eindex =
       gpuData->acousticInterfaceElementIdsDevice[faceIndex];
-  const int32_t adjacent_eindex =
-      (gpuData->acousticInterfaceAdjacentElementIndexesDevice != NULL)
-          ? gpuData->acousticInterfaceAdjacentElementIndexesDevice[faceIndex]
-          : -1;
-  const int32_t target_eindex =
-      (adjacent_eindex >= 0) ? adjacent_eindex : eindex;
-  const int32_t* solid_nodes = gpuData->acousticInterfaceSolidNodesDevice;
-  const double center[3] = {
-      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 0],
-      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 1],
-      gpuData->acousticInterfaceFaceCentersDevice[3 * faceIndex + 2]};
-  const double adjacent_center[3] = {
-      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
-          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 0]
-          : center[0],
-      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
-          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 1]
-          : center[1],
-      (gpuData->acousticInterfaceAdjacentCentersDevice != NULL)
-          ? gpuData->acousticInterfaceAdjacentCentersDevice[3 * faceIndex + 2]
-          : center[2]};
-  const double* target_center =
-      (solid_nodes != NULL || adjacent_eindex >= 0) ? adjacent_center : center;
-  double pressure = 0.0;
+  // Setup guarantees both traces and fragment geometry for open-pore faces.
+  const int32_t* solid_nodes =
+      gpuData->acousticInterfaceSolidNodesDevice + 8 * faceIndex;
+  const double* center =
+      gpuData->acousticInterfaceFaceCentersDevice + 3 * faceIndex;
+  const double* half =
+      gpuData->acousticInterfaceFaceHalfWidthsDevice + 3 * faceIndex;
+  const double* adjacent_center =
+      gpuData->acousticInterfaceAdjacentCentersDevice + 3 * faceIndex;
+  const double* adjacent_half =
+      gpuData->acousticInterfaceAdjacentHalfWidthsDevice + 3 * faceIndex;
+  int tangent_axes[2];
+  acoustic_interface_face_axes_from_face(
+      gpuData->acousticInterfaceFaceIdsDevice[faceIndex], tangent_axes);
 
-  for (int i = 0; i < 8; i++) {
+  // Read each acoustic value once and accumulate before the nodal atomics.
+  double nodal_pressure[8];
+  for (int i = 0; i < 8; ++i) {
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + i * gpuData->lenum];
-    const double weight =
-        acoustic_shape_value_at(i, center[0], center[1], center[2]);
-
-    if (vp) {
-      pressure +=
-          weight *
-          (-((double)gpuData->pressureTm2Device[lnid] -
-             (double)gpuData->pressureTm1Device[lnid]) * invDt);
-    } else {
-      pressure += weight * (double)gpuData->pressureTm2Device[lnid];
-    }
+    nodal_pressure[i] = vp
+        ? -((double)gpuData->pressureTm2Device[lnid] -
+            (double)gpuData->pressureTm1Device[lnid]) * invDt
+        : (double)gpuData->pressureTm2Device[lnid];
   }
-
-  for (int j = 0; j < 8; j++) {
-    const double weight =
-        acoustic_shape_value_at(j, target_center[0], target_center[1],
-                                target_center[2]);
-    if (weight == 0.0) {
-      continue;
-    }
-
-    const int32_t lnid =
-        solid_nodes ? solid_nodes[8 * faceIndex + j]
-                    : gpuData->lnidArrayDevice[target_eindex + j * gpuData->lenum];
+  double target[8] = {};
+  for (int q = 0; q < 4; ++q) {
+    double acoustic_shape[8], solid_shape[8];
+    acoustic_open_pore_shape_values(center, half, tangent_axes, q,
+                                    acoustic_shape);
+    acoustic_open_pore_shape_values(adjacent_center, adjacent_half,
+                                    tangent_axes, q, solid_shape);
+    double pressure = 0.0;
+    for (int i = 0; i < 8; ++i)
+      pressure += acoustic_shape[i] * nodal_pressure[i];
+    for (int j = 0; j < 8; ++j)
+      target[j] += 0.25 * solid_shape[j] * pressure;
+  }
+  for (int j = 0; j < 8; ++j) {
+    if (target[j] == 0.0) continue;
     atomicAdd((solver_float*)(gpuData->porePressureOpenPoreTargetDevice +
-                              lnid),
-              (solver_float)(scale * weight * pressure));
+                              solid_nodes[j]),
+              (solver_float)(scale * target[j]));
   }
 }
 

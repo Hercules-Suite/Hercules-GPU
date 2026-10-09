@@ -67,6 +67,7 @@ extern "C" {
 }
 #endif
 #include "psolve.h"
+#include "acoustic_open_pore_quadrature.h"
 #include "nrutila.h"
 #include "quakesource.h"
 #include "output.h"
@@ -1973,25 +1974,26 @@ static void poroelastic_add_groundwater_drain_mass(
   }
 }
 
-static double poro_shape_value_at(int node, double csi, double eta,
-                                  double dzeta) {
-  const double sx = poro_node_sign(node, 0);
-  const double sy = poro_node_sign(node, 1);
-  const double sz = poro_node_sign(node, 2);
-
-  return 0.125 * (1.0 + sx * csi) * (1.0 + sy * eta) *
-         (1.0 + sz * dzeta);
-}
-
 static const int32_t* acoustic_solid_trace_nodes(int64_t face);
+static int mesh_acoustic_face_axis(uint8_t face, int* axis, int* sign,
+                                   int tangent_axes[2]);
 
 static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
   if (!acoustic_poroelastic_open_pore_enabled() || (solver == NULL) ||
       (solver->pore_pressure_open_pore_mass == NULL) ||
-      (Global.myMesh == NULL) || (Global.acousticInterfaceFaces <= 0) ||
-      (Global.acousticInterfaceAdjacentPoroelastic == NULL) ||
-      (Global.acousticInterfacePoroelasticBoundaryScales == NULL)) {
+      (Global.myMesh == NULL) || (Global.acousticInterfaceFaces <= 0)) {
     return;
+  }
+  if (Global.acousticInterfaceAdjacentPoroelastic == NULL ||
+      Global.acousticInterfacePoroelasticBoundaryScales == NULL ||
+      Global.acousticInterfaceFaceIds == NULL ||
+      Global.acousticInterfaceFaceCenters == NULL ||
+      Global.acousticInterfaceFaceHalfWidths == NULL ||
+      Global.acousticInterfaceAdjacentCenters == NULL ||
+      Global.acousticInterfaceAdjacentHalfWidths == NULL ||
+      acoustic_solid_trace_nodes(0) == NULL) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Open-pore quadrature requires interface geometry and solid traces\n");
   }
 
   for (int64_t i = 0; i < Global.acousticInterfaceFaces; i++) {
@@ -2004,35 +2006,32 @@ static void poroelastic_add_open_pore_interface_mass(mysolver_t* solver) {
       continue;
     }
 
-    const int32_t adjacent_eindex =
-        Global.acousticInterfaceAdjacentElementIndexes[i];
     const int32_t* solid_nodes = acoustic_solid_trace_nodes(i);
-    const int32_t target_eindex =
-        (adjacent_eindex >= 0) ? adjacent_eindex
-                               : Global.acousticInterfaceElementIds[i];
-    const double* target_center =
-        (solid_nodes != NULL || adjacent_eindex >= 0)
-            ? (Global.acousticInterfaceAdjacentCenters + 3 * i)
-            : (Global.acousticInterfaceFaceCenters + 3 * i);
-
-    if ((target_eindex < 0) || (target_eindex >= Global.myMesh->lenum)) {
-      continue;
+    const double* center = Global.acousticInterfaceAdjacentCenters + 3 * i;
+    const double* half = Global.acousticInterfaceAdjacentHalfWidths + 3 * i;
+    int axis, sign, tangent_axes[2];
+    if (!mesh_acoustic_face_axis(Global.acousticInterfaceFaceIds[i],
+                                 &axis, &sign, tangent_axes)) {
+      solver_abort(__FUNCTION_NAME, NULL, "Invalid open-pore interface face\n");
     }
-
-    elem_t* elemp = &Global.myMesh->elemTable[target_eindex];
+    double weights[8] = {};
+    for (int q = 0; q < 4; ++q) {
+      double shape[8];
+      acoustic_open_pore_shape_values(center, half, tangent_axes, q, shape);
+      for (int j = 0; j < 8; ++j) weights[j] += 0.25 * shape[j];
+    }
     for (int j = 0; j < 8; j++) {
-      const double weight =
-          poro_shape_value_at(j, target_center[0], target_center[1],
-                              target_center[2]);
+      const double weight = weights[j];
       if (weight == 0.0) {
         continue;
       }
 
-      const int32_t lnid = solid_nodes ? solid_nodes[j] : elemp->lnid[j];
-      if ((lnid >= 0) && (lnid < Global.myMesh->nharbored)) {
-        solver->pore_pressure_open_pore_mass[lnid] +=
-            (solver_float)(scale * weight);
+      const int32_t lnid = solid_nodes[j];
+      if ((lnid < 0) || (lnid >= Global.myMesh->nharbored)) {
+        solver_abort(__FUNCTION_NAME, NULL, "Invalid open-pore solid trace node\n");
       }
+      solver->pore_pressure_open_pore_mass[lnid] +=
+          (solver_float)(scale * weight);
     }
   }
 }
@@ -12906,7 +12905,8 @@ static void solver_init() {
         monitor_print(
             "Acoustic-poroelastic open-pore pressure continuity: %.1fM nodes "
             "from %.3fM fragments (weak compliance-projected, factor %.6g; "
-            "undrained fast path disabled)\n",
+            "2x2 Gauss hydraulic quadrature independent of mechanical "
+            "point/face_mass; undrained fast path disabled)\n",
             (double)globalPoroelasticOpenPoreNodes / 1.0e6,
             (double)globalAcousticPoroelasticFragments / 1.0e6,
             Param.theAcousticPoroelasticPressurePenaltyFactor);
@@ -26985,7 +26985,9 @@ static void station_write_mediums_file(
   }
 }
 
-static void station_rewrite_mediums_file_from_current_state(void) {
+static void station_rewrite_mediums_file_from_current_state(
+    int rampedReferenceFinalized) {
+  if (Param.stationBinary == YES) return;
   station_medium_record_t* records = NULL;
 
   if (Param.myNumberOfStations > 0) {
@@ -27001,8 +27003,29 @@ static void station_rewrite_mediums_file_from_current_state(void) {
     }
   }
 
-  station_write_mediums_file(records, 1);
+  station_write_mediums_file(records, rampedReferenceFinalized);
   free(records);
+}
+
+/* Station geometry is prepared before solver_init(), but pressure eligibility
+ * must use its final BrickUP map, not the earlier material candidate test.
+ * Finalize before pressure gather metadata or nonlinear station state exists. */
+static void station_finalize_poroelastic_output(void) {
+  if (Param.theNumberOfStations == 0) return;
+  for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
+    station_t* station = &Param.myStations[i];
+    station->pore_pressure_is_defined =
+        poroelastic_element_map_status(Global.myMesh,
+            station->owningElementIndex, NULL, NULL) == POROELASTIC_MAP_ACTIVE &&
+        poroelastic_point_is_saturated(station->coords.x[0],
+            station->coords.x[1], station->coords.x[2], station->h);
+    station->initial_vertical_effective_stress =
+        station_initial_vertical_effective_stress(Global.myMesh,
+            station->owningElementIndex, station->coords,
+            station->pore_pressure_is_defined);
+  }
+  // Collective even on ranks with no stations; binary output has no sidecar.
+  station_rewrite_mediums_file_from_current_state(0);
 }
 
 /* At the last ramped-geostatic force evaluation, the host nonlinear state is
@@ -27026,7 +27049,7 @@ static void station_refresh_ramped_geostatic_reference(int step) {
   /* station_mediums.txt is the audit record for the denominator. Rewrite it
    * collectively after the in-memory references change so it cannot retain
    * the setup-time theoretical values. */
-  station_rewrite_mediums_file_from_current_state();
+  station_rewrite_mediums_file_from_current_state(1);
   if (Global.myID == 0) {
     monitor_print(
         "Ramped geostatic Ru references: refreshed %d nonlinear station "
@@ -27043,7 +27066,6 @@ void setup_stations_data() {
   int32_t localCapacity = 0;
   int32_t* localStationIds = NULL;
   octant_t** localStationOctants = NULL;
-  station_medium_record_t* stationMediumRecords = NULL;
   vector3D_t stationCoords;
   octant_t* octant;
 
@@ -27096,12 +27118,6 @@ void setup_stations_data() {
     //             Param.theNumberOfStations );
 
     XMALLOC_VAR_N(Param.myStations, station_t, Param.myNumberOfStations);
-    stationMediumRecords = (station_medium_record_t*)calloc(
-        (size_t)Param.myNumberOfStations, sizeof(station_medium_record_t));
-    if (stationMediumRecords == NULL) {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "Error allocating station medium records");
-    }
   }
 
   if (poroelastic_enabled() && (Param.surfaceGroundwaterTable == YES)) {
@@ -27147,14 +27163,8 @@ void setup_stations_data() {
         (acoustic_pressure_enabled() && element_is_acoustic(stationMaterial))
             ? 1
             : 0;
-    Param.myStations[iLCStation].pore_pressure_is_defined =
-        (poroelastic_element_candidate(Global.myMesh, stationElementIndex, 0,
-                                       NULL, NULL) &&
-         poroelastic_point_is_saturated(
-             stationCoords.x[0], stationCoords.x[1], stationCoords.x[2],
-             (stationMaterial != NULL) ? stationMaterial->edgesize : 1.0))
-            ? 1
-            : 0;
+    // Finalized after solver_init() excludes CPML and inactive BrickUP cells.
+    Param.myStations[iLCStation].pore_pressure_is_defined = 0;
     Param.myStations[iLCStation].acoustic_kinematics_ready = 0;
     memset(Param.myStations[iLCStation].acoustic_disp, 0,
            sizeof(Param.myStations[iLCStation].acoustic_disp));
@@ -27199,12 +27209,7 @@ void setup_stations_data() {
     compute_csi_eta_dzeta(octant, Param.myStations[iLCStation].coords,
                           &(Param.myStations[iLCStation].localcoords),
                           Param.myStations[iLCStation].nodestointerpolate);
-    Param.myStations[iLCStation].initial_vertical_effective_stress =
-        station_initial_vertical_effective_stress(
-            Global.myMesh, stationElementIndex, stationCoords,
-            Param.myStations[iLCStation].pore_pressure_is_defined);
-    station_fill_medium_record(iLCStation,
-                               &stationMediumRecords[iLCStation]);
+    Param.myStations[iLCStation].initial_vertical_effective_stress = NAN;
     if (Param.stationBinary == YES) continue;
 
     /*
@@ -27305,9 +27310,6 @@ void setup_stations_data() {
     }
   }
   Timer_Stop("Stations Local Init");
-
-  station_write_mediums_file(stationMediumRecords, 0);
-  free(stationMediumRecords);
 
   free(localStationIds);
   free(localStationOctants);
@@ -29703,6 +29705,7 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  station_finalize_poroelastic_output();
   acoustic_receiver_build_weights();
   g_acousticNeighbors.clear();
   /* Prepare the output-only CPML gradient memories after profile setup.
