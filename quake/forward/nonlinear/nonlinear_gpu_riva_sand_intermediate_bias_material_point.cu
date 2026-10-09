@@ -74,10 +74,11 @@ __host__ __device__ static inline int riva_ib_material_point_replay(
         strain_history == NULL || results == NULL || steps <= 0 ||
         !MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) ||
         !initial_state->provided || config->no_substeps < 1 ||
-        !riva_ib_reversal_type_valid(config->riva_reversal_type)) return 0;
+        !riva_ib_reversal_type_valid(config->riva_reversal_type) ||
+        !riva_ib_bias_volume_valid(config->riva_bias_volume)) return 0;
 
     const riva_ib_parameters_t parameters =
-        riva_ib_reference_parameters(1000.0);
+        riva_ib_reference_parameters(1000.0,config->riva_bias_volume);
     tensor_t strain_previous = initial_state->strain;
     tensor_t reference_stress = initial_state->stress;
     reference_stress.xy = 0.0;

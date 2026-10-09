@@ -10,16 +10,16 @@
 #include "nonlinear_riva_sand.h"
 
 /* Strict optional scalar reader shared by field and material-point inputs.
- * A missing selector means type 1; an explicit selector is valid for 02 only.
+ * A missing reversal selector means type 3; an explicit selector is valid for 02 only.
  * Reject duplicate keys and numeric prefixes such as 1.5 or 2junk.
  * Reject retired keys rather than silently selecting the default. */
-static inline int riva_read_reversal_type(FILE *fp, const char *key,
-    int is_02, int32_t *out)
+static inline int riva_read_02_selector(FILE *fp, const char *key,
+    int is_02, int32_t *out,int default_value,int low,int high)
 {
     if (!fp || !key || !out) return -1;
     rewind(fp);
     char line[4096];
-    int found=0, selected=1;
+    int found=0, selected=default_value;
     const char *retired_keys[]={"reversalType","rivasand02_reversalType"};
     while (fgets(line,sizeof(line),fp)) {
         if (!strchr(line,'\n') && !feof(fp)) return -1;
@@ -38,7 +38,7 @@ static inline int riva_read_reversal_type(FILE *fp, const char *key,
         s+=n; while (isspace((unsigned char)*s)) ++s;
         if (*s++!='=') return -1;
         while (isspace((unsigned char)*s)) ++s;
-        if (*s!='1' && *s!='2') return -1;
+        if (*s<'0'+low || *s>'0'+high) return -1;
         selected=*s++-'0';
         while (isspace((unsigned char)*s)) ++s;
         if (*s) return -1;
@@ -47,6 +47,14 @@ static inline int riva_read_reversal_type(FILE *fp, const char *key,
     *out=selected;
     return 0;
 }
+
+static inline int riva_read_reversal_type(FILE *fp,const char *key,
+    int is_02,int32_t *out)
+{ return riva_read_02_selector(fp,key,is_02,out,3,1,3); }
+
+static inline int riva_read_bias_volume(FILE *fp,const char *key,
+    int is_02,int32_t *out)
+{ return riva_read_02_selector(fp,key,is_02,out,1,0,2); }
 
 static inline int riva_read_material_rows(FILE *fp, const char *key,
     int rows, int custom, int with_vs, const riva_parameters_t *p, double *out)

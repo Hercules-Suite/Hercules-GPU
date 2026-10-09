@@ -1,8 +1,9 @@
 # Hercules 02 loading-branch reversal research
 
 **Current interface:** the [rivasand02_reversaltype selector](RIVA_REVERSAL_SELECTOR.md)
-defaults to type 1. Set `rivasand02_reversaltype = 2` to reproduce this historical
-branch-reference study or continue its marker-7 checkpoints. The validation
+defaults to type 3, with `rivasand02_biasvolume = 1`. To reproduce this historical
+branch-reference study from fresh initialization, set `rivasand02_reversaltype = 2`
+and `rivasand02_biasvolume = 0`. Marker-7 checkpoints are no longer accepted. The validation
 record below describes the original type-2 port.
 
 On `research/rivasand02-branch-reversal`, both `RIVASand02` and
@@ -103,7 +104,7 @@ Generate six CUDA inputs without claiming execution:
 
 ```sh
 python3 benchmark_inputs/nonlinear_material_point/run_riva_branch_reversal_cuda.py \
-  --output standalone/branch_cuda
+  --reversal-type 2 --bias-volume 0 --output standalone/branch_cuda
 ```
 
 On an NVIDIA/MPI host, rebuild psolve from this branch, then run:
@@ -111,7 +112,7 @@ On an NVIDIA/MPI host, rebuild psolve from this branch, then run:
 ```sh
 python3 benchmark_inputs/nonlinear_material_point/run_riva_branch_reversal_cuda.py \
   --psolve /path/to/psolve --launcher 'mpirun -np 1' \
-  --output standalone/branch_cuda
+  --reversal-type 2 --bias-volume 0 --output standalone/branch_cuda
 bash benchmark_inputs/nonlinear_material_point/run_suite.sh /path/to/psolve
 ```
 
@@ -120,7 +121,10 @@ successful full-state CPU/GPU comparison inside psolve, and exact Standard02/
 Custom02 output equality separately on each backend. Fixture rows also pass
 their event-count checks in the local host kernel.
 
-**Pending:** CUDA compilation/execution, device checkpoint file I/O, multi-rank
+**Pending at the time of this historical study:** CUDA compilation/execution, device checkpoint file I/O, multi-rank
 MPI restart, both geostatic field workflows, coupled wave/BrickUP time-step and
 mesh checks, and experimental validation. The development Mac has no CUDA/MPI
 toolchain. The OpenSees column time step is not a Hercules stability qualification.
+
+Current BiasVolume/default and Horizon validation results are recorded in
+[RIVA_REVERSAL_SELECTOR.md](RIVA_REVERSAL_SELECTOR.md).

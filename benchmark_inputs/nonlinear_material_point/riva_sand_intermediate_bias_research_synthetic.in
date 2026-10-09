@@ -62,3 +62,7 @@ material_point_strain_history =
   -2.5e-5 -2.5e-5 -2.5e-5 -5.0e-4 0 0
   -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0
   -2.0e-5 -2.0e-5 -2.0e-5 -1.0e-3 0 0
+
+# Preserve the historical fixture response across default changes.
+rivasand02_reversaltype = 1
+rivasand02_biasvolume = 0

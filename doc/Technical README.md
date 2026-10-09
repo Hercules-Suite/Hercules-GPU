@@ -200,9 +200,14 @@ interactions are in the
   see [surface sampling](Extended%20README.md#topographic-surface-geometry-and-sampling).
 - **Nonlinear and plastic controls:** `include_nonlinear_analysis`, `geostatic_loading_time_sec`,
   `geostatic_cushion_time_sec`, `approximate_geostatic_state`, `error_tolerance`, `backbone_errTol`,
-  `material_model`, `material_properties_list`, `no_substeps`, `rivasand02_reversaltype`,
+  `material_model`, `material_properties_list`, `no_substeps`, `rivasand02_reversaltype`, `rivasand02_biasvolume`,
   `manzari_dafalias_integration_scheme`, `manzari_dafalias_forward_euler_substeps`,
-  `manzari_dafalias_recovery`.
+  `manzari_dafalias_recovery`. RS02 reversal types are 1 (previous increment), 2 (accumulated branch), and
+  3 (default, unguarded host stress-ratio predictor). BiasVolume modes are 0
+  (original bias volume), 1 (default, disable bias volume but retain phase
+  volume), and 2 (gated mean correction). Restart requires both selectors
+  unchanged; all older 138-value RS02 checkpoints must be rerun. RS02 GPU failures save a diagnostic snapshot
+  as `rivasand02_failure.rank<R>.step<S>.txt` in the run directory. See [RS02 details](Extended%20README.md#nonlinear-gpu-execution-and-constitutive-models).
 - **Standalone material-point test controls:** `material_point_riva_density`,
   `material_point_riva_vs`, `material_point_brickup`.
 - **Domain Reduction Method:** `implement_drm`, `number_output_drm_boxes`,

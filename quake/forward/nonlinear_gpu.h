@@ -8,7 +8,7 @@
 #include "quake_util.h"
 
 #define NL_RIVA_STATE_VALUE_COUNT 93
-#define NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138
+#define NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 139
 
 typedef enum nl_md_recovery_mode_t {
     NL_MD_RECOVERY_STRICT = 0,
@@ -33,7 +33,8 @@ typedef struct nonlinear_gpu_config_t {
     noyesflag_t tension_cutoff;
     int32_t geostatic_final_step;
     int32_t no_substeps;
-    int32_t riva_reversal_type; /* RIVASand02/Custom02: 1 (default) or 2 */
+    int32_t riva_reversal_type; /* RIVASand02/Custom02: 1, 2 or 3 (default) */
+    int32_t riva_bias_volume; /* RIVASand02/Custom02: 0, 1 (default) or 2 */
     nl_md_integration_scheme_t md_integration_scheme;
     nl_md_forward_euler_substeps_t md_forward_euler_substeps;
     nl_md_recovery_mode_t md_recovery_mode;

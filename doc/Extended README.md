@@ -792,27 +792,84 @@ Notes:
   This adds one target-modulus double per element and one elastic-scale double
   per quadrature point; unrelated families allocate neither. Per-step updates
   load the cached scale but do not repeat the calibration. Checkpoints now
-  store the per-point scale and require marker 4 (original), 8 (02 type 1),
-  or 7 (02 type 2). Both `RIVASand02` and `RIVASandCustom02` accept the
-  optional scalar `rivasand02_reversaltype = 1` in `parameters.in`; omission also means
-  type 1. Type 1 compares adjacent valid increments. Set `rivasand02_reversaltype = 2`
-  to retain the previous accumulated loading-branch rule. Detection occurs
-  once per host increment before substeps. Only the integers 1 and 2 are
-  accepted, and only for the two 02 names; it is not a material-row column.
-  The material-point test input accepts the same key. Existing marker-7
-  checkpoints require explicit `rivasand02_reversaltype = 2`; cross-type restarts and
-  marker-6 or earlier 02 files are rejected. Retain the same model, mesh,
-  physical inputs and reversal type on restart. Original RIVA-Sand inputs
-  and checkpoints are unchanged.
+  store the per-point scale. Original models retain marker 4. Both
+  `RIVASand02` and `RIVASandCustom02` now default to:
+
+  ```ini
+  rivasand02_reversaltype = 3
+  rivasand02_biasvolume = 1
+  ```
+
+  These optional integer scalars belong in `parameters.in` or a material-point
+  input, not in a material row. Invalid values, duplicates, and explicit use
+  with other models are rejected. Reversal type 1 compares adjacent valid
+  increments; type 2 uses accumulated loading-branch strain. Type 3 uses the
+  unguarded full-host elastic stress-ratio predictor from OpenSees_RIVA
+  `355d8f042`, evaluating
+  $(\alpha_{trial}-\alpha_0):(\alpha_{trial}-\alpha)<0$ from the committed
+  mechanical state. It applies at most one event, in the first substep.
+  Before cyclic activation it retains the strain-based initialization rule.
+  `reversalGuard` and `reversalLatch` are not exposed.
+
+  BiasVolume modes follow that same OpenSees revision:
+
+  | Mode | Behavior |
+  | --- | --- |
+  | 0 | Preserve the original bias-driven reversible-volume contribution. |
+  | 1 (default) | Disable that contribution; retain separate phase-transformation volume. |
+  | 2 | Preserve it with the upstream correction to its contractive mean part. |
+
+  Mode 2 gates the correction by fixed bias, reference-pressure ratio,
+  effective-pressure ratio, and accumulated plastic activity. It evolves
+  `field_bias_mean_activity` once after the host increment, keeping that
+  activity fixed during local substeps. This additional scalar is zero in
+  modes 0/1 and is the 139th flattened state value. Mode 2 remains an optional
+  research choice; selecting it does not establish field stability or convergence.
+  None of these modes disables BrickUP fluid-pressure coupling or the separate
+  phase-transformation mechanism.
+
+  RS02 checkpoint marker = `10 + 3*BiasVolume + (reversaltype-1)`; the defaults
+  use marker 15. Each of the nine combinations has its own marker. The new
+  139-value layout rejects all older RS02 markers through 9 and changes to
+  either selector on restart. Rerun initialization, keeping model, mesh, and
+  material inputs unchanged. To reproduce an earlier response rule, explicitly
+  select mode 0 and the earlier reversal type in a fresh run. The 257-value
+  upstream reference calibration has SHA-256
+  `16c8567fd2370c562899b9ec00cc2fc313be137f239cde5d0e22cc1cd3eee800`;
+  this identifies the reference record, with runtime selector overrides
+  recorded separately. User material-row values are unchanged.
+
+  On a rejected RS02 GPU update, the solver writes
+  `rivasand02_failure.rank<R>.step<S>.txt` in the run directory before aborting.
+  This is a diagnostic snapshot, not a restart checkpoint. A repeat failure
+  at the same rank and step overwrites that filename. The download and file
+  write occur only after failure; no per-point history transfer is added to
+  successful timesteps. The log also reports the full incoming tensor strain
+  increment and cached `E_ref` in Pa. Non-finite strain increments are rejected,
+  including NaNs that must not be mistaken for a zero increment.
+
+  The text starts with `RIVASAND02_FAILURE_V2`, followed by `key=value` records:
+  model, parameter hash, kernel/checkpoint revisions, rank, element, quadrature
+  point, step, reversal type, BiasVolume mode, substeps, whether an update was attempted,
+  initialization/admission flags, compatibility residual, increment, material,
+  and state. For example, `increment=0 0 0 0 0 1e-6` uses physical tensor order
+  `[xx yy zz xy yz xz]`. The eleven `material` entries are
+  `h m M kd zeta e_max e_min Q R n_G E_ref`; `E_ref` uses Pa.
+  `state_values=139` identifies the subsequent `state` array in the native
+  `riva_ib_state_values` order. A rejected constitutive call preserves its
+  input history; a failure of the subsequent compatibility check instead
+  records the resulting state. Thus the printed pressure and residual alone
+  do not identify the rejected trial. Investigation replay helpers remain
+  local-only under `.local-diagnostics/`.
 
   The material-point driver takes Dr [G0] or the twelve Custom values,
   without Vs_limit. Automatic mode additionally requires
   material_point_riva_density (kg/m3) and material_point_riva_vs (m/s).
   Full reference histories are retained using explicit reference G0.
 
-  The 02 kernel remains the distinct revision-3 plastic-activity successor,
-  with unchanged 138-value history and material-specific density correction.
-  OpenSees BiasVolume and reversalLatch are not included. Both generations
+  The 02 kernel retains the plastic-activity and material-specific density
+  corrections, with kernel revision 5 and the 139-value BiasVolume history.
+  OpenSees reversalLatch is not included. Both generations
   return effective skeleton stress; BrickUP owns pressure and its total-stress
   contribution. Automatic initial Vs matching is not a new cyclic calibration
   and does not establish full-mesh CUDA/MPI qualification.

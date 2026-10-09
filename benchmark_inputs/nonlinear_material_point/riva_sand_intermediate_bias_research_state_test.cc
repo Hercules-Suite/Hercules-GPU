@@ -3,7 +3,7 @@
  * The test uses the frozen low-bias input path to exercise byte restart at a
  * static preload checkpoint, immediately after one-time activation, and next
  * to the first host reversal.  It also verifies point-state isolation, the
- * 63-field/138-value flatten contract, activation idempotence after restart,
+ * 64-field/139-value flatten contract, activation idempotence after restart,
  * and BrickUP ownership of fluid pressure and total-stress assembly.
  *
  * Usage:
@@ -137,7 +137,7 @@ static bool advance(const riva_ib_parameters_t &parameters,
         return false;
     tensor_t stress = state->base.stress;
     return riva_ib_update_material(&parameters, &material, increment.deps,
-                                   increment.nsub, state, &stress, info) &&
+                                   increment.nsub, state, &stress, info,1) &&
            info->accepted_substeps == increment.nsub &&
            same_tensor(stress, state->base.stress) &&
            riva_finite_tensor(stress);
@@ -278,7 +278,8 @@ static void check_plastic_gate(const riva_ib_parameters_t &parameters,
                     throw std::runtime_error("gate did not suppress weak microcycles");
                 double values[RIVA_IB_STATE_VALUE_COUNT] = {};
                 if (riva_ib_state_values(&s, values) != RIVA_IB_STATE_VALUE_COUNT ||
-                    values[RIVA_IB_STATE_VALUE_COUNT-1] != s.ep_half_last)
+                    values[RIVA_IB_STATE_VALUE_COUNT-2] != s.ep_half_last ||
+                    values[RIVA_IB_STATE_VALUE_COUNT-1] != s.field_bias_mean_activity)
                     throw std::runtime_error("activity missing from flattened restart");
                 const riva_ib_state_t active = s;
                 if (!riva_ib_begin_dynamic_phase(&p, &material, nullptr, &s) ||
@@ -298,12 +299,12 @@ int main(int argc, char **argv)
         return 2;
     }
     try {
-        if (RIVA_IB_PARAMETER_COUNT != 249 ||
-            RIVA_IB_LOGICAL_STATE_COUNT != 63 ||
-            RIVA_IB_STATE_VALUE_COUNT != 138 || RIVA_IB_KERNEL_REVISION != 4u) {
+        if (RIVA_IB_PARAMETER_COUNT != 257 ||
+            RIVA_IB_LOGICAL_STATE_COUNT != 64 ||
+            RIVA_IB_STATE_VALUE_COUNT != 139 || RIVA_IB_KERNEL_REVISION != 5u) {
             throw std::runtime_error("compile-time parameter/state contract changed");
         }
-        const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0);
+        const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0,0);
         const riva_material_parameters_t material =
             riva_reference_material_parameters(&parameters.base);
         check_plastic_gate(parameters, material);
@@ -396,14 +397,14 @@ int main(int argc, char **argv)
         if (!riva_ib_update_material(
                 &parameters, &material, affine_increment, 4,
                 &homogeneous_reference, &homogeneous_stress,
-                &homogeneous_reference_info))
+                &homogeneous_reference_info,1))
             throw std::runtime_error("homogeneous reference update failed");
         for (size_t point = 0; point < homogeneous_points.size(); ++point) {
             riva_update_info_t point_info = {};
             tensor_t point_stress = homogeneous_points[point].base.stress;
             if (!riva_ib_update_material(
                     &parameters, &material, affine_increment, 4,
-                    &homogeneous_points[point], &point_stress, &point_info) ||
+                    &homogeneous_points[point], &point_stress, &point_info,1) ||
                 !same_state(homogeneous_reference, homogeneous_points[point],
                             "homogeneous Hex8 point") ||
                 !same_tensor(homogeneous_stress, point_stress))
@@ -422,7 +423,7 @@ int main(int argc, char **argv)
                 if (!riva_ib_update_material(
                         &parameters, &material, rigid_increment, 4,
                         &homogeneous_points[point], &rigid_stress,
-                        &rigid_info))
+                        &rigid_info,1))
                     throw std::runtime_error("rigid-motion update failed");
             }
             if (!same_state(before_rigid, homogeneous_points[point],
@@ -444,7 +445,7 @@ int main(int argc, char **argv)
         if (!riva_ib_update_material(&parameters, &material,
                                      skeleton_increment.deps,
                                      skeleton_increment.nsub, &skeleton,
-                                     &effective_stress, &skeleton_info) ||
+                                     &effective_stress, &skeleton_info,1) ||
             pore_pressure != pore_pressure_before ||
             !same_tensor(effective_stress, skeleton.base.stress))
             throw std::runtime_error("material did not preserve BrickUP ownership");
@@ -474,8 +475,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("effective-to-total stress assembled incorrectly");
 
         std::cout
-            << "PASS: RIVASand02 249-parameter/63-state/"
-               "138-value flatten contract, static/post-activation/reversal restart, "
+            << "PASS: RIVASand02 257-parameter/64-state/"
+               "139-value flatten contract, static/post-activation/reversal restart, "
                "activation idempotence, point isolation, homogeneous/rigid "
                "Hex8 behavior, and BrickUP effective-stress ownership\n";
     } catch (const std::exception &error) {

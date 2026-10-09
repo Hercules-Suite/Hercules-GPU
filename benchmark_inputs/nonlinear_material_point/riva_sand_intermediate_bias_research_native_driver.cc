@@ -599,7 +599,7 @@ static void replay_case(const CaseDefinition &definition,
     const fs::path input_path = input_directory / (std::string(definition.name) + ".csv");
     const fs::path output_path = output_directory / (std::string(definition.name) + ".csv");
     const std::vector<Row> increments = read_input_path(input_path);
-    const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0);
+    const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0,0);
     const riva_material_parameters_t material =
         riva_reference_material_parameters(&parameters.base);
     const tensor_t initial_stress = {
