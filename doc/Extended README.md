@@ -1103,8 +1103,7 @@ Notes:
 	Stability with this filter does not by itself validate waveform accuracy.
 	The source-corrected Izmir comparison completed 100 s with finite output
 	for all three filters using identical generated forces; slow acoustic
-	motion and reconstruction accuracy remain under investigation. See the
-	[corrected validation record](izmir_gravity_diagnostic_20261001.md).
+	motion and reconstruction accuracy remain under investigation.
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered. In `bathymetry` mode it also reports how many bottom faces
@@ -1290,20 +1289,16 @@ Notes:
 	by optional `Ru(-)` output; it is `nan` where the initial effective-stress
 	reference itself is unavailable or nonpositive.
 - `acoustic_quality_factor`
-	Optional. Default unset / `<= 0` ⇒ acoustic is exactly lossless and
-	bit-identical to the validated baseline. A positive quality factor
-	`Q` adds a small, high-frequency-selective damping to acoustic
-	(water) elements that attenuates the synthetic lossless-cavity grid
-	ring while barely touching the physical signal. Applies to interior
-	acoustic elements only (skipped in the CPML zone); works for both
-	`pressure` and `velocity_potential`. **This is a numerical
-	regularizer for a low-order-discretisation artifact, not physical
-	ocean attenuation** (and is non-SPECFEM) — use it only to clean the
-	synthetic no-attenuation benchmark; runs with a realistically
-	attenuating Earth do not need it. The older flat-water benchmark reported
-	`acoustic_quality_factor = 100` as a useful tradeoff; the
-	[historical record](#historical-acoustic-experiments) gives its scope.
-	That case-specific observation is not a general production calibration.
+	Optional, dimensionless. Default `0`; omitting the parameter or setting
+	it to `<= 0` disables interior acoustic damping. This default was verified
+	in the documented flat-water CPS comparisons and MPI/backend consistency
+	tests; see [validation scope](#interface-constraints-and-local-matching).
+	Those results apply to the recorded configurations and durations.
+	Positive values enable stiffness-proportional numerical damping referenced
+	to `simulation_wave_max_freq_hz`, with stronger damping at higher frequencies.
+	It works for `pressure` and `velocity_potential`, skips CPML elements, and is
+	independent of material-profile `Qp`/`Qs`. CPML absorption and energy transfer
+	into coupled solids remain separate from this control.
 - `acoustic_poroelastic_interface`
 	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
 	sealed for the pore fluid while the existing acoustic pressure traction
@@ -1348,7 +1343,8 @@ affects (station motion, not the pressure column). Velocity potential remains
 the default.
 
 Pressure-formulation validation (2026-10-08 UTC): a local 58-run CUDA/MPI
-comparison exercised all three methods. Fourteen 110 s flat-water runs covered
+comparison exercised all three methods. All 58 runs used
+`acoustic_quality_factor = 0`. Fourteen 110 s flat-water runs covered
 coarse/fine meshes, both formulations and two half-time-step pressure controls.
 Forty 4 s source-excited checks covered `point`/`face_mass`, gravity, finer water,
 buildings combined with synthetic `vonMises_ep` nonlinear elastoplastic and
@@ -1897,8 +1893,7 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	now evaluates the tangential product `S_x*S_y` separately at each of the
 	four lumped top nodes, including its corner term. Earlier face-average
 	memories omitted zero-mean face modes. Historical source-corrupted tests
-	are retained in the [Izmir investigation](izmir_gravity_diagnostic_20261001.md);
-	they do not validate this formulation. Gravity-wave absorption and motion
+	do not validate this formulation. Gravity-wave absorption and motion
 	reconstruction require separate checks, since surface-gradient recovery
 	error remains even with a consistent absorber.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
@@ -2925,22 +2920,14 @@ include subsequent interface changes.
 
 For positive `acoustic_quality_factor=Q`, the implemented acoustic damping
 coefficient is `beta=1/(Q*2*pi*f_ref*dt)`, from
-`acoustic_stiffness_damping_beta`. In the modal interpretation of the discrete
-force term, `zeta(omega)=beta*omega*dt/2` and
+`acoustic_stiffness_damping_beta`, with `f_ref` set by
+`simulation_wave_max_freq_hz` and `dt` the simulation timestep. In the modal
+interpretation of the discrete force term, `zeta(omega)=beta*omega*dt/2` and
 `Q(omega)=1/(beta*omega*dt)`. This is stiffness-proportional damping: it is
 stronger at higher frequencies. It is independent of the elastic `theBBase`
 coefficient, which an earlier implementation incorrectly used, leaving the
 option ineffective for nondamped/BKT cases. Acoustic CPML elements skip this
 interior regularizer.
-
-The older flat-water, non-attenuating benchmark reported a roughly 4.6 Hz
-pressure ring, estimated by `c/(4*h)`. Its Q sweep (500, 100, 50) reported
-that Q=100 reduced pressure energy above 2 Hz by about 50–82%, improved
-pressure correlation with CPS from about 0.68 to 0.86, and retained vertical
-displacement correlation near 0.9965 with mean perturbation at most 0.5%.
-Q=50 increased the displacement perturbation with little additional ring
-reduction. These are case-specific historical measurements of a numerical
-regularizer, not physical ocean attenuation values or a general calibration.
 
 ### Historical CPML benchmark record
 
@@ -3239,7 +3226,7 @@ confirmed these identities for the recorded implementation. They isolate
 output time integration from spatial recovery and field evolution; they do
 not validate the potential field in a coupled simulation. Investigation
 scripts and smoke-test inputs are retained locally, not distributed in this
-repository. See the [recorded investigation](izmir_gravity_diagnostic_20261001.md).
+repository.
 
 Changing `simulation_wave_max_freq_hz` changes meshing and frequency-dependent
 damping; it does not filter the source. Compare CPML variants within the same
