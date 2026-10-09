@@ -91,6 +91,9 @@ interactions are in the
   overrides require PROJ. Rotated PROJ domains require a profile
   background and disable the legacy Istanbul reader. Rebuild meshes/sources
   when either frame changes; PROJ output directories include `coordinate_frame.txt`.
+  The 3-D material reader supports 64-bit sample counts/profile offsets with
+  chunked MPI initialization; full material arrays remain replicated per rank.
+  See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.

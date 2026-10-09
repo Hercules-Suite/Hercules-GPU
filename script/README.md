@@ -88,6 +88,13 @@ Unrelated files, including old Q files when the new CSV has no Q columns, are
 not removed. Use a fresh output directory to avoid mixing models. The command
 prints the profile and sample counts; it does not configure `parameters.in`.
 
+The converter and validator hold their input arrays in memory. Use a streaming
+exporter and bounded-memory verification for models with billions of samples;
+these convenience scripts are intended for models that fit available memory.
+Hercules supports signed 64-bit sample counts and profile offsets, but the
+complete material arrays are replicated on each solver rank. See the
+[material memory estimate](../doc/Extended%20README.md#3d-velocity-model-files).
+
 ### validate_3d_velocity_model.py
 
 ```bash

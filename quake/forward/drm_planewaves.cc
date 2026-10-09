@@ -18,6 +18,7 @@
  */
 
 #include <inttypes.h>
+#include <limits>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1651,6 +1652,8 @@ void Istanbul_init ( int32_t myID ) {
  * -------------- General 3D Velocity Model related functions -----------------
  * ----------------------------------------------------------------------------
  */
+/* Separate from the legacy Istanbul reader's 32-bit offsets. */
+static int64_t *Soil_layer_start;
 static double *Soil_Vp_data;
 static double *Soil_Qs_data;
 static double *Soil_Qp_data;
@@ -1671,7 +1674,7 @@ static struct Params_soil_t {
     int numLayerID;
     int numPointX;
     int numPointY;
-    int numData;
+    int64_t numData;
     int hasQualityFactors;
     double minPointZ;
     double maxPointZ;
@@ -1723,9 +1726,9 @@ static int update_3d_surface_cache(double DRM_southwest_x,
     return 0;
 }
 
-double max(double arr[], int size) {
+double max(double arr[], int64_t size) {
     double max = arr[0];
-    for (int i = 1; i < size; i++) {
+    for (int64_t i = 1; i < size; i++) {
         if (arr[i] > max) {
             max = arr[i];
         }
@@ -1733,9 +1736,9 @@ double max(double arr[], int size) {
     return max;
 }
 
-double min(double arr[], int size) {
+double min(double arr[], int64_t size) {
     double min = arr[0];
-    for (int i = 1; i < size; i++) {
+    for (int64_t i = 1; i < size; i++) {
         if (arr[i] < min) {
             min = arr[i];
         }
@@ -1756,10 +1759,11 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     y_input = grid_y;
     /* The z_input is the depth from the surface. If the topography is considered, 
     it should has been corrected before calling this function. */
-    int i, k;
+    int i;
+    int64_t k;
 
     double zd_vs[4], zd_vp[4], zd_rho[4], zd_qs[4], zd_qp[4];
-    int row1, numLayers;
+    int64_t row1, numLayers;
     double zi_elevation, zi_vs, zi_vp, zi_rho, zi_qs, zi_qp;
 
     double xmin = Soil_point_x[0];
@@ -1828,11 +1832,11 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     zi_elevation = N1 * z_elevation[0] + N2 * z_elevation[1] + N3 * z_elevation[2] + N4 * z_elevation[3];
 
     for (i = 0; i < 4; i++) {
-        row1 = Layer_start_ID[Rec_node_ID[i]];
+        row1 = Soil_layer_start[Rec_node_ID[i]];
         if (Rec_node_ID[i]+1 < Params_soil.numLayerID) {
-            numLayers = Layer_start_ID[Rec_node_ID[i]+1] - Layer_start_ID[Rec_node_ID[i]];
+            numLayers = Soil_layer_start[Rec_node_ID[i]+1] - Soil_layer_start[Rec_node_ID[i]];
         } else if (Rec_node_ID[i]+1 == Params_soil.numLayerID) {
-            numLayers = Params_soil.numData - Layer_start_ID[Rec_node_ID[i]];
+            numLayers = Params_soil.numData - Soil_layer_start[Rec_node_ID[i]];
         } else { // Rec_node_ID[i]+1 > Params_soil.numLayerID, this should never happen
             fprintf(stderr, "Error: Rec_node_ID[i]+1 > Params_soil.numLayerID\n"
                 "Rec_node_ID[%d] = %d, Params_soil.numLayerID = %d\n", i, Rec_node_ID[i], Params_soil.numLayerID);
@@ -1917,26 +1921,31 @@ int general3DVelocityModel_hasQualityFactors(void) {
     return Params_soil.hasQualityFactors;
 }
 
+template <typename Count>
 static int loadDoubleArrayDynamically(const char *filename, double **numbers,
-                                     int *count, int expected_count = -1,
+                                     Count *count, int64_t expected_count = -1,
                                      const double *quality_vs = NULL) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         fprintf(stderr, "Error opening file %s\n", filename);
         return -1;
     }
-    // Read the count of numbers
-    if (fscanf(file, "%d", count) != 1 || *count <= 0 ||
-        (expected_count >= 0 && *count != expected_count)) {
+    // Parse wide before checking axis counts or allocation sizes.
+    int64_t parsed_count = 0;
+    if (fscanf(file, "%" SCNd64, &parsed_count) != 1 || parsed_count <= 0 ||
+        parsed_count > std::numeric_limits<Count>::max() ||
+        (uint64_t)parsed_count > SIZE_MAX / sizeof(double) ||
+        (expected_count >= 0 && parsed_count != expected_count)) {
         if (expected_count < 0)
             fprintf(stderr, "Invalid material count in %s; expected a positive integer.\n",
                     filename);
         else
-            fprintf(stderr, "Invalid material count in %s; expected %d values.\n",
+            fprintf(stderr, "Invalid material count in %s; expected %" PRId64 " values.\n",
                     filename, expected_count);
         fclose(file);
         return -1;
     }
+    *count = (Count)parsed_count;
     // Allocate memory dynamically based on the count
     *numbers = (double *)malloc((size_t)*count * sizeof(double));
     if (*numbers == NULL) {
@@ -1945,9 +1954,9 @@ static int loadDoubleArrayDynamically(const char *filename, double **numbers,
         return -1;
     }
     // Read and store each number
-    for (int i = 0; i < *count; i++) {
+    for (int64_t i = 0; i < *count; i++) {
         if (fscanf(file, "%lf", &(*numbers)[i]) != 1) {
-            fprintf(stderr, "Error reading number at index %d.\n", i);
+            fprintf(stderr, "Error reading number at index %" PRId64 ".\n", i);
             fclose(file);
             free(*numbers);
             *numbers = NULL;
@@ -1959,7 +1968,7 @@ static int loadDoubleArrayDynamically(const char *filename, double **numbers,
             if (!isfinite(vs) || vs < 0.0 || !isfinite(q) || q < 0.0 ||
                 (vs > ACOUSTIC_VS_EPS && q == 0.0)) {
                 fprintf(stderr,
-                        "Invalid quality factor in %s at sample %d "
+                        "Invalid quality factor in %s at sample %" PRId64 " "
                         "(zero-based): Vs=%.17g, Q=%.17g. Solid Q must be "
                         "finite and positive; acoustic placeholders may be zero.\n",
                         filename, i, vs, q);
@@ -1974,34 +1983,51 @@ static int loadDoubleArrayDynamically(const char *filename, double **numbers,
     return 0;
 }
 
-void loadIntArrayDynamically(const char *filename, int **numbers, int *count) {
+static int loadMaterialOffsets(const char *filename, int64_t **numbers,
+                               int *count) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         fprintf(stderr, "Error opening file %s\n", filename);
-        exit(1);
+        return -1;
     }
-    // Read the count of numbers
-    if (fscanf(file, "%d", count) != 1) {
-        fprintf(stderr, "Error reading the count from the file %s.\n", filename);
+    int64_t n = 0;
+    if (fscanf(file, "%" SCNd64, &n) != 1 || n <= 0 ||
+        n > std::numeric_limits<int>::max() ||
+        (uint64_t)n > SIZE_MAX / sizeof(int64_t)) {
+        fprintf(stderr, "Invalid profile count in %s\n", filename);
         fclose(file);
-        exit(1);
+        return -1;
     }
-    // Allocate memory dynamically based on the count
-    *numbers = (int *)malloc(*count * sizeof(int));
+    *count = (int)n;
+    *numbers = (int64_t *)malloc((size_t)n * sizeof(int64_t));
     if (*numbers == NULL) {
-        perror("Memory allocation error");
         fclose(file);
-        exit(1);
+        return -1;
     }
-    // Read and store each number
-    for (int i = 0; i < *count; i++) {
-        if (fscanf(file, "%d", &(*numbers)[i]) != 1) {
-            fprintf(stderr, "Error reading number at index %d.\n", i);
+    for (int i = 0; i < *count; ++i) {
+        if (fscanf(file, "%" SCNd64, &(*numbers)[i]) != 1 ||
+            (i == 0 && (*numbers)[i] != 0) ||
+            (i > 0 && (*numbers)[i] <= (*numbers)[i-1])) {
+            fprintf(stderr, "Invalid profile offset %d in %s\n", i, filename);
             fclose(file);
-            exit(1);
+            free(*numbers);
+            *numbers = NULL;
+            return -1;
         }
     }
     fclose(file);
+    return 0;
+}
+
+/* MPI's traditional count argument remains int even with 64-bit indexing.
+ * Bound each transfer; this is initialization only, outside time stepping. */
+static void broadcastMaterialDoubles(double *values, int64_t count) {
+    const int64_t chunk_size = 64 * 1024 * 1024;
+    for (int64_t offset = 0; offset < count; offset += chunk_size) {
+        const int chunk = (int)((count - offset < chunk_size)
+                               ? count - offset : chunk_size);
+        MPI_Bcast(values + offset, chunk, MPI_DOUBLE, 0, comm_solver);
+    }
 }
 
 static int optionalMaterialFileStatus(const char *filename) {
@@ -2019,9 +2045,9 @@ static int optionalMaterialFileStatus(const char *filename) {
 }
 
 static int load3DMaterialProperty(const char *filename, double **values,
-                                  int expected_count,
+                                  int64_t expected_count,
                                   const double *quality_vs = NULL) {
-    int count = 0;
+    int64_t count = 0;
     return loadDoubleArrayDynamically(filename, values, &count,
                                       expected_count, quality_vs);
 }
@@ -2056,10 +2082,18 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
     }
     Params_soil.hasQualityFactors = qs_status;
     /* Load the data from the files */
-    loadIntArrayDynamically(layerID_file, &Layer_start_ID, &Params_soil.numLayerID);
+    if (loadMaterialOffsets(layerID_file, &Soil_layer_start,
+                            &Params_soil.numLayerID) != 0) return -1;
     if (loadDoubleArrayDynamically(x_file, &Soil_point_x, &Params_soil.numPointX) != 0 ||
         loadDoubleArrayDynamically(y_file, &Soil_point_y, &Params_soil.numPointY) != 0 ||
         loadDoubleArrayDynamically(z_file, &Soil_point_z, &Params_soil.numData) != 0) {
+        return -1;
+    }
+    if (Params_soil.numPointX < 2 || Params_soil.numPointY < 2 ||
+        (int64_t)Params_soil.numPointX * Params_soil.numPointY !=
+            Params_soil.numLayerID ||
+        Soil_layer_start[Params_soil.numLayerID - 1] >= Params_soil.numData) {
+        fprintf(stderr, "3D material profile dimensions or offsets are invalid\n");
         return -1;
     }
     Params_soil.minPointZ = min(Soil_point_z, Params_soil.numData);
@@ -2093,18 +2127,17 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
         }
     }
 
-    int int_message[5];
+    int int_message[4];
     int_message[0] = Params_soil.numLayerID;
     int_message[1] = Params_soil.numPointX;
     int_message[2] = Params_soil.numPointY;
-    int_message[3] = Params_soil.numData;
-    int_message[4] = Params_soil.hasQualityFactors;
-    MPI_Bcast(int_message, 5, MPI_INT, 0, comm_solver);
+    int_message[3] = Params_soil.hasQualityFactors;
+    MPI_Bcast(int_message, 4, MPI_INT, 0, comm_solver);
+    MPI_Bcast(&Params_soil.numData, 1, MPI_INT64_T, 0, comm_solver);
     Params_soil.numLayerID = int_message[0];
     Params_soil.numPointX = int_message[1];
     Params_soil.numPointY = int_message[2];
-    Params_soil.numData = int_message[3];
-    Params_soil.hasQualityFactors = int_message[4];
+    Params_soil.hasQualityFactors = int_message[3];
 
     double double_message[2];
     double_message[0] = Params_soil.minPointZ;
@@ -2114,7 +2147,7 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     Params_soil.maxPointZ = double_message[1];
 
     if (myID != 0) {
-        Layer_start_ID  = (int*)malloc( sizeof(int) * Params_soil.numLayerID );
+        Soil_layer_start  = (int64_t*)malloc( sizeof(int64_t) * Params_soil.numLayerID );
         Soil_point_x    = (double*)malloc( sizeof(double) * Params_soil.numPointX );
         Soil_point_y    = (double*)malloc( sizeof(double) * Params_soil.numPointY );
         Soil_point_z    = (double*)malloc( sizeof(double) * Params_soil.numData );
@@ -2126,7 +2159,7 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
             Soil_Qp_data = (double*)malloc(sizeof(double) * Params_soil.numData);
         }
     }
-    if ((Layer_start_ID == NULL) || (Soil_point_x == NULL) ||
+    if ((Soil_layer_start == NULL) || (Soil_point_x == NULL) ||
         (Soil_point_y == NULL) || (Soil_point_z == NULL) ||
         (Soil_Vs_data == NULL) || (Soil_Vp_data == NULL) ||
         (Soil_rho_data == NULL) ||
@@ -2140,18 +2173,16 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     }
 
     /* Broadcast table of properties */
-    MPI_Bcast(Layer_start_ID,  Params_soil.numLayerID, MPI_INT, 0, comm_solver);
+    MPI_Bcast(Soil_layer_start,  Params_soil.numLayerID, MPI_INT64_T, 0, comm_solver);
     MPI_Bcast(Soil_point_x,    Params_soil.numPointX, MPI_DOUBLE, 0, comm_solver);
     MPI_Bcast(Soil_point_y,    Params_soil.numPointY, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(Soil_point_z,    Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(Soil_Vs_data,    Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(Soil_Vp_data,    Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(Soil_rho_data,   Params_soil.numData, MPI_DOUBLE, 0, comm_solver);
+    broadcastMaterialDoubles(Soil_point_z, Params_soil.numData);
+    broadcastMaterialDoubles(Soil_Vs_data, Params_soil.numData);
+    broadcastMaterialDoubles(Soil_Vp_data, Params_soil.numData);
+    broadcastMaterialDoubles(Soil_rho_data, Params_soil.numData);
     if (Params_soil.hasQualityFactors) {
-        MPI_Bcast(Soil_Qs_data, Params_soil.numData, MPI_DOUBLE, 0,
-                  comm_solver);
-        MPI_Bcast(Soil_Qp_data, Params_soil.numData, MPI_DOUBLE, 0,
-                  comm_solver);
+        broadcastMaterialDoubles(Soil_Qs_data, Params_soil.numData);
+        broadcastMaterialDoubles(Soil_Qp_data, Params_soil.numData);
     }
     if (myID == 0) {
         fprintf(stderr, "3D velocity model quality factors: %s\n",

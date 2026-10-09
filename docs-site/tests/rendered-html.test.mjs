@@ -2124,3 +2124,13 @@ test("documents independent domain/material rotations and output frame conversio
     assert.match(solver, /material_azimuth_status == 1 && Param\.the3DVelocityModelAzimuth != 0\.0/);
   }
 });
+
+
+test("documents large 3-D material counts and per-rank memory", async () => {
+  const response = await render("/docs/input-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /sample counts and profile start offsets are signed 64-bit/);
+  assert.match(html, /replicated in host memory on every solver rank/);
+  assert.match(html, /65\.3 GiB per solver rank/);
+});
