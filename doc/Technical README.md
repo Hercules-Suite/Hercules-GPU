@@ -84,9 +84,11 @@ interactions are in the
   `basin_material_type`, `basin_water_vp`, `basin_water_rho`, `3D_velocity_model`,
   `3D_velocity_model_directory`, `3D_velocity_model_origin_latitude_deg`,
   `3D_velocity_model_origin_longitude_deg`, `3D_velocity_model_azimuth_deg`
-  (optional, default `0`, finite degrees clockwise from UTM grid north).
-  Material and domain angles are independent; equal angles align their axes.
-  Nonzero material azimuth requires PROJ. Rotated PROJ domains require a profile
+  (optional, defaults to `region_azimuth_leftface_deg` when omitted; finite
+  degrees clockwise from UTM grid north). Material axes follow solver axes by
+  default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,
+  omission or explicit `0` retains solver-aligned axes; explicit nonzero
+  overrides require PROJ. Rotated PROJ domains require a profile
   background and disable the legacy Istanbul reader. Rebuild meshes/sources
   when either frame changes; PROJ output directories include `coordinate_frame.txt`.
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,

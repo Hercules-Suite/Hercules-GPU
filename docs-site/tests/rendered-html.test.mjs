@@ -2110,5 +2110,17 @@ test("documents independent domain/material rotations and output frame conversio
     "true north", "vector_to_utm", "solver-aligned material grid"])
     assert.ok(html.includes(phrase), phrase);
   const params = await (await render("/docs/parameters-material-mesh")).text();
-  assert.match(params, /3D_velocity_model_azimuth_deg/);
+  const materialAngle = params.split("</tr>").find((row) => row.includes(">3D_velocity_model_azimuth_deg</td>"));
+  assert.ok(materialAngle);
+  assert.match(materialAngle, /Default: region_azimuth_leftface_deg; finite/);
+  assert.match(materialAngle, /Explicit values override this default: 0/);
+  assert.match(html, /If 3D_velocity_model_azimuth_deg is omitted, it inherits region_azimuth_leftface_deg/);
+  assert.match(html, /Omit the next line for a material grid aligned with the domain/);
+
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (existsSync(source)) {
+    const solver = readFileSync(source, "utf8");
+    assert.match(solver, /Param\.the3DVelocityModelAzimuth = region_azimuth_leftface_deg;\s*const int material_azimuth_status =\s*hu_config_get_double_opt\(fp, "3D_velocity_model_azimuth_deg"/);
+    assert.match(solver, /material_azimuth_status == 1 && Param\.the3DVelocityModelAzimuth != 0\.0/);
+  }
 });

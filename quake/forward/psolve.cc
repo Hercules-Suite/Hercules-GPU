@@ -4207,9 +4207,13 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   /* 3D Velocity Model */
-  Param.the3DVelocityModelAzimuth = 0.0;
-  if (hu_config_get_double_opt(fp, "3D_velocity_model_azimuth_deg",
-                              &Param.the3DVelocityModelAzimuth) < 0 ||
+  /* An omitted angle follows the domain; an explicit zero still selects
+   * UTM north/east axes in a PROJ build. */
+  Param.the3DVelocityModelAzimuth = region_azimuth_leftface_deg;
+  const int material_azimuth_status =
+      hu_config_get_double_opt(fp, "3D_velocity_model_azimuth_deg",
+                               &Param.the3DVelocityModelAzimuth);
+  if (material_azimuth_status < 0 ||
       !isfinite(Param.the3DVelocityModelAzimuth)) {
     fprintf(stderr, "3D_velocity_model_azimuth_deg must be finite\n");
     return -1;
@@ -4217,7 +4221,9 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.the3DVelocityModelAzimuth =
       remainder(Param.the3DVelocityModelAzimuth, 360.0);
 #ifndef PROJ
-  if (Param.the3DVelocityModelAzimuth != 0.0) {
+  /* Inheriting the domain keeps the existing corner-aligned material axes.
+   * Preserve the restriction on explicit nonzero overrides without PROJ. */
+  if (material_azimuth_status == 1 && Param.the3DVelocityModelAzimuth != 0.0) {
     fprintf(stderr, "3D_velocity_model_azimuth_deg requires a PROJ build; "
                     "without PROJ the material axes follow the domain corners\n");
     return -1;

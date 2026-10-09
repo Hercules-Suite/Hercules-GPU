@@ -54,13 +54,15 @@ rotation pivot at solver `(0,0)`, not the centre of the rectangle.
 side lengths; shallow/deep depths and octree sizing rules are unchanged.
 UTM grid north is distinct from true geographic north.
 
-Optional `3D_velocity_model_azimuth_deg` (finite degrees, default `0`) sets
-the general material grid's +X orientation in the same UTM zone, independently
-of the domain. The required `3D_velocity_model_origin_latitude_deg` and
+Optional `3D_velocity_model_azimuth_deg` (finite degrees) defaults to
+`region_azimuth_leftface_deg` when omitted, aligning the material axes with
+the solver axes. An explicit value sets the material grid's +X orientation
+independently in the same UTM zone; explicit `0` keeps UTM north/east axes.
+The required `3D_velocity_model_origin_latitude_deg` and
 `3D_velocity_model_origin_longitude_deg` locate its `(x=0,y=0)` point when
 `3D_velocity_model=yes`. `x.in` and `y.in` contain metre offsets along its
-own axes. Existing north/east grids use zero; a grid prepared along the
-rotated solver axes uses the same angle as the domain. The two origins may
+own axes. Existing north/east grids require explicit `0`; a grid prepared
+along the rotated solver axes can omit the material angle. The two origins may
 differ. For domain angle $\theta$ and projected offsets $\Delta N,\Delta E$:
 
 ```math
@@ -99,12 +101,14 @@ basin_velocity_model = no
 3D_velocity_model_directory = input/materialfiles
 3D_velocity_model_origin_latitude_deg  = 37.791109
 3D_velocity_model_origin_longitude_deg = 26.383378
-3D_velocity_model_azimuth_deg = 0
+# Omit the next line for a material grid aligned with the domain.
+3D_velocity_model_azimuth_deg = 0  # explicit override: UTM north/east grid
 ```
 
 For these matching origins, solver `(1000,0)` samples material
-`(866.0254,500)` metres. Set the material azimuth to `30` only if its grid
-was prepared at that angle; the same solver point then samples `(1000,0)`.
+`(866.0254,500)` metres with the explicit zero override. Omit the material
+azimuth or set it to `30` for a grid prepared along the domain axes; the same
+solver point then samples `(1000,0)`.
 A valid background profile and the other required simulation/source inputs
 are still necessary. Nonzero domain rotation currently requires the profile
 background and `Istanbul_velocity_model=no`: legacy etree CVM and Istanbul
@@ -154,8 +158,9 @@ positions using the recorded UTM zone and hemisphere for latitude/longitude.
 Rebuild persisted meshes and regenerate source forces whenever either
 origin or azimuth changes; previously stored material coefficients cannot
 be corrected by relabeling output. Non-PROJ builds retain the existing
-`domain_surface_corners` mapping and solver-aligned material axes; nonzero
-`3D_velocity_model_azimuth_deg` is rejected there. Local analytical geometry
+`domain_surface_corners` mapping and solver-aligned material axes when the
+material angle is omitted or explicitly `0`; explicit nonzero overrides of
+`3D_velocity_model_azimuth_deg` are rejected there. Local analytical geometry
 and interpolation checks do not establish CUDA/MPI simulation validation.
 
 ## Octree-compatible domain sizing
@@ -1891,8 +1896,8 @@ in `quake/forward/psolve.cc`.
 	Every file begins with an integer count followed by that many values.
 	`x.in` and `y.in` contain at least two strictly increasing, uniformly
 	spaced coordinates in metres along the material axes defined by
-	`3D_velocity_model_azimuth_deg` (default UTM north/east with PROJ); the
-	axis spacings may differ from one another.
+	`3D_velocity_model_azimuth_deg` (inherits `region_azimuth_leftface_deg`
+	when omitted); the axis spacings may differ from one another.
 - Let `nx` and `ny` be the counts in `x.in` and `y.in`. Horizontal profiles
 	are stored with Y as the outer loop and X as the inner loop. For zero-based
 	axis indices `i` and `j`, the profile number is
