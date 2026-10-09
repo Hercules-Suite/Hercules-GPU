@@ -1903,6 +1903,18 @@ in `quake/forward/psolve.cc`.
 	axis indices `i` and `j`, the profile number is
 	`p = j * nx + i`, giving `(x0,y0), (x1,y0), ...` before advancing to
 	`y1`. The count in `index.in` must be `nx * ny`.
+- Material sample counts and profile start offsets use signed 64-bit integers.
+	X/Y axis counts and the number of horizontal profiles remain limited to
+	2,147,483,647. MPI initialization transfers large material arrays in bounded
+	chunks; the count-prefixed text format is unchanged and old files remain valid.
+	Build the updated reader before using models above 2,147,483,647 samples.
+	Every solver rank holds the full model in host memory: approximately
+	`32 * samples + 16 * profiles` bytes for Z, Vs, Vp, density, profile offsets,
+	and the surface cache, plus another `16 * samples` bytes if Qs/Qp are supplied.
+	For example, 3,003 by 6,003 columns with 121 levels require about 65.3 GiB
+	per solver rank without Q files, before mesh/solver allocations. Plan the
+	rank count per node accordingly; large-file support does not distribute the
+	material arrays among ranks. Text parsing remains serial on solver rank zero.
 - `index.in` stores the zero-based start of each vertical profile in the
 	concatenated arrays; it does not contain a final end offset. Profile `p`
 	uses `[index[p], index[p+1])`, while the final profile uses
