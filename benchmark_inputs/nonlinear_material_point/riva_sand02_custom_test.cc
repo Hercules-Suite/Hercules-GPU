@@ -62,10 +62,10 @@ static void advance(const riva_ib_parameters_t &p,
 int main()
 {
     try {
-        require(riva_ib_checkpoint_revision(0) == 8u &&
-                riva_ib_checkpoint_revision(1) == 8u &&
-                riva_ib_checkpoint_revision(0,2) == 7u &&
-                riva_ib_checkpoint_revision(1,2) == 7u,
+        require(riva_ib_checkpoint_revision(0) == 15u &&
+                riva_ib_checkpoint_revision(1) == 15u &&
+                riva_ib_checkpoint_revision(0,2) == 14u &&
+                riva_ib_checkpoint_revision(1,2) == 14u,
                 "standard/custom reversal checkpoint markers differ");
         const riva_ib_parameters_t p = riva_ib_reference_parameters(1.0);
         const riva_material_parameters_t frozen =
@@ -84,7 +84,7 @@ int main()
             &riva_material_parameters_t::R, &riva_material_parameters_t::n_G};
         for (auto field : fields)
             require(reference.*field == frozen.*field, "reference value drift");
-        for (int reversal_type : {1,2}) for (const int nsub : {1, 4, 16}) {
+        for (int reversal_type : {1,2,3}) for (const int nsub : {1, 4, 16}) {
             for (auto field : fields) {
                 auto custom = reference;
                 custom.*field *= 1.05;
@@ -115,7 +115,7 @@ int main()
                 "out-of-range shakedown anchor accepted");
         std::cout << "PASS: RIVASand02/RIVASandCustom02 exact reference equality, "
                      "all eleven physical inputs active, per-material isolation, "
-                     "custom byte restart, and bounds (types 1/2, 1/4/16 substeps)\n";
+                     "custom byte restart, and bounds (types 1/2/3, 1/4/16 substeps)\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -5,10 +5,11 @@
 /* Native, allocation-free translation of the private intermediate-bias
  * RIVA-Sand research successor at OpenSees_RIVA commit 637d207e867b863d,
  * with the completed-half-cycle plastic gate from commit 5e4ebd30cb5f43b6.
- * Type 1 (default) uses the preceding valid increment. Opt-in type 2 uses
+ * Type 1 uses the preceding valid increment. Opt-in type 2 uses
  * the loading-branch reversal correction from OpenSees_RIVA e97c12fbc.
- * Type 3 ports the full-host stress-ratio rule from OpenSees_RIVA 355d8f042.
- * No rule imports OpenSees BiasVolume, reversalLatch or reversalGuard.
+ * Type 3 (default) ports the full-host stress-ratio rule from OpenSees_RIVA 355d8f042.
+ * BiasVolume modes 0/1/2 follow that revision; Hercules defaults to mode 1.
+ * No rule imports OpenSees reversalLatch or reversalGuard.
  *
  * This is deliberately a separate material.  It does not change the frozen
  * production RIVASand/RIVASandCustom kernel in nonlinear_riva_sand.h.  The
@@ -29,15 +30,14 @@
 #define RIVA_IB_HD
 #endif
 
-#define RIVA_IB_PARAMETER_COUNT 249
-#define RIVA_IB_LOGICAL_STATE_COUNT 63
-#define RIVA_IB_STATE_VALUE_COUNT 138
-#define RIVA_IB_KERNEL_REVISION 4u
-/* Custom02 histories written before material-specific density was corrected
- * cannot safely be continued, although their 138-value layout is unchanged. */
-#define RIVA_IB_CUSTOM_KERNEL_REVISION 4u
+#define RIVA_IB_PARAMETER_COUNT 257
+#define RIVA_IB_LOGICAL_STATE_COUNT 64
+#define RIVA_IB_STATE_VALUE_COUNT 139
+#define RIVA_IB_KERNEL_REVISION 5u
+/* Both 02 names use the 139-value BiasVolume restart contract. */
+#define RIVA_IB_CUSTOM_KERNEL_REVISION 5u
 #define RIVA_IB_PARAMETER_SHA256 \
-    "3c17e962e64d3a3b29d4797399380dfc85669a5b9fd20b187af359f57aa5b56e"
+    "16c8567fd2370c562899b9ec00cc2fc313be137f239cde5d0e22cc1cd3eee800"
 #define RIVA_IB_SOURCE_COMMIT \
     "5e4ebd30cb5f43b677c61306c7f1fbbdcb24905c"
 #define RIVA_IB_REVERSAL_SOURCE_COMMIT \
@@ -46,19 +46,23 @@
 RIVA_IB_HD static inline int riva_ib_reversal_type_valid(int reversal_type)
 { return reversal_type>=1 && reversal_type<=3; }
 
+RIVA_IB_HD static inline int riva_ib_bias_volume_valid(int mode)
+{ return mode>=0 && mode<=2; }
+
 RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(
-    int custom,int reversal_type=1)
+    int custom,int reversal_type=3,int bias_volume=1)
 {
     (void)custom;
-    // Type 2 retains marker 7 and its byte-identical branch history.
-    // Type 1 gets a distinct marker; historical pre-selector files stay rejected.
-    return reversal_type==1 ? 8u : reversal_type==2 ? 7u :
-        reversal_type==3 ? 9u : 0u;
+    // The additional activity history invalidates the old 138-value layout.
+    // Give every reversal/BiasVolume combination a distinct restart marker.
+    return riva_ib_reversal_type_valid(reversal_type) &&
+        riva_ib_bias_volume_valid(bias_volume) ?
+        (uint32_t)(10+3*bias_volume+reversal_type-1) : 0u;
 }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
  * Hercules-only production research control and remains zero here, so it is
- * not counted among the handoff's 249 values. */
+ * not counted among the 257-value OpenSees reference calibration. */
 typedef struct riva_ib_parameters_t {
     riva_parameters_t base;
 
@@ -204,12 +208,21 @@ typedef struct riva_ib_parameters_t {
     /* Last completed half-cycle plastic multiplier needed for full activity. */
     double bias_reversible_volume_ep_ref;
 
+    int32_t field_bias_mean_correction_enabled;
+    double field_bias_mean_bias_full;
+    double field_bias_mean_bias_off;
+    double field_bias_mean_pressure_onset_ratio;
+    double field_bias_mean_pressure_full_ratio;
+    double field_bias_mean_effective_ratio_off;
+    double field_bias_mean_effective_ratio_full;
+    double field_bias_mean_plastic_scale;
+
     /* Derived once for the frozen material record; not a calibrated input. */
     double reference_relative_density_value;
 } riva_ib_parameters_t;
 
 /* base contains the first 38 logical handoff fields plus two Hercules lifecycle
- * flags.  The fields below complete the exact 63-field restart contract. */
+ * flags.  The fields below complete the 64-field restart contract. */
 typedef struct riva_ib_state_t {
     riva_state_t base;
     double phase_irreversible_volume;
@@ -238,6 +251,7 @@ typedef struct riva_ib_state_t {
     double intermediate_high_gate_base;
     /* Committed activity before the most recent reversal reset. */
     double ep_half_last;
+    double field_bias_mean_activity;
 } riva_ib_state_t;
 
 /* Shared by the device-checkpoint reader and host restart-contract tests.
@@ -245,10 +259,11 @@ typedef struct riva_ib_state_t {
  * identical byte counts. Never continue one rule's history with the other. */
 RIVA_IB_HD static inline int riva_ib_checkpoint_compatible(
     uint32_t revision,uint64_t state_bytes,const char *parameter_hash,int custom,
-    int reversal_type=1)
+    int reversal_type=3,int bias_volume=1)
 {
     if (!riva_ib_reversal_type_valid(reversal_type) ||
-        revision!=riva_ib_checkpoint_revision(custom,reversal_type) ||
+        !riva_ib_bias_volume_valid(bias_volume) ||
+        revision!=riva_ib_checkpoint_revision(custom,reversal_type,bias_volume) ||
         state_bytes!=sizeof(riva_ib_state_t) || !parameter_hash) return 0;
     const char expected[]=RIVA_IB_PARAMETER_SHA256;
     for (unsigned int i=0;i<sizeof(expected);++i)
@@ -539,7 +554,7 @@ RIVA_IB_HD static inline double riva_ib_numpy_norm(tensor_t value)
 #define riva_dev riva_ib_dev_rn
 
 RIVA_IB_HD static inline riva_ib_parameters_t
-riva_ib_reference_parameters(double stress_scale)
+riva_ib_reference_parameters(double stress_scale,int bias_volume=1)
 {
     riva_ib_parameters_t p = {};
     p.base=riva_reference_parameters(stress_scale);
@@ -657,6 +672,17 @@ riva_ib_reference_parameters(double stress_scale)
     p.intermediate_high_bias_phase_activation_reversals=6.0;
     p.intermediate_high_bias_pre_reversal_phase_scale=1.50;
     p.bias_reversible_volume_ep_ref=1.5e-5;
+    p.field_bias_mean_correction_enabled=0;
+    p.field_bias_mean_bias_full=0.20;
+    p.field_bias_mean_bias_off=0.28;
+    p.field_bias_mean_pressure_onset_ratio=1.00;
+    p.field_bias_mean_pressure_full_ratio=1.25;
+    p.field_bias_mean_effective_ratio_off=0.10;
+    p.field_bias_mean_effective_ratio_full=0.35;
+    p.field_bias_mean_plastic_scale=0.0001;
+    // Runtime mode overrides are recorded separately in checkpoint identity.
+    p.base.bias_reversible_volume_enabled=bias_volume!=1;
+    p.field_bias_mean_correction_enabled=bias_volume==2;
     p.reference_relative_density_value=
         (p.base.e_max-p.base.state_shakedown_reference_void_ratio)/
         (p.base.e_max-p.base.e_min);
@@ -1331,6 +1357,7 @@ RIVA_IB_HD static inline int riva_ib_initialize_material(
     state->intermediate_low_gate_value=0.0;
     state->intermediate_high_gate_base=0.0;
     state->ep_half_last=0.0;
+    state->field_bias_mean_activity=0.0;
     return 1;
 }
 
@@ -1368,6 +1395,7 @@ RIVA_IB_HD static inline int riva_ib_begin_dynamic_phase(
     s->base.eps_v_total=s->base.physical_eps_v_total;
     s->base.last_host_deviatoric_strain_direction=riva_zero();
     s->ep_half_last=0.0;
+    s->field_bias_mean_activity=0.0;
 
     s->phase_irreversible_volume=0.0;
     s->phase_reversible_volume=0.0;
@@ -2075,6 +2103,56 @@ RIVA_IB_HD static inline double riva_ib_bias_volume_target(
     const double plastic_gate=riva_smoothstep(
         s->ep_half_last/p->bias_reversible_volume_ep_ref);
     target=riva_ib_mul_rn(target,plastic_gate);
+    if (p->field_bias_mean_correction_enabled) {
+        const double bias=riva_ib_projected_bias(s);
+        const double fixed_bias=s->base.static_bias_index;
+        const double bias_width=p->field_bias_mean_bias_off-
+            p->field_bias_mean_bias_full;
+        const double pressure_ratio=s->base.pressure_anchor/
+            p->base.bias_reversible_mean_transition_pressure;
+        const double pressure_width=p->field_bias_mean_pressure_full_ratio-
+            p->field_bias_mean_pressure_onset_ratio;
+        const double effective_ratio=riva_cone_pressure(&p->base,
+            s->base.stress)/riva_max(s->base.pressure_anchor,
+                riva_cone_pressure_floor(&p->base));
+        const double effective_width=p->field_bias_mean_effective_ratio_full-
+            p->field_bias_mean_effective_ratio_off;
+        const double plastic_activity=riva_clip(
+            s->field_bias_mean_activity,0.0,1.0);
+        double bias_gate=0.0;
+        double pressure_gate=0.0;
+        double effective_gate=0.0;
+        if (bias_width>0.0 && fixed_bias<p->field_bias_mean_bias_off)
+            bias_gate=1.0-riva_smoothstep((fixed_bias-
+                p->field_bias_mean_bias_full)/bias_width);
+        if (pressure_width>0.0 && pressure_ratio>
+            p->field_bias_mean_pressure_onset_ratio)
+            pressure_gate=riva_smoothstep((pressure_ratio-
+                p->field_bias_mean_pressure_onset_ratio)/pressure_width);
+        if (effective_width>0.0 && effective_ratio>
+            p->field_bias_mean_effective_ratio_off)
+            effective_gate=riva_smoothstep((effective_ratio-
+                p->field_bias_mean_effective_ratio_off)/effective_width);
+        const double correction_gate=riva_clip(
+            bias_gate*pressure_gate*effective_gate*plastic_activity,0.0,1.0);
+        if (correction_gate>0.0 && s->base.amplitude_reversals>=1 &&
+            bias>1.0e-14) {
+            const double mean_buildup=1.0-exp(
+                -(double)s->base.amplitude_reversals/
+                p->base.bias_reversible_mean_buildup_reversals);
+            const double mean_shift=p->base.bias_reversible_mean_scale*
+                (p->base.bias_reversible_mean_transition_pressure-
+                 s->base.pressure_anchor)/p->base.bias_reference_pressure*
+                (bias/p->base.bias_reversible_volume_reference_bias)*
+                mean_buildup;
+            /* A positive mean shift is dilative and helps retain pore
+             * pressure. Correct only the negative (contractive) contribution
+             * that can rebuild effective pressure above the transition. */
+            if (mean_shift<0.0)
+                target-=riva_ib_mul_rn(mean_shift,
+                    plastic_gate*correction_gate);
+        }
+    }
     if (!p->phase_transformation_enabled) return target;
     target*=1.0-riva_ib_phase_volume_replacement_gate(p,s);
     if (inside_substeps) target+=s->phase_reversible_volume;
@@ -2442,6 +2520,19 @@ RIVA_IB_HD static inline int riva_ib_update_material_selected(
         current=riva_ib_host_outer_correction(p,m,&current);
         current.loose_shear_hardening_state=riva_ib_loose_target_hardening(p,&current);
     }
+    /* Evolve this optional activity only after the host increment has been
+     * integrated. Consequently it remains constant through all local
+     * substeps and repeated Newton trial evaluations from `initial`. */
+    if (p->field_bias_mean_correction_enabled &&
+        initial.base.cyclic_phase_active) {
+        const double dl=riva_max(current.base.lambda_total-
+            initial.base.lambda_total,0.0);
+        const double relaxation=1.0-exp(-dl/
+            p->field_bias_mean_plastic_scale);
+        current.field_bias_mean_activity=riva_clip(
+            initial.field_bias_mean_activity+
+            (1.0-initial.field_bias_mean_activity)*relaxation,0.0,1.0);
+    }
     if (!riva_finite_tensor(current.base.stress) ||
         !isfinite(current.base.lambda_total) || !isfinite(current.base.void_ratio))
         return 0;
@@ -2464,7 +2555,7 @@ RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
 RIVA_IB_HD static inline int riva_ib_update_material(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
     tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
-    riva_update_info_t *info,int32_t reversal_type=1)
+    riva_update_info_t *info,int32_t reversal_type=3)
 {
     if (!riva_ib_reversal_type_valid(reversal_type)) return 0;
     return riva_ib_update_material_selected(p,m,deps,nsub,state,stress_new,
@@ -2474,7 +2565,7 @@ RIVA_IB_HD static inline int riva_ib_update_material(
 RIVA_IB_HD static inline int riva_ib_update(
     const riva_ib_parameters_t *p,tensor_t deps,int32_t nsub,
     riva_ib_state_t *state,tensor_t *stress_new,riva_update_info_t *info,
-    int32_t reversal_type=1)
+    int32_t reversal_type=3)
 {
     const riva_material_parameters_t m=riva_reference_material_parameters(&p->base);
     return riva_ib_update_material(p,&m,deps,nsub,state,stress_new,info,reversal_type);
@@ -2513,6 +2604,7 @@ RIVA_IB_HD static inline int riva_ib_state_values(
     values[i++]=s->intermediate_low_gate_value;
     values[i++]=s->intermediate_high_gate_base;
     values[i++]=s->ep_half_last;
+    values[i++]=s->field_bias_mean_activity;
 #undef RIVA_IB_STATE_TENSOR
     return i;
 }

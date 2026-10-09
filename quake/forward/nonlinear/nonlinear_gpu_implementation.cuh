@@ -4229,6 +4229,12 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
         return -1;
     }
 
+    if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
+        !riva_ib_bias_volume_valid(config->riva_bias_volume)) {
+        fprintf(stderr, "RIVASand02 rivasand02_biasvolume must be 0, 1 or 2\n");
+        return -1;
+    }
+
     const int local_stats_interval =
         nonlinear_gpu_workload_interval(myID);
     int minimum_stats_interval = 0;
@@ -4407,7 +4413,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             return -1;
         const size_t point_count = (size_t)count*NL_GPU_QP;
         const riva_ib_parameters_t parameters =
-            riva_ib_reference_parameters(1000.0);
+            riva_ib_reference_parameters(1000.0,config->riva_bias_volume);
         cudaError_t riva_error = cudaMalloc(
             &g_nl.riva_ib_parameters, sizeof(parameters));
         if (riva_error == cudaSuccess)
@@ -5011,16 +5017,17 @@ static void nonlinear_gpu_dump_riva_failure(int32_t myID)
         fprintf(stderr,"  Could not write RS02 failure dump %s\n",filename);
         return;
     }
-    fprintf(out,"RIVASAND02_FAILURE_V1\nmodel=%s\nparameter_hash=%s\n"
+    fprintf(out,"RIVASAND02_FAILURE_V2\nmodel=%s\nparameter_hash=%s\n"
         "kernel_revision=%u\ncheckpoint_revision=%u\nrank=%d\nelement=%d\n"
-        "qp=%d\nstep=%d\nreversal_type=%d\nsubsteps=%d\n"
+        "qp=%d\nstep=%d\nreversal_type=%d\nbias_volume=%d\nsubsteps=%d\n"
         "update_attempted=%d\ninitialized=%d\ngeostatic_admitted=%d\n"
         "compatibility_residual=%.17g\n",
         RIVA_SAND_MODEL_NAME(g_config.material_model),RIVA_IB_PARAMETER_SHA256,
         RIVA_IB_KERNEL_REVISION,riva_ib_checkpoint_revision(
-            g_config.material_model==RIVA_SAND_CUSTOM_02,g_config.riva_reversal_type),
+            g_config.material_model==RIVA_SAND_CUSTOM_02,g_config.riva_reversal_type,
+            g_config.riva_bias_volume),
         myID,g_error_host.eindex,g_error_host.qp,g_error_host.riva_step,
-        g_config.riva_reversal_type,g_config.no_substeps,
+        g_config.riva_reversal_type,g_config.riva_bias_volume,g_config.no_substeps,
         g_error_host.riva_update_attempted,state.base.initialized,
         state.base.geostatic_admitted,g_error_host.residual);
     fprintf(out,"increment=%.17g %.17g %.17g %.17g %.17g %.17g\n",
@@ -5613,7 +5620,7 @@ int nonlinear_gpu_checkpoint_write(
         header.riva_state_bytes = (uint32_t)sizeof(riva_ib_state_t);
         header.riva_kernel_revision = riva_ib_checkpoint_revision(
             g_config.material_model == RIVA_SAND_CUSTOM_02,
-            g_config.riva_reversal_type);
+            g_config.riva_reversal_type,g_config.riva_bias_volume);
         memcpy(header.riva_parameter_sha256, RIVA_IB_PARAMETER_SHA256,
                sizeof(RIVA_IB_PARAMETER_SHA256));
     }
@@ -5764,7 +5771,7 @@ int nonlinear_gpu_checkpoint_read(
          !riva_ib_checkpoint_compatible(header.riva_kernel_revision,
               header.riva_state_bytes,header.riva_parameter_sha256,
               g_config.material_model == RIVA_SAND_CUSTOM_02,
-              g_config.riva_reversal_type))) {
+              g_config.riva_reversal_type,g_config.riva_bias_volume))) {
         if (myID == 0) {
             const char *riva_name =
                 (local_flags &

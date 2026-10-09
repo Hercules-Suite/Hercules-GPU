@@ -50,9 +50,9 @@ static_assert(NL_RIVA_STATE_VALUE_COUNT == RIVA_STATE_VALUE_COUNT,
 static_assert(NL_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT ==
                   RIVA_IB_STATE_VALUE_COUNT,
               "RIVA-Sand intermediate-bias material-point state width mismatch");
-static_assert(RIVA_IB_PARAMETER_COUNT == 249 &&
-              RIVA_IB_LOGICAL_STATE_COUNT == 63 &&
-              RIVA_IB_STATE_VALUE_COUNT == 138,
+static_assert(RIVA_IB_PARAMETER_COUNT == 257 &&
+              RIVA_IB_LOGICAL_STATE_COUNT == 64 &&
+              RIVA_IB_STATE_VALUE_COUNT == 139,
               "RIVA-Sand intermediate-bias research contract mismatch");
 //#include "psolve.h"
 #include "quake_util.h"
@@ -142,7 +142,8 @@ static double                theBackboneErrorTol     = 1E-05;
 static double                theGeostaticCushionT = 0;
 static int                   theGeostaticFinalStep;
 static int                   theNoSubsteps=1000;
-static int32_t               theRivaReversalType=1;
+static int32_t               theRivaReversalType=3;
+static int32_t               theRivaBiasVolume=1;
 static nl_md_integration_scheme_t theMdIntegrationScheme =
                                 NL_MD_INTEGRATION_MODIFIED_EULER;
 static nl_md_forward_euler_substeps_t theMdForwardEulerSubsteps =
@@ -737,7 +738,7 @@ void nonlinear_init( int32_t     myID,
                      double      theEndT )
 {
     double  double_message[11];
-    int     int_message[16];
+    int     int_message[17];
 
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
@@ -778,9 +779,10 @@ void nonlinear_init( int32_t     myID,
     int_message[13] = (int)theMdIntegrationScheme;
     int_message[14] = (int)theMdForwardEulerSubsteps;
     int_message[15] = theRivaReversalType;
+    int_message[16] = theRivaBiasVolume;
 
     MPI_Bcast(double_message, 11, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    16, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    17, MPI_INT,    0, comm_solver);
 
     theGeostaticLoadingT  = double_message[0];
     theGeostaticCushionT  = double_message[1];
@@ -812,6 +814,7 @@ void nonlinear_init( int32_t     myID,
     theMdForwardEulerSubsteps  =
         (nl_md_forward_euler_substeps_t)int_message[14];
     theRivaReversalType        = int_message[15];
+    theRivaBiasVolume          = int_message[16];
 
     /* allocate table of properties for all other PEs */
 
@@ -898,7 +901,8 @@ int32_t nonlinear_initparameters ( const char *parametersin,
 {
     FILE    *fp;
     int32_t  properties_count, no_substeps;
-    int32_t  riva_reversal_type=1;
+    int32_t  riva_reversal_type=3;
+    int32_t  riva_bias_volume=1;
     int      row;
     double   geostatic_loading_t, geostatic_cushion_t, errorTol, backbone_errorTol,
             *auxiliar, stff_dmp, stff_dmp_freq;
@@ -1067,8 +1071,14 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     if (riva_read_reversal_type(fp, "rivasand02_reversaltype",
             MATERIAL_MODEL_IS_RIVA_SAND_02(materialmodel), &riva_reversal_type) != 0) {
         fprintf(stderr, "rivasand02_reversaltype must be 1, 2 or 3 and is only valid for "
-                        "RIVASand02 or RIVASandCustom02 (default: 1). "
+                        "RIVASand02 or RIVASandCustom02 (default: 3). "
                         "The retired reversalType and rivasand02_reversalType keys are not accepted.\n");
+        return -1;
+    }
+    if (riva_read_bias_volume(fp, "rivasand02_biasvolume",
+            MATERIAL_MODEL_IS_RIVA_SAND_02(materialmodel), &riva_bias_volume) != 0) {
+        fprintf(stderr, "rivasand02_biasvolume must be 0, 1 or 2 and is only valid for "
+                        "RIVASand02 or RIVASandCustom02 (default: 1).\n");
         return -1;
     }
 
@@ -1221,6 +1231,7 @@ int32_t nonlinear_initparameters ( const char *parametersin,
     theTensionCutoff           = tensioncutoff;
     theNoSubsteps              = no_substeps;
     theRivaReversalType        = riva_reversal_type;
+    theRivaBiasVolume          = riva_bias_volume;
     theMdIntegrationScheme     = md_integration_scheme;
     theMdForwardEulerSubsteps  = md_forward_euler_substeps;
     theMdRecoveryMode          = md_recovery_mode;
@@ -1487,7 +1498,12 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                     theRivaReversalType==2 ? "accumulated loading branch" : "host stress-ratio predictor",
                     RIVA_IB_KERNEL_REVISION,
                     riva_ib_checkpoint_revision(theMaterialModel==RIVA_SAND_CUSTOM_02,
-                                                theRivaReversalType));
+                                                theRivaReversalType,theRivaBiasVolume));
+            fprintf(stderr, "%s: rivasand02_biasvolume=%d (%s)\n",
+                    RIVA_SAND_MODEL_NAME(theMaterialModel),theRivaBiasVolume,
+                    theRivaBiasVolume==0 ? "original bias volume" :
+                    theRivaBiasVolume==1 ? "bias volume disabled; phase volume retained" :
+                                         "field bias mean correction");
         }
     }
 
@@ -2622,6 +2638,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
         gpuConfig.geostatic_final_step = theGeostaticFinalStep;
         gpuConfig.no_substeps = theNoSubsteps;
         gpuConfig.riva_reversal_type = theRivaReversalType;
+        gpuConfig.riva_bias_volume = theRivaBiasVolume;
         gpuConfig.md_integration_scheme = theMdIntegrationScheme;
         gpuConfig.md_forward_euler_substeps = theMdForwardEulerSubsteps;
         gpuConfig.md_recovery_mode = theMdRecoveryMode;
@@ -5611,7 +5628,7 @@ void material_update ( nlconstants_t constants, tensor_t e_n, tensor_t e_n1, ten
 #define MATERIAL_POINT_RIVA_CONSTANT_COUNT 12
 #define MATERIAL_POINT_RIVA_CUSTOM_CONSTANT_COUNT 12
 #define MATERIAL_POINT_RIVA_STATE_VALUE_COUNT 93
-#define MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 138
+#define MATERIAL_POINT_RIVA_INTERMEDIATE_BIAS_STATE_VALUE_COUNT 139
 #define MATERIAL_POINT_RESULT_VALUE_COUNT 57
 #define MATERIAL_POINT_FS_INDEX 19
 #define MATERIAL_POINT_PSI_INDEX 20
@@ -6201,7 +6218,8 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     int result = 1;
     int steps = 0;
     int no_substeps = 0;
-    int32_t riva_reversal_type = 1;
+    int32_t riva_reversal_type = 3;
+    int32_t riva_bias_volume = 1;
     int initial_array_count = 0;
     int material_constant_count = MATERIAL_POINT_CONSTANT_COUNT;
     double dt = 0.0;
@@ -6295,8 +6313,14 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     if (riva_read_reversal_type(fp, "rivasand02_reversaltype",
             MATERIAL_MODEL_IS_RIVA_SAND_02(material_model), &riva_reversal_type) != 0) {
         fprintf(stderr, "rivasand02_reversaltype must be 1, 2 or 3 and is only valid for "
-                        "RIVASand02 or RIVASandCustom02 (default: 1). "
+                        "RIVASand02 or RIVASandCustom02 (default: 3). "
                         "The retired reversalType and rivasand02_reversalType keys are not accepted.\n");
+        goto cleanup;
+    }
+    if (riva_read_bias_volume(fp, "rivasand02_biasvolume",
+            MATERIAL_MODEL_IS_RIVA_SAND_02(material_model), &riva_bias_volume) != 0) {
+        fprintf(stderr, "rivasand02_biasvolume must be 0, 1 or 2 and is only valid for "
+                        "RIVASand02 or RIVASandCustom02 (default: 1).\n");
         goto cleanup;
     }
 
@@ -6681,6 +6705,7 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
     config.geostatic_final_step = -1;
     config.no_substeps = no_substeps;
     config.riva_reversal_type = riva_reversal_type;
+    config.riva_bias_volume = riva_bias_volume;
     config.md_integration_scheme = md_integration_scheme;
     config.md_forward_euler_substeps = md_forward_euler_substeps;
     config.md_recovery_mode = md_recovery_mode;
@@ -7120,7 +7145,12 @@ int nonlinear_material_point_test(const char *input_path, int32_t myID)
                     riva_reversal_type==2 ? "accumulated loading branch" : "host stress-ratio predictor",
                RIVA_IB_KERNEL_REVISION,
                riva_ib_checkpoint_revision(material_model==RIVA_SAND_CUSTOM_02,
-                                           riva_reversal_type));
+                                           riva_reversal_type,riva_bias_volume));
+        printf("%s: rivasand02_biasvolume=%d (%s)\n",
+               RIVA_SAND_MODEL_NAME(material_model),riva_bias_volume,
+               riva_bias_volume==0 ? "original bias volume" :
+               riva_bias_volume==1 ? "bias volume disabled; phase volume retained" :
+                                    "field bias mean correction");
         printf("%s controls: %s, %d reference parameters %s, "
                "%d-value full state, %d fixed substep%s per "
                "host increment\n",

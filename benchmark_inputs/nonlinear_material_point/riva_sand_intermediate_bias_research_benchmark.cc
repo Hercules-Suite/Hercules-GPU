@@ -141,7 +141,7 @@ static TimingResult benchmark_production(const std::vector<Increment> &increment
 static TimingResult benchmark_research(const std::vector<Increment> &increments,
                                        int repetitions)
 {
-    const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0);
+    const riva_ib_parameters_t parameters = riva_ib_reference_parameters(1.0,0);
     const riva_material_parameters_t material =
         riva_reference_material_parameters(&parameters.base);
     volatile double checksum_sink = 0.0;
@@ -158,7 +158,7 @@ static TimingResult benchmark_research(const std::vector<Increment> &increments,
                 throw std::runtime_error("research activation failed");
             riva_update_info_t info = {};
             if (!riva_ib_update_material(&parameters, &material, increment.deps,
-                                         increment.nsub, &state, nullptr, &info) ||
+                                         increment.nsub, &state, nullptr, &info,1) ||
                 info.accepted_substeps != increment.nsub)
                 throw std::runtime_error("research update failed");
         }

@@ -43,7 +43,7 @@ static bool restore(const Snapshot &saved,int custom,
                     riva_material_parameters_t &m,riva_ib_state_t &s)
 {
     if (!riva_ib_checkpoint_compatible(saved.revision,saved.state_bytes,
-                                      saved.parameter_hash,custom,2) ||
+                                      saved.parameter_hash,custom,2,0) ||
         !std::isfinite(saved.elastic_scale) || saved.elastic_scale<=0.0)
         return false;
     m.E_ref=saved.elastic_scale;
@@ -54,7 +54,7 @@ static bool restore(const Snapshot &saved,int custom,
 static void checkpoint(riva_material_parameters_t &m,riva_ib_state_t &s,int custom)
 {
     Snapshot saved={};
-    saved.revision=riva_ib_checkpoint_revision(custom,2);
+    saved.revision=riva_ib_checkpoint_revision(custom,2,0);
     saved.state_bytes=sizeof(s);
     std::memcpy(saved.parameter_hash,RIVA_IB_PARAMETER_SHA256,65);
     saved.elastic_scale=m.E_ref;
@@ -67,12 +67,12 @@ static void checkpoint(riva_material_parameters_t &m,riva_ib_state_t &s,int cust
     auto restored=s; auto material=m;
     require(restore(read,custom,material,restored) && same(s,restored) &&
             material.E_ref==m.E_ref,"new checkpoint round trip failed");
-    for (uint32_t old=0;old<=6;++old) {
+    for (uint32_t old=0;old<=9;++old) {
         read.revision=old;
         require(!restore(read,custom,material,restored),"old checkpoint accepted");
         require(same(s,restored),"rejected checkpoint changed live state");
     }
-    read=saved; read.revision=8;
+    read=saved; read.revision=19;
     require(!restore(read,custom,material,restored),"future checkpoint accepted");
     read=saved; read.state_bytes--;
     require(!restore(read,custom,material,restored),"wrong state width accepted");
@@ -97,7 +97,7 @@ static History run(int steps,int nsub,bool mixed,bool branch,
                    bool loose=false,double scale=1.0,double angle=0.0,
                    bool standard_row=false)
 {
-    auto p=riva_ib_reference_parameters(scale);
+    auto p=riva_ib_reference_parameters(scale,0);
     auto m=riva_reference_material_parameters(&p.base);
     riva_material_set_G0(&p.base,&m,loose?450.0:900.0);
     m.h=loose?25.0:122.44207260468994;

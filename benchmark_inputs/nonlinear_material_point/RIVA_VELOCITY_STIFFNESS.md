@@ -89,14 +89,18 @@ is saved/restored with constitutive history. Updates load the cache; fitting
 occurs only at first dynamic initialization, not per substep. There are no new
 local iterations. Actual CUDA register/runtime impact still requires measurement.
 
-On the branch-reversal research branch, checkpoint markers are **4 for original
-RIVA-Sand and 7 for 02**. The earlier velocity-stiffness release used marker 6
-for 02; the [changed branch reference](RIVA_BRANCH_REVERSAL_VALIDATION.md) requires
-fresh initialization. Older
-checkpoints are incompatible even with explicit G0: rerun initialization.
-Keep the same model selection, mesh and complete material inputs on restart.
-The saved elastic-scale layout and calibration hashes are unchanged; the six
-02 reversal-reference values now store accumulated branch strain.
+Current RS02 controls default to reversal type 3 and BiasVolume mode 1.
+Original models retain checkpoint marker 4; RS02 uses markers 10 through 18
+for the nine selector combinations, with default marker 15. Its 139-value
+history appends BiasVolume activity. All older 02 checkpoints, including the
+historical velocity-stiffness marker 6 and branch-reference marker 7, require
+fresh initialization. Keep the model, mesh, material inputs, and both selectors
+unchanged on restart. See the [current selector contract](RIVA_REVERSAL_SELECTOR.md).
+
+The three existing 02 `.in` fixtures explicitly pin reversal type 1 and
+BiasVolume mode 0 to preserve their earlier scientific inputs and response.
+The native oracle helpers also pin mode 0; new defaults are covered separately
+by the selector regression and target-system comparisons.
 
 ## Verification and target-system commands
 

@@ -1,76 +1,107 @@
-# RIVASand02 reversal selector
+# RIVASand02 reversal and BiasVolume selectors
 
-Both `RIVASand02` and `RIVASandCustom02` accept this optional scalar in
-`parameters.in` and in `psolve --nonlinear-material-point` inputs:
+Both `RIVASand02` and `RIVASandCustom02` accept these optional scalars in
+`parameters.in` and `psolve --nonlinear-material-point` inputs. Omission selects:
 
 ```ini
 material_model = RIVASand02
-rivasand02_reversaltype = 1
+rivasand02_reversaltype = 3
+rivasand02_biasvolume = 1
 ```
 
-Omitting `rivasand02_reversaltype` also selects **1**. It is a separate setting, not an
-additional column in `material_properties_list` or `material_point_constants`.
-The selector applies to all RS02 integration points in the simulation.
+They apply to every RS02 integration point and are not material-row columns.
+Invalid values, duplicate entries, and explicit use with other models are
+rejected. The retired `reversalType` and `rivasand02_reversalType` keys remain
+rejected. Original `RIVASand` and `RIVASandCustom` behavior is unchanged.
 
-| Value | Reversal reference | Default | Checkpoint marker |
-|---|---|---|---|
-| 1 | Previous valid host increment | Yes | 8 |
-| 2 | Accumulated loading-branch strain | No | 7 |
-| 3 | Full-host elastic stress-ratio predictor | No | 9 |
+| Reversal type | Reference |
+| --- | --- |
+| 1 | Previous valid host increment |
+| 2 | Accumulated loading-branch strain |
+| 3 (default) | Full-host elastic stress-ratio predictor |
 
-Use `rivasand02_reversaltype = 2` to preserve the behavior of Hercules `main` at
-`9975658`, including the previously merged loading-branch correction.
-Type 3 selects the unguarded host stress-ratio predictor ported from
-OpenSees_RIVA `355d8f04295ab3e69f9f8fb98516b1eb8f817446`. It evaluates
-`(alpha_trial-alpha0):(alpha_trial-alpha)<0` once from the full host increment
-and the committed mechanical state. It forces at most one reversal in the
-first substep, with the strain-based initialization rule before cyclic activation.
-Only integers 1, 2 and 3 are accepted. Fractional values, duplicate entries and explicit use with another material model are rejected.
-The former `reversalType` and `rivasand02_reversalType` keys are rejected;
-rename either to `rivasand02_reversaltype` in existing inputs, preserving its value.
-Original `RIVASand` and `RIVASandCustom` behavior is unchanged.
+Type 3 ports the unguarded rule from OpenSees_RIVA
+`355d8f04295ab3e69f9f8fb98516b1eb8f817446`:
+`(alpha_trial-alpha0):(alpha_trial-alpha)<0`, evaluated from the committed
+mechanical state. All rules check once per host increment before material
+substeps. Type 3 applies at most one event, in the first substep, and retains
+the strain-based initialization rule before cyclic activation. The optional
+OpenSees `reversalGuard` and `reversalLatch` are not imported.
 
-All rules check reversal once per host increment before the fixed material
-substeps. Type-1/type-2 behavior and the 138-value state layout are unchanged. Type 3
-uses the literal OpenSees rule without the optional `reversalGuard`. The selector does not add
-OpenSees `reversalLatch` or `BiasVolume`. The 249-value reference calibration
-hash is unchanged; `rivasand02_reversaltype` is an exposed execution choice rather than
-a recalibrated material coefficient.
+| BiasVolume mode | Behavior |
+| --- | --- |
+| 0 | Original bias-driven reversible volume |
+| 1 (default) | Disable bias-driven reversible volume; retain separate phase-transformation volume |
+| 2 | Original bias volume with the upstream gated correction to its contractive mean contribution |
 
-The root input value is broadcast to all solver ranks and carried in the
-existing GPU configuration. The field kernel and CPU/GPU material-point
-adapters use the same selected update. No new per-point allocation, device
-transfer or synchronization is introduced during time stepping. Startup and
-material-point output identify the selected rule and checkpoint marker.
+Mode 2 uses the same fixed-bias, reference-pressure, effective-pressure and
+plastic-activity gates as the upstream revision. Its committed activity is
+held fixed within substeps and updated once after each host increment. It
+adds one double per point (`field_bias_mean_activity`); modes 0/1 leave it
+zero. No per-step allocation, extra exchange, or device-to-host transfer is
+introduced. Both selectors are broadcast during setup, reported at startup,
+and used by the shared field and CPU/GPU material-point constitutive core.
+
+The 257-value reference fingerprint is
+`16c8567fd2370c562899b9ec00cc2fc313be137f239cde5d0e22cc1cd3eee800`.
+This identifies the upstream reference record, with execution-mode overrides
+recorded separately. User material rows are unchanged. Mode 2 is an optional
+research choice; the port alone does not establish stability or convergence.
 
 ## Restart behavior
 
-The type-1 and type-2 references occupy the same six history slots but have different
-meanings. Cross-type restart is rejected before state is loaded. Type 2 keeps
-marker 7 and can continue an existing marker-7 history with explicit
-`rivasand02_reversaltype = 2`, subject to the usual unchanged model, mesh and material
-inputs. The default type 1 writes marker 8; type 3 writes marker 9 and cannot
-continue type-1/type-2 checkpoints. Marker-6 and earlier RS02
-checkpoints remain unsupported; rerun their initialization. Original-generation
-marker 4 is unchanged. A change of the default does not silently convert a
-saved branch reference into a previous-increment direction.
+Kernel revision 5 uses 64 logical fields and 139 flattened values. The first
+138 retain their order; `field_bias_mean_activity` is appended. All previous
+RS02 checkpoint markers through 9 are rejected. Restart requires both
+selectors, model, mesh, and material inputs unchanged. The marker is
+`10 + 3*BiasVolume + (reversaltype-1)`:
+
+| BiasVolume | Reversal 1 | Reversal 2 | Reversal 3 |
+| --- | --- | --- | --- |
+| 0 | 10 | 11 | 12 |
+| 1 | 13 | 14 | 15 (default) |
+| 2 | 16 | 17 | 18 |
+
+Rerun old cases from initialization. To reproduce an earlier response rule,
+explicitly select mode 0 and its reversal type. Original-generation marker 4
+is unchanged. New failure snapshots use `RIVASAND02_FAILURE_V2`, include both
+selectors, and record 139 values; they are diagnostics, not checkpoints.
 
 ## Verification
 
-On 2026-10-09, the three rules were compared with the exact OpenSees revision
-above on six prescribed strain histories, using each history's original
-substep count and overrides of 10 and 50. All 54 host comparisons produced
-identical values for the 138 shared state fields. AddressSanitizer and
-UndefinedBehaviorSanitizer reported no errors. The Horizon CUDA build also passed. Job 53056 passed six CPU/GPU
-material-point comparisons for standard and Custom02 reference rows at
-128, 512 and 2048 steps per cycle, with type 3 and four material substeps.
-All registered four reversals over two cycles, and complete state histories
-agreed under the runner's relative/absolute tolerances of 1e-8/1e-10.
-These material-point checks do not resolve the separate coupled-field failure.
-The local comparison harness and upstream snapshot remain ignored in
-`.local-diagnostics/rivasand02-horizon-20261009/`.
+On 2026-10-09, all **189 host comparisons** against the exact OpenSees revision
+above matched all 139 fields bit for bit, with finite states and clean
+ASan/UBSan results. The matrix covers three reversal rules, three BiasVolume
+modes, six existing strain paths plus a high-pressure low-bias variant, and
+three substep settings. Mode 2 changes the original 138 response fields in
+the high-pressure low-bias variant; that active correction also matches upstream.
+The selector test verifies omitted defaults, strict parsing, phase-volume
+retention in mode 1, same-mode restart continuation, and rejection of all
+cross-selector and old-layout checkpoints. The historical native suite also
+passes with its old controls pinned explicitly.
 
-### Horizon field reproduction on 2026-10-09
+Horizon CUDA compilation passed. Job 53060 passed 23 CPU/GPU material-point
+comparisons: standard/Custom02 reference rows at three resolutions in each
+mode, three biased cases exercising the correction, and two inputs omitting
+both selectors. Every complete state comparison passed at rtol=1e-8 and
+atol=1e-10. Standard/Custom02 histories and omitted/explicit defaults were
+byte-identical on each backend.
+
+The same job completed the full 30-s Horizon BrickUP/CPML case with both
+selectors omitted (type 3/mode 1), dt=0.005 s and ten material substeps. The
+launcher and Slurm job exited successfully; 6000 station samples extend to
+29.995 s. Displacement, velocity, acceleration, pressure, strain and stress
+were finite. The existing undefined surface-station Ru column remains NaN.
+The original case, earlier comparison outputs, and executables were preserved.
+This validates completion of this case, not timestep/mesh convergence or
+experimental agreement. Native MPI checkpoint file I/O was not tested. Comparison helpers and upstream snapshots stay
+local-only under `.local-diagnostics/rs02-biasvolume-20261009/`.
+
+The earlier type-3-only change passed 54 mode-0 host comparisons of the shared
+138 values and six GPU comparisons. Its field reproduction below retains
+that scope and does not validate the new mode-1 default.
+
+### Earlier mode-0 field reproduction on 2026-10-09 (35c539c)
 
 The maintainer's coupled BrickUP/CPML case used `RIVASand02`, automatic
 stiffness from mesh density and Vs, Dr=0.66296, a 0.005-s global timestep,
@@ -106,10 +137,33 @@ remained ten. This demonstrates timestep sensitivity of the failure; it
 does not isolate the first instability mechanism or establish convergence.
 
 This establishes completion of this particular case with type 3, not
-experimental validation or timestep/mesh convergence. Type 1 remains the
-compatibility default; no material coefficients or pore-pressure coupling
-law were changed. The new failure snapshot helps distinguish an invalid
+experimental validation or timestep/mesh convergence. Type 1 was the
+compatibility default at that revision, before the defaults changed to type 3
+and BiasVolume mode 1. No user material coefficients or pore-pressure coupling
+law were changed in that earlier comparison. The new failure snapshot helps distinguish an invalid
 incoming coupled state from a constitutive port discrepancy.
+
+### CUDA fixture utility
+
+`run_riva_branch_reversal_cuda.py` requires Python 3 and `--output DIR`.
+Without `--psolve`, it only generates six fixtures; executing them requires
+an NVIDIA/MPI build and optionally `--launcher 'mpirun -np 1'`.
+`--reversal-type` accepts 1/2/3 (default 3); `--bias-volume` accepts 0/1/2
+(default 1). Existing fixture inputs, logs, CSVs and `summary.json` in that
+output directory are overwritten. Use a separate directory for each pair.
+
+```sh
+python3 benchmark_inputs/nonlinear_material_point/run_riva_branch_reversal_cuda.py \
+  --psolve /path/to/psolve --launcher 'mpirun -np 1' \
+  --reversal-type 3 --bias-volume 1 --output /path/to/results/type3-mode1
+```
+
+The runner checks complete host/GPU state parity, finite outputs, exact
+zero-increment preservation, expected reversal counts, selector diagnostics,
+and standard/Custom02 equality. It does not test MPI checkpoint file I/O,
+field stability, or convergence. Historical native oracle helpers explicitly
+pin BiasVolume mode 0; their default type-1 replay remains a historical test,
+not the production default.
 
 ### Historical type-1/type-2 checks
 

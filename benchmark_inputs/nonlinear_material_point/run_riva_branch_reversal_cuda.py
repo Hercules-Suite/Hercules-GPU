@@ -1,7 +1,7 @@
 """Generate or execute smooth-path RIVASand02/Custom02 CUDA parity fixtures.
 
 Without --psolve this only writes inputs and reports that CUDA was not run.
-The psolve material-point runner compares all 138 state values internally.
+The psolve material-point runner compares all 139 state values internally.
 """
 import argparse
 import csv
@@ -12,7 +12,7 @@ import shlex
 import subprocess
 
 
-def fixture(steps, custom, prefix, reversal_type=2):
+def fixture(steps, custom, prefix, reversal_type=3, bias_volume=1):
     material = "RIVASandCustom02" if custom else "RIVASand02"
     row = "0.90 900"
     if custom:
@@ -25,6 +25,7 @@ def fixture(steps, custom, prefix, reversal_type=2):
     text = f"""# Loading-branch research; two smooth shear cycles with vertical strain.
 material_model = {material}
 rivasand02_reversaltype = {reversal_type}
+rivasand02_biasvolume = {bias_volume}
 material_point_delta_time_sec = {1/steps:.17g}
 material_point_steps = {len(history)}
 no_substeps = 4
@@ -56,9 +57,10 @@ def main():
     parser.add_argument("--psolve", type=Path)
     parser.add_argument("--launcher", default="", help="Optional launcher, e.g. 'mpirun -np 1'")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--reversal-type", type=int, choices=(1, 2, 3), default=2)
+    parser.add_argument("--reversal-type", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument("--bias-volume", type=int, choices=(0, 1, 2), default=1)
     args = parser.parse_args()
-    checkpoint = {1: 8, 2: 7, 3: 9}[args.reversal_type]
+    checkpoint = 10 + 3*args.bias_volume + args.reversal_type - 1
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -68,7 +70,7 @@ def main():
             name = f"branch_{'custom02' if custom else '02'}_n{steps}"
             prefixes.append(name)
             path = output / (name + ".in")
-            path.write_text(fixture(steps, custom, name, args.reversal_type))
+            path.write_text(fixture(steps, custom, name, args.reversal_type, args.bias_volume))
             if args.psolve:
                 command = shlex.split(args.launcher) + [str(args.psolve.resolve()),
                            "--nonlinear-material-point", str(path)]
@@ -77,8 +79,9 @@ def main():
                 (output / (name + ".log")).write_text(result.stdout)
                 for marker in ("PASS: CPU/GPU material-point histories agree",
                                f"Validated CPU/GPU registered reversals: {4 if args.reversal_type in (2,3) or steps==128 else 0}",
-                               f"kernel 4, checkpoint {checkpoint}",
-                               f"rivasand02_reversaltype={args.reversal_type}"):
+                               f"kernel 5, checkpoint {checkpoint}",
+                               f"rivasand02_reversaltype={args.reversal_type}",
+                               f"rivasand02_biasvolume={args.bias_volume}"):
                     if result.returncode != 0 or marker not in result.stdout:
                         raise RuntimeError(f"{name} failed or used an old executable:\n{result.stdout[-4000:]}")
                 for backend in ("cpu", "gpu"):

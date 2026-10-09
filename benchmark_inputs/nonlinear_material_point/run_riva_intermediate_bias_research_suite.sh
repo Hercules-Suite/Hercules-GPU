@@ -82,7 +82,7 @@ echo "==> Compile reversal selector/input/checkpoint checks"
   -o "$suite_tmp_dir/riva_selector_test"
 "$suite_tmp_dir/riva_selector_test"
 
-echo "==> Replay frozen oracle with default type 1"
+echo "==> Replay frozen oracle with historical type 1 / BiasVolume 0"
 "$driver_bin" "$input_paths" "$native_output"
 
 echo "==> Replay explicit type 2 on all six input paths"
@@ -109,13 +109,13 @@ if ! python3 "$suite_dir/compare_riva_sand02_custom_density.py" \
     "$port_root" "$suite_tmp_dir/riva_sand02_custom_density_test"; then
   suite_status=1
 fi
-echo "==> Verify default type-1 output: core (not corrected-mode acceptance)"
+echo "==> Verify historical type-1 / BiasVolume-0 output: core (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode core; then
   suite_status=1
 fi
 
-echo "==> Verify default type-1 output: full (not corrected-mode acceptance)"
+echo "==> Verify historical type-1 / BiasVolume-0 output: full (not corrected-mode acceptance)"
 if ! python3 "$port_root/verify_hercules_output.py" \
     "$port_root/golden_data" "$native_output" --mode full; then
   suite_status=1
