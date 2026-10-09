@@ -351,9 +351,8 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	targeted sleep/poll loop. Set `1` only for an intentional diagnostic run.
 - `HERCULES_FORCE_GENERIC_DAMPING=0|1`
 	Diagnostic/validation override for the viscoelastic damping kernels.
-	Default unset/`0`: BKT/BKT2/BKT3/BKT3F use the fast
-	hoisted-coefficient convolution kernels (bit-identical to leaving it
-	unset). Set to `1` to force the generic per-element
+	Default unset/`0`: allow the optimized BKT-family kernels, including
+	the fused BKT2 path below. Set to `1` to force the generic per-element
 	`kernelDampingCalcConv` for all BKT-family damping, bypassing the
 	fast kernels. Use it to produce a generic-kernel reference from an
 	otherwise-identical run and verify the fast kernels — they must match
@@ -362,6 +361,14 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	case). A one-time rank-0 line is printed to the monitor/stderr when
 	the override is active so a forced run cannot be mistaken for a
 	normal one. Read once at startup; production runs leave it unset.
+- `HERCULES_BKT2_FUSED=0|1`
+	Default unset/`1`: use shared histories and fused convolution/force
+	for eligible BKT2 cube elements with device-resident force and displacement
+	synchronization. Host-staged paths retain the reference kernels. `0` retains
+	the previous separate
+	hoisted-coefficient convolution and force kernels. The generic override
+	above takes precedence. Both switches are read once; never switch history
+	layouts during a run. See [BKT2 GPU execution](#bkt2-gpu-execution).
 - `HERCULES_SRC_DEBUG=0|1`
 	Diagnostic logging for the source-application path (POINT, FORCE,
 	SRFH, PLANE, PLANEWITHKINKS). Default unset/`0`: no output. Set to
@@ -1059,8 +1066,8 @@ Notes:
 	acoustic element faces adjacent to elastic material. Default is `yes`, but
 	it is only active when `include_acoustic=yes`.
 - `acoustic_interface_method`
-	Optional, case-insensitive: `shared-geometric-constraints` (default),
-	`field-specific-constraints`, or `local-matching`. Select the geometric constraints,
+	Optional, case-insensitive: `field-specific-constraints` (default for coupled
+	scalar acoustics), `shared-geometric-constraints`, or `local-matching`. Select the geometric constraints,
 	experimental field-specific constraints, or experimental automatic face
 	matching during meshing. This is independent of quadrature, face filters,
 	gravity, and CPML. See [details and limits](#interface-constraints-and-local-matching).
@@ -1137,9 +1144,10 @@ Notes:
 	scalar acoustic formulations build an explicit acoustic-solid interface table. In octree
 	meshes, nonconforming interface faces are split into area-weighted fragments
 	with fragment centers and normals, and CUDA kernels apply the normal
-	traction/acceleration coupling only on those fragments. Each fragment
-	interpolates the scalar acoustic field on the acoustic element and
-	displacement acceleration on the adjacent elastic element, so refined elastic
+	traction and normal-motion coupling only on those fragments. Each fragment
+	interpolates the scalar acoustic field on the acoustic element and solid
+	normal acceleration (`pressure`) or velocity (`velocity_potential`) on the
+	adjacent solid element, so refined solid
 	neighbors can couple to coarser acoustic faces. Fragment subdivision follows
 	`acoustic_interface_max_level` and finer neighboring leaves, including
 	remote leaves resolved on their MPI owner. The table uses the owner's
@@ -1200,6 +1208,16 @@ Notes:
 	pressure. CUDA-aware resident runs report the rank-reduced
 	`Acoustic Station Gather` and `Pore-pressure Station Gather`
 	kernel-plus-copy timings when those paths are active.
+- `acoustic_station_gradient`
+	Optional, case-insensitive `linear` (default) or `element`. Applies to
+	acoustic station motion in both `pressure` and `velocity_potential` modes.
+	`linear` combines adjacent same-material water-cell derivatives to recover
+	the pressure gradient at the actual station position before the existing
+	acceleration and time integration. `element` keeps the historical single-cell
+	Hex8 derivative. Pressure interpolation and solver propagation are unchanged.
+	ASCII/binary station displacement and requested velocity/acceleration share
+	this setting. Plane reconstruction does not use it; see
+	[Acoustic station gradient recovery](#acoustic-station-gradient-recovery).
 - `print_station_pore_pressure_ratios`
 	Optional; default `no`. With `include_poroelastic=yes` and
 	`include_nonlinear_analysis=yes`, `yes` appends `Ru(-)` to every normal
@@ -1273,26 +1291,15 @@ Notes:
 	reference itself is unavailable or nonpositive.
 - `acoustic_quality_factor`
 	Optional, dimensionless. Default `0`; omitting the parameter or setting
-	it to any value `<= 0` disables the interior acoustic damping term.
-	Here `0` is an off switch, not a physical material with zero quality
-	factor. **Use `acoustic_quality_factor = 0` as the recommended lossless
-	baseline for validation.** CPML absorption and energy transfer into
-	coupled solids remain separate from this control.
-	A positive `Q` enables stiffness-proportional numerical damping,
-	with stronger damping at higher frequencies. It applies to interior
-	acoustic elements only (skipped in the CPML zone) and works for both
-	`pressure` and `velocity_potential`. The specified `Q` is referenced to
-	`simulation_wave_max_freq_hz`; this scalar-acoustic damping is independent
-	of the material-profile `Qp` and `Qs` columns.
-	For controlled positive-damping trials, `500` gives weaker damping than
-	`100` with other settings fixed. The older flat-water benchmark reported
-	`100` as a useful tradeoff; the
-	[historical record](#historical-acoustic-experiments) gives its scope and
-	frequency-dependent formulation. **These trial values describe a numerical
-	regularizer, not physical ocean attenuation or a general production
-	calibration.** Compare each trial with `0` using unfiltered responses and
-	check amplitudes and phases in the frequency band of interest; reduced
-	high-frequency ringing alone does not establish improved accuracy.
+	it to `<= 0` disables interior acoustic damping. This default was verified
+	in the documented flat-water CPS comparisons and MPI/backend consistency
+	tests; see [validation scope](#interface-constraints-and-local-matching).
+	Those results apply to the recorded configurations and durations.
+	Positive values enable stiffness-proportional numerical damping referenced
+	to `simulation_wave_max_freq_hz`, with stronger damping at higher frequencies.
+	It works for `pressure` and `velocity_potential`, skips CPML elements, and is
+	independent of material-profile `Qp`/`Qs`. CPML absorption and energy transfer
+	into coupled solids remain separate from this control.
 - `acoustic_poroelastic_interface`
 	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
 	sealed for the pore fluid while the existing acoustic pressure traction
@@ -1311,19 +1318,60 @@ Notes:
 
 ### Interface constraints and local matching
 
-`acoustic_interface_method` accepts three values. Omitting it preserves the
-existing solver behavior. It does not change `acoustic_interface_projection`
+`acoustic_interface_method` accepts three values. Omitting it selects
+`field-specific-constraints` for coupled pressure or velocity-potential acoustics.
+If acoustics, scalar acoustics or interface coupling is disabled, an omitted method
+uses `shared-geometric-constraints`; explicit unsupported choices still abort.
+Coupled VT topography requires explicit `shared-geometric-constraints`.
+Selecting a constraint method does not change `acoustic_interface_projection`
 (`point` or `face_mass`), `acoustic_interface_face_filter`,
 `acoustic_free_surface_gravity`, or `abc_type`.
 
 | Value | Behavior |
 | --- | --- |
-| `shared-geometric-constraints` | Default. Acoustic and solid fields share the geometric hanging-node constraints. |
-| `field-specific-constraints` | Experimental. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
+| `shared-geometric-constraints` | Acoustic and solid fields share the geometric hanging-node constraints. |
+| `field-specific-constraints` | Default for coupled scalar acoustics. Separate maps retain only constraints required by an incident coarser element of the same field. Nodes constrained solely by the other material become independent for their own field. |
 | `local-matching` | Experimental. During fresh generation, refine the coarser leaf at every detected acoustic–solid interface, rebalance, re-extract and reclassify until opposing faces match in size. Use the original constraints on the resulting mesh. |
 
+Both alternatives accept either scalar acoustic formulation. In `pressure`
+mode the interface applies pressure traction to the solid and solid normal
+acceleration to the acoustic equation. In `velocity_potential` mode it obtains
+traction from the potential time difference and drives the acoustic equation
+with solid normal velocity. The field constraints and matching rules are the
+same for both. Selecting pressure does not remove the need to check time-step,
+mesh and interface accuracy; it does not change what `acoustic_station_gradient`
+affects (station motion, not the pressure column). Velocity potential remains
+the default.
+
+Pressure-formulation validation (2026-10-08 UTC): a local 58-run CUDA/MPI
+comparison exercised all three methods. All 58 runs used
+`acoustic_quality_factor = 0`. Fourteen 110 s flat-water runs covered
+coarse/fine meshes, both formulations and two half-time-step pressure controls.
+Forty 4 s source-excited checks covered `point`/`face_mass`, gravity, finer water,
+buildings combined with synthetic `vonMises_ep` nonlinear elastoplastic and
+BrickUP open-pore coupling, one/eight ranks, both MPI backends and existing
+pressure controls. Four 6 s real-terrain Izmir crop runs checked field-specific
+FEM topography with gravity, eight/sixteen ranks and both backends. Matched
+MPI/backend/formulation comparisons agreed below $10^{-6}$ aggregate relative
+L2 in motion and acoustic pressure; available pore-pressure, strain, stress and
+nonlinear station-state columns were also checked. Undefined elastic pressure
+NaNs were excluded, not other output components.
+
+Against the independent source-matched CPS reference, median submerged-receiver
+pressure errors over $10 \le t < 100$ s were about 18.38% on the coarse mesh and
+8.34% on the fine mesh for both newly enabled methods and both formulations.
+Halving the coarse time step from 0.005 to 0.0025 s changed pressure error to
+about 18.40%; changing the evolved variable did not improve pressure accuracy
+in these zero-initialized tests. No simulated response was filtered, fitted or
+shifted; the benchmark's prescribed source filter was retained. These local-only
+fixtures are unavailable in a clean checkout. Gravity/module/topography checks
+establish implementation consistency within the stated durations, not
+independent gravity-wave accuracy, calibrated constitutive response, or
+full-duration Izmir stability. Existing geometric restrictions below still apply.
+
 The two alternatives require `include_acoustic=yes`,
-`acoustic_interface_coupling=yes`, `acoustic_formulation=velocity_potential`,
+`acoustic_interface_coupling=yes`, `acoustic_formulation=pressure` or
+`acoustic_formulation=velocity_potential`,
 and full Hex8 solids. Both alternatives accept `include_buildings=yes`,
 `include_nonlinear_analysis=yes` and `include_poroelastic=yes`, separately or
 together, subject to the existing restrictions of those modules. Nonlinear
@@ -1382,7 +1430,7 @@ independently of the mechanical `point`/`face_mass` selection. In particular,
 independent fine-solid nodes must not be replaced by a coarse acoustic trace
 when the neighboring solid element is remote. This also applies without
 topography. The monitor reports remote fragments and additional harbored nodes.
-The default shared-geometric method retains its geometric hanging-node
+The shared-geometric method retains its geometric hanging-node
 constraints and its existing `point` projection path. Its `face_mass` correction
 uses the same trace and global-ID schedule ordering as the alternatives,
 including on ranks that only own nodes requested by another rank. Coupling-off
@@ -1492,7 +1540,7 @@ include_acoustic = yes
 acoustic_formulation = velocity_potential
 acoustic_interface_coupling = yes
 acoustic_interface_method = field-specific-constraints
-# Alternatives: shared-geometric-constraints (default), local-matching
+# Default: field-specific-constraints; alternatives: shared-geometric-constraints, local-matching
 acoustic_interface_projection = face_mass
 acoustic_interface_face_filter = all
 acoustic_free_surface_gravity = yes
@@ -1645,16 +1693,69 @@ in `quake/forward/psolve.cc`.
 	Each file uses the same count-prefixed layout, contains one value for every
 	entry in `z.in`, and follows the same `index.in` column/layer ordering.
 	Hercules selects the same vertical layer at each of the four surrounding
-	horizontal columns and interpolates `Qs` and `Qp` with the same shape
-	functions used for `Vs`, `Vp`, and density. With parametric Q disabled,
+	horizontal columns. For `Qs` and `Qp`, it excludes acoustic samples
+	(`Vs <= 1e-6 m/s`) and renormalizes the remaining bilinear weights. An
+	entirely solid stencil retains the previous interpolation arithmetic;
+	an all-water query returns zero solid Q. Velocity, density, topography,
+	and acoustic/solid classification are unchanged. With parametric Q disabled,
 	the BKT-family damping setup uses these interpolated values independently
 	of the fallback `cvmdb_input_file` mode.
 - `qs.in` and `qp.in` must either both be present or both be absent, and their
-	value counts must match `z.in`. If both are absent, Hercules preserves the
+	value counts must match `z.in`. Each solid sample must have finite,
+	positive Qs and Qp. Acoustic placeholders may be zero but must be finite
+	and nonnegative. These checks run as the files are read, even if solid
+	attenuation is disabled. If both files are absent, Hercules preserves the
 	legacy behavior `Qs = 0.1*Vs` and `Qp = 2*Qs`. If only one is present or a
-	count differs, initialization stops with an explicit error. Because Q values
-	are stored in element material data, regenerate or re-correct the mesh after
-	adding or changing these files.
+	count differs, initialization stops with an explicit error.
+- Raising a queried solid Vs to `simulation_shear_velocity_min` does **not**
+	rescale explicitly supplied Qs or Qp. For example, `Vs=80 m/s`, `Qs=16`,
+	and `Qp=32` retain Qs=16 and Qp=32 if Vs is raised to 120 m/s. Update the
+	Q model explicitly if a velocity-dependent Q law is intended for the
+	modified velocities. The optional parametric-Q path remains separate.
+
+For either supplied Q, the mixed-stencil rule is
+
+```math
+Q_{\mathrm{solid}} = \frac{\sum_{i\in S} N_i Q_i}{\sum_{i\in S} N_i},
+\qquad S=\{i:V_{s,i}>10^{-6}\ \mathrm{m/s},\ N_i>0\}.
+```
+
+For example, 10% weight on solid Qs=40 and 90% on water Qs=0 gives
+solid Qs=40, not 4. This prevents water placeholders from introducing
+artificially strong solid attenuation; it does not change the velocity mixture.
+
+#### Setup-time attenuation validation
+
+During the existing material-assignment loop, BKT-family setup requires finite,
+positive solid Qs/Qp, velocities, density, and reference frequency, with a
+positive bulk modulus. Unless `use_infinite_qk=yes`, it derives
+
+```math
+L=\frac{4V_s^2}{3V_p^2},\qquad
+Q_\kappa=\frac{1-L}{1/Q_p-L/Q_s}.
+```
+
+A negative denominator beyond floating-point roundoff is rejected. Zero
+inverse bulk Q, including cancellation within roundoff, selects the existing
+lossless-bulk limit. `use_infinite_qk=yes` deliberately suppresses bulk
+attenuation, while still requiring valid solid Q inputs.
+
+BKT2 additionally requires finite, nonnegative stored coefficients and positive
+relaxed stiffness, `1-a0-a1 > 0`, in both shear and bulk branches. Active
+relaxation mechanisms must have positive rates. Invalid values stop setup with
+a global invalid-element count and one example giving rank, element center,
+material values and Q values; Q is not silently clipped and the timestep is not
+changed. These are admissibility checks, not a guarantee of stability for an
+arbitrary timestep or model.
+
+The checks reuse values already read or computed: no additional material
+queries, mesh refinement, full mesh traversal, or time-step checks. Successful
+material validation adds one small MPI reduction per material-assignment call.
+Imported BKT2 meshes have their stored coefficients checked during the existing
+critical-timestep traversal. They do not retain the original Q inputs, so that
+diagnostic reports unavailable Q values as NaN. Regenerate a persisted mesh to
+apply this corrected interpolation, or after changing Q files; a coefficient
+check cannot repair an older, admissible but incorrectly interpolated Q model.
 
 ## Poroelastic U-P formulation
 
@@ -1900,14 +2001,25 @@ results are specific to the recorded configuration and implementation.
 	unsplit C-PML. If unset, behavior is unchanged from earlier versions.
 - `cpml_thickness_m`
 	Target PML thickness in metres. When `> 0`, used directly. When `0`
-	or unset (default), the solver uses `cpml_layers ×` the element size
-	at the absorbing boundary and logs the realized thickness to standard error
-	at startup. The PML element counts and optional outer-clamp count use the
-	same startup stream.
+	or unset (default), the solver uses `cpml_layers ×` the largest non-air
+	element edge touching any of the four lateral faces or the bottom face,
+	taking an MPI-wide maximum. Air elements (`Vp < 0`) are excluded, including
+	from the global non-air fallback used if no material element touches an
+	absorbing face. Material extension and optional CPML partition weighting
+	use the same exclusion rule. The realized thickness is logged to standard
+	error at startup with `air excluded`; PML element counts and the optional
+	outer-clamp count use the same startup stream.
 - `cpml_layers`
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is
-	`0` — "this many element layers deep" at the boundary, without needing
-	to know the local mesh resolution.
+	nonpositive. This multiplies one reference edge length to give a uniform
+	physical thickness; finer parts of an adaptive boundary contain more than
+	`cpml_layers` cells. For example, if a 90 km model has level-8 boundary air
+	cells (351.5625 m) but its largest non-air boundary edge is level 9
+	(175.78125 m), `cpml_layers=10` gives 1757.8125 m, excluding the air cells.
+	This example does not establish the active-material maximum of a particular
+	mesh; check its startup log. Automatic thickness can decrease after this
+	fix, changing absorption and material-extension bounds. A positive
+	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
 	Optional. Default `1.0`, which preserves the standard equal-leaf-count
 	octree partition. Values `> 1.0` make the partitioner count future
@@ -1929,27 +2041,40 @@ results are specific to the recorded configuration and implementation.
 	classification are extended normally into the absorber instead of
 	letting a coarse `materialfiles` grid create a new coastline or
 	bathymetry inside the PML. Corners clamp along every active PML
-	normal. This changes sampled element material properties, so rebuild
-	or re-correct an imported etree for the PML element values to change;
+	normal in absolute model coordinates. For SQD topography, restore
+	model Z from depth below the original local surface before clamping
+	at the bottom, then convert back using the surface at the clamped
+	X/Y location. Building surface offsets are also restored and removed.
+	For example, a surface at model Z = 2000 m and a bottom-PML entrance
+	at Z = 9000 m map a point at Z = 9500 m (relative depth 7500 m)
+	to Z = 9000 m (relative depth 7000 m). At bottom/lateral corners,
+	the final relative depth uses the clamped column's surface.
+	This changes sampled element material properties, so rebuild
+	or re-correct an imported etree after changing this setting or
+	adopting the corrected topographic bottom/corner conversion;
 	Phase B imports that reuse baked properties keep those existing
 	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`
-	Optional. Target theoretical reflection coefficient. Default `1.0e-3`.
-	Smaller = stronger absorption but tighter stability margins.
+	Optional. Target theoretical reflection coefficient. Default `0.1`; valid `(0,1)`.
+	Smaller values increase damping strength but do not guarantee smaller
+	numerical reflection or better stability.
 - `cpml_poly_order`
 	Optional integer in `[1, 4]`. Default `2` (the standard
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
 	across the PML.
 - `cpml_kappa_max`
-	Optional. Default `1.0`; must be at least one. Higher values change the
+	Optional. Default `10.0`; must be at least one. Higher values change the
 	real stretch in all stiffness, inertia and surface products. Validate
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
 - `cpml_alpha_max_hz`
-	Optional. When `> 0`, sets the CFS frequency directly (Hz). When `< 0`
-	or unset (default), it is derived from `simulation_wave_max_freq_hz`.
-	The explicit value becomes `alpha_max=2*pi*cpml_alpha_max_hz`,
-	whereas the fallback is `pi*simulation_wave_max_freq_hz`; see the
+	Optional. Default: `simulation_wave_max_freq_hz/2` in Hz. Omitted or
+	nonpositive inputs retain automatic selection (internal sentinel `-1`).
+	A positive numeric value overrides the automatic frequency; arithmetic
+	expressions are not evaluated in the input file. For `simulation_wave_max_freq_hz=4.36`,
+	the automatic value is `2.18` Hz. The angular coefficient is
+	`alpha_max=2*pi*cpml_alpha_max_hz`, giving `pi*simulation_wave_max_freq_hz`
+	for automatic selection. This automatic behavior is unchanged; see the
 	[coefficient formulas](#cpml-coefficient-and-operator-details) before
 	matching a source reference frequency.
 - `cpml_cfl_safety`
@@ -1963,6 +2088,29 @@ results are specific to the recorded configuration and implementation.
 	coordinate mapping and can increase reflections substantially. Existing
 	inputs explicitly setting `0.1` retain that behavior; remove the setting
 	or write `0` for plain CPML.
+- `cpml_acoustic_sponge_fraction`
+	Optional. Default `0.3`; finite, dimensionless and nonnegative.
+	Set `0` to disable this experimental acoustic bulk damping, applied only in CPML:
+
+```math
+a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
+\gamma_{\mathrm{ac}}=\texttt{cpml\_acoustic\_sponge\_fraction}.
+```
+
+	The acoustic volume inertia becomes `$J(s)(s^2+a_{\mathrm{ac}}s)$`;
+	`$a_{\mathrm{ac}}$` has units of inverse seconds. This applies to pressure
+	and velocity-potential acoustics. It adds no static force and does not
+	change `acoustic_quality_factor`, which remains a separate attenuation
+	control. Elastic and interior coefficients are unaffected by this option.
+	The gravity-surface inertia retains its ordinary tangential stretching,
+	with no additional sponge term; interface cofactors are also unchanged.
+	Coupled waveforms can nevertheless change.
+
+	This is independent of `cpml_mpml_cross_fraction`. Setup reuses existing inertia coefficients
+	and GPU histories, without additional kernels, exchanges or per-step
+	branches. Keep the default `0` for baseline validation. Nonzero values
+	alter matching and require raw-waveform accuracy and long-time stability
+	checks; they are not a universal remedy for heterogeneous CPML growth.
 - `cpml_alpha_floor_fraction`
 	Optional. Default `0.1`; valid `[0,1]`. Lower bound on alpha relative to
 	its maximum. Zero and repeated poles are handled without divided-pole
@@ -2027,6 +2175,58 @@ results are specific to the recorded configuration and implementation.
 	Flat-PML topography cells stay on the cube-stiffness + CPML path
 	exactly as before.
 
+### Topographic surface geometry and sampling
+
+The topography grid defines a bilinear height field shared by mesh air/solid
+classification, material-depth queries, VT volume sampling, sources, stations,
+and planes. For file height $h(X,Y)$ and station depth $d$:
+
+```math
+Z_{\mathrm{surface}}(X,Y) = \mathtt{topographybase\_zcoord} - h(X,Y),
+\qquad Z_{\mathrm{station}} = Z_{\mathrm{surface}} + d.
+```
+
+Solver Z is positive downward. `region_depth_deep_m` sets the domain extent;
+it does not replace the surface datum. FEM retains whole Hex8 staircase
+elements, so this consistency correction does not remove terrain-discretization
+error or provide a fitted surface mesh.
+
+Earlier builds used two triangles per grid cell in the mesh air/solid test,
+but bilinear heights for material and receiver queries. On nonplanar terrain
+those surfaces differ: a surface receiver could lie several fine cells above
+the mesh's solid boundary. Its trace could be zero, or nonzero through a few
+shared active nodes without being a valid material interpolation. Refinement
+can expose this mismatch. The discrepancy predates the shifted acoustic
+free-surface correction; changing the datum does not fix it.
+
+**Regenerate affected topographic meshes with `mesh_input_mode=0` and rerun.**
+Importing an older mesh preserves its stored air/solid labels, even with a
+rebuilt executable. Existing output cannot recover samples missing for this
+reason. Verify positive `Vp_mps` and `rho_kgm3` in the new `station_mediums.txt`
+for land stations. Use `HERCULES_PLANE_METADATA=1` to generate fresh plane
+ownership metadata; an older run's metadata is not evidence of current owners.
+
+The final grid row/column uses its actual edge heights. Out-of-grid material
+queries clamp to the nearest edge. For meshing proximity, `point_PlaneDist`
+returns $(Z_{\mathrm{surface}}-Z)/\sqrt{1+h_X^2+h_Y^2}$: positive in air,
+negative in material. This is a local tangent-normal offset, not an exact
+shortest distance to a curved bilinear patch. It preserves the planar normal
+distance and the existing refinement thresholds while aligning their zero
+surface with all other topography queries. The startup message identifies this
+shared bilinear geometry. No time-stepping exchange or GPU kernel is added.
+
+Local regression on 2026-10-06 replayed the production classifier at four
+air-owned Izmir stations and 4,806 zero-valued interior plane locations; all
+containing fine cells became material with the shared surface. A separate
+1 km terrain crop with homogeneous elastic material and a synthetic source
+reproduced and removed the zero station trace and 431 missing histories in a
+1,521-point plane. One/eight GPU ranks and host/CUDA-aware MPI agreed within
+`2.3e-13` relative L2 in raw plane histories. An 8 s flat-water control with
+gravity, CPML and field-specific constraints agreed with the previous build
+within `3.7e-12` relative L2 in plane output. The local-only investigation
+fixtures are not shipped. These checks establish geometry/output consistency,
+not continuum accuracy or full-Izmir long-time stability.
+
 ### CPML execution and topography
 
 - Each PML element is automatically classified as elastic or acoustic
@@ -2035,7 +2235,13 @@ results are specific to the recorded configuration and implementation.
 	For `3D_velocity_model=yes`, `cpml_3d_material_extension=yes`
 	(default) makes that classification come from the corresponding
 	inner-PML material column/row, matching the usual flat-PML material
-	extension used by spectral-element PML setups.
+	extension used by spectral-element PML setups. For SQD topography,
+	query depth is measured below the local surface, while CPML bounds
+	use mesh coordinates. The extension clamps the physical query point
+	in mesh coordinates, including the bottom limit, then converts back
+	to depth below the surface at the extended horizontal location.
+	This handles a nonzero topography datum consistently; it does not
+	by itself establish stability for a heterogeneous CPML model.
 - Material damping on PML elements follows `cpml_pml_material_damping`
 	(see that flag). With the default `none`, material damping is skipped
 	on PML elements, but non-PML elements always use material damping as
@@ -2044,7 +2250,10 @@ results are specific to the recorded configuration and implementation.
 	`rayleigh` is the only supported material-damping mode inside PML
 	elements.
 - **Viscoelastic damping runs on the GPU for all BKT-family models**
-	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). When the relaxation spectrum is
+	(`bkt`, `bkt2`, `bkt3`, `bkt3f`). BKT2 cube elements with matching
+	uniform shear/bulk relaxation rates use the shared-history fused path
+	described in [BKT2 GPU execution](#bkt2-gpu-execution). For the separate
+	convolution/force paths, when the relaxation spectrum is
 	spatially uniform — the usual case: fixed relaxation frequencies,
 	per-element weights vary with Q — the solver uses fast convolution
 	kernels with the spectral coefficients hoisted to scalars (computed
@@ -2059,8 +2268,8 @@ results are specific to the recorded configuration and implementation.
 	not applied inside PML elements. **Behavior change:**
 	a heterogeneous-spectrum `bkt2` model now uses the generic kernel —
 	previously it silently applied the first element's coefficients to
-	all elements (a latent bug). Spatially-uniform `bkt2` (every
-	validated run) is bit-identical to before and unaffected.
+	all elements (a latent bug). `HERCULES_BKT2_FUSED=0` retains the
+	previous hoisted BKT2 path for comparisons with the fused implementation.
 - The startup log prints how many elastic/acoustic PML elements were
 	found and the realized PML thickness — use it to confirm the PML zone
 	is non-empty and split between materials as expected.
@@ -2161,8 +2370,15 @@ Checkpoint reads and writes are rejected with CPML: the legacy checkpoint
 format does not preserve absorber histories. Set `use_checkpoint=0` and
 `checkpointing_rate=0`. Non-PML checkpoint behavior is unchanged.
 
-Start with `cpml_stiffness_mode=native`, `cpml_kappa_max=1`,
-`cpml_mpml_cross_fraction=0`, and the default alpha floor. Keep source and
+The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=10`,
+`cpml_reflection_target=0.1`, `cpml_acoustic_sponge_fraction=0.3`,
+automatic alpha in Hz equal to `simulation_wave_max_freq_hz/2`,
+`cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These candidate settings
+are not a universal stability or accuracy guarantee; slow gravity packets can
+require a lower alpha. Explicit input values always take precedence. To reproduce
+the previous defaults, explicitly set `acoustic_interface_method=shared-geometric-constraints`,
+`cpml_kappa_max=1`, `cpml_reflection_target=0.001`, and
+`cpml_acoustic_sponge_fraction=0`; automatic alpha is unchanged. Keep source and
 receivers outside the absorbing layer, resolve the source bandwidth, and
 compare with a larger domain at identical mesh spacing and timestep. Measure
 P/S arrivals, surface waves, late coda, and the permanent displacement
@@ -2310,6 +2526,13 @@ source-force files before repeating an affected simulation.
 SRFH force histories are generated at the common `slipfunction.in` interval
 and then interpolated at the solver timestep. Reducing
 `simulation_delta_time_sec` does not change that source-generation interval.
+
+Point and single-point body-force source generation writes all loaded nodes,
+including when a long time history spans multiple memory batches. The binary
+force-file header contains the complete node list, and each time sample uses
+that same ordering. Increasing the simulation duration must preserve the
+previously generated early-time forces. This batching is part of source setup;
+it does not change the GPU time-stepping path.
 
 ### Source-force filtering
 
@@ -2460,9 +2683,14 @@ unmodified native normalization is $\mu\Delta t^2h=9c_1$ and
 $\lambda\Delta t^2h=9c_2$. Reduced integration retains only linear modes.
 
 An interface flux component normal to axis $j$ uses the cofactor $J/S_j$.
-Acoustic and elastic sides have independent coefficients; all normal
-components are retained, including bathymetry normals. `face_mass` retains
-four quadrature points in the PML, each with its own histories. A flat gravity
+Both coupling directions use the same coefficients evaluated at the physical
+interface-fragment center, independently of the adjacent solid element size
+or MPI owner. Sampling each containing element separately can give different
+cofactors for the same nonmatching fragment. Histories remain independent for
+each direction, and all normal components are retained, including bathymetry
+normals. `face_mass` retains four quadrature points in the PML, each with its
+own histories. This corrects coefficient consistency across the interface;
+it does not establish long-time stability for arbitrary heterogeneous CPML. A flat gravity
 surface uses $S_xS_y s^2/(\rho g)$ at each of its four lumped nodes, including
 the x/y corner product. Output reconstruction uses the same inverse stretch,
 with a separate history per observation point.
@@ -2542,6 +2770,123 @@ checkout. Horizon inputs, executable and results are retained under
 42130 (long run), 42136–42139 (backend/rank/projection and Rayleigh checks),
 42145 (matched old-binary timing), and 42152 (final-default executable check).
 
+### BKT2 GPU execution
+
+The default BKT2 cube path shares the two displacement-history recurrences
+between shear and bulk, then evaluates their force in the same kernel. This
+preserves the existing relaxation rates, Q-dependent weights, reference-frequency
+correction, timestep, arithmetic precision, underflow threshold and force
+operator. The optimized dispatch requires device-resident force and displacement
+synchronization. Host-staged execution (including checkpoint-driven backend
+fallback) retains the previous kernels: an initial host-backend fused comparison
+exceeded the waveform tolerance, so that path is not enabled. No extra per-step
+synchronization is added to make it eligible. An initialization scan requires
+spatially uniform relaxation rates
+and exact agreement between active shear and bulk spectra. In BKT/BKT2, a sector
+needs relaxation history only when `a0` or `a1` is nonzero; the unused `a2/g2`
+fields cannot make it active. Generated element records initialize all damping
+fields, and two-mechanism material assignment explicitly zeros `a2/g2`. The
+eligibility scan also ignores these unused fields in imported records. BKT3/BKT3F
+still include their third mechanism in the scan.
+
+Inactive sectors need no history and are excluded from rate comparisons, so
+active, shear-only, bulk-only and inactive elements can coexist on a fused rank.
+Different Q-dependent weights remain per element and are compatible with fusion
+when the active rates match. The existing BKT2 `Qs >= 1000` and `Qk >= 1000`
+cutoffs, and `use_infinite_qk`, retain their previous physical behavior; this
+eligibility fix does not change those attenuation approximations. Other BKT
+variants and nonmatching spectra retain the previous kernels.
+
+The shared histories occupy the shear slots for eligible cubes. This halves
+history update traffic when both sectors attenuate. Transformed shear/bulk
+vectors stay local to the fused kernel unless station stresses are requested;
+then they are saved every step so the existing previous-step station gather
+remains correct, including decimated output. VT cut cells retain the original
+convolution and tetrahedral force. CPML elements retain their elastic CPML
+operator. This change adds no field exchange, host staging or per-step allocation.
+The legacy GPU buffer allocations remain in place for compatibility; reduced
+traffic must not be reported as reduced allocated GPU memory.
+
+The fused kernel launches 128-thread blocks with a six-block occupancy target.
+This deliberately permits compiler spills to increase the number of resident
+warps. The setting was selected by alternating CUDA-event measurements on
+Horizon GB200 GPUs; the unconstrained register allocation was slower than the
+separate kernels. Performance depends on the GPU and compiler, so retain the
+reference switch for comparisons on other systems.
+
+Set `HERCULES_BKT2_FUSED=0` in the launch environment to compare with the old
+two-kernel BKT2 path. `HERCULES_FORCE_GENERIC_DAMPING=1` overrides both optimized
+paths. The setup log reports actual fused ranks and fused/fallback element slots,
+then rank counts for each fallback reason: fusion disabled, generic override,
+force or displacement synchronization not device-resident, nonuniform active
+shear or bulk rates, and a shear/bulk rate mismatch. Reason counts may overlap.
+Ranks with no damping slots are reported separately and excluded from fused and
+fallback-reason rank counts. Slots describe mapper entries, which can include
+inactive, acoustic or CPML elements; they are not a count of attenuating work.
+For the fused path, `Force damping local wait only` includes convolution and
+cube force plus any VT force; `Force damping conv wait only` covers only the
+remaining legacy convolution subset. Compare total solver time or a GPU
+profiler's combined force region, not individual timer names between paths.
+Host wait timers are not isolated kernel timings, and per-rank maxima are not
+additive. Atomic nodal accumulation can change floating-point summation order,
+so full waveform comparisons require a precision-appropriate tolerance rather
+than a universal bitwise-identity claim.
+
+Horizon GB200 validation (CUDA 13.2, NVIDIA HPC SDK 26.5): an isolated CUDA
+regression compared the unchanged two kernels with the fused kernel over 128
+steps and 263 independently assembled elements. Forces and saved transformed
+vectors matched bitwise in both double- and single-precision builds, including
+different shear/bulk weights, inactive sectors, bulk-only history, interface
+projection flags and PML skips. A 2,097,152-element shared-node assembly check
+had a peak-scaled force difference of `3.12e-16` in double precision.
+
+For that larger synthetic assembly with both sectors active, no CPML/VT and
+station-vector stores disabled, four alternating 1,000-step CUDA-event timing
+pairs after warm-up gave median combined damping times of `1.110192 ms`
+(separate kernels) and `0.854177 ms` (fused): **1.30x faster**, or 23.1% less
+damping-kernel time. This is a kernel benchmark, not a full-solver or Izmir
+speedup. It does not establish production-scale waveform accuracy or stability.
+
+The small-solver regression comprised 31 ASCII-output runs and 12 float64
+binary-displacement runs against the unmodified `2e1492a` executable, including
+the updated executable's reference mode. Cases used one or four GPU/MPI ranks,
+heterogeneous Q, shear-only/bulk-only/infinite-Q sectors, acoustic--elastic
+coupling, CPML, VT cut cells and decimated strain/stress output. The final host
+backend check exercises the retained reference kernels. Maximum errors scaled
+by each station/field group's peak were `7.51e-7` for ASCII outputs (acceptance
+limit `2e-6`, accounting for the text precision) and `1.72e-13` for binary
+displacements (limit `1e-10`). Undefined solid-station pressure retained its
+documented `nan` marker; finite physical fields were checked separately.
+
+Single-pass small-solver reference/fused time ratios ranged from `0.917` to
+`1.039`, including slower VT timing. These runs show no consistent end-to-end
+speedup; use a matched production benchmark before assigning an Izmir speedup.
+The local-only harness and retained results are under
+`.local-diagnostics/bkt2-shared-fused-20261007/` (unavailable in a clean checkout).
+The corresponding Horizon directory is
+`/scratch/08458/wz_tacc/hercules/bkt2-shared-fused-20261007/`; jobs 50973 and 51046
+contain the final CUDA-kernel checks and final guarded solver comparisons,
+respectively. The latter solver source includes the independent acoustic
+receiver-halo ordering fix from `5fd3d7e`.
+
+The inactive-sector eligibility fix was checked against unmodified `42b55a7`
+on the same Horizon toolchain with 24 ASCII and eight float64-displacement runs.
+One- and four-rank cases included mixed active/shear-only/bulk-only/inactive
+layers, different active Q weights, CPML, VT, acoustic--elastic coupling and the
+host backend, with fused, separate and generic dispatch comparisons. Eight
+additional runs deliberately seeded unused `a2` weights in isolated test builds:
+the old four-rank solver fell back on all ranks, while the fixed solver fused
+on all four. Across all 40 runs, maximum peak-scaled errors were `2.33e-9` for
+ASCII fields and `7.94e-14` for binary displacements, below the same acceptance
+limits above. Setup reason counts matched the requested overrides/backends.
+Extracted production-code checks also covered nonzero/NaN unused fields,
+genuine active-rate mismatches and BKT3/BKT3F third-mechanism mismatches.
+These checks establish small-case equivalence, not full-size Izmir timing or
+512-rank eligibility. Local-only evidence is under
+`.local-diagnostics/bkt2-inactive-20261007/` (unavailable in a clean checkout),
+with Horizon build/test jobs 51728, 51739 and 51744 under
+`/scratch/08458/wz_tacc/hercules/bkt2-inactive-20261007/`.
+
 ### VT and BKT operator history
 
 The older hill test exposed a mismatch between a full-cube GPU internal
@@ -2586,15 +2931,6 @@ coefficient, which an earlier implementation incorrectly used, leaving the
 option ineffective for nondamped/BKT cases. Acoustic CPML elements skip this
 interior regularizer.
 
-The older flat-water, non-attenuating benchmark reported a roughly 4.6 Hz
-pressure ring, estimated by `c/(4*h)`. Its Q sweep (500, 100, 50) reported
-that Q=100 reduced pressure energy above 2 Hz by about 50–82%, improved
-pressure correlation with CPS from about 0.68 to 0.86, and retained vertical
-displacement correlation near 0.9965 with mean perturbation at most 0.5%.
-Q=50 increased the displacement perturbation with little additional ring
-reduction. These are case-specific historical measurements of a numerical
-regularizer, not physical ocean attenuation values or a general calibration.
-
 ### Historical CPML benchmark record
 
 The earlier Extended README recorded the following elastic half-space,
@@ -2617,6 +2953,51 @@ misfits 0.151 versus 0.154 for Lysmer, and whole-record (0–40 s) misfits
 0.170 versus 0.366. It attributed much of the deep-corner vertical improvement
 to layer thickness. Receiver labels above retain the original plotting
 convention (including “Z up”); Hercules still stores solver Z positive down.
+
+## ASCII station buffering
+
+With the default `station_binary=no`, `station_ascii_buffer_kib` sets the stdio
+buffer size for each station owned by an MPI rank. This optional `parameters.in`
+integer defaults to **64 KiB** (1 KiB = 1024 bytes). Accepted values are
+1..2097151 (`INT_MAX / 1024`); zero, negative, fractional and overflowing values
+are rejected during input parsing. The value is validated but unused with
+`station_binary=yes`. Existing inputs retain the 64 KiB default.
+
+```ini
+# CPU buffer per ASCII station, shared by all its output columns.
+station_ascii_buffer_kib = 64
+```
+
+Buffer memory per rank is `station_ascii_buffer_kib * 1024 * local_station_count`
+bytes, plus small stream/container overhead. For example, 1,000 stations owned
+by one rank use 62.5 MiB at the default or 15.625 MiB with a value of 16. A larger
+buffer allows less frequent writes but uses more CPU RAM and delays live-file
+visibility. A smaller buffer reduces memory use and writes more frequently.
+Ranks without stations and binary mode allocate no ASCII station buffers.
+Buffers are installed before writing file headers and remain valid until the
+files close; allocation failure stops setup with an error.
+
+The writer retains the existing ASCII formatting, timestamps, sample cadence
+(`output_stations_print_rate * simulation_delta_time_sec`), and all requested
+motion, pressure, strain/stress and nonlinear columns. There is no filtering,
+averaging or downsampling. Writes occur as the byte buffer fills rather than
+forcing a flush every ten samples. The number of rows per write depends on the
+enabled columns and their formatted values; the buffer size is a byte limit, not a fixed
+sample count. The policy covers acoustic, topography and ordinary solid station
+writers. Binary station output uses its separate existing MPI-IO path.
+
+At normal completion, the solver flushes each remaining partial buffer, checks
+write errors, closes the station files and releases the buffer memory. Final
+station output is included in the `Print Stations` and `Solver I/O` timers.
+The startup monitor reports the selected ASCII buffering policy. No per-step
+allocation, field exchange or GPU transfer is added.
+
+Live station files may lag the current simulation time and may end in a partial
+text row until more data is written. An interrupted or aborted run can lose the
+unflushed tail; inspect completed files for the full requested history. Larger
+writes reduce small-write frequency but cannot guarantee fast output on a
+congested filesystem. Plane output and the ETA estimator are independent of
+this station-buffering change.
 
 ## Single-file station binary output
 
@@ -2879,6 +3260,78 @@ bytes match. Finite equality and byte identity differ for signed zeros.
 Compare complete histories and record maximum errors and their locations,
 not only global peaks. Agreement between backends cannot establish physical
 accuracy, mesh/time convergence or correctness of a shared reconstruction.
+
+## Acoustic station gradient recovery
+
+With `acoustic_station_gradient=linear`, each component uses the owning
+Hex8 derivative and one adjacent water-cell derivative evaluated at the same
+transverse station coordinates. For direction $a$, let $x_a$ be the station
+coordinate and $c_0$, $c_1$ the owning and adjacent cell centers along that axis:
+
+```math
+t = \frac{x_a-c_0}{c_1-c_0}, \qquad
+(\partial_a p)_{\mathrm{rec}} = (1-t)(\partial_a p)_0 + t(\partial_a p)_1.
+```
+
+The neighbor toward the receiver from its cell center is preferred. If it is
+unavailable, the opposite neighbor gives a one-sided extrapolation. The formula
+reproduces the gradient of any quadratic scalar polynomial sampled at the mesh
+nodes, including mixed terms and unequal Cartesian cell sizes. It does not
+change the approximation space or the physical time-step operators.
+
+Setup resolves actual local or remote leaves and registers missing vertices as
+non-owned harbored nodes before solver allocation. Existing anchored/dangling
+field exchanges, after field-specific assignment, supply those samples on both
+host and CUDA-aware paths. Sender and receiver MPI mappings are sorted by
+global node ID for every interface method, including
+`shared-geometric-constraints` with point projection. This ordering is required
+when receiver-only vertices are appended after mesh extraction. Stencils are
+sorted by global node ID and uploaded
+once; the fused GPU station kernel returns only the existing four values per
+acoustic station. There is no new per-step MPI exchange or full-field download.
+
+Stencils only use acoustic cells with matching Vp and density (relative
+comparison tolerance 1e-6). Solid, air, void and different water materials are
+excluded. An unavailable neighbor on both sides retains the element derivative
+for that component. CPML stations retain the original derivative and output
+stretch memories, and an interior stencil excludes CPML neighbors. Startup
+reports added halo nodes, recovered components, fallbacks and CPML stations.
+
+This setting changes acoustic station motion, including binary displacement.
+It leaves pressure interpolation, plane reconstruction, elastic/poroelastic
+station motion, stresses/strains, sources and propagation operators unchanged.
+Use `element` for comparisons to historical station output or a colocated plane
+point using the original gradient. Recovery cannot repair a distorted nodal
+field, suppress physical high-frequency content, or establish CPML accuracy.
+A local 2026-10-07 gravity-packet comparison used the same 10 km model,
+600 s duration, independent acoustic constraints and unfiltered analytical
+reference for both settings. At the center station 20 m above the bed, the
+coarse-water (39.0625 m) vertical-displacement L2 error over 0.1--150 s decreased
+from 2.247% to 0.423%; the fine-water (19.53125 m) error decreased from 48.106%
+to 0.239%. Surface-displacement median errors decreased from 5.856% to 0.987%
+and 3.024% to 0.278%, respectively. Pressure differences between paired runs
+were at most about 1e-7 Pa (below 8e-8% relative L2), and the late surface-pressure errors
+remained 16.761% and 9.271% for those CPML settings. These are output-recovery
+results for a specific smooth, lossless packet, not general propagation or
+absorber tolerances. A separate 24-station check at heights 1--100 m above
+the bed still found median vertical-displacement errors of 14.91% (coarse)
+and 3.85% (fine) at 1 m, where the reference vertical motion is small; recovery
+does not guarantee uniform relative accuracy arbitrarily close to the
+interface. The local fixture and results are not in a clean checkout.
+
+For the same 110-station, 600 s runs, rank-maximum acoustic station gathering
+(kernel plus result copy) increased from 1.994 to 2.852 s on the coarse case
+and 1.929 to 2.787 s on the fine case: about 0.86 s extra per run. Total solver
+time changed from 105.16 to 111.64 s and 195.78 to 195.05 s, respectively.
+These are single runs on different allocations, not repeated measurements
+on fixed nodes, so their overall runtime differences cannot be attributed
+solely to reconstruction. The cases added 192 halo nodes; communication uses
+existing exchanges with a larger payload. Cost depends on station count,
+placement and the frequency at which station gradients are evaluated.
+
+Analytically initialized benchmarks must seed their initial receiver velocity
+with the selected observation formula; ordinary runs initialized at rest need
+no additional initialization.
 
 ## Structured DRM box output
 

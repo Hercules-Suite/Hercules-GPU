@@ -82,11 +82,26 @@ interactions are in the
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.
+  Optional 3-D `qs.in`/`qp.in` use solid-only interpolation at water/solid
+  stencils; supplied Q is independent of the Vs minimum. Setup rejects invalid
+  solid Q and inadmissible BKT2 coefficients without another mesh traversal.
+  Regenerate persisted meshes to apply the correction; see
+  [Quality-factor files](Extended%20README.md#quality-factor-files).
 - **Absorbing boundary and CPML:** `abc_type`, `cpml_thickness_m`, `cpml_layers`,
   `cpml_reflection_target`, `cpml_poly_order`, `cpml_kappa_max`, `cpml_alpha_max_hz`,
   `cpml_cfl_safety`, `cpml_mpml_cross_fraction`, `cpml_alpha_floor_fraction`,
+  `cpml_acoustic_sponge_fraction` (optional, default `0.3`; `0` disables experimental acoustic
+  bulk CPML damping; leaves gravity-surface coefficients unchanged),
   `cpml_partition_weight`, `cpml_clamp_outer`, `cpml_3d_material_extension`, `cpml_stiffness_mode`,
   `cpml_stiffness_mode_acoustic`, `cpml_pml_material_damping`.
+  CPML defaults are `cpml_reflection_target=0.1`, `cpml_kappa_max=10`, and
+  automatic `cpml_alpha_max_hz=simulation_wave_max_freq_hz/2` in Hz (omit it or
+  use a nonpositive numeric value; positive numeric values override it).
+  Existing explicit inputs take precedence.
+  Automatic thickness is `cpml_layers` times the largest non-air element
+  edge on a lateral or bottom boundary (MPI-wide maximum); air is also
+  excluded from the global fallback. Finer boundary regions contain more
+  cells; use positive `cpml_thickness_m` to specify the physical width.
   With `abc_type=cpml`, `cpml_clamp_outer` defaults to `yes`; set it explicitly
   to `no` to disable the outer displacement/acoustic-scalar clamp. The complete
   operator defaults to `cpml_mpml_cross_fraction=0`; explicit older `0.1`
@@ -98,28 +113,33 @@ interactions are in the
   `acoustic_free_surface_gravity`, `acoustic_pressure_formulation`, `acoustic_interface_coupling`,
   `acoustic_interface_method`, `acoustic_interface_projection`, `acoustic_interface_face_filter`, `acoustic_interface_max_level`,
   `acoustic_mesh_refinement_factor`, `acoustic_interface_diagnostics_file`,
-  `acoustic_quality_factor`.
-  `acoustic_quality_factor` defaults to `0`, disabling the interior acoustic
-  damping term; use this lossless setting for baseline and validation comparisons.
-  Positive values are numerical damping trials: `500` gives weaker damping than
-  `100`, which was useful in an older flat-water benchmark. These are not physical
-  water-attenuation calibrations. See [damping controls](Extended%20README.md#acoustic-and-elastic-coupling)
-  and the [historical scope](Extended%20README.md#historical-acoustic-experiments).
-  `acoustic_interface_method` defaults to `shared-geometric-constraints`; experimental
-  `field-specific-constraints` separates acoustic, solid and pore-pressure hanging-node maps, while
-  `local-matching` refines the coarser interface neighbors during Phase A.
+  `acoustic_quality_factor`, `acoustic_station_gradient`.
+  `acoustic_quality_factor` defaults to `0`, disabling interior acoustic damping.
+  This default was verified in the documented flat-water CPS comparisons and
+  MPI/backend consistency tests; see the
+  [validation scope](Extended%20README.md#interface-constraints-and-local-matching).
+  `acoustic_station_gradient=linear` (default) recovers station motion at the
+  actual point using same-material neighboring water cells; `element` retains
+  the historical gradient. CPML and unavailable-neighbor fallbacks are described
+  in [the detailed reference](Extended%20README.md#acoustic-station-gradient-recovery).
+  `acoustic_interface_method` defaults to `field-specific-constraints` for coupled
+  scalar acoustics, separating acoustic, solid and pore-pressure hanging-node maps.
+  When the method is omitted and acoustics, scalar acoustics or coupling is disabled,
+  shared geometric constraints remain active. Explicit unsupported choices still abort.
+  The alternative `local-matching` refines the coarser interface neighbors during Phase A.
   Imported mismatched meshes are rejected. Both alternatives require coupled
-  velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
+  pressure or velocity-potential acoustics and full Hex8 solids. Buildings, eligible nonlinear
   constitutive models and BrickUP poroelasticity can be enabled with either method;
   existing module-specific restrictions and material calibration requirements apply.
   Both methods use actual remote solid traces, including `face_mass` quadrature
-  and open-pore pressure loads. The default shared-geometric method also resolves
+  and open-pore pressure loads. The shared-geometric method also resolves
   actual remote solid traces when `face_mass` is selected, so local and remote
   faces use the same four-point quadrature; its `point` path is unchanged.
   Field-specific constraints also
   support FEM topography (`include_topography=yes`, `computation_method=fem`),
   excluding air and carved voids from the field maps. VT cut-tetrahedron topography
-  remains unsupported; local matching still requires topography off. CPML, gravity and
+  requires explicit `shared-geometric-constraints` for coupled acoustics; local matching
+  still requires topography off. CPML, gravity and
   `face_mass` remain independent; local matching does not guarantee CPML
   stability. See [constraints and matching](Extended%20README.md#interface-constraints-and-local-matching).
   `acoustic_interface_face_filter` defaults to `all`: couple every detected
@@ -142,6 +162,7 @@ interactions are in the
   Building cases measure ground and groundwater depths from `surface_shift_m`;
   above-ground building cells remain outside the saturated region.
 - **Station output:** `number_output_stations`, `station_binary`, `station_output_binary_file`,
+  `station_ascii_buffer_kib`,
   `output_stations_print_rate`, `output_stations_directory`, `output_stations`,
   `station_mediums_output_file`, `print_station_pressures`, `print_station_pore_pressure_ratios`,
   `print_station_strains`, `print_station_stresses`.
@@ -153,7 +174,11 @@ interactions are in the
   See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)
   for plane output from older executables.
 - **Topography:** `include_topography`, `topography_directory`, `maximum_octant_level`,
-  `computation_method`, `topography_bkt_gpu_stabilize`.
+  `topographybase_zcoord`, `computation_method`, `topography_bkt_gpu_stabilize`.
+  Mesh air/solid classification and receiver/material queries share a bilinear
+  surface, `Z = topographybase_zcoord - height`. Regenerate meshes made with
+  the earlier triangular classifier before rerunning affected surface outputs;
+  see [surface sampling](Extended%20README.md#topographic-surface-geometry-and-sampling).
 - **Nonlinear and plastic controls:** `include_nonlinear_analysis`, `geostatic_loading_time_sec`,
   `geostatic_cushion_time_sec`, `approximate_geostatic_state`, `error_tolerance`, `backbone_errTol`,
   `material_model`, `material_properties_list`, `no_substeps`, `rivasand02_reversaltype`,
@@ -219,12 +244,23 @@ for defaults, supported combinations, and performance implications.
   `HERCULES_PRESSURE_FORCE_SYNC_MODE`.
 - **Other performance and diagnostic controls:** `HERCULES_ADJUST_ASSIGN_OMP`,
   `HERCULES_ADJUST_DIST_OMP`, `HERCULES_ALLOW_MULTI_RANK_PER_GPU`, `HERCULES_FORCE_GENERIC_DAMPING`,
+  `HERCULES_BKT2_FUSED` (default `1` for eligible device-resident runs; host-staged
+  execution retains the reference path; `0` selects separate BKT2 convolution/force
+  kernels for comparison; setup reports fallback reasons and excludes inactive
+  sectors from rate comparisons; see [BKT2 GPU execution](Extended%20README.md#bkt2-gpu-execution)),
   `HERCULES_FULL_CLEAR_OMP`, `HERCULES_REPRO_MODE`, `HERCULES_SPARSE_CLEAR_MODE`,
   `HERCULES_SPARSE_UPLOAD_MODE`, `HERCULES_SRC_DEBUG`, `HERCULES_TOPO_FORCE_MODE`.
 
 ## Output and validation
 
 `station_binary=no` is the default and preserves ASCII station histories.
+`station_ascii_buffer_kib` sets the CPU buffer size per locally owned ASCII
+station: optional integer KiB (1 KiB = 1024 bytes), default **64**, range
+1..2097151. It is validated but unused in binary mode. All requested samples and
+columns are retained. Buffers are written when full and flushed at normal
+completion; live files can lag the simulation. The final flush is included in
+the station and solver I/O timers. See
+[ASCII station buffering](Extended%20README.md#ascii-station-buffering).
 To record displacement from the existing `output_stations` list in one file:
 
 ```ini

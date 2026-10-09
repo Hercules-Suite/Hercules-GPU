@@ -2335,6 +2335,117 @@ void kernelDampingCalcLocal(int32_t lenum,
 }
 
 
+/* The common BKT2 spectrum has identical displacement-history recurrences
+ * for shear and bulk, independent of their Q-dependent weights. With zero
+ * initial histories, one pair in conv_shear_{1,2} therefore suffices, including
+ * bulk-only elements. Do not alias the legacy arrays: VT and fallback kernels
+ * still use their independent histories. No precision or constitutive change.
+ *
+ * Keep solver_float assignment boundaries and the force operator's evaluation
+ * order identical to kernelDampingCalcConvBkt2 + kernelDampingCalcLocal.
+ * Nodal atomic summation order remains nondeterministic, as on the old path.
+ */
+/* The unconstrained fused kernel's register demand limits occupancy. This
+ * bound trades some compiler spills for more resident warps; measured against
+ * the separate kernels on GB200. Keep the launcher at 128 threads or fewer. */
+__global__ __launch_bounds__(128, 6) void kernelDampingBkt2Fused(
+    int32_t lenum, gpu_data_t* gpuData, double rmax,
+    double coef1, double coef2, double expCoef0,
+    double coef3, double coef4, double expCoef1,
+    int32_t elementCount, const int32_t* elementMapper, int saveVectors) {
+  const int32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= elementCount) return;
+  const int32_t eindex = elementMapper[idx];
+  if (gpuData->pmlFlagArrayDevice != NULL &&
+      gpuData->pmlFlagArrayDevice[eindex] != 0) return;
+
+  const int32_t numcomp = lenum * 8;
+  const double a0s = gpuData->a0_shearArrayDevice[eindex];
+  const double a1s = gpuData->a1_shearArrayDevice[eindex];
+  const double bs = gpuData->b_shearArrayDevice[eindex];
+  const double a0k = gpuData->a0_kappaArrayDevice[eindex];
+  const double a1k = gpuData->a1_kappaArrayDevice[eindex];
+  const double bk = gpuData->b_kappaArrayDevice[eindex];
+  const double cs = (rmax != 0.0) ? bs / rmax : 0.0;
+  const double ck = (rmax != 0.0) ? bk / rmax : 0.0;
+  const int historyS = (a0s != 0.0 || a1s != 0.0);
+  const int historyK = (a0k != 0.0 || a1k != 0.0);
+  const int update = (historyS || historyK) && coef1 != 0.0 && coef3 != 0.0;
+  fvector_t shear[8], bulk[8];
+  int contributeS = 0, contributeK = 0;
+
+  for (int i = 0; i < 8; ++i) {
+    const int32_t offset = eindex + i * lenum;
+    const int32_t node = gpuData->lnidArrayDevice[offset];
+    const fvector_t u = gpuData->tm1Device[node];
+    const fvector_t prev = gpuData->tm2Device[node];
+    for (int d = 0; d < 3; ++d) {
+      const int32_t pos = offset + d * numcomp;
+      solver_float h0 = 0.0, h1 = 0.0;
+      if (historyS || historyK) {
+        h0 = ((solver_float*)gpuData->conv_shear_1Device)[pos];
+        h1 = ((solver_float*)gpuData->conv_shear_2Device)[pos];
+        if (update) {
+          h0 = coef2 * u.f[d] + coef1 * prev.f[d] + expCoef0 * h0;
+          h1 = coef4 * u.f[d] + coef3 * prev.f[d] + expCoef1 * h1;
+          ((solver_float*)gpuData->conv_shear_1Device)[pos] = h0;
+          ((solver_float*)gpuData->conv_shear_2Device)[pos] = h1;
+        }
+      }
+      if (historyS) {
+        shear[i].f[d] = cs * (u.f[d] - prev.f[d]) -
+                        (a0s * h0 + a1s * h1) + u.f[d];
+      } else if (bs != 0.0) {
+        shear[i].f[d] = cs * (u.f[d] - prev.f[d]) + u.f[d];
+      } else {
+        shear[i].f[d] = u.f[d];
+      }
+      if (historyK) {
+        bulk[i].f[d] = ck * (u.f[d] - prev.f[d]) -
+                       (a0k * h0 + a1k * h1) + u.f[d];
+      } else if (bk != 0.0) {
+        bulk[i].f[d] = ck * (u.f[d] - prev.f[d]) + u.f[d];
+      } else {
+        bulk[i].f[d] = u.f[d];
+      }
+      contributeS |= fabs(shear[i].f[d]) > UNDERFLOW_CAP_STIFFNESS;
+      contributeK |= fabs(bulk[i].f[d]) > UNDERFLOW_CAP_STIFFNESS;
+      /* Station stress gathers consume the previous step's vectors. Save
+       * every step when requested, even if station output is decimated. */
+      if (saveVectors) {
+        ((solver_float*)gpuData->shearVectorDevice)[pos] = shear[i].f[d];
+        ((solver_float*)gpuData->kappaVectorDevice)[pos] = bulk[i].f[d];
+      }
+    }
+  }
+  if (!contributeS && !contributeK) return;
+
+  double atu[24], firstVec[24];
+  for (int i = 0; i < 24; ++i) firstVec[i] = 0.0;
+  const uint8_t flags = gpuData->acousticFaceFlagsArrayDevice[eindex];
+  if (contributeS) {
+    const double mu = -0.5625 * gpuData->c1ArrayDevice[eindex];
+    aTransposeU(shear, atu);
+    firstVector_mu(atu, firstVec, mu);
+  }
+  if (contributeK) {
+    const double kappa = -0.5625 * (gpuData->c2ArrayDevice[eindex] +
+                                  2. / 3. * gpuData->c1ArrayDevice[eindex]);
+    if (flags != 0) acoustic_project_interface_nodes(bulk, flags);
+    aTransposeU(bulk, atu);
+    firstVector_kappa(atu, firstVec, kappa);
+  }
+  /* Match the legacy output buffer too: au adds to its input buffer in a
+   * SINGLE_PRECISION_SOLVER build, but overwrites it in double precision. */
+  au(bulk, firstVec);
+  if (flags != 0) acoustic_project_interface_nodes(bulk, flags);
+  for (int i = 0; i < 8; ++i) {
+    const int32_t node = gpuData->lnidArrayDevice[eindex + i * lenum];
+    for (int d = 0; d < 3; ++d)
+      atomicAdd(&gpuData->forceDevice[node].f[d], bulk[i].f[d]);
+  }
+}
+
 /* Displacement Calculation Kernel
    FLOPs: 3*(2A + 3M) = 6A + 9M
    MEM  : 8(3*3) + 8 + 8*6 + 8*3 = 128
@@ -3206,7 +3317,9 @@ __global__ void kernelAcousticStationInterpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput)
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights)
 {
     const int32_t station = blockIdx.x * blockDim.x + threadIdx.x;
     if (station >= stationCount) return;
@@ -3239,6 +3352,19 @@ __global__ void kernelAcousticStationInterpolate(
         gradX += sx[corner] * oneY * oneZ * inv4h * value;
         gradY += sy[corner] * oneX * oneZ * inv4h * value;
         gradZ += sz[corner] * oneX * oneY * inv4h * value;
+    }
+
+    if (gradientOffsets != NULL && gradientOffsets[station+1] > gradientOffsets[station]) {
+        gradX = gradY = gradZ = 0.0;
+        for (int k = gradientOffsets[station]; k < gradientOffsets[station+1]; ++k) {
+            const int32_t node = gradientNodes[k];
+            const double value = velocityPotential
+                ? -(double)(pressureTm1[node]-pressureTm2[node])*inverseDt
+                : (double)pressureTm1[node];
+            gradX += gradientWeights[3*(size_t)k]*value;
+            gradY += gradientWeights[3*(size_t)k+1]*value;
+            gradZ += gradientWeights[3*(size_t)k+2]*value;
+        }
     }
 
     double* const out = stationOutput + (size_t)station * 4;

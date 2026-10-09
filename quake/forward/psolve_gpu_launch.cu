@@ -853,6 +853,8 @@ static char* kernel_handle(psolve_gpu_kernel_id_t kernel) {
       return (char*)kernelStiffnessCalcLocal;
     case PSOLVE_GPU_KERNEL_DAMPING_BKT2:
       return (char*)kernelDampingCalcConvBkt2;
+    case PSOLVE_GPU_KERNEL_DAMPING_BKT2_FUSED:
+      return (char*)kernelDampingBkt2Fused;
     case PSOLVE_GPU_KERNEL_DAMPING_BKT3:
       return (char*)kernelDampingCalcConvBkt3;
     case PSOLVE_GPU_KERNEL_DAMPING_GENERIC:
@@ -1080,6 +1082,17 @@ void psolve_launch_damping_generic(
       elementMapper);
 }
 
+void psolve_launch_damping_bkt2_fused(
+    int grid, int block, cudaStream_t stream, int32_t lenum,
+    gpu_data_t* gpuData, double rmax,
+    double coef1, double coef2, double expCoef0,
+    double coef3, double coef4, double expCoef1,
+    int32_t elementCount, const int32_t* elementMapper, int saveVectors) {
+  kernelDampingBkt2Fused<<<grid, block, 0, stream>>>(
+      lenum, gpuData, rmax, coef1, coef2, expCoef0, coef3, coef4,
+      expCoef1, elementCount, elementMapper, saveVectors);
+}
+
 void psolve_launch_damping_force(
     int grid, int block, size_t shared, cudaStream_t stream, int32_t lenum,
     gpu_data_t* gpuData, int32_t elementCount, int32_t* elementMapper) {
@@ -1190,10 +1203,13 @@ void psolve_launch_acoustic_station_interpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput) {
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights) {
   kernelAcousticStationInterpolate<<<grid, block, shared, stream>>>(
       stationCount, stationNodes, stationCoords, stationH, pressureTm1,
-      pressureTm2, velocityPotential, inverseDt, stationOutput);
+      pressureTm2, velocityPotential, inverseDt, stationOutput,
+      gradientOffsets, gradientNodes, gradientWeights);
 }
 
 void psolve_launch_pore_pressure_station_interpolate(

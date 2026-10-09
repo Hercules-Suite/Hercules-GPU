@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 240 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 243 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -207,8 +207,10 @@ test("renders the categorized parameter reference", async () => {
   assert.match(faceFilterRow, /default alias follows all/);
   const methodRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_method"));
   assert.ok(methodRow);
-  assert.match(methodRow, /Default: shared-geometric-constraints/);
-  assert.match(methodRow, /field-specific-constraints/);
+  assert.match(methodRow, /Default: field-specific-constraints for coupled scalar acoustics/);
+  assert.match(methodRow, /When omitted, uses shared-geometric-constraints if acoustics, scalar acoustics or interface coupling is disabled/);
+  assert.match(methodRow, /Explicit unsupported choices still abort/);
+  assert.match(methodRow, /Coupled VT topography must explicitly select shared-geometric-constraints/);
   assert.match(methodRow, /local-matching/);
   assert.match(methodRow, /imported mismatched meshes abort/);
   assert.match(methodRow, /Field-specific constraints support FEM topography/);
@@ -221,16 +223,15 @@ test("renders the categorized parameter reference", async () => {
   const projectionRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_projection"));
   assert.ok(projectionRow);
   assert.match(projectionRow, /All three constraint methods resolve actual remote solid vertices for face_mass/);
-  assert.match(projectionRow, /default shared-geometric point path is unchanged/);
-  const qualityRow = html.split("</tr>").find((row) => row.includes("acoustic_quality_factor"));
+  assert.match(projectionRow, /shared-geometric point path is unchanged/);
+  const qualityRow = html.split("</tr>").find((row) => row.split("</td>")[0].includes("acoustic_quality_factor"));
   assert.ok(qualityRow);
   assert.match(qualityRow, /Float \(dimensionless\)/);
   assert.match(qualityRow, /Default: 0 \(lossless\)/);
-  assert.match(qualityRow, /0 is an off switch/);
-  assert.match(qualityRow, /Use 0 as the baseline for validation/);
-  assert.match(qualityRow, /500 is a weaker damping trial than 100/);
-  assert.match(qualityRow, /older flat-water benchmark/);
-  assert.match(qualityRow, /not physical ocean-attenuation calibrations/);
+  assert.match(qualityRow, /disables interior acoustic damping/);
+  assert.match(qualityRow, /verified in the documented flat-water CPS comparisons and MPI\/backend consistency tests/);
+  assert.match(qualityRow, /within their recorded configurations and durations/);
+  assert.doesNotMatch(qualityRow, /\b(?:100|500)\b|trade.?off/i);
   assert.match(html, /poroelastic_fluid_bulk_modulus_pa/);
   assert.match(html, /Optional|Legacy/);
   assert.match(html, /parameterReferenceMain/);
@@ -305,19 +306,43 @@ test("parallelizes host, CUDA launch, and nonlinear PTX assembly", async () => {
   assert.match(html, /PTX assembly/);
 });
 
+test("documents acoustic station recovery and its historical fallback", async () => {
+  const html = await (await render("/docs/parameters-coupled-physics")).text();
+  const row = html.split("</tr>").find((part) => part.includes("acoustic_station_gradient"));
+  assert.ok(row);
+  assert.match(row, /Default: linear/);
+  assert.match(row, /linear \| element/);
+  assert.match(row, /inside CPML/);
+  assert.match(row, /plane output/);
+  const guide = await (await render("/docs/physics")).text();
+  assert.match(guide, /Sender and receiver mappings use global node ID order for every interface method/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (existsSync(source)) {
+    const solver = readFileSync(source, "utf8");
+    assert.match(solver, /acoustic_station_gradient\[64\]\s*=\s*"linear"/);
+    for (const mode of ["linear", "element"])
+      assert.ok(solver.includes(`strcasecmp(acoustic_station_gradient, "${mode}")`));
+    assert.match(solver, /int_message\[66\] = Param\.acousticStationGradientRecovered/);
+    assert.match(solver, /Param\.acousticStationGradientRecovered = int_message\[66\]/);
+  }
+});
+
 test("documents every parameters.in key parsed by the current source tree", () => {
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 240);
-  assert.equal(documented.length, 240, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 243);
+  assert.equal(documented.length, 243, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("station_binary"));
+  assert.ok(documented.includes("station_ascii_buffer_kib"));
+  assert.match(reference, /p\("station_ascii_buffer_kib", "Optional", "Integer KiB \(1024 bytes\)", "Default: 64; 1\.\.2097151/);
   assert.ok(documented.includes("station_output_binary_file"));
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
   assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
-  assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: all;/);
   assert.match(reference, /p\("acoustic_quality_factor", "Optional", "Float \(dimensionless\)", "Default: 0 \(lossless\)"/);
+  assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: all;/);
 
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
@@ -325,7 +350,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(solver, /\.theAcousticQualityFactor\s*=\s*0\.0\s*,/);
   assert.ok(documented.includes("acoustic_interface_method"));
-  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"shared-geometric-constraints"/);
+  assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"field-specific-constraints"/);
   for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
     assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
   }
@@ -337,6 +362,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
     solver.indexOf('strcpy(Param.theCheckPointingDirOut'),
   );
   assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
+  assert.doesNotMatch(interfaceGuard, /Param\.theAcousticVelocityPotential/);
+  assert.match(interfaceGuard, /Param\.acousticPressureFormulation != YES/);
+  assert.match(reference, /Both alternatives require include_acoustic=yes, acoustic_interface_coupling=yes, pressure or velocity_potential, and full Hex8 solids/);
   assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
   assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
@@ -388,19 +416,16 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
 });
 
-test("explains acoustic damping trials and their validation scope", async () => {
-  const response = await render("/docs/physics");
-  assert.equal(response.status, 200);
-  const html = await response.text();
-  assert.match(html, /id="acoustic-quality-factor"/);
-  assert.match(html, /Recommended baseline and validation setting/);
-  assert.match(html, /Weaker positive-damping trial than 100/);
-  assert.match(html, /Stronger damping trial; useful in an older flat-water benchmark/);
-  assert.match(html, /not a general production calibration/);
-  assert.match(html, /referenced to simulation_wave_max_freq_hz/);
-  assert.match(html, /skipped in CPML elements/);
-  assert.match(html, /independent of the material-profile Qp and Qs/);
-  assert.match(html, /Compare unfiltered responses against 0/);
+test("documents the default acoustic quality factor and its validation scope", async () => {
+  const html = await (await render("/docs/physics")).text();
+  const section = html.match(/<section\b[^>]*id="acoustic-quality-factor"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /acoustic_quality_factor defaults to 0/);
+  assert.match(section, /disables interior acoustic damping/);
+  assert.match(section, /verified in the documented flat-water CPS comparisons and MPI\/backend consistency tests/);
+  assert.match(section, /recorded configurations and durations/);
+  assert.doesNotMatch(section, /\b(?:100|500)\b|trade.?off/i);
+  assert.match(html, /acoustic_quality_factor=0 in every run/);
 });
 
 test("explains experimental constraints, remeshing and CPML limitations", async () => {
@@ -412,6 +437,8 @@ test("explains experimental constraints, remeshing and CPML limitations", async 
   assert.match(html, /exponential growth with CPML/);
   assert.match(html, /not a prescribed uniform-width refinement band/);
   assert.match(html, /Field-specific constraints also support FEM topography/);
+  assert.match(html, /acoustic_formulation=pressure or velocity_potential/);
+  assert.match(html, /Pressure mode couples solid normal acceleration/);
   assert.match(html, /Unresolved remote neighbors still abort/);
   assert.match(html, /VT cut-tetrahedron topography remains unsupported/);
 });
@@ -537,9 +564,23 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /type_of_damping = rayleigh/);
   assert.match(physics, /type_of_damping = mass/);
   assert.match(physics, /type_of_damping = bkt2/);
+  assert.match(physics, /BKT setup rejects nonfinite or nonpositive solid Q/);
+  assert.match(physics, /positive relaxed stiffness/);
+  assert.match(physics, /no material queries, mesh refinement, extra full mesh traversal, or time-step work/);
+  assert.match(physics, /Imported BKT2 meshes have their stored coefficients checked/);
+  assert.match(physics, /BKT2 GPU execution and comparison/);
+  assert.match(physics, /Host-staged execution retains the reference kernels/);
+  assert.match(physics, /HERCULES_BKT2_FUSED=0/);
+  assert.match(physics, /HERCULES_FORCE_GENERIC_DAMPING=1 takes precedence/);
+  assert.match(physics, /Inactive sectors are excluded from rate comparisons/);
+  assert.match(physics, /BKT3\/BKT3F still check their third mechanism/);
+  assert.match(physics, /fallback reason rank counts/);
+  assert.match(physics, /Reason counts may overlap/);
+  assert.match(physics, /not allocated GPU memory/);
+  assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
-  assert.match(physics, /Baseline CPML example/);
-  assert.match(physics, /cpml_reflection_target = 1\.0e-3/);
+  assert.match(physics, /Default CPML example/);
+  assert.match(physics, /cpml_reflection_target = 0\.1/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
   assert.match(physics, /script\/taper_topography\.py/);
 
@@ -1614,7 +1655,7 @@ test("documents controlled acoustic pressure and motion diagnostics", async () =
 test("documents structured DRM boxes and generic station binary output", async () => {
   const response = await render("/docs/output-files");
   const html = await response.text();
-  for (const key of ["station_binary", "station_output_binary_file", "drm_output_batch_size",
+  for (const key of ["station_binary", "station_ascii_buffer_kib", "station_output_binary_file", "drm_output_batch_size",
     "drm_print_rate", "drm_boundary", "drm_edgesize", "drm_offset_x", "drm_offset_y",
     "number_output_drm_boxes", "output_drm_boxes_print_rate", "output_drm_boxes_directory",
     "output_drm_boxes"]) {
@@ -1647,6 +1688,13 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /does not refine the mesh/);
   assert.match(html, /shape=\(nt, npoints, 3\)/);
   assert.match(html, /station_binary defaults to no/);
+  assert.match(html, /64 KiB buffer per locally owned station/);
+  assert.match(html, /default 64, accepted range 1\.\.2097151/);
+  assert.match(html, /validated but unused with station_binary=yes/);
+  assert.match(html, /62\.5 MiB; setting 16 uses 15\.625 MiB/);
+  assert.match(html, /Every requested sample and column is retained without filtering/);
+  assert.match(html, /includes the final flush in the Print Stations and Solver I\/O timers/);
+  assert.match(html, /interrupted or aborted run can lose the unflushed tail/);
   assert.match(html, /raw.reshape\(-1, nstations, 3\)/);
   assert.match(html, /No per-station text files or station metadata sidecar/);
   assert.match(html, /reconstructed scalar-acoustic motion/);
@@ -1782,6 +1830,10 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /qs\.in and qp\.in/);
   assert.match(html, /rho\.in.*qs\.in.*qp\.in.*index\.in/s);
   assert.match(html, /provide qs\.in and qp\.in as a matched pair/i);
+  assert.match(html, /Solid-only interpolation excludes water placeholders/);
+  assert.match(html, /Supplied Q is independent of the Vs minimum/);
+  assert.match(html, /10% solid Qs=40 plus 90% water Qs=0 gives solid Qs=40/);
+  assert.match(html, /Acoustic placeholders may be zero, but must be finite and nonnegative/);
   assert.match(html, /CSV is only a preparation format|CSV directly/);
   assert.match(html, /profile_id = j \* nx \+ i/);
   assert.match(html, /y as the outer loop and x as the inner loop/i);
@@ -1802,6 +1854,9 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /index\.in does not define one ordered profile/);
   assert.match(html, /topography\.in — 3 × 3 grid/);
   assert.match(html, /flat_index = x_index \* n_east \+ y_index/);
+  assert.match(html, /one bilinear topography grid for mesh air\/solid classification/);
+  assert.match(html, /Regenerate topographic meshes.*mesh_input_mode=0/);
+  assert.match(html, /region_depth_deep_m controls the domain extent, not this surface datum/);
   assert.match(html, /np\.meshgrid/);
   assert.match(html, /values\.reshape\(nx, ny\)/);
   assert.match(html, /perimeter range/);
@@ -1928,10 +1983,71 @@ test("documents complete CPML products and the plain-CPML default", async () => 
   const html = await (await render("/docs/physics")).text();
   assert.match(html, /Complete second-order operator/);
   assert.match(html, /cpml_mpml_cross_fraction is now 0/);
+  assert.match(html, /cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber/);
+  assert.match(html, /defaults to 0\.3; set 0 to disable it/);
   assert.match(html, /checkpoint reads and writes/);
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
+  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.3/);
+  assert.match(psolve, /parsetext\(fp, "cpml_acoustic_sponge_fraction"/);
+  assert.match(psolve, /!isfinite\(cpml_acoustic_sponge_fraction\)/);
   assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
+});
+
+test("keeps requested CPML defaults and alpha Hz units synchronized with the parser", async () => {
+  const html = await (await render("/docs/parameters-damping-cpml")).text();
+  for (const [key, value] of [
+    ["cpml_reflection_target", "0.1"],
+    ["cpml_kappa_max", "10"],
+    ["cpml_acoustic_sponge_fraction", "0.3"],
+  ]) {
+    const row = html.split("</tr>").find((part) => part.includes(`>${key}</td>`));
+    assert.ok(row?.includes(`Default: ${value};`), `${key} default`);
+  }
+  const alpha = html.split("</tr>").find((part) => part.includes(">cpml_alpha_max_hz</td>"));
+  assert.match(alpha, /Default: simulation_wave_max_freq_hz \/ 2/);
+  assert.match(alpha, /Omitted or nonpositive values/);
+  assert.match(alpha, /positive numeric value overrides/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /\.theCpmlReflectionTarget = 0\.1,/);
+  assert.match(solver, /\.theCpmlKappaMax = 10\.0,/);
+  assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
+  assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.3,/);
+  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);
+  assert.match(solver, /auto: simulation_wave_max_freq_hz \/ 2\)\\n",\s*0\.5 \* Param\.theFreq/);
+  assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
+  assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
+  assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
+});
+
+test("explains CPML material extension in model coordinates and mesh regeneration", async () => {
+  const html = await (await render("/docs/physics")).text();
+  assert.match(html, /Material extension clamps in absolute model coordinates/);
+  assert.match(html, /depth below the surface at the clamped X\/Y location/);
+  assert.match(html, /Building surface offsets/);
+  assert.match(html, /input depth of 7500 m/);
+  assert.match(html, /depth 7000 m below that surface/);
+  assert.match(html, /Rebuild or recorrect an imported mesh/);
+  assert.match(html, /corrected topographic bottom\/corner extension/);
+});
+
+
+test("documents CPML automatic thickness excluding air", async () => {
+  const physics = await (await render("/docs/physics")).text();
+  assert.match(physics, /largest non-air element edge/);
+  assert.match(physics, /Air elements \(negative Vp\) are excluded/);
+  assert.match(physics, /global fallback/);
+  assert.match(physics, /not an exact cell count everywhere/);
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const thickness = parameters.split("</tr>").find((row) => row.includes("cpml_thickness_m"));
+  const layers = parameters.split("</tr>").find((row) => row.includes(">cpml_layers</td>"));
+  assert.ok(thickness);
+  assert.ok(layers);
+  assert.match(thickness, /largest non-air element edge/);
+  assert.match(thickness, /Air is also excluded from the global fallback/);
+  assert.match(layers, /finer regions contain more than this many cells/);
 });

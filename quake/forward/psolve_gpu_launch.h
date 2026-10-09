@@ -42,6 +42,7 @@ typedef struct topo_bkt_const_t {
 typedef enum psolve_gpu_kernel_id_t {
   PSOLVE_GPU_KERNEL_STIFFNESS = 0,
   PSOLVE_GPU_KERNEL_DAMPING_BKT2,
+  PSOLVE_GPU_KERNEL_DAMPING_BKT2_FUSED,
   PSOLVE_GPU_KERNEL_DAMPING_BKT3,
   PSOLVE_GPU_KERNEL_DAMPING_GENERIC,
   PSOLVE_GPU_KERNEL_DAMPING_FORCE,
@@ -152,6 +153,12 @@ void psolve_launch_damping_bkt3(
     double kappaCoef3, double kappaCoef4, double kappaExpCoef1,
     double kappaCoef5, double kappaCoef6, double kappaExpCoef2,
     int32_t elementCount, int32_t* elementMapper);
+void psolve_launch_damping_bkt2_fused(
+    int grid, int block, cudaStream_t stream, int32_t lenum,
+    gpu_data_t* gpuData, double rmax,
+    double coef1, double coef2, double expCoef0,
+    double coef3, double coef4, double expCoef1,
+    int32_t elementCount, const int32_t* elementMapper, int saveVectors);
 void psolve_launch_damping_generic(
     int grid, int block, size_t shared, cudaStream_t stream, int32_t lenum,
     int32_t numcomp, gpu_data_t* gpuData, double rmax, int32_t dampingType,
@@ -211,7 +218,9 @@ void psolve_launch_acoustic_station_interpolate(
     int32_t stationCount, const int32_t* stationNodes,
     const double* stationCoords, const double* stationH,
     const solver_float* pressureTm1, const solver_float* pressureTm2,
-    int32_t velocityPotential, double inverseDt, double* stationOutput);
+    int32_t velocityPotential, double inverseDt, double* stationOutput,
+    const int32_t* gradientOffsets, const int32_t* gradientNodes,
+    const double* gradientWeights);
 void psolve_launch_pore_pressure_station_interpolate(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t stationCount, const int32_t* stationNodes,

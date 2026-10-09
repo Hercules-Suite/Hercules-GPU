@@ -392,222 +392,59 @@ int topo_correctproperties ( edata_t *edata )
 }
 
 
-double magnitude ( vector3D_t v1 )
+/* One bilinear height field for meshing, material depths, VT integration,
+ * sources, stations and planes. Coordinates are solver X north / Y east;
+ * the file contains heights above the datum, whereas the return value is
+ * solver Z positive downward. Queries beyond the grid use its nearest edge.
+ *
+ * normal_scale, when requested, is the length of the local height-field
+ * normal. Dividing a vertical offset by it gives a tangent-normal offset,
+ * not the exact shortest distance to the curved bilinear patch. */
+static double topo_surface_z(double x, double y, double *normal_scale)
 {
-    return sqrt ( v1.x[0] * v1.x[0] + v1.x[1] * v1.x[1] + v1.x[2] * v1.x[2] );
-}
-
-void cross_product (vector3D_t v1, vector3D_t v2, vector3D_t *v3)
-{
-    v3->x[0] = -v1.x[1] * v2.x[2] + v2.x[1] * v1.x[2];
-    v3->x[1] =  v1.x[0] * v2.x[2] - v2.x[0] * v1.x[2];
-    v3->x[2] = -v1.x[0] * v2.x[1] + v2.x[0] * v1.x[1];
-
-}
-
-
-/* distance from a point to a plane   */
-/* Note: zp and zo are measured with respect to the local z axis of the topography. i.e: m.a.s.l values  */
-double point_to_plane( double xp, double yp, double zp, double xo, double yo, double h, double zcoords[4] )
-{
-    double x1, y1, z1, mag, dist;
-    vector3D_t V1, V2, V3, V4, N;
-
-    V1.x[0] = h;
-    V1.x[1] = 0;
-    V1.x[2] = zcoords[3] - zcoords[0];
-
-    V2.x[0] = 0;
-    V2.x[1] = h;
-    V2.x[2] = zcoords[1] - zcoords[0];
-
-    V3.x[0] = h;
-    V3.x[1] = h;
-    V3.x[2] = zcoords[2] - zcoords[0];
-
-    x1 = xp - xo;  /* relative distances with respect to the plane origin */
-    y1 = yp - yo;
-    z1 = zp - zcoords[0];
-
-    if ( x1 > y1 ) {
-        cross_product ( V3, V1,  &V4);
-    }
-    else
-    {
-        cross_product ( V2, V3,  &V4);
-    }
-
-    mag     = magnitude(V4);
-
-    /*  Sanity check   */
-    if ( mag == 0 ) {
-
-        fprintf(stderr,"Error: Found zero magnitude at \n "
-                "point_to_plane fnc\n");
-        MPI_Abort(MPI_COMM_WORLD, ERROR);
-        exit(1);
-    }
-
-    N.x[0]  = V4.x[0] / mag;
-    N.x[1]  = V4.x[1] / mag;
-    N.x[2]  = V4.x[2] / mag;
-
-
-    dist = ( N.x[0] * x1 + N.x[1] * y1 + N.x[2] * z1 ); /* positive: outside surface;
-                                                           zero    : on surface
-                                                           negative: within surface */
-
-    return dist;
-
-}
-
-/* returns the zp coordinate of a point inside a plane using bi-linear interp   */
-double interp_z( double xp, double yp, double xo, double yo, double h, double zcoords[4] )
-{
-
-    double eta, psi, zp;
-
-    eta = 2.0 * ( xp - ( xo + h / 2.0 ) ) / h;
-    psi = 2.0 * ( yp - ( yo + h / 2.0 ) ) / h;
-
-    zp  = 0.25 * ( ( 1.0 - eta ) * (1.0 - psi ) * zcoords[0] +
-                   ( 1.0 - eta ) * (1.0 + psi ) * zcoords[1] +
-                   ( 1.0 + eta ) * (1.0 + psi ) * zcoords[2] +
-                   ( 1.0 + eta ) * (1.0 - psi ) * zcoords[3] );
-
-    return zp;
-}
-
-/* returns the elevation value of a point with plane coordinates (xo,yo).
- * Elevation is measured with respect to Hercules' Z global axis  */
-double point_elevation ( double xo, double yo ) {
-    int i, j;
-    double xp, yp, x_o, y_o, remi, remj, mesh_cz[4] = { 0 }, zp;
     if (thebase_zcoord == 0.0) {
-        zp = 0.0;
+        if (normal_scale != NULL) *normal_scale = 1.0;
+        return 0.0;
     }
-    else {
-        xp = xo;
-        yp = yo;
 
-        remi = modf(xp  / So, &x_o );
-        remj = modf(yp  / So, &y_o );
+    const double gx = fmax(0.0, fmin(x / So, (double)(np_ns - 1)));
+    const double gy = fmax(0.0, fmin(y / So, (double)(np_ew - 1)));
+    const int i = (int)fmin(floor(gx), (double)(np_ns - 2));
+    const int j = (int)fmin(floor(gy), (double)(np_ew - 2));
+    /* At the upper grid edge the fraction is one, not zero in the
+     * penultimate row/column. Keep cell selection and fractions together. */
+    const double u = gx - i;
+    const double v = gy - j;
+    const double h00 = theTopoInfo[np_ew * i + j];
+    const double h01 = theTopoInfo[np_ew * i + j + 1];
+    const double h10 = theTopoInfo[np_ew * (i + 1) + j];
+    const double h11 = theTopoInfo[np_ew * (i + 1) + j + 1];
+    const double h0 = (1.0 - u) * h00 + u * h10;
+    const double h1 = (1.0 - u) * h01 + u * h11;
 
-        /* Clifford's NOTE: As noted in setrec() function in psolve.c, some query 
-        points may be outside of the domain, which makes negative values of x_o 
-        and y_o possible. These negative values may lead to negative indices for
-        theTopoInfo array. To avoid this, we set i and j to 0 if x_o and y_o are
-        negative. Also, we set i and j to np_ns - 2 and np_ew - 2, respectively,
-        if x_o and y_o are greater than or equal to np_ns - 1 and np_ew - 1 so
-        that the indices are within the bounds of theTopoInfo array 
-        (np_ew * (i + 1) + j + 1 will always be less than ntp). */
-        if (x_o < 0) {
-            i = 0;
-        } else if (x_o >= np_ns - 1) {
-            i = np_ns - 2;
-        } else {
-            i = x_o;
-        }
-        if (y_o < 0) {
-            j = 0;
-        } else if (y_o >= np_ew - 1) {
-            j = np_ew - 2;
-        } else {
-            j = y_o;
-        }
-
-        if ((remi <= 0.000001) && (remj <= 0.000001)) {
-            zp = (thebase_zcoord - theTopoInfo[np_ew * i + j]);
-        }
-        else if (remi <= 0.000001) {
-            zp = (thebase_zcoord - theTopoInfo[np_ew * i + j] * (1.0 - remj) - theTopoInfo[np_ew * i + j + 1] * remj);
-        } else if (remj <= 0.000001) {
-            zp = (thebase_zcoord - theTopoInfo[np_ew * i + j] * (1.0 - remi) - theTopoInfo[np_ew * (i + 1) + j] * remi);
-        } else {
-            // NOTE: the following if statement is a sanity check. It should never be true.
-            if ( (ntp -1) < (np_ew * ( i + 1 ) + j + 1) ){
-                printf("np_ew=%d\n", np_ew);
-                printf("i=%d\n", i);
-                printf("j=%d\n", j);
-                printf("ntp=%d\n", ntp);
-                printf("np_ew * ( i + 1 ) + j + 1)=%d\n", np_ew * ( i + 1 ) + j + 1);
-                printf("x_o=%f\n", x_o);
-                printf("y_o=%f\n", y_o);
-                printf("xp=%f\n", xp);
-                printf("yp=%f\n", yp);
-                printf("remi=%f\n", remi);
-                printf("remj=%f\n", remj);
-                printf("So=%f\n", So);
-            }
-
-            mesh_cz[0] = theTopoInfo[np_ew * i + j];
-            mesh_cz[1] = theTopoInfo[np_ew * i + j + 1];
-            mesh_cz[2] = theTopoInfo[np_ew * (i + 1) + j + 1];
-            mesh_cz[3] = theTopoInfo[np_ew * (i + 1) + j];
-
-            /*  Sanity check   */
-            if ( (mesh_cz[0] == NAN) || (mesh_cz[1] == NAN) || (mesh_cz[2] == NAN) || (mesh_cz[3] == NAN) ) {
-                fprintf(stderr, "Thread 1: Topography module point_elevation fnc: "
-                    "NAN found when computing point elevation\n");
-                MPI_Abort(MPI_COMM_WORLD, ERROR);
-                exit(1);
-            }
-
-            zp = thebase_zcoord - interp_z(xp, yp, x_o*So, y_o*So, So, mesh_cz);
-        }
+    if (normal_scale != NULL) {
+        const double dx = ((1.0 - v) * (h10 - h00) + v * (h11 - h01)) / So;
+        const double dy = ((1.0 - u) * (h01 - h00) + u * (h11 - h10)) / So;
+        *normal_scale = sqrt(1.0 + dx * dx + dy * dy);
     }
-    return zp;
+    return thebase_zcoord - ((1.0 - v) * h0 + v * h1);
 }
 
-/* returns the distance of a point to the surface topography */
-/* cases: positive distance = point outside topography.
- *        zero distance     = point on topography.
- *        negative distance = point within topography */
-
-double point_PlaneDist ( double xp, double yp, double zp )
+/* Local surface in solver Z (positive downward). */
+double point_elevation(double x, double y)
 {
+    return topo_surface_z(x, y, NULL);
+}
 
-    int i, j;
-    double x_o, y_o, mesh_cz[4]= { 0 }, dist;
-    // double remi, remj;
-
-    zp = thebase_zcoord - zp; /* sea level elevation  */
-
-	// remi = modf (xp  / So, &x_o );
-	// remj = modf (yp  / So, &y_o );
-	modf (xp  / So, &x_o );
-	modf (yp  / So, &y_o );
-
-    /* Clifford's NOTE: see note in point_elevation() function */
-    if (x_o < 0) {
-        i = 0;
-    } else if (x_o > np_ns - 1) {
-        i = np_ns - 1;
-    } else {
-        i = x_o;
-    }
-    if (y_o < 0) {
-        j = 0;
-    } else if (y_o > np_ew - 1) {
-        j = np_ew - 1;
-    } else {
-        j = y_o;
-    }
-
-    if ( (i == 0) || (j == 0) || (i == np_ns - 1 ) || (j == np_ew - 1) ) {
-
-        dist = zp - ( thebase_zcoord - point_elevation(xp,yp) );
-        return dist;
-    }
-
-    mesh_cz[0] =  theTopoInfo [ np_ew * i + j ];
-    mesh_cz[1] =  theTopoInfo [ np_ew * i + j + 1 ];
-    mesh_cz[2] =  theTopoInfo [ np_ew * ( i + 1 ) + j + 1 ];
-    mesh_cz[3] =  theTopoInfo [ np_ew * ( i + 1 ) + j ];
-    dist = point_to_plane( xp, yp, zp, x_o*So, y_o*So, So, mesh_cz );
-
-    return dist;
-
+/* Signed tangent-normal offset: positive in air, zero on the surface,
+ * negative in material. The air/solid sign MUST use the same bilinear
+ * surface as point_elevation; splitting the grid cell into triangles can
+ * otherwise place surface receivers several mesh cells inside air. */
+double point_PlaneDist(double x, double y, double z)
+{
+    double normal_scale;
+    const double surface_z = topo_surface_z(x, y, &normal_scale);
+    return (surface_z - z) / normal_scale;
 }
 
 void get_airprops_topo( edata_t *edata )
@@ -1437,7 +1274,10 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
 	    return -1;
 	}
 
-	fscanf( fp_topo,   " %lf ", &So );
+	if (fscanf(fp_topo, " %lf ", &So) != 1 || !isfinite(So) || So <= 0.0) {
+        fprintf(stderr, "Topography spacing must be finite and positive\n");
+        return -1;
+    }
 
 	fract_np_ew = modf ( L_ew / So, &int_np_ew );
 	fract_np_ns = modf ( L_ns / So, &int_np_ns );
@@ -1461,13 +1301,20 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
 
 	for ( iTopo = 0; iTopo < ntp; ++iTopo) {
 
-	    fscanf(fp_topo,   " %lf ", &(theTopoInfo[iTopo]));
+	    if (fscanf(fp_topo, " %lf ", &theTopoInfo[iTopo]) != 1 ||
+            !isfinite(theTopoInfo[iTopo])) {
+            fprintf(stderr, "Invalid or missing topography height at index %d\n", iTopo);
+            return -1;
+        }
 
 	}
 
     fclose(fp);
     fclose(fp_topo);
 
+    fprintf(stderr, "Topography surface: bilinear grid shared by mesh air/solid "
+            "classification, material depths and receivers; "
+            "solver Z = %.9g - height (m).\n", thebase_zcoord);
     return 0;
 }
 

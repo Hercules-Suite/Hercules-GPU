@@ -94,6 +94,8 @@ extern "C" {
 #include <cuda_runtime.h>
 
 static flat_output::FlatWriter stationBinaryWriter;
+// Own explicit stdio buffers until the corresponding station files are closed.
+static std::vector<std::vector<char> > stationAsciiBuffers;
 
 /* ONLY GLOBAL VARIABLES ALLOWED OUTSIDE OF PARAM. and GLOBAL. IN ALL OF
  * PSOLVE!! */
@@ -118,6 +120,24 @@ static int32_t*          g_topoBktElemMapperDevice = NULL;
 static topo_bkt_const_t* g_topoBktConstDevice = NULL;
 static int32_t           g_dampingForceCountGPU = -1;
 static int32_t*          g_dampingForceMapperDevice = NULL;
+/* Complement of the cube-force mapper: retain all legacy convolution-only
+ * slots (including any cells with no force contribution), not just VT forces. */
+static int32_t g_bkt2ConvOnlyCount = 0;
+static int32_t* g_bkt2ConvOnlyMapperDevice = NULL;
+static int g_bkt2FusedActive = 0;
+static int g_bkt2SharedUseShear = 0;
+/* Setup-only reasons; a rank may have more than one. */
+enum {
+  BKT2_FALLBACK_DISABLED,
+  BKT2_FALLBACK_GENERIC,
+  BKT2_FALLBACK_FORCE_HOST,
+  BKT2_FALLBACK_DISP_HOST,
+  BKT2_FALLBACK_SHEAR_RATES,
+  BKT2_FALLBACK_BULK_RATES,
+  BKT2_FALLBACK_SHARED_RATES,
+  BKT2_FALLBACK_REASON_COUNT
+};
+static unsigned int g_bkt2FallbackReasons = 0;
 static int g_unifiedMeshHandoffEnabled = 0;
 static int g_unifiedMeshHandoffActive = 1;
 static int g_unifiedReleaseRootWorld = -1;
@@ -1045,6 +1065,7 @@ static struct Param_t {
   int theStepMeshingFactor;
   int theAcousticInterfaceMaxLevel;
   int theAcousticInterfaceMethod;
+  int acousticStationGradientRecovered;
   int32_t theTotalSteps;
   int32_t theRate;
   damping_type_t theTypeOfDamping;
@@ -1088,6 +1109,7 @@ static struct Param_t {
   int theTimingBarriersFlag;
   stiffness_type_t theStiffness;
   int stationBinary; /* Default NO: existing ASCII station histories. */
+  int stationAsciiBufferKiB; /* Per locally owned ASCII station; default 64. */
   char stationOutputBinaryFile[256];
   int theStationsPrintRate;
   double* theStationX;
@@ -1157,6 +1179,7 @@ static struct Param_t {
   double theCpmlCflSafety;
   double theCpmlMpmlCrossFraction;
   double theCpmlAlphaFloorFraction;
+  double theCpmlAcousticSpongeFraction; /* acoustic bulk only; 0 disables */
   int theCpmlPmlMaterialDamping;        /* 0 none(default) 2 rayleigh */
   noyesflag_t theCpmlClampOuter;
   /* YES = fully integrated Hex8 CPML stiffness (default);
@@ -1222,7 +1245,8 @@ static struct Param_t {
            .theSofteningFactor = 0,
            .theStepMeshingFactor = 0,
            .theAcousticInterfaceMaxLevel = -1,
-           .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL,
+           .theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,
+           .acousticStationGradientRecovered = 1,
            .theSchedulePrintErrorCheckFlag = 0,
            .theSchedulePrintToStdout = 0,
            .theSchedulePrintToFile = 0,
@@ -1255,13 +1279,14 @@ static struct Param_t {
            .theAbcType = ABC_DASHPOT,
            .theCpmlThicknessM = 0.0,
            .theCpmlLayers = 10,
-           .theCpmlReflectionTarget = 1.0e-3,
+           .theCpmlReflectionTarget = 0.1,
            .theCpmlPolyOrder = 2,
-           .theCpmlKappaMax = 1.0,
+           .theCpmlKappaMax = 10.0,
            .theCpmlAlphaMaxHz = -1.0,
            .theCpmlCflSafety = 0.9,
            .theCpmlMpmlCrossFraction = 0.0,
            .theCpmlAlphaFloorFraction = 0.1,
+           .theCpmlAcousticSpongeFraction = 0.3,
            .theCpmlPmlMaterialDamping = 0,
            .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
@@ -2041,7 +2066,7 @@ static void poroelastic_build_gpu_geometry(mesh_t* mesh, int32_t elemCount,
   }
 }
 
-static void acoustic_zero_damping(edata_t* edata) {
+static void element_zero_damping(edata_t* edata) {
   if (edata == NULL) {
     return;
   }
@@ -2068,7 +2093,126 @@ static void acoustic_sanitize_element(edata_t* edata) {
   }
 
   edata->Vs = 0.0f;
-  acoustic_zero_damping(edata);
+  element_zero_damping(edata);
+}
+
+/* Setup-only checks. No extra material queries or element traversal. */
+typedef struct attenuation_check_t {
+  int64_t checked;
+  int64_t invalid;
+  char first_error[1024];
+} attenuation_check_t;
+
+static const char* attenuation_bulk_quality(double Qs, double Qp, double L,
+                                            int infinite_bulk, double* Qk) {
+  *Qk = NAN;
+  if (!isfinite(Qs) || Qs <= 0.0 || !isfinite(Qp) || Qp <= 0.0)
+    return "solid Qs and Qp must be finite and positive";
+  if (!isfinite(L) || L < 0.0 || L >= 1.0)
+    return "Vp/Vs gives nonpositive or nonfinite bulk modulus";
+  if (infinite_bulk) {
+    *Qk = 1000.0;
+    return NULL;
+  }
+  const double p_loss = 1.0 / Qp;
+  const double s_loss = L / Qs;
+  const double denominator = p_loss - s_loss;
+  if (!isfinite(p_loss) || !isfinite(s_loss))
+    return "bulk inverse-Q calculation overflowed";
+  /* Material payloads and stored velocities are single precision. Allow
+   * their roundoff when a supplied Qp represents lossless bulk. */
+  const double tolerance = 8.0 * FLT_EPSILON * fmax(p_loss, s_loss);
+  if (denominator < -tolerance)
+    return "Qp, Qs and Vp/Vs imply negative bulk attenuation";
+  /* Exact cancellation (or only roundoff) means lossless bulk. Preserve the
+   * existing high-Q cutoff rather than divide by zero or evaluate pow(-Q). */
+  if (denominator <= tolerance) {
+    *Qk = 1000.0;
+  } else {
+    *Qk = (1.0 - L) / denominator;
+    if (isinf(*Qk)) *Qk = 1000.0; /* positive high-Q overflow is lossless */
+  }
+  return (*Qk > 0.0 && isfinite(*Qk)) ? NULL : "invalid bulk quality factor";
+}
+
+static int attenuation_bkt2_branch_valid(double a0, double a1, double g0,
+                                         double g1, double b) {
+  return isfinite(a0) && a0 >= 0.0 && isfinite(a1) && a1 >= 0.0 &&
+         isfinite(g0) && g0 >= 0.0 && isfinite(g1) && g1 >= 0.0 &&
+         isfinite(b) && b >= 0.0 &&
+         (a0 == 0.0 || g0 > 0.0) && (a1 == 0.0 || g1 > 0.0) &&
+         1.0 - a0 - a1 > 0.0;
+}
+
+static const char* attenuation_bkt2_error(const edata_t* edata) {
+  if (!isfinite(edata->Vp) || edata->Vp <= 0.0f ||
+      !isfinite(edata->Vs) || edata->Vs <= 0.0f ||
+      !isfinite(edata->rho) || edata->rho <= 0.0f ||
+      (double)edata->Vp * edata->Vp <= (4.0 / 3.0) * edata->Vs * edata->Vs)
+    return "invalid BKT2 solid velocities, density or bulk modulus";
+  if (!attenuation_bkt2_branch_valid(edata->a0_shear, edata->a1_shear,
+                                     edata->g0_shear, edata->g1_shear,
+                                     edata->b_shear))
+    return "invalid BKT2 shear coefficients or nonpositive relaxed stiffness";
+  if (!attenuation_bkt2_branch_valid(edata->a0_kappa, edata->a1_kappa,
+                                     edata->g0_kappa, edata->g1_kappa,
+                                     edata->b_kappa))
+    return "invalid BKT2 bulk coefficients or nonpositive relaxed stiffness";
+  return NULL;
+}
+
+static void attenuation_record_error(attenuation_check_t* check,
+                                      int32_t eindex, const char* reason,
+                                      double Qs, double Qp, double Qk,
+                                      int have_coefficients = 0) {
+  ++check->invalid;
+  if (check->first_error[0] != '\0') return;
+  const elem_t* elem = &Global.myMesh->elemTable[eindex];
+  const edata_t* ed = (const edata_t*)elem->data;
+  const node_t* node = &Global.myMesh->nodeTable[elem->lnid[0]];
+  const double half_h = 0.5 * ed->edgesize;
+  snprintf(check->first_error, sizeof(check->first_error),
+           "%s; rank=%d local_element=%d center_XYZ_m=(%.12g,%.12g,%.12g) "
+           "h_m=%.12g Vp=%.12g Vs=%.12g rho=%.12g "
+           "Qs=%.12g Qp=%.12g Qk=%.12g "
+           "BKT2_a_shear=(%.9g,%.9g) BKT2_a_bulk=(%.9g,%.9g)",
+           reason, Global.myID, eindex,
+           node->x * Global.myMesh->ticksize + Global.theXForMeshOrigin + half_h,
+           node->y * Global.myMesh->ticksize + Global.theYForMeshOrigin + half_h,
+           node->z * Global.myMesh->ticksize + Global.theZForMeshOrigin + half_h,
+           (double)ed->edgesize, (double)ed->Vp, (double)ed->Vs, (double)ed->rho,
+           Qs, Qp, Qk,
+           have_coefficients ? (double)ed->a0_shear : NAN,
+           have_coefficients ? (double)ed->a1_shear : NAN,
+           have_coefficients ? (double)ed->a0_kappa : NAN,
+           have_coefficients ? (double)ed->a1_kappa : NAN);
+}
+
+static void attenuation_finish_check(attenuation_check_t* check,
+                                      const char* stage) {
+  int64_t local[2] = {check->checked, check->invalid}, global[2];
+  MPI_Allreduce(local, global, 2, MPI_INT64_T, MPI_SUM, comm_solver);
+  if (Global.myID == 0) {
+    monitor_print("Attenuation validation (%s): %" PRId64
+                  " solid elements checked, %" PRId64 " invalid\n",
+                  stage, global[0], global[1]);
+  }
+  if (global[1] == 0) return;
+  int owner = check->invalid ? Global.myID : INT_MAX, first_owner;
+  MPI_Allreduce(&owner, &first_owner, 1, MPI_INT, MPI_MIN, comm_solver);
+  MPI_Bcast(check->first_error, sizeof(check->first_error), MPI_CHAR,
+            first_owner, comm_solver);
+  if (Global.myID == 0) {
+    fprintf(stderr, "Invalid attenuation during %s: %s\n"
+                    "Correct the solid Q model and regenerate the mesh. "
+                    "No Q clipping or timestep adjustment was applied.\n",
+            stage, check->first_error);
+    fflush(stderr);
+  }
+  /* Only on failure: ensure the bounded diagnostic is printed before abort. */
+  MPI_Barrier(comm_solver);
+  MPI_Abort(comm_solver, ERROR);
+  exit(1);
 }
 
 static int acoustic_has_damping(const edata_t* edata) {
@@ -2206,9 +2350,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  49 /* Must adjust this if adding double params */
+  50 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  65 /* Must adjust this if adding int params */
+  67 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2275,6 +2419,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[47] = Param.thePoroelasticSurfacePressurePenaltyFactor;
   double_message[48] =
       Param.theAcousticPoroelasticPressurePenaltyFactor;
+  double_message[49] = Param.theCpmlAcousticSpongeFraction;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2315,6 +2460,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlCflSafety = double_message[33];
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
+  Param.theCpmlAcousticSpongeFraction = double_message[49];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
   Param.thePoroelasticDepthMaxM = double_message[38];
@@ -2395,6 +2541,8 @@ static void read_parameters(int argc, char** argv) {
   int_message[62] = (int)Param.theAcousticFreeSurfaceGravity;
   int_message[63] = Param.stationBinary;
   int_message[64] = Param.theAcousticInterfaceMethod;
+  int_message[65] = Param.stationAsciiBufferKiB;
+  int_message[66] = Param.acousticStationGradientRecovered;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2465,6 +2613,8 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticFreeSurfaceGravity = (noyesflag_t)int_message[62];
   Param.stationBinary = int_message[63];
   Param.theAcousticInterfaceMethod = int_message[64];
+  Param.stationAsciiBufferKiB = int_message[65];
+  Param.acousticStationGradientRecovered = int_message[66];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -2710,6 +2860,17 @@ static int damping_force_generic(void) {
   return v;
 }
 
+/* Fixed for the entire run: optimized cube histories use the shear slots
+ * for both sectors. Unset/1 enables it; 0 retains the old two-kernel path. */
+static int damping_bkt2_fused_requested(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("HERCULES_BKT2_FUSED");
+    v = (e == NULL || e[0] != '0');
+  }
+  return v;
+}
+
 /**
  * Open material database and initialize various static global variables.
  *
@@ -2749,7 +2910,8 @@ static int32_t parse_parameters(const char* numericalin) {
        topography_bkt_gpu_stabilize[64] = "auto",
        include_acoustic[64] = "no", acoustic_interface_coupling[64] = "yes",
        acoustic_interface_projection[64] = "point",
-       acoustic_interface_method[64] = "shared-geometric-constraints",
+       acoustic_interface_method[64] = "field-specific-constraints",
+       acoustic_station_gradient[64] = "linear",
        acoustic_interface_face_filter[64] = "all",
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
@@ -2777,6 +2939,7 @@ static int32_t parse_parameters(const char* numericalin) {
    * "unset" from explicit "none". */
   int cpml_pml_damp_explicit = 0;
   int acoustic_formulation_explicit = 0;
+  int acoustic_interface_method_explicit = 0;
   int legacy_acoustic_pressure_formulation_explicit = 0;
   noyesflag_t have_buildings = UNSET;
   noyesflag_t have_parametricq = UNSET;
@@ -2926,6 +3089,7 @@ static int32_t parse_parameters(const char* numericalin) {
       double cpml_cfl_safety = Param.theCpmlCflSafety;
       double cpml_mpml_cross_fraction = Param.theCpmlMpmlCrossFraction;
       double cpml_alpha_floor_fraction = Param.theCpmlAlphaFloorFraction;
+      double cpml_acoustic_sponge_fraction = Param.theCpmlAcousticSpongeFraction;
       double cpml_partition_weight = Param.theCpmlPartitionWeight;
 
       (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
@@ -2940,6 +3104,8 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_mpml_cross_fraction);
       (void)parsetext(fp, "cpml_alpha_floor_fraction", 'd',
                       &cpml_alpha_floor_fraction);
+      (void)parsetext(fp, "cpml_acoustic_sponge_fraction", 'd',
+                      &cpml_acoustic_sponge_fraction);
       (void)parsetext(fp, "cpml_partition_weight", 'd',
                       &cpml_partition_weight);
 
@@ -3046,6 +3212,12 @@ static int32_t parse_parameters(const char* numericalin) {
                      "cpml_alpha_floor_fraction=%g must be in [0, 1].\n",
                      cpml_alpha_floor_fraction);
       }
+      if (!isfinite(cpml_acoustic_sponge_fraction) ||
+          cpml_acoustic_sponge_fraction < 0.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_acoustic_sponge_fraction=%g must be finite and >= 0.\n",
+                     cpml_acoustic_sponge_fraction);
+      }
       if (cpml_partition_weight < 1.0) {
         solver_abort(__FUNCTION_NAME, NULL,
                      "cpml_partition_weight=%g must be >= 1.0.\n",
@@ -3061,6 +3233,7 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlCflSafety = cpml_cfl_safety;
       Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
+      Param.theCpmlAcousticSpongeFraction = cpml_acoustic_sponge_fraction;
       Param.theCpmlPartitionWeight = cpml_partition_weight;
 
       /* Optional material damping inside the elastic PML zone. Rayleigh uses
@@ -3169,6 +3342,26 @@ static int32_t parse_parameters(const char* numericalin) {
     solver_abort(__FUNCTION_NAME, NULL, "station_binary must be yes or no");
   }
   Param.stationBinary = (strcasecmp(station_binary, "yes") == 0) ? YES : NO;
+  char station_ascii_buffer_kib[64] = "64";
+  char* stationBufferText = station_ascii_buffer_kib;
+  size_t stationBufferLength = sizeof(station_ascii_buffer_kib);
+  if (hu_config_get_string_opt(fp, "station_ascii_buffer_kib", &stationBufferText,
+                               &stationBufferLength) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unable to read station_ascii_buffer_kib");
+  }
+  char* stationBufferEnd = NULL;
+  errno = 0;
+  const long stationBufferKiB = strtol(stationBufferText, &stationBufferEnd, 10);
+  /* Bound the byte count to INT_MAX on both 32-bit and 64-bit hosts. */
+  if (errno != 0 || stationBufferEnd == stationBufferText ||
+      *stationBufferEnd != '\0' || stationBufferKiB < 1 ||
+      stationBufferKiB > INT_MAX / 1024) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "station_ascii_buffer_kib must be an integer in 1..%d KiB",
+                 INT_MAX / 1024);
+  }
+  Param.stationAsciiBufferKiB = (int)stationBufferKiB;
   if (Param.stationBinary == YES) {
     if (number_output_stations <= 0 || number_output_stations > INT_MAX / 3) {
       solver_abort(__FUNCTION_NAME, NULL,
@@ -3193,7 +3386,10 @@ static int32_t parse_parameters(const char* numericalin) {
   parsetext(fp, "include_acoustic", 's', &include_acoustic);
   parsetext(fp, "acoustic_interface_coupling", 's',
             &acoustic_interface_coupling);
-  parsetext(fp, "acoustic_interface_method", 's', &acoustic_interface_method);
+  acoustic_interface_method_explicit =
+      (parsetext(fp, "acoustic_interface_method", 's',
+                 &acoustic_interface_method) == 0);
+  parsetext(fp, "acoustic_station_gradient", 's', &acoustic_station_gradient);
   parsetext(fp, "acoustic_interface_projection", 's',
             &acoustic_interface_projection);
   parsetext(fp, "acoustic_interface_face_filter", 's',
@@ -3606,6 +3802,16 @@ static int32_t parse_parameters(const char* numericalin) {
                  "Unknown response for acoustic_interface_coupling (yes or no): "
                  "%s\n",
                  acoustic_interface_coupling);
+  }
+
+  if (strcasecmp(acoustic_station_gradient, "linear") == 0) {
+    Param.acousticStationGradientRecovered = 1;
+  } else if (strcasecmp(acoustic_station_gradient, "element") == 0) {
+    Param.acousticStationGradientRecovered = 0;
+  } else {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unknown acoustic_station_gradient '%s': use linear or element\n",
+                 acoustic_station_gradient);
   }
 
   if (strcasecmp(acoustic_interface_method, "shared-geometric-constraints") == 0) {
@@ -4165,12 +4371,21 @@ static int32_t parse_parameters(const char* numericalin) {
   Param.basinMaterialType = basinMaterialType;
   Param.threeDVelocityModel = include3DVelModel;
 
+  /* Field-specific maps apply to coupled scalar acoustics. Keep the geometric
+   * maps for inactive/legacy acoustic paths when no method was requested;
+   * explicit unsupported choices still fail the guard below. */
+  if (!acoustic_interface_method_explicit &&
+      (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
+       Param.acousticPressureFormulation != YES)) {
+    Param.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;
+    strcpy(acoustic_interface_method, "shared-geometric-constraints");
+  }
   if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&
       (Param.includeAcoustic != YES || Param.acousticInterfaceCoupling != YES ||
-       Param.acousticPressureFormulation != YES || !Param.theAcousticVelocityPotential)) {
+       Param.acousticPressureFormulation != YES)) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Experimental acoustic_interface_method requires coupled "
-                 "velocity_potential acoustics and full Hex8 solids.\n");
+                 "pressure or velocity_potential acoustics and full Hex8 solids.\n");
   }
   if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING &&
       Param.includeTopography == YES) {
@@ -4223,8 +4438,9 @@ static int32_t parse_parameters(const char* numericalin) {
                   acoustic_interface_coupling);
     monitor_print("Acoustic interface method:         %s%s\n",
                   acoustic_interface_method,
-                  Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_ORIGINAL
-                      ? " (default constraints)" : " (experimental)");
+                  acoustic_interface_method_explicit ? " (explicit)"
+                      : (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS
+                             ? " (default)" : " (inactive coupling fallback)"));
     if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_MATCHING) {
       monitor_print("Local matching: equal-size water/solid interface faces; "
                     "CPML stability and convergence are not established.\n");
@@ -4359,13 +4575,21 @@ static int32_t parse_parameters(const char* numericalin) {
       monitor_print("PML alpha max (Hz):                 %f\n",
                     Param.theCpmlAlphaMaxHz);
     } else {
-      monitor_print("PML alpha max (Hz):                 auto "
-                    "(pi * simulation_wave_max_freq_hz)\n");
+      monitor_print("PML alpha max (Hz):                 %g "
+                    "(auto: simulation_wave_max_freq_hz / 2)\n",
+                    0.5 * Param.theFreq);
     }
     monitor_print("PML multiaxial cross fraction:      %f\n",
                   Param.theCpmlMpmlCrossFraction);
     monitor_print("PML alpha floor fraction:           %f\n",
                   Param.theCpmlAlphaFloorFraction);
+    monitor_print("PML acoustic bulk sponge fraction:  %f\n",
+                  Param.theCpmlAcousticSpongeFraction);
+    if (Param.theCpmlAcousticSpongeFraction > 0.0) {
+      monitor_print("CPML: experimental acoustic bulk mass damping "
+                    "a=gamma*sum(d_j); no added gravity-surface damping. "
+                    "Validate reflections and long-time stability.\n");
+    }
     monitor_print("PML CFL safety factor:              %f\n",
                   Param.theCpmlCflSafety);
     monitor_print("PML partition weight:               %f\n",
@@ -4913,6 +5137,8 @@ static double cpml_material_extension_thickness(void) {
   for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
     elem_t* elemp = &Global.myMesh->elemTable[eindex];
     edata_t* edata = (edata_t*)elemp->data;
+    /* Negative Vp marks air; exclude it from boundary and fallback maxima. */
+    if (edata->Vp < 0.0f) continue;
     node_t* node0 = &Global.myMesh->nodeTable[elemp->lnid[0]];
     const double h = edata->edgesize;
     const double c0[3] = {(double)node0->x * ticksize,
@@ -4995,6 +5221,17 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
 
   const double old_north = *north_m;
   const double old_east = *east_m;
+  const int topography_relative =
+      (Param.includeTopography == YES) && (get_theetree_type() == SQD);
+  const double building_shift =
+      (Param.includeBuildings == YES) ? get_surface_shift() : 0.0;
+  const double old_surface_z =
+      topography_relative ? point_elevation(old_north, old_east) : 0.0;
+  /* Callers have already subtracted the building/surface offsets from depth.
+   * The PML box uses absolute model coordinates, so restore model Z before
+   * the bottom clamp. At corners, convert back using the clamped X/Y below. */
+  const double old_model_z = *depth_m + building_shift + old_surface_z;
+  double model_z = old_model_z;
 
   if ((domain_lo[0] + L) < (domain_hi[0] - L)) {
     if (*north_m < domain_lo[0] + L) {
@@ -5011,16 +5248,21 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
     }
   }
   if (domain_lo[2] < (domain_hi[2] - L)) {
-    if (*depth_m > domain_hi[2] - L) {
-      *depth_m = domain_hi[2] - L;
+    if (model_z > domain_hi[2] - L) {
+      model_z = domain_hi[2] - L;
     }
   }
 
-  if (((*north_m != old_north) || (*east_m != old_east)) &&
-      (Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
-    *depth_m += point_elevation(old_north, old_east) -
-                point_elevation(*north_m, *east_m);
-    if (*depth_m < 0.0) {
+  const int lateral_clamp =
+      (*north_m != old_north) || (*east_m != old_east);
+  /* Leave untouched queries bit-for-bit unchanged: avoid an offset
+   * round trip unless the sampled depth or topographic column changed. */
+  if ((model_z != old_model_z) || (topography_relative && lateral_clamp)) {
+    const double surface_z = (topography_relative && lateral_clamp)
+                                 ? point_elevation(*north_m, *east_m)
+                                 : old_surface_z;
+    *depth_m = model_z - building_shift - surface_z;
+    if (topography_relative && *depth_m < 0.0) {
       *depth_m = 0.0;
     }
   }
@@ -5749,60 +5991,6 @@ static int mesh_reconstruct_bathymetry_normal_at_domain_point(
   *area_scale_out = norm;
   return has_center || has_x_minus || has_x_plus || has_y_minus || has_y_plus;
 }
-
-#ifdef BOUNDARY
-static int mesh_compute_elastic_side_pml_profile_at_domain_point(
-    const vector3D_t* domain_point,
-    const vector3D_t* IstVelModel_origin, const vector3D_t* basinVelModel_origin,
-    const vector3D_t* threeDVelModel_origin, cpml_interface_t* coeff_out,
-    uint8_t* face_mask_out) {
-  tick_t ldb[3], ruf[3];
-  uint8_t face_mask;
-  double a3[3], b3[3], iK3[3], d3[3];
-  double al3[3], ka3[3];
-  (void)IstVelModel_origin;
-  (void)basinVelModel_origin;
-  (void)threeDVelModel_origin;
-
-  if ((domain_point == NULL) || (coeff_out == NULL)) {
-    return 0;
-  }
-
-  if (!mesh_find_octant_at_domain_point(domain_point, ldb, ruf, NULL, NULL,
-                                        NULL)) {
-    return 0;
-  }
-
-  face_mask = compute_pml_face_mask(
-      ldb, ruf, Global.myOctree->nearendp, Global.myOctree->farendp,
-      Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
-  if (face_mask_out != NULL) {
-    *face_mask_out = face_mask;
-  }
-  if (face_mask == 0) {
-    return 0;
-  }
-
-  const acoustic_neighbor_t* neighbor =
-      mesh_cached_acoustic_neighbor_at(domain_point);
-  if (neighbor == NULL ||
-      !material_values_are_elastic(neighbor->vp, neighbor->vs, neighbor->rho)) {
-    return 0;
-  }
-
-  compute_pml_profile_coeffs(
-      face_mask, ldb, ruf, Global.myOctree->nearendp,
-      Global.myOctree->farendp, Global.myOctree->ticksize,
-      g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp, Param.theDeltaT,
-      Param.theCpmlPolyOrder, Param.theCpmlReflectionTarget,
-      Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-      Param.theCpmlMpmlCrossFraction, Param.theCpmlAlphaFloorFraction,
-      a3, b3, iK3, d3, al3, ka3);
-
-  *coeff_out = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-  return 1;
-}
-#endif /* BOUNDARY */
 
 static void mesh_reserve_acoustic_interface_fragments(int64_t needed,
                                                       int64_t current_count,
@@ -6636,6 +6824,9 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
 
   int res = 0;
   edata_t* edata = (edata_t*)data;
+  /* Octant record storage is recycled. Initialize every damping field before
+   * material assignment, including unused mechanisms and early-return cells. */
+  element_zero_damping(edata);
 
   points[0] = 0.01;
   points[1] = 1;
@@ -7091,6 +7282,7 @@ void setrec(octant_t* leaf, double ticksize, void* data) {
   point_t searchpoint;
 
   edata = (edata_t*)data;
+  element_zero_damping(edata);
 
   halfticks = (tick_t)1 << (PIXELLEVEL - leaf->level - 1);
 
@@ -7169,6 +7361,7 @@ static int mesh_prepare_cpml_partition_weight(void) {
 
     for (octant_t* leaf = octor_getfirstleaf(Global.myOctree); leaf != NULL;
          leaf = octor_getnextleaf(leaf)) {
+      if (leaf->where != LOCAL) continue;
       const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
       const double h = (double)edgeticks * ticksize;
       const double c0[3] = {(double)leaf->lx * ticksize,
@@ -7177,13 +7370,22 @@ static int mesh_prepare_cpml_partition_weight(void) {
       int on_face = 0;
 
       if (h <= 0.0) continue;
-      if (h > local_any_h) local_any_h = h;
 
       for (int ax = 0; ax < 2; ax++) {
         if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
         if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
       }
       if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
+      /* Read material only when this leaf can increase either maximum. */
+      if ((h <= local_any_h) && (!on_face || h <= local_bnd_h)) continue;
+      edata_t edata;
+      if (octor_getleafrec(Global.myOctree, leaf, &edata) != 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Cannot read octree material for CPML thickness.\n");
+      }
+      /* Match material extension and solver sizing, including the fallback. */
+      if (edata.Vp < 0.0f) continue;
+      if (h > local_any_h) local_any_h = h;
       if (on_face && h > local_bnd_h) local_bnd_h = h;
     }
 
@@ -7264,6 +7466,7 @@ static int mesh_partitiontree(const char* context) {
 
 #include "acoustic_interface_setup.h"
 #include "acoustic_interface_trace.h"
+#include "acoustic_receiver_setup.h"
 
 /**
  * mesh_generate: Generate and partition an unstructured octree mesh.
@@ -10491,6 +10694,9 @@ static void damping_statistics(double min_xi, double max_xi, double min_zeta,
  */
 static void solver_set_critical_T() {
   int32_t eindex; /* element index */
+  attenuation_check_t imported_attenuation = {};
+  const int check_imported_bkt2 =
+      Param.theMeshInputMode != 0 && Param.theTypeOfDamping == BKT2;
 
   double min_h_over_Vp = 1e32; /* the min h/Vp group */
   double min_h_over_Vp_global;
@@ -10547,6 +10753,19 @@ static void solver_set_critical_T() {
 
     elemp = &Global.myMesh->elemTable[eindex];
     edata = (edata_t*)elemp->data;
+
+    /* Persisted meshes bypass material correction. Reuse this existing
+     * setup traversal to validate their stored BKT2 coefficients too. */
+    if (check_imported_bkt2 && edata->Vp > 0.0f &&
+        !element_is_acoustic(edata)) {
+      ++imported_attenuation.checked;
+      const char* error = attenuation_bkt2_error(edata);
+      if (error != NULL) {
+        attenuation_record_error(&imported_attenuation, eindex, error,
+                                  NAN, NAN, NAN, 1);
+        continue;
+      }
+    }
 
     /* Calculate the clue quantities */
 
@@ -10661,6 +10880,9 @@ static void solver_set_critical_T() {
     }
 
   } /* End of the loop over the mesh elements */
+
+  if (check_imported_bkt2)
+    attenuation_finish_check(&imported_attenuation, "imported BKT2 coefficients");
 
   /* Reducing to global values */
   MPI_Reduce(&min_h_over_Vp, &min_h_over_Vp_global, 1, MPI_DOUBLE, MPI_MIN, 0,
@@ -11470,14 +11692,14 @@ static void solver_init() {
     Global.gpuData.cpmlPmlMaterialDamping = Param.theCpmlPmlMaterialDamping;
 
     /* Resolve PML thickness. Priority: explicit cpml_thickness_m wins; else
-     * cpml_layers × (max edgesize among elements ON an absorbing face).
+     * cpml_layers × (max non-air edgesize ON an absorbing face).
      *
      * Octree meshes refine by local Vs, so the global max element size is
      * usually a coarse *interior* element (deep fast rock) that is NOT
      * representative of the boundary. Sizing the PML from the global max
      * over-thickens it and pushes the inner edge deep into the model.
-     * The PML thickness should instead span cpml_layers element layers
-     * AT THE BOUNDARY, so the max is taken only over elements touching
+     * Use a single reference size from non-air boundary elements; finer
+     * regions can span more than cpml_layers cells. Include elements touching
      * one of the five absorbing faces (x_min, x_max, y_min, y_max,
      * z_max); z_min is the free surface and is excluded. The MPI max-
      * reduce keeps the realized thickness identical on every rank, which
@@ -11496,11 +11718,13 @@ static void solver_init() {
           (double)Global.myOctree->farendp[0] * ticksize,
           (double)Global.myOctree->farendp[1] * ticksize,
           (double)Global.myOctree->farendp[2] * ticksize};
-      double local_bnd_h = 0.0;   /* max edgesize on an absorbing face */
-      double local_any_h = 0.0;   /* global max (defensive fallback)   */
+      double local_bnd_h = 0.0;   /* non-air max on an absorbing face */
+      double local_any_h = 0.0;   /* non-air max (defensive fallback)  */
       for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
         elem_t* ep = &Global.myMesh->elemTable[ei];
         edata_t* ed = (edata_t*)ep->data;
+        /* Air must not set the thickness, even through the fallback. */
+        if (ed->Vp < 0.0f) continue;
         double h = (double)ed->edgesize;
         if (h <= 0.0) continue;
         if (h > local_any_h) local_any_h = h;
@@ -11524,9 +11748,8 @@ static void solver_init() {
                     comm_solver);
       MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
                     comm_solver);
-      /* Defensive: a non-empty domain always has boundary elements, but
-       * if the boundary scan somehow found none, fall back to the global
-       * element max rather than abort with a zero-thickness PML. */
+      /* If no non-air element touches an absorbing face, use the global
+       * non-air maximum. An all-air mesh leaves both maxima at zero. */
       int used_fallback = (global_bnd_h <= 0.0);
       double basis_h = used_fallback ? global_any_h : global_bnd_h;
       g_cpmlBuild.thickness_m = (double)Param.theCpmlLayers * basis_h;
@@ -11536,13 +11759,14 @@ static void solver_init() {
       if (Global.myID == 0) {
         fprintf(stderr,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
-                "(%s max element edgesize)\n",
+                "(%s max element edgesize; air excluded)\n",
                 g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
                 used_fallback ? "global-fallback" : "boundary");
       }
     }
 
-    /* Default alpha_max = pi * f_max if user didn't specify */
+    /* Automatic Hz value is f_max / 2; alpha_max uses angular units (pi*f_max).
+     * Nonpositive inputs retain the legacy automatic selection. */
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
                                 : (M_PI * Param.theFreq);
@@ -11714,8 +11938,16 @@ static void solver_init() {
           const double dt2 = Param.theDeltaTSquared;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+          /* Optional volume-only numerical damping. The separately built
+           * gravity-surface inertia retains only its coordinate stretching. */
+          const double sponge_a = Param.theCpmlAcousticSpongeFraction *
+              (d_axis[0] + d_axis[1] + d_axis[2]);
+          if (!isfinite(sponge_a)) {
+            solver_abort(__FUNCTION_NAME, NULL,
+                         "Nonfinite acoustic CPML sponge coefficient");
+          }
           g_cpmlBuild.acoustic_coeff[pml_idx] = cpml_element(
-              d_axis, alpha_axis, kappa_axis, dt, 0.0, 0.0,
+              d_axis, alpha_axis, kappa_axis, dt, sponge_a, 0.0,
               nodalPressureMass, dt2*h/(double)edata->rho, 0.0);
           acoustic_kprod = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.mass;
           acoustic_damp = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.damping;
@@ -12278,30 +12510,18 @@ static void solver_init() {
     }
 
     /* --- CPML-aware acoustic-elastic interface coupling correction --- */
-    /* For each interface face, precompute independent cofactor ADE
-     * coefficients for the acoustic side and the elastic side. The
-     * elastic-to-acoustic source term uses the acoustic-side profile; the
-     * pressure traction on the solid uses the elastic-side profile. Keeping
-     * the two sides separate matters because the side geometry/mask can
-     * differ; the damping amplitude itself uses the global CPML reference
-     * Vp, matching the main PML element profiles. */
+    /* The two weak coupling terms integrate over the same physical face
+     * fragment and must use the same cofactor J/S_j. Sampling the separate
+     * containing elements can assign different profiles on a nonmatching
+     * interface. Evaluate once at the fragment center, independently of
+     * neighbor size or MPI ownership. Each side/quadrature point retains
+     * its own history; this only changes setup-time coefficients. */
     Global.acousticInterfacePmlFaceCount = 0;
     int64_t pml_face_count = 0;
-    int64_t pml_acoustic_side_count = 0;
-    int64_t pml_elastic_side_count = 0;
-    int64_t pml_both_side_count = 0;
     int64_t remote_elastic_side_count = 0;
     int64_t remote_elastic_pml_side_count = 0;
     if (Global.acousticInterfaceFaces > 0) {
-      vector3D_t cpmlIfaceBasinVelModel_origin;
-      vector3D_t cpmlIfaceThreeDVelModel_origin;
-      const vector3D_t* cpmlIfaceIstVelModel_origin =
-          (Param.IstanbulVelocityModel == YES && g_hasIstanbulVelModelOrigin)
-              ? &g_istanbulVelModelOrigin
-              : NULL;
-      const vector3D_t* cpmlIfaceBasinVelModel_origin_ptr = NULL;
-      const vector3D_t* cpmlIfaceThreeDVelModel_origin_ptr = NULL;
-      int64_t nface = Global.acousticInterfaceFaces;
+      const int64_t nface = Global.acousticInterfaceFaces;
       uint8_t* iface_mask =
           (uint8_t*)calloc((size_t)nface, sizeof(uint8_t));
       cpml_interface_t* iface_ac =
@@ -12314,131 +12534,51 @@ static void solver_init() {
                 Global.myID);
         MPI_Abort(MPI_COMM_WORLD, ERROR); exit(1);
       }
-      if (Param.basinVelocityModel == YES) {
-        cpmlIfaceBasinVelModel_origin = compute_domain_coords_linearinterp(
-            Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-            Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-            &Param.utmZone);
-        cpmlIfaceBasinVelModel_origin_ptr = &cpmlIfaceBasinVelModel_origin;
-      }
-      if (Param.threeDVelocityModel == YES) {
-        cpmlIfaceThreeDVelModel_origin = compute_domain_coords_linearinterp(
-            Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-            Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-            Param.theDomainY, Param.theDomainX, &Param.utmZone);
-        cpmlIfaceThreeDVelModel_origin_ptr =
-            &cpmlIfaceThreeDVelModel_origin;
-      }
       for (int64_t i = 0; i < nface; i++) {
-        int32_t ea = Global.acousticInterfaceElementIds[i];
-        int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
-                         ? Global.acousticInterfaceAdjacentElementIndexes[i]
-                         : -1;
-        uint8_t ma = (ea >= 0 && ea < Global.myMesh->lenum)
-                         ? g_cpmlBuild.face_mask[ea]
-                         : 0;
-        uint8_t me = (ee >= 0 && ee < Global.myMesh->lenum)
-                         ? g_cpmlBuild.face_mask[ee]
-                         : 0;
+        const int32_t ea = Global.acousticInterfaceElementIds[i];
+        const int32_t ee = (Global.acousticInterfaceAdjacentElementIndexes != NULL)
+                              ? Global.acousticInterfaceAdjacentElementIndexes[i]
+                              : -1;
         if (ee < 0) {
           remote_elastic_side_count++;
         }
-
-        if (ma != 0) {
-          elem_t* pe = &Global.myMesh->elemTable[ea];
-          int32_t pln0 = pe->lnid[0];
-          tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
-                           Global.myMesh->nodeTable[pln0].y,
-                           Global.myMesh->nodeTable[pln0].z};
-          tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
-          tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
-                           ldb[2] + edgeticks};
-          double a3[3], b3[3], iK3[3], d3[3];
-          double al3[3], ka3[3];
-
-          compute_pml_profile_coeffs(
-              ma, ldb, ruf, Global.myOctree->nearendp,
-              Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
-              Param.theDeltaT, Param.theCpmlPolyOrder,
-              Param.theCpmlReflectionTarget,
-              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-              Param.theCpmlMpmlCrossFraction,
-              Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
-          iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE;
-          iface_ac[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-          pml_acoustic_side_count++;
+        if (ea < 0 || ea >= Global.myMesh->lenum) {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "Invalid acoustic element for CPML interface fragment.\n");
         }
-
-        if (me != 0) {
-          elem_t* pe = &Global.myMesh->elemTable[ee];
-          int32_t pln0 = pe->lnid[0];
-          tick_t ldb[3] = {Global.myMesh->nodeTable[pln0].x,
-                           Global.myMesh->nodeTable[pln0].y,
-                           Global.myMesh->nodeTable[pln0].z};
-          tick_t edgeticks = (tick_t)1 << (PIXELLEVEL - pe->level);
-          tick_t ruf[3] = {ldb[0] + edgeticks, ldb[1] + edgeticks,
-                           ldb[2] + edgeticks};
-          double a3[3], b3[3], iK3[3], d3[3];
-          double al3[3], ka3[3];
-
-          compute_pml_profile_coeffs(
-              me, ldb, ruf, Global.myOctree->nearendp,
-              Global.myOctree->farendp, Global.myOctree->ticksize,
-              g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
-              Param.theDeltaT, Param.theCpmlPolyOrder,
-              Param.theCpmlReflectionTarget,
-              Param.theCpmlKappaMax, g_cpmlBuild.alpha_max,
-              Param.theCpmlMpmlCrossFraction,
-              Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
-          iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
-          iface_el[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
-          pml_elastic_side_count++;
-        } else if ((ee < 0) && (ea >= 0) && (ea < Global.myMesh->lenum)) {
-          /* The elastic neighbor is remote on this MPI rank.  Do not let
-           * that make the elastic-side CPML correction silently disappear:
-           * reconstruct the fragment's physical location from the local
-           * acoustic element, nudge it to the elastic side, then use the
-           * remote octant geometry plus a material query to compute the
-           * elastic-side coefficients. */
-          elem_t* pe = &Global.myMesh->elemTable[ea];
-          edata_t* ped = (edata_t*)pe->data;
-          int32_t pln0 = pe->lnid[0];
-          double ldb_m[3] = {
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].x,
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].y,
-              Global.myMesh->ticksize *
-                  (double)Global.myMesh->nodeTable[pln0].z};
-          double h = (double)ped->edgesize;
-          double eps = fmax(Global.myMesh->ticksize * 0.25, h * 1.0e-3);
-          vector3D_t elastic_probe;
-
-          for (int dim = 0; dim < 3; dim++) {
-            elastic_probe.x[dim] =
-                ldb_m[dim] +
-                0.5 * h *
-                    (Global.acousticInterfaceFaceCenters[3 * i + dim] + 1.0) +
-                Global.acousticInterfaceFaceNormals[3 * i + dim] * eps;
-          }
-
-          if (mesh_compute_elastic_side_pml_profile_at_domain_point(
-                  &elastic_probe, cpmlIfaceIstVelModel_origin,
-                  cpmlIfaceBasinVelModel_origin_ptr,
-                  cpmlIfaceThreeDVelModel_origin_ptr, &iface_el[i], NULL)) {
-            iface_mask[i] |= ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
-            pml_elastic_side_count++;
-            remote_elastic_pml_side_count++;
-          }
+        const elem_t* pe = &Global.myMesh->elemTable[ea];
+        const int32_t pln0 = pe->lnid[0];
+        const tick_t edge = (tick_t)1 << (PIXELLEVEL - pe->level);
+        const tick_t origin[3] = {Global.myMesh->nodeTable[pln0].x,
+                                  Global.myMesh->nodeTable[pln0].y,
+                                  Global.myMesh->nodeTable[pln0].z};
+        tick_t point[3];
+        for (int j = 0; j < 3; j++) {
+          point[j] = origin[j] + (tick_t)llround(
+              0.5 * (double)edge *
+              (Global.acousticInterfaceFaceCenters[3 * i + j] + 1.0));
         }
-
-        if (iface_mask[i] != 0) {
-          pml_face_count++;
-          if ((iface_mask[i] & ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE) &&
-              (iface_mask[i] & ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE)) {
-            pml_both_side_count++;
-          }
+        const uint8_t mask = compute_pml_face_mask(
+            point, point, Global.myOctree->nearendp, Global.myOctree->farendp,
+            Global.myOctree->ticksize, g_cpmlBuild.thickness_m);
+        if (mask == 0) {
+          continue;
+        }
+        double a3[3], b3[3], iK3[3], d3[3], al3[3], ka3[3];
+        compute_pml_profile_coeffs(
+            mask, point, point, Global.myOctree->nearendp,
+            Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
+            Param.theDeltaT, Param.theCpmlPolyOrder,
+            Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
+            g_cpmlBuild.alpha_max, Param.theCpmlMpmlCrossFraction,
+            Param.theCpmlAlphaFloorFraction, a3, b3, iK3, d3, al3, ka3);
+        iface_ac[i] = iface_el[i] = cpml_interface(d3, al3, ka3, Param.theDeltaT);
+        iface_mask[i] = ACOUSTIC_INTERFACE_PML_ACOUSTIC_SIDE |
+                        ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE;
+        pml_face_count++;
+        if (ee < 0) {
+          remote_elastic_pml_side_count++;
         }
       }
 
@@ -12468,25 +12608,20 @@ static void solver_init() {
      * ranks with no local water-solid interface faces, especially for a flat
      * water layer, and letting those ranks skip the reduction deadlocks the
      * interface-owning ranks during Phase B startup. */
-    int64_t local_iface_diag[6] = {
-        pml_face_count, pml_acoustic_side_count, pml_elastic_side_count,
-        pml_both_side_count, remote_elastic_side_count,
+    int64_t local_iface_diag[3] = {
+        pml_face_count, remote_elastic_side_count,
         remote_elastic_pml_side_count};
-    int64_t global_iface_diag[6] = {0, 0, 0, 0, 0, 0};
-    MPI_Reduce(local_iface_diag, global_iface_diag, 6, MPI_LONG_LONG,
+    int64_t global_iface_diag[3] = {0, 0, 0};
+    MPI_Reduce(local_iface_diag, global_iface_diag, 3, MPI_LONG_LONG,
                MPI_SUM, 0, comm_solver);
     if (Global.myID == 0 && global_iface_diag[0] > 0) {
       fprintf(stdout,
-              "CPML: %lld acoustic-elastic interface faces lie inside the "
-              "PML zone; side-specific correction acoustic=%lld, "
-              "elastic=%lld, both=%lld, remote-elastic=%lld "
-              "(elastic-PML recovered=%lld)\n",
+              "CPML: %lld acoustic-elastic interface fragments use a common "
+              "physical-face profile on both sides; remote-elastic=%lld "
+              "(remote fragments in PML=%lld)\n",
               (long long)global_iface_diag[0],
               (long long)global_iface_diag[1],
-              (long long)global_iface_diag[2],
-              (long long)global_iface_diag[3],
-              (long long)global_iface_diag[4],
-              (long long)global_iface_diag[5]);
+              (long long)global_iface_diag[2]);
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
@@ -14443,6 +14578,7 @@ static void solver_delete() {
 
   /* Free device memory */
   acoustic_constraints_free();
+  acoustic_receiver_free();
   cudaFree(Global.gpuData.acousticInterfaceSolidNodesDevice);
   Global.gpuData.acousticInterfaceSolidNodesDevice = NULL;
   g_acousticSolidTraceNodes.clear();
@@ -14483,6 +14619,8 @@ static void solver_delete() {
   cudaFree(Global.gpuData.conv_kappa_1Device);
   cudaFree(Global.gpuData.conv_kappa_2Device);
   cudaFree(Global.gpuData.conv_kappa_3Device);
+  cudaFree(g_bkt2ConvOnlyMapperDevice);
+  g_bkt2ConvOnlyMapperDevice = NULL;
   /* GPU station tensor gather (all NULL when inactive). */
   cudaFree(Global.gpuData.stationGatherEindexDevice);
   cudaFree(Global.gpuData.stationGatherCsiDevice);
@@ -15093,11 +15231,16 @@ static void solver_close_station_outputs(void) {
   for (int32_t iStation = 0; iStation < Param.myNumberOfStations; iStation++) {
     FILE* fp = Param.myStations[iStation].fpoutputfile;
     if (fp != NULL) {
-      fflush(fp);
+      if (fflush(fp) != 0 || ferror(fp)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to write ASCII station %d in %s",
+                     Param.myStations[iStation].id, Param.theStationsDirOut);
+      }
       hu_fclose(fp);
       Param.myStations[iStation].fpoutputfile = NULL;
     }
   }
+  stationAsciiBuffers.clear();
 }
 
 static void solver_output_stations(int step) {
@@ -15243,6 +15386,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
 
   if (need_conv_coeffs) {
     g_dampingGUniform = 1;
+    g_bkt2FallbackReasons = 0;
     g_dampingBkt2ShearCoef1 = 0.0;
     g_dampingBkt2ShearCoef2 = 0.0;
     g_dampingBkt2ShearExpCoef0 = 0.0;
@@ -15286,15 +15430,15 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
       if (need_conv_coeffs) {
         const int shear_q =
             ((edata->a0_shear != 0.0f) || (edata->a1_shear != 0.0f) ||
-             (edata->a2_shear != 0.0f));
+             (is_3mech && (edata->a2_shear != 0.0f)));
         const int kappa_q =
             ((edata->a0_kappa != 0.0f) || (edata->a1_kappa != 0.0f) ||
-             (edata->a2_kappa != 0.0f));
+             (is_3mech && (edata->a2_kappa != 0.0f)));
         if (shear_q) {
           if (!have_ref_shear) {
             ref_g0_shear = edata->g0_shear;
             ref_g1_shear = edata->g1_shear;
-            ref_g2_shear = edata->g2_shear;
+            ref_g2_shear = is_3mech ? edata->g2_shear : 0.0f;
             const double g0 = (double)edata->g0_shear * conv_rmax;
             const double g1 = (double)edata->g1_shear * conv_rmax;
             g_dampingBkt2ShearCoef1 = g0 / 2.0;
@@ -15320,13 +15464,14 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
                      (edata->g1_shear != ref_g1_shear) ||
                      (is_3mech && (edata->g2_shear != ref_g2_shear))) {
             g_dampingGUniform = 0;
+            g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_SHEAR_RATES;
           }
         }
         if (kappa_q) {
           if (!have_ref_kappa) {
             ref_g0_kappa = edata->g0_kappa;
             ref_g1_kappa = edata->g1_kappa;
-            ref_g2_kappa = edata->g2_kappa;
+            ref_g2_kappa = is_3mech ? edata->g2_kappa : 0.0f;
             const double g0 = (double)edata->g0_kappa * conv_rmax;
             const double g1 = (double)edata->g1_kappa * conv_rmax;
             g_dampingBkt2KappaCoef1 = g0 / 2.0;
@@ -15352,6 +15497,7 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
                      (edata->g1_kappa != ref_g1_kappa) ||
                      (is_3mech && (edata->g2_kappa != ref_g2_kappa))) {
             g_dampingGUniform = 0;
+            g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_BULK_RATES;
           }
         }
       }
@@ -15364,6 +15510,28 @@ static void solver_init_damping_gpu_mapper(int32_t myID, mesh_t* mesh) {
       g_dampingBkt3CoeffsReady = 1;
     } else {
       g_dampingBkt2CoeffsReady = 1;
+    }
+    /* Inactive sectors have zero weights and need no history. For active
+     * sectors, require exact equality of both rates before sharing. */
+    g_bkt2SharedUseShear = have_ref_shear;
+    /* Restrict the optimized dispatch to the validated resident path. A
+     * host-staged comparison exceeded the waveform tolerance; preserve its
+     * existing kernels without adding synchronization to the hot loop. */
+    if (dtype == BKT2) {
+      if (!damping_bkt2_fused_requested())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_DISABLED;
+      if (damping_force_generic())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_GENERIC;
+      if (!elastic_force_device_sync_enabled())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_FORCE_HOST;
+      if (!displacement_device_sync_enabled())
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_DISP_HOST;
+      if (have_ref_shear && have_ref_kappa &&
+          (ref_g0_shear != ref_g0_kappa || ref_g1_shear != ref_g1_kappa))
+        g_bkt2FallbackReasons |= 1U << BKT2_FALLBACK_SHARED_RATES;
+      g_bkt2FusedActive = g_bkt2FallbackReasons == 0;
+    } else {
+      g_bkt2FusedActive = 0;
     }
   }
 
@@ -15971,17 +16139,153 @@ static void solver_compute_force_stiffness(mysolver_t* solver, mesh_t* mesh,
   Timer_Stop("Compute addforces e");
 }
 
+static void solver_init_bkt2_fused_dispatch(mysolver_t* solver, mesh_t* mesh) {
+  static int initialized = 0;
+  if (initialized || Param.theTypeOfDamping != BKT2) return;
+  initialized = 1;
+  if (g_bkt2FusedActive && g_topoBktElemCountGPU > 0) {
+    const int32_t capacity = g_dampingElemCountGPU - g_dampingForceCountGPU;
+    int32_t* host = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
+    if (capacity > 0 && host == NULL) {
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper allocation failed");
+    }
+    for (int32_t e = 0; e < mesh->lenum; ++e) {
+      const edata_t* data = (const edata_t*)mesh->elemTable[e].data;
+      if (data->topoBkt != 0 && isThisElementNonLinear(mesh, e) == NO &&
+          IsDampingElement(mesh, e) == YES) {
+        if (g_bkt2ConvOnlyCount >= capacity)
+          solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper mismatch");
+        host[g_bkt2ConvOnlyCount++] = e;
+      }
+    }
+    if (g_bkt2ConvOnlyCount != capacity)
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper incomplete");
+    if (capacity > 0 &&
+        (cudaMalloc((void**)&g_bkt2ConvOnlyMapperDevice,
+                    sizeof(int32_t) * (size_t)capacity) != cudaSuccess ||
+         cudaMemcpy(g_bkt2ConvOnlyMapperDevice, host,
+                    sizeof(int32_t) * (size_t)capacity,
+                    cudaMemcpyHostToDevice) != cudaSuccess)) {
+      solver_abort(__FUNCTION_NAME, NULL, "BKT2 convolution mapper upload failed");
+    }
+    free(host);
+  }
+  /* All solver ranks participate once, including ranks with no damping work.
+   * Counts describe actual dispatch, not just the optimistic kernel specs. */
+  const long long cubes = g_topoBktElemCountGPU > 0 ? g_dampingForceCountGPU
+                                                  : g_dampingElemCountGPU;
+  const int has_work = g_dampingElemCountGPU > 0;
+  const int count_size = 5 + BKT2_FALLBACK_REASON_COUNT;
+  long long local[count_size] = {g_bkt2FusedActive && has_work ? 1LL : 0LL,
+                       g_bkt2FusedActive ? cubes : 0LL,
+                       g_bkt2ConvOnlyCount,
+                       g_bkt2FusedActive ? 0LL : g_dampingElemCountGPU,
+                       has_work ? 0LL : 1LL};
+  for (int r = 0; r < BKT2_FALLBACK_REASON_COUNT; ++r)
+    local[5 + r] = has_work && (g_bkt2FallbackReasons & (1U << r)) ? 1LL : 0LL;
+  long long total[count_size] = {};
+  MPI_Reduce(local, total, count_size, MPI_LONG_LONG_INT, MPI_SUM, 0, comm_solver);
+  if (Global.myID == 0) {
+    monitor_print("BKT2 GPU: fused/shared-history ranks=%lld, cube slots=%lld, "
+                  "legacy convolution-only slots=%lld, fallback slots=%lld; "
+                  "station stress vectors=%s. CPML remains elastic; VT "
+                  "retains the tetrahedral force. Host-staged execution "
+                  "retains the reference kernels.\n",
+                  total[0], total[1], total[2], total[3],
+                  Param.printStationStresses == YES ? "saved" : "not requested");
+    monitor_print("BKT2 GPU: fallback reason ranks (counts may overlap): "
+                  "fusion disabled=%lld, generic override=%lld, "
+                  "force not device-resident=%lld, displacement not device-resident=%lld, "
+                  "nonuniform active shear rates=%lld, nonuniform active bulk rates=%lld, "
+                  "shear/bulk rate mismatch=%lld; no damping slots ranks=%lld. "
+                  "Inactive sectors are excluded from rate comparisons.\n",
+                  total[5 + BKT2_FALLBACK_DISABLED],
+                  total[5 + BKT2_FALLBACK_GENERIC],
+                  total[5 + BKT2_FALLBACK_FORCE_HOST],
+                  total[5 + BKT2_FALLBACK_DISP_HOST],
+                  total[5 + BKT2_FALLBACK_SHEAR_RATES],
+                  total[5 + BKT2_FALLBACK_BULK_RATES],
+                  total[5 + BKT2_FALLBACK_SHARED_RATES], total[4]);
+    monitor_print("BKT2 GPU: HERCULES_BKT2_FUSED=%d, generic override=%d. "
+                  "Fused work is charged to Force damping local wait only.\n",
+                  damping_bkt2_fused_requested(), damping_force_generic());
+  }
+  (void)solver;
+}
+
+static void solver_compute_force_bkt2_fused(mysolver_t* solver, mesh_t* mesh,
+                                           double dt, double dt2) {
+  /* Update only the excluded slots with the unchanged convolution kernel.
+   * This preserves VT/other consumers without updating cube histories twice. */
+  if (g_bkt2ConvOnlyCount > 0) {
+    const int block = solver->gpu_kernel[CUDA_KERNEL_DAMPING_CONV].blocksize;
+    psolve_launch_damping_bkt2((g_bkt2ConvOnlyCount + block - 1) / block,
+        block, 0, solver->streams[CUDA_STREAM_MAIN], mesh->lenum,
+        mesh->lenum * 8, solver->gpuDataDevice, dt,
+        g_dampingBkt2ShearCoef1, g_dampingBkt2ShearCoef2,
+        g_dampingBkt2ShearExpCoef0, g_dampingBkt2ShearCoef3,
+        g_dampingBkt2ShearCoef4, g_dampingBkt2ShearExpCoef1,
+        g_dampingBkt2KappaCoef1, g_dampingBkt2KappaCoef2,
+        g_dampingBkt2KappaExpCoef0, g_dampingBkt2KappaCoef3,
+        g_dampingBkt2KappaCoef4, g_dampingBkt2KappaExpCoef1,
+        g_bkt2ConvOnlyCount, g_bkt2ConvOnlyMapperDevice);
+  }
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
+                          "BKT2 legacy convolution subset");
+  const int32_t count = g_topoBktElemCountGPU > 0 ? g_dampingForceCountGPU
+                                                : g_dampingElemCountGPU;
+  const int32_t* mapper = g_topoBktElemCountGPU > 0 ? g_dampingForceMapperDevice
+                                                  : g_dampingElemMapperDevice;
+  if (count > 0) {
+    const int s = g_bkt2SharedUseShear;
+    /* Bound the block size for the fused operator's larger register set. */
+    const int block = 128;
+    psolve_launch_damping_bkt2_fused((count + block - 1) / block, block,
+        solver->streams[CUDA_STREAM_MAIN], mesh->lenum, solver->gpuDataDevice, dt,
+        s ? g_dampingBkt2ShearCoef1 : g_dampingBkt2KappaCoef1,
+        s ? g_dampingBkt2ShearCoef2 : g_dampingBkt2KappaCoef2,
+        s ? g_dampingBkt2ShearExpCoef0 : g_dampingBkt2KappaExpCoef0,
+        s ? g_dampingBkt2ShearCoef3 : g_dampingBkt2KappaCoef3,
+        s ? g_dampingBkt2ShearCoef4 : g_dampingBkt2KappaCoef4,
+        s ? g_dampingBkt2ShearExpCoef1 : g_dampingBkt2KappaExpCoef1,
+        count, mapper, Param.printStationStresses == YES);
+  }
+  if (g_topoBktElemCountGPU > 0) {
+    psolve_launch_topography_bkt((g_topoBktElemCountGPU + 127) / 128, 128, 0,
+        solver->streams[CUDA_STREAM_MAIN], mesh->lenum, solver->gpuDataDevice,
+        g_topoBktElemCountGPU, g_topoBktElemMapperDevice, g_topoBktConstDevice, dt2);
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess)
+    solver_abort(__FUNCTION_NAME, NULL, "BKT2 fused launch: %s", cudaGetErrorString(error));
+  solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
+                          "BKT2 fused force and VT force");
+  /* Existing counters are analytical estimates, not measured GPU traffic. */
+  solver->gpu_spec->numflops +=
+      (kernel_flops_per_thread(FLOP_CALCCONV_KERNEL) +
+       kernel_flops_per_thread(FLOP_DAMPING_KERNEL)) * g_dampingElemCountGPU;
+  solver->gpu_spec->numbytes +=
+      (kernel_mem_per_thread(FLOP_CALCCONV_KERNEL) +
+       kernel_mem_per_thread(FLOP_DAMPING_KERNEL)) * g_dampingElemCountGPU;
+}
+
 static void solver_compute_force_damping_gpu(int32_t myID, mysolver_t* solver,
                                              mesh_t* mesh, double theFreq,
                                              double theDeltaT,
                                              double theDeltaTSquared) {
   solver_init_damping_gpu_mapper(myID, mesh);
   solver_init_topo_bkt_gpu(myID, mesh);
+  solver_init_bkt2_fused_dispatch(solver, mesh);
   if (g_dampingElemCountGPU <= 0) {
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_CONV_DONE,
                             "force damping conv");
     solver_record_gpu_event(solver, CUDA_EVENT_FORCE_DAMPING_LOCAL_DONE,
                             "force damping local");
+    return;
+  }
+
+  if (g_bkt2FusedActive) {
+    solver_compute_force_bkt2_fused(solver, mesh, theDeltaT, theDeltaTSquared);
     return;
   }
 
@@ -19338,6 +19642,16 @@ static void solver_init_acoustic_pressure_station_sync(mysolver_t* solver) {
   free(coords);
   free(h);
 
+  if (!g_acousticReceiverOffsets.empty()) {
+    std::vector<int32_t> offsets;
+    for (int i = 0; i < Param.myNumberOfStations; ++i)
+      if (Param.myStations[i].pressure_is_defined)
+        offsets.push_back(g_acousticReceiverOffsets[i]);
+    offsets.push_back(g_acousticReceiverOffsets.back());
+    acoustic_constraint_upload(&g_acousticReceiverOffsetsDevice, offsets);
+    acoustic_constraint_upload(&g_acousticReceiverNodesDevice, g_acousticReceiverNodes);
+    acoustic_constraint_upload(&g_acousticReceiverWeightsDevice, g_acousticReceiverWeights);
+  }
   g_acousticPressureStationSyncReady = 1;
 }
 
@@ -19367,7 +19681,8 @@ static void solver_sync_acoustic_pressure_station_values(mysolver_t* solver) {
       g_acousticPressureStationCoordsDevice,
       g_acousticPressureStationHDevice, solver->gpuData->pressureTm1Device,
       solver->gpuData->pressureTm2Device, velocityPotential, inverseDt,
-      g_acousticPressureStationResultsDevice);
+      g_acousticPressureStationResultsDevice, g_acousticReceiverOffsetsDevice,
+      g_acousticReceiverNodesDevice, g_acousticReceiverWeightsDevice);
   solver_pore_pressure_device_check(cudaGetLastError(),
                                     "acoustic station interpolation");
   solver_pore_pressure_device_check(
@@ -21627,6 +21942,15 @@ static void solver_run() {
     g_dnDiagLocal[DN_DIAG_STEPS] += 1.0;
   } /* for (step = ....): all steps */
 
+  // Include the final partial station buffers in solver I/O timing.
+  if (Param.theNumberOfStations != 0) {
+    Timer_Start("Solver I/O");
+    Timer_Start("Print Stations");
+    solver_close_station_outputs();
+    Timer_Stop("Print Stations");
+    Timer_Stop("Solver I/O");
+  }
+
   /* Flush a partial plane MPI-IO batch while Solver/Print Planes timers are
    * still active and before their collective reductions. Full batches are
    * written at their output steps. */
@@ -22184,9 +22508,12 @@ static void schedule_build(mesh_t* mesh, schedule_t* dnsched,
     }
   }
 
-  /* Additional solid-trace ghosts are appended after octree extraction.
-   * Match sender/receiver packing by global ID, independent of local order. */
-  if (acoustic_solid_trace_enabled()) {
+  /* Solid-trace and receiver-stencil ghosts are appended after octree
+   * extraction. Match packing by global ID even with the original interface
+   * method: receiver ghosts need the same ordering on sender and receiver. */
+  if (acoustic_solid_trace_enabled() ||
+      (acoustic_pressure_enabled() && Param.acousticStationGradientRecovered &&
+       Param.theNumberOfStations > 0)) {
     messenger_t* lists[] = {dnsched->first_c, dnsched->first_s,
                             ansched->first_c, ansched->first_s};
     for (auto* head : lists)
@@ -26782,6 +27109,18 @@ void setup_stations_data() {
   }
 
   Timer_Start("Stations Local Init");
+  if (Param.stationBinary != YES) {
+    const size_t stationBufferBytes = (size_t)Param.stationAsciiBufferKiB * 1024;
+    try {
+      stationAsciiBuffers.resize(Param.myNumberOfStations);
+      for (int32_t i = 0; i < Param.myNumberOfStations; ++i) {
+        stationAsciiBuffers[i].resize(stationBufferBytes);
+      }
+    } catch (const std::exception& error) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unable to allocate ASCII station buffers: %s", error.what());
+    }
+  }
 #ifdef _OPENMP
   const int32_t useOmp = station_output_use_omp();
 #pragma omp parallel for if(useOmp) schedule(static) \
@@ -26845,6 +27184,14 @@ void setup_stations_data() {
     if (Param.stationBinary != YES) {
       sprintf(stationFile, "%s/station.%d", Param.theStationsDirOut, iStation);
       Param.myStations[iLCStation].fpoutputfile = hu_fopen(stationFile, "w");
+      // Set the buffer before writing the header; only this station's owner
+      // writes the stream. No per-sample allocation or extra field transfer.
+      if (setvbuf(Param.myStations[iLCStation].fpoutputfile,
+                  stationAsciiBuffers[iLCStation].data(), _IOFBF,
+                  stationAsciiBuffers[iLCStation].size()) != 0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Unable to buffer ASCII station output %s", stationFile);
+      }
     }
     Param.myStations[iLCStation].prev_disp[0] = 0.0;
     Param.myStations[iLCStation].prev_disp[1] = 0.0;
@@ -27049,6 +27396,23 @@ static int station_pressure_gradient(int32_t iStation, double grad[3]) {
     return 0;
   }
 
+  if (!g_acousticReceiverOffsets.empty()) {
+    const int begin = g_acousticReceiverOffsets[iStation];
+    const int end = g_acousticReceiverOffsets[iStation+1];
+    const bool vp = Param.theAcousticVelocityPotential == 1 && Param.theDeltaT > 0;
+    if (end > begin) {
+      for (int k = begin; k < end; ++k) {
+        const int n = g_acousticReceiverNodes[k];
+        const double p = vp ? -(double)(Global.mySolver->pressure_tm1[n] -
+            Global.mySolver->pressure_tm2[n])/Param.theDeltaT
+                           : (double)Global.mySolver->pressure_tm1[n];
+        for (int axis = 0; axis < 3; ++axis)
+          grad[axis] += g_acousticReceiverWeights[3*(size_t)k+axis]*p;
+      }
+      return 1;
+    }
+  }
+
   for (iPhi = 0; iPhi < 8; iPhi++) {
     nodesToInterpolate[iPhi] =
         Param.myStations[iStation].nodestointerpolate[iPhi];
@@ -27223,10 +27587,6 @@ static int interpolate_station_displacements(int32_t step) {
       }
 
       station_write_pressure_columns(iStation);
-
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else if ((Param.includeTopography == YES) &&
                (compute_tetra_displ(&dis_x, &dis_y, &dis_z, &vel_x, &vel_y,
                                     &vel_z, &acc_x, &acc_y, &acc_z,
@@ -27323,9 +27683,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     } else {
       for (iPhi = 0; iPhi < 8; iPhi++) {
         phi[iPhi] = (1 + xi[0][iPhi] * localCoords.x[0]) *
@@ -27473,10 +27830,6 @@ static int interpolate_station_displacements(int32_t step) {
         }
       }
 
-      /* TODO: Have this 10 as a parameter with a default value */
-      if ((step % (Param.theStationsPrintRate * 10)) == 0) {
-        fflush(Param.myStations[iStation].fpoutputfile);
-      }
     }
   }
 
@@ -27739,6 +28092,7 @@ void output_stations_init(const char* numericalin) {
   Timer_Stop("Stations Broadcast");
 
   setup_stations_data();
+  acoustic_receiver_prepare();
 
   if (Param.stationBinary == YES) {
     try {
@@ -27780,6 +28134,12 @@ void output_stations_init(const char* numericalin) {
              comm_solver);
 
   if (Global.myID == 0) {
+    if (Param.stationBinary != YES) {
+      monitor_print("Station ASCII buffering: %d KiB per locally owned station; "
+                    "write on buffer fill and flush at normal close; "
+                    "all requested samples and columns retained.\n",
+                    Param.stationAsciiBufferKiB);
+    }
     monitor_print(
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
         totalStations, setupSecondsMax);
@@ -28203,6 +28563,7 @@ static void mesh_correct_properties(etree_t* cvm) {
   int32_t lnid0;
   int64_t acoustic_elements = 0;
   int64_t mixed_elements = 0;
+  attenuation_check_t attenuation = {};
   vector3D_t IstVelModel_origin;
   vector3D_t basinVelModel_origin;
   vector3D_t threeDVelModel_origin;
@@ -28510,6 +28871,7 @@ static void mesh_correct_properties(etree_t* cvm) {
      * Definition of BTK-Family Damping parameters
      */
     if (Param.theTypeOfDamping >= BKT) {
+      ++attenuation.checked;
       double vs_vp_Ratio, vksquared;
       double vs_kms = edata->Vs * 0.001; /* Vs in km/s */
       const int use_material_quality_factors =
@@ -28559,10 +28921,25 @@ static void mesh_correct_properties(etree_t* cvm) {
       // edata->Qs = Qs;  // update Qs and Qp
       // edata->Qp = Qp;
 
-      if (Param.useInfQk == YES) {
-        Qk = 1000;
-      } else {
-        Qk = (1. - L) / (1. / Qp - L / Qs);
+      const char* attenuation_error = attenuation_bulk_quality(
+          Qs, Qp, L, Param.useInfQk == YES, &Qk);
+      if (!isfinite(edata->Vs) || edata->Vs <= 0.0f ||
+          !isfinite(edata->Vp) || edata->Vp <= 0.0f ||
+          !isfinite(edata->rho) || edata->rho <= 0.0f ||
+          !isfinite(Param.theFreq) || Param.theFreq <= 0.0) {
+        attenuation_error = "solid velocities, density and frequency must be finite and positive";
+      }
+      if (attenuation_error != NULL) {
+        attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                  Qs, Qp, Qk);
+        continue; /* Do not evaluate fractional powers of invalid Q. */
+      }
+
+      /* Two-mechanism models never use a2/g2. Keep their stored payload
+       * deterministic even when material properties are reassigned. */
+      if (Param.theTypeOfDamping == BKT || Param.theTypeOfDamping == BKT2) {
+        edata->a2_shear = edata->g2_shear = 0.0f;
+        edata->a2_kappa = edata->g2_kappa = 0.0f;
       }
 
       if (Param.theTypeOfDamping == BKT) {
@@ -28792,6 +29169,15 @@ static void mesh_correct_properties(etree_t* cvm) {
                      Param.theTypeOfDamping);
       }
 
+      if (Param.theTypeOfDamping == BKT2) {
+        attenuation_error = attenuation_bkt2_error(edata);
+        if (attenuation_error != NULL) {
+          attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                    Qs, Qp, Qk, 1);
+          continue;
+        }
+      }
+
       /*
        * Phase velocity adjustment
        */
@@ -28851,9 +29237,18 @@ static void mesh_correct_properties(etree_t* cvm) {
         edata->Vp =
             sqrt(kappa_vel_corr_factor * kappa_vel_corr_factor * vksquared +
                  4. / 3. * edata->Vs * edata->Vs);
+        if (Param.theTypeOfDamping == BKT2) {
+          attenuation_error = attenuation_bkt2_error(edata);
+          if (attenuation_error != NULL)
+            attenuation_record_error(&attenuation, eindex, attenuation_error,
+                                      Qs, Qp, Qk, 1);
+        }
       }
     }
   }
+
+  if (Param.theTypeOfDamping >= BKT)
+    attenuation_finish_check(&attenuation, "material assignment");
 
   if (Param.includeAcoustic == YES) {
     int64_t local_counts[2];
@@ -29308,6 +29703,7 @@ int main(int argc, char** argv) {
   /* Initialize the solver, source and output structures */
   Timer_Start("Pre Setup Solver Init");
   solver_init();
+  acoustic_receiver_build_weights();
   g_acousticNeighbors.clear();
   /* Prepare the output-only CPML gradient memories after profile setup.
    * All plane backends and both station gather paths use these memories. */
@@ -29490,9 +29886,6 @@ int main(int argc, char** argv) {
   solver_run();
   Timer_Stop("Solver");
 
-  if (Param.theNumberOfStations != 0) {
-    solver_close_station_outputs();
-  }
   if (Param.theNumberOfPlanes != 0) {
     planes_close(Global.myID, Param.IO_pool_pe_count, Param.theNumberOfPlanes);
   }
