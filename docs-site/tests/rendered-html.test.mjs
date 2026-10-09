@@ -186,7 +186,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 244 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 245 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -331,8 +331,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 244);
-  assert.equal(documented.length, 244, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 245);
+  assert.equal(documented.length, 245, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -1552,7 +1552,7 @@ test("documents every supported source model and its auxiliary inputs", async ()
   assert.match(html, /change the final applied force/);
   assert.match(html, /extended_number_of_kinks/);
   assert.match(html, /number_of_point_sources/);
-  assert.match(html, /x north, y east, and z positive downward/);
+  assert.match(html, /local solver X\/Y and Z positive downward/);
 });
 
 test("provides configuration and reader examples for output files", async () => {
@@ -1691,7 +1691,7 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /1,449,744 bytes/);
   assert.match(html, /top center/);
   assert.match(html, /length_x − 2h, length_y − 2h, depth − h/);
-  assert.match(html, /clockwise from north/);
+  assert.match(html, /clockwise from solver \+X/);
   assert.match(html, /drmdisplacements\.0/);
   assert.match(html, /drmdisplacements\.1/);
   assert.match(html, /drmcoordinates\.0/);
@@ -2100,4 +2100,27 @@ test("documents CPML automatic thickness excluding air", async () => {
   assert.match(thickness, /largest non-air element edge/);
   assert.match(thickness, /Air is also excluded from the global fallback/);
   assert.match(layers, /finer regions contain more than this many cells/);
+});
+
+
+test("documents independent domain/material rotations and output frame conversion", async () => {
+  const html = await (await render("/docs/input-files")).text();
+  for (const phrase of ["Rotated domains and material grids", "3D_velocity_model_azimuth_deg",
+    "coordinate_frame.txt", "CPML extension clamps in solver coordinates", "Rebuild persisted meshes",
+    "true north", "vector_to_utm", "solver-aligned material grid"])
+    assert.ok(html.includes(phrase), phrase);
+  const params = await (await render("/docs/parameters-material-mesh")).text();
+  const materialAngle = params.split("</tr>").find((row) => row.includes(">3D_velocity_model_azimuth_deg</td>"));
+  assert.ok(materialAngle);
+  assert.match(materialAngle, /Default: region_azimuth_leftface_deg; finite/);
+  assert.match(materialAngle, /Explicit values override this default: 0/);
+  assert.match(html, /If 3D_velocity_model_azimuth_deg is omitted, it inherits region_azimuth_leftface_deg/);
+  assert.match(html, /Omit the next line for a material grid aligned with the domain/);
+
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (existsSync(source)) {
+    const solver = readFileSync(source, "utf8");
+    assert.match(solver, /Param\.the3DVelocityModelAzimuth = region_azimuth_leftface_deg;\s*const int material_azimuth_status =\s*hu_config_get_double_opt\(fp, "3D_velocity_model_azimuth_deg"/);
+    assert.match(solver, /material_azimuth_status == 1 && Param\.the3DVelocityModelAzimuth != 0\.0/);
+  }
 });

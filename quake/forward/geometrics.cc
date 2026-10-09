@@ -175,6 +175,7 @@ vector3D_t compute_domain_coords( vector3D_t point, double azimuth )
 
     UTMZone_t getUTMZone(double latitude, double longitude) {
         UTMZone_t utmZone;
+        utmZone.domain_frame = horizontal_frame(0.0);
         utmZone.zone = floor((longitude + 180) / 6) + 1;
         utmZone.hemisphere = (latitude >= 0) ? 'N' : 'S';
         // Save PROJ context and PJ for later use
@@ -236,8 +237,10 @@ vector3D_t compute_domain_coords( vector3D_t point, double azimuth )
             printf("Conversion from latitude/longitude to UTM failed\n");
             return (vector3D_t){-1, -1, -1}; // Return error coordinates
         }
-        domainCoords.x[0] = utmCoordinates.n - utmZone->refPoint.n;
-        domainCoords.x[1] = utmCoordinates.e - utmZone->refPoint.e;
+        horizontal_to_local(utmZone->domain_frame,
+            utmCoordinates.n - utmZone->refPoint.n,
+            utmCoordinates.e - utmZone->refPoint.e,
+            &domainCoords.x[0], &domainCoords.x[1]);
         domainCoords.x[2] = 0;
         return domainCoords;
     }
@@ -318,3 +321,43 @@ compute_domain_coords_linearinterp( double  lon , double lat,
 }
 
 #endif
+
+double compute_domain_strike(double strike, double lon, double lat,
+    double* longcorner, double* latcorner, double domain_y, double domain_x,
+    UTMZone_t* utmZone)
+{
+    const vector3D_t pivot = compute_domain_coords_linearinterp(
+        lon, lat, longcorner, latcorner, domain_y, domain_x, utmZone);
+    const vector3D_t north = compute_domain_coords_linearinterp(
+        lon, lat + 0.1, longcorner, latcorner, domain_y, domain_x, utmZone);
+    /* atan2 handles all quadrants, including domain rotations past 90 deg. */
+    return strike + atan2(north.x[1] - pivot.x[1],
+                          north.x[0] - pivot.x[0]) * 180.0 / PI;
+}
+
+int write_domain_frame(const char* directory, const UTMZone_t* utmZone)
+{
+#ifdef PROJ
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/coordinate_frame.txt", directory);
+    if (n < 0 || (size_t)n >= sizeof(path)) return -1;
+    FILE* fp = fopen(path, "w");
+    if (fp == NULL) return -1;
+    int result = fprintf(fp,
+        "# Hercules PROJ output frame; positions in metres, Z positive down.\n"
+        "# Vectors/tensors remain in solver axes. For positions add N0/E0;\n"
+        "# for vectors omit translation: N=c*X-s*Y, E=s*X+c*Y.\n"
+        "# Tensor conversion: T_UTM=A*T_solver*A^T, A=[[c,-s,0],[s,c,0],[0,0,1]].\n"
+        "utm_zone = %d\nhemisphere = %c\nN0 = %.17g\nE0 = %.17g\n"
+        "c = %.17g\ns = %.17g\n",
+        utmZone->zone, utmZone->hemisphere,
+        utmZone->refPoint.n, utmZone->refPoint.e,
+        utmZone->domain_frame.c, utmZone->domain_frame.s);
+    int closed = fclose(fp);
+    return (result < 0 || closed != 0) ? -1 : 0;
+#else
+    (void)directory;
+    (void)utmZone;
+    return 0;
+#endif
+}

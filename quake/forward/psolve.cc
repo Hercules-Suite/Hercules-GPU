@@ -1165,6 +1165,7 @@ static struct Param_t {
   double** basinData;
   double the3DVelocityModelLong;
   double the3DVelocityModelLat;
+  double the3DVelocityModelAzimuth;
   UTMZone_t utmZone;
 
   /* Absorbing boundary configuration. Placed at the end of the struct so the
@@ -2349,7 +2350,7 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  50 /* Must adjust this if adding double params */
+  51 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
   67 /* Must adjust this if adding int params */
 
@@ -2419,6 +2420,7 @@ static void read_parameters(int argc, char** argv) {
   double_message[48] =
       Param.theAcousticPoroelasticPressurePenaltyFactor;
   double_message[49] = Param.theCpmlAcousticSpongeFraction;
+  double_message[50] = Param.the3DVelocityModelAzimuth;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2460,6 +2462,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlMpmlCrossFraction = double_message[34];
   Param.theCpmlAlphaFloorFraction = double_message[35];
   Param.theCpmlAcousticSpongeFraction = double_message[49];
+  Param.the3DVelocityModelAzimuth = double_message[50];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
   Param.thePoroelasticDepthMaxM = double_message[38];
@@ -2649,6 +2652,9 @@ static void read_parameters(int argc, char** argv) {
 #ifdef PROJ
   /* Compute UTM Zone */
   Param.utmZone = getUTMZone(Param.theRegionLat, Param.theRegionLong);
+  Param.utmZone.domain_frame = horizontal_frame(Param.theDomainAzimuth);
+  general3DVelocityModel_set_rotation(
+      Param.the3DVelocityModelAzimuth - Param.theDomainAzimuth);
   Param.utmZone.refPoint = convertLatLonToUTM(
       Param.theRegionLat, Param.theRegionLong, Param.utmZone.P);
   /* Compute the corners of the surface */
@@ -2656,14 +2662,14 @@ static void read_parameters(int argc, char** argv) {
   corners (except the origin) are not used when the PROJ library is used.
   But it can be printed for post-processing purposes. */
   UTMCoordinates_t cornersUTM[4];
-  cornersUTM[0].n = Param.utmZone.refPoint.n;
-  cornersUTM[0].e = Param.utmZone.refPoint.e;
-  cornersUTM[1].n = cornersUTM[0].n + Param.theDomainX;
-  cornersUTM[1].e = cornersUTM[0].e;
-  cornersUTM[2].n = cornersUTM[0].n + Param.theDomainX;
-  cornersUTM[2].e = cornersUTM[0].e + Param.theDomainY;
-  cornersUTM[3].n = cornersUTM[0].n;
-  cornersUTM[3].e = cornersUTM[0].e + Param.theDomainY;
+  const double cornerX[4] = {0, Param.theDomainX, Param.theDomainX, 0};
+  const double cornerY[4] = {0, 0, Param.theDomainY, Param.theDomainY};
+  for (int i = 0; i < 4; ++i) {
+    horizontal_to_parent(Param.utmZone.domain_frame, cornerX[i], cornerY[i],
+                         &cornersUTM[i].n, &cornersUTM[i].e);
+    cornersUTM[i].n += Param.utmZone.refPoint.n;
+    cornersUTM[i].e += Param.utmZone.refPoint.e;
+  }
   double lat, lon;
   for (int iCorner = 0; iCorner < 4; iCorner++) {
     convertUTMToLatLon(cornersUTM[iCorner], Param.utmZone.P, &lat, &lon);
@@ -2998,6 +3004,12 @@ static int32_t parse_parameters(const char* numericalin) {
     fprintf(stderr, "Error reading region origin from %s\n", physicsin);
     return -1;
   }
+
+  if (!isfinite(region_azimuth_leftface_deg)) {
+    fprintf(stderr, "region_azimuth_leftface_deg must be finite\n");
+    return -1;
+  }
+  region_azimuth_leftface_deg = remainder(region_azimuth_leftface_deg, 360.0);
 
   if (strcasecmp(type_of_damping, "rayleigh") == 0) {
     typeOfDamping = RAYLEIGH;
@@ -4195,6 +4207,38 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   /* 3D Velocity Model */
+  /* An omitted angle follows the domain; an explicit zero still selects
+   * UTM north/east axes in a PROJ build. */
+  Param.the3DVelocityModelAzimuth = region_azimuth_leftface_deg;
+  const int material_azimuth_status =
+      hu_config_get_double_opt(fp, "3D_velocity_model_azimuth_deg",
+                               &Param.the3DVelocityModelAzimuth);
+  if (material_azimuth_status < 0 ||
+      !isfinite(Param.the3DVelocityModelAzimuth)) {
+    fprintf(stderr, "3D_velocity_model_azimuth_deg must be finite\n");
+    return -1;
+  }
+  Param.the3DVelocityModelAzimuth =
+      remainder(Param.the3DVelocityModelAzimuth, 360.0);
+#ifndef PROJ
+  /* Inheriting the domain keeps the existing corner-aligned material axes.
+   * Preserve the restriction on explicit nonzero overrides without PROJ. */
+  if (material_azimuth_status == 1 && Param.the3DVelocityModelAzimuth != 0.0) {
+    fprintf(stderr, "3D_velocity_model_azimuth_deg requires a PROJ build; "
+                    "without PROJ the material axes follow the domain corners\n");
+    return -1;
+  }
+#else
+  /* These legacy readers have their own unrotated database coordinates. */
+  if (region_azimuth_leftface_deg != 0.0 &&
+      (strcasecmp(Param.cvmdb_input_file, "profile") != 0 ||
+       includeIstanbulVelModel == YES)) {
+    fprintf(stderr, "Rotated PROJ domains require cvmdb_input_file=profile "
+                    "and Istanbul_velocity_model=no; the general 3D and "
+                    "basin models are supported\n");
+    return -1;
+  }
+#endif
   if (strcasecmp(threeDModel, "yes") == 0) {
     include3DVelModel = YES;
     parsetext(fp, "3D_velocity_model_directory", 's', &Param.the3DVelModelDir);
@@ -4633,6 +4677,12 @@ static int32_t parse_parameters(const char* numericalin) {
   monitor_print("Include 3D Velocity model:          %s\n", threeDModel);
 #ifdef PROJ
   monitor_print("Use PROJ library:                   yes\n");
+  monitor_print("Domain +X azimuth:                  %.17g deg clockwise from UTM grid north\n",
+                Param.theDomainAzimuth);
+  monitor_print("3D grid +X azimuth:                 %.17g deg clockwise from UTM grid north\n",
+                Param.the3DVelocityModelAzimuth);
+  monitor_print("Coordinate/output frame:            solver-local X/Y, Z down; vectors and tensors use these axes\n");
+  monitor_print("Local geometry:                     topography, groundwater, buildings, DRM and plane strikes use solver axes\n");
 #endif
   if (typeOfDamping >= BKT) {
     monitor_print("Use Parametric Q factor:            %s\n", use_parametricq);
@@ -5074,6 +5124,12 @@ int getBasinMaterial(cvmpayload_t* g_props, vector3D_t basinVelModel_origin,
   int res = 0;
   double x_rel = x_m - basinVelModel_origin.x[0];
   double y_rel = y_m - basinVelModel_origin.x[1];
+#ifdef PROJ
+  double north, east;
+  horizontal_to_parent(Param.utmZone.domain_frame, x_rel, y_rel, &north, &east);
+  x_rel = north;
+  y_rel = east;
+#endif
   if (isInBasin(Param.basinData, Param.basinXCount, Param.basinYCount,
                 Param.basinIncrement, x_rel, y_rel, z_m) == 0) {
     getBasinMaterialProperties(g_props, z_m,
@@ -26718,6 +26774,9 @@ static void read_stations_info(const char* numericalin) {
 
   parsetext(fp, "output_stations_directory", 's', Param.theStationsDirOut);
   createDir(Param.theStationsDirOut, fname);
+  if (write_domain_frame(Param.theStationsDirOut, &Param.utmZone) != 0) {
+    solver_abort(fname, NULL, "Cannot write station coordinate_frame.txt");
+  }
   Param.theStationMediumsFile[0] = '\0';
   parsetext(fp, "station_mediums_output_file", 's',
             Param.theStationMediumsFile);
@@ -29685,6 +29744,10 @@ int main(int argc, char** argv) {
                  Param.planes_input_file, &Param.utmZone,
                  Param.reconstructAcousticPlaneDisplacements);
     Timer_Stop("Pre Setup Planes Init");
+    if (Global.myID == 0 &&
+        write_domain_frame(Param.thePlaneDirOut, &Param.utmZone) != 0) {
+      solver_abort(__FUNCTION_NAME, NULL, "Cannot write plane coordinate_frame.txt");
+    }
 
     planesSetupElapsed = MPI_Wtime() - planesSetupStart;
     MPI_Reduce(&planesSetupElapsed, &planesSetupElapsedMax, 1, MPI_DOUBLE,
@@ -29735,7 +29798,7 @@ int main(int argc, char** argv) {
                    Param.includeTopography == YES,
                    Param.stationOutputBinaryFile,
                    Param.theDomainX, Param.theDomainY, Param.theDomainZ,
-                   Global.mySolver, Param.theDeltaT);
+                   Global.mySolver, Param.theDeltaT, &Param.utmZone);
   solver_init_station_ve_stress_gpu(Global.myID);
   Timer_Stop("Pre Setup Solver Init");
   Timer_Start("Solver Stats Print");

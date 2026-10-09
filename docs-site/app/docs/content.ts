@@ -1101,7 +1101,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "groups",
         title: "Complete parameter reference",
         paragraphs: [
-          "The categorized pages below document all 244 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
+          "The categorized pages below document all 245 unique keys currently consumed from parameters.in by psolve and its active feature modules. Each entry states whether it is required, conditional, optional, or a legacy compatibility alias, together with its type, accepted values or default, and scientific or operational meaning.",
         ],
         table: {
           headers: ["Reference page", "Documented entries"],
@@ -1217,10 +1217,37 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
       },
       {
+        id: "rotated-domain",
+        title: "Rotated domains and material grids",
+        paragraphs: [
+          "With PROJ, region_azimuth_leftface_deg rotates solver +X clockwise from UTM grid north about the region origin. +Y is 90 degrees clockwise from +X; Z remains positive down. The north/east length parameters remain the local X/Y side lengths. This is grid north in the origin's UTM zone, not true north or a rotation about the rectangle's centre.",
+          "If 3D_velocity_model_azimuth_deg is omitted, it inherits region_azimuth_leftface_deg, aligning the material axes with the solver axes. Explicit values override this default: set 0 to keep an existing north/east material grid geographically fixed while the solver domain rotates. Prepare x.in/y.in in the selected material frame. The material origin may differ from the domain origin.",
+          "The example below is an input-format example, not a validated scientific case. With a 30-degree domain and zero-degree material grid, solver (X,Y)=(1000,0) lies 866.025 m north and 500 m east of the origin. When the material angle is omitted or explicitly set to 30 degrees, matching origins make the same point query material (x,y)=(1000,0).",
+        ],
+        codeLabel: "parameters.in — add to a complete case",
+        code: "region_origin_latitude_deg  = 37.791109\nregion_origin_longitude_deg = 26.383378\nregion_length_north_m       = 90000\nregion_length_east_m        = 90000\nregion_depth_shallow_m      = 0\nregion_depth_deep_m         = 39375\nregion_azimuth_leftface_deg = 30\n\ncvmdb_input_file = profile\nIstanbul_velocity_model = no\nbasin_velocity_model = no\n3D_velocity_model = yes\n3D_velocity_model_directory = input/materialfiles\n3D_velocity_model_origin_latitude_deg  = 37.791109\n3D_velocity_model_origin_longitude_deg = 26.383378\n# Omit the next line for a material grid aligned with the domain.\n3D_velocity_model_azimuth_deg = 0  # explicit override: UTM north/east grid",
+        bullets: [
+          "Geographic stations, plane origins, point sources, SRFH sources, and planar-fault origins use the rotated mapping. Geographic source strikes are corrected from true north into solver axes. Cartesian source coordinates and body-force components remain solver-local. Plane and DRM-box strikes and incident-wave directions are measured from solver +X.",
+          "Topography, groundwater, building coordinates, local DRM geometry, and directional permeability must be prepared in solver axes. These local-coordinate files have no geographic header and are not automatically resampled. Basin grids retain UTM north/east axes under PROJ. Legacy etree CVM and Istanbul readers reject nonzero domain rotation; use a valid profile background, optionally with the general 3-D or basin model.",
+          "Material queries rotate into the material axes after CPML extension clamps in solver coordinates. Cached topographic elevations at material columns use the inverse transform. Topography outside its horizontal coverage retains the reader's existing edge clamping. Extend material coverage beyond all intended sample points, including interpolation stencils.",
+          "All displacement, velocity, acceleration, stress, strain, and exported XYZ coordinates remain in solver axes. PROJ writes coordinate_frame.txt in station, plane, and DRM output directories, overwriting it at setup. It contains the UTM zone, hemisphere, origin N0/E0, and rotation c/s; binary layouts are unchanged. For station_binary=yes, this metadata is in output_stations_directory even if the binary file is elsewhere.",
+          "Rebuild persisted meshes and regenerate source forces after changing either azimuth or origin. Non-PROJ builds retain their corner mapping and solver-aligned material grid when the material angle is omitted or explicitly 0; explicit nonzero overrides require PROJ. Local geometry/interpolation checks do not establish CUDA/MPI benchmark validation.",
+        ],
+      },
+      {
+        id: "rotated-output-reader",
+        title: "Convert solver output to UTM north/east",
+        paragraphs: [
+          "Use the sidecar coefficients with any station, plane, or DRM vector. Add N0/E0 only for positions. UTM north/east components differ from true geographic north/east by meridian convergence; obtain latitude/longitude by inverse projection in the recorded UTM zone. For tensors use A T A-transpose, where A has rows (c,-s,0), (s,c,0), (0,0,1).",
+        ],
+        codeLabel: "Python — read coordinate_frame.txt and convert horizontal coordinates",
+        code: "from pathlib import Path\n\nframe = dict(line.split(\" = \", 1) for line in\n             Path(\"outputfiles/stations/coordinate_frame.txt\").read_text().splitlines()\n             if line and not line.startswith(\"#\"))\nc, s = float(frame[\"c\"]), float(frame[\"s\"])\n\ndef vector_to_utm(ux, uy, uz):\n    return c*ux - s*uy, s*ux + c*uy, uz\n\ndef position_to_utm(x, y):\n    return float(frame[\"N0\"]) + c*x - s*y, float(frame[\"E0\"]) + s*x + c*y",
+      },
+      {
         id: "velocity-model-configuration",
         title: "Configure a three-dimensional velocity model",
         paragraphs: [
-          "The general 3-D model replaces the background material inside its horizontal footprint. The origin parameters locate the model's lower-left corner geographically; x.in is distance north and y.in is distance east from that origin.",
+          "The general 3-D model replaces the background material inside its horizontal footprint. The origin parameters locate the model's (x=0,y=0) point geographically; x.in and y.in are metre offsets along the material axes set by 3D_velocity_model_azimuth_deg (inherits region_azimuth_leftface_deg when omitted).",
           "Keep the fallback cvmdb_input_file or profile valid because Hercules uses it outside the structured model. Do not enable the Istanbul or basin replacement for the same case unless their priority over the general 3-D model is intentional.",
         ],
         codeLabel: "parameters.in",
@@ -1232,7 +1259,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "3-D model files and ordering",
         paragraphs: [
           "A convenient way to prepare a model is one row per material sample with columns x, y, z, Vs, Vp, and density. That row-wise CSV is only a preparation format: Hercules reads the separate count-prefixed files listed below. The column order in your preparation table is your choice, but the converted filenames and their meanings are fixed.",
-          "Coordinates use the solver convention: x is distance north, y is distance east, and z is depth positive downward, all in metres. x.in and y.in must each contain at least two strictly increasing, uniformly spaced coordinates. The x and y spacings may differ, but the spacing within either axis must remain constant.",
+          "Coordinates use the material-grid frame: x and y follow 3D_velocity_model_azimuth_deg (inherits region_azimuth_leftface_deg when omitted), and z is depth positive downward, all in metres. x.in and y.in must each contain at least two strictly increasing, uniformly spaced coordinates. The x and y spacings may differ, but the spacing within either axis must remain constant.",
           "Treat y as the outer loop and x as the inner loop. For zero-based indices i and j, profile_id = j * nx + i, where i is the x index and j is the y index. Therefore write every x profile at y0 before advancing to y1: (x0,y0), (x1,y0), ..., (x0,y1), (x1,y1), ....",
           "Within one x-y profile, write z from shallow to deep with no duplicate depths. Different profiles may use different z values and different numbers of layers. Append the matching Vs, Vp, density, and optional Q values in exactly the same order as z.in.",
         ],
@@ -1247,8 +1274,8 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         table: {
           headers: ["File", "Units", "Contents"],
           rows: [
-            ["x.in", "m", "Unique northward coordinates, ascending and uniformly spaced"],
-            ["y.in", "m", "Unique eastward coordinates, ascending and uniformly spaced"],
+            ["x.in", "m", "Material-grid X coordinates, ascending and uniformly spaced"],
+            ["y.in", "m", "Material-grid Y coordinates, ascending and uniformly spaced"],
             ["z.in", "m", "Depth levels, concatenated in index.in profile order"],
             ["vs.in", "m/s", "Shear-wave speed for every z.in entry; zero is permitted for acoustic material"],
             ["vp.in", "m/s", "Compressional-wave speed for every z.in entry"],
@@ -1752,7 +1779,7 @@ if __name__ == "__main__":
             ["hypocenter_lat_deg / hypocenter_long_deg", "Required when coordinate mode is 0", "Geographic hypocentre latitude and longitude in degrees."],
             ["hypocenter_x / hypocenter_y", "Required when coordinate mode is 1", "Local x and y coordinates in metres."],
             ["hypocenter_depth_m", "Required", "Depth in metres, positive downward."],
-            ["source_strike_deg", "Required", "Fault strike in degrees clockwise from north."],
+            ["source_strike_deg", "Required", "Fault strike in degrees clockwise from true north for geographic sources, or solver +X for Cartesian sources."],
             ["source_dip_deg", "Required", "Fault dip in degrees."],
             ["source_rake_deg", "Required", "Slip rake in degrees."],
           ],
@@ -1764,7 +1791,7 @@ if __name__ == "__main__":
         id: "force-source",
         title: "Single-point body-force source",
         paragraphs: [
-          "The force model applies F(t) = (Fx, Fy, Fz) s(t) at one point and distributes it to the containing eight-node element with trilinear shape functions. The simulation frame is x north, y east, and z positive downward.",
+          "The force model applies F(t) = (Fx, Fy, Fz) s(t) at one point and distributes it to the containing eight-node element with trilinear shape functions. The simulation frame uses local solver X/Y and Z positive downward; X/Y coincide with UTM north/east at zero domain azimuth.",
         ],
         table: {
           headers: ["Key", "Requirement", "Meaning"],
@@ -1803,7 +1830,7 @@ if __name__ == "__main__":
             ["source_function_type", "Required: discrete", "base_force accepts only a tabulated velocity history."],
             ["base_force_rho_kgm3", "Required; positive", "Base or bedrock density in kg/m3."],
             ["base_force_vs_mps", "Required; positive", "Base or bedrock shear-wave speed in m/s."],
-            ["base_force_direction_x/y/z", "Required; nonzero vector", "Propagation/polarization direction in the x-north, y-east, z-down frame; Hercules normalizes the vector."],
+            ["base_force_direction_x/y/z", "Required; nonzero vector", "Propagation/polarization direction in the solver-local X/Y, Z-down frame; Hercules normalizes the vector."],
             ["base_force_scale", "Optional; default 1", "Use 1 for an incident/within motion and commonly 2 for an outcrop motion."],
             ["base_force_depth_m", "Optional", "Target base depth in metres; omission selects the deepest mesh-node plane."],
             ["base_force_tolerance_m", "Optional", "Positive depth-matching tolerance; omission uses 1% of the minimum mesh edge."],
@@ -1828,7 +1855,7 @@ if __name__ == "__main__":
             ["extended_cell_size_down_dip_m", "Required", "Subfault-cell length down dip."],
             ["extended_cells_along_strike / extended_cells_down_dip", "Required", "Number of fault cells in each direction."],
             ["extended_lat_deg / extended_long_deg / extended_depth_m", "Required", "Geographic location and depth of the plane origin."],
-            ["extended_strike_deg / extended_dip_deg", "Required", "Fault-plane orientation in degrees."],
+            ["extended_strike_deg / extended_dip_deg", "Required", "Fault-plane orientation in degrees. Under PROJ, strike is clockwise from true north at the fault origin and is transformed into solver axes."],
             ["extended_hypocenter_along_strike_m", "Required", "Hypocentre distance from the origin along strike."],
             ["extended_hypocenter_down_dip_m", "Required", "Hypocentre distance from the origin down dip."],
             ["extended_average_rupture_velocity", "Required", "Average rupture speed in m/s."],
@@ -1909,7 +1936,7 @@ if __name__ == "__main__":
         title: "Source validation checklist",
         bullets: [
           "Confirm source coordinates fall inside the domain and use the intended geographic or Cartesian convention.",
-          "Check positive-down z, x-north, and y-east signs before interpreting force or station components.",
+          "Check positive-down Z and the local solver X/Y frame before interpreting force or station components.",
           "Plot every analytical or tabulated source-time function at its native sample interval.",
           "Verify scalar moment, force, slip, area, density, velocity, and time units independently.",
           "For finite faults, check matrix dimensions and point ordering before starting a large run.",
@@ -1961,7 +1988,7 @@ if __name__ == "__main__":
         "title": "Write all station displacements to one binary file",
         "paragraphs": [
           "Set station_binary=yes and station_output_binary_file to record the existing output_stations list in one file. station_binary defaults to no, which preserves the existing station.N output functions. Binary mode requires number_output_stations>0 and a positive output_stations_print_rate. Coordinates still come from output_stations as latitude longitude depth, with the existing geographic conversion and surface-relative building/topography shifts.",
-          "The file is headerless native-endian float64 [snapshot, station, XYZ] displacement in metres, where XYZ means solver north, east, down. Input row order is preserved, including duplicate rows. Every station must have exactly one owner. The existing station interpolation handles solid/skeleton displacement, topography cut cells, and reconstructed scalar-acoustic motion.",
+          "The file is headerless native-endian float64 [snapshot, station, XYZ] displacement in metres, where XYZ means solver-local X/Y, Z down. PROJ writes the geographic mapping in coordinate_frame.txt in output_stations_directory. Input row order is preserved, including duplicate rows. Every station must have exactly one owner. The existing station interpolation handles solid/skeleton displacement, topography cut cells, and reconstructed scalar-acoustic motion.",
           "Binary mode writes displacement only. It ignores print_station_* switches, nonlinear diagnostic columns, output_stations_directory, and station_mediums_output_file. No per-station text files or station metadata sidecar are created. The filename is required only with station_binary=yes and is ignored otherwise. Paths contain 1 to 240 bytes, resolve from the run directory without tilde expansion, and have parent directories created automatically."
         ],
         "codeLabel": "parameters.in — one displacement file, using the existing station table",
@@ -2025,8 +2052,8 @@ if __name__ == "__main__":
         "title": "Record multiple DRM boxes",
         "paragraphs": [
           "Use number_output_drm_boxes, output_drm_boxes_print_rate, output_drm_boxes_directory, and the output_drm_boxes table, following the plane-output style. Each row writes one headerless native-float64 drmdisplacements.N file plus a matching ASCII drmcoordinates.N file, numbered from zero in row order. Coordinate output is automatic; no extra parameter is needed. Each file contains ten structured faces: front, back, left, right, and bottom on both exterior and interior sides. There is no top lid.",
-          "Each row has seven values: drm_offset_x drm_offset_y length_x length_y depth drm_edgesize strk. The offsets locate the top center in solver X/north and Y/east metres from the domain origin. The three dimensions describe the exterior box. With h=drm_edgesize, the interior dimensions are (length_x − 2h, length_y − 2h, depth − h), centered on the same X/Y location with the same top elevation. Spacing must be positive; lengths must exceed 2h and depth must exceed h; all dimensions must be integer multiples of h.",
-          "Strike rotates the box clockwise from north in degrees: for box-local horizontal coordinates (x,y), global X = center_x + x*cos(strk) − y*sin(strk), and global Y = center_y + x*sin(strk) + y*cos(strk). Zero strike aligns local X/Y with solver X/Y. The output displacement components remain solver X/Y/Z; they are not rotated into box-local components.",
+          "Each row has seven values: drm_offset_x drm_offset_y length_x length_y depth drm_edgesize strk. The offsets locate the top center in solver-local X/Y metres from the domain origin. The three dimensions describe the exterior box. With h=drm_edgesize, the interior dimensions are (length_x − 2h, length_y − 2h, depth − h), centered on the same X/Y location with the same top elevation. Spacing must be positive; lengths must exceed 2h and depth must exceed h; all dimensions must be integer multiples of h.",
+          "Strike rotates the box clockwise from solver +X in degrees: for box-local horizontal coordinates (x,y), global X = center_x + x*cos(strk) − y*sin(strk), and global Y = center_y + x*sin(strk) + y*cos(strk). Zero strike aligns local X/Y with solver X/Y. The output displacement components remain solver X/Y/Z; they are not rotated into box-local components.",
           "This independent recorder works with implement_drm=no. It requires no drm_boundary or standalone drm_offset_x/y/drm_edgesize keys. Sampling does not refine the mesh. All generated points must lie inside the simulation domain and have exactly one owning solid element. A box centered at (0,0) extends to negative X/Y at zero strike; choose a center that keeps the full rotated footprint inside the domain."
         ],
         "codeLabel": "parameters.in — two boxes; all distances in metres, strike in degrees",
@@ -2081,13 +2108,13 @@ if __name__ == "__main__":
             ]
           ]
         },
-        "note": "The file stores global X/north, Y/east, Z/down displacement in metres, in native-endian float64 triples. The companion ASCII table records the actual sample positions. Keep the input box row to identify face shapes and offsets. No timestamps, velocities, accelerations, pressure, or stress are embedded."
+        "note": "The file stores solver-local X/Y, Z/down displacement in metres, in native-endian float64 triples. The companion ASCII table records the actual sample positions. Keep the input box row to identify face shapes and offsets. No timestamps, velocities, accelerations, pressure, or stress are embedded."
       },
       {
         "id": "drm-coordinate-file",
         "title": "ASCII coordinates for every DRM sample",
         "paragraphs": [
-          "drmcoordinates.N has comment headers beginning with #, followed by three whitespace-separated columns X_m Y_m Z_m. Coordinates are solver X/north, Y/east, Z/positive-down in metres after strike rotation and the same building/topography depth shifts used for interpolation. Z includes those shifts in the solver coordinate frame. Data row i (zero-based, excluding comments) matches binary sample i in every snapshot, including repeated edge/corner rows; points are never sorted or deduplicated.",
+          "drmcoordinates.N has comment headers beginning with #, followed by three whitespace-separated columns X_m Y_m Z_m. Coordinates are solver-local X/Y, Z/positive-down in metres after strike rotation and the same building/topography depth shifts used for interpolation. Z includes those shifts in the solver coordinate frame. Data row i (zero-based, excluding comments) matches binary sample i in every snapshot, including repeated edge/corner rows; points are never sorted or deduplicated.",
           "The header gives the point count, axes and row convention. Values use 17 significant digits with a locale-independent decimal point, allowing exact float64 round trips. Solver rank zero writes and closes the ASCII file once during setup after point ownership validation. Every run overwrites it, including restarts; keep each coordinate/binary pair together. This adds no per-step I/O or GPU transfers."
         ],
         "codeLabel": "First data rows for box 0 on flat terrain with zero surface shift",
@@ -2141,7 +2168,7 @@ if __name__ == "__main__":
         id: "plane-amplitude-diagnostics",
         title: "Plane-point metadata and motion interpretation",
         paragraphs: [
-          "Use script/read_planes.py to inspect completed plane layout, finite values and vertical peak motion. The largest displacements need not coincide with the largest differences between output backends. Indices are zero-based and components are solver X/north, Y/east, Z/down in metres. The saved interval is output_planes_print_rate times simulation_delta_time_sec.",
+          "Use script/read_planes.py to inspect completed plane layout, finite values and vertical peak motion. The largest displacements need not coincide with the largest differences between output backends. Indices are zero-based and components are solver-local X/Y, Z/down in metres. The saved interval is output_planes_print_rate times simulation_delta_time_sec.",
           "HERCULES_PLANE_METADATA=1 enables a setup-only audit after solver_init establishes CPML membership. Each solver MPI rank owning plane points writes plane_point_metadata.RANK.csv in output_planes_directory. The suffix is the rank, not the plane number; each file can contain several planes. Ranks without points write no file. This works with every plane backend and adds no per-step work. The export contains no pressure, velocity or displacement histories.",
           "Rows contain plane,i,j,rank,element,x_m,y_m,z_m,medium,cpml,vp_m_s,vs_m_s,rho_kg_m3,h_m,valid,topostrip,acoustic_reconstruction,pressure_defined. Element IDs are local to the rank. Coordinates include plane rotation and topography/building shifts. Speeds are m/s, density is kg/m³ and h_m is element width in metres. Medium is acoustic, solid, inactive or unknown; solid alone does not identify its constitutive law. CPML membership is 0 outside, 1 inside, or -1 unresolved. The final flags record point validity, tetrahedral topography interpolation, configured acoustic reconstruction and availability of its full hex pressure stencil.",
           "A geometric boundary band is only a CPML candidate region. Join metadata using (plane,i,j), reject duplicate ownership and keep missing ownership unknown. Do not mix rank files from different runs. A short run with the same saved mesh, materials, topography and plane configuration can supply metadata for existing displacement output. Use fresh output directories because plane setup truncates displacement files.",

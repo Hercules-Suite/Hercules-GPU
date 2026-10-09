@@ -145,7 +145,7 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
 void setup(int32_t rank, const char* parameters, double surface_shift,
            int topography, const char* station_binary_path,
            double domain_x, double domain_y, double domain_z,
-           mysolver_t* solver, double delta_t) {
+           mysolver_t* solver, double delta_t, const UTMZone_t* utmZone) {
     int box_count = 0, box_rate = 0, batch_size = 16;
     char directory[256] = "";
     std::vector<drm_output::BoxSpec> boxes;
@@ -193,7 +193,7 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
             coordinate_path = output_paths[static_cast<size_t>(index) * 2 + 1];
             drm_output::BoxGeometry geometry = drm_output::box_faces(boxes[index]);
             printf("DRM box %d: top center=(%.17g,%.17g), exterior=(%.17g,%.17g,%.17g), "
-                   "spacing=%.17g m, strike=%.17g deg clockwise from north\n", index,
+                   "spacing=%.17g m, strike=%.17g deg clockwise from solver +X\n", index,
                    boxes[index][0], boxes[index][1], boxes[index][2], boxes[index][3],
                    boxes[index][4], boxes[index][5], boxes[index][6]);
             for (const drm_output::Face& face : geometry.faces)
@@ -204,6 +204,8 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
         setup_recording(rank, points, path, coordinate_path, box_rate, batch_size,
                         surface_shift, topography, domain_x, domain_y, domain_z, solver, delta_t);
     }
+    if (rank == 0 && box_count > 0 && write_domain_frame(directory, utmZone) != 0)
+        throw std::runtime_error("Cannot write DRM coordinate_frame.txt");
 }
 
 } // namespace
@@ -211,10 +213,10 @@ void setup(int32_t rank, const char* parameters, double surface_shift,
 void drm_output_setup(int32_t rank, const char* parameters, double surface_shift,
                       int topography, const char* station_binary_path,
                       double domain_x, double domain_y, double domain_z,
-                      mysolver_t* solver, double delta_t) {
+                      mysolver_t* solver, double delta_t, const UTMZone_t* utmZone) {
     try {
         setup(rank, parameters, surface_shift, topography, station_binary_path,
-              domain_x, domain_y, domain_z, solver, delta_t);
+              domain_x, domain_y, domain_z, solver, delta_t, utmZone);
     } catch (const std::exception& error) {
         solver_abort("drm_output_setup", NULL, "%s", error.what());
     }

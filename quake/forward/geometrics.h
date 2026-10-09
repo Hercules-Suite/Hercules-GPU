@@ -23,6 +23,7 @@
 	#include <proj.h>
 #endif
 #include "psolve.h"
+#include "horizontal_frame.h"
 
 
 #define PI 3.14159265358979323846264338327
@@ -66,6 +67,7 @@ typedef struct {
     int zone;
     char hemisphere;
 	UTMCoordinates_t refPoint;
+	horizontal_frame_t domain_frame;
 	#ifdef PROJ
 		PJ *P;
 	#endif
@@ -77,6 +79,13 @@ compute_domain_coords_linearinterp(
 	double domainlengthetha, double domainlengthcsi, UTMZone_t* utmZone);
 
 UTMZone_t getUTMZone(double latitude, double longitude);
+/* Geographic strike clockwise from true north -> solver-local strike.
+ * Derive north in the same mapping used for source and receiver locations. */
+double compute_domain_strike(double strike, double lon, double lat,
+    double* longcorner, double* latcorner, double domain_y, double domain_x,
+    UTMZone_t* utmZone);
+/* Write coordinate_frame.txt alongside output; no-op for corner mapping. */
+int write_domain_frame(const char* directory, const UTMZone_t* utmZone);
 #ifdef PROJ
 	UTMCoordinates_t convertLatLonToUTM(double latitude, double longitude, PJ *P);
 	void convertUTMToLatLon(UTMCoordinates_t utmCoordinates, PJ *P, double *latitude, double *longitude);

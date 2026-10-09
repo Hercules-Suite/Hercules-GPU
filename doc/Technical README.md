@@ -43,7 +43,8 @@ launches. See [launcher details](Extended%20README.md#launch-a-simulation).
 
 Use one `parameters.in`; source-specific controls stay in `source.in` and its
 auxiliary files. Start from a current [benchmark case](../benchmark_inputs/).
-Use SI units, solver X north, Y east, and Z/depth positive downward.
+Use SI units and Z/depth positive downward. At zero PROJ azimuth, solver
+X/Y follow UTM north/east; rotated runs use local X/Y axes.
 
 - Domain extents must be compatible with a common dyadic octree level. The
   depth extent is deep minus shallow depth. Set `maximum_octant_level` from
@@ -70,15 +71,26 @@ interactions are in the
 [full parameter catalog](../docs-site/app/docs/parameter-reference.ts) and the
 [Extended README](Extended%20README.md).
 
-- **Domain geometry:** `region_depth_shallow_m`, `region_length_east_m`, `region_length_north_m`,
-  `region_depth_deep_m`.
+- **Domain geometry:** `region_origin_latitude_deg`, `region_origin_longitude_deg`,
+  `region_azimuth_leftface_deg`, `domain_surface_corners`, `region_depth_shallow_m`, `region_length_east_m`, `region_length_north_m`,
+  `region_depth_deep_m`. PROJ azimuth is clockwise from UTM grid north;
+  rotate about the origin and retain local X/Y lengths. See
+  [domain rotation and output conversion](Extended%20README.md#rotated-domains-and-material-grids).
 - **Time integration and spatial resolution:** `simulation_delta_time_sec`,
   `simulation_wave_max_freq_hz`, `simulation_node_per_wavelength`, `simulation_shear_velocity_min`.
 - **Base material model:** `cvmdb_input_file`.
 - **Optional regional material models:** `Istanbul_velocity_model`, `basin_velocity_model`,
   `basin_origin_latitude_deg`, `basin_origin_longitude_deg`, `basin_input_file`,
   `basin_material_type`, `basin_water_vp`, `basin_water_rho`, `3D_velocity_model`,
-  `3D_velocity_model_directory`.
+  `3D_velocity_model_directory`, `3D_velocity_model_origin_latitude_deg`,
+  `3D_velocity_model_origin_longitude_deg`, `3D_velocity_model_azimuth_deg`
+  (optional, defaults to `region_azimuth_leftface_deg` when omitted; finite
+  degrees clockwise from UTM grid north). Material axes follow solver axes by
+  default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,
+  omission or explicit `0` retains solver-aligned axes; explicit nonzero
+  overrides require PROJ. Rotated PROJ domains require a profile
+  background and disable the legacy Istanbul reader. Rebuild meshes/sources
+  when either frame changes; PROJ output directories include `coordinate_frame.txt`.
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.
@@ -319,7 +331,7 @@ results. [Extended README](Extended%20README.md) holds the engineering detail;
 ## Structured DRM box output
 
 Each `output_drm_boxes` row gives top-center X/Y, exterior lengths X/Y, depth,
-spacing h, and clockwise strike from north. Hercules writes one
+spacing h, and clockwise strike from solver +X. Hercules writes one
 `drmdisplacements.N` containing five exterior and five interior face grids;
 interior dimensions are `(Lx-2h, Ly-2h, depth-h)`. Configure
 `number_output_drm_boxes`, `output_drm_boxes_print_rate`, and
@@ -327,7 +339,7 @@ interior dimensions are `(Lx-2h, Ly-2h, depth-h)`. Configure
 replay and does not refine the mesh.
 
 Each box also writes `drmcoordinates.N` once during setup: an ASCII table of
-solver X/north, Y/east, Z/down in metres, including terrain/building shifts.
+solver-local X/Y, Z/down in metres, including terrain/building shifts.
 Its rows match binary sample order exactly, including repeated edges/corners.
 
 See [the complete geometry, layout, and reader examples](Extended%20README.md#structured-drm-box-output).

@@ -10,7 +10,8 @@ with the solver. Current parser and solver code under `quake/forward/` take
 precedence over historical notes.
 
 Use one `parameters.in` for simulation controls and `source.in` for
-source-specific controls. Units are SI; solver X is north, Y is east, and
+source-specific controls. Units are SI; at zero PROJ azimuth solver X is UTM
+grid north and Y is grid east. Rotated runs use the local axes described below;
 Z/depth is positive downward. Nonlinear examples require case-specific
 calibration of geostatic state, tolerances, substeps, damping, and material
 properties. Reported historical benchmarks apply to their stated cases and
@@ -18,6 +19,7 @@ versions; consolidating these documents does not validate new combinations.
 
 ## Contents
 
+- [Domain rotation](#rotated-domains-and-material-grids)
 - [Domain sizing](#octree-compatible-domain-sizing) and [compilation](#host-and-cuda-compilation)
 - [Runtime controls](#runtime-performance-controls) and [diagnostics](#advanced-and-diagnostic-controls)
 - [Launcher defaults](#phase-launcher-defaults), [launching](#launch-a-simulation), and [mesh import](#mesh-generation-and-import)
@@ -39,6 +41,127 @@ versions; consolidating these documents does not validate new combinations.
 | `user.mk`      | User-specified compiler and linker settings. This should be the only file we need to change.
 | `systemdef.mk` | generic system-specific compile and linker settings. Tailored by entries in user.mk
 | `common.mk`    | system-independent settings
+
+## Rotated domains and material grids
+
+In a PROJ build, required `region_azimuth_leftface_deg` is the finite angle
+of solver +X clockwise from UTM grid north in the region origin's UTM zone.
+Angles are normalized modulo 360 degrees. Zero retains X north/Y east;
++Y is always 90 degrees clockwise from +X and Z stays positive down.
+`region_origin_latitude_deg` and `region_origin_longitude_deg` fix the
+rotation pivot at solver `(0,0)`, not the centre of the rectangle.
+`region_length_north_m` and `region_length_east_m` remain the local X and Y
+side lengths; shallow/deep depths and octree sizing rules are unchanged.
+UTM grid north is distinct from true geographic north.
+
+Optional `3D_velocity_model_azimuth_deg` (finite degrees) defaults to
+`region_azimuth_leftface_deg` when omitted, aligning the material axes with
+the solver axes. An explicit value sets the material grid's +X orientation
+independently in the same UTM zone; explicit `0` keeps UTM north/east axes.
+The required `3D_velocity_model_origin_latitude_deg` and
+`3D_velocity_model_origin_longitude_deg` locate its `(x=0,y=0)` point when
+`3D_velocity_model=yes`. `x.in` and `y.in` contain metre offsets along its
+own axes. Existing north/east grids require explicit `0`; a grid prepared
+along the rotated solver axes can omit the material angle. The two origins may
+differ. For domain angle $\theta$ and projected offsets $\Delta N,\Delta E$:
+
+```math
+\begin{aligned}
+X &= \cos\theta\,\Delta N + \sin\theta\,\Delta E,\\
+Y &= -\sin\theta\,\Delta N + \cos\theta\,\Delta E,\\
+\Delta N &= \cos\theta\,X - \sin\theta\,Y,\\
+\Delta E &= \sin\theta\,X + \cos\theta\,Y.
+\end{aligned}
+```
+
+After subtracting the material origin expressed in solver coordinates,
+rotate by the relative angle $\theta_{material}-\theta_{domain}$ into
+material-grid axes. CPML material extension clamps the query in solver
+coordinates first. Cached elevations at material columns use the inverse
+rotation back into solver topography coordinates. Topography beyond its
+horizontal coverage retains the existing edge-clamping behavior. Extend
+material coverage past every intended query and its interpolation stencil;
+the existing upper grid boundary remains exclusive.
+
+Example additions to a complete case (illustrative, not scientifically
+validated input):
+
+```ini
+region_origin_latitude_deg  = 37.791109
+region_origin_longitude_deg = 26.383378
+region_length_north_m       = 90000
+region_length_east_m        = 90000
+region_depth_shallow_m      = 0
+region_depth_deep_m         = 39375
+region_azimuth_leftface_deg = 30
+cvmdb_input_file = profile
+Istanbul_velocity_model = no
+basin_velocity_model = no
+3D_velocity_model = yes
+3D_velocity_model_directory = input/materialfiles
+3D_velocity_model_origin_latitude_deg  = 37.791109
+3D_velocity_model_origin_longitude_deg = 26.383378
+# Omit the next line for a material grid aligned with the domain.
+3D_velocity_model_azimuth_deg = 0  # explicit override: UTM north/east grid
+```
+
+For these matching origins, solver `(1000,0)` samples material
+`(866.0254,500)` metres with the explicit zero override. Omit the material
+azimuth or set it to `30` for a grid prepared along the domain axes; the same
+solver point then samples `(1000,0)`.
+A valid background profile and the other required simulation/source inputs
+are still necessary. Nonzero domain rotation currently requires the profile
+background and `Istanbul_velocity_model=no`: legacy etree CVM and Istanbul
+coordinate readers have not been migrated and are rejected. The general
+3-D and basin models are supported; a PROJ basin grid stays aligned with
+UTM north/east while queries rotate back into those axes.
+
+Geographic stations, output-plane origins, point/SRFH source locations,
+and planar-fault origins use the same mapping. Geographic fault strikes
+are corrected from true north into solver axes, including UTM convergence.
+Point/SRFH and kinked-fault strikes use quadrant-safe `atan2` directions.
+The PROJ planar-fault path now uses projected origin coordinates instead of
+the old constant metres-per-degree approximation. Cartesian source
+coordinates and force components remain local. Output-plane strikes,
+DRM-box strikes, and incident-wave directions are clockwise from solver +X.
+Topography, groundwater, buildings, local DRM inputs, and directional
+permeability use solver axes; prepare/resample these local grids for the
+rotated domain because their files carry no independent geographic frame.
+
+Output XYZ positions, displacement/velocity/acceleration vectors, and
+strain/stress components stay in solver axes. PROJ writes
+`coordinate_frame.txt` in each enabled station, plane, and structured DRM
+output directory. It is overwritten at setup, including restarts, and
+records `utm_zone`, `hemisphere`, `N0`, `E0`, `c`, and `s`, with
+$c=\cos\theta$ and $s=\sin\theta$. Binary layouts are unchanged. For
+`station_binary=yes`, the sidecar is in `output_stations_directory` even
+when `station_output_binary_file` is elsewhere. A Python reader is:
+
+```python
+from pathlib import Path
+frame = dict(line.split(" = ", 1) for line in
+             Path("outputfiles/stations/coordinate_frame.txt").read_text().splitlines()
+             if line and not line.startswith("#"))
+c, s = float(frame["c"]), float(frame["s"])
+def vector_to_utm(ux, uy, uz):
+    return c*ux - s*uy, s*ux + c*uy, uz
+
+def position_to_utm(x, y):
+    return float(frame["N0"]) + c*x - s*y, float(frame["E0"]) + s*x + c*y
+```
+
+Convert tensor components with $T_{UTM}=A T_{solver} A^T$, using
+$A=[[c,-s,0],[s,c,0],[0,0,1]]$. These are UTM grid components; conversion to
+true north/east additionally requires meridian convergence. Inverse-project
+positions using the recorded UTM zone and hemisphere for latitude/longitude.
+
+Rebuild persisted meshes and regenerate source forces whenever either
+origin or azimuth changes; previously stored material coefficients cannot
+be corrected by relabeling output. Non-PROJ builds retain the existing
+`domain_surface_corners` mapping and solver-aligned material axes when the
+material angle is omitted or explicitly `0`; explicit nonzero overrides of
+`3D_velocity_model_azimuth_deg` are rejected there. Local analytical geometry
+and interpolation checks do not establish CUDA/MPI simulation validation.
 
 ## Octree-compatible domain sizing
 
@@ -1772,8 +1895,9 @@ in `quake/forward/psolve.cc`.
 	`x.in`, `y.in`, `z.in`, `vs.in`, `vp.in`, `rho.in`, and `index.in`.
 	Every file begins with an integer count followed by that many values.
 	`x.in` and `y.in` contain at least two strictly increasing, uniformly
-	spaced coordinates in metres. Solver X is north and solver Y is east; the
-	axis spacings may differ from one another.
+	spaced coordinates in metres along the material axes defined by
+	`3D_velocity_model_azimuth_deg` (inherits `region_azimuth_leftface_deg`
+	when omitted); the axis spacings may differ from one another.
 - Let `nx` and `ny` be the counts in `x.in` and `y.in`. Horizontal profiles
 	are stored with Y as the outer loop and X as the inner loop. For zero-based
 	axis indices `i` and `j`, the profile number is
@@ -2627,7 +2751,7 @@ force_z_n            = 1.0e15        # F_z in Newtons (downwards)
 The source-time-function (`source_function_type`, `average_risetime_sec`,
 `ricker_Ts`, `ricker_Tp`) keys are shared with the moment-tensor point
 source. Force components are in Newtons in the simulation Cartesian
-frame (`x = north`, `y = east`, `z = downwards`). Internally the FORCE
+frame (local solver X/Y, Z down; UTM north/east at zero azimuth). Internally the FORCE
 path reuses the same file-based per-step force pipeline as POINT — no
 new MPI traffic, no new GPU plumbing.
 
@@ -2731,7 +2855,7 @@ source_function_type = discrete
 
 base_force_rho_kgm3      = 2500.0   # base/rock density
 base_force_vs_mps        = 700.0    # base/rock shear velocity
-base_force_direction_x   = 1.0      # x = north
+base_force_direction_x   = 1.0      # solver +X (UTM north at zero domain azimuth)
 base_force_direction_y   = 0.0      # y = east
 base_force_direction_z   = 0.0      # z = down
 base_force_scale         = 2.0      # use 2.0 for outcrop velocity input
@@ -3162,7 +3286,7 @@ interpolation, including cut-cell topography and scalar-acoustic reconstructed
 motion; poroelastic samples contain skeleton displacement.
 
 The file contains native-endian float64 values in metres, shaped
-`[snapshot, station, XYZ]` in C order. XYZ means solver north, east, down.
+`[snapshot, station, XYZ]` in C order. XYZ means solver-local X/Y, Z down; see `coordinate_frame.txt` for the PROJ mapping.
 There is no header, timestamp, coordinate table, or per-station file. ASCII
 `print_station_*` flags and nonlinear diagnostic columns are ignored; binary
 mode does not create `station_mediums.txt` or use `output_stations_directory`.
@@ -3216,8 +3340,7 @@ most. Keep raw histories when investigating slow motion.
 
 The storage order is `[snapshot, along-strike point, down-dip point, XYZ]` in
 C order, with native-endian float64 displacements in metres. Indices are
-zero-based. For zero strike and dip, the grid axes are solver X/north and
-Y/east; vector components always remain global X/north, Y/east, Z/down.
+zero-based. For zero strike and dip, the grid axes are solver X/Y; vector components always remain solver-local X/Y, Z/down.
 The saved interval is `output_planes_print_rate * simulation_delta_time_sec`,
 not the solver time step. Geometry, timestamps and byte order are not recorded
 in the headerless binary.
@@ -3497,12 +3620,12 @@ created automatically. The complete output path is limited to 240 bytes and
 resolves from the run working directory (`~` is not expanded).
 
 The first two fields (`drm_offset_x/y`) locate the **top center** in solver
-X/north and Y/east metres from the domain origin. Lengths and depth describe
+local X/Y metres from the domain origin. Lengths and depth describe
 the **exterior**. For spacing h, the interior dimensions are
 `(length_x - 2*h, length_y - 2*h, depth - h)`, sharing the same horizontal
 center and top. Lengths must exceed 2h, depth must exceed h, and all three
 exterior dimensions must be positive integer multiples of positive h.
-Strike is degrees clockwise from north: for box-local (x,y),
+Strike is degrees clockwise from solver +X: for box-local (x,y),
 `X = center_x + x*cos(strike) - y*sin(strike)` and
 `Y = center_y + x*sin(strike) + y*cos(strike)`. Displacements remain in solver
 XYZ components; they are not rotated into box-local components.
@@ -3541,7 +3664,7 @@ header or embedded timestamps. Keep the input box row to identify face shapes.
 
 The matching `drmcoordinates.N` contains three whitespace-separated columns:
 `X_m Y_m Z_m`. These are the actual solver sampling coordinates in metres:
-X north, Y east, Z positive downward, after strike rotation and the same
+local X/Y, Z positive downward, after strike rotation and the same
 building/topography depth shifts used for interpolation. Z is in the solver
 coordinate frame, including those shifts. Ignoring lines beginning with `#`,
 data row i (zero-based) gives the position of binary sample i in every

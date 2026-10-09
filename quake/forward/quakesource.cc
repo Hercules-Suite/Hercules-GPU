@@ -1566,49 +1566,11 @@ static void update_point_source (ptsrc_t *pointSource,
 static void
 compute_point_source_strike_srfh (ptsrc_t* ps, int32_t iSrc, UTMZone_t* utmZone)
 {
-
-  vector3D_t pivot, pointInNorth, unitVec;
-
-  double norm,fi ;
-
-
-  if( theLonlatOrCartesian == 1 )return;
-
-
-  if( theLonlatOrCartesian == 0 ){
-
-    pivot = compute_domain_coords_linearinterp(
+    if (theLonlatOrCartesian == 1) return;
+    ps->strike = compute_domain_strike(ps->strike,
         theSourceLonArray[iSrc], theSourceLatArray[iSrc],
         theSurfaceCornersLong, theSurfaceCornersLat,
         theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-
-    pointInNorth = compute_domain_coords_linearinterp(
-        theSourceLonArray[iSrc], theSourceLatArray[iSrc]+.1,
-        theSurfaceCornersLong , theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-
-
-    /* Compute Unit Vector */
-    unitVec.x[1]=pointInNorth.x[1]-pivot.x[1];
-    unitVec.x[0]=pointInNorth.x[0]-pivot.x[0];
-
-    norm = pow( pow( unitVec.x[0], 2)+ pow(unitVec.x[1],2), .5);
-
-    unitVec.x[1]= unitVec.x[1]/norm;
-    unitVec.x[0]= unitVec.x[0]/norm;
-
-    /* Compute the Angle North-X axis */
-    fi = atan( unitVec.x[0]/unitVec.x[1]);
-
-    if(  unitVec.x[1] < 0 ) /* in rad*/
-      fi = fi + PI;
-
-    /* Compute the strike */
-    ps->strike =90+ ps->strike-( 180*fi/PI);
-
-
-  }
-
 }
 
 
@@ -1850,25 +1812,11 @@ static double compute_strike_planewithkinks(vector3D_t point){
         }
     }
 
-    if( theTraceVectors[iKinkOrigin].x[1] >= 0) {
-
-        strike = acos(theTraceVectors[iKinkOrigin].x[0]);
-
-    } else if ( theTraceVectors[iKinkOrigin].x[0] < 0 &&
-                theTraceVectors[iKinkOrigin].x[1] <= 0 ) {
-
-        strike = ( 3*PI/2 ) - acos(theTraceVectors[iKinkOrigin].x[0]);
-
-    } else if ( theTraceVectors[iKinkOrigin].x[0] > 0 &&
-                theTraceVectors[iKinkOrigin].x[1] < 0 ) {
-
-        strike = acos(theTraceVectors[iKinkOrigin].x[0]) + 3*PI/2;
-    }
-
-    /* compute deg that is what is take from the code */
-
-
-    strike = 180* strike / PI;
+    /* Rotating the domain can put a trace in any quadrant. atan2 also
+     * avoids depending on the trace vector's normalization accuracy. */
+    strike = atan2(theTraceVectors[iKinkOrigin].x[1],
+                   theTraceVectors[iKinkOrigin].x[0]) * 180.0 / PI;
+    if (strike < 0.0) strike += 360.0;
 
 
     return strike;
@@ -2394,7 +2342,7 @@ static int read_force_source(FILE *fp){
   }
 
   /* Body-force components in Newtons (Cartesian, in the simulation frame:
-   * x = north, y = east, z = downwards). */
+   * x/y = solver-local axes, z = downwards). */
   if ( (parsetext(fp,"force_x_n", 'd',&force_x_n) != 0) ||
        (parsetext(fp,"force_y_n", 'd',&force_y_n) != 0) ||
        (parsetext(fp,"force_z_n", 'd',&force_z_n) != 0) ) {
@@ -3134,8 +3082,20 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
   double depth = theExtendedDepthM;
 
 
-  if( theTypeOfSource == PLANE )
-      origin=compute_cartesian_coords(lat,lon,depth );
+  double planeStrike = theExtendedStrikeDeg;
+  if (theTypeOfSource == PLANE) {
+#ifdef PROJ
+      origin = compute_domain_coords_linearinterp(lon, lat,
+          theSurfaceCornersLong, theSurfaceCornersLat,
+          theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+      origin.x[2] = depth - theRegionDepthShallowM;
+      planeStrike = compute_domain_strike(theExtendedStrikeDeg, lon, lat,
+          theSurfaceCornersLong, theSurfaceCornersLat,
+          theRegionLengthEastM, theRegionLengthNorthM, utmZone);
+#else
+      origin = compute_cartesian_coords(lat, lon, depth);
+#endif
+  }
 
   theExtendedHypLocCart.x[0]=theExtendedHypocenterAlongStrikeM;
   theExtendedHypLocCart.x[1]=theExtendedHypocenterDownDipM;
@@ -3296,6 +3256,10 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 
 	if ( theTypeOfSource == PLANE ){
 
+#ifdef PROJ
+          pntSrc.domainCoords = compute_global_coords(
+              origin, localCoords, pntSrc.dip, 0, planeStrike);
+#else
 	  globalCoords = compute_global_coords(origin,localCoords,pntSrc.dip,
 					       0 ,pntSrc.strike);
 	  /* Transform if neccesary to domain coordinates */
@@ -3304,7 +3268,7 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 	  else
 	    pntSrc.domainCoords=compute_domain_coords(globalCoords ,
 						      theRegionAzimuthDeg);
-
+#endif
 	}
 
 	if ( theTypeOfSource == PLANEWITHKINKS ){
@@ -3412,6 +3376,11 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 	    pntSrc.localCoords = localCoords;
 
 	    if ( theTypeOfSource == PLANE ){
+#ifdef PROJ
+              pntSrc.domainCoords = compute_global_coords(
+                  origin, localCoords, pntSrc.dip, 0, planeStrike);
+              pntSrc.strike = planeStrike;
+#else
 	      globalCoords = compute_global_coords( origin, localCoords,pntSrc.dip ,
 						    0 ,theExtendedStrikeDeg);
 	      /* Transform if neccesary to domain coordinates just for plane*/
@@ -3422,6 +3391,7 @@ compute_myForces_planes(const char *physicsin, UTMZone_t* utmZone)
 		  compute_domain_coords( globalCoords, theRegionAzimuthDeg );
 		pntSrc.strike = theExtendedStrikeDeg - theRegionAzimuthDeg;
 	      }
+#endif
 	    }
 
 
@@ -3573,51 +3543,11 @@ fill_point_source_coordinates(ptsrc_t* ps, UTMZone_t* utmZone)
 static void
 compute_point_source_strike(ptsrc_t* ps, UTMZone_t* utmZone)
 {
-
-  vector3D_t pivot, pointInNorth, unitVec;
-
-  double norm,fi ;
-
-
-  if( theLonlatOrCartesian == 1 )return;
-
-
-  if( theLonlatOrCartesian == 0 ){
-
-    printf("\nin strike correction = %f %f", theHypocenterLongDeg,theHypocenterLatDeg);
-
-    pivot = compute_domain_coords_linearinterp(
+    if (theLonlatOrCartesian == 1) return;
+    ps->strike = compute_domain_strike(ps->strike,
         theHypocenterLongDeg, theHypocenterLatDeg,
         theSurfaceCornersLong, theSurfaceCornersLat,
         theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-
-    pointInNorth = compute_domain_coords_linearinterp(
-        theHypocenterLongDeg, theHypocenterLatDeg+.1,
-        theSurfaceCornersLong, theSurfaceCornersLat,
-        theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-
-
-    /* Compute Unit Vector */
-    unitVec.x[1]=pointInNorth.x[1]-pivot.x[1];
-    unitVec.x[0]=pointInNorth.x[0]-pivot.x[0];
-
-    norm = pow( pow( unitVec.x[0], 2)+ pow(unitVec.x[1],2), .5);
-
-    unitVec.x[1]= unitVec.x[1]/norm;
-    unitVec.x[0]= unitVec.x[0]/norm;
-
-    /* Compute the Angle North-X axis */
-    fi = atan( unitVec.x[0]/unitVec.x[1]);
-
-    if(  unitVec.x[1] < 0 ) /* in rad*/
-      fi = fi + PI;
-
-    /* Compute the strike */
-
-    ps->strike =90+ ps->strike-( 180*fi/PI);
-
-  }
-
 }
 
 /**
