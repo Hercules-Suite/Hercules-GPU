@@ -499,7 +499,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /RIVASand02/);
   assert.match(physics, /RIVASandCustom02/);
   assert.match(physics, /Custom02 uses its own e_max\/e_min for both the initial and reference relative densities/);
-  assert.match(physics, /Marker 8 identifies type-1 history and marker 7 identifies type-2 history/);
+  assert.match(physics, /Marker 8 identifies type-1 history, marker 7 identifies type-2 history and marker 9 identifies type-3 history/);
   assert.match(physics, /retired RIVASandIntermediateBiasResearch input is not restored/);
   assert.match(physics, /not an alias for, replacement for, or retuning of production RIVASand/);
   assert.match(physics, /BrickUP remains the sole owner of pore pressure/);
@@ -1289,6 +1289,11 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(researchMaterialPointUnit, /&state, &stress, &info, config->riva_reversal_type/);
   assert.match(researchCore, /riva_update_info_t \*info,int32_t reversal_type=1/);
 
+  assert.match(researchCore, /riva_ib_host_stress_ratio_predictor/);
+  assert.match(researchCore, /riva_ib_host_stress_ratio_reversal/);
+  assert.match(researchCore, /reversal_type>=1 && reversal_type<=3/);
+  assert.match(researchCore, /\(objective \|\| host_ratio\) && reversal && i==0/);
+  assert.match(readFileSync(`${sourceRoot}nonlinear_riva_sand_input.h`, "utf8"), /\*s!='1' && \*s!='2' && \*s!='3'/);
   assert.match(researchCore, /#define RIVA_IB_PARAMETER_COUNT 249/);
   assert.match(researchCore, /#define RIVA_IB_LOGICAL_STATE_COUNT 63/);
   assert.match(researchCore, /#define RIVA_IB_STATE_VALUE_COUNT 138/);
@@ -1303,7 +1308,7 @@ test("wires frozen and custom RIVA-Sand through CUDA, BrickUP, and checkpoints",
   assert.match(researchCore, /target=riva_ib_mul_rn\(target,plastic_gate\)/);
   assert.match(researchCore, /s->ep_half_last\/p->bias_reversible_volume_ep_ref/);
   assert.match(researchCore, /#define RIVA_IB_CUSTOM_KERNEL_REVISION 4u/);
-  assert.match(researchCore, /return reversal_type==1 \? 8u : reversal_type==2 \? 7u : 0u;/);
+  assert.match(researchCore, /return reversal_type==1 \? 8u : reversal_type==2 \? 7u :\s*reversal_type==3 \? 9u : 0u;/);
   assert.match(gpu, /header\.riva_kernel_revision = riva_ib_checkpoint_revision\(\s*g_config\.material_model == RIVA_SAND_CUSTOM_02,\s*g_config\.riva_reversal_type\)/);
   assert.match(gpu, /!riva_ib_checkpoint_compatible\(header\.riva_kernel_revision,[\s\S]*?g_config\.material_model == RIVA_SAND_CUSTOM_02,\s*g_config\.riva_reversal_type\)/);
   assert.match(researchCore, /riva_ib_reference_relative_density\(\s*const riva_ib_parameters_t \*p,const riva_material_parameters_t \*m\)/);

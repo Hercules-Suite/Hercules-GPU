@@ -86,6 +86,12 @@ typedef struct nonlinear_gpu_error_t {
     double md_second_hardening_gap;
     tensor_t md_stress;
     tensor_t md_strain_increment;
+    /* RS02 failure context only; full history is downloaded after failure. */
+    int32_t riva_point;
+    int32_t riva_step;
+    int32_t riva_update_attempted;
+    tensor_t riva_increment;
+    double riva_E_ref;
 } nonlinear_gpu_error_t;
 
 /* Only these quadrature-point values are consumed by
@@ -3835,13 +3841,17 @@ __global__ static void kernel_nonlinear_update_force(
             }
             riva_update_info_t riva_info = {};
             tensor_t full_effective_stress = riva_state->base.stress;
+            const tensor_t increment=riva_sub(strain,strain_prev);
+            int riva_update_attempted=0;
             if (ok) {
-                const tensor_t increment=riva_sub(strain,strain_prev);
                 /* A rigid translation has nonzero nodal displacement but
                  * exactly zero strain.  Preserve constitutive history in the
                  * field adapter; the replay driver intentionally retains the
                  * oracle's row-level accepted-substep accounting. */
-                if (riva_ddot(increment,increment)>0.0) {
+                if (!riva_finite_tensor(increment)) {
+                    ok=0;
+                } else if (riva_ddot(increment,increment)>0.0) {
+                    riva_update_attempted=1;
                     ok = riva_ib_update_material(
                         riva_parameters,riva_material,increment,
                         cfg.no_substeps,riva_state,&full_effective_stress,
@@ -3860,8 +3870,17 @@ __global__ static void kernel_nonlinear_update_force(
                 (double)riva_info.accepted_substeps;
             if (!ok || !isfinite(model_error) ||
                 !riva_finite_tensor(full_effective_stress)) {
-                nl_record_error(state.error, 6, eindex, qp, model_error,
-                                riva_pressure(full_effective_stress));
+                if (atomicCAS(&state.error->code,0,6)==0) {
+                    state.error->eindex=eindex;
+                    state.error->qp=qp;
+                    state.error->residual=model_error;
+                    state.error->value=riva_pressure(full_effective_stress);
+                    state.error->riva_point=point;
+                    state.error->riva_step=step;
+                    state.error->riva_update_attempted=riva_update_attempted;
+                    state.error->riva_increment=increment;
+                    state.error->riva_E_ref=point_material.E_ref;
+                }
             }
 #elif defined(NL_GPU_MANZARI_DAFALIAS_ONLY)
             int32_t md_substeps = 0;
@@ -4206,7 +4225,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
 
     if (MATERIAL_MODEL_IS_RIVA_SAND_02(config->material_model) &&
         !riva_ib_reversal_type_valid(config->riva_reversal_type)) {
-        fprintf(stderr, "RIVASand02 rivasand02_reversaltype must be 1 or 2\n");
+        fprintf(stderr, "RIVASand02 rivasand02_reversaltype must be 1, 2 or 3\n");
         return -1;
     }
 
@@ -4956,6 +4975,72 @@ static void nonlinear_gpu_report_riva_geostatic(int32_t myID)
     g_riva_geostatic.reported = 1;
 }
 
+/* Called only after an RS02 failure, never on a successful timestep. The
+ * rejected update leaves its input history intact. If the post-update
+ * compatibility check failed instead, the dump holds that resulting state. */
+static void nonlinear_gpu_dump_riva_failure(int32_t myID)
+{
+    const int32_t point=g_error_host.riva_point;
+    if (point<0 || point/NL_GPU_QP>=g_nl.count || !g_nl.riva_ib_states)
+        return;
+    riva_ib_state_t state={};
+    riva_material_parameters_t material={};
+    cudaError_t error=cudaMemcpy(&state,
+        (const riva_ib_state_t *)g_nl.riva_ib_states+point,
+        sizeof(state),cudaMemcpyDeviceToHost);
+    if (error==cudaSuccess)
+        error=cudaMemcpy(&material,g_nl.riva_materials+point/NL_GPU_QP,
+            sizeof(material),cudaMemcpyDeviceToHost);
+    if (error!=cudaSuccess) {
+        fprintf(stderr,"  RS02 failure-state download failed: %s\n",
+            cudaGetErrorString(error));
+        return;
+    }
+    material.E_ref=g_error_host.riva_E_ref;
+    const tensor_t de=g_error_host.riva_increment;
+    fprintf(stderr,"  RS02 step=%d type=%d substeps=%d update_attempted=%d; "
+        "incoming strain increment=[%.17g %.17g %.17g %.17g %.17g %.17g]; "
+        "E_ref=%.17g Pa\n",g_error_host.riva_step,g_config.riva_reversal_type,
+        g_config.no_substeps,g_error_host.riva_update_attempted,
+        de.xx,de.yy,de.zz,de.xy,de.yz,de.xz,material.E_ref);
+    char filename[160];
+    snprintf(filename,sizeof(filename),"rivasand02_failure.rank%d.step%d.txt",
+        myID,g_error_host.riva_step);
+    FILE *out=fopen(filename,"w");
+    if (!out) {
+        fprintf(stderr,"  Could not write RS02 failure dump %s\n",filename);
+        return;
+    }
+    fprintf(out,"RIVASAND02_FAILURE_V1\nmodel=%s\nparameter_hash=%s\n"
+        "kernel_revision=%u\ncheckpoint_revision=%u\nrank=%d\nelement=%d\n"
+        "qp=%d\nstep=%d\nreversal_type=%d\nsubsteps=%d\n"
+        "update_attempted=%d\ninitialized=%d\ngeostatic_admitted=%d\n"
+        "compatibility_residual=%.17g\n",
+        RIVA_SAND_MODEL_NAME(g_config.material_model),RIVA_IB_PARAMETER_SHA256,
+        RIVA_IB_KERNEL_REVISION,riva_ib_checkpoint_revision(
+            g_config.material_model==RIVA_SAND_CUSTOM_02,g_config.riva_reversal_type),
+        myID,g_error_host.eindex,g_error_host.qp,g_error_host.riva_step,
+        g_config.riva_reversal_type,g_config.no_substeps,
+        g_error_host.riva_update_attempted,state.base.initialized,
+        state.base.geostatic_admitted,g_error_host.residual);
+    fprintf(out,"increment=%.17g %.17g %.17g %.17g %.17g %.17g\n",
+        de.xx,de.yy,de.zz,de.xy,de.yz,de.xz);
+    /* Material order: h m M kd zeta e_max e_min Q R n_G E_ref (Pa). */
+    fprintf(out,"material=%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+        "%.17g %.17g %.17g\n",material.h,material.m,material.M,material.kd,
+        material.zeta,material.e_max,material.e_min,material.Q,material.R,
+        material.n_G,material.E_ref);
+    double values[RIVA_IB_STATE_VALUE_COUNT];
+    const int count=riva_ib_state_values(&state,values);
+    fprintf(out,"state_values=%d\nstate=",count);
+    for (int i=0;i<count;++i) fprintf(out,"%s%.17g",i?" ":"",values[i]);
+    fprintf(out,"\n");
+    const int write_failed=ferror(out);
+    const int close_failed=fclose(out);
+    fprintf(stderr,"  RS02 failure dump %s: %s\n",filename,
+        write_failed || close_failed ? "write failed" : "written");
+}
+
 void nonlinear_gpu_check_error(int32_t myID)
 {
     if (!g_active) return;
@@ -5136,6 +5221,7 @@ void nonlinear_gpu_check_error(int32_t myID)
                     "compatibility_residual=%12.8E, "
                     "effective_mean_stress=%12.8E Pa\n",
                     g_error_host.residual, g_error_host.value);
+            nonlinear_gpu_dump_riva_failure(myID);
         }
         fflush(stderr);
         MPI_Abort(MPI_COMM_WORLD, ERROR);

@@ -202,7 +202,10 @@ interactions are in the
   `geostatic_cushion_time_sec`, `approximate_geostatic_state`, `error_tolerance`, `backbone_errTol`,
   `material_model`, `material_properties_list`, `no_substeps`, `rivasand02_reversaltype`,
   `manzari_dafalias_integration_scheme`, `manzari_dafalias_forward_euler_substeps`,
-  `manzari_dafalias_recovery`.
+  `manzari_dafalias_recovery`. RS02 reversal types are 1 (default, previous
+  increment), 2 (accumulated branch), and 3 (unguarded host stress-ratio predictor);
+  use the same type on restart. RS02 GPU failures save a diagnostic snapshot
+  as `rivasand02_failure.rank<R>.step<S>.txt` in the run directory. See [RS02 details](Extended%20README.md#nonlinear-gpu-execution-and-constitutive-models).
 - **Standalone material-point test controls:** `material_point_riva_density`,
   `material_point_riva_vs`, `material_point_brickup`.
 - **Domain Reduction Method:** `implement_drm`, `number_output_drm_boxes`,

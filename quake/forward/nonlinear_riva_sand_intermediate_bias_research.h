@@ -7,7 +7,8 @@
  * with the completed-half-cycle plastic gate from commit 5e4ebd30cb5f43b6.
  * Type 1 (default) uses the preceding valid increment. Opt-in type 2 uses
  * the loading-branch reversal correction from OpenSees_RIVA e97c12fbc.
- * Neither imports OpenSees BiasVolume/reversalLatch.
+ * Type 3 ports the full-host stress-ratio rule from OpenSees_RIVA 355d8f042.
+ * No rule imports OpenSees BiasVolume, reversalLatch or reversalGuard.
  *
  * This is deliberately a separate material.  It does not change the frozen
  * production RIVASand/RIVASandCustom kernel in nonlinear_riva_sand.h.  The
@@ -43,7 +44,7 @@
     "e97c12fbcf3f4fff63ff9acd602fdb78af44630c"
 
 RIVA_IB_HD static inline int riva_ib_reversal_type_valid(int reversal_type)
-{ return reversal_type==1 || reversal_type==2; }
+{ return reversal_type>=1 && reversal_type<=3; }
 
 RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(
     int custom,int reversal_type=1)
@@ -51,7 +52,8 @@ RIVA_IB_HD static inline uint32_t riva_ib_checkpoint_revision(
     (void)custom;
     // Type 2 retains marker 7 and its byte-identical branch history.
     // Type 1 gets a distinct marker; historical pre-selector files stay rejected.
-    return reversal_type==1 ? 8u : reversal_type==2 ? 7u : 0u;
+    return reversal_type==1 ? 8u : reversal_type==2 ? 7u :
+        reversal_type==3 ? 9u : 0u;
 }
 
 /* The first 116 calibrated values are held in base.  p_residual is a
@@ -2348,22 +2350,64 @@ RIVA_IB_HD static inline riva_ib_state_t riva_ib_host_outer_correction(
     return s;
 }
 
-// Shared implementation of the two existing reference rules.
-// Field and material-point adapters call the checked public entry below.
-RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
+// Type 3 research rule: one full-host elastic predictor, independent of nSub.
+RIVA_IB_HD static inline tensor_t riva_ib_host_stress_ratio_predictor(
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,tensor_t deps)
+{
+    const riva_parameters_t *b=&p->base;
+    const double floor=riva_cone_pressure_floor(b);
+    const double pressure=riva_max(riva_cone_pressure(b,s->base.stress),floor);
+    double shear,bulk;
+    if (s->base.cyclic_phase_active && riva_ib_mapping_gate(p,s)>1.0e-14) {
+        riva_moduli(b,m,pressure,&shear,&bulk);
+        double mb,md,xi;
+        riva_surfaces(b,m,pressure,s->base.void_ratio,&mb,&md,&xi);
+        const double capacity=riva_ib_mapping_capacity(p,s,mb);
+        shear*=riva_ib_mapping_shear_ratio(p,s->mapping_backstress,capacity);
+    } else riva_ib_moduli_for_state(p,m,s,pressure,&shear,&bulk);
+    const double dv=riva_trace(deps);
+    double trial_pressure;
+    if (b->compatibility_enabled) { int hit=0;
+        trial_pressure=riva_pressure_from_confining(b,m,
+            s->base.eps_v_confining+dv,s->base.pressure_anchor,&hit);
+    } else trial_pressure=riva_max(pressure-bulk*dv,floor);
+    const tensor_t trial_deviator=riva_add(riva_dev(s->base.stress),
+        riva_scale(riva_dev(deps),riva_ib_mul_rn(2.0,shear)));
+    return riva_ib_div(trial_deviator,riva_max(trial_pressure,floor));
+}
+
+RIVA_IB_HD static inline int riva_ib_host_stress_ratio_reversal(
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    const riva_ib_state_t *s,tensor_t deps)
+{
+    if (!s->base.cyclic_phase_active || riva_ddot(deps,deps)==0.0) return 0;
+    // Use the same mechanical predictor state as the first backbone call.
+    // This conversion removes reversible bias pressure without evolving history.
+    const riva_ib_state_t mechanical=riva_ib_mechanical_state(p,m,s);
+    const tensor_t trial=riva_ib_host_stress_ratio_predictor(p,m,&mechanical,deps);
+    return riva_ddot(riva_sub(trial,mechanical.base.alpha0),
+        riva_sub(trial,mechanical.base.alpha))<0.0;
+}
+
+// Shared implementation; field and material-point adapters use the same rule.
+RIVA_IB_HD static inline int riva_ib_update_material_selected(
     const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
     tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
-    riva_update_info_t *info,int32_t branch_reference)
+    riva_update_info_t *info,int32_t reversal_type)
 {
     if (!p || !m || !state || !state->base.initialized || nsub<1 ||
         !riva_material_parameters_valid(&p->base,m) || !riva_finite_tensor(deps))
         return 0;
-    const int objective=p->base.objective_reversal_enabled;
+    const int host_ratio=reversal_type==3 && state->base.cyclic_phase_active;
+    const int objective=reversal_type==3 ? !state->base.cyclic_phase_active :
+        p->base.objective_reversal_enabled;
     int valid=0;
     const tensor_t direction=objective?riva_ib_host_direction(&p->base,deps,&valid):
         riva_zero();
-    const int reversal=objective?riva_ib_host_reversal(&p->base,&state->base,
-        direction,valid):0;
+    const int reversal=host_ratio?
+        riva_ib_host_stress_ratio_reversal(p,m,state,deps):
+        objective?riva_ib_host_reversal(&p->base,&state->base,direction,valid):0;
     const riva_ib_state_t initial=*state;
     riva_ib_state_t current=initial;
     const int phase_active=p->phase_transformation_enabled &&
@@ -2372,9 +2416,10 @@ RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
     const tensor_t sub=riva_ib_div(deps,(double)nsub);
     for (int32_t i=0;i<nsub;i++)
         current=riva_ib_forward_euler(p,m,&current,sub,
-            objective && reversal && i==0,!objective,phase_active);
+            (objective || host_ratio) && reversal && i==0,
+            !(objective || host_ratio),phase_active);
     if (objective && valid) {
-        if (branch_reference) {
+        if (reversal_type!=1) {
             const tensor_t branch=initial.base.last_host_deviatoric_strain_direction;
             const tensor_t increment=riva_dev(deps);
             current.base.last_host_deviatoric_strain_direction=
@@ -2401,8 +2446,19 @@ RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
         !isfinite(current.base.lambda_total) || !isfinite(current.base.void_ratio))
         return 0;
     *state=current; if (stress_new) *stress_new=current.base.stress;
-    if (info) { info->accepted_substeps=nsub; info->reversal_registered=reversal; }
+    if (info) { info->accepted_substeps=nsub; info->reversal_registered=host_ratio?
+        (current.base.reversals>initial.base.reversals):reversal; }
     return 1;
+}
+
+// Compatibility entry for existing offline type-1/type-2 replays.
+RIVA_IB_HD static inline int riva_ib_update_material_reference_ex(
+    const riva_ib_parameters_t *p,const riva_material_parameters_t *m,
+    tensor_t deps,int32_t nsub,riva_ib_state_t *state,tensor_t *stress_new,
+    riva_update_info_t *info,int32_t branch_reference)
+{
+    return riva_ib_update_material_selected(p,m,deps,nsub,state,stress_new,
+                                            info,branch_reference ? 2 : 1);
 }
 
 RIVA_IB_HD static inline int riva_ib_update_material(
@@ -2411,8 +2467,8 @@ RIVA_IB_HD static inline int riva_ib_update_material(
     riva_update_info_t *info,int32_t reversal_type=1)
 {
     if (!riva_ib_reversal_type_valid(reversal_type)) return 0;
-    return riva_ib_update_material_reference_ex(p,m,deps,nsub,state,stress_new,
-                                               info,reversal_type==2);
+    return riva_ib_update_material_selected(p,m,deps,nsub,state,stress_new,
+                                             info,reversal_type);
 }
 
 RIVA_IB_HD static inline int riva_ib_update(

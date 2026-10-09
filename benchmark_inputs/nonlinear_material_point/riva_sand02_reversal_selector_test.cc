@@ -1,4 +1,4 @@
-/* Host input/default/restart contracts for the two existing reversal rules. */
+/* Host input/default/restart contracts for the three reversal rules. */
 #define RIVA_STANDALONE
 #include "../../quake/forward/nonlinear_riva_sand_intermediate_bias_research.h"
 #include "../../quake/forward/nonlinear_riva_sand_input.h"
@@ -35,13 +35,13 @@ int main()
         int32_t value=99;
         require(parse("# omitted\nmaterial_model=RIVASand02\n",1,&value)==0 && value==1,
                 "omitted selector did not default to type 1");
-        for (int type : {1,2}) {
+        for (int type : {1,2,3}) {
             require(parse("  rivasand02_reversaltype = "+std::to_string(type)+" # comment\n",1,&value)==0 && value==type,
                     "valid selector rejected");
             require(parse("rivasand02_reversaltype="+std::to_string(type),1,&value)==0 && value==type,
                     "selector without final newline rejected");
         }
-        for (const char *bad : {"0","3","-1","1.0","1e0","2junk","1 2","nan",""}) {
+        for (const char *bad : {"0","4","-1","1.0","1e0","2junk","1 2","nan",""}) {
             value=99;
             require(parse(std::string("rivasand02_reversaltype = ")+bad+"\n",1,&value)!=0 && value==99,
                     "invalid selector accepted or changed output");
@@ -78,7 +78,7 @@ int main()
             riva_ib_state_t initial={};
             require(riva_ib_initialize_material(&p,&m,stress,e,&initial) &&
                 riva_ib_begin_dynamic_phase(&p,&m,&stress,&initial),"initialization failed");
-            auto default_state=initial,explicit_one=initial,two=initial;
+            auto default_state=initial,explicit_one=initial,two=initial,three=initial;
             double previous=0;
             for (int i=1;i<=1024;++i) {
                 const double shear=.0015*std::sin(2*std::acos(-1.0)*i/512.0);
@@ -87,23 +87,29 @@ int main()
                         riva_ib_update_material(&p,&m,de,nsub,&explicit_one,nullptr,nullptr,1) &&
                         same(default_state,explicit_one),"default differs from explicit type 1");
                 require(riva_ib_update_material(&p,&m,de,nsub,&two,nullptr,nullptr,2),"type 2 failed");
+                riva_update_info_t info={};
+                const auto before=three.base.reversals;
+                require(riva_ib_update_material(&p,&m,de,nsub,&three,nullptr,&info,3),"type 3 failed");
+                require(three.base.reversals-before>=0 && three.base.reversals-before<=1 &&
+                        info.reversal_registered==three.base.reversals-before,"type 3 host event accounting");
             }
-            require(default_state.base.reversals==0 && two.base.reversals==4,
+            require(default_state.base.reversals==0 && two.base.reversals==4 && three.base.reversals==4,
                     "selector did not distinguish the known mixed-path reversal counts");
-            for (int invalid : {0,3,-1}) {
+            for (int invalid : {0,4,-1}) {
                 auto copy=two;
                 require(!riva_ib_update_material(&p,&m,{0,0,0,1e-5,0,0},nsub,
                         &copy,nullptr,nullptr,invalid) && same(copy,two),
                         "invalid direct selector mutated the committed state");
             }
-            for (int custom : {0,1}) for (int type : {1,2}) {
-                const auto state=type==1?default_state:two;
+            for (int custom : {0,1}) for (int type : {1,2,3}) {
+                const auto state=type==1?default_state:type==2?two:three;
                 const auto marker=riva_ib_checkpoint_revision(custom,type);
-                require(marker==(type==1?8u:7u),"wrong checkpoint marker");
+                require(marker==(type==1?8u:type==2?7u:9u),"wrong checkpoint marker");
                 require(riva_ib_checkpoint_compatible(marker,sizeof(state),RIVA_IB_PARAMETER_SHA256,custom,type),
                         "same-type checkpoint rejected");
-                require(!riva_ib_checkpoint_compatible(marker,sizeof(state),RIVA_IB_PARAMETER_SHA256,custom,3-type),
-                        "cross-type restart accepted");
+                for (int other : {1,2,3}) if (other!=type)
+                    require(!riva_ib_checkpoint_compatible(marker,sizeof(state),RIVA_IB_PARAMETER_SHA256,custom,other),
+                            "cross-type restart accepted");
                 for (unsigned old=0;old<=6;++old)
                     require(!riva_ib_checkpoint_compatible(old,sizeof(state),RIVA_IB_PARAMETER_SHA256,custom,type),
                             "pre-selector checkpoint accepted");
@@ -120,9 +126,9 @@ int main()
             }
         }
         require(riva_ib_checkpoint_revision(0)==8 &&
-                !riva_ib_checkpoint_compatible(0,sizeof(riva_ib_state_t),RIVA_IB_PARAMETER_SHA256,0,3),
+                !riva_ib_checkpoint_compatible(0,sizeof(riva_ib_state_t),RIVA_IB_PARAMETER_SHA256,0,4),
                 "default/invalid checkpoint contract failed");
-        std::cout << "PASS: rivasand02_reversaltype input, type-1 default, type-2 event counts, rejected selectors and restart isolation\n";
+        std::cout << "PASS: rivasand02_reversaltype input, type-1 default, type-2 event counts, type-3 host events, rejected selectors and restart isolation\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;
     }

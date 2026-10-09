@@ -793,17 +793,45 @@ Notes:
   per quadrature point; unrelated families allocate neither. Per-step updates
   load the cached scale but do not repeat the calibration. Checkpoints now
   store the per-point scale and require marker 4 (original), 8 (02 type 1),
-  or 7 (02 type 2). Both `RIVASand02` and `RIVASandCustom02` accept the
+  7 (02 type 2), or 9 (02 type 3). Both `RIVASand02` and `RIVASandCustom02` accept the
   optional scalar `rivasand02_reversaltype = 1` in `parameters.in`; omission also means
   type 1. Type 1 compares adjacent valid increments. Set `rivasand02_reversaltype = 2`
   to retain the previous accumulated loading-branch rule. Detection occurs
-  once per host increment before substeps. Only the integers 1 and 2 are
-  accepted, and only for the two 02 names; it is not a material-row column.
+  once per host increment before substeps. Set `rivasand02_reversaltype = 3`
+  for the unguarded full-host elastic stress-ratio predictor from
+  OpenSees_RIVA `355d8f042`. It uses the committed mechanical state and tests
+  $(\alpha_{trial}-\alpha_0):(\alpha_{trial}-\alpha)<0$; an event is applied
+  only to the first substep. Before cyclic activation, type 3 retains the
+  strain-based initialization rule. No `reversalGuard`, `reversalLatch` or
+  `BiasVolume` option is added. Only integers 1, 2 and 3 are accepted, and only for the two 02 names; it is not a material-row column.
   The material-point test input accepts the same key. Existing marker-7
   checkpoints require explicit `rivasand02_reversaltype = 2`; cross-type restarts and
   marker-6 or earlier 02 files are rejected. Retain the same model, mesh,
   physical inputs and reversal type on restart. Original RIVA-Sand inputs
   and checkpoints are unchanged.
+
+  On a rejected RS02 GPU update, the solver writes
+  `rivasand02_failure.rank<R>.step<S>.txt` in the run directory before aborting.
+  This is a diagnostic snapshot, not a restart checkpoint. A repeat failure
+  at the same rank and step overwrites that filename. The download and file
+  write occur only after failure; no per-point history transfer is added to
+  successful timesteps. The log also reports the full incoming tensor strain
+  increment and cached `E_ref` in Pa. Non-finite strain increments are rejected,
+  including NaNs that must not be mistaken for a zero increment.
+
+  The text starts with `RIVASAND02_FAILURE_V1`, followed by `key=value` records:
+  model, parameter hash, kernel/checkpoint revisions, rank, element, quadrature
+  point, step, reversal type, substeps, whether an update was attempted,
+  initialization/admission flags, compatibility residual, increment, material,
+  and state. For example, `increment=0 0 0 0 0 1e-6` uses physical tensor order
+  `[xx yy zz xy yz xz]`. The eleven `material` entries are
+  `h m M kd zeta e_max e_min Q R n_G E_ref`; `E_ref` uses Pa.
+  `state_values=138` identifies the subsequent `state` array in the native
+  `riva_ib_state_values` order. A rejected constitutive call preserves its
+  input history; a failure of the subsequent compatibility check instead
+  records the resulting state. Thus the printed pressure and residual alone
+  do not identify the rejected trial. Investigation replay helpers remain
+  local-only under `.local-diagnostics/`.
 
   The material-point driver takes Dr [G0] or the twelve Custom values,
   without Vs_limit. Automatic mode additionally requires

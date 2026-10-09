@@ -38,7 +38,7 @@ static inline int riva_read_reversal_type(FILE *fp, const char *key,
         s+=n; while (isspace((unsigned char)*s)) ++s;
         if (*s++!='=') return -1;
         while (isspace((unsigned char)*s)) ++s;
-        if (*s!='1' && *s!='2') return -1;
+        if (*s!='1' && *s!='2' && *s!='3') return -1;
         selected=*s++-'0';
         while (isspace((unsigned char)*s)) ++s;
         if (*s) return -1;

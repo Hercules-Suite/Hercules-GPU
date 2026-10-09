@@ -56,8 +56,9 @@ def main():
     parser.add_argument("--psolve", type=Path)
     parser.add_argument("--launcher", default="", help="Optional launcher, e.g. 'mpirun -np 1'")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--reversal-type", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--reversal-type", type=int, choices=(1, 2, 3), default=2)
     args = parser.parse_args()
+    checkpoint = {1: 8, 2: 7, 3: 9}[args.reversal_type]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -75,8 +76,8 @@ def main():
                                         stderr=subprocess.STDOUT, text=True, timeout=600)
                 (output / (name + ".log")).write_text(result.stdout)
                 for marker in ("PASS: CPU/GPU material-point histories agree",
-                               f"Validated CPU/GPU registered reversals: {4 if args.reversal_type==2 or steps==128 else 0}",
-                               f"kernel 4, checkpoint {7 if args.reversal_type==2 else 8}",
+                               f"Validated CPU/GPU registered reversals: {4 if args.reversal_type in (2,3) or steps==128 else 0}",
+                               f"kernel 4, checkpoint {checkpoint}",
                                f"rivasand02_reversaltype={args.reversal_type}"):
                     if result.returncode != 0 or marker not in result.stdout:
                         raise RuntimeError(f"{name} failed or used an old executable:\n{result.stdout[-4000:]}")
