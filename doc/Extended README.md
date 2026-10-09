@@ -1103,8 +1103,7 @@ Notes:
 	Stability with this filter does not by itself validate waveform accuracy.
 	The source-corrected Izmir comparison completed 100 s with finite output
 	for all three filters using identical generated forces; slow acoustic
-	motion and reconstruction accuracy remain under investigation. See the
-	[corrected validation record](izmir_gravity_diagnostic_20261001.md).
+	motion and reconstruction accuracy remain under investigation.
 	The monitor reports candidate and actually coupled face/fragment counts by
 	face direction, so this option also shows how much lateral interface area
 	was filtered. In `bathymetry` mode it also reports how many bottom faces
@@ -1894,8 +1893,7 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	now evaluates the tangential product `S_x*S_y` separately at each of the
 	four lumped top nodes, including its corner term. Earlier face-average
 	memories omitted zero-mean face modes. Historical source-corrupted tests
-	are retained in the [Izmir investigation](izmir_gravity_diagnostic_20261001.md);
-	they do not validate this formulation. Gravity-wave absorption and motion
+	do not validate this formulation. Gravity-wave absorption and motion
 	reconstruction require separate checks, since surface-gradient recovery
 	error remains even with a consistent absorber.
 - **Coupled displacement synchronization.** Acoustic interface forcing reads
@@ -3228,7 +3226,7 @@ confirmed these identities for the recorded implementation. They isolate
 output time integration from spatial recovery and field evolution; they do
 not validate the potential field in a coupled simulation. Investigation
 scripts and smoke-test inputs are retained locally, not distributed in this
-repository. See the [recorded investigation](izmir_gravity_diagnostic_20261001.md).
+repository.
 
 Changing `simulation_wave_max_freq_hz` changes meshing and frequency-dependent
 damping; it does not filter the source. Compare CPML variants within the same

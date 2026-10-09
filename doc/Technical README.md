@@ -281,10 +281,7 @@ For acoustic observations, enable ASCII station velocity, acceleration and
 pressure output and verify ownership in `station_mediums.txt`. See
 [pressure and motion interpretation](Extended%20README.md#acoustic-pressure-and-motion-diagnostics)
 and [gravity-wave recovery limits](Extended%20README.md#check-gravity-wave-dispersion-and-reconstruction).
-The [Izmir gravity investigation](izmir_gravity_diagnostic_20261001.md)
-records surface-gradient recovery errors, the earlier face-average CPML inconsistency,
-and source-corrupted experiments with a corrected-source follow-up. Validate
-generated source forces before interpreting a failed boundary experiment.
+Validate generated source forces before interpreting a failed boundary experiment.
 Small operator tests or finite field output alone do not validate CPML
 absorption or reconstructed gravity-surface motion.
 
