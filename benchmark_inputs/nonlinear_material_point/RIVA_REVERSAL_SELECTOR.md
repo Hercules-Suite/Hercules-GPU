@@ -70,6 +70,47 @@ These material-point checks do not resolve the separate coupled-field failure.
 The local comparison harness and upstream snapshot remain ignored in
 `.local-diagnostics/rivasand02-horizon-20261009/`.
 
+### Horizon field reproduction on 2026-10-09
+
+The maintainer's coupled BrickUP/CPML case used `RIVASand02`, automatic
+stiffness from mesh density and Vs, Dr=0.66296, a 0.005-s global timestep,
+and ten constitutive substeps. Both the original executable (job 53057)
+and the diagnostic build (job 53056) failed with type 1 near 8.3--8.6 s.
+The diagnostic build captured rank 8, element 697232, point 0 at step 1729:
+the largest incoming strain component was approximately 7.23e32 and the
+stored void ratio was already 1.47e61. The cached E_ref was finite and
+positive. Replaying that exact state and increment with Hercules and
+OpenSees `355d8f042` produced identical rejection traces, with void-ratio
+overflow in substep 8. The near-1-Pa printed pressure was therefore not a
+complete description of the already unphysical input state.
+
+The setup scan reported a CPML critical dt of 0.015625 s and an undrained
+minimum h/Vp of 0.013224 s. The failed timestep was below both values;
+these initial linear estimates do not establish stability of the evolving
+nonlinear coupled state.
+
+Changing only the reversal selector to type 3 in the diagnostic build
+completed the full 30-s case in job 53056, with exit status zero and
+6000 station samples through 29.995 s. Station displacement, velocity,
+acceleration, pressure, strain, and stress were finite; the surface-station
+Ru column remained NaN. The original case, executable, and outputs were
+preserved. A separate 12-s preliminary run completed, but its shortened
+source history did not reproduce the full-duration failure and is not
+used as evidence of a fix.
+
+Keeping type 1 and changing only the global timestep to 0.0025 s also
+completed the full 30-s case (job 53058, exit status zero), with 12000
+station samples through 29.9975 s. Its primary station fields were finite,
+with the same undefined surface Ru column. The constitutive substep count
+remained ten. This demonstrates timestep sensitivity of the failure; it
+does not isolate the first instability mechanism or establish convergence.
+
+This establishes completion of this particular case with type 3, not
+experimental validation or timestep/mesh convergence. Type 1 remains the
+compatibility default; no material coefficients or pore-pressure coupling
+law were changed. The new failure snapshot helps distinguish an invalid
+incoming coupled state from a constitutive port discrepancy.
+
 ### Historical type-1/type-2 checks
 
 Host and documentation checks passed on 2026-09-22. The
