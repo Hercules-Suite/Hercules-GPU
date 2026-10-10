@@ -92,6 +92,11 @@ already published site.
 
 ## Content workflow
 
+Changes to parsers, input formats, source or physical models, output formats,
+or benchmark workflows should update the affected site content in the same
+pull request. The documentation workflow builds the site and audits the
+documented `parameters.in` keys against the current parser sources.
+
 Documentation navigation lives in `app/docs/navigation.ts`; page content lives
 in `app/docs/content.ts`. Add a navigation entry and a matching content record
 to publish another guide through the shared documentation layout.

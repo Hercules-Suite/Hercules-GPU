@@ -9,13 +9,11 @@ studies.
 ## Documentation
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.utexas.chatgpt.site) — installation, input parameters, source models, running, output, and validation
-- [GitHub Pages publishing](docs-site/README.md#github-pages) — static documentation build and activation after the repository becomes public
 - [Technical README](doc/Technical%20README.md) — concise build/run guidance and input/runtime variable index
 - [Extended README](doc/Extended%20README.md) — comprehensive solver controls, formulations, examples, implementation details, and historical validation notes
 - [Plane velocity animations](doc/plane_velocity_animations.md) — rendering plane output, manual geometry and timing, MPI affinity, and GMT troubleshooting
 - [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, and output readers
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
-- [`docs-site/`](docs-site/README.md) — source code for the documentation website
 
 ## Capabilities
 
@@ -99,15 +97,6 @@ layout.
 | `benchmark_inputs/` | Reproducible validation and feature cases |
 | `script/` | Input preparation, validation, output readers, and animation scripts |
 | `doc/` | Extended technical notes and specialized workflows |
-| `docs-site/` | Documentation website source and rendered-page tests |
+| [`docs-site/`](docs-site/README.md) | Documentation website source, tests, and publishing instructions |
 | `examples/` | Legacy examples and sample build configuration |
 | `run_phaseA_phaseB.sh` | Unified Phase A and Phase B launcher |
-
-## Keeping documentation current
-
-Changes to parsers, input formats, source models, output formats, or benchmark
-workflows should update `docs-site/` in the same pull request. The documentation
-workflow builds the site and audits the documented `parameters.in` keys against
-the current parser sources.
-Keep detailed engineering documentation in `doc/Extended README.md` and the
-operational summary and variable index in `doc/Technical README.md`.
