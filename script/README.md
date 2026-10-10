@@ -291,9 +291,23 @@ python3 script/animations_mpi.py \
 
 Required: `--plane-file`, `--nx`, `--ny`, and saved-snapshot interval `--dt`.
 Use at least two points per axis and two snapshots. The binary layout matches
-`read_planes.py`. Rendering assumes **strike=0 (modulo 360), dip=0**; the script
-cannot verify those angles from the file. Plots show solver Y rightward and X
-upward, as offsets from the plane origin in km.
+`read_planes.py`: headerless native float64 in C order, shaped
+`(NT, nx, ny, 3)`, with XYZ components contiguous and down-dip points varying
+faster than along-strike points. For spacing/count pairs `500 201` and
+`325 126`, supply `--nx 201 --ny 126 --dx 500 --dy 325`; the shape is
+`(NT, 201, 126, 3)`. Read the file on a machine with matching byte order.
+
+Rendering assumes **strike=0 (modulo 360), dip=0**; the script cannot verify
+those angles from the file. Plots show solver Y rightward and X upward, as
+offsets from the plane origin in km, without a transpose or mirror. Geographic
+origin conversion and source-location consistency remain separate checks.
+
+Set `--dt` to `simulation_delta_time_sec * output_planes_print_rate`, in
+seconds; no additional print-rate factor is applied. For restarted output,
+set `--first-time` to the time of the first snapshot actually stored. This
+changes time labels; the binary has no timestamps and the script cannot detect
+restarts. Geometry and timing are supplied manually, not read from
+`parameters.in`.
 
 | Optional control | Default / effect |
 | --- | --- |
@@ -312,19 +326,58 @@ upward, as offsets from the plane origin in km.
 Velocity is obtained by differentiating saved global Z displacements, using
 central differences internally and one-sided differences at endpoints, then
 converting to **cm/s, positive downward**. Reported values are not clipped;
-colours saturate at the display limit. Display upsampling does not improve the
-simulation's physical resolution. Sampled velocities can differ from station
-velocities saved at every solver step.
+colours saturate at the display limit. Progress reports include extrema and
+the percentage beyond the colour limits. Differentiating decimated snapshots
+can differ from station velocities saved at every solver step, especially at
+higher frequencies.
 
 Output is `frame_00000.png`, `frame_00001.png`, etc., not an encoded video.
 Existing matching frames are replaced, and unrelated/old frames are retained;
 use a fresh directory for each run. `--check-only` writes no frames and samples
-only three times, so it is not a full-file validation.
+at most three snapshots, so it is not a full-file validation.
+
+#### Display settings
+
+The renderer uses a continuous `vik` colour palette. The defaults are
+equivalent to:
+
+```bash
+--plot-upsample 4 --plot-interpolation linear --dpi 300
+```
+
+Upsampling adds intermediate display values to reduce visible blocks between
+plane samples. `--plot-upsample` must be a positive integer: use `1` for the
+native grid or `8` for a finer display. A 201 by 126 plane becomes 801 by 501
+display points at factor four. Display point counts grow approximately with
+the square of this factor, increasing memory and rendering cost per worker.
+Increasing `--dpi` alone does not add intermediate grid values.
+
+The default `linear` interpolation avoids overshoot. `cubic` gives smoother
+gradients but can overshoot locally; GMT's clipping modifier constrains the
+interpolated grid to the input's global range. Interpolation applies only to
+the display after velocity is computed. Original samples, matrix orientation,
+and reported extrema and saturation percentages are unchanged. A finer
+display does not increase the simulation's physical resolution.
+
+Solid red or blue regions can indicate saturation, which interpolation cannot
+remove. The default `--velocity-limit 10` saturates beyond +/-10 cm/s; use, for
+example, `--velocity-limit 50` to distinguish amplitudes within +/-50 cm/s.
+Keep one fixed limit across frames for a comparable animation.
+
+#### MPI placement and CPU affinity
 
 MPI is optional. Rank/size are detected from Open MPI, PMI/PMIx, or Slurm
 environment variables; no `mpi4py` dependency or inter-rank communication is
-used. Each rank renders a disjoint frame range. For **an existing allocation**
-of two nodes with at least four cores per rank, an Open MPI example is:
+used. Each rank renders a disjoint frame range, without a shared marker file;
+numbered PNG names preserve time order.
+
+Check `mpirun --version` first: the following examples use **Open MPI** options;
+Intel MPI and MPICH have different affinity controls. On Linux, child
+processes inherit CPU affinity, so binding a Python rank to one core can
+constrain all its joblib workers to that core. See the
+[Linux affinity documentation](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html).
+
+For **an existing allocation** of two nodes with at least four cores per rank:
 
 ```bash
 mpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \
@@ -334,10 +387,65 @@ mpirun -np 2 --map-by ppr:1:node:PE=4 --bind-to core --report-bindings \
   --workers 4 --output-dir Animations_velocity_run2
 ```
 
-Match workers to allocated cores and available memory. These mapping options
-are Open MPI-specific and do not allocate nodes. See the
-[animation guide](../doc/plane_velocity_animations.md) for affinity choices,
-temporary GMT sessions, palette settings, and rendering troubleshooting.
+`ppr:1:node:PE=4` gives each rank and its workers a shared group of four physical
+cores under Open MPI's default core-based PE interpretation. Workers are not
+individually pinned. For two such ranks per node, use `ppr:2:node:PE=4`, allocate
+at least eight cores per node, and set `-np` to the intended total rank count.
+
+For **two exclusively allocated nodes, each with at least 100 available
+cores**, one rank per node can let 100 workers use the available CPU set:
+
+```bash
+mpirun -np 2 --map-by ppr:1:node --bind-to none --report-bindings \
+  python3 script/animations_mpi.py \
+  --plane-file outputfiles/planes/planedisplacements.0 \
+  --nx 201 --ny 126 --dx 500 --dy 325 --dt 0.02 \
+  --workers 100 --output-dir Animations_velocity_run3
+```
+
+This allows up to 200 rendering workers across the two nodes; each rank caps
+its worker count at its assigned frame count. `--bind-to none` adds no Open MPI
+binding; scheduler-enforced CPU sets still apply. For this layout,
+set `-np` to the node count and match workers to each rank's available cores
+and memory. Substitute the geometry and saved-snapshot interval for your file.
+Mapping and binding control placement within an existing allocation; they do
+not request nodes or CPUs. See the
+[Open MPI mapping and binding reference](https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man1/mpirun.1.html).
+
+`--report-bindings` reports each launched rank's binding. On Linux, inspect the
+CPU set visible to Python using the same placement policy:
+
+```bash
+mpirun -np 2 --map-by ppr:1:node --bind-to none --report-bindings \
+  python3 -c 'import os, socket; cpus = sorted(os.sched_getaffinity(0)); print(socket.gethostname(), "allowed logical CPUs:", len(cpus), cpus, flush=True)'
+```
+
+Repeat with the `PE=4` policy when checking that alternative. Counts and IDs
+refer to logical CPUs; simultaneous multithreading can make the count larger
+than the physical core count. This checks the parent rank's allowed CPU set,
+not individual worker placement or measured rendering performance.
+
+#### GMT sessions and troubleshooting
+
+Each worker keeps a read-only mapping, private temporary GMT directory, and
+colour table for its assigned chunk. Its PyGMT session ends before the
+directory is removed, including on rendering failure, and the corresponding
+exit callback is unregistered. A reused worker starts a new session for its
+next chunk. Both GMT and Python temporary files, including download locks,
+use that private directory.
+
+The script sets `GMT_DATA_UPDATE_INTERVAL = off` before importing PyGMT,
+disabling remote catalogue refresh. These plots use local displacement files
+and the installed `vik` palette, with no remote data requirement. See the
+[GMT catalogue setting](https://docs.generic-mapping-tools.org/6.4/gmt.conf.html#gmt-data-update-interval).
+
+Older versions could report `Not available in classic mode` or
+`Module 'end' failed with status code 30` at exit after deleting the session
+directory too early. Concurrent catalogue refreshes could also produce
+`gmt_data_server.txt.download` or `Bad record counter` errors. Those exit or
+catalogue diagnostics do not change already saved PNGs; use the current script
+for session teardown and catalogue isolation. Rendering failures still
+propagate as errors.
 
 ## Local investigation helpers
 
