@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { navGroups } from "./navigation";
+import { assetPath } from "../site-path";
 
 export default function DocsOverview() {
   return (
@@ -27,7 +28,7 @@ export default function DocsOverview() {
           </div>
           <figure className="overviewHeroMark">
             <Image
-              src="/hercules-octree-mesh-mark.png?v=graded-centered-256"
+              src={assetPath("/hercules-octree-mesh-mark.png?v=graded-centered-256")}
               alt="Hercules emblem formed from adaptive octree cells and a seismic waveform"
               width={512}
               height={512}

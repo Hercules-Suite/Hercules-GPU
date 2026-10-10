@@ -1,14 +1,20 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { assetPath } from "./site-path";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const requestHeaders = await headers();
-  const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
-  const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const base = new URL(`${protocol}://${host}`);
-  const socialImage = new URL("/og.png", base).toString();
+  let base: URL;
+  if (process.env.DOCS_STATIC_EXPORT === "1") {
+    base = new URL(process.env.DOCS_SITE_URL ?? "https://zwyll.github.io/Hercules_GPU/");
+  } else {
+    const requestHeaders = await headers();
+    const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
+    const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
+    base = new URL(`${protocol}://${host}`);
+  }
+  const socialImage = new URL(assetPath("/og.png"), base).toString();
 
   return {
     title: {
@@ -18,8 +24,8 @@ export async function generateMetadata(): Promise<Metadata> {
     description:
       "Technical documentation for Hercules linear, nonlinear/plastic, and coupled-physics seismic simulations.",
     icons: {
-      icon: "/hercules-octree-mesh-mark.png?v=graded-centered-256",
-      apple: "/hercules-octree-mesh-mark.png?v=graded-centered-256",
+      icon: assetPath("/hercules-octree-mesh-mark.png?v=graded-centered-256"),
+      apple: assetPath("/hercules-octree-mesh-mark.png?v=graded-centered-256"),
     },
     metadataBase: base,
     openGraph: {

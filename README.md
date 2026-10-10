@@ -9,6 +9,7 @@ studies.
 ## Documentation
 
 - [Hercules GPU Documentation](https://hercules-gpu-docs.utexas.chatgpt.site) — installation, input parameters, source models, running, output, and validation
+- [GitHub Pages publishing](docs-site/README.md#github-pages) — static documentation build and activation after the repository becomes public
 - [Technical README](doc/Technical%20README.md) — concise build/run guidance and input/runtime variable index
 - [Extended README](doc/Extended%20README.md) — comprehensive solver controls, formulations, examples, implementation details, and historical validation notes
 - [Plane velocity animations](doc/plane_velocity_animations.md) — rendering plane output, manual geometry and timing, MPI affinity, and GMT troubleshooting
