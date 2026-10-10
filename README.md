@@ -11,8 +11,7 @@ studies.
 - [Hercules GPU Documentation](https://hercules-gpu-docs.utexas.chatgpt.site) — installation, input parameters, source models, running, output, and validation
 - [Technical README](doc/Technical%20README.md) — concise build/run guidance and input/runtime variable index
 - [Extended README](doc/Extended%20README.md) — comprehensive solver controls, formulations, examples, implementation details, and historical validation notes
-- [Plane velocity animations](doc/plane_velocity_animations.md) — rendering plane output, manual geometry and timing, MPI affinity, and GMT troubleshooting
-- [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, and output readers
+- [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, output readers, and plane animations
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 
 ## Capabilities
