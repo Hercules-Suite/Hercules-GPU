@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { SearchBox } from "./search-box";
 import { ThemeToggle } from "./theme-toggle";
+import { assetPath } from "../site-path";
 
 const topLinks = [
   { href: "/docs", label: "Documentation" },
@@ -14,7 +15,7 @@ export function SiteHeader() {
       <div className="headerInner">
         <Link className="brand" href="/" aria-label="Hercules documentation home">
           <span className="brandMark" aria-hidden="true">
-            <Image src="/hercules-octree-mesh-mark.png?v=graded-centered-256" alt="" width={34} height={34} priority unoptimized />
+            <Image src={assetPath("/hercules-octree-mesh-mark.png?v=graded-centered-256")} alt="" width={34} height={34} priority unoptimized />
           </span>
           <span className="brandCopy">
             <strong>Hercules Documentation</strong>

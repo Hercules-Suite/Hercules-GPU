@@ -1,12 +1,29 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+const staticExport = process.env.DOCS_STATIC_EXPORT === "1";
+const basePath = staticExport ? (process.env.NEXT_PUBLIC_DOCS_BASE_PATH ?? "/Hercules_GPU") : "";
+const exportDirectory = fileURLToPath(new URL("../out/", import.meta.url));
+
+function filesUnder(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? filesUnder(path) : [path];
+  });
+}
+
 async function render(path = "/") {
+  if (staticExport) {
+    const file = join(exportDirectory, path, "index.html");
+    return existsSync(file)
+      ? new Response(readFileSync(file), { headers: { "content-type": "text/html" } })
+      : new Response("Not found", { status: 404 });
+  }
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
@@ -22,7 +39,7 @@ async function render(path = "/") {
   );
 }
 
-test("server-renders the Hercules documentation home", async () => {
+test("renders the Hercules documentation home", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
@@ -38,10 +55,44 @@ test("server-renders the Hercules documentation home", async () => {
   assert.match(html, /one.*parameters\.in.*file/i);
   assert.match(html, /Search documentation/);
   assert.match(html, /hercules-octree-mesh-mark\.png\?v=graded-centered-256/);
-  assert.match(html, /src="\/hercules-octree-mesh-mark\.png\?v=graded-centered-256"/);
+  assert.ok(html.includes(`src="${basePath}/hercules-octree-mesh-mark.png?v=graded-centered-256"`));
   assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mesh-mark/);
   assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mesh-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("exports complete pages with working repository-prefixed links and assets", { skip: !staticExport }, () => {
+  const origin = new URL(process.env.DOCS_SITE_URL ?? "https://zwyll.github.io/Hercules_GPU/").origin;
+  const navigation = readFileSync(new URL("../app/docs/navigation.ts", import.meta.url), "utf8");
+  const slugs = [...navigation.matchAll(/slug: "([^"]+)"/g)].map((match) => match[1]);
+  for (const slug of slugs) {
+    assert.ok(existsSync(join(exportDirectory, "docs", slug, "index.html")), `Missing exported page: ${slug}`);
+  }
+  assert.ok(existsSync(join(exportDirectory, "404.html")), "Static hosting needs a 404 page");
+
+  for (const file of filesUnder(exportDirectory).filter((path) => path.endsWith(".html"))) {
+    const html = readFileSync(file, "utf8");
+    const documentPath = `${basePath}/${file.slice(exportDirectory.length).replace(/index\.html$/, "")}`;
+    for (const tag of html.match(/<(?:a|link|img|script)\b[^>]*>/g) ?? []) {
+      const reference = tag.match(/\b(?:href|src)="([^"]+)"/)?.[1]?.replaceAll("&amp;", "&");
+      if (!reference || reference.startsWith("#")) continue;
+      const url = new URL(reference, `${origin}${documentPath}`);
+      if (url.origin !== origin) continue;
+      assert.ok(url.pathname.startsWith(`${basePath}/`), `URL escapes the repository path: ${reference} in ${file}`);
+      const relativePath = decodeURIComponent(url.pathname.slice(basePath.length + 1));
+      let target = join(exportDirectory, relativePath);
+      assert.ok(existsSync(target), `Missing link/asset target: ${reference} in ${file}`);
+      if (statSync(target).isDirectory()) target = join(target, "index.html");
+      assert.ok(existsSync(target), `Missing directory index: ${reference} in ${file}`);
+      if (url.hash && target.endsWith(".html")) {
+        const fragment = decodeURIComponent(url.hash.slice(1));
+        assert.ok(readFileSync(target, "utf8").includes(`id="${fragment}"`), `Missing section: ${reference}`);
+      }
+    }
+  }
+  const home = readFileSync(join(exportDirectory, "index.html"), "utf8");
+  assert.ok(home.includes(`content="${origin}${basePath}/og.png"`), "Social image must use the published site URL");
+  assert.doesNotMatch(home, /localhost:3000|_vinext\/image|_next\/image/);
 });
 
 test("builds the octree emblem from square mesh cells and square waveform terminals", () => {
@@ -168,10 +219,10 @@ test("searches complete documentation text and parameter names", async () => {
   assert.equal(matchesSearchQuery(searchable, "approximate_geostatic_state"), true);
   assert.equal(matchesSearchQuery(searchable, "unrelated keyword"), false);
 
-  const assetsDirectory = fileURLToPath(new URL("../dist/client/assets/", import.meta.url));
-  const clientJavaScript = readdirSync(assetsDirectory)
-    .filter((name) => name.endsWith(".js"))
-    .map((name) => readFileSync(join(assetsDirectory, name), "utf8"))
+  const assetsDirectory = fileURLToPath(new URL(staticExport ? "../out/_next/static/" : "../dist/client/assets/", import.meta.url));
+  const clientJavaScript = filesUnder(assetsDirectory)
+    .filter((path) => path.endsWith(".js"))
+    .map((path) => readFileSync(path, "utf8"))
     .join("\n");
   assert.match(clientJavaScript, /approximate_geostatic_state/);
   assert.match(clientJavaScript, /taper_topography\.py/);

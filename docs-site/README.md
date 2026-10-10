@@ -20,6 +20,67 @@ pnpm run dev
 pnpm run build
 ```
 
+## GitHub Pages
+
+The same source also exports a static website for GitHub Pages, including the
+current layout, browser-side search, theme switch, equations, and parameter
+tables. The existing `build`, `start`, and `test` commands continue to use the
+Sites/Vinext Worker build; `.openai/hosting.json` still identifies the university
+Sites deployment.
+
+From `docs-site/`, build and verify the static export with:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run test:pages
+```
+
+`build:pages` runs the installed Next.js compiler in static-export mode and
+replaces the generated `out/` directory. `test:pages` first builds that output,
+then runs the existing rendered-content and parser audits against the exported
+HTML, plus checks for missing pages, broken internal links, images, stylesheets,
+JavaScript assets, and incorrect repository URL prefixes. No server or Sites
+credentials are needed to serve the exported files. Keep `out/` and `.next/`
+untracked. Both build paths require Node.js 22.13 or newer and the existing pnpm
+lockfile; neither compiles the solver.
+
+The default public address is `https://zwyll.github.io/Hercules_GPU/`. These
+build-time controls allow a different hosting location:
+
+| Control | Default for `build:pages` | Meaning |
+| --- | --- | --- |
+| `DOCS_STATIC_EXPORT` | `1`, set by the command | Select static metadata and Next.js export. Leave unset for the Sites build. |
+| `NEXT_PUBLIC_DOCS_BASE_PATH` | `/Hercules_GPU` | URL prefix, beginning with `/` and without a trailing slash; use an empty string for a domain-root site. Next.js prefixes navigation links; the site prefixes public image URLs. |
+| `DOCS_SITE_URL` | `https://zwyll.github.io/Hercules_GPU/` | Absolute public site URL used for social-preview metadata. Set this together with the URL prefix when changing host or repository. |
+
+For example, to export for a custom domain at its root:
+
+```bash
+NEXT_PUBLIC_DOCS_BASE_PATH='' DOCS_SITE_URL=https://docs.example.org/ pnpm run test:pages
+```
+
+The documentation workflow builds and audits both targets on pull requests and
+updates to `main`, including while the repository is private. Publication is
+disabled until all of these activation steps are complete:
+
+1. Make the repository public when ready. Changing its visibility is a separate
+   maintainer action.
+2. In **Settings → Pages → Build and deployment**, choose **GitHub Actions** as
+   the source.
+3. In **Settings → Secrets and variables → Actions → Variables**, create the
+   repository variable `DOCS_PAGES_ENABLED` with the value `true`.
+4. Run **Actions → Documentation site → Run workflow** on `main`.
+
+After activation, successful documentation workflow runs on `main` publish the
+static export through the `github-pages` environment. Pull requests and private
+repositories never publish through this workflow. The workflow derives the
+default URL and prefix from the repository owner/name; update its export-step
+environment values before using a custom domain. Check navigation, search,
+images, and a direct link to a nested documentation page on the first live
+deployment, then update the repository's primary documentation link. Setting
+`DOCS_PAGES_ENABLED` to `false` stops future deployments; it does not remove an
+already published site.
+
 ## Project structure
 
 - `app/` contains the public site, documentation routes, navigation, and styles.
