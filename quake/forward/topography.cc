@@ -48,6 +48,7 @@ static int                ntp, np_ew, np_ns;
 static int8_t             theMaxoctlevel;
 static double             thebase_zcoord = 0.0, So, theDomainLong_ew, theDomainLong_ns, theMinTopoVol;
 static double             *theTopoInfo;
+static double             *theSeabedInfo = NULL;
 static etreetype_t        theEtreeType;
 static int32_t            myTopoElementsCount = 0;
 static int32_t            *myTopoElementsMapping;
@@ -434,6 +435,97 @@ static double topo_surface_z(double x, double y, double *normal_scale)
 double point_elevation(double x, double y)
 {
     return topo_surface_z(x, y, NULL);
+}
+
+static const double SEABED_HEIGHT_TOLERANCE_M = 1e-8;
+
+int topo_seabed_enabled(void) { return theSeabedInfo != NULL; }
+
+int topo_seabed_sample(double x, double y, double *bed_z) {
+    if (!topo_seabed_enabled()) {
+        *bed_z = point_elevation(x, y);
+        return 0;
+    }
+    /* Same extent, spacing, edge extension and ordering as topography.in.
+     * Infer coverage after interpolating the two physical surfaces. */
+    const double gx = fmax(0.0, fmin(x / So, (double)(np_ns - 1)));
+    const double gy = fmax(0.0, fmin(y / So, (double)(np_ew - 1)));
+    const int i = (int)fmin(floor(gx), (double)(np_ns - 2));
+    const int j = (int)fmin(floor(gy), (double)(np_ew - 2));
+    const double u = gx - i, v = gy - j;
+    const double h0 = (1.0-u)*theSeabedInfo[i*np_ew+j] +
+                     u*theSeabedInfo[(i+1)*np_ew+j];
+    const double h1 = (1.0-u)*theSeabedInfo[i*np_ew+j+1] +
+                     u*theSeabedInfo[(i+1)*np_ew+j+1];
+    *bed_z = thebase_zcoord - ((1.0-v)*h0 + v*h1);
+    const double surface_z = point_elevation(x, y);
+    if (*bed_z - surface_z > SEABED_HEIGHT_TOLERANCE_M) return 1;
+    *bed_z = surface_z;
+    return 0;
+}
+
+/* Called after topo_init. Root alone reads; every solver rank receives the
+ * identical geometry before meshing, material queries and interface setup. */
+void topo_seabed_init(int32_t myID, const char *path) {
+    theSeabedInfo = (double*)malloc(sizeof(double) * (size_t)ntp);
+    if (theSeabedInfo == NULL) {
+        fprintf(stderr, "Cannot allocate explicit seabed geometry\n");
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+    if (myID == 0) {
+        FILE *fp = fopen(path, "r");
+        double spacing;
+        int valid = fp != NULL;
+        if (valid) valid = fscanf(fp, "%lf", &spacing) == 1 &&
+            isfinite(spacing) && fabs(spacing-So) <= 1e-10*fmax(1.0, So);
+        for (int n=0; valid && n<ntp; ++n)
+            valid = fscanf(fp, "%lf", &theSeabedInfo[n]) == 1 &&
+                    isfinite(theSeabedInfo[n]);
+        char extra;
+        if (valid) valid = fscanf(fp, " %c", &extra) == EOF;
+        if (fp != NULL) fclose(fp);
+        if (!valid) {
+            fprintf(stderr, "Invalid seabed_geometry_file %s: expected the "
+                    "topography spacing followed by exactly %d finite bed "
+                    "elevations, with no mask or extra tokens\n", path, ntp);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+        for (int n=0; n<ntp; ++n) {
+            const double water_depth = theTopoInfo[n] - theSeabedInfo[n];
+            if (water_depth < -SEABED_HEIGHT_TOLERANCE_M) {
+                fprintf(stderr, "Bed elevation exceeds topography at node %d "
+                        "in %s (bed=%g, outer surface=%g m)\n",
+                        n, path, theSeabedInfo[n], theTopoInfo[n]);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            if (water_depth <= SEABED_HEIGHT_TOLERANCE_M)
+                theSeabedInfo[n] = theTopoInfo[n];
+        }
+        /* Existing acoustic free-surface operators use horizontal mesh faces.
+         * Distinct flat water bodies may have different elevations, separated
+         * by dry cells. Do not silently apply that operator to a sloping lake. */
+        for (int i=0; i<np_ns-1; ++i) for (int j=0; j<np_ew-1; ++j) {
+            double lo = theTopoInfo[i*np_ew+j], hi = lo;
+            int wet = 0;
+            for (int di=0; di<2; ++di) for (int dj=0; dj<2; ++dj) {
+                const int n = (i+di)*np_ew+j+dj;
+                lo = fmin(lo, theTopoInfo[n]);
+                hi = fmax(hi, theTopoInfo[n]);
+                wet |= theTopoInfo[n] - theSeabedInfo[n] > SEABED_HEIGHT_TOLERANCE_M;
+            }
+            if (wet && (hi-lo > SEABED_HEIGHT_TOLERANCE_M || hi >= thebase_zcoord)) {
+                fprintf(stderr, "Wet geometry cell (%d,%d) requires a flat "
+                        "outer surface below topographybase_zcoord; sloping "
+                        "acoustic free surfaces are unsupported\n", i, j);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+        }
+    }
+    MPI_Bcast(theSeabedInfo, ntp, MPI_DOUBLE, 0, comm_solver);
 }
 
 /* Signed tangent-normal offset: positive in air, zero on the surface,

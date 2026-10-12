@@ -237,7 +237,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 245 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 249 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -249,7 +249,8 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /Acoustic and poroelastic parameters/);
   assert.match(html, /acoustic_free_surface_gravity/);
   assert.match(html, /Z=topographybase_zcoord/);
-  assert.match(html, /buried water beneath land is excluded/);
+  assert.match(html, /excluding buried water beneath land/);
+  assert.match(html, /complete horizontal top faces must coincide with local topography over water/);
   assert.match(html, /acoustic_interface_face_filter/);
   const faceFilterRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_face_filter"));
   assert.ok(faceFilterRow, "the acoustic interface filter must appear in the parameter reference");
@@ -382,8 +383,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 245);
-  assert.equal(documented.length, 245, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 249);
+  assert.equal(documented.length, 249, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -468,6 +469,38 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("documents elevation-only seabed geometry and depth-reference contract", async () => {
+  const html = await (await render("/docs/input-files")).text();
+  const section = html.match(/<section\b[^>]*id="explicit-seabed-geometry"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  for (const name of ["seabed_geometry_file", "3D_velocity_model_depth_reference", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
+    assert.ok(section.includes(name), `missing seabed input example: ${name}`);
+  }
+  assert.match(section, /solid-only/i);
+  assert.match(section, /east-fast/);
+  assert.match(section, /topography minus bed/);
+  assert.match(section, /1e-8 m/);
+  assert.match(section, /No separate water-level parameter or wet\/dry mask/);
+  assert.match(section, /One number per line is valid/);
+  assert.match(section, /Distinct water bodies may have different elevations/);
+  assert.match(section, /sloping water surfaces are rejected/);
+  assert.doesNotMatch(html, /seabed_water_level_m/);
+  assert.match(section, /both full and sqd/);
+  assert.match(section, /20, 120 or 1120/);
+  assert.match(section, /dry land can be below zero/);
+  assert.match(section, /1000 m × 1000 m/);
+  assert.match(section, /Porous sediment depth limits are measured below the bed/);
+  assert.match(section, /supercomputer validation/);
+  const sourceRoot = "../quake/forward/";
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const geometry = readFileSync(`${sourceRoot}topography.cc`, "utf8");
+  assert.match(solver, /char depth_reference\[64\] = "legacy"/);
+  assert.match(solver, /have_buildings == YES \|\| Param\.the3DDepthReference == 0/);
+  assert.match(solver, /MPI_Bcast\(Param\.theSeabedGeometryFile/);
+  assert.match(geometry, /MPI_Bcast\(theSeabedInfo, ntp, MPI_DOUBLE/);
+  assert.doesNotMatch(solver + geometry, /seabed_water_level_m|theSeabedWaterLevel|theSeabedWet|topo_seabed_water_surface_z/);
 });
 
 test("documents the default acoustic quality factor and its validation scope", async () => {
@@ -1688,6 +1721,8 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.doesNotMatch(html, /routine has no CPML memory correction/);
   const models = await (await render("/docs/physics")).text();
   assert.match(models, /Acoustic free-surface geometry/);
+  assert.match(models, /acoustic free surfaces follow local topography over water/);
+  assert.match(models, /Without explicit seabed geometry/);
   assert.match(models, /missed shifted water surfaces/);
   assert.match(models, /MPI displacement sharing and hanging-node assignment/);
   assert.match(models, /Compare one and four ranks/);
@@ -1944,6 +1979,15 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /unequal layer counts: 4, 4, 3, and 4/);
   assert.match(html, /piecewise constant with depth/);
   assert.match(html, /bilinearly interpolates Vs, Vp, density/);
+  assert.match(html, /3-D material depths with full and sqd topography/);
+  assert.match(html, /d_i = d \+ h_i - h_query/);
+  assert.match(html, /actual topography grid at the solver query point/);
+  assert.match(html, /every column is queried at Z, with no column terrain shift/);
+  assert.match(html, /sqd queries depths 30 and 130 m, and full queries Z=1030 m/);
+  assert.match(html, /there is no global minimum-depth rejection/);
+  assert.match(html, /does not interpolate corresponding layers at equal burial depth/);
+  assert.match(html, /Imported element materials retain those old values/);
+  assert.match(html, /not new GPU\/MPI wave-propagation benchmarks/);
   assert.match(html, /script\/convert_3d_velocity_model\.py/);
   for (const name of ["validate_3d_velocity_model", "generate_topography", "validate_topography"]) {
     assert.ok(html.includes(`script/${name}.py`));
@@ -1966,6 +2010,17 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /--pml-thickness.*does not configure Hercules/s);
   assert.match(html, /max \|z_boundary - z_ref\| = 0/);
   assert.match(html, /cpml_3d_material_extension/);
+});
+
+test("documents the required full/sqd material-coordinate convention", async () => {
+  const html = await (await render("/docs/parameters-topography-buildings")).text();
+  const row = html.split("</tr>").find((part) => part.includes(">type_of_etree</td>"));
+  assert.ok(row);
+  assert.match(row, /Required with topography; sqd \| full; no default/);
+  assert.match(row, /sqd subtracts the local surface; full retains fixed model Z/);
+  assert.match(row, /actual query-point topography/);
+  assert.match(row, /Both are in metres, positive downward/);
+  assert.match(row, /Changing modes requires matching material depths/);
 });
 
 test("converts a row-wise CSV into Hercules 3-D model files", () => {

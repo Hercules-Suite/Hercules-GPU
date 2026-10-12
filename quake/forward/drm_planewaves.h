@@ -48,12 +48,19 @@ int material_property_relative_V10_local(double x_input, double y_input, double 
 int32_t Istanbul_initparameters ( );
 void Istanbul_init ( int32_t myID );
 
+/* X/Y are solver offsets from the material origin. With topography SQD,
+ * z_input and z.in are depths below their respective local surfaces; the
+ * reader samples columns at the query's physical elevation. FULL/no-topography
+ * z_input and z.in use fixed model Z. Caller removes building offsets first. */
 int getMaterialFrom3DVelocityModel(double x_input, double y_input,
                                    double z_input, double output[5],
                                    double DRM_southwest_x,
                                    double DRM_southwest_y,
                                    int *has_quality_factors);
 int general3DVelocityModel_hasQualityFactors(void);
+/* 0 retains legacy type_of_etree behavior; explicit geometry uses 1=model_z,
+ * 2=surface, 3=seabed. Water density is SI kg/m^3. */
+void general3DVelocityModel_set_seabed(int reference, double vp, double rho);
 /* Grid +X azimuth relative to solver +X; called on every rank at setup. */
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg);
 void general3DVelocityModel_init(int32_t myID, const char *the3DVelModelDir);
