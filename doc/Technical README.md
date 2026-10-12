@@ -94,11 +94,23 @@ interactions are in the
   The 3-D material reader supports 64-bit sample counts/profile offsets with
   chunked MPI initialization; full material arrays remain replicated per rank.
   See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
-  With topography, `type_of_etree=sqd` uses `z.in` depths below each column's
+  Without explicit seabed geometry, `type_of_etree=sqd` uses `z.in` depths below each column's
   surface and samples at equal physical elevation using the actual query-point
   terrain. `full` uses fixed model Z without a terrain shift. Rebuild the solver
   and regenerate meshes with `mesh_input_mode=0` to apply the corrected lookup;
   see [depth conventions and example](Extended%20README.md#3d-material-depths-with-topography).
+- **Explicit seabed geometry (opt-in):** `seabed_geometry_file` supplies ground/bed
+  heights and a cell wet/dry mask on the topography grid; omission retains the
+  existing Vs-based acoustic convention. Set `3D_velocity_model_depth_reference`
+  explicitly to `seabed`, `surface`, or `model_z` (default `legacy` without the
+  file); each explicit reference works with either `full` or `sqd`. Supply
+  `seabed_water_vp_m_s` and `seabed_water_density_kg_m3` (required, finite positive
+  SI values), and optionally `seabed_water_level_m` (default 0, positive-upward
+  elevation). Requires topography, acoustics and solid-only 3-D profiles;
+  buildings and other material-model overrides are unsupported. Dry negative
+  elevations remain dry. Porous depth limits start at the bed; wet hydrostatic
+  pressure starts at the water surface. Regenerate meshes after changes. See
+  [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.

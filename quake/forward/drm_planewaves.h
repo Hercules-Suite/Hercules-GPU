@@ -58,6 +58,9 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
                                    double DRM_southwest_y,
                                    int *has_quality_factors);
 int general3DVelocityModel_hasQualityFactors(void);
+/* 0 retains legacy type_of_etree behavior; explicit geometry uses 1=model_z,
+ * 2=surface, 3=seabed. Water density is SI kg/m^3. */
+void general3DVelocityModel_set_seabed(int reference, double vp, double rho);
 /* Grid +X azimuth relative to solver +X; called on every rank at setup. */
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg);
 void general3DVelocityModel_init(int32_t myID, const char *the3DVelModelDir);

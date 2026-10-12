@@ -1660,12 +1660,15 @@ static double *Soil_Qp_data;
 static double *Soil_point_x;
 static double *Soil_point_y;
 static double *Soil_point_z;
-/* Solver Z of each column's surface, positive downward; used only by SQD. */
+/* Solver Z of each column's reference surface, positive downward: outer
+ * topography for legacy SQD/surface, ground/bed for explicit seabed depths. */
 static double *Soil_surface_z = NULL;
 static int Soil_surface_count = 0;
 static double Soil_surface_swx = NAN;
 static double Soil_surface_swy = NAN;
 static horizontal_frame_t Soil_frame = {1.0, 0.0};
+static int Soil_depth_reference = 0;
+static double Soil_water_vp = 0.0, Soil_water_rho = 0.0;
 
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg) {
     Soil_frame = horizontal_frame(relative_azimuth_deg);
@@ -1680,6 +1683,25 @@ static struct Params_soil_t {
     double minPointZ;
     double maxPointZ;
 } Params_soil;
+
+void general3DVelocityModel_set_seabed(int reference, double vp, double rho) {
+    Soil_depth_reference = reference;
+    Soil_water_vp = vp;
+    Soil_water_rho = rho;
+    Soil_surface_swx = Soil_surface_swy = NAN;
+    /* Geometry supplies water. The input profiles must describe only solid
+     * material, including the top solid endpoint in every column. */
+    if (reference == 0) return;
+    for (int64_t n=0; n<Params_soil.numData; ++n) {
+        if (Soil_Vs_data[n] <= ACOUSTIC_VS_EPS) {
+            fprintf(stderr, "Explicit seabed geometry requires solid-only "
+                    "vs.in (Vs > 1e-6); remove water samples from all matched "
+                    "material arrays before using this mode\n");
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+    }
+}
 
 static int update_3d_surface_cache(double DRM_southwest_x,
                                    double DRM_southwest_y) {
@@ -1715,9 +1737,15 @@ static int update_3d_surface_cache(double DRM_southwest_x,
             double solver_x, solver_y;
             horizontal_to_parent(Soil_frame, Soil_point_x[x], Soil_point_y[y],
                                  &solver_x, &solver_y);
-            Soil_surface_z[node_id] =
-                point_elevation(solver_x + DRM_southwest_x,
-                                solver_y + DRM_southwest_y);
+            if (Soil_depth_reference == 3) {
+                topo_seabed_sample(solver_x + DRM_southwest_x,
+                                   solver_y + DRM_southwest_y,
+                                   &Soil_surface_z[node_id]);
+            } else {
+                Soil_surface_z[node_id] =
+                    point_elevation(solver_x + DRM_southwest_x,
+                                    solver_y + DRM_southwest_y);
+            }
         }
     }
 
@@ -1760,6 +1788,23 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     const double solver_y = y_input + DRM_southwest_y;
     const int surface_relative =
         (get_thebase_topo() > 0.0) && (get_theetree_type() == SQD);
+    const int explicit_seabed = topo_seabed_enabled();
+    const int column_relative = explicit_seabed
+        ? Soil_depth_reference != 1 : surface_relative;
+    double physical_z = z_input;
+    if (explicit_seabed) {
+        if (surface_relative) physical_z += point_elevation(solver_x, solver_y);
+        double bed_z;
+        if (topo_seabed_sample(solver_x, solver_y, &bed_z) &&
+            physical_z >= topo_seabed_water_surface_z() && physical_z < bed_z) {
+            output[0] = 0.0;
+            output[1] = Soil_water_vp;
+            output[2] = Soil_water_rho;
+            output[3] = output[4] = 0.0;
+            *has_quality_factors = 0;
+            return 0;
+        }
+    }
     double grid_x, grid_y;
     horizontal_to_local(Soil_frame, x_input, y_input, &grid_x, &grid_y);
     x_input = grid_x;
@@ -1784,7 +1829,7 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     /* Preserve the fixed-coordinate background fallback. In SQD, raw query
      * depth and the column layer depths have different surface origins, so
      * this global test is invalid; apply endpoint extension per column. */
-    if (!surface_relative && z_input < Params_soil.minPointZ) {
+    if (!explicit_seabed && !surface_relative && z_input < Params_soil.minPointZ) {
         return -1;
     }
     /* Clifford's NOTE: Using the commented out code below, we can replicate how 
@@ -1814,13 +1859,14 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     y_coord[3] = y_coord[2];
 
     double query_surface_z = 0.0;
-    if (surface_relative) {
+    if (column_relative) {
         if (update_3d_surface_cache(DRM_southwest_x, DRM_southwest_y) != 0) {
             return -1;
         }
-        /* Use the same topography grid as the caller, including terrain
-         * resolved between the (possibly coarser or rotated) model columns. */
-        query_surface_z = point_elevation(solver_x, solver_y);
+        /* Preserve legacy arithmetic with the actual query-point surface;
+         * explicit references already restored physical_z above. */
+        if (!explicit_seabed)
+            query_surface_z = point_elevation(solver_x, solver_y);
     }
 
     xi  = (x_input - x_coord[0])/x_spacing*2.0 - 1.0;
@@ -1834,10 +1880,13 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
         /* Same physical Z at all four columns: d_i = d + Zs(q) - Zs(i),
          * equivalently d + h(i) - h(q) for heights positive upward.
          * Subtract surfaces first to retain flat-terrain depths exactly.
-         * FULL already stores layer tops in fixed model Z; do not shift it. */
-        const double column_depth = surface_relative
-            ? z_input + (query_surface_z - Soil_surface_z[Rec_node_ID[i]])
-            : z_input;
+         * Legacy FULL stores layer tops in fixed model Z. Explicit geometry
+         * uses its declared column reference independently of FULL/SQD. */
+        const double column_depth = explicit_seabed
+            ? physical_z - (column_relative ? Soil_surface_z[Rec_node_ID[i]] : 0.0)
+            : (surface_relative
+                ? z_input + (query_surface_z - Soil_surface_z[Rec_node_ID[i]])
+                : z_input);
         row1 = Soil_layer_start[Rec_node_ID[i]];
         if (Rec_node_ID[i]+1 < Params_soil.numLayerID) {
             numLayers = Soil_layer_start[Rec_node_ID[i]+1] - Soil_layer_start[Rec_node_ID[i]];

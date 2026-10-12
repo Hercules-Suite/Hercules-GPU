@@ -382,8 +382,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 245);
-  assert.equal(documented.length, 245, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 250);
+  assert.equal(documented.length, 250, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -468,6 +468,31 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("documents explicit seabed geometry, mask format and depth-reference contract", async () => {
+  const html = await (await render("/docs/input-files")).text();
+  const section = html.match(/<section\b[^>]*id="explicit-seabed-geometry"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  for (const name of ["seabed_geometry_file", "3D_velocity_model_depth_reference", "seabed_water_level_m", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
+    assert.ok(section.includes(name), `missing seabed input example: ${name}`);
+  }
+  assert.match(section, /solid-only/i);
+  assert.match(section, /east-fast/);
+  assert.match(section, /binary cell masks/);
+  assert.match(section, /both full and sqd/);
+  assert.match(section, /20, 120 or 1120/);
+  assert.match(section, /dry land can be below zero/);
+  assert.match(section, /1000 m × 1000 m/);
+  assert.match(section, /Porous sediment depth limits are measured below the bed/);
+  assert.match(section, /supercomputer validation/);
+  const sourceRoot = "../quake/forward/";
+  const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const geometry = readFileSync(`${sourceRoot}topography.cc`, "utf8");
+  assert.match(solver, /char depth_reference\[64\] = "legacy"/);
+  assert.match(solver, /have_buildings == YES \|\| Param\.the3DDepthReference == 0/);
+  assert.match(solver, /MPI_Bcast\(Param\.theSeabedGeometryFile/);
+  assert.match(geometry, /MPI_Bcast\(theSeabedWet, ncells, MPI_INT/);
 });
 
 test("documents the default acoustic quality factor and its validation scope", async () => {

@@ -1048,6 +1048,9 @@ static struct Param_t {
   char theSourceOutputDir[256];
   char theMeshDirMatlab[256];
   char the3DVelModelDir[256];
+  char theSeabedGeometryFile[256];
+  int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
+  double theSeabedWaterVp, theSeabedWaterRho, theSeabedWaterLevel;
   char theTopoDir[256];
   char theStationMediumsFile[256];
   char theAcousticInterfaceDiagnosticsFile[256];
@@ -1706,6 +1709,11 @@ static double poro_grid_interp_value(const groundwater_grid_t* grid,
 }
 
 static double poro_ground_surface_shift(double north_m, double east_m) {
+  if (topo_seabed_enabled()) {
+    double bed_z;
+    topo_seabed_sample(north_m, east_m, &bed_z);
+    return bed_z;
+  }
   if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
     return point_elevation(north_m, east_m);
   }
@@ -1717,6 +1725,11 @@ static double poro_ground_surface_shift(double north_m, double east_m) {
 
 static double poro_groundwater_shift(double north_m, double east_m,
                                      double ground_shift) {
+  if (topo_seabed_enabled()) {
+    double bed_z;
+    if (topo_seabed_sample(north_m, east_m, &bed_z))
+      return topo_seabed_water_surface_z();
+  }
   if (Param.surfaceGroundwaterTable != YES) {
     return ground_shift;
   }
@@ -2630,6 +2643,11 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(Param.theSourceOutputDir, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.theMeshDirMatlab, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.the3DVelModelDir, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(Param.theSeabedGeometryFile, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
+  MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
+  MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
+  MPI_Bcast(&Param.theSeabedWaterLevel, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.theAcousticInterfaceDiagnosticsFile, 256, MPI_CHAR, 0,
             comm_solver);
@@ -4258,6 +4276,47 @@ static int32_t parse_parameters(const char* numericalin) {
                  include3DVelModel);
   }
 
+  char depth_reference[64] = "legacy";
+  char *seabed_path = Param.theSeabedGeometryFile, *depth_reference_ptr = depth_reference;
+  size_t seabed_path_size = sizeof(Param.theSeabedGeometryFile);
+  size_t depth_reference_size = sizeof(depth_reference);
+  hu_config_get_string_opt(fp, "seabed_geometry_file", &seabed_path, &seabed_path_size);
+  hu_config_get_string_opt(fp, "3D_velocity_model_depth_reference",
+                           &depth_reference_ptr, &depth_reference_size);
+  if (strcasecmp(depth_reference, "legacy") == 0) Param.the3DDepthReference = 0;
+  else if (strcasecmp(depth_reference, "model_z") == 0) Param.the3DDepthReference = 1;
+  else if (strcasecmp(depth_reference, "surface") == 0) Param.the3DDepthReference = 2;
+  else if (strcasecmp(depth_reference, "seabed") == 0) Param.the3DDepthReference = 3;
+  else solver_abort(__FUNCTION_NAME, NULL,
+                   "3D_velocity_model_depth_reference must be legacy, model_z, surface or seabed\n");
+  const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
+  const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
+  const int has_water_level = hu_config_get_double_opt(fp, "seabed_water_level_m", &Param.theSeabedWaterLevel) == 1;
+  if (Param.theSeabedGeometryFile[0] != '\0') {
+    if (haveTopography != YES || include3DVelModel != YES ||
+        includeAcoustic != YES || includeIstanbulVelModel == YES ||
+        includeBasinVelModel == YES || includeHmgHalfSpace == YES ||
+        have_buildings == YES || Param.the3DDepthReference == 0) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "seabed_geometry_file requires include_topography=yes, "
+                   "3D_velocity_model=yes, include_acoustic=yes, an explicit "
+                   "3D_velocity_model_depth_reference (model_z/surface/seabed), "
+                   "and buildings, Istanbul, basin and homogeneous-halfspace overrides disabled\n");
+    }
+    if (!has_water_vp || !has_water_rho ||
+        !isfinite(Param.theSeabedWaterVp) || Param.theSeabedWaterVp <= 0.0 ||
+        !isfinite(Param.theSeabedWaterRho) || Param.theSeabedWaterRho <= 0.0 ||
+        !isfinite(Param.theSeabedWaterLevel)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Explicit seabed geometry requires finite positive "
+                   "seabed_water_vp_m_s and seabed_water_density_kg_m3; "
+                   "seabed_water_level_m must be finite (default 0)\n");
+    }
+  } else if (Param.the3DDepthReference != 0 || has_water_vp || has_water_rho || has_water_level) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Explicit depth reference and seabed water controls require seabed_geometry_file\n");
+  }
+
   parsetext(fp, "source_directory_output", 's', &Param.theSourceOutputDir);
   createDir(Param.theSourceOutputDir, __FUNCTION_NAME);
   if (Param.theAcousticInterfaceDiagnosticsFile[0] != '\0') {
@@ -5343,6 +5402,13 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
                                            threeDVelModel_origin.x[1],
                                            &has_quality_factors);
   if (res != 0) {
+    if (topo_seabed_enabled()) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Explicit seabed solid query lies outside the 3D model: "
+                   "X=%g Y=%g depth=%g. Extend the solid model footprint; "
+                   "background fallback would have an ambiguous depth reference.\n",
+                   x_m, y_m, z_m);
+    }
     if (Param.useProfile == NO) {
       res = cvm_query(Global.theCVMEp, y_m, x_m, z_m, g_props);
     } else {
@@ -5369,6 +5435,32 @@ int get3DMaterial(cvmpayload_t* g_props, vector3D_t threeDVelModel_origin,
     }
   }
   return res;
+}
+
+/* Total vertical overburden for approximate nonlinear geostatic setup. The
+ * water load is exact; midpoint quadrature applies only to the solid column.
+ * Poroelastic initialization subsequently subtracts hydrostatic Biot stress. */
+static double seabed_geostatic_overburden(vector3D_t origin, double north,
+                                         double east, double input_depth) {
+  cpml_extend_3d_material_query(&north, &east, &input_depth);
+  const double surface_z = point_elevation(north, east);
+  const double physical_z = input_depth +
+      (get_theetree_type() == SQD ? surface_z : 0.0);
+  double bed_z;
+  const int wet = topo_seabed_sample(north, east, &bed_z);
+  double stress = wet ? Param.theSeabedWaterRho * 9.81 *
+      fmax(0.0, fmin(physical_z, bed_z) - topo_seabed_water_surface_z()) : 0.0;
+  const int samples = 100;
+  const double dz = fmax(0.0, physical_z - bed_z) / samples;
+  for (int k=0; dz > 0.0 && k<samples; ++k) {
+    const double z = bed_z + (k+0.5)*dz -
+        (get_theetree_type() == SQD ? surface_z : 0.0);
+    cvmpayload_t props;
+    if (get3DMaterial(&props, origin, north, east, z) != 0)
+      solver_abort(__FUNCTION_NAME, NULL, "Cannot sample seabed overburden\n");
+    stress += dz * props.rho * 9.81;
+  }
+  return stress;
 }
 
 static int material_values_are_elastic(double Vp, double Vs, double rho) {
@@ -5851,12 +5943,14 @@ static int mesh_query_material_at_model_point(
     depth_m -= get_surface_shift();
   }
 
-  if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
-    depth_m -= point_elevation(north_m, east_m);
-    if (depth_m < 0.0) {
+  if ((Param.includeTopography == YES) &&
+      (get_theetree_type() == SQD || topo_seabed_enabled())) {
+    const double surface_depth = depth_m - point_elevation(north_m, east_m);
+    if (surface_depth < 0.0) {
       return 1;
     }
-    if (depth_m > Param.theDomainZ) {
+    if (get_theetree_type() == SQD) depth_m = surface_depth;
+    if (get_theetree_type() == SQD && depth_m > Param.theDomainZ) {
       depth_m = Param.theDomainZ;
     }
   }
@@ -5927,6 +6021,21 @@ static int mesh_find_acoustic_elastic_transition_depth(
       (east_m < Global.theYForMeshOrigin) ||
       (east_m > Global.theYForMeshOrigin + Param.theDomainY)) {
     return 0;
+  }
+
+  if (topo_seabed_enabled()) {
+    /* Use the same lateral CPML extension as material assignment. Read the
+     * explicit bed directly; never reconstruct it from interpolated Vs. */
+    double query_depth = depth_hint_m;
+    if (get_theetree_type() == SQD)
+      query_depth -= point_elevation(north_m, east_m);
+    cpml_extend_3d_material_query(&north_m, &east_m, &query_depth);
+    double bed_z;
+    if (!topo_seabed_sample(north_m, east_m, &bed_z) ||
+        bed_z <= topo_seabed_water_surface_z() ||
+        bed_z < z_domain_min || bed_z > z_domain_max) return 0;
+    *depth_out = bed_z;
+    return 1;
   }
 
   for (int expand = 0; expand < 4; expand++) {
@@ -6962,9 +7071,11 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
         // }
 
         /* Shift the domain if topography with squashed etree is considered */
-        if ((Param.includeTopography == YES) && (get_theetree_type() == SQD)) {
-          z_m -= point_elevation(x_m, y_m);
-          if (z_m < 0) /* get air properties */
+        if ((Param.includeTopography == YES) &&
+            (get_theetree_type() == SQD || topo_seabed_enabled())) {
+          const double surface_depth = z_m - point_elevation(x_m, y_m);
+          if (get_theetree_type() == SQD) z_m = surface_depth;
+          if (surface_depth < 0) /* get air properties */
           {
             edata_t* airedata = (edata_t*)data;
             get_airprops_topo(airedata);
@@ -11376,8 +11487,10 @@ static void gpu_init(int32_t myID) {
 
 /* The octree starts at Z=0 even when air/buildings shift the physical
  * surface downward. Acoustic water at sea level follows the topography
- * datum, not nearendp[2]. Keep the unshifted global-top case unchanged. */
+ * datum, not nearendp[2]. Explicit geometry may select a different constant
+ * water elevation. Keep the unshifted global-top case unchanged. */
 static double acoustic_free_surface_z() {
+  if (topo_seabed_enabled()) return topo_seabed_water_surface_z();
   if (Param.includeTopography == YES) return get_thebase_topo();
   if (Param.includeBuildings == YES) return get_surface_shift();
   return (double)Global.myOctree->nearendp[2] * Global.myOctree->ticksize;
@@ -28721,11 +28834,12 @@ static void mesh_correct_properties(etree_t* cvm) {
           }
 
           if ((Param.includeTopography == YES) &&
-              (get_theetree_type() == SQD)) {
-            depth_m -= point_elevation(north_m, east_m);
-            if (depth_m < 0) continue;
+              (get_theetree_type() == SQD || topo_seabed_enabled())) {
+            const double surface_depth = depth_m - point_elevation(north_m, east_m);
+            if (surface_depth < 0) continue;
+            if (get_theetree_type() == SQD) depth_m = surface_depth;
 
-            if (depth_m > Param.theDomainZ)
+            if (get_theetree_type() == SQD && depth_m > Param.theDomainZ)
               depth_m = Param.theDomainZ - edata->edgesize * 0.005;
           }
 
@@ -28788,50 +28902,56 @@ static void mesh_correct_properties(etree_t* cvm) {
           int k;
           if (iNorth == 1 && iEast == 1 && iDepth == 1 &&
               Param.includeNonlinearAnalysis == YES) {
-            // NOTE from Clifford: This nonlinear section is only applicable for
-            // the Istanbul Velocity Model as the nonlinear_id is calculated
-            // based on the Istanbul Velocity Model.
+            if (topo_seabed_enabled()) {
+              s_0 = seabed_geostatic_overburden(threeDVelModel_origin, north_m,
+                                               east_m, depth_m);
+            } else {
+              // NOTE from Clifford: This nonlinear section is only applicable for
+              // the Istanbul Velocity Model as the nonlinear_id is calculated
+              // based on the Istanbul Velocity Model.
 
-            if (Param.IstanbulVelocityModel == YES) {
-              // get nonlinear_id at the element's center
-              double output[4] = {0.0}, x_rel, y_rel;
-              x_rel = 4536400.00 + north_m - IstVelModel_origin.x[0];
-              y_rel = 388500.00 + east_m - IstVelModel_origin.x[1];
+              if (Param.IstanbulVelocityModel == YES) {
+                // get nonlinear_id at the element's center
+                double output[4] = {0.0}, x_rel, y_rel;
+                x_rel = 4536400.00 + north_m - IstVelModel_origin.x[0];
+                y_rel = 388500.00 + east_m - IstVelModel_origin.x[1];
 
-              res = material_property_relative_V10_local(
-                  y_rel, x_rel, -depth_m, output, IstVelModel_origin.x[1],
-                  IstVelModel_origin.x[0]);
+                res = material_property_relative_V10_local(
+                    y_rel, x_rel, -depth_m, output, IstVelModel_origin.x[1],
+                    IstVelModel_origin.x[0]);
 
-              edata->nl_id = output[3];
-            }
-
-            s_0 = edata->edgesize / 2.0 * edata->rho * 9.81;
-            for (k = 0; k < nlayers; k++) {
-              depth_k = depth_o * (k + 0.5);
-
-              if (belongs2hmgHalfspace(east_m, north_m, depth_m))
-                res = get_halfspaceproperties(&g_props);
-              /* NOTE: This section is a little bit different from the previous
-              Istanbul Velocity Model. g_props->Qs and g_props->Qp are not
-              assigned in the original section. But it should be fine if they
-              are still assigned. */
-              else if (Param.IstanbulVelocityModel == YES) {
-                res = getIstanbulMaterial(&g_props, IstVelModel_origin, north_m,
-                                          east_m, depth_k);
-              } else if (Param.basinVelocityModel == YES) {
-                res = getBasinMaterial(&g_props, basinVelModel_origin, north_m,
-                                       east_m, depth_k);
-              } else if (Param.threeDVelocityModel == YES) {
-                res = get3DMaterial(&g_props, threeDVelModel_origin, north_m,
-                                    east_m, depth_k);
-              } else if (Param.useProfile == NO) {
-                res = cvm_query(Global.theCVMEp, east_m, north_m, depth_k,
-                                &g_props);
-              } else {
-                res = profile_query(depth_k, &g_props);
+                edata->nl_id = output[3];
               }
 
-              s_0 += depth_o * g_props.rho * 9.81;
+              s_0 = edata->edgesize / 2.0 * edata->rho * 9.81;
+              for (k = 0; k < nlayers; k++) {
+                depth_k = depth_o * (k + 0.5);
+
+                if (belongs2hmgHalfspace(east_m, north_m, depth_m))
+                  res = get_halfspaceproperties(&g_props);
+                /* NOTE: This section is a little bit different from the previous
+                Istanbul Velocity Model. g_props->Qs and g_props->Qp are not
+                assigned in the original section. But it should be fine if they
+                are still assigned. */
+                else if (Param.IstanbulVelocityModel == YES) {
+                  res = getIstanbulMaterial(&g_props, IstVelModel_origin, north_m,
+                                            east_m, depth_k);
+                } else if (Param.basinVelocityModel == YES) {
+                  res = getBasinMaterial(&g_props, basinVelModel_origin, north_m,
+                                         east_m, depth_k);
+                } else if (Param.threeDVelocityModel == YES) {
+                  res = get3DMaterial(&g_props, threeDVelModel_origin, north_m,
+                                      east_m, depth_k);
+                } else if (Param.useProfile == NO) {
+                  res = cvm_query(Global.theCVMEp, east_m, north_m, depth_k,
+                                  &g_props);
+                } else {
+                  res = profile_query(depth_k, &g_props);
+                }
+
+                s_0 += depth_o * g_props.rho * 9.81;
+              }
+
             }
 
             edata->sigma_0 = s_0;
@@ -29448,6 +29568,7 @@ int main(int argc, char** argv) {
   }
 
   need_material_queries =
+      (Param.theSeabedGeometryFile[0] != '\0') ||
       (Param.theMeshInputMode == 0) ||
       ((Param.includeAcoustic == YES) &&
        (Param.acousticInterfaceCoupling == YES));
@@ -29518,6 +29639,28 @@ int main(int argc, char** argv) {
 
   if (Param.includeTopography == YES) {
     topo_init(Global.myID, Param.parameters_input_file, Param.theTopoDir);
+    if (Param.theSeabedGeometryFile[0] != '\0') {
+      if (Param.theSeabedWaterLevel >= get_thebase_topo()) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "seabed_water_level_m must be below topographybase_zcoord\n");
+      }
+      topo_seabed_init(Global.myID, Param.theSeabedGeometryFile,
+                      Param.theSeabedWaterLevel);
+      general3DVelocityModel_set_seabed(Param.the3DDepthReference,
+                                      Param.theSeabedWaterVp,
+                                      Param.theSeabedWaterRho);
+      if (Global.myID == 0) {
+        monitor_print("Explicit seabed: %s; categorical wet/dry cells, water "
+                      "level %.9g m, Vp %.9g m/s, density %.9g kg/m^3.\n",
+                      Param.theSeabedGeometryFile, Param.theSeabedWaterLevel,
+                      Param.theSeabedWaterVp, Param.theSeabedWaterRho);
+        monitor_print("Solid-only 3D profiles: %s; water assigned before "
+                      "solid interpolation. Rebuild mesh after geometry changes.\n",
+                      Param.the3DDepthReference == 1 ? "fixed model Z" :
+                      Param.the3DDepthReference == 2 ? "below outer surface" :
+                      "below seabed (ground on dry cells)");
+      }
+    }
     if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS) {
       if (get_topo_meth() != FEM) {
         solver_abort(__FUNCTION_NAME, NULL,
@@ -29534,7 +29677,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  if ((Param.threeDVelocityModel == YES) && need_material_queries &&
+  if (!topo_seabed_enabled() && (Param.threeDVelocityModel == YES) && need_material_queries &&
       (Global.myID == 0)) {
     monitor_print(
         "3D material depths:                 %s\n",

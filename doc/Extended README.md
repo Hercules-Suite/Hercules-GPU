@@ -1946,7 +1946,7 @@ in `quake/forward/psolve.cc`.
 
 ### 3D material depths with topography
 
-For `3D_velocity_model=yes`, the selected vertical reference applies to all
+Without explicit seabed geometry, for `3D_velocity_model=yes` the selected vertical reference applies to all
 aligned `z.in`, Vs, Vp, density and optional Q entries. With topography enabled,
 `type_of_etree` is required (`sqd` or `full`, no default); it is independent of
 the `computation_method=vt|fem` boundary treatment. Heights in `topography.in`
@@ -2027,6 +2027,158 @@ cases and both GPU/MPI backends still require supercomputer comparisons.
 Existing restrictions remain: field-specific coupled constraints require FEM
 topography; VT uses the supported shared-geometric path. No new coupled
 formulation or unsupported nonlinear/acoustic combination is enabled.
+
+### Explicit seabed geometry
+
+`seabed_geometry_file` enables geometry-defined water with the general 3-D
+velocity model. Omit it to retain the legacy Vs-based convention. Negative
+height alone never means water: a binary wet/dry mask distinguishes submerged
+bed from dry ground, including dry land below sea level.
+
+| Control | Requirement, default and meaning |
+| --- | --- |
+| `seabed_geometry_file` | Optional; omitted by default. Path relative to the solver working directory; grid format below. |
+| `3D_velocity_model_depth_reference` | Default `legacy` without geometry. With geometry, explicitly choose `seabed`, `surface`, or `model_z`. |
+| `seabed_water_level_m` | Optional with geometry, default 0. Finite water elevation in metres, positive upward in the topography datum, below `topographybase_zcoord`. One level per run. |
+| `seabed_water_vp_m_s` | Required with geometry, finite positive water Vp in m/s; no default. |
+| `seabed_water_density_kg_m3` | Required with geometry, finite positive density in kg/m3; no default. Unlike `rho.in`, this is SI rather than tonne/m3. |
+
+Explicit mode requires `include_topography=yes`, `3D_velocity_model=yes` and
+`include_acoustic=yes`. It rejects buildings and Istanbul, basin and
+homogeneous-halfspace overrides, which otherwise bypass the shared reader.
+Non-legacy depth references and water controls require the geometry file.
+Use solid-only 3-D profiles: every Vs must exceed `1e-6 m/s`. Remove existing
+water samples consistently from all aligned material arrays and rebuild
+`index.in`. The solid dataset must contain its shallow solid endpoint at every
+column; water is inserted from geometry before interpolation. Water uses
+`Vs=0`, the supplied Vp/density and existing `acoustic_quality_factor` controls.
+Solid Q interpolation, viscoelastic damping and material calibration retain
+their existing roles.
+
+The geometry shares the origin, extent and spacing of `topography.in`, in
+solver X north/Y east axes, regardless of material-grid rotation. Let
+`Nnorth=region_length_north_m/spacing+1` and similarly for `Neast`. Its text
+format is:
+
+1. One positive spacing matching `topography.in`.
+2. `Nnorth*Neast` finite ground/seabed elevations in metres, positive upward,
+   ordered north outer/east inner (east fastest).
+3. `(Nnorth-1)*(Neast-1)` integer cell masks, same east-fast ordering: 1 wet,
+   0 dry. No count prefixes, coordinates, comments or extra tokens.
+
+The bed is bilinear; masks are categorical, constant within each grid cell.
+At an internal grid boundary the positive-coordinate cell owns the mask;
+the final cell owns the maximum boundary. Outside queries extend the nearest
+edge. `topography.in` remains the **outer air/material surface**. At every wet
+cell's four corners its heights must equal the water level, and bed heights
+must not exceed that level. At every dry cell's four corners the bed grid must
+equal topography. Shared shoreline nodes therefore meet the water level.
+Inconsistent surfaces abort setup. Resolve shorelines on this grid; do not put
+submerged bed heights into the outer topographic surface.
+
+For a 1000 m north by 1000 m east domain with 500 m spacing, this complete
+`input/seabed.in` defines a flat bed 100 m below sea level:
+
+```text
+500
+-100 -100 -100
+-100 -100 -100
+-100 -100 -100
+1 1
+1 1
+```
+
+The corresponding `topography.in` has the same spacing followed by nine zero
+heights. Add this excerpt to the normal case configuration (illustrative water
+properties, not a site calibration):
+
+```ini
+include_topography = yes
+3D_velocity_model = yes
+include_acoustic = yes
+seabed_geometry_file = input/seabed.in
+3D_velocity_model_depth_reference = seabed
+seabed_water_level_m = 0
+seabed_water_vp_m_s = 1500
+seabed_water_density_kg_m3 = 1025
+```
+
+The explicit reference is independent of `type_of_etree`. Both `full` and
+`sqd` work: the caller convention is converted back to physical solver Z
+before evaluating the selected column reference. For column $i$:
+
+```math
+z_i =
+\begin{cases}
+Z, & \texttt{model\_z},\\
+Z-Z_s(i), & \texttt{surface},\\
+Z-Z_b(i), & \texttt{seabed}.
+\end{cases}
+```
+
+$Z_s=B-h_s$ is the outer surface, $Z_b=B-h_b$ the ground/bed and
+$B=\mathtt{topographybase\_zcoord}$. All `z.in` coordinates are metres,
+positive downward. For $B=1000$, bed elevation $-100$, water level 0 and a
+layer 20 m below bed, write 1120 (`model_z`), 120 (`surface`), or 20 (`seabed`).
+On dry cells seabed-relative means below ground. At the query point, water
+occupies $B-\eta\le Z<Z_b$ only where the mask is wet; the bed belongs to solid.
+The actual fine geometry is used even with coarse/rotated velocity columns.
+
+Solid columns retain piecewise-constant vertical lookup and bilinear horizontal
+interpolation at equal physical elevation. First/last solid endpoints extend
+beyond listed depths. A solid query outside the half-open velocity footprint
+aborts rather than using an ambiguously referenced background model. Extend
+velocity axes beyond maximum query coordinates. CPML clamps queries in solver
+coordinates before geometry and material lookup; the bathymetry reconstruction
+uses the same lateral clamp and reads bed depths directly.
+
+Physics and runtime integration:
+
+- Elastic, viscoelastic and nonlinear elastoplastic/plastic and hysteretic
+  solids receive the selected solid properties; water is excluded from solid
+  interpolation and retains the acoustic marker. Material laws are unchanged.
+  Calibrated geostatic, tolerance, substep, damping and
+  `material_properties_list` values remain case-specific.
+- Porous depth limits are measured below ground/bed for both FULL and SQD.
+  Beneath explicit water, the saturation/hydrostatic reference is the water
+  surface; `groundwaterlevel_file` is ignored there. Dry-cell groundwater depths
+  remain relative to the ground. Keep the pore-fluid and water densities
+  physically consistent. Nonlinear approximate geostatic initialization adds
+  the exact water-column load and uses 100 midpoint samples for the solid
+  overburden before the existing hydrostatic Biot-stress correction.
+- Acoustic free-surface selection follows the configured constant water level.
+  This permits one elevated lake/reservoir, but the surface must coincide with
+  horizontal mesh faces. Multiple levels, changing water levels and cut acoustic
+  free surfaces are unsupported. Existing gravity/free-surface formulations
+  retain their algorithms.
+- The optional `acoustic_interface_face_filter=bathymetry` reads bed depths
+  from geometry while retaining its existing Z+ bottom-face-only policy.
+  Default all-face coupling and the acoustic–elastic, poroelastic–acoustic and
+  poroelastic–elastic formulations retain existing constraints and algorithms.
+  FEM/VT restrictions remain. Existing 27-point element classification gives
+  mixed water/solid cells solid priority; resolve thin water layers and check
+  mesh convergence. This is not a conforming seabed mesh.
+- Rank zero reads the geometry and broadcasts identical arrays to solver
+  ranks. All material/geometry work stays in initialization; time integration,
+  device-resident GPU fields and both MPI exchange backends receive the existing
+  element metadata without new per-step messages or transfers. Station/source
+  depth conventions continue to reference the outer surface: a station on the
+  example seabed has surface-relative depth 100 m. Medium labels, interface maps
+  and output waveforms can change after remeshing.
+
+**Rebuild and regenerate with `mesh_input_mode=0` after changing these inputs.**
+Importing a mesh does not update saved element material assignments. Geometry
+is still loaded for interface/poroelastic setup on imported runs; it must match
+the mesh. The setup monitor reports the explicit reference and water properties.
+
+Local extracted C++ analytical checks cover parser rejection, grid/mask
+validation, positive/negative water levels, dry negative terrain, FULL/SQD
+references, slopes and rotated material axes, CPML sampling, Q isolation,
+poroelastic depth/groundwater mapping, geostatic water load and legacy controls.
+The ignored investigation harness is unavailable in a clean checkout. These
+checks do not validate wave propagation: elastic, acoustic, poroelastic,
+viscoelastic and nonlinear standalone/coupled simulations, both GPU/MPI backends
+and station outputs still require supercomputer comparisons.
 
 ### Quality-factor files
 
