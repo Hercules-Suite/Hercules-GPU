@@ -1909,10 +1909,11 @@ in `quake/forward/psolve.cc`.
 	chunks; the count-prefixed text format is unchanged and old files remain valid.
 	Build the updated reader before using models above 2,147,483,647 samples.
 	Every solver rank holds the full model in host memory: approximately
-	`32 * samples + 16 * profiles` bytes for Z, Vs, Vp, density, profile offsets,
-	and the surface cache, plus another `16 * samples` bytes if Qs/Qp are supplied.
+	`32 * samples + 8 * profiles` bytes for Z, Vs, Vp, density and profile offsets,
+	plus `8 * profiles` bytes for the SQD surface cache when needed, and another
+	`16 * samples` bytes if Qs/Qp are supplied.
 	For example, 3,003 by 6,003 columns with 121 levels require about 65.3 GiB
-	per solver rank without Q files, before mesh/solver allocations. Plan the
+	per solver rank with the SQD cache and without Q files, before mesh/solver allocations. Plan the
 	rank count per node accordingly; large-file support does not distribute the
 	material arrays among ranks. Text parsing remains serial on solver rank zero.
 - `index.in` stores the zero-based start of each vertical profile in the
@@ -1942,6 +1943,90 @@ in `quake/forward/psolve.cc`.
 	python3 script/convert_3d_velocity_model.py model.csv \
 	    --output-dir input/materialfiles
 	```
+
+### 3D material depths with topography
+
+For `3D_velocity_model=yes`, the selected vertical reference applies to all
+aligned `z.in`, Vs, Vp, density and optional Q entries. With topography enabled,
+`type_of_etree` is required (`sqd` or `full`, no default); it is independent of
+the `computation_method=vt|fem` boundary treatment. Heights in `topography.in`
+are positive upward; all material depths and model Z coordinates are metres,
+positive downward. Write the files in the reference selected below:
+
+| Mode | Meaning of `z.in` | Depth used at column $i$ |
+| --- | --- | --- |
+| `include_topography=yes`, `type_of_etree=sqd` | Layer-top depth below that column's own surface | $d_i=d+Z_s(q)-Z_s(i)=d+h_i-h_q$ |
+| `include_topography=yes`, `type_of_etree=full` | Layer-top coordinate in fixed model Z | $Z_i=Z$; no terrain shift |
+| `include_topography=no` | Existing fixed model Z reference | $Z_i=Z$ |
+
+Here $q$ is the query location, $Z_s=B-h$ with
+$B=\mathtt{topographybase\_zcoord}$, and the SQD caller supplies
+$d=Z-Z_s(q)$. Existing building offsets are removed before the material query;
+fixed model Z includes the existing mesh/database origin convention. It is
+not automatically depth below sea level. For each column the SQD reader uses
+the query's physical elevation:
+
+```math
+e_q=h_q-d,\qquad d_i=h_i-e_q=d+h_i-h_q.
+```
+
+Both $Z_s(q)$ and the cached column surfaces come from `point_elevation` on
+the actual topography grid, in solver coordinates. The query surface is not
+reconstructed by interpolating the four velocity-grid heights. This matters
+for fine terrain on a coarse material grid and for translated/rotated grids.
+The general 3-D convention samples at equal physical elevation; it does not
+interpolate corresponding layers at equal burial depth. Terrain-following
+interfaces can be encoded by column depths, but horizontal property blending
+can smooth their discontinuities between columns.
+
+For a concrete example, take $B=1000$ m and two columns with heights 0 and
+100 m. A horizontal layer boundary at elevation $-40$ m has fixed
+$Z=1040$ m. Encode that boundary as 40 and 140 m in SQD, or 1040 m in both
+FULL columns. At the midpoint, a point at $Z=1030$ m has local burial depth
+80 m. SQD samples the two profiles at 30 and 130 m; FULL samples both at
+1030 m. Both select the upper layer. Switching the parameter alone without
+converting the file depths changes the physical model.
+
+Queries outside `xmin <= x < xmax` or `ymin <= y < ymax` retain the background
+profile/CVM fallback, including the maximum grid edges. FULL and no-topography
+queries below the smallest numeric `z.in` value also retain that fallback.
+For SQD the raw query depth has a different origin from each profile, so no
+global minimum-depth rejection is applied; each converted column query uses
+the first/last material sample beyond that column's listed depth range.
+Supply shallow coverage consistent with the intended model: this endpoint
+extension is not an air-mask or a new material interface algorithm.
+
+**Rebuild the solver and regenerate meshes with `mesh_input_mode=0` after
+this correction.** The earlier general 3-D reader reversed the terrain-height
+difference, used a surface interpolated on the velocity grid, and applied
+column terrain shifts even in FULL mode. Imported element properties retain
+those earlier values; new interface queries cannot repair an old mesh.
+The setup monitor reports the selected 3-D depth convention.
+
+The shared lookup serves refinement, element material assignment, nonlinear
+geostatic density queries and acoustic interface reconstruction. Its chosen
+layer supplies Vs, Vp, density and Q together. This affects elastic stiffness,
+viscoelastic damping, Vs-indexed nonlinear elastoplastic/plastic and hysteretic
+initialization, poroelastic material initialization, and acoustic/solid labels
+used by acoustic–elastic, poroelastic–acoustic and poroelastic–elastic paths.
+Water retains Vs=0 and solid Q weighting remains unchanged. Saturation mapping,
+groundwater coordinates, yielding laws, interface constraints, time integration,
+station interpolation, GPU kernels and both MPI exchange backends retain their
+existing algorithms; their inputs can change after remeshing. Source and
+receiver coordinate conventions are unchanged, but medium labels and output
+waveforms can consequently change. CPML still clamps queries in solver
+coordinates before the reader converts SQD depths at the clamped location.
+
+Local analytical reader checks cover flat/sloping terrain, FULL/SQD equivalent
+models, fine topography on coarse material grids, translated/rotated frames,
+acoustic/solid transitions, Q selection, endpoint/fallback behavior and CPML
+sampling. These ignored investigation fixtures are not shipped. They establish
+material-coordinate correctness, not new wave-propagation validation: standalone
+and coupled elastic/acoustic/poroelastic runs, applicable viscoelastic/nonlinear
+cases and both GPU/MPI backends still require supercomputer comparisons.
+Existing restrictions remain: field-specific coupled constraints require FEM
+topography; VT uses the supported shared-geometric path. No new coupled
+formulation or unsupported nonlinear/acoustic combination is enabled.
 
 ### Quality-factor files
 

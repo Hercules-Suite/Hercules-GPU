@@ -1271,7 +1271,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           "Explicit Qs/Qp are not scaled when Vs is raised to simulation_shear_velocity_min. For example, Vs=80 m/s with Qs=16 and Qp=32 keeps those Q values if Vs is raised to 120 m/s. Regenerate persisted meshes after changing these files or to apply corrected Q interpolation; imported coefficient checks cannot recover the original Q inputs.",
           "index.in contains starts only—do not append a final end offset. The end of the last profile is the total sample count from z.in.",
           "Material sample counts and profile start offsets are signed 64-bit integers; axis counts and the number of horizontal profiles remain limited to 2,147,483,647. Rebuild Hercules with this reader for larger sample counts. Existing count-prefixed files remain compatible, and MPI initialization broadcasts large arrays in bounded chunks.",
-          "The complete material model is replicated in host memory on every solver rank. Budget approximately 32 bytes per material sample plus 16 bytes per horizontal profile, including the surface cache; optional Qs/Qp add 16 bytes per sample. A 3,003 by 6,003 grid with 121 depths needs about 65.3 GiB per solver rank without Q files, before mesh and solver allocations. Text parsing runs on solver rank zero; 64-bit indexing does not distribute the material storage.",
+          "The complete material model is replicated in host memory on every solver rank. Budget approximately 32 bytes per material sample plus 8 bytes per horizontal profile, with another 8 bytes per profile for the SQD surface cache when needed; optional Qs/Qp add 16 bytes per sample. A 3,003 by 6,003 grid with 121 depths needs about 65.3 GiB per solver rank with the SQD cache and without Q files, before mesh and solver allocations. Text parsing runs on solver rank zero; 64-bit indexing does not distribute the material storage.",
         ],
         table: {
           headers: ["File", "Units", "Contents"],
@@ -1403,8 +1403,22 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         title: "How Hercules samples the model",
         paragraphs: [
           "At each of the four horizontal grid columns surrounding a query point, Hercules selects the deepest listed z that does not exceed the local depth. Values are therefore piecewise constant with depth within each profile; a listed z acts as the top depth of that material interval. Above the first listed depth, Hercules uses the first sample, and below the last listed depth it uses the last sample.",
-          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. With topography enabled, the lookup adjusts the column depths relative to the local interpolated ground surface before selecting layers.",
+          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. The general 3-D reader samples the columns at the same physical elevation. With topography, type_of_etree selects the vertical reference described below; computation_method independently selects VT or FEM boundary treatment.",
+          "Queries outside xmin <= x < xmax or ymin <= y < ymax use the background model. With full or topography disabled, a query Z below the smallest numeric z.in value also uses the background. In sqd, depths have different surface origins, so endpoint extension is applied separately after converting each column depth; there is no global minimum-depth rejection.",
         ],
+      },
+      {
+        id: "velocity-model-topography-depths",
+        title: "3-D material depths with full and sqd topography",
+        paragraphs: [
+          "With include_topography=yes and type_of_etree=sqd, z.in stores positive-downward layer-top depths below each column's own terrain surface. The caller supplies d = Z - Z_surface(query). The reader uses d_i = d + h_i - h_query, where heights h are positive upward. h_query comes directly from the actual topography grid at the solver query point, including when that grid is finer than, offset from, or rotated relative to the velocity grid.",
+          "With type_of_etree=full, z.in stores layer tops in fixed model Z coordinates and every column is queried at Z, with no column terrain shift. The fixed model origin includes the existing mesh-origin convention; existing building offsets are removed before material lookup. With topography disabled, the fixed-coordinate lookup is retained. Changing full to sqd requires converting z.in to the corresponding reference, not just changing the parameter.",
+          "For example, topographybase_zcoord=1000 m and terrain heights 0 and 100 m give surface Z values 1000 and 900 m. A horizontal interface at elevation -40 m is at Z=1040 m: encode its layer tops as 40 and 140 m in sqd, or 1040 m in both columns in full. At the midpoint, Z=1030 m is 80 m below the surface; sqd queries depths 30 and 130 m, and full queries Z=1030 m. Both select the material above the interface.",
+          "The chosen general 3-D convention is interpolation at equal physical elevation. It does not interpolate corresponding layers at equal burial depth. A terrain-following layer can be encoded through column depths, but a discontinuity between columns may be blended by the horizontal property interpolation.",
+          "Rebuild the solver and regenerate material meshes with mesh_input_mode=0 after this correction. Older general 3-D lookups reversed the terrain offset, reconstructed the query surface on the velocity grid, and shifted full-mode columns. Imported element materials retain those old values. The setup monitor now reports the selected 3-D depth convention.",
+          "Validation covers local analytical material queries and CPML sampling, not new GPU/MPI wave-propagation benchmarks. The correction selects Vs, Vp, density, and optional Qs/Qp together and therefore affects elastic, viscoelastic, nonlinear elastoplastic and poroelastic initialization, plus acoustic/solid classification and coupled interfaces. Existing VT/FEM and coupled-formulation restrictions still apply.",
+        ],
+        equations: [String.raw`d_i=d+Z_{\mathrm{surface}}(q)-Z_{\mathrm{surface}}(i)=d+h_i-h_q\quad(\mathrm{sqd}),\qquad Z_i=Z\quad(\mathrm{full}).`],
       },
       {
         id: "velocity-model-converter",
@@ -1553,7 +1567,7 @@ if __name__ == "__main__":
         ],
         codeLabel: "parameters.in — illustrative values",
         code: "include_topography             = yes\ntopography_directory           = input/topography\ncomputation_method             = vt\nmaximum_octant_level           = 9\ntopographybase_zcoord          = 1250.0\ntype_of_etree                  = full\nmin_enclosed_volume_perc       = 0.1\nconsider_nonlinear_topography  = no\ntopography_bkt_gpu_stabilize   = auto",
-        note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
+        note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. type_of_etree=full uses fixed model Z; sqd uses surface-relative material depths. For the general 3-D files, follow the depth-reference example above. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
       },
       {
         id: "topography-surface-consistency",

@@ -29534,6 +29534,15 @@ int main(int argc, char** argv) {
     }
   }
 
+  if ((Param.threeDVelocityModel == YES) && need_material_queries &&
+      (Global.myID == 0)) {
+    monitor_print(
+        "3D material depths:                 %s\n",
+        ((Param.includeTopography == YES) && (get_theetree_type() == SQD))
+            ? "SQD surface-relative profiles; same-elevation column sampling using the actual topography grid"
+            : "fixed model Z; no column terrain shift (FULL or topography off)");
+  }
+
   if (Param.includeIncidentPlaneWaves == YES) {
     /* compute half-space Vs */
     /*      cvmpayload_t props;

@@ -94,6 +94,11 @@ interactions are in the
   The 3-D material reader supports 64-bit sample counts/profile offsets with
   chunked MPI initialization; full material arrays remain replicated per rank.
   See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
+  With topography, `type_of_etree=sqd` uses `z.in` depths below each column's
+  surface and samples at equal physical elevation using the actual query-point
+  terrain. `full` uses fixed model Z without a terrain shift. Rebuild the solver
+  and regenerate meshes with `mesh_input_mode=0` to apply the corrected lookup;
+  see [depth conventions and example](Extended%20README.md#3d-material-depths-with-topography).
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.
 - **Material damping:** `type_of_damping`.
@@ -208,7 +213,8 @@ interactions are in the
   See the [correction and validation note](Extended%20README.md#scalar-acoustic-corrections-and-limitations)
   for plane output from older executables.
 - **Topography:** `include_topography`, `topography_directory`, `maximum_octant_level`,
-  `topographybase_zcoord`, `computation_method`, `topography_bkt_gpu_stabilize`.
+  `topographybase_zcoord`, `type_of_etree` (required: `sqd` or `full`, as above),
+  `computation_method`, `topography_bkt_gpu_stabilize`.
   Mesh air/solid classification and receiver/material queries share a bilinear
   surface, `Z = topographybase_zcoord - height`. Regenerate meshes made with
   the earlier triangular classifier before rerunning affected surface outputs;

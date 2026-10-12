@@ -1660,6 +1660,7 @@ static double *Soil_Qp_data;
 static double *Soil_point_x;
 static double *Soil_point_y;
 static double *Soil_point_z;
+/* Solver Z of each column's surface, positive downward; used only by SQD. */
 static double *Soil_surface_z = NULL;
 static int Soil_surface_count = 0;
 static double Soil_surface_swx = NAN;
@@ -1683,7 +1684,6 @@ static struct Params_soil_t {
 static int update_3d_surface_cache(double DRM_southwest_x,
                                    double DRM_southwest_y) {
     int node_count;
-    double thebase_zcoord = get_thebase_topo();
 
     if ((Soil_point_x == NULL) || (Soil_point_y == NULL) ||
         (Params_soil.numPointX <= 0) || (Params_soil.numPointY <= 0)) {
@@ -1716,8 +1716,8 @@ static int update_3d_surface_cache(double DRM_southwest_x,
             horizontal_to_parent(Soil_frame, Soil_point_x[x], Soil_point_y[y],
                                  &solver_x, &solver_y);
             Soil_surface_z[node_id] =
-                thebase_zcoord - point_elevation(solver_x + DRM_southwest_x,
-                                                 solver_y + DRM_southwest_y);
+                point_elevation(solver_x + DRM_southwest_x,
+                                solver_y + DRM_southwest_y);
         }
     }
 
@@ -1752,19 +1752,24 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
                                    double DRM_southwest_y,
                                    int *has_quality_factors) {
     /* Inputs are solver-frame offsets from the material origin. CPML clamps
-     * have already been applied in solver coordinates by get3DMaterial. */
+     * have already been applied in solver coordinates by get3DMaterial.
+     * SQD z_input is depth below the actual query-point surface. FULL (and
+     * no topography) uses fixed model Z. Building offsets are already removed.
+     * Save solver coordinates before rotating into the material grid. */
+    const double solver_x = x_input + DRM_southwest_x;
+    const double solver_y = y_input + DRM_southwest_y;
+    const int surface_relative =
+        (get_thebase_topo() > 0.0) && (get_theetree_type() == SQD);
     double grid_x, grid_y;
     horizontal_to_local(Soil_frame, x_input, y_input, &grid_x, &grid_y);
     x_input = grid_x;
     y_input = grid_y;
-    /* The z_input is the depth from the surface. If the topography is considered, 
-    it should has been corrected before calling this function. */
     int i;
     int64_t k;
 
     double zd_vs[4], zd_vp[4], zd_rho[4], zd_qs[4], zd_qp[4];
     int64_t row1, numLayers;
-    double zi_elevation, zi_vs, zi_vp, zi_rho, zi_qs, zi_qp;
+    double zi_vs, zi_vp, zi_rho, zi_qs, zi_qp;
 
     double xmin = Soil_point_x[0];
     double xmax = Soil_point_x[Params_soil.numPointX - 1];
@@ -1774,10 +1779,12 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     double y_spacing = Soil_point_y[1] - Soil_point_y[0]; // Assuming uniform spacing
 
     int x_grid_ID, y_grid_ID, Rec_node_ID[4];
-    double x_coord[4], y_coord[4], z_elevation[4], xi, eta, N1, N2, N3, N4;
-    double thebase_zcoord = get_thebase_topo();
+    double x_coord[4], y_coord[4], xi, eta, N1, N2, N3, N4;
 
-    if (z_input < Params_soil.minPointZ) {
+    /* Preserve the fixed-coordinate background fallback. In SQD, raw query
+     * depth and the column layer depths have different surface origins, so
+     * this global test is invalid; apply endpoint extension per column. */
+    if (!surface_relative && z_input < Params_soil.minPointZ) {
         return -1;
     }
     /* Clifford's NOTE: Using the commented out code below, we can replicate how 
@@ -1806,20 +1813,15 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     y_coord[2] = y_coord[0] + y_spacing;
     y_coord[3] = y_coord[2];
 
-    /* Clifford's NOTE: by printing the following, we would know whether the origin 
-    is correctly set to (0, 0). */
-    // printf("DRM_southwest_x: %lf, DRM_southwest_y: %lf\n", DRM_southwest_x, DRM_southwest_y);
-    // printf("x_coord[0]: %lf, y_coord[0]: %lf\n", x_coord[0], y_coord[0]);
-    // printf("x: %lf, y: %lf\n", x_coord[0] + DRM_southwest_x, y_coord[0] + DRM_southwest_y);
-    if (update_3d_surface_cache(DRM_southwest_x, DRM_southwest_y) != 0) {
-        return -1;
+    double query_surface_z = 0.0;
+    if (surface_relative) {
+        if (update_3d_surface_cache(DRM_southwest_x, DRM_southwest_y) != 0) {
+            return -1;
+        }
+        /* Use the same topography grid as the caller, including terrain
+         * resolved between the (possibly coarser or rotated) model columns. */
+        query_surface_z = point_elevation(solver_x, solver_y);
     }
-
-    z_elevation[0] = Soil_surface_z[Rec_node_ID[0]];
-    // printf("z_elevation[0]: %lf\n", z_elevation[0]);
-    z_elevation[1] = Soil_surface_z[Rec_node_ID[1]];
-    z_elevation[2] = Soil_surface_z[Rec_node_ID[2]];
-    z_elevation[3] = Soil_surface_z[Rec_node_ID[3]];
 
     xi  = (x_input - x_coord[0])/x_spacing*2.0 - 1.0;
     eta = (y_input - y_coord[0])/y_spacing*2.0 - 1.0;
@@ -1828,10 +1830,14 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
     N3 = 0.25*(1.0+xi)*(1.0+eta);
     N4 = 0.25*(1.0-xi)*(1.0+eta);
 
-    // The interpolated elevation at the input point
-    zi_elevation = N1 * z_elevation[0] + N2 * z_elevation[1] + N3 * z_elevation[2] + N4 * z_elevation[3];
-
     for (i = 0; i < 4; i++) {
+        /* Same physical Z at all four columns: d_i = d + Zs(q) - Zs(i),
+         * equivalently d + h(i) - h(q) for heights positive upward.
+         * Subtract surfaces first to retain flat-terrain depths exactly.
+         * FULL already stores layer tops in fixed model Z; do not shift it. */
+        const double column_depth = surface_relative
+            ? z_input + (query_surface_z - Soil_surface_z[Rec_node_ID[i]])
+            : z_input;
         row1 = Soil_layer_start[Rec_node_ID[i]];
         if (Rec_node_ID[i]+1 < Params_soil.numLayerID) {
             numLayers = Soil_layer_start[Rec_node_ID[i]+1] - Soil_layer_start[Rec_node_ID[i]];
@@ -1849,11 +1855,7 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
             exit(1);
         }
         for (k = numLayers-1; k >= 0; k--) {
-            /* NOTE: z_input + zi_elevation can be treated as a reference point 
-            (similar to thebase_zcoord). It then be shifted to one of the four
-            adjacent points and corrected to the depth from the surface with the
-            elevation at that point. */
-            if (z_input + zi_elevation >= z_elevation[i] + Soil_point_z[row1 + k]) {
+            if (column_depth >= Soil_point_z[row1 + k]) {
                 zd_vs[i] = Soil_Vs_data[row1 + k];
                 zd_vp[i] = Soil_Vp_data[row1 + k];
                 zd_rho[i] = Soil_rho_data[row1 + k];

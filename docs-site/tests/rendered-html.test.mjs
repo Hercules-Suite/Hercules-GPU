@@ -1944,6 +1944,15 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /unequal layer counts: 4, 4, 3, and 4/);
   assert.match(html, /piecewise constant with depth/);
   assert.match(html, /bilinearly interpolates Vs, Vp, density/);
+  assert.match(html, /3-D material depths with full and sqd topography/);
+  assert.match(html, /d_i = d \+ h_i - h_query/);
+  assert.match(html, /actual topography grid at the solver query point/);
+  assert.match(html, /every column is queried at Z, with no column terrain shift/);
+  assert.match(html, /sqd queries depths 30 and 130 m, and full queries Z=1030 m/);
+  assert.match(html, /there is no global minimum-depth rejection/);
+  assert.match(html, /does not interpolate corresponding layers at equal burial depth/);
+  assert.match(html, /Imported element materials retain those old values/);
+  assert.match(html, /not new GPU\/MPI wave-propagation benchmarks/);
   assert.match(html, /script\/convert_3d_velocity_model\.py/);
   for (const name of ["validate_3d_velocity_model", "generate_topography", "validate_topography"]) {
     assert.ok(html.includes(`script/${name}.py`));
@@ -1966,6 +1975,17 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /--pml-thickness.*does not configure Hercules/s);
   assert.match(html, /max \|z_boundary - z_ref\| = 0/);
   assert.match(html, /cpml_3d_material_extension/);
+});
+
+test("documents the required full/sqd material-coordinate convention", async () => {
+  const html = await (await render("/docs/parameters-topography-buildings")).text();
+  const row = html.split("</tr>").find((part) => part.includes(">type_of_etree</td>"));
+  assert.ok(row);
+  assert.match(row, /Required with topography; sqd \| full; no default/);
+  assert.match(row, /sqd subtracts the local surface; full retains fixed model Z/);
+  assert.match(row, /actual query-point topography/);
+  assert.match(row, /Both are in metres, positive downward/);
+  assert.match(row, /Changing modes requires matching material depths/);
 });
 
 test("converts a row-wise CSV into Hercules 3-D model files", () => {
