@@ -237,7 +237,7 @@ test("documents the current single parameter-file interface", async () => {
   assert.match(html, /The parameters\.in file/);
   assert.match(html, /psolve parameters\.in/);
   assert.match(html, /not the current psolve interface/);
-  assert.match(html, /all 245 unique keys currently consumed from parameters\.in/);
+  assert.match(html, /all 249 unique keys currently consumed from parameters\.in/);
   assert.match(html, /Source-specific controls.*source\.in/);
 });
 
@@ -249,7 +249,8 @@ test("renders the categorized parameter reference", async () => {
   assert.match(html, /Acoustic and poroelastic parameters/);
   assert.match(html, /acoustic_free_surface_gravity/);
   assert.match(html, /Z=topographybase_zcoord/);
-  assert.match(html, /buried water beneath land is excluded/);
+  assert.match(html, /excluding buried water beneath land/);
+  assert.match(html, /complete horizontal top faces must coincide with local topography over water/);
   assert.match(html, /acoustic_interface_face_filter/);
   const faceFilterRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_face_filter"));
   assert.ok(faceFilterRow, "the acoustic interface filter must appear in the parameter reference");
@@ -1720,6 +1721,8 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.doesNotMatch(html, /routine has no CPML memory correction/);
   const models = await (await render("/docs/physics")).text();
   assert.match(models, /Acoustic free-surface geometry/);
+  assert.match(models, /acoustic free surfaces follow local topography over water/);
+  assert.match(models, /Without explicit seabed geometry/);
   assert.match(models, /missed shifted water surfaces/);
   assert.match(models, /MPI displacement sharing and hanging-node assignment/);
   assert.match(models, /Compare one and four ranks/);

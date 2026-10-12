@@ -1346,15 +1346,19 @@ Notes:
 	`integral_Gamma N_i N_j/(rho g)` to the acoustic surface mass; the Hex8 top
 	face is lumped as `h^2/(4 rho g)` per node. This supports linear surface-
 	gravity waves without adding a bulk `rho g` load, a moving mesh, or a
-	hydrostatic prestress solve. The flat acoustic surface is at solver
+	hydrostatic prestress solve. With `seabed_geometry_file`, complete horizontal
+	acoustic top faces must coincide with local topography over water. Separate
+	flat water bodies may have different elevations. Without explicit seabed
+	geometry, the flat acoustic surface is at solver
 	`Z=topographybase_zcoord` with topography, `Z=surface_shift_m` with buildings,
 	or the octree top otherwise. A Hex8 top face must coincide with that datum;
 	with topography its center must also be exposed at the topographic surface,
 	so buried water beneath land is excluded. This supports flat water surfaces,
 	not a general curved or cut-cell fluid free-surface operator. The same
 	detection selects the pressure-release nodes when this option is `no`.
-	The startup `Acoustic free-surface geometry` line reports the solver datum,
-	exact exposed face count, and summed harbored surface-node copies (the last
+	The startup `Acoustic free-surface geometry` line identifies local topography
+	or the legacy solver datum, then reports the exact exposed face count and
+	summed harbored surface-node copies (the last
 	count includes MPI replicas). Where this face intersects a
 	lateral acoustic CPML, the surface mass uses the tangential Jacobian
 	`kappa_x*kappa_y`; the solver also adds the paired `x/y` mass-proportional
