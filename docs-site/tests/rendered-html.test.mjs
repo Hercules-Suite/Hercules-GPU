@@ -382,8 +382,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 250);
-  assert.equal(documented.length, 250, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 249);
+  assert.equal(documented.length, 249, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -470,16 +470,22 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
 });
 
-test("documents explicit seabed geometry, mask format and depth-reference contract", async () => {
+test("documents elevation-only seabed geometry and depth-reference contract", async () => {
   const html = await (await render("/docs/input-files")).text();
   const section = html.match(/<section\b[^>]*id="explicit-seabed-geometry"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
-  for (const name of ["seabed_geometry_file", "3D_velocity_model_depth_reference", "seabed_water_level_m", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
+  for (const name of ["seabed_geometry_file", "3D_velocity_model_depth_reference", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
     assert.ok(section.includes(name), `missing seabed input example: ${name}`);
   }
   assert.match(section, /solid-only/i);
   assert.match(section, /east-fast/);
-  assert.match(section, /binary cell masks/);
+  assert.match(section, /topography minus bed/);
+  assert.match(section, /1e-8 m/);
+  assert.match(section, /No separate water-level parameter or wet\/dry mask/);
+  assert.match(section, /One number per line is valid/);
+  assert.match(section, /Distinct water bodies may have different elevations/);
+  assert.match(section, /sloping water surfaces are rejected/);
+  assert.doesNotMatch(html, /seabed_water_level_m/);
   assert.match(section, /both full and sqd/);
   assert.match(section, /20, 120 or 1120/);
   assert.match(section, /dry land can be below zero/);
@@ -492,7 +498,8 @@ test("documents explicit seabed geometry, mask format and depth-reference contra
   assert.match(solver, /char depth_reference\[64\] = "legacy"/);
   assert.match(solver, /have_buildings == YES \|\| Param\.the3DDepthReference == 0/);
   assert.match(solver, /MPI_Bcast\(Param\.theSeabedGeometryFile/);
-  assert.match(geometry, /MPI_Bcast\(theSeabedWet, ncells, MPI_INT/);
+  assert.match(geometry, /MPI_Bcast\(theSeabedInfo, ntp, MPI_DOUBLE/);
+  assert.doesNotMatch(solver + geometry, /seabed_water_level_m|theSeabedWaterLevel|theSeabedWet|topo_seabed_water_surface_z/);
 });
 
 test("documents the default acoustic quality factor and its validation scope", async () => {

@@ -100,16 +100,19 @@ interactions are in the
   and regenerate meshes with `mesh_input_mode=0` to apply the corrected lookup;
   see [depth conventions and example](Extended%20README.md#3d-material-depths-with-topography).
 - **Explicit seabed geometry (opt-in):** `seabed_geometry_file` supplies ground/bed
-  heights and a cell wet/dry mask on the topography grid; omission retains the
-  existing Vs-based acoustic convention. Set `3D_velocity_model_depth_reference`
-  explicitly to `seabed`, `surface`, or `model_z` (default `legacy` without the
-  file); each explicit reference works with either `full` or `sqd`. Supply
-  `seabed_water_vp_m_s` and `seabed_water_density_kg_m3` (required, finite positive
-  SI values), and optionally `seabed_water_level_m` (default 0, positive-upward
-  elevation). Requires topography, acoustics and solid-only 3-D profiles;
-  buildings and other material-model overrides are unsupported. Dry negative
-  elevations remain dry. Porous depth limits start at the bed; wet hydrostatic
-  pressure starts at the water surface. Regenerate meshes after changes. See
+  elevations on the topography grid, with the same datum and positive-upward
+  sign. The file contains spacing followed by elevations only; one number per
+  line is valid. Water depth and coverage come from topography minus bed
+  (fixed `1e-8 m` tolerance). Omission retains Vs-based water classification.
+  Set `3D_velocity_model_depth_reference` explicitly to `seabed`, `surface`,
+  or `model_z` (default `legacy` without the file); each explicit reference
+  works with either `full` or `sqd`. Supply `seabed_water_vp_m_s` and
+  `seabed_water_density_kg_m3` (required, finite positive SI values). Requires
+  topography, acoustics and solid-only 3-D profiles; buildings and other
+  material-model overrides are unsupported. Dry negative elevations remain
+  dry. Porous depth limits start at the bed; wet hydrostatic pressure and
+  acoustic free surfaces use local topography. Separate flat water bodies may
+  have different elevations. Regenerate meshes after changes. See
   [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 - **Mesh generation, persistence, and import:** `output_mesh`, `mesh_only_mode`, `mesh_input_mode`,
   `mesh_etree_output_file`.

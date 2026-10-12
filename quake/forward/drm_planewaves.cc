@@ -1793,10 +1793,11 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
         ? Soil_depth_reference != 1 : surface_relative;
     double physical_z = z_input;
     if (explicit_seabed) {
-        if (surface_relative) physical_z += point_elevation(solver_x, solver_y);
+        const double surface_z = point_elevation(solver_x, solver_y);
+        if (surface_relative) physical_z += surface_z;
         double bed_z;
         if (topo_seabed_sample(solver_x, solver_y, &bed_z) &&
-            physical_z >= topo_seabed_water_surface_z() && physical_z < bed_z) {
+            physical_z >= surface_z && physical_z < bed_z) {
             output[0] = 0.0;
             output[1] = Soil_water_vp;
             output[2] = Soil_water_rho;

@@ -2032,14 +2032,17 @@ formulation or unsupported nonlinear/acoustic combination is enabled.
 
 `seabed_geometry_file` enables geometry-defined water with the general 3-D
 velocity model. Omit it to retain the legacy Vs-based convention. Negative
-height alone never means water: a binary wet/dry mask distinguishes submerged
-bed from dry ground, including dry land below sea level.
+height alone never means water. Water depth and coverage come from the difference
+between the outer surface in `topography.in` and the ground/bed surface in the
+new file. Both contain elevations in the same datum, in metres positive upward.
+A positive gap greater than `1e-8 m` is water; coincident surfaces are dry,
+including dry land below sea level. There is no separate mask or water-level
+input.
 
 | Control | Requirement, default and meaning |
 | --- | --- |
 | `seabed_geometry_file` | Optional; omitted by default. Path relative to the solver working directory; grid format below. |
 | `3D_velocity_model_depth_reference` | Default `legacy` without geometry. With geometry, explicitly choose `seabed`, `surface`, or `model_z`. |
-| `seabed_water_level_m` | Optional with geometry, default 0. Finite water elevation in metres, positive upward in the topography datum, below `topographybase_zcoord`. One level per run. |
 | `seabed_water_vp_m_s` | Required with geometry, finite positive water Vp in m/s; no default. |
 | `seabed_water_density_kg_m3` | Required with geometry, finite positive density in kg/m3; no default. Unlike `rho.in`, this is SI rather than tonne/m3. |
 
@@ -2063,29 +2066,39 @@ format is:
 1. One positive spacing matching `topography.in`.
 2. `Nnorth*Neast` finite ground/seabed elevations in metres, positive upward,
    ordered north outer/east inner (east fastest).
-3. `(Nnorth-1)*(Neast-1)` integer cell masks, same east-fast ordering: 1 wet,
-   0 dry. No count prefixes, coordinates, comments or extra tokens.
 
-The bed is bilinear; masks are categorical, constant within each grid cell.
-At an internal grid boundary the positive-coordinate cell owns the mask;
-the final cell owns the maximum boundary. Outside queries extend the nearest
-edge. `topography.in` remains the **outer air/material surface**. At every wet
-cell's four corners its heights must equal the water level, and bed heights
-must not exceed that level. At every dry cell's four corners the bed grid must
-equal topography. Shared shoreline nodes therefore meet the water level.
-Inconsistent surfaces abort setup. Resolve shorelines on this grid; do not put
-submerged bed heights into the outer topographic surface.
+There are no count prefixes, coordinates, masks, comments or extra tokens.
+One number per line is supported, exactly as in `topography.in`; spaces and
+newlines are equivalent. The two elevation fields use bilinear interpolation
+and nearest-edge extension outside the domain. At each query, water occupies
+the gap between the surfaces when that gap exceeds the fixed `1e-8 m`
+tolerance. Bed elevations above topography by more than that tolerance abort
+setup; nodal differences within tolerance are snapped to the outer surface.
+Dry queries also snap their bed reference to the outer surface.
+
+`topography.in` remains the **outer air/material surface**. It supplies the
+local water surface wherever the bed is lower, and dry ground where both
+surfaces coincide. A wet grid cell (any corner has positive water depth) must
+have a flat outer surface below `topographybase_zcoord`: existing acoustic
+free-surface operators require horizontal mesh faces. Separate flat water
+bodies may have different elevations, with dry cells between them. Sloping
+water surfaces are rejected at setup. Resolve shorelines on this grid; do not
+put submerged bed elevations into the outer topographic surface.
 
 For a 1000 m north by 1000 m east domain with 500 m spacing, this complete
 `input/seabed.in` defines a flat bed 100 m below sea level:
 
 ```text
 500
--100 -100 -100
--100 -100 -100
--100 -100 -100
-1 1
-1 1
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-100
 ```
 
 The corresponding `topography.in` has the same spacing followed by nine zero
@@ -2098,7 +2111,6 @@ include_topography = yes
 include_acoustic = yes
 seabed_geometry_file = input/seabed.in
 3D_velocity_model_depth_reference = seabed
-seabed_water_level_m = 0
 seabed_water_vp_m_s = 1500
 seabed_water_density_kg_m3 = 1025
 ```
@@ -2121,7 +2133,7 @@ $B=\mathtt{topographybase\_zcoord}$. All `z.in` coordinates are metres,
 positive downward. For $B=1000$, bed elevation $-100$, water level 0 and a
 layer 20 m below bed, write 1120 (`model_z`), 120 (`surface`), or 20 (`seabed`).
 On dry cells seabed-relative means below ground. At the query point, water
-occupies $B-\eta\le Z<Z_b$ only where the mask is wet; the bed belongs to solid.
+occupies $Z_s\le Z<Z_b$ where $Z_b-Z_s>10^{-8}\,\mathrm{m}$; the bed belongs to solid.
 The actual fine geometry is used even with coarse/rotated velocity columns.
 
 Solid columns retain piecewise-constant vertical lookup and bilinear horizontal
@@ -2141,16 +2153,17 @@ Physics and runtime integration:
   `material_properties_list` values remain case-specific.
 - Porous depth limits are measured below ground/bed for both FULL and SQD.
   Beneath explicit water, the saturation/hydrostatic reference is the water
-  surface; `groundwaterlevel_file` is ignored there. Dry-cell groundwater depths
-  remain relative to the ground. Keep the pore-fluid and water densities
+  surface from local topography; `groundwaterlevel_file` is ignored there.
+  Dry-cell groundwater depths remain relative to the ground. Keep the pore-fluid and water densities
   physically consistent. Nonlinear approximate geostatic initialization adds
   the exact water-column load and uses 100 midpoint samples for the solid
   overburden before the existing hydrostatic Biot-stress correction.
-- Acoustic free-surface selection follows the configured constant water level.
-  This permits one elevated lake/reservoir, but the surface must coincide with
-  horizontal mesh faces. Multiple levels, changing water levels and cut acoustic
-  free surfaces are unsupported. Existing gravity/free-surface formulations
-  retain their algorithms.
+- Acoustic free-surface selection uses local topography at each wet element,
+  including separate flat lakes/reservoirs at different elevations. Only
+  complete horizontal mesh faces coincident with that surface are enrolled;
+  crossing or submerged faces are excluded. Sloping/changing water surfaces
+  and cut acoustic free surfaces remain unsupported. Existing gravity and
+  pressure-release formulations retain their mass/force algorithms.
 - The optional `acoustic_interface_face_filter=bathymetry` reads bed depths
   from geometry while retaining its existing Z+ bottom-face-only policy.
   Default all-face coupling and the acoustic–elastic, poroelastic–acoustic and
@@ -2169,11 +2182,12 @@ Physics and runtime integration:
 **Rebuild and regenerate with `mesh_input_mode=0` after changing these inputs.**
 Importing a mesh does not update saved element material assignments. Geometry
 is still loaded for interface/poroelastic setup on imported runs; it must match
-the mesh. The setup monitor reports the explicit reference and water properties.
+the mesh. The setup monitor reports the explicit reference, water properties
+and geometry tolerance.
 
-Local extracted C++ analytical checks cover parser rejection, grid/mask
-validation, positive/negative water levels, dry negative terrain, FULL/SQD
-references, slopes and rotated material axes, CPML sampling, Q isolation,
+Local extracted C++ analytical checks cover parser rejection, elevation-only
+file validation, roundoff tolerance, distinct local water levels, dry negative
+terrain, FULL/SQD references, sloping beds and rotated material axes, CPML sampling, Q isolation,
 poroelastic depth/groundwater mapping, geostatic water load and legacy controls.
 The ignored investigation harness is unavailable in a clean checkout. These
 checks do not validate wave propagation: elastic, acoustic, poroelastic,

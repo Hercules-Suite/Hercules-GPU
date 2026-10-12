@@ -120,12 +120,11 @@ int    compute_tetra_displ      (double *dis_x, double *dis_y, double *dis_z,
 int    topo_setrec              ( octant_t *leaf, double    ticksize, edata_t  *edata, etree_t  *cvm );
 double point_elevation          ( double xo, double yo );
 
-/* Optional bed grid and cell wet/dry mask; all coordinates are solver metres.
- * Dry cells return the existing topographic ground surface. */
-void topo_seabed_init(int32_t myID, const char *path, double water_level);
+/* Optional ground/bed grid; all coordinates are solver metres. Water exists
+ * where the outer topographic surface is more than 1e-8 m above the bed. */
+void topo_seabed_init(int32_t myID, const char *path);
 int topo_seabed_enabled(void);
 int topo_seabed_sample(double x, double y, double *bed_z);
-double topo_seabed_water_surface_z(void);
 int    topo_nodesearch          ( tick_t x, tick_t y, tick_t z, double ticksize );
 int    topo_crossings           ( double xo, double yo, double zo, double esize );
 int8_t    topo_maxLevel();

@@ -1050,7 +1050,7 @@ static struct Param_t {
   char the3DVelModelDir[256];
   char theSeabedGeometryFile[256];
   int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
-  double theSeabedWaterVp, theSeabedWaterRho, theSeabedWaterLevel;
+  double theSeabedWaterVp, theSeabedWaterRho;
   char theTopoDir[256];
   char theStationMediumsFile[256];
   char theAcousticInterfaceDiagnosticsFile[256];
@@ -1728,7 +1728,7 @@ static double poro_groundwater_shift(double north_m, double east_m,
   if (topo_seabed_enabled()) {
     double bed_z;
     if (topo_seabed_sample(north_m, east_m, &bed_z))
-      return topo_seabed_water_surface_z();
+      return point_elevation(north_m, east_m);
   }
   if (Param.surfaceGroundwaterTable != YES) {
     return ground_shift;
@@ -2647,7 +2647,6 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
-  MPI_Bcast(&Param.theSeabedWaterLevel, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.theAcousticInterfaceDiagnosticsFile, 256, MPI_CHAR, 0,
             comm_solver);
@@ -4291,7 +4290,6 @@ static int32_t parse_parameters(const char* numericalin) {
                    "3D_velocity_model_depth_reference must be legacy, model_z, surface or seabed\n");
   const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
   const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
-  const int has_water_level = hu_config_get_double_opt(fp, "seabed_water_level_m", &Param.theSeabedWaterLevel) == 1;
   if (Param.theSeabedGeometryFile[0] != '\0') {
     if (haveTopography != YES || include3DVelModel != YES ||
         includeAcoustic != YES || includeIstanbulVelModel == YES ||
@@ -4305,14 +4303,12 @@ static int32_t parse_parameters(const char* numericalin) {
     }
     if (!has_water_vp || !has_water_rho ||
         !isfinite(Param.theSeabedWaterVp) || Param.theSeabedWaterVp <= 0.0 ||
-        !isfinite(Param.theSeabedWaterRho) || Param.theSeabedWaterRho <= 0.0 ||
-        !isfinite(Param.theSeabedWaterLevel)) {
+        !isfinite(Param.theSeabedWaterRho) || Param.theSeabedWaterRho <= 0.0) {
       solver_abort(__FUNCTION_NAME, NULL,
                    "Explicit seabed geometry requires finite positive "
-                   "seabed_water_vp_m_s and seabed_water_density_kg_m3; "
-                   "seabed_water_level_m must be finite (default 0)\n");
+                   "seabed_water_vp_m_s and seabed_water_density_kg_m3\n");
     }
-  } else if (Param.the3DDepthReference != 0 || has_water_vp || has_water_rho || has_water_level) {
+  } else if (Param.the3DDepthReference != 0 || has_water_vp || has_water_rho) {
     solver_abort(__FUNCTION_NAME, NULL,
                  "Explicit depth reference and seabed water controls require seabed_geometry_file\n");
   }
@@ -5449,7 +5445,7 @@ static double seabed_geostatic_overburden(vector3D_t origin, double north,
   double bed_z;
   const int wet = topo_seabed_sample(north, east, &bed_z);
   double stress = wet ? Param.theSeabedWaterRho * 9.81 *
-      fmax(0.0, fmin(physical_z, bed_z) - topo_seabed_water_surface_z()) : 0.0;
+      fmax(0.0, fmin(physical_z, bed_z) - surface_z) : 0.0;
   const int samples = 100;
   const double dz = fmax(0.0, physical_z - bed_z) / samples;
   for (int k=0; dz > 0.0 && k<samples; ++k) {
@@ -6032,7 +6028,6 @@ static int mesh_find_acoustic_elastic_transition_depth(
     cpml_extend_3d_material_query(&north_m, &east_m, &query_depth);
     double bed_z;
     if (!topo_seabed_sample(north_m, east_m, &bed_z) ||
-        bed_z <= topo_seabed_water_surface_z() ||
         bed_z < z_domain_min || bed_z > z_domain_max) return 0;
     *depth_out = bed_z;
     return 1;
@@ -11487,10 +11482,9 @@ static void gpu_init(int32_t myID) {
 
 /* The octree starts at Z=0 even when air/buildings shift the physical
  * surface downward. Acoustic water at sea level follows the topography
- * datum, not nearendp[2]. Explicit geometry may select a different constant
- * water elevation. Keep the unshifted global-top case unchanged. */
+ * datum, not nearendp[2]. Explicit geometry uses the local topography instead
+ * in acoustic_element_has_free_surface. Keep the legacy datum unchanged. */
 static double acoustic_free_surface_z() {
-  if (topo_seabed_enabled()) return topo_seabed_water_surface_z();
   if (Param.includeTopography == YES) return get_thebase_topo();
   if (Param.includeBuildings == YES) return get_surface_shift();
   return (double)Global.myOctree->nearendp[2] * Global.myOctree->ticksize;
@@ -11504,6 +11498,23 @@ static int acoustic_element_has_free_surface(const elem_t* element,
   /* A fraction of one octree tick tolerates coordinate roundoff without
    * selecting the next vertical element or a face crossing the datum. */
   const double tol = 0.25 * ticksize;
+  if (topo_seabed_enabled()) {
+    const edata_t* material = (const edata_t*)element->data;
+    const double h = material->edgesize;
+    const double x0 = Global.theXForMeshOrigin +
+                     (double)Global.myMesh->nodeTable[node].x * ticksize;
+    const double y0 = Global.theYForMeshOrigin +
+                     (double)Global.myMesh->nodeTable[node].y * ticksize;
+    double bed_z;
+    if (!topo_seabed_sample(x0 + 0.5*h, y0 + 0.5*h, &bed_z)) return 0;
+    surfaceZ = point_elevation(x0 + 0.5*h, y0 + 0.5*h);
+    if (fabs(topZ + Global.theZForMeshOrigin - surfaceZ) > tol) return 0;
+    /* The pressure-release/gravity operator covers a complete horizontal
+     * face. Do not enroll a face crossing a shore or another water level. */
+    for (int i=0; i<2; ++i) for (int j=0; j<2; ++j)
+      if (fabs(point_elevation(x0+i*h, y0+j*h) - surfaceZ) > tol) return 0;
+    return 1;
+  }
   if (fabs(topZ - surfaceZ) > tol) return 0;
   if (Param.includeTopography == YES) {
     const edata_t* material = (const edata_t*)element->data;
@@ -12908,11 +12919,19 @@ static void solver_init() {
           (double)globalPressureElements / 1.0e6,
           (double)globalPressureNodes / 1.0e6,
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
-      monitor_print(
-          "Acoustic free-surface geometry: solver Z=%.17g m, %lld exposed "
-          "acoustic top faces, %lld harbored surface-node copies\n",
-          acousticSurfaceZ, (long long)globalPressureSurfaceFaces,
-          (long long)globalPressureFreeSurfaceNodes);
+      if (topo_seabed_enabled()) {
+        monitor_print(
+            "Acoustic free-surface geometry: local topography over water, "
+            "%lld exposed acoustic top faces, %lld harbored surface-node copies\n",
+            (long long)globalPressureSurfaceFaces,
+            (long long)globalPressureFreeSurfaceNodes);
+      } else {
+        monitor_print(
+            "Acoustic free-surface geometry: solver Z=%.17g m, %lld exposed "
+            "acoustic top faces, %lld harbored surface-node copies\n",
+            acousticSurfaceZ, (long long)globalPressureSurfaceFaces,
+            (long long)globalPressureFreeSurfaceNodes);
+      }
     }
   } else {
     g_acousticPressureElementCount = 0;
@@ -29640,19 +29659,15 @@ int main(int argc, char** argv) {
   if (Param.includeTopography == YES) {
     topo_init(Global.myID, Param.parameters_input_file, Param.theTopoDir);
     if (Param.theSeabedGeometryFile[0] != '\0') {
-      if (Param.theSeabedWaterLevel >= get_thebase_topo()) {
-        solver_abort(__FUNCTION_NAME, NULL,
-                     "seabed_water_level_m must be below topographybase_zcoord\n");
-      }
-      topo_seabed_init(Global.myID, Param.theSeabedGeometryFile,
-                      Param.theSeabedWaterLevel);
+      topo_seabed_init(Global.myID, Param.theSeabedGeometryFile);
       general3DVelocityModel_set_seabed(Param.the3DDepthReference,
                                       Param.theSeabedWaterVp,
                                       Param.theSeabedWaterRho);
       if (Global.myID == 0) {
-        monitor_print("Explicit seabed: %s; categorical wet/dry cells, water "
-                      "level %.9g m, Vp %.9g m/s, density %.9g kg/m^3.\n",
-                      Param.theSeabedGeometryFile, Param.theSeabedWaterLevel,
+        monitor_print("Explicit seabed: %s; water coverage/depth from "
+                      "topography minus bed (tolerance 1e-8 m), Vp %.9g m/s, "
+                      "density %.9g kg/m^3.\n",
+                      Param.theSeabedGeometryFile,
                       Param.theSeabedWaterVp, Param.theSeabedWaterRho);
         monitor_print("Solid-only 3D profiles: %s; water assigned before "
                       "solid interpolation. Rebuild mesh after geometry changes.\n",
