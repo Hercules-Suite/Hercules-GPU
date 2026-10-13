@@ -652,6 +652,11 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /type_of_damping = mass/);
   assert.match(physics, /type_of_damping = bkt2/);
   assert.match(physics, /BKT setup rejects nonfinite or nonpositive solid Q/);
+  assert.match(physics, /Qk=1000 \(lossless bulk\) only for affected elements/);
+  assert.match(physics, /Valid bulk and shear attenuation remain unchanged/);
+  assert.match(physics, /global negative-Qk bulk fallbacks count/);
+  assert.match(physics, /original supplied Qp is no longer reproduced/);
+  assert.match(physics, /must be regenerated to apply the fallback/);
   assert.match(physics, /positive relaxed stiffness/);
   assert.match(physics, /no material queries, mesh refinement, extra full mesh traversal, or time-step work/);
   assert.match(physics, /Imported BKT2 meshes have their stored coefficients checked/);
