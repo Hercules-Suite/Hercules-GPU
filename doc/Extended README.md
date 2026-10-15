@@ -2247,17 +2247,50 @@ L=\frac{4V_s^2}{3V_p^2},\qquad
 Q_\kappa=\frac{1-L}{1/Q_p-L/Q_s}.
 ```
 
-A negative denominator beyond floating-point roundoff is rejected. Zero
-inverse bulk Q, including cancellation within roundoff, selects the existing
-lossless-bulk limit. `use_infinite_qk=yes` deliberately suppresses bulk
-attenuation, while still requiring valid solid Q inputs.
+With `use_infinite_qk=no`, a negative denominator beyond floating-point
+roundoff now selects **Qk=1000 for that element only**. This is Hercules's
+existing high-Q, lossless-bulk limit: all bulk relaxation weights, rates and
+viscous coefficients are zero. It applies to `bkt`, `bkt2`, `bkt3`, and `bkt3f`.
+Valid positive-bulk calculations and their existing high-Q cutoffs are
+unchanged, as are Qs and the shear coefficients. Zero inverse bulk Q, including
+cancellation within roundoff, continues to select lossless bulk. In contrast,
+`use_infinite_qk=yes` suppresses bulk attenuation for every solid element;
+both settings still require finite, positive solid Q inputs.
+
+The setup diagnostic reports the global `negative-Qk bulk fallbacks` count.
+That count excludes the roundoff/lossless limit and the explicit
+`use_infinite_qk=yes` override. A nonzero count also prints the fallback value
+and states that the original Qp is no longer reproduced in those elements.
+No new input is needed: keep `use_infinite_qk=no` to retain valid bulk
+attenuation elsewhere. This follows the high-Q fallback approach used in
+[SPECFEM3D's tomography Q conversion](https://github.com/SPECFEM/specfem3d/blob/master/src/generate_databases/model_tomography.f90),
+using Hercules's own lossless cutoff rather than SPECFEM's numerical constant.
+
+For example, illustrative values `Vp=1500 m/s`, `Vs=1000 m/s`, `Qs=100`,
+`Qp=200` imply a negative Qk and therefore select the fallback. With
+`Vp=2000 m/s` and the same Vs/Qs/Qp, the valid derived `Qk=400` is retained.
+These are examples, not calibrated material values. Setting lossless bulk
+changes the effective P-wave attenuation, approximately
+
+```math
+\frac{1}{Q_{p,\mathrm{effective}}}=\frac{L}{Q_s},
+\qquad Q_{p,\mathrm{effective}}=\frac{Q_s}{L}.
+```
+
+P waves still attenuate through the shear contribution. The usual
+`simulation_velocity_profile_freq_hz` correction still runs with the selected
+coefficients: shear dispersion is unchanged, and the fallback removes bulk
+dispersion only in affected elements. It does not introduce a Vp/Vs clamp or
+make an inconsistent supplied Qp/Qs pair physically equivalent to the original.
 
 BKT2 additionally requires finite, nonnegative stored coefficients and positive
 relaxed stiffness, `1-a0-a1 > 0`, in both shear and bulk branches. Active
 relaxation mechanisms must have positive rates. Invalid values stop setup with
 a global invalid-element count and one example giving rank, element center,
-material values and Q values; Q is not silently clipped and the timestep is not
-changed. These are admissibility checks, not a guarantee of stability for an
+material values and Q values. The negative-Qk fallback does not bypass these
+checks or repair nonfinite/nonpositive Q, invalid material properties, or
+inadmissible BKT2 shear coefficients. The timestep is not changed by this
+policy. These are admissibility checks, not a guarantee of stability for an
 arbitrary timestep or model.
 
 The checks reuse values already read or computed: no additional material
@@ -2266,8 +2299,23 @@ material validation adds one small MPI reduction per material-assignment call.
 Imported BKT2 meshes have their stored coefficients checked during the existing
 critical-timestep traversal. They do not retain the original Q inputs, so that
 diagnostic reports unavailable Q values as NaN. Regenerate a persisted mesh to
-apply this corrected interpolation, or after changing Q files; a coefficient
-check cannot repair an older, admissible but incorrectly interpolated Q model.
+apply this fallback or corrected interpolation, or after changing Q files;
+a coefficient check cannot recover the original Q or repair an older,
+admissible but incorrectly interpolated Q model.
+
+The fallback is assigned in the common solid material setup, including solids
+in acoustic–elastic, poroelastic–elastic and poroelastic–acoustic cases. Pure
+acoustic elements bypass BKT setup and remain lossless; none, Rayleigh and
+mass damping are unaffected. Existing selection of BKT-active cubes and VT
+cut cells, elastic CPML treatment, and exclusion of nonlinear elements from
+the BKT force path remain unchanged. The policy does not alter poroelastic
+pressure evolution or nonlinear elastoplastic/plastic and hysteretic laws.
+CPU/GPU force and station-stress paths consume the same stored coefficients;
+there are no new boundary/interface terms, GPU kernels or MPI field exchanges.
+Host coefficient and phase-velocity comparisons cover all four BKT variants;
+they do not validate full GPU/MPI wave propagation or any of the coupled or
+nonlinear cases. Those still require platform benchmarks with the rebuilt
+solver and regenerated mesh.
 
 ## Poroelastic U-P formulation
 

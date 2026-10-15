@@ -2113,12 +2113,15 @@ static void acoustic_sanitize_element(edata_t* edata) {
 typedef struct attenuation_check_t {
   int64_t checked;
   int64_t invalid;
+  int64_t negative_bulk_fallback;
   char first_error[1024];
 } attenuation_check_t;
 
 static const char* attenuation_bulk_quality(double Qs, double Qp, double L,
-                                            int infinite_bulk, double* Qk) {
+                                            int infinite_bulk, double* Qk,
+                                            int* negative_bulk_fallback) {
   *Qk = NAN;
+  *negative_bulk_fallback = 0;
   if (!isfinite(Qs) || Qs <= 0.0 || !isfinite(Qp) || Qp <= 0.0)
     return "solid Qs and Qp must be finite and positive";
   if (!isfinite(L) || L < 0.0 || L >= 1.0)
@@ -2135,10 +2138,12 @@ static const char* attenuation_bulk_quality(double Qs, double Qp, double L,
   /* Material payloads and stored velocities are single precision. Allow
    * their roundoff when a supplied Qp represents lossless bulk. */
   const double tolerance = 8.0 * FLT_EPSILON * fmax(p_loss, s_loss);
-  if (denominator < -tolerance)
-    return "Qp, Qs and Vp/Vs imply negative bulk attenuation";
-  /* Exact cancellation (or only roundoff) means lossless bulk. Preserve the
-   * existing high-Q cutoff rather than divide by zero or evaluate pow(-Q). */
+  /* An incompatible Qp/Qs pair gets lossless bulk for this element only.
+   * Keep the shear Q and every positive-bulk calculation unchanged. Count
+   * genuine negative inverse Q separately from the existing roundoff limit. */
+  *negative_bulk_fallback = (denominator < -tolerance);
+  /* Use the existing high-Q cutoff for negative or zero inverse bulk Q,
+   * rather than divide by zero or evaluate fractional powers of negative Q. */
   if (denominator <= tolerance) {
     *Qk = 1000.0;
   } else {
@@ -2203,12 +2208,19 @@ static void attenuation_record_error(attenuation_check_t* check,
 
 static void attenuation_finish_check(attenuation_check_t* check,
                                       const char* stage) {
-  int64_t local[2] = {check->checked, check->invalid}, global[2];
-  MPI_Allreduce(local, global, 2, MPI_INT64_T, MPI_SUM, comm_solver);
+  int64_t local[3] = {check->checked, check->invalid,
+                      check->negative_bulk_fallback}, global[3];
+  MPI_Allreduce(local, global, 3, MPI_INT64_T, MPI_SUM, comm_solver);
   if (Global.myID == 0) {
     monitor_print("Attenuation validation (%s): %" PRId64
-                  " solid elements checked, %" PRId64 " invalid\n",
-                  stage, global[0], global[1]);
+                  " solid elements checked, %" PRId64 " invalid, %" PRId64
+                  " negative-Qk bulk fallbacks\n",
+                  stage, global[0], global[1], global[2]);
+    if (global[2] != 0) {
+      monitor_print("Negative-Qk elements use Qk=1000 (lossless bulk); "
+                    "valid bulk attenuation and shear Q are unchanged. "
+                    "Supplied Qp is not preserved in fallback elements.\n");
+    }
   }
   if (global[1] == 0) return;
   int owner = check->invalid ? Global.myID : INT_MAX, first_owner;
@@ -2217,8 +2229,9 @@ static void attenuation_finish_check(attenuation_check_t* check,
             first_owner, comm_solver);
   if (Global.myID == 0) {
     fprintf(stderr, "Invalid attenuation during %s: %s\n"
-                    "Correct the solid Q model and regenerate the mesh. "
-                    "No Q clipping or timestep adjustment was applied.\n",
+                    "Correct the invalid material or attenuation inputs and "
+                    "regenerate the mesh. The negative-Qk fallback cannot "
+                    "repair these errors. No timestep adjustment was applied.\n",
             stage, check->first_error);
     fflush(stderr);
   }
@@ -29121,8 +29134,9 @@ static void mesh_correct_properties(etree_t* cvm) {
       // edata->Qs = Qs;  // update Qs and Qp
       // edata->Qp = Qp;
 
+      int negative_bulk_fallback = 0;
       const char* attenuation_error = attenuation_bulk_quality(
-          Qs, Qp, L, Param.useInfQk == YES, &Qk);
+          Qs, Qp, L, Param.useInfQk == YES, &Qk, &negative_bulk_fallback);
       if (!isfinite(edata->Vs) || edata->Vs <= 0.0f ||
           !isfinite(edata->Vp) || edata->Vp <= 0.0f ||
           !isfinite(edata->rho) || edata->rho <= 0.0f ||
@@ -29134,6 +29148,7 @@ static void mesh_correct_properties(etree_t* cvm) {
                                   Qs, Qp, Qk);
         continue; /* Do not evaluate fractional powers of invalid Q. */
       }
+      attenuation.negative_bulk_fallback += negative_bulk_fallback;
 
       /* Two-mechanism models never use a2/g2. Keep their stored payload
        * deterministic even when material properties are reassigned. */

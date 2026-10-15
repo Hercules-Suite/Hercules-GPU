@@ -210,8 +210,15 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 Optional 3-D `qs.in`/`qp.in` use solid-only interpolation at water/solid
 stencils; supplied Q is independent of the Vs minimum. Setup rejects invalid
 solid Q and inadmissible BKT2 coefficients without another mesh traversal.
-Regenerate persisted meshes to apply the correction; see
-[Quality-factor files](Extended%20README.md#quality-factor-files).
+With `use_infinite_qk=no`, only elements whose Qp/Qs imply negative bulk
+attenuation use the existing `Qk=1000` lossless-bulk fallback. Valid bulk
+attenuation and shear attenuation remain unchanged; setup reports the global
+fallback count. The supplied Qp is no longer reproduced in fallback elements.
+`use_infinite_qk=yes` suppresses bulk attenuation for all solids. Zero inverse
+bulk Q remains lossless with either setting. Regenerate persisted meshes to
+apply the policy; see
+[Setup-time attenuation validation](Extended%20README.md#setup-time-attenuation-validation)
+and [Quality-factor files](Extended%20README.md#quality-factor-files).
 
 ### Absorbing boundary and CPML
 
