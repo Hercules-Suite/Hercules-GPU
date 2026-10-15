@@ -3995,16 +3995,43 @@ including applicable velocity cutoffs, softening, and phase-velocity correction.
 At an interface, the same unique owning element used for displacement sampling
 supplies the properties. All points within that element share its values.
 
-Qs/Qp retain the element's material-model averages; BKT-family damping replaces
-them with the selected attenuation inputs (including parametric Qs where enabled).
-They are prescribed Q values before bulk-Q fallback, infinite-Qk handling,
-coefficient fitting, or high-Q cutoff, so they are not a measurement of effective
-attenuation. For damping types outside the BKT family, they remain material-model
-metadata even when attenuation is disabled. Missing, nonpositive, or nonfinite
-model Q values, and building/foundation overrides without Q, are written as `nan`.
-They do not describe Rayleigh damping or evolving nonlinear elastoplastic/plastic
-and hysteretic loss. Poroelastic points report the mesh skeleton/drained material
-inputs, not frequency-dependent fast/slow Biot wave speeds or attenuation;
+The Qp column reports the **selected nominal P-wave Q**, after the BKT
+shear/bulk branch choices, rather than the input Qp. The Qs column reports the
+selected shear Q; legacy `bkt` uses the selected table-entry Q values. Disabled
+branches contribute zero inverse Q after negative-Qk fallback, explicit
+`use_infinite_qk=yes`, and the existing high-Q cutoffs. The reported Qp is
+computed with the final Vs/Vp printed in the same row, including any
+phase-velocity correction:
+
+```math
+L=\frac{4V_s^2}{3V_p^2},\qquad
+\frac{1}{Q_{p,\mathrm{selected}}}=
+\frac{L}{Q_{s,\mathrm{selected}}}+\frac{1-L}{Q_{\kappa,\mathrm{selected}}}.
+```
+
+For a disabled branch, its inverse Q is exactly zero; the internal Qk=1000
+sentinel is not treated as finite bulk loss in this calculation. For example,
+with final Vs=1000 m/s, Vp=1500 m/s, selected Qs=100 and lossless bulk, the
+exported Qp is **168.75**, even if the input Qp was 200. A valid case with final
+Vs=1000 m/s, Vp=2000 m/s, Qs=100 and selected Qk=400 reports Qp=200. These are
+analytical illustrations, not production calibration. No input-Qp, Qk or
+fallback-flag columns are added.
+
+`inf` denotes zero selected material loss: Qs is `inf` when the shear branch
+is disabled, and Qp is `inf` when both branches are disabled. With
+`type_of_damping=none`, both are `inf` for ordinary solid materials.
+Rayleigh/mass damping and building/foundation overrides report `nan` because
+there is no selected frequency-independent BKT Q to report. BKT inputs still
+must pass the existing admissibility checks; this reporting calculation does
+not repair invalid inputs or alter damping coefficients.
+
+These are nominal material-attenuation values, not a frequency-resolved
+measurement of the fitted BKT response (including frequency-dependent `bkt3f`)
+or a total effective Q for evolving nonlinear elastoplastic/plastic and
+hysteretic loss, CPML absorption, or poroelastic flow. In nonlinear or other
+regions where the time-stepping path excludes BKT, they describe the selected
+linear reference material only. Poroelastic points report the mesh
+skeleton/drained material inputs, not fast/slow Biot wave speeds or attenuation;
 density is the mesh `rho`, not the separately configured fluid density.
 
 Elastic, viscoelastic, nonlinear-solid and poroelastic solid samples use the same
@@ -4017,8 +4044,8 @@ still required; CPU formatting and synthetic MPI checks do not validate physics.
 
 Values use 17 significant digits and a locale-independent decimal point.
 The header describes units, ordering, point count, column names and Q semantics.
-For illustration only, a homogeneous material with Vs=300 m/s, Vp=700 m/s,
-density=1800 kg/m³, Qs=25 and Qp=50 would start as follows for the first box on
+For illustration only, a homogeneous BKT material with final Vs=300 m/s,
+Vp=700 m/s, density=1800 kg/m³ and selected Qs=25, Qp=50 would start as follows for the first box on
 flat terrain with zero surface shift (these are synthetic values, not defaults
 or calibrated production properties):
 
@@ -4036,13 +4063,15 @@ Position-only readers should use `usecols=(0, 1, 2)`; readers expecting exactly
 three columns must be updated. The displacement binary format is unchanged.
 
 **Rebuild the solver and regenerate older meshes with `mesh_input_mode=0`.**
-Qs/Qp now persist as two double-precision fields in the element and saved mesh
+Selected Qs/Qp persist as two double-precision fields in the element and saved mesh
 payload (16 additional host bytes per element). Single-etree and sharded payload
 sizes are checked; sharded manifests and MPI-IO archives use format version 2.
 Older meshes are rejected before records are imported. The fields travel with
 the existing mesh payload through single/sharded/MPI-IO output and import,
 local interface refinement, and unified rank redistribution; no separate
-quality-factor cache or new configuration parameter is required.
+quality-factor cache or new configuration parameter is required. Regenerate
+meshes from earlier development builds that saved input Qp, and regenerate
+after changing damping settings; import preserves the saved material selection.
 
 Inspect the first example (assuming solver dt=0.001 s) with:
 

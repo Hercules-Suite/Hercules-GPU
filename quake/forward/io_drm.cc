@@ -140,7 +140,7 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
         // retaining global sample order and duplicate face-edge/corner rows.
         drm_output::write_coordinates(coordinate_path, points, materials);
         printf("DRM coordinates: %s; %d rows, XYZ (m), Vs/Vp (m/s), density (kg/m^3), Qs/Qp; "
-               "initial containing-element properties, unavailable Q = nan\n",
+               "initial containing-element properties, selected nominal Q, zero loss = inf, unavailable Q = nan\n",
                coordinate_path.c_str(), config[0]);
         printf("DRM flat backend: GPU plane interpolation + collective MPI-IO on solver ranks; "
                "solid displacement (poroelastic skeleton where applicable); no mesh refinement\n");

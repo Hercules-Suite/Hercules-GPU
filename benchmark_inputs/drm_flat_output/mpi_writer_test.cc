@@ -79,7 +79,8 @@ int main(int argc, char** argv) {
             for (int id : box_ids[box]) {
                 const auto& point = boxes[box].points[id];
                 local_materials.push_back(drm_output::Material{{300 + point[2], 700 + point[2],
-                    1800 + point[2], id == 0 ? NAN : 25.125, 50.25}});
+                    1800 + point[2], id == 0 ? NAN : id == 1 ? INFINITY : 25.125,
+                    id == 1 ? INFINITY : 50.25}});
             }
             const auto materials = drm_output::gather_materials(MPI_COMM_WORLD,
                 boxes[box].points.size(), box_ids[box], local_materials);
@@ -114,7 +115,8 @@ int main(int argc, char** argv) {
                     std::string extra;
                     assert(row >> point[0] >> point[1] >> point[2]);
                     const drm_output::Material expected{{300 + point[2], 700 + point[2],
-                        1800 + point[2], points.empty() ? NAN : 25.125, 50.25}};
+                        1800 + point[2], points.empty() ? NAN : points.size() == 1 ? INFINITY : 25.125,
+                        points.size() == 1 ? INFINITY : 50.25}};
                     for (double value : expected) {
                         assert(row >> extra);
                         const double actual = std::stod(extra);

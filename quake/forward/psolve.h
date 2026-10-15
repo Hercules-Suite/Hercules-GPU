@@ -186,7 +186,7 @@ struct mdata_t {
     int   topoBkt;
     int32_t topo_eindex;
     double nl_id;
-    double Qs, Qp; // Material/BKT input quality factors retained in mesh output.
+    double Qs, Qp; // Selected nominal attenuation Q; +inf lossless, NaN unavailable.
 };
 
 typedef struct mdata_t mdata_t;

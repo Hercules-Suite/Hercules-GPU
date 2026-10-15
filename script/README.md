@@ -667,8 +667,11 @@ Each box also writes `drmcoordinates.N` at setup: comment headers followed by
 `X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp`. Coordinates are solver-local
 X/Y/down metres, including rotation and building/topography shifts. The appended
 columns are initial owning-element speeds (m/s), density (kg/m³), and dimensionless
-material/BKT input Q values; `nan` means unavailable. They are not evolving
-nonlinear or effective poroelastic attenuation. See the
+selected nominal Q values. Qp includes the selected shear/bulk branches after
+fallback, overrides and cutoffs, using the final Vs/Vp in that row. `inf` means
+zero selected loss; `nan` means no applicable scalar Q (Rayleigh/mass or building
+overrides). These are linear reference-material values, not evolving nonlinear
+or effective poroelastic attenuation. See the
 [material semantics and mesh regeneration requirement](../doc/Extended%20README.md#structured-drm-box-output).
 Coordinate row i matches binary sample i, including repeated edges/corners.
 Older three-column-only readers need `usecols=(0, 1, 2)` for positions. The binary

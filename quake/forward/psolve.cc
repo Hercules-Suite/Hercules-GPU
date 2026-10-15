@@ -89,6 +89,7 @@ extern "C" {
 #include "topography.h"
 #include "drm_planewaves.h"
 #include "io_drm.h"
+#include "drm_output_quality.h"
 #include "flat_output_mpi.h"
 #include "basin.h"
 
@@ -28827,7 +28828,8 @@ static void mesh_correct_properties(etree_t* cvm) {
     edata = (edata_t*)elemp->data;
     lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
 
-    // Building overrides and excluded air cells do not supply quality factors.
+    // Report selected attenuation, never the unused input Qp. Rayleigh/mass
+    // and building overrides have no selected frequency-independent BKT Q.
     edata->Qs = edata->Qp = NAN;
 
     if (Param.includeTopography == YES) {
@@ -28841,6 +28843,8 @@ static void mesh_correct_properties(etree_t* cvm) {
         continue;
       }
     }
+
+    if (Param.theTypeOfDamping == NONE) edata->Qs = edata->Qp = INFINITY;
 
     vp = 0;
     vs = 0;
@@ -29043,11 +29047,8 @@ static void mesh_correct_properties(etree_t* cvm) {
       }
     }
 
-    edata->Qs = (isfinite(qs) && qs > 0.0) ? qs : NAN;
-    edata->Qp = (isfinite(qp) && qp > 0.0) ? qp : NAN;
-
     if (element_is_acoustic(edata)) {
-      edata->Qs = NAN; // No shear wave in a scalar-acoustic material.
+      edata->Qs = edata->Qp = NAN; // Scalar-acoustic DRM samples are unsupported.
       acoustic_sanitize_element(edata);
       continue;
     }
@@ -29151,9 +29152,6 @@ static void mesh_correct_properties(etree_t* cvm) {
       else
         Qp = 2. * Qs;
 
-      edata->Qs = Qs;
-      edata->Qp = Qp;
-
       int negative_bulk_fallback = 0;
       const char* attenuation_error = attenuation_bulk_quality(
           Qs, Qp, L, Param.useInfQk == YES, &Qk, &negative_bulk_fallback);
@@ -29169,6 +29167,7 @@ static void mesh_correct_properties(etree_t* cvm) {
         continue; /* Do not evaluate fractional powers of invalid Q. */
       }
       attenuation.negative_bulk_fallback += negative_bulk_fallback;
+      double selected_Qs = Qs, selected_Qk = Qk;
 
       /* Two-mechanism models never use a2/g2. Keep their stored payload
        * deterministic even when material properties are reassigned. */
@@ -29204,6 +29203,7 @@ static void mesh_correct_properties(etree_t* cvm) {
           edata->g1_shear = 0;
           edata->b_shear = 0;
         } else {
+          selected_Qs = Global.theQTABLE[index_Qs][0];
           edata->a0_shear = Global.theQTABLE[index_Qs][1];
           edata->a1_shear = Global.theQTABLE[index_Qs][2];
           edata->g0_shear = Global.theQTABLE[index_Qs][3];
@@ -29218,6 +29218,7 @@ static void mesh_correct_properties(etree_t* cvm) {
           edata->g1_kappa = 0;
           edata->b_kappa = 0;
         } else {
+          selected_Qk = Global.theQTABLE[index_Qk][0];
           edata->a0_kappa = Global.theQTABLE[index_Qk][1];
           edata->a1_kappa = Global.theQTABLE[index_Qk][2];
           edata->g0_kappa = Global.theQTABLE[index_Qk][3];
@@ -29479,6 +29480,18 @@ static void mesh_correct_properties(etree_t* cvm) {
                                       Qs, Qp, Qk, 1);
         }
       }
+
+      // Save the selection after fallback, table lookup, high-Q cutoffs and
+      // phase-velocity correction. All-zero coefficients mean exactly zero
+      // branch loss; treating Qk=1000 as finite here would invent bulk loss.
+      if (edata->a0_shear == 0 && edata->a1_shear == 0 &&
+          edata->a2_shear == 0 && edata->b_shear == 0)
+        selected_Qs = INFINITY;
+      if (edata->a0_kappa == 0 && edata->a1_kappa == 0 &&
+          edata->a2_kappa == 0 && edata->b_kappa == 0)
+        selected_Qk = INFINITY;
+      edata->Qs = selected_Qs;
+      edata->Qp = drm_output::selected_qp(edata->Vs, edata->Vp, selected_Qs, selected_Qk);
     }
   }
 

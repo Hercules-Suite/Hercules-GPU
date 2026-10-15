@@ -1790,6 +1790,10 @@ test("documents structured DRM boxes and generic station binary output", async (
   assert.match(html, /X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp/);
   assert.match(html, /initial containing mesh element/);
   assert.match(html, /produce nan/);
+  assert.match(html, /selected nominal P-wave Q/);
+  assert.match(html, /Qp=168\.75/);
+  assert.match(html, /inf means zero selected material loss/);
+  assert.match(html, /No input-Qp, Qk or fallback-flag columns/);
   assert.match(html, /format version 2/);
   assert.match(html, /metadata.shape != \(npoints, 8\)/);
   assert.match(html, /vs, vp, density, qs, qp/);
