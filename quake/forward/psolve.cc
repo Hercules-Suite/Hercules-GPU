@@ -28871,7 +28871,9 @@ static void mesh_correct_properties(etree_t* cvm) {
                   edata->edgesize * points[iEast] + Global.theYForMeshOrigin);
 
         for (iDepth = 0; iDepth < numPoints; iDepth++) {
-          cvmpayload_t g_props = {}; /* Models without Q leave it unavailable. */
+          cvmpayload_t g_props = {};
+          // Propagate unavailable Q even if only some of the 27 samples lack it.
+          g_props.Qs = g_props.Qp = NAN;
 
           depth_m =
               ((Global.myMesh->ticksize) *
