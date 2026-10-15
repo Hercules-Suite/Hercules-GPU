@@ -29491,7 +29491,7 @@ static void mesh_correct_properties(etree_t* cvm) {
           edata->a2_kappa == 0 && edata->b_kappa == 0)
         selected_Qk = INFINITY;
       edata->Qs = selected_Qs;
-      edata->Qp = drm_output::selected_qp(edata->Vs, edata->Vp, selected_Qs, selected_Qk);
+      edata->Qp = drm_output_quality::selected_qp(edata->Vs, edata->Vp, selected_Qs, selected_Qk);
     }
   }
 

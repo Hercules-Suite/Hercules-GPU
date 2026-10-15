@@ -17,13 +17,13 @@ int main(int argc, char** argv) {
     // Analytical selected-Q cases. Lossless bulk still allows P-wave loss
     // through shear; neither the rejected Qp=200 nor the Qk=1000 sentinel
     // describes that selection for Vs=1000, Vp=1500, Qs=100.
-    assert(std::abs(drm_output::selected_qp(1000, 1500, 100, lossless) - 168.75) < 1e-12);
-    assert(std::abs(drm_output::selected_qp(1000, 2000, 100, 400) - 200) < 1e-12);
-    assert(std::abs(drm_output::selected_qp(1000, 2000, 100, lossless) - 300) < 1e-12);
-    assert(std::abs(drm_output::selected_qp(1000, 2000, lossless, 400) - 600) < 1e-12);
-    assert(std::isinf(drm_output::selected_qp(1000, 2000, lossless, lossless)));
-    assert(std::isnan(drm_output::selected_qp(1000, 2000, 0, 400)));
-    assert(std::isnan(drm_output::selected_qp(2000, 1000, 100, 400)));
+    assert(std::abs(drm_output_quality::selected_qp(1000, 1500, 100, lossless) - 168.75) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, 100, 400) - 200) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, 100, lossless) - 300) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, lossless, 400) - 600) < 1e-12);
+    assert(std::isinf(drm_output_quality::selected_qp(1000, 2000, lossless, lossless)));
+    assert(std::isnan(drm_output_quality::selected_qp(1000, 2000, 0, 400)));
+    assert(std::isnan(drm_output_quality::selected_qp(2000, 1000, 100, 400)));
     const drm_output::BoxSpec specs[] = {
         {{1000, 2000, 4, 6, 3, 1, 37}},
         {{10, 20, 0.3, 0.5, 0.4, 0.1, 0}}};
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
         materials[0][3] = materials[0][4] = std::numeric_limits<double>::quiet_NaN();
         materials[1][3] = materials[1][4] = lossless;
         materials[2] = drm_output::Material{{1000, 1500, 1800, 100,
-            drm_output::selected_qp(1000, 1500, 100, lossless)}};
+            drm_output_quality::selected_qp(1000, 1500, 100, lossless)}};
         drm_output::write_coordinates(path, geometry.points, materials);
         std::ifstream input(path);
         std::string line;
