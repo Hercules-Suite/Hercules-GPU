@@ -124,7 +124,7 @@ psolve_novis.o: psolve.o
 single_query: single_query.o q4.o
 
 output.o: output.cc output.h psolve.h
-io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h flat_output_mpi.h psolve.h psolve_gpu_launch.h
+io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h drm_output_materials_mpi.h flat_output_mpi.h psolve.h psolve_gpu_launch.h
 io_checkpoint.o: io_checkpoint.cc io_checkpoint.h psolve.h nonlinear_gpu.h
 psolve.o: psolve.cc acoustic_interface_setup.h acoustic_interface_trace.h \
           acoustic_open_pore_quadrature.h \

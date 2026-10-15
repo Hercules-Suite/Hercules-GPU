@@ -15,7 +15,8 @@ c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/coordina
 The coordinate regression runs the production ASCII writer. It checks exact
 float64 round trips for rotated/fractional grids with synthetic terrain/depth
 shifts, binary sample order (including duplicate face edges), locale-independent
-formatting, truncation of an older file, and failed output paths. On Linux it
+formatting, all five appended material columns, unavailable-Q NaNs, row-count
+validation before truncation, truncation of an older file, and failed output paths. On Linux it
 also checks write/close failure with `/dev/full`.
 
 Run the actual MPI-IO writer on a machine with MPI (CUDA is not required):
@@ -36,8 +37,11 @@ ownership, an empty rank, multiple batches, a partial final batch, and
 truncation of an older file. It also writes two differently sized/rotated boxes
 simultaneously with different output rates, checks every XYZ value against an
 affine field, and verifies their independent file sizes and partial batches.
-Rank zero exports the shifted sample coordinates through the production ASCII
-writer; reading those rows back must recover every binary sample's location.
+The production setup-only material gather collects five properties from each
+sample owner, including an empty rank and a box exceeding the 4096-point gather
+chunk. Rank zero exports the shifted coordinates and gathered material values
+through the production ASCII writer; reading those rows back must recover every
+binary sample's location and prescribed material values (including a missing Q).
 Both runs must produce identical bytes for all five files. The geometry test
 checks the full row/column ordering of all ten faces, repeated shared edges,
 center offsets, rotations, exterior-to-interior dimensions, and table parsing.
@@ -101,6 +105,13 @@ Also test two `output_drm_boxes` rows together with station binary output. Compa
 each generated face at coincident station locations, including common face
 edges, a nonzero strike, and the interior/exterior bottom separation. The
 `drmcoordinates.N` rows must match the solver interpolation points, including
-building/topography shifts and repeated shared edges/corners. Verify the ASCII
+building/topography shifts and repeated shared edges/corners. Verify Vs/Vp/rho
+against the adjusted owning-element properties and Qs/Qp against model/BKT input
+values; include multiple material layers, nonlinear and poroelastic solids and
+solid samples next to acoustic interfaces. Pure acoustic samples must still be
+rejected. Rebuild and regenerate old meshes: the material payload now retains
+Qs/Qp, sharded manifests and MPI-IO archives use version 2. Compare fresh meshes,
+single/sharded/MPI-IO imports, and unified handoff with different rank counts.
+Verify that older payloads are rejected before import. Verify the ASCII
 and binary pair for each box and restart segment. The
 synthetic MPI regression does not compile or execute the CUDA solver path.

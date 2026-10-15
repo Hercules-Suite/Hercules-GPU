@@ -2,6 +2,7 @@
 #include "../../quake/forward/flat_output_mpi.h"
 #include "../../quake/forward/drm_output_points.h"
 #include "../../quake/forward/drm_output_coordinates.h"
+#include "../../quake/forward/drm_output_materials_mpi.h"
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -64,7 +65,7 @@ int main(int argc, char** argv) {
         // sample rate and partial final batch. The payload is an affine field.
         drm_output::BoxGeometry boxes[2] = {
             drm_output::box_faces(drm_output::BoxSpec{{10,20,4,6,3,1,0}}),
-            drm_output::box_faces(drm_output::BoxSpec{{30,50,6,4,4,1,37}})};
+            drm_output::box_faces(drm_output::BoxSpec{{30,50,40,60,30,1,37}})};
         flat_output::FlatWriter writers[2];
         std::vector<int> box_ids[2];
         const int rates[2] = {2, 3};
@@ -74,7 +75,16 @@ int main(int argc, char** argv) {
             for (size_t id = 0; id < boxes[box].points.size(); ++id)
                 if (static_cast<int>(id) % active == rank) box_ids[box].push_back(id);
             const std::string path = std::string(argv[1]) + ".box" + std::to_string(box);
-            if (rank == 0) drm_output::write_coordinates(path + ".coords", boxes[box].points);
+            std::vector<drm_output::Material> local_materials;
+            for (int id : box_ids[box]) {
+                const auto& point = boxes[box].points[id];
+                local_materials.push_back(drm_output::Material{{300 + point[2], 700 + point[2],
+                    1800 + point[2], id == 0 ? NAN : 25.125, 50.25}});
+            }
+            const auto materials = drm_output::gather_materials(MPI_COMM_WORLD,
+                boxes[box].points.size(), box_ids[box], local_materials);
+            if (rank == 0) drm_output::write_coordinates(path + ".coords", boxes[box].points, materials);
+            else assert(materials.empty());
             writers[box].open(MPI_COMM_WORLD, path.c_str(), boxes[box].points.size(), box_ids[box], 2);
         }
         for (int step = 0; step < 14; ++step)
@@ -103,6 +113,13 @@ int main(int argc, char** argv) {
                     drm_output::Point point;
                     std::string extra;
                     assert(row >> point[0] >> point[1] >> point[2]);
+                    const drm_output::Material expected{{300 + point[2], 700 + point[2],
+                        1800 + point[2], points.empty() ? NAN : 25.125, 50.25}};
+                    for (double value : expected) {
+                        assert(row >> extra);
+                        const double actual = std::stod(extra);
+                        assert(std::isnan(value) ? std::isnan(actual) : actual == value);
+                    }
                     assert(!(row >> extra));
                     points.push_back(point);
                 }
