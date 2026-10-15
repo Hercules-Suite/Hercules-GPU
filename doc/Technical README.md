@@ -814,7 +814,15 @@ interior dimensions are `(Lx-2h, Ly-2h, depth-h)`. Configure
 replay and does not refine the mesh.
 
 Each box also writes `drmcoordinates.N` once during setup: an ASCII table of
-solver-local X/Y, Z/down in metres, including terrain/building shifts.
-Its rows match binary sample order exactly, including repeated edges/corners.
+`X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp`. Coordinates are solver-local
+X/Y, Z/down in metres, including terrain/building shifts. Appended properties
+come from the initial owning mesh element: speeds in m/s, density in kg/m³,
+and dimensionless selected nominal Q values. Qp includes lossless-bulk fallback,
+infinite-Qk overrides, high-Q cutoffs and final Vs/Vp; it is not the input Qp.
+`inf` denotes zero selected loss; `nan` denotes no applicable scalar Q.
+They do not represent evolving nonlinear loss or effective poroelastic attenuation.
+Rows match binary samples exactly, including repeated edges/corners. Use
+`numpy.loadtxt(path, usecols=(0, 1, 2))` for positions only. Rebuild and regenerate
+older meshes with `mesh_input_mode=0`; mesh payloads now retain Qs/Qp.
 
 See [the complete geometry, layout, and reader examples](Extended%20README.md#structured-drm-box-output).

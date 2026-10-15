@@ -186,6 +186,7 @@ struct mdata_t {
     int   topoBkt;
     int32_t topo_eindex;
     double nl_id;
+    double Qs, Qp; // Selected nominal attenuation Q; +inf lossless, NaN unavailable.
 };
 
 typedef struct mdata_t mdata_t;
@@ -204,6 +205,7 @@ typedef struct edata_t {
     int     topoBkt;
     int32_t topo_eindex;
     double  nl_id;
+    double  Qs, Qp; // Same trailing layout as mdata_t; unavailable values are NaN.
 
 } edata_t;
 

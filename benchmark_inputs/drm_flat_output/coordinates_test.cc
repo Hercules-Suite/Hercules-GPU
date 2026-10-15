@@ -1,4 +1,5 @@
 #include "../../quake/forward/drm_output_coordinates.h"
+#include "../../quake/forward/drm_output_quality.h"
 #include <cassert>
 #include <iostream>
 
@@ -12,6 +13,17 @@ struct CommaNumbers : std::numpunct<char> {
 int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string path = argv[1];
+    const double lossless = std::numeric_limits<double>::infinity();
+    // Analytical selected-Q cases. Lossless bulk still allows P-wave loss
+    // through shear; neither the rejected Qp=200 nor the Qk=1000 sentinel
+    // describes that selection for Vs=1000, Vp=1500, Qs=100.
+    assert(std::abs(drm_output_quality::selected_qp(1000, 1500, 100, lossless) - 168.75) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, 100, 400) - 200) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, 100, lossless) - 300) < 1e-12);
+    assert(std::abs(drm_output_quality::selected_qp(1000, 2000, lossless, 400) - 600) < 1e-12);
+    assert(std::isinf(drm_output_quality::selected_qp(1000, 2000, lossless, lossless)));
+    assert(std::isnan(drm_output_quality::selected_qp(1000, 2000, 0, 400)));
+    assert(std::isnan(drm_output_quality::selected_qp(2000, 1000, 100, 400)));
     const drm_output::BoxSpec specs[] = {
         {{1000, 2000, 4, 6, 3, 1, 37}},
         {{10, 20, 0.3, 0.5, 0.4, 0.1, 0}}};
@@ -22,7 +34,15 @@ int main(int argc, char** argv) {
         auto geometry = drm_output::box_faces(spec);
         for (auto& p : geometry.points)
             p[2] += 25.125 + 0.0125 * p[0] - 0.0025 * p[1]; // Synthetic terrain/shift.
-        drm_output::write_coordinates(path, geometry.points);
+        std::vector<drm_output::Material> materials;
+        for (const auto& p : geometry.points)
+            materials.push_back(drm_output::Material{{300.125 + p[2], 700.5 + p[2],
+                1800.25 + p[2], 25.125, 50.25}});
+        materials[0][3] = materials[0][4] = std::numeric_limits<double>::quiet_NaN();
+        materials[1][3] = materials[1][4] = lossless;
+        materials[2] = drm_output::Material{{1000, 1500, 1800, 100,
+            drm_output_quality::selected_qp(1000, 1500, 100, lossless)}};
+        drm_output::write_coordinates(path, geometry.points, materials);
         std::ifstream input(path);
         std::string line;
         size_t row = 0;
@@ -30,7 +50,7 @@ int main(int argc, char** argv) {
         while (std::getline(input, line)) {
             assert(!line.empty());
             if (line[0] == '#') {
-                if (line == "# X_m Y_m Z_m") columns = true;
+                if (line == "# X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp") columns = true;
                 if (line == "# point_count = " + std::to_string(geometry.points.size())) count = true;
                 continue;
             }
@@ -39,8 +59,13 @@ int main(int argc, char** argv) {
             drm_output::Point point;
             std::string extra;
             assert(values >> point[0] >> point[1] >> point[2]);
-            assert(!(values >> extra));
             assert(row < geometry.points.size());
+            for (double expected : materials[row]) {
+                assert(values >> extra);
+                const double value = std::stod(extra);
+                assert(std::isnan(expected) ? std::isnan(value) : value == expected);
+            }
+            assert(!(values >> extra));
             assert(point == geometry.points[row++]); // Exact float64 round trip and face order.
         }
         assert(!input.bad() && columns && count && row == geometry.points.size());
@@ -48,15 +73,24 @@ int main(int argc, char** argv) {
     std::locale::global(original);
     // A regular file cannot serve as a parent directory.
     bool failed = false;
-    try { drm_output::write_coordinates(path + "/drmcoordinates.0", {}); }
+    try { drm_output::write_coordinates(path + "/drmcoordinates.0", {}, {}); }
     catch (const std::runtime_error&) { failed = true; }
     assert(failed);
+    // Dimension errors must be detected before an existing output is truncated.
+    std::ifstream before(path);
+    const std::string previous((std::istreambuf_iterator<char>(before)), {});
+    failed = false;
+    try { drm_output::write_coordinates(path, {drm_output::Point{{1, 2, 3}}}, {}); }
+    catch (const std::runtime_error&) { failed = true; }
+    std::ifstream after(path);
+    assert(failed && previous == std::string((std::istreambuf_iterator<char>(after)), {}));
 #ifdef __linux__
     // Disk-full errors may surface only on flush/close.
     failed = false;
-    try { drm_output::write_coordinates("/dev/full", drm_output::box_faces(specs[0]).points); }
+    try { drm_output::write_coordinates("/dev/full", {drm_output::Point{{1, 2, 3}}},
+                                       {drm_output::Material{{300, 700, 1800, 25, 50}}}); }
     catch (const std::runtime_error&) { failed = true; }
     assert(failed);
 #endif
-    std::cout << "DRM ASCII coordinates: exact order, duplicates, rotation, shifted depths, precision, locale and truncation passed\n";
+    std::cout << "DRM ASCII coordinates/materials: selected Qp, lossless branches, exact order, duplicates, rotation, shifted depths, precision, NaN/inf, locale and truncation passed\n";
 }

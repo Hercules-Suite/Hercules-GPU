@@ -124,12 +124,12 @@ psolve_novis.o: psolve.o
 single_query: single_query.o q4.o
 
 output.o: output.cc output.h psolve.h
-io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h flat_output_mpi.h psolve.h psolve_gpu_launch.h
+io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h drm_output_materials_mpi.h flat_output_mpi.h psolve.h psolve_gpu_launch.h
 io_checkpoint.o: io_checkpoint.cc io_checkpoint.h psolve.h nonlinear_gpu.h
 psolve.o: psolve.cc acoustic_interface_setup.h acoustic_interface_trace.h \
           acoustic_open_pore_quadrature.h \
           acoustic_receiver_setup.h acoustic_receiver_gradient.h psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
-          io_checkpoint.h io_drm.h flat_output_mpi.h stiffness.h damping.h quake_util.h timers.h \
+          io_checkpoint.h io_drm.h drm_output_quality.h flat_output_mpi.h stiffness.h damping.h quake_util.h timers.h \
 		  buildings.h meshformatlab.h drm.h topography.h drm_planewaves.h \
 		  basin.h kernel.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@

@@ -33,6 +33,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,6 +89,7 @@ extern "C" {
 #include "topography.h"
 #include "drm_planewaves.h"
 #include "io_drm.h"
+#include "drm_output_quality.h"
 #include "flat_output_mpi.h"
 #include "basin.h"
 
@@ -535,11 +537,18 @@ typedef struct mrecord_t {
   mdata_t mdata;
 } mrecord_t;
 
+// Mesh import/output and unified handoff copy the trailing element payload.
+static_assert(sizeof(mdata_t) - offsetof(mdata_t, edgesize) == sizeof(edata_t),
+              "Saved and runtime mesh material layouts must match");
+static_assert(offsetof(mdata_t, Qs) - offsetof(mdata_t, edgesize) == offsetof(edata_t, Qs) &&
+              offsetof(mdata_t, Qp) - offsetof(mdata_t, edgesize) == offsetof(edata_t, Qp),
+              "Saved and runtime quality-factor offsets must match");
+
 #define MESH_SHARD_MANIFEST_MAGIC "HERCULES_MESH_SHARDS"
-#define MESH_SHARD_MANIFEST_VERSION 1
+#define MESH_SHARD_MANIFEST_VERSION 2
 #define MESH_SHARD_PATH_SIZE 512
 #define MESH_MPIIO_MAGIC "HERCULES_MPIIO"
-#define MESH_MPIIO_VERSION 1
+#define MESH_MPIIO_VERSION 2
 #define MESH_MPIIO_BATCH (1 << 16)
 
 typedef struct mesh_shard_meta_t {
@@ -8266,7 +8275,7 @@ static void mesh_mpiio_archive_open(const char* path,
       (archive->header.total_elements < 0) ||
       (archive->header.directory_offset !=
        (int64_t)sizeof(mesh_mpiio_header_t))) {
-    fprintf(stderr, "Thread %d: incompatible MPI-IO mesh archive %s\n",
+    fprintf(stderr, "Thread %d: incompatible MPI-IO mesh archive %s; regenerate with mesh_input_mode=0\n",
             Global.myID, path);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
@@ -8382,7 +8391,7 @@ static int mesh_shard_manifest_load(const char* path,
       (version != MESH_SHARD_MANIFEST_VERSION) ||
       (fscanf(fp, "%63s %d", keyword, &shard_count) != 2) ||
       (strcmp(keyword, "shards") != 0) || (shard_count < 1)) {
-    fprintf(stderr, "Thread %d: malformed mesh shard manifest %s\n",
+    fprintf(stderr, "Thread %d: malformed or incompatible mesh shard manifest %s; regenerate with mesh_input_mode=0\n",
             Global.myID, path);
     fclose(fp);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -8666,6 +8675,10 @@ static int64_t mesh_import_cursor_load_shards(
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+
+    if (etree_getpayloadsize(ep) != sizeof(mdata_t))
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Incompatible mesh payload in %s; regenerate with mesh_input_mode=0", shard_path);
 
     imported += mesh_import_cursor_load_etree(ep, shard_start, phase_end);
     if (etree_close(ep) != 0) {
@@ -9097,6 +9110,10 @@ static void mesh_generate_from_etree(void) {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
+    if (etree_getpayloadsize(Global.theMeshInputEp) != sizeof(mdata_t))
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Incompatible mesh payload in %s; regenerate with mesh_input_mode=0",
+                   Param.mesh_etree_output_file);
   }
 
   Timer_Start("Octor Refinetree");
@@ -28811,6 +28828,10 @@ static void mesh_correct_properties(etree_t* cvm) {
     edata = (edata_t*)elemp->data;
     lnid0 = Global.myMesh->elemTable[eindex].lnid[0];
 
+    // Report selected attenuation, never the unused input Qp. Rayleigh/mass
+    // and building overrides have no selected frequency-independent BKT Q.
+    edata->Qs = edata->Qp = NAN;
+
     if (Param.includeTopography == YES) {
       if (topo_correctproperties(edata)) {
         continue;
@@ -28822,6 +28843,8 @@ static void mesh_correct_properties(etree_t* cvm) {
         continue;
       }
     }
+
+    if (Param.theTypeOfDamping == NONE) edata->Qs = edata->Qp = INFINITY;
 
     vp = 0;
     vs = 0;
@@ -28852,7 +28875,9 @@ static void mesh_correct_properties(etree_t* cvm) {
                   edata->edgesize * points[iEast] + Global.theYForMeshOrigin);
 
         for (iDepth = 0; iDepth < numPoints; iDepth++) {
-          cvmpayload_t g_props; /* ground properties record */
+          cvmpayload_t g_props = {};
+          // Propagate unavailable Q even if only some of the 27 samples lack it.
+          g_props.Qs = g_props.Qp = NAN;
 
           depth_m =
               ((Global.myMesh->ticksize) *
@@ -29012,8 +29037,6 @@ static void mesh_correct_properties(etree_t* cvm) {
       edata->Vp = vp;
       edata->Vs = vs;
       edata->rho = rho;
-      // edata->Qp  = qp;
-      // edata->Qs  = qs;
 
       if (cnt != 0) {
         edata->Vp = vp / cnt;
@@ -29021,13 +29044,11 @@ static void mesh_correct_properties(etree_t* cvm) {
         edata->rho = rho / cnt;
         qp = qp / cnt;
         qs = qs / cnt;
-
-        // edata->Qp  = qp / cnt;
-        // edata->Qs  = qs / cnt;
       }
     }
 
     if (element_is_acoustic(edata)) {
+      edata->Qs = edata->Qp = NAN; // Scalar-acoustic DRM samples are unsupported.
       acoustic_sanitize_element(edata);
       continue;
     }
@@ -29131,9 +29152,6 @@ static void mesh_correct_properties(etree_t* cvm) {
       else
         Qp = 2. * Qs;
 
-      // edata->Qs = Qs;  // update Qs and Qp
-      // edata->Qp = Qp;
-
       int negative_bulk_fallback = 0;
       const char* attenuation_error = attenuation_bulk_quality(
           Qs, Qp, L, Param.useInfQk == YES, &Qk, &negative_bulk_fallback);
@@ -29149,6 +29167,7 @@ static void mesh_correct_properties(etree_t* cvm) {
         continue; /* Do not evaluate fractional powers of invalid Q. */
       }
       attenuation.negative_bulk_fallback += negative_bulk_fallback;
+      double selected_Qs = Qs, selected_Qk = Qk;
 
       /* Two-mechanism models never use a2/g2. Keep their stored payload
        * deterministic even when material properties are reassigned. */
@@ -29184,6 +29203,7 @@ static void mesh_correct_properties(etree_t* cvm) {
           edata->g1_shear = 0;
           edata->b_shear = 0;
         } else {
+          selected_Qs = Global.theQTABLE[index_Qs][0];
           edata->a0_shear = Global.theQTABLE[index_Qs][1];
           edata->a1_shear = Global.theQTABLE[index_Qs][2];
           edata->g0_shear = Global.theQTABLE[index_Qs][3];
@@ -29198,6 +29218,7 @@ static void mesh_correct_properties(etree_t* cvm) {
           edata->g1_kappa = 0;
           edata->b_kappa = 0;
         } else {
+          selected_Qk = Global.theQTABLE[index_Qk][0];
           edata->a0_kappa = Global.theQTABLE[index_Qk][1];
           edata->a1_kappa = Global.theQTABLE[index_Qk][2];
           edata->g0_kappa = Global.theQTABLE[index_Qk][3];
@@ -29459,6 +29480,18 @@ static void mesh_correct_properties(etree_t* cvm) {
                                       Qs, Qp, Qk, 1);
         }
       }
+
+      // Save the selection after fallback, table lookup, high-Q cutoffs and
+      // phase-velocity correction. All-zero coefficients mean exactly zero
+      // branch loss; treating Qk=1000 as finite here would invent bulk loss.
+      if (edata->a0_shear == 0 && edata->a1_shear == 0 &&
+          edata->a2_shear == 0 && edata->b_shear == 0)
+        selected_Qs = INFINITY;
+      if (edata->a0_kappa == 0 && edata->a1_kappa == 0 &&
+          edata->a2_kappa == 0 && edata->b_kappa == 0)
+        selected_Qk = INFINITY;
+      edata->Qs = selected_Qs;
+      edata->Qp = drm_output_quality::selected_qp(edata->Vs, edata->Vp, selected_Qs, selected_Qk);
     }
   }
 

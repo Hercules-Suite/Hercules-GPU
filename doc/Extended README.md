@@ -1224,6 +1224,8 @@ Notes:
 - `mesh_input_mode`
 	`1` builds mesh from an existing mesh etree (import path).
 	`0` builds mesh from the velocity/topography models (normal meshing path).
+	Regenerate meshes made before the DRM Qs/Qp material-payload extension;
+	current sharded manifests and MPI-IO archives use format version 2.
 
 ### Separate mesh and solver settings
 
@@ -3977,29 +3979,99 @@ Each snapshot concatenates the ten faces as native-endian float64 XYZ triples
 in metres. The full file is `[time, concatenated_face_sample, XYZ]` with no
 header or embedded timestamps. Keep the input box row to identify face shapes.
 
-The matching `drmcoordinates.N` contains three whitespace-separated columns:
-`X_m Y_m Z_m`. These are the actual solver sampling coordinates in metres:
-local X/Y, Z positive downward, after strike rotation and the same
-building/topography depth shifts used for interpolation. Z is in the solver
-coordinate frame, including those shifts. Ignoring lines beginning with `#`,
-data row i (zero-based) gives the position of binary sample i in every
-snapshot. The exterior/interior face ordering and repeated edge/corner rows
-are identical to the binary layout; no points are sorted or deduplicated.
-Values use 17 significant digits, sufficient to round-trip float64 coordinates,
-with a decimal point independent of the host locale. The file begins with
-comment lines describing the axes, ordering, point count, and column names.
-For the first example on flat terrain with zero surface shift, its data begin:
+The matching `drmcoordinates.N` contains eight whitespace-separated columns:
+`X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp`. The first three are the actual
+solver sampling coordinates in metres: local X/Y, Z positive downward, after
+strike rotation and the same building/topography depth shifts used for
+interpolation. Ignoring lines beginning with `#`, data row i (zero-based)
+matches binary sample i in every snapshot. Face ordering and repeated
+edge/corner rows are identical; no points are sorted or deduplicated.
 
-```text
-# X_m Y_m Z_m
-950 1950 0
-950 1950 1
-950 1950 2
+The five appended columns describe the **initial containing mesh element**:
+Vs and Vp in m/s, density in kg/m³, and dimensionless Qs and Qp. They are not
+point queries of the original velocity model or interpolation across a material
+interface. Vs/Vp/density include the solver's mesh-material adjustments,
+including applicable velocity cutoffs, softening, and phase-velocity correction.
+At an interface, the same unique owning element used for displacement sampling
+supplies the properties. All points within that element share its values.
+
+The Qp column reports the **selected nominal P-wave Q**, after the BKT
+shear/bulk branch choices, rather than the input Qp. The Qs column reports the
+selected shear Q; legacy `bkt` uses the selected table-entry Q values. Disabled
+branches contribute zero inverse Q after negative-Qk fallback, explicit
+`use_infinite_qk=yes`, and the existing high-Q cutoffs. The reported Qp is
+computed with the final Vs/Vp printed in the same row, including any
+phase-velocity correction:
+
+```math
+L=\frac{4V_s^2}{3V_p^2},\qquad
+\frac{1}{Q_{p,\mathrm{selected}}}=
+\frac{L}{Q_{s,\mathrm{selected}}}+\frac{1-L}{Q_{\kappa,\mathrm{selected}}}.
 ```
 
-Solver rank zero writes and closes the coordinate file once during setup,
-after validating point ownership. Each run overwrites it, including restarts,
-alongside the binary file. It adds no per-step I/O or GPU transfers.
+For a disabled branch, its inverse Q is exactly zero; the internal Qk=1000
+sentinel is not treated as finite bulk loss in this calculation. For example,
+with final Vs=1000 m/s, Vp=1500 m/s, selected Qs=100 and lossless bulk, the
+exported Qp is **168.75**, even if the input Qp was 200. A valid case with final
+Vs=1000 m/s, Vp=2000 m/s, Qs=100 and selected Qk=400 reports Qp=200. These are
+analytical illustrations, not production calibration. No input-Qp, Qk or
+fallback-flag columns are added.
+
+`inf` denotes zero selected material loss: Qs is `inf` when the shear branch
+is disabled, and Qp is `inf` when both branches are disabled. With
+`type_of_damping=none`, both are `inf` for ordinary solid materials.
+Rayleigh/mass damping and building/foundation overrides report `nan` because
+there is no selected frequency-independent BKT Q to report. BKT inputs still
+must pass the existing admissibility checks; this reporting calculation does
+not repair invalid inputs or alter damping coefficients.
+
+These are nominal material-attenuation values, not a frequency-resolved
+measurement of the fitted BKT response (including frequency-dependent `bkt3f`)
+or a total effective Q for evolving nonlinear elastoplastic/plastic and
+hysteretic loss, CPML absorption, or poroelastic flow. In nonlinear or other
+regions where the time-stepping path excludes BKT, they describe the selected
+linear reference material only. Poroelastic points report the mesh
+skeleton/drained material inputs, not fast/slow Biot wave speeds or attenuation;
+density is the mesh `rho`, not the separately configured fluid density.
+
+Elastic, viscoelastic, nonlinear-solid and poroelastic solid samples use the same
+metadata path. Acoustic–elastic, poroelastic–acoustic and poroelastic–elastic runs
+can sample supported solid elements; scalar-acoustic samples remain unsupported
+and stop DRM setup. This change does not modify initialization physics,
+boundary/interface conditions, time integration, station quantities, or GPU
+field exchanges. Target-system standalone and coupled CUDA/MPI comparisons are
+still required; CPU formatting and synthetic MPI checks do not validate physics.
+
+Values use 17 significant digits and a locale-independent decimal point.
+The header describes units, ordering, point count, column names and Q semantics.
+For illustration only, a homogeneous BKT material with final Vs=300 m/s,
+Vp=700 m/s, density=1800 kg/m³ and selected Qs=25, Qp=50 would start as follows for the first box on
+flat terrain with zero surface shift (these are synthetic values, not defaults
+or calibrated production properties):
+
+```text
+# X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp
+950 1950 0 300 700 1800 25 50
+950 1950 1 300 700 1800 25 50
+950 1950 2 300 700 1800 25 50
+```
+
+Solver rank zero writes the table once during setup after point ownership
+validation and a bounded-chunk MPI material gather. Each run overwrites it,
+including restarts. There is no additional per-step I/O or GPU transfer.
+Position-only readers should use `usecols=(0, 1, 2)`; readers expecting exactly
+three columns must be updated. The displacement binary format is unchanged.
+
+**Rebuild the solver and regenerate older meshes with `mesh_input_mode=0`.**
+Selected Qs/Qp persist as two double-precision fields in the element and saved mesh
+payload (16 additional host bytes per element). Single-etree and sharded payload
+sizes are checked; sharded manifests and MPI-IO archives use format version 2.
+Older meshes are rejected before records are imported. The fields travel with
+the existing mesh payload through single/sharded/MPI-IO output and import,
+local interface refinement, and unified rank redistribution; no separate
+quality-factor cache or new configuration parameter is required. Regenerate
+meshes from earlier development builds that saved input Qp, and regenerate
+after changing damping settings; import preserves the saved material selection.
 
 Inspect the first example (assuming solver dt=0.001 s) with:
 
@@ -4018,9 +4090,11 @@ from script.read_drm import box_layout
 layout = box_layout(100, 100, 50, 1)  # exterior dimensions and spacing
 npoints = sum(rows * cols for _, rows, cols, _ in layout)
 path = Path("outputfiles/drm_boxes_fullDomain/drmdisplacements.0")
-xyz = np.loadtxt(path.with_name("drmcoordinates.0"), comments="#", ndmin=2)
-if xyz.shape != (npoints, 3):
-    raise ValueError("coordinate count does not match box dimensions")
+metadata = np.loadtxt(path.with_name("drmcoordinates.0"), comments="#", ndmin=2)
+if metadata.shape != (npoints, 8):
+    raise ValueError("coordinate/material table does not match box dimensions")
+xyz = metadata[:, :3]
+vs, vp, density, qs, qp = metadata[:, 3:].T
 nt, remainder = divmod(path.stat().st_size, npoints * 3 * 8)
 if remainder or nt == 0:
     raise ValueError("incomplete snapshot or wrong dimensions")

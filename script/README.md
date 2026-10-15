@@ -664,9 +664,18 @@ The importable helper `box_layout(lx, ly, depth, spacing)` returns
 `(name, rows, columns, point_offset)` tuples for slicing those faces.
 
 Each box also writes `drmcoordinates.N` at setup: comment headers followed by
-`X_m Y_m Z_m` in global solver north/east/down metres, including rotation and
-building/topography shifts. Coordinate row i matches binary sample i, including
-repeated edges/corners. Read and slice both arrays with the same layout:
+`X_m Y_m Z_m Vs_m_s Vp_m_s density_kg_m3 Qs Qp`. Coordinates are solver-local
+X/Y/down metres, including rotation and building/topography shifts. The appended
+columns are initial owning-element speeds (m/s), density (kg/m³), and dimensionless
+selected nominal Q values. Qp includes the selected shear/bulk branches after
+fallback, overrides and cutoffs, using the final Vs/Vp in that row. `inf` means
+zero selected loss; `nan` means no applicable scalar Q (Rayleigh/mass or building
+overrides). These are linear reference-material values, not evolving nonlinear
+or effective poroelastic attenuation. See the
+[material semantics and mesh regeneration requirement](../doc/Extended%20README.md#structured-drm-box-output).
+Coordinate row i matches binary sample i, including repeated edges/corners.
+Older three-column-only readers need `usecols=(0, 1, 2)` for positions. The binary
+reader interface is unchanged. Read and slice both arrays with the same layout:
 
 ```python
 from pathlib import Path
@@ -678,8 +687,10 @@ from read_drm import box_layout
 
 layout = box_layout(100, 100, 50, 1)
 npoints = sum(rows * columns for _, rows, columns, _ in layout)
-xyz = np.loadtxt("outputfiles/drmcoordinates.0", comments="#", ndmin=2)
-assert xyz.shape == (npoints, 3)
+metadata = np.loadtxt("outputfiles/drmcoordinates.0", comments="#", ndmin=2)
+assert metadata.shape == (npoints, 8)
+xyz = metadata[:, :3]
+vs, vp, density, qs, qp = metadata[:, 3:].T
 u = np.memmap("outputfiles/drmdisplacements.0", dtype=np.float64, mode="r")
 assert u.size % (npoints * 3) == 0
 u = u.reshape(-1, npoints, 3)

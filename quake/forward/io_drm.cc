@@ -5,6 +5,7 @@
 #include <memory>
 #include "drm_output_points.h"
 #include "drm_output_coordinates.h"
+#include "drm_output_materials_mpi.h"
 #include "flat_output_mpi.h"
 #include "io_drm.h"
 #include "psolve_gpu_launch.h"
@@ -80,6 +81,7 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
     std::vector<int> owners(config[0], 0), ids;
     std::vector<int32_t> nodes, modes;
     std::vector<double> coords;
+    std::vector<drm_output::Material> local_materials;
     for (int i = 0; i < config[0]; ++i) {
         vector3D_t point = {{points[i][0], points[i][1], points[i][2]}};
         octant_t* octant = NULL;
@@ -105,6 +107,8 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
             throw std::runtime_error("DRM point outside solid topography tetrahedron: " + std::to_string(i));
         owners[i] = 1;
         ids.push_back(i);
+        local_materials.push_back(drm_output::Material{{material.Vs, material.Vp,
+                                  material.rho, material.Qs, material.Qp}});
         nodes.insert(nodes.end(), stencil, stencil + 8);
         coords.insert(coords.end(), local.x, local.x + 3);
         modes.push_back(tetra ? PLANE_GPU_POINT_TOPO : PLANE_GPU_POINT_TRILINEAR);
@@ -115,6 +119,8 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
         if (owners[i] != 1)
             throw std::runtime_error("DRM point " + std::to_string(i) + " has " +
                                      std::to_string(owners[i]) + " owners; expected exactly one");
+    const std::vector<drm_output::Material> materials =
+        drm_output::gather_materials(comm_solver, config[0], ids, local_materials);
     recorder.local_count = static_cast<int>(ids.size());
     if (recorder.local_count) {
         if (!solver || !solver->gpuData || !solver->gpuData->tm1Device)
@@ -132,8 +138,9 @@ void setup_recording(int32_t rank, std::vector<drm_output::Point>& points,
             createDir(parent.substr(0, slash ? slash : 1).c_str(), "drm_output_setup");
         // Export exactly the validated, shifted points used for interpolation,
         // retaining global sample order and duplicate face-edge/corner rows.
-        drm_output::write_coordinates(coordinate_path, points);
-        printf("DRM coordinates: %s; %d rows, solver XYZ in metres\n",
+        drm_output::write_coordinates(coordinate_path, points, materials);
+        printf("DRM coordinates: %s; %d rows, XYZ (m), Vs/Vp (m/s), density (kg/m^3), Qs/Qp; "
+               "initial containing-element properties, selected nominal Q, zero loss = inf, unavailable Q = nan\n",
                coordinate_path.c_str(), config[0]);
         printf("DRM flat backend: GPU plane interpolation + collective MPI-IO on solver ranks; "
                "solid displacement (poroelastic skeleton where applicable); no mesh refinement\n");
