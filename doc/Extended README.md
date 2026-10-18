@@ -426,6 +426,64 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Set `PHASE_B_KEEP_OMPI_MCA_BTL=1` only if a site MPI stack requires an
 	explicit inherited BTL setting.
 
+### Scalar MPI schedules and profiling
+
+`HERCULES_SCALAR_MPI_SCHEDULE=compact|full` selects the scalar communication
+graph. `compact` is the default on both host and CUDA-aware MPI backends.
+Setup retains nodes used by acoustic pressure/velocity potential, final active
+BrickUP elements, open-pore target assembly, station/plane interpolation and
+acoustic receiver recovery. It closes dependencies through the selected
+field-specific hanging-node map (or the existing geometric fallback) and
+propagates activity between owners and sharers. Neighbor global IDs and counts
+are checked before filtering. A rank without local active cells still
+participates when it owns or harbors a required degree of freedom.
+
+The resulting separate acoustic, pore-pressure and open-pore-target schedules
+retain original message/node order and duplicate entries. Empty peer messages
+are removed; an entirely empty device schedule needs no stream synchronization.
+Host scalar records contain one scalar plus the existing debug ID when enabled.
+Initialization exchanges and solid-vector schedules retain their full maps;
+time levels, quadrature, constraint operators and physical boundary conditions
+are unchanged. Host sparse GPU-transfer lists remain conservative supersets;
+this optimization compacts MPI traffic, not all host/device transfers.
+`full` restores the original general schedules, including their host record
+sizes, for comparison. Both settings must be identical on all solver ranks.
+Startup reports global original/retained node-entry and peer-schedule counts,
+counting each contributor-to-owner edge once over dangling and anchored lists.
+
+`HERCULES_GPU_MPI_PROFILE=0|1` defaults to `0`. Set `1` consistently on all
+solver ranks to record device-helper calls, send/receive bytes and messages,
+and CPU elapsed times for posting receives, packing/waiting for GPU readiness,
+posting sends, waiting for receives, unpacking/waiting for the GPU, and waiting
+for sends. End-of-loop output reports cumulative rank average/min/max for solid
+force, displacement, acoustic RHS/field, pore RHS/field and open-pore target.
+It adds no per-step collective, allocation or GPU synchronization. These CPU
+timings include existing waits and pending GPU work; they do not isolate kernel
+duration or network transfer. Host schedule timers and dangling communication
+counters cover only the host helper. Scalar exchanges remain nested under
+`Compute Physics`, so the top-level `Communication` timer is not total MPI cost.
+
+For an identical-mesh comparison, preserve partition, timestep, source and
+output cadence and run each combination of `compact|full` and
+`host|cuda_aware`, for example:
+
+```bash
+export HERCULES_SCALAR_MPI_SCHEDULE=compact
+export HERCULES_GPU_MPI_PROFILE=1
+export HERCULES_GPU_MPI_BACKEND=cuda_aware
+BASE_IN=/absolute/path/parameters.in PSOLVE_BIN=/absolute/path/quake/forward/psolve ./run_phaseA_phaseB.sh
+```
+
+This change requires target-system CUDA/MPI propagation and performance
+comparison before claiming a speedup. Check standalone and coupled elastic,
+acoustic and poroelastic cases, sealed/open-pore interfaces, refinement across
+ranks, ranks without local active cells, both acoustic scalar formulations,
+viscoelastic/nonlinear solid paths, station/plane pressure and motion outputs,
+and restart. The linear undrained diagnostic-pressure update still runs each
+step. Existing limits remain: poroelastic–elastic supports `no_flow`, saturated
+CPML candidates remain elastic CPML, and VT pore constraints use the geometric
+fallback. This change does not add poroelastic CPML or validate those limits.
+
 ## Advanced and diagnostic controls
 
 - `HERCULES_REPRO_MODE=0|1|2`

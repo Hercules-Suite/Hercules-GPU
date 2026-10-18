@@ -363,6 +363,17 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         code: "export HERCULES_GPU_MPI_BACKEND=cuda_aware\nexport HERCULES_DISP_SYNC_MODE=boundary\nexport HERCULES_PRESSURE_FIELD_SYNC_MODE=resident\nexport HERCULES_PORE_PRESSURE_FIELD_SYNC_MODE=resident",
       },
       {
+        id: "scalar-schedules",
+        title: "Scalar communication schedules and profiling",
+        paragraphs: [
+          "HERCULES_SCALAR_MPI_SCHEDULE=compact (default) builds separate acoustic, pore-pressure and open-pore-target schedules once at setup, on both host and CUDA-aware MPI backends. It retains active field nodes, ownership, hanging-node parents, interface traces and station/plane/receiver ghosts. Neighbor node order is checked before filtering. Ranks without local active elements still communicate required owned or shared nodes. Startup reports original and retained node entries and peer schedules; entirely empty device schedules skip synchronization. Initialization and solid-vector exchanges keep their original maps, and host sparse transfer lists remain conservative supersets.",
+          "Set HERCULES_SCALAR_MPI_SCHEDULE=full to restore the original general scalar schedules for comparison. The change preserves time levels, quadrature, field constraints and physical coupling; it does not skip diagnostic pore-pressure updates. Target-system CUDA/MPI propagation and performance comparisons are required before claiming a speedup. Test standalone and coupled elastic/acoustic/poroelastic cases, sealed/open-pore and matching/nonmatching interfaces, both acoustic scalar formulations, applicable viscoelastic/nonlinear paths, outputs and restart. Existing poroelastic CPML exclusions and VT geometric constraint limitations remain.",
+          "HERCULES_GPU_MPI_PROFILE=1 enables device-helper calls, byte/message counts and CPU elapsed times by field; default 0 disables it. End-of-loop output gives cumulative rank average/min/max. Pack/unpack times include stream waits and pending GPU work, not isolated kernel or network time. Profiling adds no GPU synchronization or per-step collective. Both settings must agree across all solver ranks. Existing host schedule and dangling communication counters cover only the host helper; scalar exchanges remain nested under Compute Physics rather than the top-level Communication timer.",
+        ],
+        codeLabel: "shell — repeat with full and with host on the same mesh and partition",
+        code: "export HERCULES_SCALAR_MPI_SCHEDULE=compact\nexport HERCULES_GPU_MPI_PROFILE=1\nexport HERCULES_GPU_MPI_BACKEND=cuda_aware",
+      },
+      {
         id: "resident-fields",
         title: "Resident-field strategy",
         bullets: [
@@ -1017,6 +1028,8 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           rows: [
             ["HERCULES_PHASE_MODE", "unified | two-phase", "Select mesh/solver orchestration"],
             ["HERCULES_GPU_MPI_BACKEND", "host | cuda_aware", "Select field-exchange backend"],
+            ["HERCULES_SCALAR_MPI_SCHEDULE", "compact | full", "Scalar field schedules on both backends; default: compact; full restores general schedules"],
+            ["HERCULES_GPU_MPI_PROFILE", "0 | 1", "Device-helper timing and byte/message counters; default: 0; cumulative rank average/min/max"],
             ["HERCULES_NONLINEAR_BACKEND", "cpu | gpu", "Select nonlinear constitutive and force backend; default: gpu"],
             ["HERCULES_NONLINEAR_STATS_INTERVAL", "0 | positive integer", "Sample global ManzariDafalias GPU substep workload; default: 0 (disabled)"],
             ["HERCULES_DISP_SYNC_MODE", "auto | full | boundary", "Control elastic host/device synchronization"],

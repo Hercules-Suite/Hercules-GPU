@@ -745,6 +745,8 @@ for interactions and performance implications.
 | `HERCULES_CONTRIB_RECV_MODE` | `waitsome` (default), `waitall` | Reproducibility modes force deterministic `waitall` |
 | `HERCULES_DISP_SYNC_MODE` | `auto` (default), `full` / `0`, `boundary` / `1` | Unsafe boundary-only configurations fall back to full host visibility |
 | `HERCULES_GPU_MPI_BACKEND` | `cuda_aware` (default) when MPI reports CUDA support, `host` (default) otherwise | Checkpoint/host-dependent paths may force host schedules |
+| `HERCULES_SCALAR_MPI_SCHEDULE` | `compact` (default), `full` | Setup-built acoustic, pore-pressure and open-pore-target schedules on both backends; retains ownership, field constraints and output ghosts. `full` restores the general schedules for comparison. Same value on all ranks; [details](Extended%20README.md#scalar-mpi-schedules-and-profiling) |
+| `HERCULES_GPU_MPI_PROFILE` | `0` (default), `1` | Optional device-helper counters and CPU elapsed times by field, reported as cumulative rank average/min/max after the loop. Adds no synchronization; pack/unpack include pending GPU work. Same value on all ranks; [details](Extended%20README.md#scalar-mpi-schedules-and-profiling) |
 | `HERCULES_PORE_PRESSURE_SYNC_BACKEND` | Omitted (default); `host`, `cuda_aware` | Legacy alias, used only when `HERCULES_GPU_MPI_BACKEND` is unset |
 | `HERCULES_PRESSURE_FORCE_SYNC_MODE` | `sparse` / `1` (default), `full` / `0` | Acoustic scalar force exchange |
 | `HERCULES_PRESSURE_FIELD_SYNC_MODE` | `resident` / `1` (default), `full` / `0` | Checkpoint restart forces full host-visible acoustic state |
