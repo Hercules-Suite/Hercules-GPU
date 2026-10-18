@@ -501,6 +501,9 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
   assert.match(section, /CVM mesh offsets must be zero/);
   assert.match(section, /model_z and surface coincide/);
   assert.match(section, /These setup checks are not a CUDA\/MPI propagation benchmark/);
+  assert.match(section, /independent CPS Green functions/);
+  assert.match(section, /Submerged ramped equilibrium/);
+  assert.match(section, /GPU scheduling and MPI transport are mocked/);
   const sourceRoot = "../quake/forward/";
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const geometry = readFileSync(`${sourceRoot}topography.cc`, "utf8");

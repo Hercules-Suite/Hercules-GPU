@@ -2227,19 +2227,33 @@ is still loaded for interface/poroelastic setup on imported runs; it must match
 the mesh. The setup monitor reports the explicit reference, water properties
 and geometry tolerance.
 
-Flat-ocean extracted C++ checks cover initialization without a topography
-file, parser acceptance/rejection, grid dimensions, all three depth references,
-water/solid phase separation, sloping-bed normals, CPML sampling, porous depth
-and hydrostatic references, nonlinear overburden, surface mass assembly and
-refinement dispatch. No new CUDA/MPI propagation benchmark has been run for
-this mode. Existing local extracted C++ analytical checks cover parser rejection, elevation-only
-file validation, roundoff tolerance, distinct local water levels, dry negative
-terrain, FULL/SQD references, sloping beds and rotated material axes, CPML sampling, Q isolation,
-poroelastic depth/groundwater mapping, geostatic water load and legacy controls.
-The ignored investigation harness is unavailable in a clean checkout. These
-checks do not validate wave propagation: elastic, acoustic, poroelastic,
-viscoelastic and nonlinear standalone/coupled simulations, both GPU/MPI backends
-and station outputs still require supercomputer comparisons.
+A 2026-10-18 Horizon benchmark at solver commit `8c9a514` compared this
+flat-ocean mode against independent CPS layered-medium Green functions. Two
+nodes/eight GPUs used CUDA-aware MPI, velocity-potential acoustics and
+field-specific constraints for 110 s, with a 937.5 m water layer over a uniform
+elastic solid. The same physical 1 Hz source, 0.0025 s step and CPML controls
+were used on 22,282,240- and 178,257,920-element meshes. Refined off-axis median raw
+waveform L2 errors over 10–100 s were 2.89% displacement,
+6.64% velocity and 9.80% pressure. No response filtering,
+fitted gain or timing shift was applied. Some refined receiver peaks exceed the 5% target; the two resolutions do not establish mesh independence.
+All 30 receivers and the generated source history were checked. This benchmark
+covers a horizontal seabed, pressure-release surface and lossless materials;
+it does not cover gravity waves, sloping-bed propagation or the host-MPI backend.
+
+Local extracted C++ checks cover flat-ocean parser/geometry/material behavior,
+all three depth references, sloping-bed normals, refinement dispatch and surface
+mass assembly. Additional host tests exercise production porous pressure and
+traction algebra, sealed-interface content conservation, open-pore quadrature,
+local/remote constraint selection, station eligibility, solid Q conversion,
+water exclusion from solid damping/nonlinearity, and prescribed hydrostatic and
+approximate geostatic effective stress. CUDA scheduling and MPI transport are
+mocked in these tests. Nonlinear skeletons retain explicit pore-pressure coupling.
+A zero-permeability gravity-loading ramp is rejected by the existing solver.
+Submerged ramped equilibrium and viscoelastic, poroelastic and nonlinear
+elastoplastic/plastic or hysteretic standalone/coupled propagation still require
+separate validation; an analytical initial-stress check is not a gravity-ramp
+equilibration test. The ignored investigation harness and benchmark results are
+not distributed in a clean checkout.
 
 ### Quality-factor files
 
