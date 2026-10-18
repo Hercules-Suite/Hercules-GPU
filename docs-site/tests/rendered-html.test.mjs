@@ -39,6 +39,34 @@ async function render(path = "/") {
   );
 }
 
+test("documents compact scalar MPI schedules and device profiling limits", async () => {
+  const html = await (await render("/docs/gpu-execution")).text();
+  assert.match(html, /id="scalar-schedules"/);
+  assert.match(html, /HERCULES_SCALAR_MPI_SCHEDULE=compact \(default\)/);
+  assert.match(html, /HERCULES_SCALAR_MPI_SCHEDULE=full/);
+  assert.match(html, /HERCULES_GPU_MPI_PROFILE=1/);
+  assert.match(html, /HERCULES_SCALAR_MPI_BATCH=1 \(default\)/);
+  assert.match(html, /HERCULES_GPU_MPI_OVERLAP=1 \(default\)/);
+  assert.match(html, /HERCULES_PORE_PRESSURE_UPDATE=output \(default\)/);
+  assert.match(html, /Checkpoint reads\/writes/);
+  assert.match(html, /final two states/);
+  assert.match(html, /12 to 8 phases/);
+  assert.match(html, /14 to 12 phases/);
+  assert.match(html, /CUDA events protect receive-buffer reuse/);
+  assert.match(html, /Host staging remains synchronous/);
+  assert.match(html, /Ranks without local active elements/);
+  assert.match(html, /host and CUDA-aware MPI backends/);
+  assert.match(html, /cumulative rank average\/min\/max/);
+  assert.match(html, /Target-system CUDA\/MPI propagation and performance comparisons/);
+  assert.match(html, /cover only the host helper/);
+  const controls = await (await render("/docs/configuration")).text();
+  assert.match(controls, /HERCULES_SCALAR_MPI_SCHEDULE/);
+  assert.match(controls, /HERCULES_GPU_MPI_PROFILE/);
+  assert.match(controls, /HERCULES_SCALAR_MPI_BATCH/);
+  assert.match(controls, /HERCULES_GPU_MPI_OVERLAP/);
+  assert.match(controls, /HERCULES_PORE_PRESSURE_UPDATE/);
+});
+
 test("renders the Hercules documentation home", async () => {
   const response = await render();
   assert.equal(response.status, 200);

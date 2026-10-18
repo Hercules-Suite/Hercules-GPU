@@ -426,6 +426,146 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	Set `PHASE_B_KEEP_OMPI_MCA_BTL=1` only if a site MPI stack requires an
 	explicit inherited BTL setting.
 
+### Scalar MPI schedules and profiling
+
+`HERCULES_SCALAR_MPI_SCHEDULE=compact|full` selects the scalar communication
+graph. `compact` is the default on both host and CUDA-aware MPI backends.
+Setup retains nodes used by acoustic pressure/velocity potential, final active
+BrickUP elements, open-pore target assembly, station/plane interpolation and
+acoustic receiver recovery. It closes dependencies through the selected
+field-specific hanging-node map (or the existing geometric fallback) and
+propagates activity between owners and sharers. Neighbor global IDs and counts
+are checked before filtering. A rank without local active cells still
+participates when it owns or harbors a required degree of freedom.
+
+The resulting separate acoustic, pore-pressure and open-pore-target schedules
+retain original message/node order and duplicate entries. Empty peer messages
+are removed; an entirely empty device schedule needs no stream synchronization.
+Unbatched host scalar records contain one scalar plus the existing debug ID when enabled. Batched packets carry contiguous scalar segments using the setup-verified mappings.
+Initialization exchanges and solid-vector schedules retain their full maps;
+time levels, quadrature, constraint operators and physical boundary conditions
+are unchanged. Host sparse GPU-transfer lists remain conservative supersets;
+this optimization compacts MPI traffic, not all host/device transfers.
+`full` restores the original general node mappings. Set both batching and
+overlap to `0` as well to restore the sequential exchange path and legacy host
+record format. All communication settings must be identical on all solver ranks.
+Startup reports global original/retained node-entry and peer-schedule counts,
+counting each contributor-to-owner edge once over dangling and anchored lists.
+
+`HERCULES_SCALAR_MPI_BATCH=0|1` defaults to `1`. For sealed acoustic–poroelastic
+coupling with the same transport backend for both fields, it assembles both
+RHS vectors before exchanging them together, then updates and shares both
+fields together. Including the unchanged four solid phases, the dependency
+sequence goes from 12 to 8 exchange phases per step. Open-pore coupling must
+finish the acoustic field first because the hydraulic target reads that new
+field. It combines only the pore RHS and target contributions, reducing 14 to
+12 phases. A packet concatenates each field's existing compact mapping; it
+does not pad one field to the other field's nodes. Each shared neighbor receives
+one message per phase. Neighbors used by only one field still receive that
+field. Peer unpack order, duplicate-node handling and field-specific hanging
+constraints are preserved. Batching works with host and CUDA-aware MPI and
+with `compact` or `full` schedules. Different acoustic/pore backends retain
+separate exchanges. Phase counts describe dependencies, not a runtime speedup.
+
+`HERCULES_GPU_MPI_OVERLAP=0|1` defaults to `1`. On CUDA-aware scalar paths, the
+anchored RHS exchange starts before an independent interior pressure update is
+queued. Setup partitions all harbored nodes into two disjoint lists: nodes
+that incoming anchored contributions can modify, and all remaining nodes.
+The pore partition also includes incoming hydraulic-target destinations when
+that target is batched. Dangling contributions and constraint distribution
+finish before this split, so the interior update cannot read an unfinished
+RHS. Receive completion, ordered unpack and boundary updates follow. These
+launches use the same node-local formulas, including free-surface, CPML,
+drainage and open-pore terms. No interior update overlap is attempted on the
+host transport; its existing staging and fallback behavior remain available.
+Consecutive host pore-RHS/target uploads protect their shared pinned staging
+buffer with a completion event before the CPU rewrites it.
+
+Both scalar batches and solid-vector device exchanges omit the immediate
+host wait after GPU unpack when overlap is enabled. A CUDA event protects
+receive-buffer reuse on the next call; MPI send completion separately protects
+send-buffer reuse. Packing still waits for GPU readiness before MPI sends,
+and subsequent field consumers remain ordered on the main CUDA stream.
+The solver drains the final GPU tail before collecting solver timings.
+There are no per-step buffer allocations or additional MPI collectives.
+This implements overlap for scalar node updates, not a split of all solid
+stiffness or nonlinear element kernels. Disable overlap with `0` to use
+whole-field pressure updates and synchronous unpack; disable batching as well
+for the previous sequential path. Neither switch alone skips diagnostic pore pressure;
+how often it is updated is controlled separately below.
+
+`HERCULES_PORE_PRESSURE_UPDATE=output|step` defaults to `output`.
+It applies only to fresh linear runs where the undrained fast path is active:
+zero permeability, undrained boundaries, no open-pore coupling and no nonlinear
+analysis. Since fluid stiffening is already in the solid operator, pore pressure
+is diagnostic and its linear increment equation telescopes from the initial
+zero displacement/excess pressure. At a required state the solver reconstructs
+`p = -M_lumped^-1 Q^T u` using the existing element quadrature, assembled mass,
+MPI contribution maps and hanging-node constraints. It does not accumulate
+unexchanged increments or allocate another displacement history. Floating-point
+rounding can differ from the incremental recurrence.
+
+All ranks reconstruct the state preceding an ASCII pressure station output,
+even ranks without local stations. Only stations in poroelastic
+elements trigger this work. Displacement-only binary stations and plane/DRM motion
+do not consume pore pressure. The final two pressure states are also reconstructed.
+Intervening steps skip pore RHS assembly, update and all four standalone pore
+exchange phases. With sealed scalar batching, acoustic-only packets are used on
+skipped steps and combined acoustic/pore packets on reconstruction steps; the
+four combined phases themselves still occur for the acoustic field. Both host
+and CUDA-aware MPI, full/compact maps, and batching/overlap controls remain usable.
+
+`step` retains the original incremental update on every step. Checkpoint reads
+or writes automatically select that path regardless of the request, preserving
+both saved pressure time levels and the existing checkpoint format; no checkpoint
+schema or restart-state migration is introduced. Nonlinear, diffusion, drained
+and open-pore paths always retain every-step pressure feedback. Pore-pressure-ratio
+(`Ru`) output currently requires nonlinear analysis and an initial effective-stress
+reference, so it also retains every-step updates. The selected
+update mode and output consumers are reported at startup, and reconstructed/skipped
+step counts after the loop. This control must agree on all ranks. It is separate
+from `poroelastic_undrained_fast_path=no`, which changes the mechanical formulation.
+
+`HERCULES_GPU_MPI_PROFILE=0|1` defaults to `0`. Set `1` consistently on all
+solver ranks to record device-helper and scalar-batch calls, send/receive bytes
+and messages, and CPU elapsed times for posting receives, packing/waiting for
+GPU readiness, posting sends, waiting for receives, unpacking, and waiting for
+sends. End-of-loop output reports cumulative rank average/min/max for solid
+force, displacement, acoustic RHS/field, pore RHS/field, open-pore target, and
+combined acoustic+pore RHS/field or pore RHS+target packets when active. The
+combined counters count actual packets and their concatenated bytes once.
+It adds no per-step collective, allocation or GPU synchronization. With overlap,
+unpack time measures enqueue work; receive-wait time can overlap an interior
+GPU update. These CPU timings do not isolate kernel duration or network transfer.
+Host schedule timers and dangling communication counters cover only the host helper;
+batched host traffic is in the scalar-batch profile instead. Scalar exchanges
+remain nested under `Compute Physics`, so top-level `Communication` is not total
+MPI cost. The pipeline, RHS/field exchange, and interior/boundary enqueue timers
+are reported separately; nested timings must not be added together.
+
+For an identical-mesh comparison, preserve partition, timestep, source and
+output cadence and run each combination of `compact|full` and
+`host|cuda_aware`, for example:
+
+```bash
+export HERCULES_SCALAR_MPI_SCHEDULE=compact
+export HERCULES_SCALAR_MPI_BATCH=1
+export HERCULES_GPU_MPI_OVERLAP=1
+export HERCULES_GPU_MPI_PROFILE=1
+export HERCULES_GPU_MPI_BACKEND=cuda_aware
+BASE_IN=/absolute/path/parameters.in PSOLVE_BIN=/absolute/path/quake/forward/psolve ./run_phaseA_phaseB.sh
+```
+
+This change requires target-system CUDA/MPI propagation and performance
+comparison before claiming a speedup. Check standalone and coupled elastic,
+acoustic and poroelastic cases, sealed/open-pore interfaces, refinement across
+ranks, ranks without local active cells, both acoustic scalar formulations,
+viscoelastic/nonlinear solid paths, station/plane pressure and motion outputs,
+and restart. The linear undrained diagnostic-pressure update still runs each
+step. Existing limits remain: poroelastic–elastic supports `no_flow`, saturated
+CPML candidates remain elastic CPML, and VT pore constraints use the geometric
+fallback. This change does not add poroelastic CPML or validate those limits.
+
 ## Advanced and diagnostic controls
 
 - `HERCULES_REPRO_MODE=0|1|2`
@@ -2414,8 +2554,11 @@ solver and regenerated mesh.
 	linear validation/undrained limit, the
 	solver folds `alpha^2 M` directly into the native elastic volumetric
 	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
-	pressure-traction feedback. Pore pressure is still updated from `Q^T du`
-	and remains available in station output as a diagnostic. Set this to `no`
+	pressure-traction feedback. Pore pressure remains available in station output as a diagnostic.
+	`HERCULES_PORE_PRESSURE_UPDATE=output` (default) reconstructs it at
+	required output states; `step` retains incremental `Q^T du` updates.
+	Checkpoint/restart runs always retain every-step updates (see
+	[pressure update modes](#scalar-mpi-schedules-and-profiling)). Set this to `no`
 	to use the older split `Q p` / `Q^T du` path for comparisons, or use
 	nonzero permeability / `drained` pressure BC for the full split path.
 	`acoustic_poroelastic_interface=open_pore` also disables this fast path so
