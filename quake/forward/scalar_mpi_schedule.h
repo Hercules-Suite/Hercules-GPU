@@ -10,7 +10,7 @@ enum { SCALAR_MPI_ACOUSTIC, SCALAR_MPI_PORE, SCALAR_MPI_TARGET,
        SCALAR_MPI_FIELDS };
 static schedule_t* g_scalarMpiSchedules[SCALAR_MPI_FIELDS][2] = {};
 static int g_gpuMpiProfile = 0;
-static double g_gpuMpiMetrics[7][11] = {};
+static double g_gpuMpiMetrics[10][11] = {};
 
 static int scalar_mpi_field(int tag) {
   switch (tag) {
@@ -259,6 +259,7 @@ static void solver_init_scalar_schedules(mysolver_t* solver) {
 struct gpu_mpi_profile_t {
   double* metrics = NULL;
   double start = 0;
+  gpu_mpi_profile_t() = default;
   gpu_mpi_profile_t(int tag, messenger_t* send, messenger_t* recv) {
     if (!g_gpuMpiProfile || (!send && !recv)) return;
     int field = -1;
@@ -290,19 +291,21 @@ struct gpu_mpi_profile_t {
 
 static void solver_report_gpu_mpi_profile() {
   if (!g_gpuMpiProfile) return;
-  double sum[7][11], low[7][11], high[7][11];
-  MPI_Reduce(g_gpuMpiMetrics, sum, 77, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
-  MPI_Reduce(g_gpuMpiMetrics, low, 77, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-  MPI_Reduce(g_gpuMpiMetrics, high, 77, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  double sum[10][11], low[10][11], high[10][11];
+  MPI_Reduce(g_gpuMpiMetrics, sum, 110, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(g_gpuMpiMetrics, low, 110, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_gpuMpiMetrics, high, 110, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
   if (Global.myID != 0) return;
   const char* fields[] = {"solid force", "displacement", "acoustic RHS", "acoustic field",
-                          "pore RHS", "pore field", "open-pore target"};
+                          "pore RHS", "pore field", "open-pore target",
+                          "acoustic+pore RHS", "acoustic+pore field", "pore RHS+target"};
   const char* metrics[] = {"nonempty calls", "send bytes", "receive bytes", "send messages", "receive messages",
       "post receive seconds", "pack/ready seconds", "post send seconds", "wait receive seconds",
       "unpack/ready seconds", "wait send seconds"};
-  monitor_print("GPU MPI profile: cumulative rank average/min/max, device helpers only; "
-                "pack/unpack include stream waits and pending GPU work; scalar phases are nested in Compute Physics\n");
-  for (int f = 0; f < 7; ++f) {
+  monitor_print("GPU MPI profile: cumulative rank average/min/max, device helpers and scalar batches; "
+                "pack/unpack include pending GPU work (unpack is enqueue-only with overlap); "
+                "scalar phases are nested in Compute Physics\n");
+  for (int f = 0; f < 10; ++f) {
     if (sum[f][0] == 0) continue;
     for (int m = 0; m < 11; ++m)
       monitor_print("GPU MPI %s %s: %.9g / %.9g / %.9g\n", fields[f], metrics[m],

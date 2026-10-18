@@ -167,7 +167,7 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 								   double deltaT);
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-					     gpu_data_t* gpuData);
+					     gpu_data_t* gpuData, const int32_t* nodes = NULL);
 
 __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
                                                   gpu_data_t* gpuData,
@@ -190,7 +190,7 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
 __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
                                                 gpu_data_t* gpuData,
                                                 int useDrainMass,
-                                                int useOpenPore);
+                                                int useOpenPore, const int32_t* nodes = NULL);
 
 /* Standalone uniform one-element regression hook. It executes the production
  * BrickUP pressure-force and pressure-update kernels for an affine tensor-

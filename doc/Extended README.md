@@ -441,27 +441,74 @@ participates when it owns or harbors a required degree of freedom.
 The resulting separate acoustic, pore-pressure and open-pore-target schedules
 retain original message/node order and duplicate entries. Empty peer messages
 are removed; an entirely empty device schedule needs no stream synchronization.
-Host scalar records contain one scalar plus the existing debug ID when enabled.
+Unbatched host scalar records contain one scalar plus the existing debug ID when enabled. Batched packets carry contiguous scalar segments using the setup-verified mappings.
 Initialization exchanges and solid-vector schedules retain their full maps;
 time levels, quadrature, constraint operators and physical boundary conditions
 are unchanged. Host sparse GPU-transfer lists remain conservative supersets;
 this optimization compacts MPI traffic, not all host/device transfers.
-`full` restores the original general schedules, including their host record
-sizes, for comparison. Both settings must be identical on all solver ranks.
+`full` restores the original general node mappings. Set both batching and
+overlap to `0` as well to restore the sequential exchange path and legacy host
+record format. All communication settings must be identical on all solver ranks.
 Startup reports global original/retained node-entry and peer-schedule counts,
 counting each contributor-to-owner edge once over dangling and anchored lists.
 
+`HERCULES_SCALAR_MPI_BATCH=0|1` defaults to `1`. For sealed acoustic–poroelastic
+coupling with the same transport backend for both fields, it assembles both
+RHS vectors before exchanging them together, then updates and shares both
+fields together. Including the unchanged four solid phases, the dependency
+sequence goes from 12 to 8 exchange phases per step. Open-pore coupling must
+finish the acoustic field first because the hydraulic target reads that new
+field. It combines only the pore RHS and target contributions, reducing 14 to
+12 phases. A packet concatenates each field's existing compact mapping; it
+does not pad one field to the other field's nodes. Each shared neighbor receives
+one message per phase. Neighbors used by only one field still receive that
+field. Peer unpack order, duplicate-node handling and field-specific hanging
+constraints are preserved. Batching works with host and CUDA-aware MPI and
+with `compact` or `full` schedules. Different acoustic/pore backends retain
+separate exchanges. Phase counts describe dependencies, not a runtime speedup.
+
+`HERCULES_GPU_MPI_OVERLAP=0|1` defaults to `1`. On CUDA-aware scalar paths, the
+anchored RHS exchange starts before an independent interior pressure update is
+queued. Setup partitions all harbored nodes into two disjoint lists: nodes
+that incoming anchored contributions can modify, and all remaining nodes.
+The pore partition also includes incoming hydraulic-target destinations when
+that target is batched. Dangling contributions and constraint distribution
+finish before this split, so the interior update cannot read an unfinished
+RHS. Receive completion, ordered unpack and boundary updates follow. These
+launches use the same node-local formulas, including free-surface, CPML,
+drainage and open-pore terms. No interior update overlap is attempted on the
+host transport; its existing staging and fallback behavior remain available.
+Consecutive host pore-RHS/target uploads protect their shared pinned staging
+buffer with a completion event before the CPU rewrites it.
+
+Both scalar batches and solid-vector device exchanges omit the immediate
+host wait after GPU unpack when overlap is enabled. A CUDA event protects
+receive-buffer reuse on the next call; MPI send completion separately protects
+send-buffer reuse. Packing still waits for GPU readiness before MPI sends,
+and subsequent field consumers remain ordered on the main CUDA stream.
+The solver drains the final GPU tail before collecting solver timings.
+There are no per-step buffer allocations or additional MPI collectives.
+This implements overlap for scalar node updates, not a split of all solid
+stiffness or nonlinear element kernels. Disable overlap with `0` to use
+whole-field pressure updates and synchronous unpack; disable batching as well
+for the previous sequential path. Neither switch skips diagnostic pore pressure.
+
 `HERCULES_GPU_MPI_PROFILE=0|1` defaults to `0`. Set `1` consistently on all
-solver ranks to record device-helper calls, send/receive bytes and messages,
-and CPU elapsed times for posting receives, packing/waiting for GPU readiness,
-posting sends, waiting for receives, unpacking/waiting for the GPU, and waiting
-for sends. End-of-loop output reports cumulative rank average/min/max for solid
-force, displacement, acoustic RHS/field, pore RHS/field and open-pore target.
-It adds no per-step collective, allocation or GPU synchronization. These CPU
-timings include existing waits and pending GPU work; they do not isolate kernel
-duration or network transfer. Host schedule timers and dangling communication
-counters cover only the host helper. Scalar exchanges remain nested under
-`Compute Physics`, so the top-level `Communication` timer is not total MPI cost.
+solver ranks to record device-helper and scalar-batch calls, send/receive bytes
+and messages, and CPU elapsed times for posting receives, packing/waiting for
+GPU readiness, posting sends, waiting for receives, unpacking, and waiting for
+sends. End-of-loop output reports cumulative rank average/min/max for solid
+force, displacement, acoustic RHS/field, pore RHS/field, open-pore target, and
+combined acoustic+pore RHS/field or pore RHS+target packets when active. The
+combined counters count actual packets and their concatenated bytes once.
+It adds no per-step collective, allocation or GPU synchronization. With overlap,
+unpack time measures enqueue work; receive-wait time can overlap an interior
+GPU update. These CPU timings do not isolate kernel duration or network transfer.
+Host schedule timers and dangling communication counters cover only the host helper;
+batched host traffic is in the scalar-batch profile instead. Scalar exchanges
+remain nested under `Compute Physics`, so top-level `Communication` is not total
+MPI cost. The pipeline, RHS/field exchange, and interior/boundary enqueue timers
+are reported separately; nested timings must not be added together.
 
 For an identical-mesh comparison, preserve partition, timestep, source and
 output cadence and run each combination of `compact|full` and
@@ -469,6 +516,8 @@ output cadence and run each combination of `compact|full` and
 
 ```bash
 export HERCULES_SCALAR_MPI_SCHEDULE=compact
+export HERCULES_SCALAR_MPI_BATCH=1
+export HERCULES_GPU_MPI_OVERLAP=1
 export HERCULES_GPU_MPI_PROFILE=1
 export HERCULES_GPU_MPI_BACKEND=cuda_aware
 BASE_IN=/absolute/path/parameters.in PSOLVE_BIN=/absolute/path/quake/forward/psolve ./run_phaseA_phaseB.sh

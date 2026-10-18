@@ -921,13 +921,15 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 }
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-                                             gpu_data_t* gpuData)
+                                             gpu_data_t* gpuData, const int32_t* nodes)
 {
-  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const int32_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  if (nindex >= nharbored) {
+  if (index >= nharbored) {
     return;
   }
+
+  const int32_t nindex = nodes ? nodes[index] : index;
 
   if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
       (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0) &&
@@ -1299,13 +1301,15 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
 __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
                                                 gpu_data_t* gpuData,
                                                 int useDrainMass,
-                                                int useOpenPore)
+                                                int useOpenPore, const int32_t* nodes)
 {
-  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const int32_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  if (nindex >= nharbored) {
+  if (index >= nharbored) {
     return;
   }
+
+  const int32_t nindex = nodes ? nodes[index] : index;
 
   const solver_float mass = gpuData->porePressureMassDevice[nindex];
   solver_float pnew = 0.0;

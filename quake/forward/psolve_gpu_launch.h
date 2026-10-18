@@ -193,6 +193,10 @@ void psolve_launch_acoustic_interface_force(
 void psolve_launch_acoustic_pressure_update(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t nharbored, gpu_data_t* gpuData);
+
+void psolve_launch_acoustic_pressure_update_nodes(
+    int grid, int block, size_t shared, cudaStream_t stream,
+    int32_t nharbored, gpu_data_t* gpuData, const int32_t* nodes);
 void psolve_launch_poroelastic_pressure_traction(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t elementCount, gpu_data_t* gpuData, double dt2,
@@ -208,6 +212,11 @@ void psolve_launch_poroelastic_pressure_update(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t nharbored, gpu_data_t* gpuData, int useDrainMass,
     int useOpenPore);
+
+void psolve_launch_poroelastic_pressure_update_nodes(
+    int grid, int block, size_t shared, cudaStream_t stream,
+    int32_t nharbored, gpu_data_t* gpuData, int useDrainMass,
+    int useOpenPore, const int32_t* nodes);
 
 void psolve_launch_plane_interpolate(
     int grid, int block, size_t shared, cudaStream_t stream,
