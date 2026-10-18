@@ -728,7 +728,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
   assert.match(physics, /Default CPML example/);
-  assert.match(physics, /cpml_reflection_target = 0\.1/);
+  assert.match(physics, /cpml_reflection_target = 0\.001/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
   assert.match(physics, /script\/taper_topography\.py/);
 
@@ -2210,13 +2210,13 @@ test("documents complete CPML products and the plain-CPML default", async () => 
   assert.match(html, /Complete second-order operator/);
   assert.match(html, /cpml_mpml_cross_fraction is now 0/);
   assert.match(html, /cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber/);
-  assert.match(html, /defaults to 0\.3; set 0 to disable it/);
+  assert.match(html, /defaults to 0 \(disabled\); positive values enable it/);
   assert.match(html, /checkpoint reads and writes/);
   const sourceRoot = fileURLToPath(new URL("../../quake/forward/", import.meta.url));
   if (!existsSync(sourceRoot)) return;
   const psolve = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   assert.match(psolve, /theCpmlMpmlCrossFraction = 0\.0/);
-  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.3/);
+  assert.match(psolve, /theCpmlAcousticSpongeFraction = 0\.0/);
   assert.match(psolve, /parsetext\(fp, "cpml_acoustic_sponge_fraction"/);
   assert.match(psolve, /!isfinite\(cpml_acoustic_sponge_fraction\)/);
   assert.match(psolve, /if \(use_checkpoint \|\| checkpointing_rate > 0\)/);
@@ -2225,9 +2225,9 @@ test("documents complete CPML products and the plain-CPML default", async () => 
 test("keeps requested CPML defaults and alpha Hz units synchronized with the parser", async () => {
   const html = await (await render("/docs/parameters-damping-cpml")).text();
   for (const [key, value] of [
-    ["cpml_reflection_target", "0.1"],
-    ["cpml_kappa_max", "10"],
-    ["cpml_acoustic_sponge_fraction", "0.3"],
+    ["cpml_reflection_target", "0.001"],
+    ["cpml_kappa_max", "1"],
+    ["cpml_acoustic_sponge_fraction", "0"],
   ]) {
     const row = html.split("</tr>").find((part) => part.includes(`>${key}</td>`));
     assert.ok(row?.includes(`Default: ${value};`), `${key} default`);
@@ -2239,10 +2239,10 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;
   const solver = readFileSync(source, "utf8");
-  assert.match(solver, /\.theCpmlReflectionTarget = 0\.1,/);
-  assert.match(solver, /\.theCpmlKappaMax = 10\.0,/);
+  assert.match(solver, /\.theCpmlReflectionTarget = 0\.001,/);
+  assert.match(solver, /\.theCpmlKappaMax = 1\.0,/);
   assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
-  assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.3,/);
+  assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.0,/);
   assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);
   assert.match(solver, /auto: simulation_wave_max_freq_hz \/ 2\)\\n",\s*0\.5 \* Param\.theFreq/);
   assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
