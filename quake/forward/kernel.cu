@@ -921,13 +921,15 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
 }
 
 __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
-                                             gpu_data_t* gpuData)
+                                             gpu_data_t* gpuData, const int32_t* nodes)
 {
-  lnid_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const int32_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  if (nindex >= nharbored) {
+  if (index >= nharbored) {
     return;
   }
+
+  const int32_t nindex = nodes ? nodes[index] : index;
 
   if ((gpuData->pressureFreeSurfaceNodeFlagsDevice != NULL) &&
       (gpuData->pressureFreeSurfaceNodeFlagsDevice[nindex] != 0) &&
@@ -1070,7 +1072,8 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
   }
 }
 
-__global__ void kernelPoroelasticPressureForce(int32_t elemCount,
+template <bool reconstruct>
+__device__ __forceinline__ void poroelastic_pressure_force(int32_t elemCount,
                                                gpu_data_t* gpuData,
                                                double deltaT,
                                                double mobilityX,
@@ -1119,7 +1122,7 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
           const int32_t lnid =
               gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
           const fvector_t unew = gpuData->tm2Device[lnid];
-          const fvector_t uold = gpuData->tm1Device[lnid];
+          const fvector_t uold = reconstruct ? fvector_t{} : gpuData->tm1Device[lnid];
           const double N = 0.125 * ax * ay * az;
           const double shapeScale =
               gpuData->poroelasticPressureShapeScaleDevice[j * elemCount +
@@ -1224,6 +1227,20 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
   }
 }
 
+__global__ void kernelPoroelasticPressureForce(
+    int32_t elemCount, gpu_data_t* gpuData, double deltaT, double mobilityX,
+    double mobilityY, double mobilityZ, int haveDiffusion, double biotAlpha) {
+  poroelastic_pressure_force<false>(elemCount, gpuData, deltaT, mobilityX,
+      mobilityY, mobilityZ, haveDiffusion, biotAlpha);
+}
+
+/* Linear undrained diagnostic: p = -M_lumped^-1 Q^T u for zero initial
+ * displacement/excess pressure. Reuse exactly the existing element quadrature. */
+__global__ void kernelPoroelasticDiagnosticForce(
+    int32_t elemCount, gpu_data_t* gpuData, double biotAlpha) {
+  poroelastic_pressure_force<true>(elemCount, gpuData, 0.0, 0.0, 0.0, 0.0, 0, biotAlpha);
+}
+
 __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
                                                         gpu_data_t* gpuData,
                                                         double deltaT)
@@ -1296,22 +1313,25 @@ __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
   }
 }
 
-__global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
+template <bool reconstruct>
+__device__ __forceinline__ void poroelastic_pressure_update(int32_t nharbored,
                                                 gpu_data_t* gpuData,
                                                 int useDrainMass,
-                                                int useOpenPore)
+                                                int useOpenPore, const int32_t* nodes)
 {
-  const int32_t nindex = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const int32_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-  if (nindex >= nharbored) {
+  if (index >= nharbored) {
     return;
   }
+
+  const int32_t nindex = nodes ? nodes[index] : index;
 
   const solver_float mass = gpuData->porePressureMassDevice[nindex];
   solver_float pnew = 0.0;
   if (mass > 0.0) {
     const solver_float pfree =
-        gpuData->porePressureTm1Device[nindex] +
+        (reconstruct ? (solver_float)0.0 : gpuData->porePressureTm1Device[nindex]) +
         gpuData->porePressureForceDevice[nindex] / mass;
     const solver_float drainMass =
         useDrainMass ? gpuData->porePressureSurfaceDevice[nindex]
@@ -1333,6 +1353,17 @@ __global__ void kernelPoroelasticPressureUpdate(int32_t nharbored,
 
   gpuData->porePressureTm2Device[nindex] = pnew;
   gpuData->porePressureForceDevice[nindex] = (solver_float)0.0;
+}
+
+__global__ void kernelPoroelasticPressureUpdate(
+    int32_t nharbored, gpu_data_t* gpuData, int useDrainMass, int useOpenPore,
+    const int32_t* nodes) {
+  poroelastic_pressure_update<false>(nharbored, gpuData, useDrainMass, useOpenPore, nodes);
+}
+
+__global__ void kernelPoroelasticDiagnosticUpdate(
+    int32_t nharbored, gpu_data_t* gpuData, const int32_t* nodes) {
+  poroelastic_pressure_update<true>(nharbored, gpuData, 0, 0, nodes);
 }
 
 int poroelastic_gpu_uniform_element_history(
