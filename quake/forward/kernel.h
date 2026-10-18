@@ -183,6 +183,11 @@ __global__ void kernelPoroelasticPressureForce(int32_t elemCount,
                                                int haveDiffusion,
                                                double biotAlpha);
 
+__global__ void kernelPoroelasticDiagnosticForce(
+    int32_t elemCount, gpu_data_t* gpuData, double biotAlpha);
+__global__ void kernelPoroelasticDiagnosticUpdate(
+    int32_t nharbored, gpu_data_t* gpuData, const int32_t* nodes);
+
 __global__ void kernelAcousticPoroelasticOpenPoreTarget(int32_t faceCount,
                                                         gpu_data_t* gpuData,
                                                         double deltaT);

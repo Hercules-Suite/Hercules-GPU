@@ -31,6 +31,9 @@ static void scalar_update_nodes(mysolver_t* s, int field, int part) {
   if (field == 0)
     psolve_launch_acoustic_pressure_update_nodes((count + 255) / 256, 256, 0,
         s->streams[CUDA_STREAM_MAIN], count, s->gpuDataDevice, p.nodes[part]);
+  else if (g_poreDiagnosticDeferred)
+    psolve_launch_poroelastic_diagnostic_update((count + 255) / 256, 256, 0,
+        s->streams[CUDA_STREAM_MAIN], count, s->gpuDataDevice, p.nodes[part]);
   else
     psolve_launch_poroelastic_pressure_update_nodes((count + 255) / 256, 256, 0,
         s->streams[CUDA_STREAM_MAIN], count, s->gpuDataDevice,
@@ -149,6 +152,10 @@ static void solver_run_poroelastic_pressure_step(mysolver_t* s, mesh_t* mesh) {
 }
 
 static void solver_run_scalar_pressure_steps(mysolver_t* s, mesh_t* mesh) {
+  if (g_poreDiagnosticDeferred && !g_poreDiagnosticDue) {
+    solver_run_acoustic_pressure_step(s, mesh);
+    return;
+  }
   if (g_scalarSealedBatch)
     scalar_run_group(s, mesh, SCALAR_BATCH_SEALED, true, true, false,
                      acoustic_pressure_device_sync_enabled());

@@ -323,7 +323,7 @@ static void solver_init_mpi_pipeline(mysolver_t* solver) {
   if (g_poreHostUploadTracked) g_poreHostUploadFence.init();
   for (int group = 0; group < SCALAR_BATCH_GROUPS; ++group)
     for (int phase = 0; phase < 4; ++phase) {
-      const bool use = group == SCALAR_BATCH_ACOUSTIC ? a && !g_scalarSealedBatch :
+      const bool use = group == SCALAR_BATCH_ACOUSTIC ? a && (!g_scalarSealedBatch || g_poreDiagnosticDeferred) :
           group == SCALAR_BATCH_PORE ? p && !g_scalarSealedBatch && !(g_scalarMpiBatch && open && phase < 2) :
           group == SCALAR_BATCH_SEALED ? g_scalarSealedBatch :
           group == SCALAR_BATCH_OPEN ? g_scalarMpiBatch && open && phase < 2 :

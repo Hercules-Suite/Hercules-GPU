@@ -208,6 +208,12 @@ void psolve_launch_poroelastic_pressure_force(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t elementCount, gpu_data_t* gpuData, double dt, double mobilityX,
     double mobilityY, double mobilityZ, int haveDiffusion, double biotAlpha);
+void psolve_launch_poroelastic_diagnostic_force(
+    int grid, int block, size_t shared, cudaStream_t stream,
+    int32_t elementCount, gpu_data_t* gpuData, double biotAlpha);
+void psolve_launch_poroelastic_diagnostic_update(
+    int grid, int block, size_t shared, cudaStream_t stream,
+    int32_t nharbored, gpu_data_t* gpuData, const int32_t* nodes);
 void psolve_launch_poroelastic_pressure_update(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t nharbored, gpu_data_t* gpuData, int useDrainMass,

@@ -841,6 +841,7 @@ static int32_t hercules_repro_mode(void);
 static int32_t displacement_sync_mode(void);
 static int32_t pressure_force_sync_mode(void);
 static int32_t pressure_field_sync_mode(void);
+static int32_t checkpoint_host_state_required(void);
 static int32_t pore_pressure_force_sync_mode(void);
 static int32_t pore_pressure_field_sync_mode(void);
 static int32_t gpu_device_sync_enabled(void);
@@ -15336,6 +15337,7 @@ void solver_check_nan(mysolver_t* solver, int node_count, int time_step) {
   }
 }
 
+#include "pore_diagnostic_schedule.h"
 #include "scalar_mpi_schedule.h"
 #include "scalar_mpi_pipeline.h"
 
@@ -17673,7 +17675,11 @@ static void scalar_pore_prepare(mysolver_t* solver, mesh_t* mesh,
   if (g_poroelasticLocalElementCount > 0) {
     blocksize = 128;
     gridsize = (g_poroelasticLocalElementCount + blocksize - 1) / blocksize;
-    psolve_launch_poroelastic_pressure_force(gridsize, blocksize, 0,
+    if (g_poreDiagnosticDeferred)
+      psolve_launch_poroelastic_diagnostic_force(gridsize, blocksize, 0,
+          solver->streams[CUDA_STREAM_MAIN], g_poroelasticLocalElementCount,
+          solver->gpuDataDevice, Param.thePoroelasticBiotAlpha);
+    else psolve_launch_poroelastic_pressure_force(gridsize, blocksize, 0,
                                      solver->streams[CUDA_STREAM_MAIN],
         g_poroelasticLocalElementCount, solver->gpuDataDevice, dt,
         mobility[0], mobility[1], mobility[2], haveDiffusion,
@@ -17760,7 +17766,10 @@ static void scalar_pore_update(mysolver_t* solver, mesh_t* mesh,
   Timer_Start("Poroelastic pressure update");
   blocksize = 256;
   gridsize = (mesh->nharbored + blocksize - 1) / blocksize;
-  psolve_launch_poroelastic_pressure_update(gridsize, blocksize, 0,
+  if (g_poreDiagnosticDeferred)
+    psolve_launch_poroelastic_diagnostic_update(gridsize, blocksize, 0,
+        solver->streams[CUDA_STREAM_MAIN], mesh->nharbored, solver->gpuDataDevice, NULL);
+  else psolve_launch_poroelastic_pressure_update(gridsize, blocksize, 0,
                                     solver->streams[CUDA_STREAM_MAIN],
       mesh->nharbored, solver->gpuDataDevice,
       (Param.thePoroelasticSurfacePressureBC ==
@@ -22011,6 +22020,10 @@ static void solver_run_collect_timers(void) {
 
   solver_diag_reduce();
   solver_report_gpu_mpi_profile();
+  if (g_poreDiagnosticDeferred && Global.myID == 0)
+    monitor_print("Pore diagnostic steps: %lld reconstructed; %lld skipped "
+                  "(skipped steps perform no pore RHS/update/exchange)\n",
+        (long long)g_poreDiagnosticUpdates, (long long)g_poreDiagnosticSkipped);
   solver_cpml_rank_diag_collect();
 }
 
@@ -22029,6 +22042,7 @@ static void solver_run() {
   const int pressure_step_needs_synced_disp =
       poroelastic_gpu_active() || acoustic_needs_synced_disp;
 
+  solver_init_pore_diagnostics();
   solver_run_init_comm(Global.mySolver);
   solver_diag_reset();
   solver_diag_prepare_local(Global.myMesh);
@@ -22058,6 +22072,12 @@ static void solver_run() {
   for (step = startingStep; step < Param.theTotalSteps; step++) {
     fvector_t* tmpvector;
     int is_final_step = (step == Param.theTotalSteps - 1);
+    g_poreDiagnosticDue = !g_poreDiagnosticDeferred || pore_diagnostic_due(
+        step, Param.theTotalSteps, Param.theStationsPrintRate, g_poreDiagnosticStations);
+    if (g_poreDiagnosticDeferred) {
+      if (g_poreDiagnosticDue) ++g_poreDiagnosticUpdates;
+      else ++g_poreDiagnosticSkipped;
+    }
 
     /* prepare for a new iteration
      * swap displacement vectors for t(n) and t(n-1) */

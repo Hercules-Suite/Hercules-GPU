@@ -491,7 +491,39 @@ There are no per-step buffer allocations or additional MPI collectives.
 This implements overlap for scalar node updates, not a split of all solid
 stiffness or nonlinear element kernels. Disable overlap with `0` to use
 whole-field pressure updates and synchronous unpack; disable batching as well
-for the previous sequential path. Neither switch skips diagnostic pore pressure.
+for the previous sequential path. Neither switch alone skips diagnostic pore pressure; its cadence is controlled separately below.
+
+`HERCULES_PORE_DIAGNOSTIC_CADENCE=output|step` defaults to `output`.
+It applies only to fresh linear runs where the undrained fast path is active:
+zero permeability, undrained boundaries, no open-pore coupling and no nonlinear
+analysis. Since fluid stiffening is already in the solid operator, pore pressure
+is diagnostic and its linear increment equation telescopes from the initial
+zero displacement/excess pressure. At a required state the solver reconstructs
+`p = -M_lumped^-1 Q^T u` using the existing element quadrature, assembled mass,
+MPI contribution maps and hanging-node constraints. It does not accumulate
+unexchanged increments or allocate another displacement history. Floating-point
+rounding can differ from the incremental recurrence.
+
+All ranks reconstruct the state preceding an ASCII pressure station output,
+even ranks without local stations. Only stations in poroelastic
+elements trigger this work. Displacement-only binary stations and plane/DRM motion
+do not consume pore pressure. The final two pressure states are also reconstructed.
+Intervening steps skip pore RHS assembly, update and all four standalone pore
+exchange phases. With sealed scalar batching, acoustic-only packets are used on
+skipped steps and combined acoustic/pore packets on reconstruction steps; the
+four combined phases themselves still occur for the acoustic field. Both host
+and CUDA-aware MPI, full/compact maps, and batching/overlap controls remain usable.
+
+`step` retains the original incremental update on every step. Checkpoint reads
+or writes automatically select that path regardless of the request, preserving
+both saved pressure time levels and the existing checkpoint format; no checkpoint
+schema or restart-state migration is introduced. Nonlinear, diffusion, drained
+and open-pore paths always retain every-step pressure feedback. Pore-pressure-ratio
+(`Ru`) output currently requires nonlinear analysis and an initial effective-stress
+reference, so it also retains every-step updates. The selected
+cadence and output consumers are reported at startup, and reconstructed/skipped
+step counts after the loop. This control must agree on all ranks. It is separate
+from `poroelastic_undrained_fast_path=no`, which changes the mechanical formulation.
 
 `HERCULES_GPU_MPI_PROFILE=0|1` defaults to `0`. Set `1` consistently on all
 solver ranks to record device-helper and scalar-batch calls, send/receive bytes
@@ -2507,8 +2539,11 @@ solver and regenerated mesh.
 	linear validation/undrained limit, the
 	solver folds `alpha^2 M` directly into the native elastic volumetric
 	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
-	pressure-traction feedback. Pore pressure is still updated from `Q^T du`
-	and remains available in station output as a diagnostic. Set this to `no`
+	pressure-traction feedback. Pore pressure remains available in station output as a diagnostic.
+	`HERCULES_PORE_DIAGNOSTIC_CADENCE=output` (default) reconstructs it at
+	required output states; `step` retains incremental `Q^T du` updates.
+	Checkpoint/restart runs always retain every-step updates (see
+	[diagnostic cadence](#scalar-mpi-schedules-and-profiling)). Set this to `no`
 	to use the older split `Q p` / `Q^T du` path for comparisons, or use
 	nonzero permeability / `drained` pressure BC for the full split path.
 	`acoustic_poroelastic_interface=open_pore` also disables this fast path so
