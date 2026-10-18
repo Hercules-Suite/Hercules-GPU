@@ -493,6 +493,17 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
   assert.match(section, /1000 m × 1000 m/);
   assert.match(section, /Porous sediment depth limits are measured below the bed/);
   assert.match(section, /supercomputer validation/);
+  assert.match(section, /include_topography=no/);
+  assert.match(section, /flat at solver Z=0/);
+  assert.match(section, /No topography.in/);
+  assert.match(section, /no forced topography surface-refinement band/);
+  assert.match(section, /spacing must divide both horizontal domain lengths/);
+  assert.match(section, /CVM mesh offsets must be zero/);
+  assert.match(section, /model_z and surface coincide/);
+  assert.match(section, /These setup checks are not a CUDA\/MPI propagation benchmark/);
+  assert.match(section, /independent CPS Green functions/);
+  assert.match(section, /Submerged ramped equilibrium/);
+  assert.match(section, /GPU scheduling and MPI transport are mocked/);
   const sourceRoot = "../quake/forward/";
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const geometry = readFileSync(`${sourceRoot}topography.cc`, "utf8");
@@ -500,6 +511,12 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
   assert.match(solver, /have_buildings == YES \|\| Param\.the3DDepthReference == 0/);
   assert.match(solver, /MPI_Bcast\(Param\.theSeabedGeometryFile/);
   assert.match(geometry, /MPI_Bcast\(theSeabedInfo, ntp, MPI_DOUBLE/);
+  const seabedParser = solver.slice(solver.indexOf('  char depth_reference[64]'), solver.indexOf('  parsetext(fp, "source_directory_output"'));
+  assert.doesNotMatch(seabedParser, /haveTopography != YES/);
+  assert.match(solver, /topo_seabed_init_flat\(Global\.myID, Param\.theSeabedGeometryFile/);
+  assert.match(geometry, /void topo_seabed_init_flat/);
+  assert.match(geometry, /MPI_Bcast\(counts, 2, MPI_INT/);
+  assert.match(geometry, /thebase_zcoord = 0\.0;\s+theEtreeType = FULL;/);
   assert.doesNotMatch(solver + geometry, /seabed_water_level_m|theSeabedWaterLevel|theSeabedWet|topo_seabed_water_surface_z/);
 });
 

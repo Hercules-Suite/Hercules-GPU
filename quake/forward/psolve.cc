@@ -4313,13 +4313,13 @@ static int32_t parse_parameters(const char* numericalin) {
   const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
   const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
   if (Param.theSeabedGeometryFile[0] != '\0') {
-    if (haveTopography != YES || include3DVelModel != YES ||
+    if (include3DVelModel != YES ||
         includeAcoustic != YES || includeIstanbulVelModel == YES ||
         includeBasinVelModel == YES || includeHmgHalfSpace == YES ||
         have_buildings == YES || Param.the3DDepthReference == 0) {
       solver_abort(__FUNCTION_NAME, NULL,
-                   "seabed_geometry_file requires include_topography=yes, "
-                   "3D_velocity_model=yes, include_acoustic=yes, an explicit "
+                   "seabed_geometry_file requires 3D_velocity_model=yes, "
+                   "include_acoustic=yes, an explicit "
                    "3D_velocity_model_depth_reference (model_z/surface/seabed), "
                    "and buildings, Istanbul, basin and homogeneous-halfspace overrides disabled\n");
     }
@@ -5961,8 +5961,8 @@ static int mesh_query_material_at_model_point(
     depth_m -= get_surface_shift();
   }
 
-  if ((Param.includeTopography == YES) &&
-      (get_theetree_type() == SQD || topo_seabed_enabled())) {
+  if (topo_seabed_enabled() ||
+      (Param.includeTopography == YES && get_theetree_type() == SQD)) {
     const double surface_depth = depth_m - point_elevation(north_m, east_m);
     if (surface_depth < 0.0) {
       return 1;
@@ -7088,8 +7088,8 @@ static void setrec(octant_t* leaf, double ticksize, void* data) {
         // }
 
         /* Shift the domain if topography with squashed etree is considered */
-        if ((Param.includeTopography == YES) &&
-            (get_theetree_type() == SQD || topo_seabed_enabled())) {
+        if (topo_seabed_enabled() ||
+            (Param.includeTopography == YES && get_theetree_type() == SQD)) {
           const double surface_depth = z_m - point_elevation(x_m, y_m);
           if (get_theetree_type() == SQD) z_m = surface_depth;
           if (surface_depth < 0) /* get air properties */
@@ -12951,8 +12951,10 @@ static void solver_init() {
           (double)globalPressureFreeSurfaceNodes / 1.0e6);
       if (topo_seabed_enabled()) {
         monitor_print(
-            "Acoustic free-surface geometry: local topography over water, "
+            "Acoustic free-surface geometry: %s, "
             "%lld exposed acoustic top faces, %lld harbored surface-node copies\n",
+            Param.includeTopography == YES ? "local topography over water" :
+                                            "flat solver Z=0 over explicit seabed",
             (long long)globalPressureSurfaceFaces,
             (long long)globalPressureFreeSurfaceNodes);
       } else {
@@ -28890,8 +28892,8 @@ static void mesh_correct_properties(etree_t* cvm) {
             depth_m -= get_surface_shift();
           }
 
-          if ((Param.includeTopography == YES) &&
-              (get_theetree_type() == SQD || topo_seabed_enabled())) {
+          if (topo_seabed_enabled() ||
+              (Param.includeTopography == YES && get_theetree_type() == SQD)) {
             const double surface_depth = depth_m - point_elevation(north_m, east_m);
             if (surface_depth < 0) continue;
             if (get_theetree_type() == SQD) depth_m = surface_depth;
@@ -29706,24 +29708,47 @@ int main(int argc, char** argv) {
 
   if (Param.includeTopography == YES) {
     topo_init(Global.myID, Param.parameters_input_file, Param.theTopoDir);
-    if (Param.theSeabedGeometryFile[0] != '\0') {
+  }
+  if (Param.theSeabedGeometryFile[0] != '\0') {
+    if (Param.includeTopography == YES) {
       topo_seabed_init(Global.myID, Param.theSeabedGeometryFile);
-      general3DVelocityModel_set_seabed(Param.the3DDepthReference,
-                                      Param.theSeabedWaterVp,
-                                      Param.theSeabedWaterRho);
-      if (Global.myID == 0) {
-        monitor_print("Explicit seabed: %s; water coverage/depth from "
-                      "topography minus bed (tolerance 1e-8 m), Vp %.9g m/s, "
-                      "density %.9g kg/m^3.\n",
-                      Param.theSeabedGeometryFile,
-                      Param.theSeabedWaterVp, Param.theSeabedWaterRho);
-        monitor_print("Solid-only 3D profiles: %s; water assigned before "
-                      "solid interpolation. Rebuild mesh after geometry changes.\n",
-                      Param.the3DDepthReference == 1 ? "fixed model Z" :
-                      Param.the3DDepthReference == 2 ? "below outer surface" :
-                      "below seabed (ground on dry cells)");
+    } else {
+      /* Geometry uses solver axes and the existing flat-domain datum. CVM
+       * subvolume offsets would require translating geometry and sources too. */
+      if (Global.theXForMeshOrigin != 0.0 || Global.theYForMeshOrigin != 0.0 ||
+          Global.theZForMeshOrigin != 0.0) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Flat seabed geometry requires zero mesh offsets in the "
+                     "CVM coordinate system (use cvmdb_input_file=profile); "
+                     "the flat ocean surface is solver Z=0.\n");
       }
+      topo_seabed_init_flat(Global.myID, Param.theSeabedGeometryFile,
+                            Param.theDomainX, Param.theDomainY);
     }
+    general3DVelocityModel_set_seabed(Param.the3DDepthReference,
+                                    Param.theSeabedWaterVp,
+                                    Param.theSeabedWaterRho);
+    if (Global.myID == 0) {
+      monitor_print("Explicit seabed: %s; water coverage/depth from "
+                    "%s minus bed (tolerance 1e-8 m), Vp %.9g m/s, "
+                    "density %.9g kg/m^3.\n",
+                    Param.theSeabedGeometryFile,
+                    Param.includeTopography == YES ? "topography" :
+                                                    "flat zero elevation",
+                    Param.theSeabedWaterVp, Param.theSeabedWaterRho);
+      if (Param.includeTopography != YES) {
+        monitor_print("Flat ocean: solver Z=0; no topography file, air carving "
+                      "or topography surface refinement. Wavelength, optional "
+                      "interface refinement and 2:1 balancing remain active.\n");
+      }
+      monitor_print("Solid-only 3D profiles: %s; water assigned before "
+                    "solid interpolation. Rebuild mesh after geometry changes.\n",
+                    Param.the3DDepthReference == 1 ? "fixed model Z" :
+                    Param.the3DDepthReference == 2 ? "below outer surface" :
+                    "below seabed (ground on dry cells)");
+    }
+  }
+  if (Param.includeTopography == YES) {
     if (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS) {
       if (get_topo_meth() != FEM) {
         solver_abort(__FUNCTION_NAME, NULL,
