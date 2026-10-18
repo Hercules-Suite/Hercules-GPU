@@ -1595,6 +1595,20 @@ if __name__ == "__main__":
         note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. type_of_etree=full uses fixed model Z; sqd uses surface-relative material depths. For the general 3-D files, follow the depth-reference example above. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
       },
       {
+        id: "topography-wavelength-refinement",
+        title: "Opt in to wavelength-based surface sizing",
+        paragraphs: [
+          "topography_surface_refinement=maximum_level is the default and preserves forced refinement near the surface to maximum_octant_level. Set topography_surface_refinement=wavelength to skip that target and its legacy surface-size consistency check. The option is case-insensitive and is read only with include_topography=yes. Startup output reports the selected mode.",
+          "The ordinary wavelength rule then sizes solid cells from Vs, simulation_wave_max_freq_hz and simulation_node_per_wavelength, with the existing shear-velocity floor. Water uses Vp and acoustic_mesh_refinement_factor. Air/material classification, other enabled building/DRM/interface refinement and octree 2:1 balancing remain in place; wavelength mode therefore does not promise a uniform mesh or an exact element count.",
+          "Keep maximum_octant_level in parameters.in: it is still required for topographic geometry classification/proximity bookkeeping. It is not a global cap on wavelength refinement. Changing this option requires a fresh mesh; mesh_input_mode=0 regenerates it, whereas importing a stored mesh retains its sizing.",
+          "This trades forced terrain resolution for fewer surface elements where wavelengths allow them. FEM retains its whole-cube staircase surface; VT samples cut volumes at the resulting element size. Neither guarantees accurate terrain representation from wavelength resolution alone. Check the represented surface, receiver ownership, timestep limits and waveform convergence before using a coarser production mesh.",
+          "The shared meshing decision applies to elastic, viscoelastic, nonlinear elastoplastic and poroelastic solids, and to supported acoustic–elastic, porous–water and porous–elastic combinations. Existing formulation restrictions remain: acoustic field-specific constraints require FEM when topography is enabled; local-matching rejects topography; VT retains its existing pore-pressure constraint limitations. Acoustic free surfaces still require the supported flat, complete-face geometry. Hydrostatic/geostatic initialization and constitutive/time-integration paths are unchanged but operate on the new mesh.",
+        ],
+        codeLabel: "parameters.in — opt-in addition to a valid topography case",
+        code: "include_topography             = yes\ntopography_surface_refinement = wavelength\nmesh_input_mode               = 0\n# Retain maximum_octant_level and the remaining topography/material inputs.",
+        note: "Local regression checks cover parsing, rank-broadcast serialization and the production refinement/classification functions. This is not CUDA/MPI propagation, coupled-physics accuracy or hydrostatic/geostatic equilibrium validation of a coarser mesh.",
+      },
+      {
         id: "topography-surface-consistency",
         title: "Surface geometry and receiver sampling",
         paragraphs: [
@@ -1610,7 +1624,7 @@ if __name__ == "__main__":
         title: "Choose maximum_octant_level",
         paragraphs: [
           String.raw`\(\mathtt{maximum\_octant\_level}\) is required only when \(\mathtt{include\_topography=yes}\). Let \(V_{S,\min}^{\mathrm{model}}\) denote the smallest shear-wave velocity in the active solid material model; this is derived from the selected material inputs, not read from a separate parameters.in key.`,
-          String.raw`Choose the smallest integer \(N\) that satisfies the exact wavelength inequality below, then set \(\mathtt{maximum\_octant\_level}=N\). The accepted range is 0 through 30. A smaller value prevents the topography mesher from reaching the resolution required by \(\mathtt{simulation\_wave\_max\_freq\_hz}\) and \(\mathtt{simulation\_node\_per\_wavelength}\).`,
+          String.raw`For the default topography_surface_refinement=maximum_level, choose the smallest integer \(N\) that satisfies the wavelength inequality below as a baseline for the forced surface target. The accepted range is 0 through 30. The subsequent material wavelength rule can refine further; this parameter is not a global refinement cap. In wavelength mode, the forced target and its legacy surface-size consistency check are skipped.`,
         ],
         equations: [
           String.raw`\frac{
@@ -1636,7 +1650,7 @@ if __name__ == "__main__":
         afterEquationsParagraphs: [
           String.raw`For the worked example, the maximum domain extent is \(1{,}000{,}000\,\mathrm{m}\), \(V_{S,\min}^{\mathrm{model}}=500\,\mathrm{m/s}\), \(\mathtt{simulation\_shear\_velocity\_min}=400\,\mathrm{m/s}\), \(\mathtt{simulation\_wave\_max\_freq\_hz}=2\,\mathrm{Hz}\), and \(\mathtt{simulation\_node\_per\_wavelength}=8\). Level 14 gives \(61.035\,\mathrm{m}\) and is too coarse; level 15 gives \(30.518\,\mathrm{m}\), so \(\mathtt{maximum\_octant\_level}=15\) is the smallest acceptable value.`,
         ],
-        note: "This is the shear-wave-controlled baseline. Acoustic refinement and other enabled feature constraints can require a finer mesh; ensure the topography cap does not block the most restrictive active refinement rule.",
+        note: "This is a shear-wave baseline for selecting the default forced surface target. Terrain geometry, acoustic refinement and other enabled feature constraints may require finer elements. With wavelength mode, assess geometry accuracy separately from wave resolution.",
       },
       {
         id: "topography-format",

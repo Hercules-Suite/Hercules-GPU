@@ -47,6 +47,8 @@
 static toposolver_t       *myTopoSolver;
 static int                ntp, np_ew, np_ns;
 static int8_t             theMaxoctlevel;
+/* Opt-in: leave surface sizing to the ordinary material wavelength rule. */
+static int                theTopoWavelengthRefinement = 0;
 static double             thebase_zcoord = 0.0, So, theDomainLong_ew, theDomainLong_ns, theMinTopoVol;
 static double             *theTopoInfo;
 static double             *theSeabedInfo = NULL;
@@ -1254,16 +1256,18 @@ int topo_setrec ( octant_t *leaf, double ticksize,
     return 0;
 }
 
-// Note from Clifford: It seems topo_toexpand does not return 0 in any case.
 /**
- * Return  1 if an element is in the topography and needs to be refined,
- * Return  0 if an element is air element and does not need to be refined,
- * Return -1 if an element is not a topography element.
+ * Return 1 to force surface refinement, or -1 to defer to the ordinary
+ * wavelength rule. Air/material assignment remains in topo_setrec.
  */
 int topo_toexpand (  octant_t *leaf,
                      double    ticksize,
                      edata_t  *edata, double theFactor ) {
     int          res_exp, res_setr;
+
+    if (theTopoWavelengthRefinement) {
+        return -1;
+    }
 
     double emin = ( (tick_t)1 << (PIXELLEVEL - theMaxoctlevel) ) * ticksize;
 
@@ -1293,7 +1297,7 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
     FILE                *fp;
     FILE                *fp_topo;
     int                 iTopo;
-    int8_t              Maxoctlevel;
+    int                 Maxoctlevel;
     char                topo_file[256];
     double              L_ew, L_ns, int_np_ew, int_np_ns, fract_np_ew, fract_np_ns;
     char                etree_model[64], fem_meth[64], type_of_damping[64];
@@ -1305,6 +1309,7 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
 
     /* Optional parameters */
     double minvol = 0.1;
+    char surface_refinement[64] = "maximum_level";
     char consider_topo_nonlin[64] = "no", 
         include_nonlin_analysis[64] = "no";
 
@@ -1335,6 +1340,18 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
     parsetext(fp, "min_enclosed_volume_perc", 'd', &minvol);
     parsetext(fp, "include_nonlinear_analysis", 's', &include_nonlin_analysis);
     parsetext(fp, "consider_nonlinear_topography", 's', &consider_topo_nonlin);
+    parsetext(fp, "topography_surface_refinement", 's', &surface_refinement);
+
+    if (strcasecmp(surface_refinement, "maximum_level") == 0) {
+        theTopoWavelengthRefinement = 0;
+    } else if (strcasecmp(surface_refinement, "wavelength") == 0) {
+        theTopoWavelengthRefinement = 1;
+    } else {
+        fprintf(stderr, "Unknown topography_surface_refinement '%s': "
+                "expected maximum_level or wavelength\n", surface_refinement);
+        fclose(fp);
+        return -1;
+    }
 
     if ( (strcasecmp(type_of_damping, "bkt" )  == 0) ||
          (strcasecmp(type_of_damping, "bkt2")  == 0) ||
@@ -1471,7 +1488,7 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
 
 void topo_init (int32_t myID, const char *parametersin, const char *theTopoDir) {
 
-    int     int_message[8];
+    int     int_message[9];
     double  double_message[5];
 
     /* Capturing data from file --- only done by PE0 */
@@ -1501,9 +1518,10 @@ void topo_init (int32_t myID, const char *parametersin, const char *theTopoDir) 
     int_message   [5]    = (int)theTopoMethod;
     int_message   [6]    = (int)theNonlinTopo_flag;
     int_message   [7]    = (int)theTopoBKT_flag;
+    int_message   [8]    = theTopoWavelengthRefinement;
 
     MPI_Bcast(double_message, 5, MPI_DOUBLE, 0, comm_solver);
-    MPI_Bcast(int_message,    8, MPI_INT,    0, comm_solver);
+    MPI_Bcast(int_message,    9, MPI_INT,    0, comm_solver);
 
     thebase_zcoord       = double_message[0];
     So				     = double_message[1];
@@ -1519,6 +1537,20 @@ void topo_init (int32_t myID, const char *parametersin, const char *theTopoDir) 
     theTopoMethod        = (topometh_t)int_message[5];
     theNonlinTopo_flag   = (noyesflag_t)int_message[6];
     theTopoBKT_flag      = (noyesflag_t)int_message[7];
+    theTopoWavelengthRefinement = int_message[8];
+
+    if (myID == 0) {
+        if (theTopoWavelengthRefinement) {
+            fprintf(stdout, "Topography surface refinement: wavelength; no forced "
+                          "maximum_octant_level target. Material wavelength "
+                          "rules and 2:1 balancing remain; surface geometry "
+                          "may be coarser. Rebuild mesh to change sizing.\n");
+        } else {
+            fprintf(stdout, "Topography surface refinement: maximum_level; "
+                          "surface target level %d, followed by the material "
+                          "wavelength rule.\n", (int)theMaxoctlevel);
+        }
+    }
 
     /* allocate table of properties for all other PEs */
     if (myID != 0) {

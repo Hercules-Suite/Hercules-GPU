@@ -187,6 +187,10 @@ test("documents octree-compatible domain sizing and refinement level selection",
   assert.match(topography, /simulation_node_per_wavelength/);
   assert.match(topography, /maximum_octant_level/);
   assert.match(topography, /61\.035.*30\.518/s);
+  assert.match(topography, /Opt in to wavelength-based surface sizing/);
+  assert.match(topography, /topography_surface_refinement=wavelength/);
+  assert.match(topography, /not a global cap on wavelength refinement/);
+  assert.match(topography, /Hydrostatic\/geostatic initialization/);
 
   const parametersResponse = await render("/docs/parameters-domain-time");
   assert.equal(parametersResponse.status, 200);
@@ -383,8 +387,10 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 249);
-  assert.equal(documented.length, 249, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 250);
+  assert.equal(documented.length, 250, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("topography_surface_refinement"));
+  assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -403,6 +409,11 @@ test("documents every parameters.in key parsed by the current source tree", () =
   if (!existsSync(sourceRoot)) return;
 
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
+  const topographySolver = readFileSync(`${sourceRoot}topography.cc`, "utf8");
+  assert.match(topographySolver, /char surface_refinement\[64\] = "maximum_level"/);
+  for (const mode of ["maximum_level", "wavelength"]) {
+    assert.ok(topographySolver.includes(`strcasecmp(surface_refinement, "${mode}")`));
+  }
   assert.match(solver, /\.theAcousticQualityFactor\s*=\s*0\.0\s*,/);
   assert.ok(documented.includes("acoustic_interface_method"));
   assert.match(solver, /acoustic_interface_method\[64\]\s*=\s*"field-specific-constraints"/);
