@@ -455,7 +455,8 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 | --- | --- | --- |
 | `include_topography` | `no` (default), `yes` | Optional; Yes/no |
 | `topography_directory` | Directory path; `inputfiles/topography` (default) | Optional; Directory path |
-| `maximum_octant_level` | Integer octree level; Required with topography; 0 to 30; no default | Conditional; Integer octree level |
+| `maximum_octant_level` | Integer 0 to 30; no default | Required with topography; forced surface target in `maximum_level` mode, geometry bookkeeping in both modes; not a global cap |
+| `topography_surface_refinement` | `maximum_level` (default), `wavelength`; case-insensitive | Optional; read only with topography enabled; skip forced surface sizing and its consistency check with `wavelength`; ordinary Vs/Vp wavelength rules and 2:1 balancing remain |
 | `computation_method` | `Required with topography`; no default; vt \| fem | Conditional; String |
 | `topographybase_zcoord` | Float (m); Required with topography; > 0; no default | Conditional; Float (m) |
 | `type_of_etree` | `Required with topography`; no default; sqd \| full; no default | Conditional; String |
@@ -467,6 +468,11 @@ Mesh air/solid classification and receiver/material queries share a bilinear
 surface, `Z = topographybase_zcoord - height`. Regenerate meshes made with
 the earlier triangular classifier before rerunning affected surface outputs;
 see [surface sampling](Extended%20README.md#topographic-surface-geometry-and-sampling).
+Use `topography_surface_refinement=wavelength` with `mesh_input_mode=0` to
+regenerate a mesh without the forced surface target. Retain the required
+`maximum_octant_level`. Coarser surface cells may reduce terrain accuracy;
+see [surface refinement](Extended%20README.md#topography-surface-refinement)
+for water sizing, coupling restrictions and validation limits.
 
 ### Buildings and push-down regions
 

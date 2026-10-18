@@ -204,7 +204,8 @@ $`\mathtt{region\_depth\_shallow\_m}=10{,}000\,\mathrm{m}`$, the corresponding
 bottom coordinate is
 $`\mathtt{region\_depth\_deep\_m}=197{,}500\,\mathrm{m}`$.
 
-For topographic meshes, choose `maximum_octant_level` from the wavelength
+For topographic meshes using `topography_surface_refinement=maximum_level`
+(default), choose the forced surface target `maximum_octant_level` from the wavelength
 target. Let $`V_{S,\min}^{\mathrm{model}}`$ be the smallest shear velocity in
 the active solid material model. Choose the smallest integer $`N`$ satisfying
 
@@ -236,8 +237,65 @@ $`31.25\,\mathrm{m}`$. Level 14 gives $`61.035\,\mathrm{m}`$, while level 15
 gives $`30.518\,\mathrm{m}`$, so the smallest acceptable value is
 $`\mathtt{maximum\_octant\_level}=15`$.
 This explicit parameter is required only with `include_topography=yes`.
-Acoustic or other feature-specific refinement rules can be more restrictive;
-the chosen topography cap must not prevent the finest active rule.
+This is not a global cap: the subsequent material wavelength rule can refine
+further. Acoustic or other feature-specific rules can also require finer cells.
+
+## Topography surface refinement
+
+`topography_surface_refinement` accepts `maximum_level` (default) or
+`wavelength`, case-insensitively. It is read only with `include_topography=yes`.
+The default preserves forced refinement near the surface to
+`maximum_octant_level` and the existing surface-size consistency check.
+`wavelength` skips both and delegates sizing to the ordinary material rule,
+as in the topography-off refinement path. Add this to an otherwise complete
+topography case:
+
+```ini
+include_topography             = yes
+topography_surface_refinement = wavelength
+mesh_input_mode               = 0
+# Keep maximum_octant_level and all other required topography/material inputs.
+```
+
+`maximum_octant_level` remains required (integer 0–30, no default) for geometry
+classification/proximity bookkeeping even in wavelength mode. The startup log
+reports the mode. Regenerate the mesh to change its sizing; importing an
+existing mesh retains its stored cells.
+
+For element edge length $`h`$, maximum frequency $`f_{\max}`$ and requested
+`simulation_node_per_wavelength` $`n`$, the ordinary sizing targets are
+
+```math
+h \le \frac{V_S}{f_{\max} n}\quad\text{(solid)},\qquad
+h \le \frac{V_P}{f_{\max} n\,r_a}\quad\text{(acoustic)},
+```
+
+where solid properties already reflect the existing shear-velocity floor and
+$`r_a`$ is `acoustic_mesh_refinement_factor`. This option does not change
+air/material classification, material interpolation, enabled building/DRM or
+interface refinement, or octree 2:1 balancing. Those rules can produce finer
+cells than the simple wavelength estimate.
+
+Coarser surface cells reduce terrain resolution. FEM retains whole-cube
+staircase geometry; VT computes cut volumes using the resulting element size.
+Wavelength resolution alone does not establish surface-geometry accuracy.
+Inspect surface representation, source/receiver ownership, actual timestep
+limits and waveform convergence after rebuilding.
+
+The decision is shared by elastic, viscoelastic, nonlinear elastoplastic and
+poroelastic solids and supported acoustic–elastic, porous–water and
+porous–elastic paths. Existing restrictions remain: acoustic field-specific
+constraints require FEM with topography; local-matching rejects topography;
+VT retains its existing pore-pressure constraint limitations. Acoustic free
+surfaces still require supported flat, complete-face geometry; this option
+does not add acoustic cut cells. Hydrostatic/geostatic initialization,
+constitutive models, time integration, GPU kernels and field exchanges are
+unchanged, but use the resulting mesh.
+
+Local regression checks cover the parser, rank-broadcast serialization, and
+production refinement/classification functions. They do not establish CUDA/MPI
+propagation accuracy, coupled-physics accuracy or hydrostatic/geostatic
+equilibrium for a coarser mesh. Those require case-specific comparisons.
 
 ## Host and CUDA compilation
 
