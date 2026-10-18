@@ -491,9 +491,10 @@ There are no per-step buffer allocations or additional MPI collectives.
 This implements overlap for scalar node updates, not a split of all solid
 stiffness or nonlinear element kernels. Disable overlap with `0` to use
 whole-field pressure updates and synchronous unpack; disable batching as well
-for the previous sequential path. Neither switch alone skips diagnostic pore pressure; its cadence is controlled separately below.
+for the previous sequential path. Neither switch alone skips diagnostic pore pressure;
+how often it is updated is controlled separately below.
 
-`HERCULES_PORE_DIAGNOSTIC_CADENCE=output|step` defaults to `output`.
+`HERCULES_PORE_PRESSURE_UPDATE=output|step` defaults to `output`.
 It applies only to fresh linear runs where the undrained fast path is active:
 zero permeability, undrained boundaries, no open-pore coupling and no nonlinear
 analysis. Since fluid stiffening is already in the solid operator, pore pressure
@@ -521,7 +522,7 @@ schema or restart-state migration is introduced. Nonlinear, diffusion, drained
 and open-pore paths always retain every-step pressure feedback. Pore-pressure-ratio
 (`Ru`) output currently requires nonlinear analysis and an initial effective-stress
 reference, so it also retains every-step updates. The selected
-cadence and output consumers are reported at startup, and reconstructed/skipped
+update mode and output consumers are reported at startup, and reconstructed/skipped
 step counts after the loop. This control must agree on all ranks. It is separate
 from `poroelastic_undrained_fast_path=no`, which changes the mechanical formulation.
 
@@ -2554,10 +2555,10 @@ solver and regenerated mesh.
 	solver folds `alpha^2 M` directly into the native elastic volumetric
 	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
 	pressure-traction feedback. Pore pressure remains available in station output as a diagnostic.
-	`HERCULES_PORE_DIAGNOSTIC_CADENCE=output` (default) reconstructs it at
+	`HERCULES_PORE_PRESSURE_UPDATE=output` (default) reconstructs it at
 	required output states; `step` retains incremental `Q^T du` updates.
 	Checkpoint/restart runs always retain every-step updates (see
-	[diagnostic cadence](#scalar-mpi-schedules-and-profiling)). Set this to `no`
+	[pressure update modes](#scalar-mpi-schedules-and-profiling)). Set this to `no`
 	to use the older split `Q p` / `Q^T du` path for comparisons, or use
 	nonzero permeability / `drained` pressure BC for the full split path.
 	`acoustic_poroelastic_interface=open_pore` also disables this fast path so

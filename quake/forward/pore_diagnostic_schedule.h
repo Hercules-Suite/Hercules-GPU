@@ -18,16 +18,16 @@ static bool pore_diagnostic_due(int step, int total, int rate, bool stations) {
 }
 
 static void solver_init_pore_diagnostics() {
-  const char* env = getenv("HERCULES_PORE_DIAGNOSTIC_CADENCE");
+  const char* env = getenv("HERCULES_PORE_PRESSURE_UPDATE");
   int requested = 1, low, high;
   if (env && strcmp(env, "step") == 0) requested = 0;
   else if (env && strcmp(env, "output") != 0)
     solver_abort(__FUNCTION_NAME, NULL,
-        "HERCULES_PORE_DIAGNOSTIC_CADENCE must be output or step\n");
+        "HERCULES_PORE_PRESSURE_UPDATE must be output or step\n");
   MPI_Allreduce(&requested, &low, 1, MPI_INT, MPI_MIN, comm_solver);
   MPI_Allreduce(&requested, &high, 1, MPI_INT, MPI_MAX, comm_solver);
   if (low != high)
-    solver_abort(__FUNCTION_NAME, NULL, "Pore diagnostic cadence differs between ranks\n");
+    solver_abort(__FUNCTION_NAME, NULL, "Pore pressure update mode differs between ranks\n");
   g_poreDiagnosticDeferred = requested && poroelastic_gpu_active() &&
       poroelastic_undrained_fast_path_active() && !checkpoint_host_state_required();
   if (!poroelastic_gpu_active()) return;
@@ -38,7 +38,7 @@ static void solver_init_pore_diagnostics() {
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, comm_solver);
   g_poreDiagnosticStations = global != 0;
   if (Global.myID == 0)
-    monitor_print("Pore diagnostic cadence: %s (request=%s; pore-pressure/Ru stations=%s); "
+    monitor_print("Pore pressure update mode: %s (request=%s; pore-pressure/Ru stations=%s); "
                   "checkpoint/restart and non-diagnostic physics retain every-step updates\n",
         g_poreDiagnosticDeferred ? "output" : "step", requested ? "output" : "step",
         global ? "yes" : "no");

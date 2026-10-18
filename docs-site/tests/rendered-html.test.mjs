@@ -47,7 +47,7 @@ test("documents compact scalar MPI schedules and device profiling limits", async
   assert.match(html, /HERCULES_GPU_MPI_PROFILE=1/);
   assert.match(html, /HERCULES_SCALAR_MPI_BATCH=1 \(default\)/);
   assert.match(html, /HERCULES_GPU_MPI_OVERLAP=1 \(default\)/);
-  assert.match(html, /HERCULES_PORE_DIAGNOSTIC_CADENCE=output \(default\)/);
+  assert.match(html, /HERCULES_PORE_PRESSURE_UPDATE=output \(default\)/);
   assert.match(html, /Checkpoint reads\/writes/);
   assert.match(html, /final two states/);
   assert.match(html, /12 to 8 phases/);
@@ -64,6 +64,7 @@ test("documents compact scalar MPI schedules and device profiling limits", async
   assert.match(controls, /HERCULES_GPU_MPI_PROFILE/);
   assert.match(controls, /HERCULES_SCALAR_MPI_BATCH/);
   assert.match(controls, /HERCULES_GPU_MPI_OVERLAP/);
+  assert.match(controls, /HERCULES_PORE_PRESSURE_UPDATE/);
 });
 
 test("renders the Hercules documentation home", async () => {
