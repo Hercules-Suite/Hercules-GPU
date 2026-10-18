@@ -18,6 +18,7 @@
  */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -464,8 +465,8 @@ int topo_seabed_sample(double x, double y, double *bed_z) {
     return 0;
 }
 
-/* Called after topo_init. Root alone reads; every solver rank receives the
- * identical geometry before meshing, material queries and interface setup. */
+/* Called after topo_init or flat-surface grid setup. Root alone reads; every
+ * solver rank receives identical geometry before meshing and interface setup. */
 void topo_seabed_init(int32_t myID, const char *path) {
     theSeabedInfo = (double*)malloc(sizeof(double) * (size_t)ntp);
     if (theSeabedInfo == NULL) {
@@ -487,7 +488,7 @@ void topo_seabed_init(int32_t myID, const char *path) {
         if (fp != NULL) fclose(fp);
         if (!valid) {
             fprintf(stderr, "Invalid seabed_geometry_file %s: expected the "
-                    "topography spacing followed by exactly %d finite bed "
+                    "grid spacing followed by exactly %d finite bed "
                     "elevations, with no mask or extra tokens\n", path, ntp);
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
@@ -495,7 +496,7 @@ void topo_seabed_init(int32_t myID, const char *path) {
         for (int n=0; n<ntp; ++n) {
             const double water_depth = theTopoInfo[n] - theSeabedInfo[n];
             if (water_depth < -SEABED_HEIGHT_TOLERANCE_M) {
-                fprintf(stderr, "Bed elevation exceeds topography at node %d "
+                fprintf(stderr, "Bed elevation exceeds outer surface at node %d "
                         "in %s (bed=%g, outer surface=%g m)\n",
                         n, path, theSeabedInfo[n], theTopoInfo[n]);
                 MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -516,7 +517,8 @@ void topo_seabed_init(int32_t myID, const char *path) {
                 hi = fmax(hi, theTopoInfo[n]);
                 wet |= theTopoInfo[n] - theSeabedInfo[n] > SEABED_HEIGHT_TOLERANCE_M;
             }
-            if (wet && (hi-lo > SEABED_HEIGHT_TOLERANCE_M || hi >= thebase_zcoord)) {
+            if (wet && (hi-lo > SEABED_HEIGHT_TOLERANCE_M ||
+                        (thebase_zcoord > 0.0 && hi >= thebase_zcoord))) {
                 fprintf(stderr, "Wet geometry cell (%d,%d) requires a flat "
                         "outer surface below topographybase_zcoord; sloping "
                         "acoustic free surfaces are unsupported\n", i, j);
@@ -526,6 +528,63 @@ void topo_seabed_init(int32_t myID, const char *path) {
         }
     }
     MPI_Bcast(theSeabedInfo, ntp, MPI_DOUBLE, 0, comm_solver);
+}
+
+/* Geometry-only setup for a flat ocean at solver Z=0. Do not call topo_init:
+ * its surface refinement, air carving and cut-cell operators stay disabled.
+ * Reuse the elevation-only reader with an implicit zero-height outer surface.
+ * The seabed may slope; its elevations are negative below the flat surface. */
+void topo_seabed_init_flat(int32_t myID, const char *path,
+                          double length_north, double length_east) {
+    int counts[2] = {0, 0};
+    if (myID == 0) {
+        FILE *fp = fopen(path, "r");
+        const int read_spacing = fp != NULL && fscanf(fp, "%lf", &So) == 1;
+        if (fp != NULL) fclose(fp);
+        if (!read_spacing || !isfinite(So) || So <= 0.0 ||
+            !isfinite(length_north) || length_north <= 0.0 ||
+            !isfinite(length_east) || length_east <= 0.0) {
+            fprintf(stderr, "Flat seabed geometry requires positive finite "
+                    "spacing and domain lengths: %s\n", path);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+        const double cells[2] = {length_north / So, length_east / So};
+        for (int axis=0; axis<2; ++axis) {
+            const double count = round(cells[axis]);
+            if (!isfinite(cells[axis]) || count < 1.0 ||
+                count > INT_MAX-1.0 ||
+                fabs(cells[axis]-count) > 1e-10*fmax(1.0, cells[axis])) {
+                fprintf(stderr, "Flat seabed spacing must divide both domain "
+                        "lengths into positive integer cell counts: %s\n", path);
+                MPI_Abort(MPI_COMM_WORLD, ERROR);
+                exit(1);
+            }
+            counts[axis] = (int)count + 1;
+        }
+        if ((int64_t)counts[0] * counts[1] > INT_MAX) {
+            fprintf(stderr, "Flat seabed grid exceeds MPI count capacity\n");
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+    }
+    MPI_Bcast(&So, 1, MPI_DOUBLE, 0, comm_solver);
+    MPI_Bcast(counts, 2, MPI_INT, 0, comm_solver);
+    np_ns = counts[0];
+    np_ew = counts[1];
+    ntp = np_ns * np_ew;
+    theDomainLong_ns = length_north;
+    theDomainLong_ew = length_east;
+    thebase_zcoord = 0.0;
+    theEtreeType = FULL;
+    theTopoMethod = FEM;
+    theTopoInfo = (double*)calloc((size_t)ntp, sizeof(double));
+    if (theTopoInfo == NULL) {
+        fprintf(stderr, "Cannot allocate flat seabed surface grid\n");
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+    topo_seabed_init(myID, path);
 }
 
 /* Signed tangent-normal offset: positive in air, zero on the surface,

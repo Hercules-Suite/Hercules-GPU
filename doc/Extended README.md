@@ -1349,7 +1349,8 @@ Notes:
 	face is lumped as `h^2/(4 rho g)` per node. This supports linear surface-
 	gravity waves without adding a bulk `rho g` load, a moving mesh, or a
 	hydrostatic prestress solve. With `seabed_geometry_file`, complete horizontal
-	acoustic top faces must coincide with local topography over water. Separate
+	acoustic top faces must coincide with local topography over water, or solver
+	Z=0 with `include_topography=no`. Separate
 	flat water bodies may have different elevations. Without explicit seabed
 	geometry, the flat acoustic surface is at solver
 	`Z=topographybase_zcoord` with topography, `Z=surface_shift_m` with buildings,
@@ -2052,8 +2053,8 @@ input.
 | `seabed_water_vp_m_s` | Required with geometry, finite positive water Vp in m/s; no default. |
 | `seabed_water_density_kg_m3` | Required with geometry, finite positive density in kg/m3; no default. Unlike `rho.in`, this is SI rather than tonne/m3. |
 
-Explicit mode requires `include_topography=yes`, `3D_velocity_model=yes` and
-`include_acoustic=yes`. It rejects buildings and Istanbul, basin and
+Explicit mode requires `3D_velocity_model=yes` and `include_acoustic=yes`.
+`include_topography=no` is supported for a flat outer surface at solver Z=0. It rejects buildings and Istanbul, basin and
 homogeneous-halfspace overrides, which otherwise bypass the shared reader.
 Non-legacy depth references and water controls require the geometry file.
 Use solid-only 3-D profiles: every Vs must exceed `1e-6 m/s`. Remove existing
@@ -2064,12 +2065,14 @@ column; water is inserted from geometry before interpolation. Water uses
 Solid Q interpolation, viscoelastic damping and material calibration retain
 their existing roles.
 
-The geometry shares the origin, extent and spacing of `topography.in`, in
+With topography enabled, the geometry shares the origin, extent and spacing
+of `topography.in`, in
 solver X north/Y east axes, regardless of material-grid rotation. Let
 `Nnorth=region_length_north_m/spacing+1` and similarly for `Neast`. Its text
 format is:
 
-1. One positive spacing matching `topography.in`.
+1. One positive finite spacing dividing both horizontal domain lengths,
+   matching `topography.in` when topography is enabled.
 2. `Nnorth*Neast` finite ground/seabed elevations in metres, positive upward,
    ordered north outer/east inner (east fastest).
 
@@ -2082,7 +2085,7 @@ tolerance. Bed elevations above topography by more than that tolerance abort
 setup; nodal differences within tolerance are snapped to the outer surface.
 Dry queries also snap their bed reference to the outer surface.
 
-`topography.in` remains the **outer air/material surface**. It supplies the
+With `include_topography=yes`, `topography.in` remains the **outer air/material surface**. It supplies the
 local water surface wherever the bed is lower, and dry ground where both
 surfaces coincide. A wet grid cell (any corner has positive water depth) must
 have a flat outer surface below `topographybase_zcoord`: existing acoustic
@@ -2121,6 +2124,37 @@ seabed_water_vp_m_s = 1500
 seabed_water_density_kg_m3 = 1025
 ```
 
+For a flat ocean, use the same seabed file and water/solid controls but set:
+
+```ini
+include_topography = no
+```
+
+No `topography.in`, `topography_directory`, `topographybase_zcoord`,
+`maximum_octant_level`, `type_of_etree` or `computation_method` is needed for
+this mode; the topography-only controls are unused. The outer surface and
+height datum are both zero: `bed_z = -bed_elevation`. Negative bed elevations
+are underwater, zero is dry ground, and positive elevations beyond the fixed
+tolerance are rejected. The seabed itself may slope. The uniform spacing must
+divide both horizontal domain lengths into positive integer cell counts;
+node counts and the exact number of file values are checked before use.
+CVM mesh offsets must be zero, as normally obtained with
+`cvmdb_input_file=profile`; translating a CVM subvolume is not supported in
+this flat mode. The general 3-D dataset still supplies all solid properties.
+
+The topography surface-refinement band and air/cut-cell operators are skipped.
+Wavelength refinement, optional acoustic-interface refinement, local matching
+when selected, and 2:1 balancing remain. In particular, `maximum_octant_level`
+is not a global refinement cap with topography off. Adequate water-column,
+seabed and gravity-wave resolution must still be established by convergence
+checks. This mode provides no moving or sloping water surface.
+
+With topography off, `surface` and `model_z` both mean depth below Z=0;
+`seabed` means depth below the local bed. In the 100 m water example, a solid
+layer 20 m below bed uses `z.in=120`, `120`, or `20`, respectively. Sources,
+stations and planes retain the flat solver depth convention; a seabed
+receiver is at depth 100 m, not zero.
+
 The explicit reference is independent of `type_of_etree`. Both `full` and
 `sqd` work: the caller convention is converted back to physical solver Z
 before evaluating the selected column reference. For column $i$:
@@ -2135,7 +2169,7 @@ Z-Z_b(i), & \texttt{seabed}.
 ```
 
 $Z_s=B-h_s$ is the outer surface, $Z_b=B-h_b$ the ground/bed and
-$B=\mathtt{topographybase\_zcoord}$. All `z.in` coordinates are metres,
+$B=\mathtt{topographybase\_zcoord}$ with topography enabled (zero in flat mode). All `z.in` coordinates are metres,
 positive downward. For $B=1000$, bed elevation $-100$, water level 0 and a
 layer 20 m below bed, write 1120 (`model_z`), 120 (`surface`), or 20 (`seabed`).
 On dry cells seabed-relative means below ground. At the query point, water
@@ -2159,12 +2193,14 @@ Physics and runtime integration:
   `material_properties_list` values remain case-specific.
 - Porous depth limits are measured below ground/bed for both FULL and SQD.
   Beneath explicit water, the saturation/hydrostatic reference is the water
-  surface from local topography; `groundwaterlevel_file` is ignored there.
+  surface from local topography, or Z=0 with topography off;
+  `groundwaterlevel_file` is ignored there.
   Dry-cell groundwater depths remain relative to the ground. Keep the pore-fluid and water densities
   physically consistent. Nonlinear approximate geostatic initialization adds
   the exact water-column load and uses 100 midpoint samples for the solid
   overburden before the existing hydrostatic Biot-stress correction.
-- Acoustic free-surface selection uses local topography at each wet element,
+- Acoustic free-surface selection uses Z=0 with topography off, or local
+  topography at each wet element with it enabled,
   including separate flat lakes/reservoirs at different elevations. Only
   complete horizontal mesh faces coincident with that surface are enrolled;
   crossing or submerged faces are excluded. Sloping/changing water surfaces
@@ -2181,7 +2217,7 @@ Physics and runtime integration:
   ranks. All material/geometry work stays in initialization; time integration,
   device-resident GPU fields and both MPI exchange backends receive the existing
   element metadata without new per-step messages or transfers. Station/source
-  depth conventions continue to reference the outer surface: a station on the
+  depth conventions continue to reference the outer surface (Z=0 in flat mode): a station on the
   example seabed has surface-relative depth 100 m. Medium labels, interface maps
   and output waveforms can change after remeshing.
 
@@ -2191,7 +2227,12 @@ is still loaded for interface/poroelastic setup on imported runs; it must match
 the mesh. The setup monitor reports the explicit reference, water properties
 and geometry tolerance.
 
-Local extracted C++ analytical checks cover parser rejection, elevation-only
+Flat-ocean extracted C++ checks cover initialization without a topography
+file, parser acceptance/rejection, grid dimensions, all three depth references,
+water/solid phase separation, sloping-bed normals, CPML sampling, porous depth
+and hydrostatic references, nonlinear overburden, surface mass assembly and
+refinement dispatch. No new CUDA/MPI propagation benchmark has been run for
+this mode. Existing local extracted C++ analytical checks cover parser rejection, elevation-only
 file validation, roundoff tolerance, distinct local water levels, dry negative
 terrain, FULL/SQD references, sloping beds and rotated material axes, CPML sampling, Q isolation,
 poroelastic depth/groundwater mapping, geostatic water load and legacy controls.

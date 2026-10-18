@@ -162,17 +162,25 @@ see [depth conventions and example](Extended%20README.md#3d-material-depths-with
 | `seabed_water_density_kg_m3` | Float (kg/m3); Required with seabed_geometry_file; finite > 0; no default | Conditional; Float (kg/m3) |
 
 The optional seabed file contains spacing followed by elevations only; one number per
-line is valid. Water depth and coverage come from topography minus bed
-(fixed `1e-8 m` tolerance). Omission retains Vs-based water classification.
+line is valid. Water depth and coverage come from the outer surface minus bed
+(fixed `1e-8 m` tolerance). With `include_topography=no`, the outer surface is
+flat at solver Z=0 and no topography file is loaded. Spacing must divide both
+horizontal domain lengths; bed elevations are negative below this zero datum.
+The domain must have zero CVM mesh offsets (normally `cvmdb_input_file=profile`).
+Topography refinement is skipped; wavelength/interface refinement and 2:1
+balancing remain. Omitting the seabed file retains Vs-based water classification.
 Set `3D_velocity_model_depth_reference` explicitly to `seabed`, `surface`,
-or `model_z` (default) `legacy` without the file; each explicit reference
-works with either `full` or `sqd`. Supply `seabed_water_vp_m_s` and
+or `model_z`; `legacy` (default) applies without the file. With topography on,
+each explicit reference works with either `full` or `sqd`. With it off,
+`surface` and `model_z` coincide, `seabed` remains bed-relative, and
+`type_of_etree` and other topography-only controls are unused. Supply `seabed_water_vp_m_s` and
 `seabed_water_density_kg_m3` (required, finite positive SI values). Requires
-topography, acoustics and solid-only 3-D profiles; buildings and other
-material-model overrides are unsupported. Dry negative elevations remain
-dry. Porous depth limits start at the bed; wet hydrostatic pressure and
-acoustic free surfaces use local topography. Separate flat water bodies may
-have different elevations. Regenerate meshes after changes. See
+acoustics and solid-only 3-D profiles; buildings and other
+material-model overrides are unsupported. With topography on, dry negative
+elevations remain dry and separate flat water bodies may have different elevations.
+Porous depth limits start at the bed; wet hydrostatic pressure and acoustic free
+surfaces use Z=0 with topography off, or local topography with it on.
+Regenerate meshes after changes. See
 [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 
 ### Source directories
@@ -308,7 +316,8 @@ interface face using mesh-face normals. The `default` alias also selects
 `all`. Explicit `bathymetry` uses reconstructed normals and area weights on
 Z+ bottom faces; `bottom_only` uses vertical normals on Z+ faces.
 See [interface geometry and aliases](Extended%20README.md#acoustic-and-elastic-coupling).
-With explicit seabed geometry, flat water surfaces follow local topography.
+With explicit seabed geometry, flat water surfaces follow local topography
+when enabled, or solver Z=0 when `include_topography=no`.
 Otherwise they follow `topographybase_zcoord` (or building `surface_shift_m`).
 Check the exact exposed-face count in the startup log.
 Coupled scalar updates wait for MPI displacement sharing and hanging-node
