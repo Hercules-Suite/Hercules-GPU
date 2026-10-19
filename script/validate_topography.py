@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """Check Hercules topography counts, spacing, base and perimeter relief (NumPy)."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/validate_topography.py inputfiles/topography/topography.in \
+#       --lx 40000 --ly 40000 --base 1250
+#   python3 script/validate_topography.py --help
+#
+# Required: input filename, --lx (north extent), --ly (east extent), and --base
+# (the run's topographybase_zcoord), all in metres. Relative paths use the
+# working directory. File format: positive uniform spacing followed by nodal
+# elevations, positive up, X outer/Y inner; spacing must divide both lengths.
+# Checks: finite values, exact point count, positive lengths/base/spacing, and
+# a base above the highest elevation. --base is a datum inside the domain;
+# it does not add depth to region_depth_deep_m.
+# Output: grid dimensions, elevation range, and perimeter elevation range.
+# No files are written; all elevations are loaded into memory.
+# Non-flat boundaries are reported, not rejected. A flat perimeter alone does
+# not prove the entire CPML collar is flat. This does not validate seabed
+# consistency, material coverage, or source clearance. See script/README.md.
+
 import argparse
 from pathlib import Path
 

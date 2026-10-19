@@ -8,6 +8,13 @@ the current working directory. Every top-level script accepts `--help`:
 python3 script/read_planes.py --help
 ```
 
+Every Python file in this directory, including the local-only helpers and test
+modules described below, has a `# USAGE` comment block near the top. It gives a
+copyable command, dependencies, input conventions, optional controls, outputs,
+overwrite behavior, and scope. Keep those comments aligned with this guide
+when changing a script. Test modules use the `unittest` commands shown in their
+headers; they do not use the utility-specific command-line options below.
+
 Use a Python 3 environment with the dependencies listed below. Most readers need
 NumPy (`python3 -m pip install numpy`). Animation rendering additionally needs a
 working PyGMT/GMT installation, xarray, and joblib; its `--check-only` mode needs
@@ -202,7 +209,10 @@ Select the generated directory with
 the changed geometry. Choose a reference appropriate to the case: `auto` can
 move a zero-elevation water surface if nearby land raises the ring average.
 Tapering this file does not modify the 3-D material water mask or seabed and
-does not increase source-to-boundary clearance. See the
+does not increase source-to-boundary clearance. When using a separate
+`seabed_geometry_file`, keep its elevations at or below the outer topography
+surface. Tapering both surfaces to zero removes the water column in that collar;
+retaining water requires a consistent submerged seabed target. See the
 [CPML/topography discussion](../doc/Extended%20README.md#cpml-execution-and-topography).
 
 ## Output inspection and rendering

@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """Read a rank's packed native-endian mesh coordinate/material files (NumPy)."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/read_mesh.py \
+#       outputfiles/mesh_coordinates.0 outputfiles/mesh_data.0
+#   python3 script/read_mesh.py --help
+#
+# Required: coordinate file then material file from the SAME run and MPI rank;
+# use their actual output directory. Relative paths use the working directory.
+# Packed native-endian formats: coordinates = int64 ID + float64 X/Y/Z (32
+# bytes per corner); materials = int64 ID + float32 Vs/Vp/rho (20 bytes/element).
+# There must be eight consecutive coordinate records per material record with
+# matching IDs. Coordinates are metres, X north/Y east/Z down; speeds m/s;
+# density kg/m^3 (unlike tonne/m^3 in material-input rho.in).
+# Output: element/corner counts and coordinate ranges. Both files are loaded
+# into memory; incomplete records, ID mismatches and nonfinite values fail.
+# No files are written. Finite sentinel material values are not rejected just
+# because they are negative. This is NOT a mesh.e/archive reader or plotter.
+# See script/README.md for the binary layouts.
+
 import argparse
 from pathlib import Path
 
