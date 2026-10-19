@@ -2247,6 +2247,7 @@ input.
 | Control | Requirement, default and meaning |
 | --- | --- |
 | `seabed_geometry_file` | Optional; omitted by default. Path relative to the solver working directory; grid format below. |
+| `seabed_above_surface_policy` | Optional; `error` (default) or `clip`, case-insensitive; requires `seabed_geometry_file` when supplied. |
 | `3D_velocity_model_depth_reference` | Default `legacy` without geometry. With geometry, explicitly choose `seabed`, `surface`, or `model_z`. |
 | `seabed_water_vp_m_s` | Required with geometry, finite positive water Vp in m/s; no default. |
 | `seabed_water_density_kg_m3` | Required with geometry, finite positive density in kg/m3; no default. Unlike `rho.in`, this is SI rather than tonne/m3. |
@@ -2279,9 +2280,44 @@ One number per line is supported, exactly as in `topography.in`; spaces and
 newlines are equivalent. The two elevation fields use bilinear interpolation
 and nearest-edge extension outside the domain. At each query, water occupies
 the gap between the surfaces when that gap exceeds the fixed `1e-8 m`
-tolerance. Bed elevations above topography by more than that tolerance abort
-setup; nodal differences within tolerance are snapped to the outer surface.
+tolerance. With `seabed_above_surface_policy=error` (default), bed elevations
+above topography by more than that tolerance abort setup. Nodal differences
+within tolerance are snapped to the outer surface under either policy.
 Dry queries also snap their bed reference to the outer surface.
+
+To handle bed/surface crossings explicitly inside Hercules, add:
+
+```ini
+seabed_above_surface_policy = clip
+```
+
+At geometry loading, rank zero replaces each above-surface bed elevation with
+`min(bed_elevation, outer_surface_elevation)`. The outer surface is topography
+when enabled and zero elevation otherwise. It reports the number of lowered
+nodes (including positive excesses within tolerance) and maximum lowering in
+metres, then broadcasts the corrected grid. Neither input file is rewritten;
+no clipping work is added to time stepping. A zero-depth column is dry. Valid
+bed values below the surface are preserved apart from existing `1e-8 m`
+tolerance snapping. Clipping does not relax the flat-water-surface requirement
+or validate the input grids' physical datum.
+
+All geometry consumers use this corrected grid: acoustic/solid interface
+classification, free-surface enrollment, porous ground and groundwater depths,
+and nonlinear geostatic water/solid overburden. The same material lookup serves
+elastic, viscoelastic and nonlinear solids; their constitutive laws and Q rules
+are unchanged. `model_z` retains fixed material layer coordinates, `surface`
+retains the outer-surface reference, and `seabed` follows the corrected bed.
+Wet/dry changes can therefore change loads and material assignment. Rebuild
+meshes and sources before using the policy; changing it does not repair an
+existing mesh archive or checkpoint.
+
+Local extracted-production checks compare clipping with manually corrected
+geometry in FULL/SQD and flat domains, test all three explicit depth references,
+and cover material/Q queries, hydrostatic and nonlinear geostatic initialization,
+porous eligibility and station stress. MPI transport is mocked in those checks;
+this option has not received a full CUDA/MPI propagation benchmark. Existing
+acoustic–elastic, acoustic–poroelastic and poroelastic–elastic coupling and
+VT/FEM restrictions continue to apply.
 
 With `include_topography=yes`, `topography.in` remains the **outer air/material surface**. It supplies the
 local water surface wherever the bed is lower, and dry ground where both

@@ -469,7 +469,7 @@ int topo_seabed_sample(double x, double y, double *bed_z) {
 
 /* Called after topo_init or flat-surface grid setup. Root alone reads; every
  * solver rank receives identical geometry before meshing and interface setup. */
-void topo_seabed_init(int32_t myID, const char *path) {
+void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
     theSeabedInfo = (double*)malloc(sizeof(double) * (size_t)ntp);
     if (theSeabedInfo == NULL) {
         fprintf(stderr, "Cannot allocate explicit seabed geometry\n");
@@ -495,17 +495,32 @@ void topo_seabed_init(int32_t myID, const char *path) {
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
+        int clipped_nodes = 0;
+        double maximum_lowering_m = 0.0;
         for (int n=0; n<ntp; ++n) {
             const double water_depth = theTopoInfo[n] - theSeabedInfo[n];
-            if (water_depth < -SEABED_HEIGHT_TOLERANCE_M) {
+            if (water_depth < -SEABED_HEIGHT_TOLERANCE_M && !clip_above_surface) {
                 fprintf(stderr, "Bed elevation exceeds outer surface at node %d "
                         "in %s (bed=%g, outer surface=%g m)\n",
                         n, path, theSeabedInfo[n], theTopoInfo[n]);
                 MPI_Abort(MPI_COMM_WORLD, ERROR);
                 exit(1);
             }
+            /* Clip elevations, not solver Z. Every consumer (material depth,
+             * interfaces, hydrostatic/geostatic setup and outputs) uses this
+             * one corrected grid. Keep tolerance snapping in both policies. */
+            if (clip_above_surface && water_depth < 0.0) {
+                ++clipped_nodes;
+                maximum_lowering_m = fmax(maximum_lowering_m, -water_depth);
+            }
             if (water_depth <= SEABED_HEIGHT_TOLERANCE_M)
                 theSeabedInfo[n] = theTopoInfo[n];
+        }
+        if (clip_above_surface) {
+            fprintf(stderr, "Seabed above-surface policy: clip; lowered %d / %d "
+                    "nodes to the outer surface; maximum lowering %.9g m. "
+                    "Coincident nodes are dry; input file unchanged: %s\n",
+                    clipped_nodes, ntp, maximum_lowering_m, path);
         }
         /* Existing acoustic free-surface operators use horizontal mesh faces.
          * Distinct flat water bodies may have different elevations, separated
@@ -537,7 +552,8 @@ void topo_seabed_init(int32_t myID, const char *path) {
  * Reuse the elevation-only reader with an implicit zero-height outer surface.
  * The seabed may slope; its elevations are negative below the flat surface. */
 void topo_seabed_init_flat(int32_t myID, const char *path,
-                          double length_north, double length_east) {
+                          double length_north, double length_east,
+                          int clip_above_surface) {
     int counts[2] = {0, 0};
     if (myID == 0) {
         FILE *fp = fopen(path, "r");
@@ -586,7 +602,7 @@ void topo_seabed_init_flat(int32_t myID, const char *path,
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
-    topo_seabed_init(myID, path);
+    topo_seabed_init(myID, path, clip_above_surface);
 }
 
 /* Signed tangent-normal offset: positive in air, zero on the surface,

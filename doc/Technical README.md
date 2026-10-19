@@ -157,6 +157,7 @@ see [depth conventions and example](Extended%20README.md#3d-material-depths-with
 | Variable | Options / accepted values | Requirement / units |
 | --- | --- | --- |
 | `seabed_geometry_file` | File path; omitted (default), retaining legacy Vs-based classification | Optional; File path |
+| `seabed_above_surface_policy` | `error` (default), `clip`; case-insensitive | Optional; requires `seabed_geometry_file` when supplied |
 | `3D_velocity_model_depth_reference` | `legacy` (default) without seabed geometry, `model_z`, `surface`, `seabed`; explicit non-legacy choice required with geometry | Conditional; String |
 | `seabed_water_vp_m_s` | Float (m/s); Required with seabed_geometry_file; finite > 0; no default | Conditional; Float (m/s) |
 | `seabed_water_density_kg_m3` | Float (kg/m3); Required with seabed_geometry_file; finite > 0; no default | Conditional; Float (kg/m3) |
@@ -180,7 +181,11 @@ material-model overrides are unsupported. With topography on, dry negative
 elevations remain dry and separate flat water bodies may have different elevations.
 Porous depth limits start at the bed; wet hydrostatic pressure and acoustic free
 surfaces use Z=0 with topography off, or local topography with it on.
-Regenerate meshes after changes. See
+`seabed_above_surface_policy=clip` lowers bed elevations above the outer surface
+to that surface in memory, reports the count and maximum lowering, and preserves
+the input file. Corrected nodes are dry; valid water and the flat-water-surface
+requirement remain. `error` (default) retains rejection beyond `1e-8 m`.
+Regenerate meshes and sources after changes. See
 [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 
 ### Source directories

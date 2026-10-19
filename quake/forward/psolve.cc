@@ -1064,6 +1064,7 @@ static struct Param_t {
   char theMeshDirMatlab[256];
   char the3DVelModelDir[256];
   char theSeabedGeometryFile[256];
+  int theSeabedClipAboveSurface; /* 0=error (default), 1=clip at setup */
   int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
   double theSeabedWaterVp, theSeabedWaterRho;
   char theTopoDir[256];
@@ -2672,6 +2673,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(Param.theMeshDirMatlab, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.the3DVelModelDir, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.theSeabedGeometryFile, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(&Param.theSeabedClipAboveSurface, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
@@ -4304,6 +4306,19 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   char depth_reference[64] = "legacy";
+  char seabed_policy[64] = "error";
+  char *seabed_policy_ptr = seabed_policy;
+  size_t seabed_policy_size = sizeof(seabed_policy);
+  const int has_seabed_policy = hu_config_get_string_opt(
+      fp, "seabed_above_surface_policy", &seabed_policy_ptr, &seabed_policy_size);
+  if (has_seabed_policy < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Cannot read seabed_above_surface_policy (error or clip)\n");
+  }
+  if (strcasecmp(seabed_policy, "error") == 0) Param.theSeabedClipAboveSurface = 0;
+  else if (strcasecmp(seabed_policy, "clip") == 0) Param.theSeabedClipAboveSurface = 1;
+  else solver_abort(__FUNCTION_NAME, NULL,
+                   "seabed_above_surface_policy must be error or clip\n");
   char *seabed_path = Param.theSeabedGeometryFile, *depth_reference_ptr = depth_reference;
   size_t seabed_path_size = sizeof(Param.theSeabedGeometryFile);
   size_t depth_reference_size = sizeof(depth_reference);
@@ -4336,9 +4351,11 @@ static int32_t parse_parameters(const char* numericalin) {
                    "Explicit seabed geometry requires finite positive "
                    "seabed_water_vp_m_s and seabed_water_density_kg_m3\n");
     }
-  } else if (Param.the3DDepthReference != 0 || has_water_vp || has_water_rho) {
+  } else if (Param.the3DDepthReference != 0 || has_water_vp || has_water_rho ||
+             has_seabed_policy == 1) {
     solver_abort(__FUNCTION_NAME, NULL,
-                 "Explicit depth reference and seabed water controls require seabed_geometry_file\n");
+                 "Explicit depth reference, seabed water controls and "
+                 "seabed_above_surface_policy require seabed_geometry_file\n");
   }
 
   parsetext(fp, "source_directory_output", 's', &Param.theSourceOutputDir);
@@ -30009,7 +30026,8 @@ int main(int argc, char** argv) {
   }
   if (Param.theSeabedGeometryFile[0] != '\0') {
     if (Param.includeTopography == YES) {
-      topo_seabed_init(Global.myID, Param.theSeabedGeometryFile);
+      topo_seabed_init(Global.myID, Param.theSeabedGeometryFile,
+                       Param.theSeabedClipAboveSurface);
     } else {
       /* Geometry uses solver axes and the existing flat-domain datum. CVM
        * subvolume offsets would require translating geometry and sources too. */
@@ -30021,7 +30039,8 @@ int main(int argc, char** argv) {
                      "the flat ocean surface is solver Z=0.\n");
       }
       topo_seabed_init_flat(Global.myID, Param.theSeabedGeometryFile,
-                            Param.theDomainX, Param.theDomainY);
+                            Param.theDomainX, Param.theDomainY,
+                            Param.theSeabedClipAboveSurface);
     }
     general3DVelocityModel_set_seabed(Param.the3DDepthReference,
                                     Param.theSeabedWaterVp,
