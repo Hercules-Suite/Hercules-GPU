@@ -235,13 +235,13 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `abc_type` | `dashpot` (default), `cpml` | Optional; String |
 | `cpml_thickness_m` | `0` (default), automatic thickness; positive physical width overrides `cpml_layers`; nonpositive values select automatic width | Optional; Float (m) |
 | `cpml_layers` | Integer; `10` (default); must be positive when thickness is automatic | Optional; Integer |
-| `cpml_reflection_target` | `0.1` (default); 0 < R < 1 | Optional; Float |
+| `cpml_reflection_target` | `0.001` (default); 0 < R < 1 | Optional; Float |
 | `cpml_poly_order` | `2` (default); 1 to 4 | Optional; Integer |
-| `cpml_kappa_max` | `10` (default); >= 1 | Optional; Float |
+| `cpml_kappa_max` | `1` (default); >= 1 | Optional; Float |
 | `cpml_alpha_max_hz` | Omitted or nonpositive number → `simulation_wave_max_freq_hz / 2` (default); positive number overrides; `auto` is not an input token | Optional; Float (Hz) |
 | `cpml_cfl_safety` | `0.9` (default); 0 < value <= 1 | Optional; Float |
 | `cpml_mpml_cross_fraction` | `0` (default); 0 to 0.5 | Optional; Float |
-| `cpml_acoustic_sponge_fraction` | `0.3` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
+| `cpml_acoustic_sponge_fraction` | `0` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
 | `cpml_alpha_floor_fraction` | `0.1` (default); 0 to 1 | Optional; Float |
 | `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float. CPML weighting applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
