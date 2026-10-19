@@ -2856,17 +2856,46 @@ results are specific to the recorded configuration and implementation.
 	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
 	Optional. Default `1.0`, which preserves the standard equal-leaf-count
-	octree partition. Values `> 1.0` make the partitioner count future
-	CPML elements as heavier work, so boundary-heavy ranks may receive
-	fewer total elements. This is a performance tuning knob only: it does
-	not refine/remesh the model, does not change `mesh.e`, and can be
-	changed for Phase B runs that import an existing mesh. Use it only when
-	the `CPML rank/load diagnostics` show that the same ranks have high
-	`pml_total` and high `core_wait`; otherwise leave it at `1.0`.
-	Moderate values (`1.25`-`1.5`) are the useful range seen so far.
-	Larger values can reduce CPML compute skew but also increase MPI /
-	patch imbalance, so they may slow the full run even when the PML
-	kernel load looks better.
+	octree partition. Values `> 1.0` count the CPML boundary band as heavier
+	work, so boundary-heavy solver ranks may receive fewer total elements.
+	**Ordinary partitions are always used during mesh construction**, including
+	progressive refinement, 2:1 balancing, building carving, and local acoustic
+	interface matching. Weighting is deferred until the completed mesh is
+	assigned to the solver ranks: after an in-memory unified handoff, on Phase B
+	mesh import, or by final re-extraction for a direct/equal-rank unified run.
+	Mesh-only runs stay equally partitioned. No extra input is required.
+	The startup log identifies the partition stage, solver-rank count, weight,
+	and realized thickness. Automatic weighting thickness uses the completed
+	mesh rather than a coarse intermediate mesh.
+
+	This changes ownership, not refinement rules or corrected material payloads.
+	Direct re-extraction retains the leaf records (including Q and geostatic
+	stress) and rebuilds rank-local acoustic/porous interface metadata before
+	physics initialization. Mesh archive layout can change with ownership;
+	its physical leaves and payloads should remain equivalent. Existing
+	poroelastic/nonlinear restrictions inside CPML remain in effect.
+
+	This is a work-balancing surrogate, **not a GPU-memory cap**. Compare the
+	`CPML rank/load diagnostics`, communication waits, and setup memory reports.
+	Moderate values (`1.25`–`1.5`) helped in earlier case-specific benchmarks;
+	larger weights can worsen MPI imbalance. Deferring weighting avoids
+	weighted intermediate partitions before subsequent balancing; it is not
+	a general repair or proof of absence of OCTOR anchor-search failures.
+
+	`GPU memory [stage]` reports maximum observed device use and minimum free
+	memory across solver ranks before CPML upload, after the main solver
+	allocation, and before the first timestep (after communication/source/physics
+	initialization). It identifies solver/world rank, node/device, element/node
+	counts, and elastic/acoustic PML counts. Before CPML upload it also reports
+	the largest planned maps/coefficient/ADE-history allocation, including gravity
+	surface state. This is a **subset** of required storage: ordinary solver,
+	interface, source, nonlinear/poroelastic, and MPI buffers are additional.
+	Device occupancy includes CUDA context and other processes; these snapshots
+	do not guarantee the later peak or account for every lazy allocation.
+	Failed `cudaMalloc` calls in the main solver setup print the requested bytes,
+	CUDA error, rank/device and available memory before existing fatal handling.
+	Allocations in other modules retain their own error handling. These checks
+	add no work or synchronization inside the timestep loop.
 - `cpml_3d_material_extension`
 	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
 	and `3D_velocity_model=yes`. When enabled, material queries made
