@@ -440,7 +440,7 @@ double point_elevation(double x, double y)
     return topo_surface_z(x, y, NULL);
 }
 
-static const double SEABED_HEIGHT_TOLERANCE_M = 1e-8;
+static double theSeabedHeightToleranceM = 0.01;
 
 int topo_seabed_enabled(void) { return theSeabedInfo != NULL; }
 
@@ -462,14 +462,23 @@ int topo_seabed_sample(double x, double y, double *bed_z) {
                      u*theSeabedInfo[(i+1)*np_ew+j+1];
     *bed_z = thebase_zcoord - ((1.0-v)*h0 + v*h1);
     const double surface_z = point_elevation(x, y);
-    if (*bed_z - surface_z > SEABED_HEIGHT_TOLERANCE_M) return 1;
+    if (*bed_z - surface_z > theSeabedHeightToleranceM) return 1;
     *bed_z = surface_z;
     return 0;
 }
 
 /* Called after topo_init or flat-surface grid setup. Root alone reads; every
  * solver rank receives identical geometry before meshing and interface setup. */
-void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
+void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface,
+                      double height_tolerance_m) {
+    if (!isfinite(height_tolerance_m) || height_tolerance_m < 0.0) {
+        fprintf(stderr, "seabed_height_tolerance_m must be finite and >= 0 (metres)\n");
+        MPI_Abort(MPI_COMM_WORLD, ERROR);
+        exit(1);
+    }
+    /* The parsed value is broadcast before initialization; every rank must
+     * use it in both setup checks and subsequent geometry/material queries. */
+    theSeabedHeightToleranceM = height_tolerance_m;
     theSeabedInfo = (double*)malloc(sizeof(double) * (size_t)ntp);
     if (theSeabedInfo == NULL) {
         fprintf(stderr, "Cannot allocate explicit seabed geometry\n");
@@ -495,11 +504,14 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
+        fprintf(stderr, "Seabed height tolerance: %.9g m; water depths <= "
+                "tolerance are dry; wet-cell surface range must be <= tolerance.\n",
+                theSeabedHeightToleranceM);
         int clipped_nodes = 0;
         double maximum_lowering_m = 0.0;
         for (int n=0; n<ntp; ++n) {
             const double water_depth = theTopoInfo[n] - theSeabedInfo[n];
-            if (water_depth < -SEABED_HEIGHT_TOLERANCE_M && !clip_above_surface) {
+            if (water_depth < -theSeabedHeightToleranceM && !clip_above_surface) {
                 fprintf(stderr, "Bed elevation exceeds outer surface at node %d "
                         "in %s (bed=%g, outer surface=%g m)\n",
                         n, path, theSeabedInfo[n], theTopoInfo[n]);
@@ -513,7 +525,7 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
                 ++clipped_nodes;
                 maximum_lowering_m = fmax(maximum_lowering_m, -water_depth);
             }
-            if (water_depth <= SEABED_HEIGHT_TOLERANCE_M)
+            if (water_depth <= theSeabedHeightToleranceM)
                 theSeabedInfo[n] = theTopoInfo[n];
         }
         if (clip_above_surface) {
@@ -532,13 +544,15 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
                 const int n = (i+di)*np_ew+j+dj;
                 lo = fmin(lo, theTopoInfo[n]);
                 hi = fmax(hi, theTopoInfo[n]);
-                wet |= theTopoInfo[n] - theSeabedInfo[n] > SEABED_HEIGHT_TOLERANCE_M;
+                wet |= theTopoInfo[n] - theSeabedInfo[n] > theSeabedHeightToleranceM;
             }
-            if (wet && (hi-lo > SEABED_HEIGHT_TOLERANCE_M ||
+            if (wet && (hi-lo > theSeabedHeightToleranceM ||
                         (thebase_zcoord > 0.0 && hi >= thebase_zcoord))) {
                 fprintf(stderr, "Wet geometry cell (%d,%d) requires a flat "
                         "outer surface below topographybase_zcoord; sloping "
-                        "acoustic free surfaces are unsupported\n", i, j);
+                        "acoustic free surfaces are unsupported "
+                        "(surface range %.9g m, height tolerance %.9g m)\n",
+                        i, j, hi-lo, theSeabedHeightToleranceM);
                 MPI_Abort(MPI_COMM_WORLD, ERROR);
                 exit(1);
             }
@@ -553,7 +567,7 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface) {
  * The seabed may slope; its elevations are negative below the flat surface. */
 void topo_seabed_init_flat(int32_t myID, const char *path,
                           double length_north, double length_east,
-                          int clip_above_surface) {
+                          int clip_above_surface, double height_tolerance_m) {
     int counts[2] = {0, 0};
     if (myID == 0) {
         FILE *fp = fopen(path, "r");
@@ -602,7 +616,7 @@ void topo_seabed_init_flat(int32_t myID, const char *path,
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
-    topo_seabed_init(myID, path, clip_above_surface);
+    topo_seabed_init(myID, path, clip_above_surface, height_tolerance_m);
 }
 
 /* Signed tangent-normal offset: positive in air, zero on the surface,

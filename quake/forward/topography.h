@@ -122,12 +122,15 @@ double point_elevation          ( double xo, double yo );
 
 /* Optional ground/bed grid; all coordinates are solver metres. Water exists
  * where the outer surface (flat Z=0 with topography off) is more than
- * 1e-8 m above the bed. clip_above_surface enables root-side correction of
- * bed elevations above the outer surface before validation and broadcast. */
-void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface);
+ * height_tolerance_m above the bed (input default 0.01 m, finite >= 0).
+ * The same tolerance controls nodal snapping and wet-cell surface flatness.
+ * clip_above_surface enables root-side correction of bed elevations above
+ * the outer surface before validation and broadcast. */
+void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface,
+                      double height_tolerance_m);
 void topo_seabed_init_flat(int32_t myID, const char *path,
                           double length_north, double length_east,
-                          int clip_above_surface);
+                          int clip_above_surface, double height_tolerance_m);
 int topo_seabed_enabled(void);
 int topo_seabed_sample(double x, double y, double *bed_z);
 int    topo_nodesearch          ( tick_t x, tick_t y, tick_t z, double ticksize );

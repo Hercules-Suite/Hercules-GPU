@@ -157,6 +157,7 @@ see [depth conventions and example](Extended%20README.md#3d-material-depths-with
 | Variable | Options / accepted values | Requirement / units |
 | --- | --- | --- |
 | `seabed_geometry_file` | File path; omitted (default), retaining legacy Vs-based classification | Optional; File path |
+| `seabed_height_tolerance_m` | `0.01` (default); finite >= 0; `0` means exact comparisons | Optional; metres; requires `seabed_geometry_file` when supplied |
 | `seabed_above_surface_policy` | `error` (default), `clip`; case-insensitive | Optional; requires `seabed_geometry_file` when supplied |
 | `3D_velocity_model_depth_reference` | `legacy` (default) without seabed geometry, `model_z`, `surface`, `seabed`; explicit non-legacy choice required with geometry | Conditional; String |
 | `seabed_water_vp_m_s` | Float (m/s); Required with seabed_geometry_file; finite > 0; no default | Conditional; Float (m/s) |
@@ -164,7 +165,7 @@ see [depth conventions and example](Extended%20README.md#3d-material-depths-with
 
 The optional seabed file contains spacing followed by elevations only; one number per
 line is valid. Water depth and coverage come from the outer surface minus bed
-(fixed `1e-8 m` tolerance). With `include_topography=no`, the outer surface is
+(`seabed_height_tolerance_m`, `0.01` m (default)). With `include_topography=no`, the outer surface is
 flat at solver Z=0 and no topography file is loaded. Spacing must divide both
 horizontal domain lengths; bed elevations are negative below this zero datum.
 The domain must have zero CVM mesh offsets (normally `cvmdb_input_file=profile`).
@@ -184,7 +185,11 @@ surfaces use Z=0 with topography off, or local topography with it on.
 `seabed_above_surface_policy=clip` lowers bed elevations above the outer surface
 to that surface in memory, reports the count and maximum lowering, and preserves
 the input file. Corrected nodes are dry; valid water and the flat-water-surface
-requirement remain. `error` (default) retains rejection beyond `1e-8 m`.
+requirement remain. `error` (default) rejects crossings beyond the configured tolerance.
+The same tolerance defines dry gaps, nodal snapping and the maximum corner-height
+range in wet cells; it does not flatten the surface or change mesh-face alignment
+checks. Use `1e-8` to restore the former tolerance. Larger tolerances can remove
+real shallow water and change geometry-relative depths and loads.
 Regenerate meshes and sources after changes. See
 [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 
