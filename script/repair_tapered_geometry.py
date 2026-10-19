@@ -98,20 +98,157 @@ class Grid:
         return self.digest.hexdigest()
 
 
-def validate_cells(previous, current, row, label, base):
-    wet_count = 0
+def cell_counts(previous, current, base):
+    """Return wet/invalid cell counts and the first invalid cell's details."""
+    wet_count, invalid_count, first = 0, 0, None
     if previous is None:
-        return wet_count
+        return wet_count, invalid_count, first
     for j in range(len(current)-1):
         nodes = (previous[j], previous[j+1], current[j], current[j+1])
         if any(surface-bed > TOL for surface, bed in nodes):
             wet_count += 1
             low = min(surface for surface, bed in nodes)
             high = max(surface for surface, bed in nodes)
-            if high-low > TOL or (base > 0 and high >= base):
-                raise ValueError('%s: invalid wet cell (%d,%d), surface range %g..%g m'
-                                 % (label, row-1, j, low, high))
+            if high-low > TOL or (base is not None and base > 0 and high >= base):
+                invalid_count += 1
+                if first is None:
+                    first = (j, low, high)
+    return wet_count, invalid_count, first
+
+
+def validate_cells(previous, current, row, label, base):
+    wet_count, invalid_count, first = cell_counts(previous, current, base)
+    if invalid_count:
+        j, low, high = first
+        raise ValueError('%s: invalid wet cell (%d,%d), surface range %g..%g m'
+                         % (label, row-1, j, low, high))
     return wet_count
+
+
+def copy_verified(source, destination, expected_hash):
+    digest = hashlib.sha256()
+    with Path(source).open('rb') as src, Path(destination).open('wb') as dst:
+        for block in iter(lambda: src.read(1024*1024), b''):
+            dst.write(block)
+            digest.update(block)
+    if digest.hexdigest() != expected_hash:
+        raise ValueError('Input changed during repair: ' + str(source))
+
+
+def repair_geometry(original_surface, original_bed, tapered_surface, out_dir,
+                    lx, ly, topography_base, *, only_if_needed=False):
+    """Validate and prepare a pair; taper may omit the absolute-datum check.
+
+    With only_if_needed, retain the original bed bytes if the candidate pair
+    already preserves the original classes and satisfies geometry checks.
+    This entry point lets taper_topography share the standalone repair rules.
+    """
+    dimensions = [lx, ly] + ([] if topography_base is None else [topography_base])
+    if not all(math.isfinite(v) for v in dimensions):
+        raise ValueError('Domain dimensions and base must be finite')
+    if min(lx, ly) <= 0 or (topography_base is not None and topography_base < 0):
+        raise ValueError('Domain dimensions must be positive; base must be nonnegative')
+    out = Path(out_dir)
+    if out.exists() or out.is_symlink():
+        raise ValueError('Output already exists; choose a new directory: '+str(out))
+    if not out.parent.is_dir():
+        raise ValueError('Output parent directory does not exist: '+str(out.parent))
+    old_surface, old_bed = Grid(original_surface), Grid(original_bed)
+    new_surface = Grid(tapered_surface)
+    spacing = old_surface.spacing
+    if any(abs(g.spacing-spacing) > 1e-10*max(1, spacing)
+           for g in (old_bed, new_surface)):
+        raise ValueError('Grid spacing mismatch')
+    counts = [round(lx/spacing), round(ly/spacing)]
+    if min(counts) < 1 or any(abs(count-value/spacing) > 1e-9
+                            for count, value in zip(counts, (lx, ly))):
+        raise ValueError('Grid spacing must divide both domain dimensions')
+    nx, ny = [v+1 for v in counts]
+    summary = {'grid': [nx, ny], 'spacing_m': spacing, 'original_wet_nodes': 0,
+               'original_dry_nodes': 0, 'changed_dry_bed_nodes': 0,
+               'preserved_wet_bed_nodes': 0, 'maximum_dry_bed_adjustment_m': 0.0,
+               'original_wet_cells': 0, 'output_wet_cells': 0}
+    with tempfile.TemporaryDirectory(prefix='.repair-geometry-', dir=out.parent) as tmp:
+        tmp = Path(tmp)
+        previous_old = previous_new = previous_candidate = None
+        candidate_crossings = candidate_class_changes = candidate_bad_cells = 0
+        candidate_wet_cells = 0
+        with (tmp/'seabed.in').open('x') as sink:
+            sink.write(format(spacing, '.17g')+'\n')
+            for i in range(nx):
+                row_old, row_new, row_candidate = [], [], []
+                for j in range(ny):
+                    s0, _ = old_surface.take()
+                    b0, bed_token = old_bed.take()
+                    s, surface_token = new_surface.take()
+                    if b0-s0 > TOL:
+                        raise ValueError('Original bed is above surface at (%d,%d)' % (i,j))
+                    wet = s0-b0 > TOL
+                    if only_if_needed:
+                        candidate_crossings += b0-s > TOL
+                        candidate_class_changes += (s-b0 > TOL) != wet
+                        row_candidate.append((s, b0))
+                    if wet:
+                        if abs(s-s0) > TOL or s-b0 <= TOL:
+                            raise ValueError('Taper changes original water at (%d,%d)' % (i,j))
+                        bed = b0
+                        token = bed_token
+                        summary['original_wet_nodes'] += 1
+                        summary['preserved_wet_bed_nodes'] += 1
+                    else:
+                        bed = s
+                        token = surface_token
+                        summary['original_dry_nodes'] += 1
+                        summary['changed_dry_bed_nodes'] += bed != b0
+                        summary['maximum_dry_bed_adjustment_m'] = max(
+                            summary['maximum_dry_bed_adjustment_m'], abs(bed-b0))
+                    sink.write(token+'\n')
+                    row_old.append((s0, b0))
+                    row_new.append((s, bed))
+                summary['original_wet_cells'] += validate_cells(
+                    previous_old, row_old, i, 'Original', topography_base)
+                summary['output_wet_cells'] += validate_cells(
+                    previous_new, row_new, i, 'Corrected', topography_base)
+                if only_if_needed:
+                    wet_cells, bad_cells, _ = cell_counts(
+                        previous_candidate, row_candidate, topography_base)
+                    candidate_wet_cells += wet_cells
+                    candidate_bad_cells += bad_cells
+                    previous_candidate = row_candidate
+                previous_old, previous_new = row_old, row_new
+        summary['input_sha256'] = {str(g.path): g.finish()
+                                   for g in (old_surface, old_bed, new_surface)}
+        # Copy after validation and check that no concurrent edit changed the
+        # surface used to select exact dry tokens.
+        surface_hash = summary['input_sha256'][str(new_surface.path)]
+        copy_verified(new_surface.path, tmp/'topography.in', surface_hash)
+        summary['output_sha256'] = {'topography.in': surface_hash}
+        if only_if_needed:
+            needs_repair = bool(candidate_crossings or candidate_class_changes or candidate_bad_cells)
+            summary['candidate_bed_above_surface_nodes'] = candidate_crossings
+            summary['candidate_changed_wet_dry_nodes'] = candidate_class_changes
+            summary['candidate_invalid_wet_cells'] = candidate_bad_cells
+            summary['status'] = 'repaired' if needs_repair else 'valid'
+            summary['validation_tolerance_m'] = TOL
+            summary['topography_base_m'] = topography_base
+            if not needs_repair:
+                copy_verified(old_bed.path, tmp/'seabed.in', summary['input_sha256'][str(old_bed.path)])
+                summary['changed_dry_bed_nodes'] = 0
+                summary['maximum_dry_bed_adjustment_m'] = 0.0
+                summary['output_wet_cells'] = candidate_wet_cells
+        bed_hash = hashlib.sha256()
+        with (tmp/'seabed.in').open('rb') as source:
+            for block in iter(lambda: source.read(1024*1024), b''):
+                bed_hash.update(block)
+        summary['output_sha256']['seabed.in'] = bed_hash.hexdigest()
+        summary['invalid_wet_cells'] = 0
+        summary['wet_bed_values_changed'] = 0
+        (tmp/'repair-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+        # mkdir is exclusive, so even a concurrent output creator is protected.
+        out.mkdir()
+        for name in ('topography.in', 'seabed.in', 'repair-summary.json'):
+            shutil.move(str(tmp/name), str(out/name))
+    return summary
 
 
 def main():
@@ -131,91 +268,11 @@ def main():
     ):
         parser.add_argument('--'+name, type=float, required=True, help=help_text)
     args = parser.parse_args()
-    if not all(math.isfinite(v) for v in (args.lx, args.ly, args.topography_base)):
-        parser.error('Domain dimensions and base must be finite')
-    if min(args.lx, args.ly) <= 0 or args.topography_base < 0:
-        parser.error('Domain dimensions must be positive; base must be nonnegative')
-    out = args.out_dir
-    if out.exists() or out.is_symlink():
-        parser.error('Output already exists; choose a new directory: '+str(out))
-    if not out.parent.is_dir():
-        parser.error('Output parent directory does not exist: '+str(out.parent))
-    old_surface, old_bed = Grid(args.original_surface), Grid(args.original_bed)
-    new_surface = Grid(args.tapered_surface)
-    spacing = old_surface.spacing
-    if any(abs(g.spacing-spacing) > 1e-10*max(1, spacing)
-           for g in (old_bed, new_surface)):
-        raise ValueError('Grid spacing mismatch')
-    counts = [round(args.lx/spacing), round(args.ly/spacing)]
-    if min(counts) < 1 or any(abs(count-value/spacing) > 1e-9
-                            for count, value in zip(counts, (args.lx, args.ly))):
-        raise ValueError('Grid spacing must divide both domain dimensions')
-    nx, ny = [v+1 for v in counts]
-    summary = {'grid': [nx, ny], 'spacing_m': spacing, 'original_wet_nodes': 0,
-               'original_dry_nodes': 0, 'changed_dry_bed_nodes': 0,
-               'preserved_wet_bed_nodes': 0, 'maximum_dry_bed_adjustment_m': 0.0,
-               'original_wet_cells': 0, 'output_wet_cells': 0}
-    with tempfile.TemporaryDirectory(prefix='.repair-geometry-', dir=out.parent) as tmp:
-        tmp = Path(tmp)
-        previous_old = previous_new = None
-        with (tmp/'seabed.in').open('x') as sink:
-            sink.write(format(spacing, '.17g')+'\n')
-            for i in range(nx):
-                row_old, row_new = [], []
-                for j in range(ny):
-                    s0, _ = old_surface.take()
-                    b0, bed_token = old_bed.take()
-                    s, surface_token = new_surface.take()
-                    if b0-s0 > TOL:
-                        raise ValueError('Original bed is above surface at (%d,%d)' % (i,j))
-                    wet = s0-b0 > TOL
-                    if wet:
-                        if abs(s-s0) > TOL or s-b0 <= TOL:
-                            raise ValueError('Taper changes original water at (%d,%d)' % (i,j))
-                        bed = b0
-                        token = bed_token
-                        summary['original_wet_nodes'] += 1
-                        summary['preserved_wet_bed_nodes'] += 1
-                    else:
-                        bed = s
-                        token = surface_token
-                        summary['original_dry_nodes'] += 1
-                        summary['changed_dry_bed_nodes'] += bed != b0
-                        summary['maximum_dry_bed_adjustment_m'] = max(
-                            summary['maximum_dry_bed_adjustment_m'], abs(bed-b0))
-                    sink.write(token+'\n')
-                    row_old.append((s0, b0))
-                    row_new.append((s, bed))
-                summary['original_wet_cells'] += validate_cells(
-                    previous_old, row_old, i, 'Original', args.topography_base)
-                summary['output_wet_cells'] += validate_cells(
-                    previous_new, row_new, i, 'Corrected', args.topography_base)
-                previous_old, previous_new = row_old, row_new
-        summary['input_sha256'] = {str(g.path): g.finish()
-                                   for g in (old_surface, old_bed, new_surface)}
-        # Copy after validation and check that no concurrent edit changed the
-        # surface used to select exact dry tokens.
-        copied_hash = hashlib.sha256()
-        with args.tapered_surface.open('rb') as source, (tmp/'topography.in').open('xb') as sink:
-            for block in iter(lambda: source.read(1024*1024), b''):
-                sink.write(block); copied_hash.update(block)
-        if copied_hash.hexdigest() != summary['input_sha256'][str(args.tapered_surface)]:
-            raise ValueError('Tapered surface changed during repair')
-        summary['output_sha256'] = {'topography.in': copied_hash.hexdigest()}
-        bed_hash = hashlib.sha256()
-        with (tmp/'seabed.in').open('rb') as source:
-            for block in iter(lambda: source.read(1024*1024), b''):
-                bed_hash.update(block)
-        summary['output_sha256']['seabed.in'] = bed_hash.hexdigest()
-        summary['invalid_wet_cells'] = 0
-        summary['wet_bed_values_changed'] = 0
-        (tmp/'repair-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-        # mkdir is exclusive, so even a concurrent output creator is protected.
-        out.mkdir()
-        for name in ('topography.in', 'seabed.in', 'repair-summary.json'):
-            shutil.move(str(tmp/name), str(out/name))
+    summary = repair_geometry(args.original_surface, args.original_bed,
+                              args.tapered_surface, args.out_dir,
+                              args.lx, args.ly, args.topography_base)
     print(json.dumps(summary, indent=2))
-    print('Wrote validated pair to '+str(out.resolve()))
+    print('Wrote validated pair to '+str(args.out_dir.resolve()))
 
 
 if __name__ == '__main__':

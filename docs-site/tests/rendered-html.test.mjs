@@ -2095,6 +2095,11 @@ test("documents paired topography and seabed repair", async () => {
   assert.match(section, /repair-summary\.json/);
   assert.match(section, /byte-for-byte/);
   assert.match(section, /regenerate meshes and mesh-dependent sources/);
+  assert.match(section, /script\/taper_topography\.py checks the tapered candidate automatically/);
+  assert.match(section, /Status is valid or repaired/);
+  assert.match(section, /--no-seabed disables it/);
+  assert.match(section, /skips only that check/);
+  assert.match(section, /Both scripts must remain together/);
   const root = fileURLToPath(new URL("../../", import.meta.url));
   assert.ok(existsSync(join(root, "script", "repair_tapered_geometry.py")));
   assert.match(readFileSync(join(root, "script", "README.md"), "utf8"), /### repair_tapered_geometry\.py/);
