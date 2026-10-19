@@ -49,6 +49,16 @@ INNER loop y (west->east). The solver uses flat_index = x_index * ny + y_index.
 DEFAULTS (40 km x 40 km benchmark domain; surface mesh ~78 m, PML ~10
 layers ~ 780 m): buffer 6000 m, flat_margin 1500 m (>= the ~780 m PML
 band, with margin), z_ref 0.0.  Tune to your domain / PML thickness.
+
+SEABED PAIRS
+------------
+If seabed.in exists beside the input surface (or --seabed supplies a file),
+check the tapered pair with the original wet/dry nodes before publishing.
+Keep an already valid bed byte-for-byte; otherwise repair originally dry beds
+to the new surface, retaining wet beds. Invalid original geometry, changed
+water levels and invalid repaired wet cells stop the command without publishing.
+Both outputs and repair-summary.json go beside --out. Keep original inputs in
+a separate directory. --no-seabed explicitly requests surface-only operation.
 """
 
 # USAGE (Python 3 standard library; run this example from the repository root)
@@ -72,19 +82,80 @@ band, with margin), z_ref 0.0.  Tune to your domain / PML thickness.
 # and ordering are preserved; all output elevations round to four decimals,
 # including interior values. Whole grids are held in memory.
 # Create the output parent first. Existing output/in-place writes are refused
-# unless --force is supplied. Relative paths use the working directory.
+# unless --force is supplied. Paired outputs must never replace either input,
+# even with --force. Output symlinks are refused. Relative paths use the cwd.
 # Reports: grid size, taper settings, affected point count, maximum change,
 # and perimeter flatness. These are geometry checks, not a stability proof.
-# Set topography_directory to the new folder and rebuild the mesh when adopting
-# it. This script does NOT update seabed_geometry_file or material/source files.
-# Keep paired topography/bed elevations consistent: bed above the outer surface
-# is invalid. Tapering both to zero removes water in the flat collar; preserving
-# water requires a consistent submerged bed target. See script/README.md.
+# Auto-detect infile's sibling seabed.in, or use --seabed PATH. --no-seabed skips
+# detection/check/repair. Paired mode requires repair_tapered_geometry.py beside
+# this script (both ship in script/). It uses that helper's fixed 1e-8 m checks,
+# independent of parameters.in. --topography-base optionally supplies the run's
+# nonnegative datum for the absolute top-plane check; omitted means skip that
+# check. Wet/dry, crossing and wet-cell flatness checks still run.
+# Paired output: --out, sibling seabed.in, repair-summary.json (valid/repaired,
+# counts, maximum adjustment and hashes). Originally wet beds retain precision;
+# dry beds follow the tapered surface when repair is needed. Changed water
+# levels, malformed originals or invalid repaired cells stop before publishing.
+# Set BOTH topography_directory and seabed_geometry_file to the output pair;
+# rebuild meshes/sources and review placements. No parameters.in or material/
+# source inputs are edited. Validation is geometric, not a propagation test.
 
 import argparse
+import hashlib
+import json
 import math
 import os
+from pathlib import Path
+import shutil
 import sys
+import tempfile
+
+
+def same_path(first, second):
+    first, second = Path(first), Path(second)
+    return first.resolve() == second.resolve() or (
+        first.exists() and second.exists() and os.path.samefile(first, second))
+
+
+def check_outputs(paths, force, protected=()):
+    for i, path in enumerate(paths):
+        if not path.parent.is_dir():
+            raise ValueError('Output parent directory does not exist: ' + str(path.parent))
+        if any(same_path(path, other) for other in paths[:i]):
+            raise ValueError('Output filenames must be distinct: ' + str(path))
+        if any(same_path(path, source) for source in protected):
+            raise ValueError('Paired output would replace an input: %s; '
+                             'choose --out in a separate directory, even with --force' % path)
+        if path.is_symlink() or path.is_dir():
+            raise ValueError('Output cannot be a symlink or directory: ' + str(path))
+        if path.exists() and not force:
+            raise ValueError('Output already exists: %s (pass --force to replace outputs)' % path)
+
+
+def publish_outputs(staged, destinations, force, protected=()):
+    """Publish only validated files; roll back ordinary I/O failures."""
+    check_outputs(destinations, force, protected)
+    with tempfile.TemporaryDirectory(prefix='.taper-backup-', dir=destinations[0].parent) as tmp:
+        backups, published = {}, []
+        try:
+            for i, (source, destination) in enumerate(zip(staged, destinations)):
+                if force:
+                    if destination.exists():
+                        backup = Path(tmp)/str(i)
+                        shutil.copy2(destination, backup)
+                        backups[destination] = backup
+                    os.replace(source, destination)
+                else:
+                    # Exclusive creation: do not overwrite a path created since preflight.
+                    os.link(source, destination)
+                published.append(destination)
+        except OSError:
+            for destination in reversed(published):
+                if destination in backups:
+                    os.replace(backups[destination], destination)
+                else:
+                    destination.unlink()
+            raise
 
 
 def edge_factor(x, y, lx, ly, buffer_w, flat_margin):
@@ -109,7 +180,16 @@ def main():
                     help="output file (must differ from infile unless "
                          "--force)")
     ap.add_argument("--force", action="store_true",
-                    help="allow overwriting infile / an existing --out")
+                    help="replace existing outputs; in-place input replacement "
+                         "is allowed only without seabed handling")
+    bed_options = ap.add_mutually_exclusive_group()
+    bed_options.add_argument("--seabed", type=Path,
+                             help="original bed file; otherwise auto-detect seabed.in beside infile")
+    bed_options.add_argument("--no-seabed", action="store_true",
+                             help="explicitly disable seabed detection, checking and repair")
+    ap.add_argument("--topography-base", type=float,
+                    help="optional topographybase_zcoord (m, nonnegative); "
+                         "with seabed, check wet surfaces against this datum when positive")
     ap.add_argument("--lx", type=float, default=40000.0,
                     help="domain length S-N (x), m")
     ap.add_argument("--ly", type=float, default=40000.0,
@@ -138,12 +218,23 @@ def main():
 
     if not os.path.isfile(a.infile):
         sys.exit("error: input file not found: %s" % a.infile)
-    if os.path.abspath(a.out) == os.path.abspath(a.infile) and not a.force:
-        sys.exit("error: --out equals infile; pass --force to overwrite "
-                 "in place (or choose a different --out)")
-    if os.path.exists(a.out) and os.path.abspath(a.out) != os.path.abspath(
-            a.infile) and not a.force:
-        sys.exit("error: --out already exists: %s (pass --force)" % a.out)
+    if a.topography_base is not None and (
+            not math.isfinite(a.topography_base) or a.topography_base < 0):
+        ap.error('--topography-base must be finite and nonnegative')
+    bed = None
+    if not a.no_seabed:
+        candidate = a.seabed if a.seabed is not None else Path(a.infile).parent/'seabed.in'
+        if a.seabed is not None or candidate.exists() or candidate.is_symlink():
+            if not candidate.is_file():
+                ap.error('Seabed input is not a readable file: ' + str(candidate))
+            bed = candidate
+    destination = Path(a.out)
+    destinations = [destination]
+    protected = []
+    if bed is not None:
+        destinations += [destination.parent/'seabed.in', destination.parent/'repair-summary.json']
+        protected = [Path(a.infile), bed]
+    check_outputs(destinations, a.force, protected)
 
     if a.flat_margin <= 0 or a.buffer <= a.flat_margin:
         sys.exit("error: need 0 < flat-margin < buffer (got flat-margin="
@@ -159,8 +250,11 @@ def main():
               "margin) so the PML sees only flat topography."
               % (a.flat_margin, a.pml_thickness), file=sys.stderr)
 
-    with open(a.infile) as f:
-        values = [float(value) for value in f.read().split()]
+    with open(a.infile, 'rb') as f:
+        raw = f.read()
+    surface_hash = hashlib.sha256(raw).hexdigest()
+    values = [float(value) for value in raw.split()]
+    del raw
     if len(values) < 2 or not all(math.isfinite(value) for value in values):
         sys.exit("error: need spacing and finite elevation values")
     spacing, z = values[0], values[1:]
@@ -211,10 +305,35 @@ def main():
         if i == 0 or i == nx - 1 or j == 0 or j == ny - 1:
             max_perim = max(max_perim, abs(zo - z_ref))
 
-    with open(a.out, "w") as f:
-        f.write("%g\n" % spacing)
-        for zo in out:
-            f.write("%.4f\n" % zo)
+    summary = None
+    with tempfile.TemporaryDirectory(prefix='.taper-geometry-', dir=destination.parent) as tmp:
+        tmp = Path(tmp)
+        staged_surface = tmp/'topography.in'
+        with staged_surface.open('w') as f:
+            f.write("%g\n" % spacing)
+            for zo in out:
+                f.write("%.4f\n" % zo)
+        staged = [staged_surface]
+        if bed is not None:
+            # Import only for paired geometry: surface-only use remains standalone.
+            try:
+                from repair_tapered_geometry import repair_geometry
+            except ImportError as error:
+                raise ValueError('Paired mode requires repair_tapered_geometry.py beside '
+                                 'taper_topography.py; copy both utilities from script/') from error
+            print('Seabed detected: %s; checking the tapered pair before publishing.' % bed,
+                  flush=True)
+            pair = tmp/'pair'
+            summary = repair_geometry(Path(a.infile), bed, staged_surface, pair,
+                                      a.lx, a.ly, a.topography_base, only_if_needed=True)
+            if summary['input_sha256'][str(Path(a.infile))] != surface_hash:
+                raise ValueError('Original surface changed during tapering')
+            summary['tapered_surface_sha256'] = summary['input_sha256'].pop(str(staged_surface))
+            summary['output_files'] = {name: str(path.resolve()) for name, path in zip(
+                ('topography.in', 'seabed.in', 'repair-summary.json'), destinations)}
+            (pair/'repair-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+            staged = [pair/name for name in ('topography.in', 'seabed.in', 'repair-summary.json')]
+        publish_outputs(staged, destinations, a.force, protected)
 
     ramp = a.buffer - a.flat_margin
     print("wrote %s: spacing=%g m, grid %d x %d = %d points (+1 spacing "
@@ -229,7 +348,25 @@ def main():
     print("The outer %g m (>= PML band) is now EXACTLY flat; the PML / "
           "flatten-PML re-route sees no relief -> no artificial cliff."
           % a.flat_margin)
+    if summary is not None:
+        if summary['status'] == 'valid':
+            print('Seabed check: valid; original bed copied byte-for-byte.')
+        else:
+            print('Seabed check: repaired %d dry bed nodes; maximum adjustment %.9g m; '
+                  'all %d original wet bed values retained.' % (
+                      summary['changed_dry_bed_nodes'], summary['maximum_dry_bed_adjustment_m'],
+                      summary['preserved_wet_bed_nodes']))
+        print('Paired outputs: %s and %s; summary: %s' % tuple(destinations))
+        if a.topography_base is None:
+            print('Absolute top-plane check skipped; supply --topography-base for this check.')
+    elif a.no_seabed:
+        print('Seabed handling explicitly disabled (--no-seabed); surface output only.')
+    else:
+        print('No sibling seabed.in found; surface output only.')
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError) as error:
+        sys.exit('error: ' + str(error))

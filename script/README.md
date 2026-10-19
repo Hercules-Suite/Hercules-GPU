@@ -37,7 +37,8 @@ partial files or fewer complete snapshots than expected.
 | [validate_3d_velocity_model.py](#validate_3d_velocity_modelpy) | Check material counts, profiles, ranges, and Q files | NumPy |
 | [generate_topography.py](#generate_topographypy) | Generate a Gaussian hill | NumPy |
 | [validate_topography.py](#validate_topographypy) | Check topography spacing, elevations, datum, and perimeter | NumPy |
-| [taper_topography.py](#taper_topographypy) | Make a flat collar before lateral CPML | Python standard library |
+| [taper_topography.py](#taper_topographypy) | Make a flat collar and automatically check/repair a sibling seabed | Python standard library |
+| [repair_tapered_geometry.py](#repair_tapered_geometrypy) | Pair a tapered surface with seabed while preserving original wet/dry nodes | Python standard library |
 | [read_stations.py](#read_stationspy) | Summarize an ASCII station history | NumPy |
 | [read_planes.py](#read_planespy) | Inspect a binary displacement plane | NumPy |
 | [read_mesh.py](#read_meshpy) | Inspect paired mesh coordinate/material files | NumPy |
@@ -174,7 +175,7 @@ mkdir -p inputfiles/topography_pml
 python3 script/taper_topography.py inputfiles/topography/topography.in \
   --out inputfiles/topography_pml/topography.in \
   --lx 40000 --ly 40000 --buffer 6000 --flat-margin 1500 \
-  --pml-thickness 780 --z-ref 0
+  --pml-thickness 780 --z-ref 0 --topography-base 1250
 python3 script/validate_topography.py inputfiles/topography_pml/topography.in \
   --lx 40000 --ly 40000 --base 1250
 ```
@@ -188,7 +189,10 @@ python3 script/validate_topography.py inputfiles/topography_pml/topography.in \
 | `--flat-margin` | Constant-elevation collar within that band, m; 1500 |
 | `--pml-thickness` | Thickness used for the collar-width check only, m; 780 |
 | `--z-ref` | Flat target elevation, m; `0.0`, or `auto` for the mean of the first interior ring at the taper band |
-| `--force` | Permit replacing the input or an existing output; off by default |
+| `--seabed` | Original bed path; omitted by default, which detects `seabed.in` beside `infile` |
+| `--no-seabed` | Disable detection/check/repair; off by default; mutually exclusive with `--seabed` |
+| `--topography-base` | Optional finite nonnegative `topographybase_zcoord`, m; omitted by default, skipping the absolute top-plane check; positive values enable it for wet cells |
+| `--force` | Replace existing outputs; off by default. Paired mode never replaces either input; surface-only mode still permits an in-place taper |
 
 Let `r` be distance to the nearest lateral boundary. Elevations are unchanged
 for `r >= buffer`, equal to `z_ref` for `r <= flat_margin`, and follow a raised
@@ -208,12 +212,133 @@ Select the generated directory with
 `topography_directory = inputfiles/topography_pml` and regenerate the mesh for
 the changed geometry. Choose a reference appropriate to the case: `auto` can
 move a zero-elevation water surface if nearby land raises the ring average.
-Tapering this file does not modify the 3-D material water mask or seabed and
-does not increase source-to-boundary clearance. When using a separate
-`seabed_geometry_file`, keep its elevations at or below the outer topography
-surface. Tapering both surfaces to zero removes the water column in that collar;
-retaining water requires a consistent submerged seabed target. See the
+Tapering does not modify the 3-D material water mask or increase source-to-boundary
+clearance. For explicit seabed geometry, the automatic workflow below retains
+original wet beds and moves dry beds when needed. See the
 [CPML/topography discussion](../doc/Extended%20README.md#cpml-execution-and-topography).
+
+**Automatic seabed checking and repair:** no extra repair command is needed if
+`seabed.in` is beside the input `topography.in`. For a different bed filename or
+location, add `--seabed path/to/bed.in`; relative paths use the working directory.
+Detection uses the **input** directory, not the output directory. Without a bed,
+the script produces only the surface, as before. `--no-seabed` explicitly requests
+that surface-only behavior even when a sibling exists.
+
+With a bed, the script stages the taper and checks it against the original bed
+and original wet/dry nodes. If valid, the bed is copied byte-for-byte. If there
+are new water gaps, above-surface beds or invalid wet cells caused by the taper,
+originally dry bed nodes are set to the tapered surface, while wet bed tokens
+retain their precision. The repaired pair must pass validation. Invalid original
+geometry, changed original water levels or invalid repaired wet cells stop the
+command before outputs are published, including with `--force`.
+
+Paired mode writes three files beside `--out`: the named surface, `seabed.in`,
+and `repair-summary.json`. The summary records `valid` or `repaired`, candidate
+crossing/classification/invalid-cell counts, actual dry-bed changes, largest
+adjustment, wet-cell counts, hashes and output paths. Use a **separate output
+directory**: paired outputs cannot replace either input, even through a symlink
+or hard-link alias and even with `--force`. All output names must be distinct;
+existing outputs require `--force`, and output symlinks are refused. Files are
+prepared before publication; this is not a crash-atomic multi-file transaction.
+Keep the output directory idle until the command finishes successfully.
+
+The shared repair implementation uses fixed `1e-8 m` geometry checks, independent
+of `parameters.in` and `seabed_height_tolerance_m`. Supply `--topography-base` to
+also check wet surfaces against the positive solver datum; omission is reported
+and skips only this absolute-datum check. Checks for crossings, wet/dry nodes,
+water-level changes and wet-cell flatness still run. These checks do not prove
+acoustic mesh-face alignment or simulation accuracy. Paired mode imports the
+adjacent `repair_tapered_geometry.py`; when copying utilities to another machine,
+copy **both scripts**. Surface-only operation needs only `taper_topography.py`.
+
+Select both files when adopting the pair:
+
+```ini
+topography_directory = inputfiles/topography_pml
+seabed_geometry_file = inputfiles/topography_pml/seabed.in
+```
+
+Regenerate meshes and mesh-dependent sources, retaining the other required water
+and material controls. The standalone repair command below remains available
+for a surface that has already been tapered.
+
+### repair_tapered_geometry.py
+
+Repair the **pair** after tapering `topography.in`. The original surface and bed
+identify which nodes were wet before tapering. At original dry nodes, the new
+bed is set exactly equal to the tapered surface. At original wet nodes, the
+original bed value is retained and the water surface must remain unchanged
+within `1e-8 m`. This avoids artificial water columns caused by rounding the
+tapered surface or moving dry land without moving its bed.
+
+```bash
+python3 script/repair_tapered_geometry.py \
+  --original-surface inputfiles/geometry/topography.in \
+  --original-bed inputfiles/geometry/seabed.in \
+  --tapered-surface inputfiles/geometry_tapered/topography.in \
+  --out-dir inputfiles/geometry_tapered_consistent \
+  --lx 40000 --ly 40000 --topography-base 1250
+```
+
+Only Python 3's standard library is needed. All seven arguments are **required,
+with no defaults**; replace the example dimensions and datum with your case.
+
+| Argument | Meaning / units |
+| --- | --- |
+| `--original-surface` | Untapered `topography.in` |
+| `--original-bed` | Matching original `seabed.in` |
+| `--tapered-surface` | Tapered `topography.in` on the same grid |
+| `--out-dir` | New directory for the repaired pair; parent must exist |
+| `--lx`, `--ly` | Positive north/X and east/Y domain lengths, m |
+| `--topography-base` | The run's `topographybase_zcoord`, finite and nonnegative, m; used to check wet surfaces lie below the solver's top plane when positive |
+
+Each file contains one positive spacing value followed by exactly
+`(lx/spacing+1)*(ly/spacing+1)` finite ASCII elevations in metres **positive
+upward**, ordered X/north outer, Y/east inner. Whitespace separates values;
+there are no count headers, coordinate columns or comments. Spacing must match
+across all three files and divide both domain lengths. Origins and vertical
+datums must also match; the file format does not record them, so the utility
+cannot verify them. The script streams grid rows; memory scales with row width
+and the longest input line. Use short lines for large grids.
+
+The helper uses a fixed **`1e-8 m`** tolerance for original wet/dry classification,
+bed-above-surface checks, water-level preservation and wet-cell flatness. It does
+not read `parameters.in` or inherit `seabed_height_tolerance_m`. A positive gap
+greater than `1e-8 m` is wet; all other accepted nodes are dry. Every original
+and output cell touching a wet node must have four surface elevations agreeing
+within that tolerance. Invalid original crossings, changed water levels,
+sloping wet cells, incorrect counts and nonfinite values are rejected before
+publishing the output pair. There are no optional repair controls beyond
+`--help`.
+
+The output directory contains:
+
+- `topography.in`: a byte-for-byte copy of the tapered surface.
+- `seabed.in`: original bed tokens at wet nodes and tapered-surface tokens at
+  dry nodes, without re-rounding elevations.
+- `repair-summary.json`: grid dimensions, wet/dry counts, changed dry-bed count,
+  largest dry-bed adjustment, wet-cell counts and input/output SHA-256 hashes.
+  The same summary is printed to the terminal.
+
+Inputs are read-only. Existing output directories, files and symlinks are
+refused; there is **no `--force`**. Use a new directory for each repair. Temporary
+files are removed when validation fails. A successful repair does not change
+case settings or launch a job. To adopt it, set both paths:
+
+```ini
+topography_directory = inputfiles/geometry_tapered_consistent
+seabed_geometry_file = inputfiles/geometry_tapered_consistent/seabed.in
+```
+
+Retain the other required topography, seabed-water and material-depth settings.
+Regenerate the mesh and mesh-dependent sources, and review source and receiver
+placement. This preserves **nodal** wet/dry classification; it does not promise
+an identical interpolated coastline between nodes. It does not flatten water
+surfaces, check acoustic mesh-face alignment, or validate simulation accuracy
+or stability. Changes to ground geometry can change geometry-relative material
+depths and hydrostatic/geostatic loads in elastic, viscoelastic, nonlinear and
+porous solids beneath water. This is a file-preparation utility, not a solver
+or a propagation validation.
 
 ## Output inspection and rendering
 

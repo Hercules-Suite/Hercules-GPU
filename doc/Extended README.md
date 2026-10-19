@@ -3264,13 +3264,19 @@ preprocessing step for any real topography + C-PML run):
 		Use `auto` for real DEMs sitting at a large offset so the taper
 		ramps to a representative interior level instead of an arbitrary
 		0.
-	* `--force` — allow overwriting the output (or in-place when `--out`
-		equals the input).
+	* `--force` — allow overwriting existing outputs. In-place replacement
+		is allowed only in surface-only mode; paired mode protects both inputs.
 - **What it prints** — the resolved grid, the buffer/collar/ramp widths,
 	`z_ref`, how many points were modified vs left untouched, the max
 	elevation change, and a perimeter-flatness self-check that must print
 	`OK`. If it is not `OK`, do not use the file.
 - **`--help`** lists every option with its default.
+- **Paired seabed controls.** A sibling `seabed.in` beside the input is detected
+	automatically. `--seabed PATH` selects another original bed;
+	`--no-seabed` disables detection/check/repair. Optional `--topography-base`
+	supplies the finite nonnegative solver datum; positive values enable the wet
+	surface absolute top-plane check, and omission skips that check. The workflow
+	is described below. Paired mode preserves inputs even with `--force`.
 - **Alternative for the two bundled examples.** Regenerate either
 	example surface already tapered with `python3 gen_topography_tilt.py
 	--edge-taper` (or `gen_topography_gaussian_hill.py --edge-taper`),
@@ -3278,6 +3284,56 @@ preprocessing step for any real topography + C-PML run):
 	`--taper-zref`. For these square benchmark domains, output is identical
 	to running the standalone utility on the un-tapered surface; the flag
 	is off by default so the committed example files stay reproducible.
+
+### Repair a tapered surface and explicit seabed pair
+
+When `seabed_geometry_file` is used, tapering only `topography.in` can leave the
+bed above the new surface or introduce small water gaps on originally dry land.
+`script/taper_topography.py` now detects a sibling input `seabed.in`, or accepts
+an explicit `--seabed PATH`. It stages the taper and checks the candidate pair
+against original wet/dry nodes. Valid beds are copied byte-for-byte. If repair
+is needed, dry bed nodes receive the tapered surface's exact numeric token;
+wet nodes retain their original bed token. Repaired geometry is validated before
+publication. Changed water levels and invalid original or repaired wet geometry
+cause failure, leaving existing outputs unchanged on validation errors.
+
+The surface, `seabed.in` and `repair-summary.json` are written beside `--out`.
+Paired mode never overwrites input files, even with `--force`; use a separate
+output directory. Existing derived outputs require `--force`. The summary
+reports `valid`/`repaired`, candidate problems, actual changes and hashes. Both
+Python files must remain together when copying the utilities to a cluster.
+Use `--no-seabed` only to explicitly request surface-only output.
+
+For a surface that has already been tapered, the same implementation is
+available through the standalone repair command:
+
+```bash
+python3 script/repair_tapered_geometry.py \
+  --original-surface inputfiles/geometry/topography.in \
+  --original-bed inputfiles/geometry/seabed.in \
+  --tapered-surface inputfiles/geometry_tapered/topography.in \
+  --out-dir inputfiles/geometry_tapered_consistent \
+  --lx 40000 --ly 40000 --topography-base 1250
+```
+
+All arguments are required; replace the example dimensions and datum. The
+standard-library helper requires a common grid, ordering and vertical datum,
+and an existing output parent. It refuses existing output directories. It
+validates original crossings, wet-cell flatness and unchanged wet-node water
+levels with its own fixed `1e-8 m` tolerance, independent of solver settings.
+The integrated taper uses these same checks; its optional `--topography-base`
+omits only the absolute top-plane check when not supplied. The standalone
+repair command requires that datum explicitly.
+It rejects invalid geometry before publishing a pair. `repair-summary.json`
+records counts, maximum dry-bed adjustment and input/output hashes.
+
+Point both `topography_directory` and `seabed_geometry_file` at the new pair,
+regenerate meshes and mesh-dependent sources, and review receiver/source
+placement. Preserving nodal classes does not establish an identical
+interpolated coastline, acoustic mesh-face alignment, or simulation accuracy.
+Ground-relative material depths and hydrostatic/geostatic loads follow the
+changed geometry. No solver formulation or propagation kernel is changed by
+the helper. See [all options, outputs and limits](../script/README.md#repair_tapered_geometrypy).
 
 ### CPML setup and validation requirements
 

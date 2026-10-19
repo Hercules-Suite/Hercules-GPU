@@ -193,6 +193,16 @@ real shallow water and change geometry-relative depths and loads.
 Regenerate meshes and sources after changes. See
 [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 
+[`script/taper_topography.py`](../script/README.md#taper_topographypy) automatically
+checks a sibling input `seabed.in` and repairs taper-induced inconsistencies
+using the original wet/dry nodes. `--seabed PATH` selects another bed;
+`--no-seabed` disables handling. `--topography-base` optionally supplies the
+absolute datum. It retains wet beds and writes the paired files plus a summary
+beside `--out`, preserving inputs even with `--force`. Validation uses a fixed
+`1e-8 m` tolerance. For already tapered surfaces, the separate
+[`repair_tapered_geometry.py`](../script/README.md#repair_tapered_geometrypy)
+command remains available. See the usage guide for arguments and limits.
+
 ### Source directories
 
 | Variable | Options / accepted values | Requirement / units |
