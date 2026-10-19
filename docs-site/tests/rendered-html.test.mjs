@@ -415,8 +415,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 250);
-  assert.equal(documented.length, 250, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 252);
+  assert.equal(documented.length, 252, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -514,13 +514,15 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
   const html = await (await render("/docs/input-files")).text();
   const section = html.match(/<section\b[^>]*id="explicit-seabed-geometry"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
-  for (const name of ["seabed_geometry_file", "3D_velocity_model_depth_reference", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
+  for (const name of ["seabed_geometry_file", "seabed_height_tolerance_m", "seabed_above_surface_policy", "3D_velocity_model_depth_reference", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
     assert.ok(section.includes(name), `missing seabed input example: ${name}`);
   }
   assert.match(section, /solid-only/i);
   assert.match(section, /east-fast/);
   assert.match(section, /topography minus bed/);
-  assert.match(section, /1e-8 m/);
+  assert.match(section, /default 0\.01 m/);
+  assert.match(section, /Zero means exact comparisons; 1e-8 restores the former tolerance/);
+  assert.match(section, /separate mesh-face alignment check/);
   assert.match(section, /No separate water-level parameter or wet\/dry mask/);
   assert.match(section, /One number per line is valid/);
   assert.match(section, /Distinct water bodies may have different elevations/);
@@ -543,10 +545,33 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
   assert.match(section, /independent CPS Green functions/);
   assert.match(section, /Submerged ramped equilibrium/);
   assert.match(section, /GPU scheduling and MPI transport are mocked/);
+  assert.match(section, /seabed_above_surface_policy=error \(default\)/);
+  assert.match(section, /seabed_above_surface_policy=clip/);
+  assert.match(section, /lowered-node count/);
+  assert.match(section, /maximum lowering in metres/);
+  assert.match(section, /Original input files are unchanged/);
+  assert.match(section, /full CUDA\/MPI propagation validation of clipping remains outstanding/);
   const sourceRoot = "../quake/forward/";
   const solver = readFileSync(`${sourceRoot}psolve.cc`, "utf8");
   const geometry = readFileSync(`${sourceRoot}topography.cc`, "utf8");
   assert.match(solver, /char depth_reference\[64\] = "legacy"/);
+  assert.match(solver, /char seabed_policy\[64\] = "error"/);
+  for (const policy of ["error", "clip"]) {
+    assert.ok(solver.includes(`strcasecmp(seabed_policy, "${policy}")`));
+  }
+  assert.match(solver, /MPI_Bcast\(&Param\.theSeabedClipAboveSurface, 1, MPI_INT, 0, comm_solver\)/);
+  assert.match(solver, /has_seabed_policy == 1/);
+  assert.match(solver, /Param\.theSeabedHeightToleranceM = 0\.01/);
+  assert.match(solver, /hu_config_get_double_opt\(\s*fp, "seabed_height_tolerance_m", &Param\.theSeabedHeightToleranceM\)/);
+  assert.match(solver, /has_seabed_tolerance < 0 \|\| !isfinite\(Param\.theSeabedHeightToleranceM\)/);
+  assert.match(solver, /has_seabed_tolerance == 1/);
+  assert.match(solver, /MPI_Bcast\(&Param\.theSeabedHeightToleranceM, 1, MPI_DOUBLE, 0, comm_solver\)/);
+  assert.match(geometry, /theSeabedHeightToleranceM = height_tolerance_m/);
+  assert.doesNotMatch(geometry, /SEABED_HEIGHT_TOLERANCE_M/);
+  assert.match(solver, /topo_seabed_init\(Global\.myID, Param\.theSeabedGeometryFile,\s*Param\.theSeabedClipAboveSurface, Param\.theSeabedHeightToleranceM\)/);
+  assert.match(solver, /topo_seabed_init_flat\(Global\.myID, Param\.theSeabedGeometryFile,\s*Param\.theDomainX, Param\.theDomainY,\s*Param\.theSeabedClipAboveSurface, Param\.theSeabedHeightToleranceM\)/);
+  assert.match(geometry, /water_depth < -theSeabedHeightToleranceM && !clip_above_surface/);
+  assert.match(geometry, /topo_seabed_init\(myID, path, clip_above_surface, height_tolerance_m\)/);
   assert.match(solver, /have_buildings == YES \|\| Param\.the3DDepthReference == 0/);
   assert.match(solver, /MPI_Bcast\(Param\.theSeabedGeometryFile/);
   assert.match(geometry, /MPI_Bcast\(theSeabedInfo, ntp, MPI_DOUBLE/);

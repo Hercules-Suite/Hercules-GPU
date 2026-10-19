@@ -2240,13 +2240,15 @@ velocity model. Omit it to retain the legacy Vs-based convention. Negative
 height alone never means water. Water depth and coverage come from the difference
 between the outer surface in `topography.in` and the ground/bed surface in the
 new file. Both contain elevations in the same datum, in metres positive upward.
-A positive gap greater than `1e-8 m` is water; coincident surfaces are dry,
+A positive gap greater than `seabed_height_tolerance_m` (`0.01` m by default) is water; coincident surfaces are dry,
 including dry land below sea level. There is no separate mask or water-level
 input.
 
 | Control | Requirement, default and meaning |
 | --- | --- |
 | `seabed_geometry_file` | Optional; omitted by default. Path relative to the solver working directory; grid format below. |
+| `seabed_height_tolerance_m` | Optional; `0.01` m (default), finite >= 0; requires `seabed_geometry_file` when supplied. Zero requests exact comparisons. |
+| `seabed_above_surface_policy` | Optional; `error` (default) or `clip`, case-insensitive; requires `seabed_geometry_file` when supplied. |
 | `3D_velocity_model_depth_reference` | Default `legacy` without geometry. With geometry, explicitly choose `seabed`, `surface`, or `model_z`. |
 | `seabed_water_vp_m_s` | Required with geometry, finite positive water Vp in m/s; no default. |
 | `seabed_water_density_kg_m3` | Required with geometry, finite positive density in kg/m3; no default. Unlike `rho.in`, this is SI rather than tonne/m3. |
@@ -2278,10 +2280,61 @@ There are no count prefixes, coordinates, masks, comments or extra tokens.
 One number per line is supported, exactly as in `topography.in`; spaces and
 newlines are equivalent. The two elevation fields use bilinear interpolation
 and nearest-edge extension outside the domain. At each query, water occupies
-the gap between the surfaces when that gap exceeds the fixed `1e-8 m`
-tolerance. Bed elevations above topography by more than that tolerance abort
-setup; nodal differences within tolerance are snapped to the outer surface.
+the gap between the surfaces when that gap exceeds `seabed_height_tolerance_m`. With `seabed_above_surface_policy=error` (default), bed elevations
+above topography by more than that tolerance abort setup. Nodal differences
+within tolerance are snapped to the outer surface under either policy.
 Dry queries also snap their bed reference to the outer surface.
+
+To handle bed/surface crossings explicitly inside Hercules, add:
+
+```ini
+seabed_above_surface_policy = clip
+seabed_height_tolerance_m = 0.01
+```
+
+At geometry loading, rank zero replaces each above-surface bed elevation with
+`min(bed_elevation, outer_surface_elevation)`. The outer surface is topography
+when enabled and zero elevation otherwise. It reports the number of lowered
+nodes (including positive excesses within tolerance) and maximum lowering in
+metres, then broadcasts the corrected grid. Neither input file is rewritten;
+no clipping work is added to time stepping. A zero-depth column is dry. Valid
+bed values below the surface are preserved apart from the configured
+tolerance snapping. Clipping does not relax the flat-water-surface requirement
+or validate the input grids' physical datum.
+
+`seabed_height_tolerance_m` defaults to `0.01` m (1 cm). It is shared by all
+ranks for nodal snapping, interpolated water detection, above-surface rejection
+under the `error` policy, and the maximum-minus-minimum surface elevation check
+across each wet cell's four corners. Water depths <= tolerance are treated as
+dry; the corner-height range must be <= tolerance. Zero uses exact comparisons.
+Set `seabed_height_tolerance_m = 1e-8` to reproduce the former tolerance.
+The selected tolerance is printed before the geometry checks and in the monitor.
+
+This is a geometry interpretation setting, not mesh resolution or a timestep
+control. Increasing it can remove real shallow water and change ground/seabed
+material reference depths, porous eligibility and hydrostatic/geostatic loads.
+The outer-surface grid is not flattened or rewritten. Acoustic free-surface
+operators still require horizontal mesh faces, and their separate alignment
+check (one quarter of an octree tick) is unchanged; a permissive geometry
+tolerance does not establish support for sloping water surfaces.
+
+All geometry consumers use this corrected grid: acoustic/solid interface
+classification, free-surface enrollment, porous ground and groundwater depths,
+and nonlinear geostatic water/solid overburden. The same material lookup serves
+elastic, viscoelastic and nonlinear solids; their constitutive laws and Q rules
+are unchanged. `model_z` retains fixed material layer coordinates, `surface`
+retains the outer-surface reference, and `seabed` follows the corrected bed.
+Wet/dry changes can therefore change loads and material assignment. Rebuild
+meshes and sources before using the policy; changing it does not repair an
+existing mesh archive or checkpoint.
+
+Local extracted-production checks compare clipping with manually corrected
+geometry in FULL/SQD and flat domains, test all three explicit depth references,
+and cover material/Q queries, hydrostatic and nonlinear geostatic initialization,
+porous eligibility and station stress. MPI transport is mocked in those checks;
+this option has not received a full CUDA/MPI propagation benchmark. Existing
+acoustic–elastic, acoustic–poroelastic and poroelastic–elastic coupling and
+VT/FEM restrictions continue to apply.
 
 With `include_topography=yes`, `topography.in` remains the **outer air/material surface**. It supplies the
 local water surface wherever the bed is lower, and dry ground where both
@@ -2332,7 +2385,7 @@ No `topography.in`, `topography_directory`, `topographybase_zcoord`,
 `maximum_octant_level`, `type_of_etree` or `computation_method` is needed for
 this mode; the topography-only controls are unused. The outer surface and
 height datum are both zero: `bed_z = -bed_elevation`. Negative bed elevations
-are underwater, zero is dry ground, and positive elevations beyond the fixed
+are underwater, zero is dry ground, and positive elevations beyond the configured
 tolerance are rejected. The seabed itself may slope. The uniform spacing must
 divide both horizontal domain lengths into positive integer cell counts;
 node counts and the exact number of file values are checked before use.
@@ -2371,7 +2424,7 @@ $B=\mathtt{topographybase\_zcoord}$ with topography enabled (zero in flat mode).
 positive downward. For $B=1000$, bed elevation $-100$, water level 0 and a
 layer 20 m below bed, write 1120 (`model_z`), 120 (`surface`), or 20 (`seabed`).
 On dry cells seabed-relative means below ground. At the query point, water
-occupies $Z_s\le Z<Z_b$ where $Z_b-Z_s>10^{-8}\,\mathrm{m}$; the bed belongs to solid.
+occupies $Z_s\le Z<Z_b$ where $Z_b-Z_s>\mathtt{seabed\_height\_tolerance\_m}$; the bed belongs to solid.
 The actual fine geometry is used even with coarse/rotated velocity columns.
 
 Solid columns retain piecewise-constant vertical lookup and bilinear horizontal
