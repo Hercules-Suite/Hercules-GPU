@@ -2082,6 +2082,24 @@ test("provides complete examples for 3-D material and topography inputs", async 
   assert.match(html, /cpml_3d_material_extension/);
 });
 
+test("documents paired topography and seabed repair", async () => {
+  const html = await (await render("/docs/input-files")).text();
+  const section = html.match(/<section\b[^>]*id="repair-tapered-geometry"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /script\/repair_tapered_geometry\.py/);
+  for (const option of ["original-surface", "original-bed", "tapered-surface", "out-dir", "lx", "ly", "topography-base"]) {
+    assert.ok(section.includes(`--${option}`));
+  }
+  assert.match(section, /fixed 1e-8 m tolerance/);
+  assert.match(section, /no --force option/);
+  assert.match(section, /repair-summary\.json/);
+  assert.match(section, /byte-for-byte/);
+  assert.match(section, /regenerate meshes and mesh-dependent sources/);
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  assert.ok(existsSync(join(root, "script", "repair_tapered_geometry.py")));
+  assert.match(readFileSync(join(root, "script", "README.md"), "utf8"), /### repair_tapered_geometry\.py/);
+});
+
 test("documents the required full/sqd material-coordinate convention", async () => {
   const html = await (await render("/docs/parameters-topography-buildings")).text();
   const row = html.split("</tr>").find((part) => part.includes(">type_of_etree</td>"));

@@ -1767,6 +1767,22 @@ if __name__ == "__main__":
         ],
         note: "Do not use the boundary-reaching topography_tilt_boundary benchmark as a production setup. It deliberately exercises the flatten-PML backstop; real surfaces should be tapered first.",
       },
+      {
+        id: "repair-tapered-geometry",
+        title: "Pair tapered topography with explicit seabed geometry",
+        paragraphs: [
+          "After tapering, script/repair_tapered_geometry.py preserves the original wet/dry nodes using the untapered surface and bed. Originally dry beds receive the exact tapered-surface token; originally wet beds retain their original token without re-rounding. The tapered surface is copied byte-for-byte. This prevents artificial water gaps caused by moving or rounding land elevations while leaving the bed unchanged.",
+          "The Python 3 standard-library helper requires all seven command-line arguments below, with no defaults. Supply common grid spacing, origin, ordering and vertical datum; elevations are metres positive upward, X/north outer and Y/east inner. Domain lengths and topographybase_zcoord are in metres. Create the output parent first. Existing output paths are refused, with no --force option; original inputs are read-only.",
+          "Validation uses the helper's fixed 1e-8 m tolerance, independent of parameters.in and the solver's configurable geometry tolerance. Original bed crossings, changed wet-node water levels, sloping original or output wet cells, invalid values and incorrect counts cause failure before publishing a pair. This preserves nodal classification, not necessarily an identical interpolated coastline. It does not flatten water surfaces or check acoustic mesh-face alignment.",
+        ],
+        codeLabel: "shell — replace example dimensions and datum with your case",
+        code: "python3 script/repair_tapered_geometry.py \\\n  --original-surface inputfiles/geometry/topography.in \\\n  --original-bed inputfiles/geometry/seabed.in \\\n  --tapered-surface inputfiles/geometry_tapered/topography.in \\\n  --out-dir inputfiles/geometry_tapered_consistent \\\n  --lx 40000 --ly 40000 --topography-base 1250",
+        bullets: [
+          "Outputs are topography.in, seabed.in and repair-summary.json. The summary records wet/dry counts, changed dry-bed nodes, maximum dry-bed adjustment, wet-cell counts and input/output SHA-256 hashes.",
+          "Set topography_directory = inputfiles/geometry_tapered_consistent and seabed_geometry_file = inputfiles/geometry_tapered_consistent/seabed.in. Keep the other required water/material controls, regenerate meshes and mesh-dependent sources, and review source/receiver placement.",
+          "The helper streams rows; memory scales with row width and the longest input line. Geometry-relative materials and hydrostatic/geostatic loads follow the resulting surface/bed pair. File validation does not establish simulation accuracy or stability. See script/README.md for formats, all arguments, overwrite behavior and limits.",
+        ],
+      },
     ],
   },
   "source-models": {

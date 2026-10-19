@@ -3226,6 +3226,40 @@ preprocessing step for any real topography + C-PML run):
 	to running the standalone utility on the un-tapered surface; the flag
 	is off by default so the committed example files stay reproducible.
 
+### Repair a tapered surface and explicit seabed pair
+
+When `seabed_geometry_file` is used, tapering only `topography.in` can leave the
+bed above the new surface or introduce small water gaps on originally dry land.
+`script/repair_tapered_geometry.py` uses the original surface/bed pair to retain
+the original nodal wet/dry classification. Dry bed nodes receive the tapered
+surface's exact numeric token; wet nodes retain their original bed token. The
+tapered topography is copied byte-for-byte. This avoids further rounding.
+
+```bash
+python3 script/repair_tapered_geometry.py \
+  --original-surface inputfiles/geometry/topography.in \
+  --original-bed inputfiles/geometry/seabed.in \
+  --tapered-surface inputfiles/geometry_tapered/topography.in \
+  --out-dir inputfiles/geometry_tapered_consistent \
+  --lx 40000 --ly 40000 --topography-base 1250
+```
+
+All arguments are required; replace the example dimensions and datum. The
+standard-library helper requires a common grid, ordering and vertical datum,
+and an existing output parent. It refuses existing output directories. It
+validates original crossings, wet-cell flatness and unchanged wet-node water
+levels with its own fixed `1e-8 m` tolerance, independent of solver settings.
+It rejects invalid geometry before publishing a pair. `repair-summary.json`
+records counts, maximum dry-bed adjustment and input/output hashes.
+
+Point both `topography_directory` and `seabed_geometry_file` at the new pair,
+regenerate meshes and mesh-dependent sources, and review receiver/source
+placement. Preserving nodal classes does not establish an identical
+interpolated coastline, acoustic mesh-face alignment, or simulation accuracy.
+Ground-relative material depths and hydrostatic/geostatic loads follow the
+changed geometry. No solver formulation or propagation kernel is changed by
+the helper. See [all options, outputs and limits](../script/README.md#repair_tapered_geometrypy).
+
 ### CPML setup and validation requirements
 
 Use `stiffness_calculation_method=effective` for the GPU elastic path.

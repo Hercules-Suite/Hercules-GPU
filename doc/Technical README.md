@@ -183,6 +183,13 @@ surfaces use Z=0 with topography off, or local topography with it on.
 Regenerate meshes after changes. See
 [file example, physics scope and limits](Extended%20README.md#explicit-seabed-geometry).
 
+After tapering, use
+[`script/repair_tapered_geometry.py`](../script/README.md#repair_tapered_geometrypy)
+to pair the new surface with the original wet/dry nodes. It retains wet bed
+values, moves dry beds with the surface, validates with a fixed `1e-8 m`
+tolerance, and writes a new directory without overwriting inputs. Supply all
+three grids, domain lengths and the topography datum; see the linked usage guide.
+
 ### Source directories
 
 | Variable | Options / accepted values | Requirement / units |

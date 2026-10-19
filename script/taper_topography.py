@@ -80,6 +80,8 @@ band, with margin), z_ref 0.0.  Tune to your domain / PML thickness.
 # Keep paired topography/bed elevations consistent: bed above the outer surface
 # is invalid. Tapering both to zero removes water in the flat collar; preserving
 # water requires a consistent submerged bed target. See script/README.md.
+# With explicit seabed geometry, repair_tapered_geometry.py can pair this output
+# with the original wet/dry nodes; it refuses changes to original water levels.
 
 import argparse
 import math
