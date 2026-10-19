@@ -2310,3 +2310,21 @@ test("documents large 3-D material counts and per-rank memory", async () => {
   assert.match(html, /replicated in host memory on every solver rank/);
   assert.match(html, /65\.3 GiB per solver rank/);
 });
+
+
+test("documents deferred CPML partitioning and the limits of GPU memory snapshots", async () => {
+  const html = await (await render("/docs/physics")).text();
+  for (const phrase of ["Completed-mesh partitioning and GPU memory",
+    "ordinary partitions are still used throughout progressive construction",
+    "local acoustic-interface matching", "equal-rank unified run",
+    "preserves Q and geostatic data", "minimum free memory",
+    "only a subset of the required storage", "later lazy allocations",
+    "No diagnostics are added inside the timestep loop"])
+    assert.ok(html.includes(phrase), phrase);
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const weight = parameters.split("</tr>").find((row) => row.includes(">cpml_partition_weight</td>"));
+  assert.ok(weight);
+  assert.match(weight, /Default: 1; &gt;= 1/);
+  assert.match(weight, /Construction and mesh-only runs use ordinary partitions/);
+  assert.match(weight, /not a GPU-memory cap/);
+});

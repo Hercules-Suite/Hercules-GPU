@@ -786,7 +786,9 @@ static double g_cpmlPartitionThicknessM = 0.0;
 static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
                                           const void* data);
 static int mesh_prepare_cpml_partition_weight(void);
-static int mesh_partitiontree(const char* context);
+static int mesh_partitiontree(const char* context,
+                              bool completed_solver_mesh = false);
+static bool g_solverMeshPartitioned = false;
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static int32_t mesh_element_index_for_octant(octant_t* octant,
@@ -7639,14 +7641,21 @@ static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
 #endif
 }
 
-static int mesh_partitiontree(const char* context) {
-  if (mesh_prepare_cpml_partition_weight()) {
+static int mesh_partitiontree(const char* context, bool completed_solver_mesh) {
+  /* Construction (including local interface matching) must retain ordinary
+   * partitions. Weighted ownership is applied only after the last refinement
+   * and balance pass, on the communicator that will actually run the solver. */
+  if (completed_solver_mesh && !Param.theMeshOnlyMode &&
+      mesh_prepare_cpml_partition_weight()) {
+    if (Global.myID == 0)
+      monitor_print("CPML partition stage: %s, completed mesh on %d solver ranks\n",
+                    context, Global.theGroupSize);
+    g_solverMeshPartitioned = true;
     return octor_partitiontree_weighted(Global.myOctree, bldgs_nodesearch_com,
                                         pushdowns_nodesearch,
                                         mesh_cpml_partition_weight);
   }
 
-  (void)context;
   return octor_partitiontree(Global.myOctree, bldgs_nodesearch_com,
                              pushdowns_nodesearch);
 }
@@ -7667,6 +7676,10 @@ static void mesh_generate() {
   int64_t tote, mine, maxe;
 
   if (Global.myID == 0) {
+    if (Param.theAbcType == ABC_CPML && Param.theCpmlPartitionWeight > 1.0)
+      monitor_print("CPML partitioning: ordinary partitions during mesh construction; "
+                    "weight %.3f deferred until the completed solver mesh\n",
+                    Param.theCpmlPartitionWeight);
     monitor_print("Meshing: ");
     if (Param.theStepMeshingFactor == 0) {
       monitor_print("Conventional\n\n");
@@ -9212,7 +9225,7 @@ static void mesh_generate_from_etree(void) {
     monitor_print("Partitioning ");
     fflush(stdout);
   }
-  if (mesh_partitiontree("mesh_generate_from_etree") != 0) {
+  if (mesh_partitiontree("mesh_generate_from_etree", true) != 0) {
     fprintf(stderr,
             "Thread %d: mesh_generate_from_etree: fail to partition tree\n",
             Global.myID);
@@ -10191,6 +10204,63 @@ static void mesh_unified_release_inactive(void) {
   g_unifiedInactiveCount = 0;
 }
 
+/* Rebuild rank-local interface ownership after a completed-mesh partition.
+ * Do not re-query materials: corrected edata is owned by the octree leaves. */
+static void mesh_rebuild_acoustic_interfaces(void) {
+  vector3D_t istanbul_origin;
+  vector3D_t basin_origin;
+  vector3D_t three_d_origin;
+  vector3D_t* istanbul_ptr = NULL;
+  vector3D_t* basin_ptr = NULL;
+  vector3D_t* three_d_ptr = NULL;
+  if (Param.IstanbulVelocityModel == YES) {
+    istanbul_origin = compute_domain_coords_linearinterp(
+        28.675, 40.9565, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+    istanbul_ptr = &istanbul_origin;
+  }
+  if (Param.basinVelocityModel == YES) {
+    basin_origin = compute_domain_coords_linearinterp(
+        Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
+        Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
+        &Param.utmZone);
+    basin_ptr = &basin_origin;
+  }
+  if (Param.threeDVelocityModel == YES) {
+    three_d_origin = compute_domain_coords_linearinterp(
+        Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
+        Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
+        Param.theDomainY, Param.theDomainX, &Param.utmZone);
+    three_d_ptr = &three_d_origin;
+  }
+  mesh_build_acoustic_interface_flags(istanbul_ptr, basin_ptr, three_d_ptr);
+}
+
+/* Direct runs and equal-rank unified runs do not pass through the reduced-rank
+ * handoff. Re-extract their final tree once when weighting is requested. The
+ * extracted element data aliases leaf payloads (octor_extractmesh), so
+ * deleting only the mesh preserves corrected material/Q/geostatic records. */
+static void mesh_partition_completed_solver(void) {
+  if (Param.theMeshOnlyMode || g_solverMeshPartitioned ||
+      Param.theAbcType != ABC_CPML || Param.theCpmlPartitionWeight <= 1.0)
+    return;
+  Timer_Start("Completed Solver Partition");
+  mesh_release_acoustic_interface_data();
+  g_acousticNeighbors.clear();
+  g_acousticNeighborRequests.clear();
+  octor_deletemesh(Global.myMesh);
+  Global.myMesh = NULL;
+  if (mesh_partitiontree("completed_direct_mesh", true) != 0)
+    solver_abort(__FUNCTION_NAME, NULL, "Cannot partition completed solver mesh\n");
+  Global.myMesh = octor_extractmesh(Global.myOctree, bldgs_nodesearch,
+      pushdowns_nodesearch, bldgs_nodesearch_com, find_topoAirOct, topo_nodesearch);
+  if (!Global.myMesh)
+    solver_abort(__FUNCTION_NAME, NULL, "Cannot extract completed solver mesh\n");
+  mesh_rebuild_acoustic_interfaces();
+  Timer_Stop("Completed Solver Partition");
+}
+
 /* Redistribute a CPU-rank mesh to a smaller architecture-neutral set of GPU
  * ranks without terminating the MPI job.  The selected ranks are the first
  * HERCULES_UNIFIED_PHASE_B_RANKS / node local ranks on each node, so the
@@ -10625,7 +10695,7 @@ static int mesh_unified_memory_handoff(void) {
   setenv("OCTOR_SETCOM_ALL2ALL", "1", 0);
   setenv("OCTOR_EXTRACT_PROFILE", "1", 0);
 
-  if (mesh_partitiontree("mesh_unified_memory_handoff") != 0) {
+  if (mesh_partitiontree("mesh_unified_memory_handoff", true) != 0) {
     fprintf(stderr, "Thread %d: cannot partition handed-off mesh\n", world_rank);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
@@ -10639,36 +10709,7 @@ static int mesh_unified_memory_handoff(void) {
     exit(1);
   }
   mesh_sanitize_and_report_acoustic("In-memory handed-off mesh");
-  {
-    vector3D_t istanbul_origin;
-    vector3D_t basin_origin;
-    vector3D_t three_d_origin;
-    vector3D_t* istanbul_ptr = NULL;
-    vector3D_t* basin_ptr = NULL;
-    vector3D_t* three_d_ptr = NULL;
-    if (Param.IstanbulVelocityModel == YES) {
-      istanbul_origin = compute_domain_coords_linearinterp(
-          28.675, 40.9565, Param.theSurfaceCornersLong,
-          Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-          &Param.utmZone);
-      istanbul_ptr = &istanbul_origin;
-    }
-    if (Param.basinVelocityModel == YES) {
-      basin_origin = compute_domain_coords_linearinterp(
-          Param.theBasinLong, Param.theBasinLat, Param.theSurfaceCornersLong,
-          Param.theSurfaceCornersLat, Param.theDomainY, Param.theDomainX,
-          &Param.utmZone);
-      basin_ptr = &basin_origin;
-    }
-    if (Param.threeDVelocityModel == YES) {
-      three_d_origin = compute_domain_coords_linearinterp(
-          Param.the3DVelocityModelLong, Param.the3DVelocityModelLat,
-          Param.theSurfaceCornersLong, Param.theSurfaceCornersLat,
-          Param.theDomainY, Param.theDomainX, &Param.utmZone);
-      three_d_ptr = &three_d_origin;
-    }
-    mesh_build_acoustic_interface_flags(istanbul_ptr, basin_ptr, three_d_ptr);
-  }
+  mesh_rebuild_acoustic_interfaces();
 #ifdef __linux__
   if (have_node_cpu_mask) {
     mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
@@ -11562,6 +11603,112 @@ static int acoustic_element_has_free_surface(const elem_t* element,
   }
   return 1;
 }
+
+/* Setup-only diagnostics: report actual device occupancy, not an estimate of
+ * future peak use. cudaMemGetInfo includes CUDA context and other processes. */
+struct gpu_memory_sample_t {
+  unsigned long long free_bytes, total_bytes, cpml_core_bytes;
+  int valid, world_rank, device, elements, nodes, elastic_pml, acoustic_pml;
+  char host[MPI_MAX_PROCESSOR_NAME];
+};
+
+static void gpu_setup_memory_report(const char* stage, bool before_cpml = false) {
+  gpu_memory_sample_t sample = {};
+  size_t free_bytes = 0, total_bytes = 0;
+  int host_len = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &sample.world_rank);
+  MPI_Get_processor_name(sample.host, &host_len);
+  sample.device = -1;
+  cudaGetDevice(&sample.device);
+  cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+  sample.valid = status == cudaSuccess;
+  sample.free_bytes = free_bytes;
+  sample.total_bytes = total_bytes;
+  sample.elements = Global.myMesh->lenum;
+  sample.nodes = Global.myMesh->nharbored;
+  sample.elastic_pml = g_cpmlBuild.elastic_count;
+  sample.acoustic_pml = g_cpmlBuild.acoustic_count;
+  if (!sample.valid)
+    fprintf(stderr, "GPU memory query failed on solver rank %d: %s\n",
+            Global.myID, cudaGetErrorString(status));
+  if (before_cpml && Param.theAbcType == ABC_CPML) {
+    /* Exact subset about to be allocated: maps, coefficients, ADE histories
+     * and gravity-surface records. Other solver/interface buffers are extra. */
+    sample.cpml_core_bytes =
+        (unsigned long long)sample.elastic_pml *
+        (sizeof(int32_t) + sizeof(cpml_element_t) + sizeof(solver_float) *
+         cpml_element_states(3, Global.gpuData.pmlNativeStiffness)) +
+        (unsigned long long)sample.acoustic_pml *
+        (sizeof(int32_t) + sizeof(cpml_element_t) + sizeof(solver_float) *
+         cpml_element_states(1, Global.gpuData.pmlNativeStiffnessAcoustic)) +
+        (unsigned long long)g_cpmlBuild.acoustic_gravity_surface_count *
+        (sizeof(int32_t) + sizeof(cpml_surface_t) + 8 * sizeof(solver_float));
+  }
+  std::vector<gpu_memory_sample_t> samples(Global.myID == 0 ? Global.theGroupSize : 0);
+  MPI_Gather(&sample, sizeof(sample), MPI_BYTE,
+             Global.myID == 0 ? samples.data() : NULL, sizeof(sample), MPI_BYTE,
+             0, comm_solver);
+  if (Global.myID != 0) return;
+  int most_used = -1, least_free = -1, most_cpml = 0, valid = 0;
+  for (int rank = 0; rank < Global.theGroupSize; ++rank) {
+    const gpu_memory_sample_t& r = samples[rank];
+    if (r.cpml_core_bytes > samples[most_cpml].cpml_core_bytes) most_cpml = rank;
+    if (!r.valid) continue;
+    ++valid;
+    if (most_used < 0 || r.total_bytes - r.free_bytes >
+        samples[most_used].total_bytes - samples[most_used].free_bytes) most_used = rank;
+    if (least_free < 0 || r.free_bytes < samples[least_free].free_bytes) least_free = rank;
+  }
+  monitor_print("GPU memory [%s]: valid samples %d/%d; device occupancy includes "
+                "context/other processes, not a future peak guarantee\n",
+                stage, valid, Global.theGroupSize);
+  const double gib = 1073741824.0;
+  const int ranks[2] = {most_used, least_free};
+  const char* labels[2] = {"maximum used", "minimum free"};
+  for (int i = 0; i < 2; ++i) {
+    if (ranks[i] < 0) continue;
+    const gpu_memory_sample_t& r = samples[ranks[i]];
+    monitor_print("  %s: solver rank %d, world rank %d, %s device %d: "
+                  "used %.3f GiB, free %.3f GiB / %.3f GiB; "
+                  "elements %d, harbored nodes %d, PML elastic %d acoustic %d\n",
+                  labels[i], ranks[i], r.world_rank, r.host, r.device,
+                  (r.total_bytes - r.free_bytes) / gib, r.free_bytes / gib,
+                  r.total_bytes / gib, r.elements, r.nodes, r.elastic_pml, r.acoustic_pml);
+  }
+  if (before_cpml && samples[most_cpml].cpml_core_bytes) {
+    const gpu_memory_sample_t& r = samples[most_cpml];
+    monitor_print("  largest planned CPML maps/coefficients/histories: "
+                  "solver rank %d, world rank %d, %s device %d: %.3f GiB "
+                  "(%llu bytes); excludes other solver/interface buffers\n",
+                  most_cpml, r.world_rank, r.host, r.device,
+                  r.cpml_core_bytes / gib, r.cpml_core_bytes);
+  }
+}
+
+/* Preserve callers' existing fatal-error handling and show the CUDA error and
+ * requested bytes before abort. No MPI collective is safe on this error path. */
+static cudaError_t gpu_setup_malloc(void** ptr, size_t bytes, const char* name) {
+  cudaError_t status = cudaMalloc(ptr, bytes);
+  if (status != cudaSuccess) {
+    int world_rank = -1, device = -1, host_len = 0;
+    char host[MPI_MAX_PROCESSOR_NAME] = {};
+    size_t free_bytes = 0, total_bytes = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Get_processor_name(host, &host_len);
+    cudaGetDevice(&device);
+    cudaError_t query = cudaMemGetInfo(&free_bytes, &total_bytes);
+    fprintf(stderr, "GPU allocation failed: solver rank %d, world rank %d, "
+            "%s device %d, %s: requested %zu bytes; CUDA %d (%s); "
+            "memory query %s, free %zu / total %zu bytes\n",
+            Global.myID, world_rank, host, device, name, bytes,
+            (int)status, cudaGetErrorString(status), cudaGetErrorString(query),
+            free_bytes, total_bytes);
+    fflush(stderr);
+  }
+  return status;
+}
+
+#define GPU_SETUP_MALLOC(ptr, bytes) gpu_setup_malloc((void**)(ptr), (bytes), #ptr)
 
 /** Init matrices/constants, communication schedules, and solver storage. */
 static void solver_init() {
@@ -12544,6 +12691,8 @@ static void solver_init() {
 
   } /* eindex for elements */
 
+  gpu_setup_memory_report("before CPML upload", true);
+
 #ifdef BOUNDARY
   /* Publish counts and upload coefficients and zeroed device histories. */
   if (Param.theAbcType == ABC_CPML) {
@@ -12584,9 +12733,9 @@ static void solver_init() {
       else Global.gpuData.pmlElasticElemCount = count;
       if (count == 0) continue;
       const size_t state_bytes = (size_t)count*cpml_element_states(type ? 1 : 3,native)*sizeof(solver_float);
-      if (cudaMalloc((void**)mapper,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
-          cudaMalloc((void**)coeff,(size_t)count*sizeof(cpml_element_t)) != cudaSuccess ||
-          cudaMalloc((void**)state,state_bytes) != cudaSuccess ||
+      if (GPU_SETUP_MALLOC((void**)mapper,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
+          GPU_SETUP_MALLOC((void**)coeff,(size_t)count*sizeof(cpml_element_t)) != cudaSuccess ||
+          GPU_SETUP_MALLOC((void**)state,state_bytes) != cudaSuccess ||
           cudaMemcpy(*mapper,host_map,(size_t)count*sizeof(int32_t),cudaMemcpyHostToDevice) != cudaSuccess ||
           cudaMemcpy(*coeff,host_coeff,(size_t)count*sizeof(cpml_element_t),cudaMemcpyHostToDevice) != cudaSuccess ||
           cudaMemset(*state,0,state_bytes) != cudaSuccess) {
@@ -12597,9 +12746,9 @@ static void solver_init() {
       const int32_t count = g_cpmlBuild.acoustic_gravity_surface_count;
       Global.gpuData.pmlAcousticGravitySurfaceCount = count;
       if (count > 0 &&
-          (cudaMalloc((void**)&Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
-           cudaMalloc((void**)&Global.gpuData.pmlGravityCoeffDevice,(size_t)count*sizeof(cpml_surface_t)) != cudaSuccess ||
-           cudaMalloc((void**)&Global.gpuData.pmlGravityStateDevice,(size_t)count*8*sizeof(solver_float)) != cudaSuccess ||
+          (GPU_SETUP_MALLOC((void**)&Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice,(size_t)count*sizeof(int32_t)) != cudaSuccess ||
+           GPU_SETUP_MALLOC((void**)&Global.gpuData.pmlGravityCoeffDevice,(size_t)count*sizeof(cpml_surface_t)) != cudaSuccess ||
+           GPU_SETUP_MALLOC((void**)&Global.gpuData.pmlGravityStateDevice,(size_t)count*8*sizeof(solver_float)) != cudaSuccess ||
            cudaMemcpy(Global.gpuData.pml_acoustic_gravitySurfacePmlIndexArrayDevice,g_cpmlBuild.acoustic_gravity_surface_pml_index,(size_t)count*sizeof(int32_t),cudaMemcpyHostToDevice) != cudaSuccess ||
            cudaMemcpy(Global.gpuData.pmlGravityCoeffDevice,g_cpmlBuild.acoustic_gravity_surface_coeff,(size_t)count*sizeof(cpml_surface_t),cudaMemcpyHostToDevice) != cudaSuccess ||
            cudaMemset(Global.gpuData.pmlGravityStateDevice,0,(size_t)count*8*sizeof(solver_float)) != cudaSuccess)) {
@@ -12619,7 +12768,7 @@ static void solver_init() {
      * so each element is processed by exactly one stiffness/force kernel.
      * Allocated even if both PML counts are zero so the kernels can
      * unconditionally null-check the pointer. */
-    if (cudaMalloc((void**)&(Global.gpuData.pmlFlagArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pmlFlagArrayDevice),
                    (size_t)Global.myMesh->lenum * sizeof(uint8_t)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: cudaMalloc pmlFlag failed\n", Global.myID);
@@ -12672,7 +12821,7 @@ static void solver_init() {
      * captures every shared node on the outer face regardless of which
      * PML element owns it. */
     if (Param.theCpmlClampOuter == YES) {
-      if (cudaMalloc((void**)&(Global.gpuData.pmlClampNodeMaskDevice),
+      if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pmlClampNodeMaskDevice),
                      (size_t)Global.myMesh->nharbored * sizeof(uint8_t)) !=
           cudaSuccess) {
         fprintf(stderr, "Thread %d: cudaMalloc pmlClampNodeMask failed\n",
@@ -13164,14 +13313,14 @@ static void solver_init() {
   Global.mySolver->gpu_spec = &(Global.gpu_spec);
 
   /* Allocate memory for GPU */
-  if (cudaMalloc((void**)&(Global.gpuData.tm1Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.tm1Device),
                  Global.myMesh->nharbored * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate tm1 device memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.tm2Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.tm2Device),
                  Global.myMesh->nharbored * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate tm2 device memory\n",
             Global.myID);
@@ -13179,7 +13328,7 @@ static void solver_init() {
     exit(1);
   }
   if ((Param.printStationAccelerations == YES) || acoustic_pressure_enabled()) {
-    if (cudaMalloc((void**)&(Global.gpuData.tm3Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.tm3Device),
                    Global.myMesh->nharbored * sizeof(fvector_t)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate tm3 device memory\n",
@@ -13189,7 +13338,7 @@ static void solver_init() {
     }
   }
 
-  if (cudaMalloc((void**)&(Global.gpuData.forceDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.forceDevice),
                  Global.myMesh->nharbored * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate force memory\n",
             Global.myID);
@@ -13197,7 +13346,7 @@ static void solver_init() {
     exit(1);
   }
   if (acoustic_pressure_enabled()) {
-    if (cudaMalloc((void**)&(Global.gpuData.pressureTm1Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pressureTm1Device),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure tm1 memory\n",
@@ -13205,7 +13354,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureTm2Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pressureTm2Device),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure tm2 memory\n",
@@ -13213,7 +13362,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureForceDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pressureForceDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure force memory\n",
@@ -13221,7 +13370,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureMassDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pressureMassDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure mass memory\n",
@@ -13229,7 +13378,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.pressureDampDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.pressureDampDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pressure damp memory\n",
@@ -13237,7 +13386,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc(
+    if (GPU_SETUP_MALLOC(
             (void**)&Global.gpuData.pressureFreeSurfaceNodeFlagsDevice,
             Global.myMesh->nharbored * sizeof(uint8_t)) != cudaSuccess) {
       fprintf(stderr,
@@ -13251,7 +13400,7 @@ static void solver_init() {
     Global.gpuData.poroelasticElemCount = g_poroelasticLocalElementCount;
     Global.gpuData.porePressureOpenPoreMassDevice = NULL;
     Global.gpuData.porePressureOpenPoreTargetDevice = NULL;
-    if (cudaMalloc((void**)&(Global.gpuData.porePressureTm1Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureTm1Device),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pore pressure tm1 memory\n",
@@ -13259,7 +13408,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.porePressureTm2Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureTm2Device),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate pore pressure tm2 memory\n",
@@ -13267,7 +13416,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.porePressureForceDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureForceDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
@@ -13276,7 +13425,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.porePressureMassDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureMassDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
@@ -13285,7 +13434,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.porePressureSurfaceDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureSurfaceDevice),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
@@ -13295,7 +13444,7 @@ static void solver_init() {
       exit(1);
     }
     if (acoustic_poroelastic_open_pore_enabled()) {
-      if (cudaMalloc((void**)&(Global.gpuData.porePressureOpenPoreMassDevice),
+      if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureOpenPoreMassDevice),
                      Global.myMesh->nharbored * sizeof(solver_float)) !=
           cudaSuccess) {
         fprintf(stderr,
@@ -13304,7 +13453,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc((void**)&(Global.gpuData.porePressureOpenPoreTargetDevice),
+      if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.porePressureOpenPoreTargetDevice),
                      Global.myMesh->nharbored * sizeof(solver_float)) !=
           cudaSuccess) {
         fprintf(stderr,
@@ -13316,16 +13465,16 @@ static void solver_init() {
     }
     if (g_poroelasticLocalElementCount > 0) {
       const size_t poroN = (size_t)g_poroelasticLocalElementCount;
-      if ((cudaMalloc(
+      if ((GPU_SETUP_MALLOC(
                (void**)&(Global.gpuData.poroelasticElemMapperDevice),
                poroN * sizeof(int32_t)) != cudaSuccess) ||
-          (cudaMalloc((void**)&(Global.gpuData.poroelasticElemHDevice),
+          (GPU_SETUP_MALLOC((void**)&(Global.gpuData.poroelasticElemHDevice),
                       poroN * sizeof(double)) != cudaSuccess) ||
-          (cudaMalloc((void**)&(Global.gpuData.poroelasticElemDetJDevice),
+          (GPU_SETUP_MALLOC((void**)&(Global.gpuData.poroelasticElemDetJDevice),
                       poroN * sizeof(double)) != cudaSuccess) ||
-          (cudaMalloc((void**)&(Global.gpuData.poroelasticStorageMDevice),
+          (GPU_SETUP_MALLOC((void**)&(Global.gpuData.poroelasticStorageMDevice),
                       poroN * sizeof(double)) != cudaSuccess) ||
-          (cudaMalloc(
+          (GPU_SETUP_MALLOC(
                (void**)&(Global.gpuData.poroelasticPressureShapeScaleDevice),
                8 * poroN * sizeof(double)) != cudaSuccess)) {
         fprintf(stderr,
@@ -13340,42 +13489,42 @@ static void solver_init() {
     Global.gpuData.porePressureOpenPoreMassDevice = NULL;
     Global.gpuData.porePressureOpenPoreTargetDevice = NULL;
   }
-  if (cudaMalloc((void**)&(Global.gpuData.conv_shear_1Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_shear_1Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate conv_shear_1 memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.conv_shear_2Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_shear_2Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate conv_shear_2 memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.conv_shear_3Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_shear_3Device),
        8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate conv_shear_3 memory\n",
         Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-  if (cudaMalloc((void**)&(Global.gpuData.conv_kappa_1Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_kappa_1Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate conv_kappa_1 memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.conv_kappa_2Device),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_kappa_2Device),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate conv_kappa_2 memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.conv_kappa_3Device),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.conv_kappa_3Device),
        8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate conv_kappa_3 memory\n",
         Global.myID);
@@ -13383,21 +13532,21 @@ static void solver_init() {
       exit(1);
     }
 
-  if (cudaMalloc((void**)&(Global.gpuData.c1ArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.c1ArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate c1 array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.c2ArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.c2ArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate c1 array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.c3ArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.c3ArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate c3 array memory\n",
             Global.myID);
@@ -13405,7 +13554,7 @@ static void solver_init() {
     exit(1);
   }
 
-  if (cudaMalloc((void**)&(Global.gpuData.lnidArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.lnidArrayDevice),
                  Global.myMesh->lenum * 8 * sizeof(int32_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate lnid array memory\n",
             Global.myID);
@@ -13413,7 +13562,7 @@ static void solver_init() {
     exit(1);
   }
 
-  if (cudaMalloc((void**)&(Global.gpuData.acousticFaceFlagsArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.acousticFaceFlagsArrayDevice),
                  Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
     fprintf(stderr,
             "Thread %d: Failed to allocate acoustic interface flag memory\n",
@@ -13466,7 +13615,7 @@ static void solver_init() {
   Global.gpuData.acousticInterfaceAdjacentPoroelasticDevice = NULL;
   Global.gpuData.acousticInterfacePoroelasticBoundaryScalesDevice = NULL;
   if (acoustic_pressure_enabled()) {
-    if (cudaMalloc((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.acousticElementFlagsArrayDevice),
                    Global.myMesh->lenum * sizeof(uint8_t)) != cudaSuccess) {
       fprintf(stderr,
               "Thread %d: Failed to allocate acoustic pressure element flag memory\n",
@@ -13474,7 +13623,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.acousticPressureCoeffArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.acousticPressureCoeffArrayDevice),
                    Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr,
               "Thread %d: Failed to allocate acoustic pressure coefficient memory\n",
@@ -13482,7 +13631,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc(
+    if (GPU_SETUP_MALLOC(
             (void**)&(Global.gpuData.acousticPressureBoundaryCoeffArrayDevice),
             Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr,
@@ -13497,7 +13646,7 @@ static void solver_init() {
       size_t face_count =
           (size_t)Global.gpuData.acousticInterfaceFaceCount;
 
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(Global.gpuData.acousticInterfaceElementIdsDevice),
               face_count * sizeof(int32_t)) != cudaSuccess) {
         fprintf(stderr,
@@ -13506,7 +13655,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc((void**)&(Global.gpuData.acousticInterfaceFaceIdsDevice),
+      if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.acousticInterfaceFaceIdsDevice),
                      face_count * sizeof(uint8_t)) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to allocate acoustic interface face table\n",
@@ -13514,7 +13663,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc((void**)&(Global.gpuData.acousticInterfaceFaceAreasDevice),
+      if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.acousticInterfaceFaceAreasDevice),
                      face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
                 "Thread %d: Failed to allocate acoustic interface face areas\n",
@@ -13522,7 +13671,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(Global.gpuData.acousticInterfaceFaceCentersDevice),
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
@@ -13531,7 +13680,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(Global.gpuData.acousticInterfaceFaceNormalsDevice),
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
@@ -13540,7 +13689,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(Global.gpuData.acousticInterfaceFaceHalfWidthsDevice),
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
@@ -13549,7 +13698,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(
                   Global.gpuData.acousticInterfaceAdjacentElementIndexesDevice),
               face_count * sizeof(int32_t)) != cudaSuccess) {
@@ -13559,7 +13708,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(Global.gpuData.acousticInterfaceAdjacentCentersDevice),
               3 * face_count * sizeof(double)) != cudaSuccess) {
         fprintf(stderr,
@@ -13568,7 +13717,7 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      if (cudaMalloc(
+      if (GPU_SETUP_MALLOC(
               (void**)&(
                   Global.gpuData.acousticInterfaceAdjacentHalfWidthsDevice),
               3 * face_count * sizeof(double)) != cudaSuccess) {
@@ -13579,7 +13728,7 @@ static void solver_init() {
         exit(1);
       }
       if (acoustic_poroelastic_open_pore_enabled()) {
-        if (cudaMalloc(
+        if (GPU_SETUP_MALLOC(
                 (void**)&(Global.gpuData
                     .acousticInterfaceAdjacentPoroelasticDevice),
                 face_count * sizeof(uint8_t)) != cudaSuccess) {
@@ -13589,7 +13738,7 @@ static void solver_init() {
           MPI_Abort(MPI_COMM_WORLD, ERROR);
           exit(1);
         }
-        if (cudaMalloc(
+        if (GPU_SETUP_MALLOC(
                 (void**)&(Global.gpuData
                     .acousticInterfacePoroelasticBoundaryScalesDevice),
                 face_count * sizeof(double)) != cudaSuccess) {
@@ -13603,21 +13752,21 @@ static void solver_init() {
     }
   }
 
-  if (cudaMalloc((void**)&(Global.gpuData.g0_shearArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g0_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate g0 shear array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.g1_shearArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g1_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate g1 shear array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.g2_shearArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g2_shearArrayDevice),
        Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate g2 shear array memory\n",
         Global.myID);
@@ -13625,21 +13774,21 @@ static void solver_init() {
       exit(1);
     }
 
-  if (cudaMalloc((void**)&(Global.gpuData.g0_kappaArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g0_kappaArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate g0 kappa array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.g1_kappaArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g1_kappaArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate g1 kappa array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.g2_kappaArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.g2_kappaArrayDevice),
        Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate g2 kappa array memory\n",
         Global.myID);
@@ -13647,56 +13796,56 @@ static void solver_init() {
       exit(1);
     }
 
-  if (cudaMalloc((void**)&(Global.gpuData.b_shearArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.b_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate b shear array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.a0_shearArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a0_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate a0 shear array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.a1_shearArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a1_shearArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate a1 shear array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.a2_shearArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a2_shearArrayDevice),
        Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate a2 shear array memory\n",
         Global.myID);
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-  if (cudaMalloc((void**)&(Global.gpuData.b_kappaArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.b_kappaArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate b kappa array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.a0_kappaArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a0_kappaArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate a0 kappa array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.a1_kappaArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a1_kappaArrayDevice),
                  Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate a1 kappa array memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-    if (cudaMalloc((void**)&(Global.gpuData.a2_kappaArrayDevice),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.a2_kappaArrayDevice),
        Global.myMesh->lenum * sizeof(double)) != cudaSuccess) {
       fprintf(stderr, "Thread %d: Failed to allocate a2 kappa array memory\n",
         Global.myID);
@@ -13704,14 +13853,14 @@ static void solver_init() {
       exit(1);
     }
 
-  if (cudaMalloc((void**)&(Global.gpuData.shearVectorDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.shearVectorDevice),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate shear vector memory\n",
             Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  if (cudaMalloc((void**)&(Global.gpuData.kappaVectorDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.kappaVectorDevice),
                  8 * Global.myMesh->lenum * sizeof(fvector_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate kappa vector memory\n",
             Global.myID);
@@ -13719,7 +13868,7 @@ static void solver_init() {
     exit(1);
   }
 
-  if (cudaMalloc((void**)&(Global.gpuData.mass_simpleArrayDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.mass_simpleArrayDevice),
                  Global.myMesh->nharbored * sizeof(solver_float)) !=
       cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate mass_simple array memory\n",
@@ -13729,7 +13878,7 @@ static void solver_init() {
   }
 
     for (int i = 0; i < 3; i++) {
-    if (cudaMalloc((void**)&(Global.gpuData.mass2_minusaMArrayDevice[i]),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.mass2_minusaMArrayDevice[i]),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
@@ -13738,7 +13887,7 @@ static void solver_init() {
       MPI_Abort(MPI_COMM_WORLD, ERROR);
       exit(1);
     }
-    if (cudaMalloc((void**)&(Global.gpuData.mass_minusaMArrayDevice[i]),
+    if (GPU_SETUP_MALLOC((void**)&(Global.gpuData.mass_minusaMArrayDevice[i]),
                    Global.myMesh->nharbored * sizeof(solver_float)) !=
         cudaSuccess) {
       fprintf(stderr,
@@ -14333,15 +14482,15 @@ static void solver_init() {
       if (Global.acousticInterfacePmlSideMask != NULL) {
         const size_t coeff_bytes = face_count*sizeof(cpml_interface_t);
         const size_t state_bytes = 24*face_count*sizeof(solver_float);
-        if (cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlSideMaskDevice,
+        if (GPU_SETUP_MALLOC((void**)&Global.gpuData.acousticInterfacePmlSideMaskDevice,
                        face_count*sizeof(uint8_t)) != cudaSuccess ||
-            cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlAcousticDevice,
+            GPU_SETUP_MALLOC((void**)&Global.gpuData.acousticInterfacePmlAcousticDevice,
                        coeff_bytes) != cudaSuccess ||
-            cudaMalloc((void**)&Global.gpuData.acousticInterfacePmlElasticDevice,
+            GPU_SETUP_MALLOC((void**)&Global.gpuData.acousticInterfacePmlElasticDevice,
                        coeff_bytes) != cudaSuccess ||
-            cudaMalloc((void**)&Global.gpuData.acousticInterfacePsiPressureDevice,
+            GPU_SETUP_MALLOC((void**)&Global.gpuData.acousticInterfacePsiPressureDevice,
                        state_bytes) != cudaSuccess ||
-            cudaMalloc((void**)&Global.gpuData.acousticInterfacePsiAccelDevice,
+            GPU_SETUP_MALLOC((void**)&Global.gpuData.acousticInterfacePsiAccelDevice,
                        state_bytes) != cudaSuccess ||
             cudaMemset(Global.gpuData.acousticInterfacePsiPressureDevice,0,state_bytes) != cudaSuccess ||
             cudaMemset(Global.gpuData.acousticInterfacePsiAccelDevice,0,state_bytes) != cudaSuccess ||
@@ -14553,7 +14702,7 @@ static void solver_init() {
   }
 
   /* Copy GPU data to device */
-  if (cudaMalloc((void**)&(Global.mySolver->gpuDataDevice),
+  if (GPU_SETUP_MALLOC((void**)&(Global.mySolver->gpuDataDevice),
                  sizeof(gpu_data_t)) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to allocate GPU data memory\n",
             Global.myID);
@@ -14580,7 +14729,7 @@ static void solver_init() {
   /* Check for CUDA errors */
   cudaError_t cerror = cudaGetLastError();
   if (cerror != cudaSuccess) {
-    fprintf(stderr, "Thread %d: Failed to setup data in GPU memory\n",
+    fprintf(stderr, "Thread %d: Failed to setup data in GPU memory: %s\n",
             Global.myID, cudaGetErrorString(cerror));
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
@@ -14589,6 +14738,7 @@ static void solver_init() {
   /* Save reference to device data in solver */
   Global.mySolver->gpuData = &Global.gpuData;
 
+  gpu_setup_memory_report("solver allocation complete");
   if (Global.myID == 0) {
     fprintf(stdout, "GPU Device memory allocation: end\n");
   }
@@ -14694,6 +14844,8 @@ static void solver_init() {
 
   return;
 }
+
+#undef GPU_SETUP_MALLOC
 
 /**
  * Print the communication schedule of each processor to the given output
@@ -22067,6 +22219,8 @@ static void solver_run() {
   }
 
   MPI_Barrier(comm_solver);
+
+  gpu_setup_memory_report("before first timestep (communication/source/physics initialized)");
 
   /* march forward in time */
   for (step = startingStep; step < Param.theTotalSteps; step++) {
@@ -29966,6 +30120,7 @@ int main(int argc, char** argv) {
     }
   }
 
+  mesh_partition_completed_solver();
   if (!Param.theMeshOnlyMode) acoustic_solid_trace_build();
 
   if (Param.includeBuildings == YES) {

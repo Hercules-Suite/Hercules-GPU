@@ -966,6 +966,16 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
       },
       {
+        id: "pml-partition-memory",
+        title: "Completed-mesh partitioning and GPU memory",
+        paragraphs: [
+          "cpml_partition_weight defaults to 1 (equal leaf counts). With a weight above 1, ordinary partitions are still used throughout progressive construction, 2:1 balancing, building carving and local acoustic-interface matching. CPML weighting is deferred until the completed solver mesh: after unified handoff to the GPU ranks, during Phase B import, or by final re-extraction in a direct or equal-rank unified run. Mesh-only runs remain equally partitioned. The log identifies the stage, rank count, weight and completed-mesh thickness.",
+          "Weighting changes ownership, not refinement or corrected material records. Direct re-extraction preserves Q and geostatic data and rebuilds local interface metadata before physics initialization. Existing porous/nonlinear CPML restrictions are unchanged. This avoids weighted intermediate partitions followed by more balancing, but does not establish a general repair of OCTOR anchor-search failures.",
+          "GPU memory reports show maximum observed use and minimum free memory before CPML upload, after the main solver allocation, and before the first timestep after communication/source/physics initialization. Each includes the responsible solver/world rank, node/device and element/node/PML counts. The largest planned CPML maps, coefficients and histories (including gravity-surface state) are also reported before upload; this is only a subset of the required storage. Ordinary solver, interface, source, nonlinear/poroelastic and MPI buffers are additional.",
+          "These are setup-only snapshots, not a GPU-memory cap or a guarantee of later peak use. Occupancy includes CUDA context and other processes, and later lazy allocations may add storage. Main solver setup allocation failures print requested bytes, CUDA error and free/total memory with rank/device identity; other modules retain their own failure handling. No diagnostics are added inside the timestep loop. Validate the final partition and target-device headroom before a large production run.",
+        ],
+      },
+      {
         id: "pml-complete-operator",
         title: "Complete second-order operator",
         paragraphs: [

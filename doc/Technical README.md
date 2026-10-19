@@ -243,7 +243,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_mpml_cross_fraction` | `0` (default); 0 to 0.5 | Optional; Float |
 | `cpml_acoustic_sponge_fraction` | `0.3` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
 | `cpml_alpha_floor_fraction` | `0.1` (default); 0 to 1 | Optional; Float |
-| `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float |
+| `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float. CPML weighting applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_stiffness_mode` | `native` (default), `reduced` | Optional; String |
