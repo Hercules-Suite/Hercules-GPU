@@ -8,6 +8,28 @@ Required CSV columns and units:
 Optional columns qs and qp must either both be present or both be absent.
 """
 
+# USAGE (Python 3 standard library; run this example from the repository root)
+#   python3 script/convert_3d_velocity_model.py model.csv \
+#       --output-dir inputfiles/materialfiles_new
+#   python3 script/convert_3d_velocity_model.py --help
+#
+# Required: positional CSV filename and --output-dir. Relative paths use the
+# current working directory. No parameters.in is read or modified.
+# CSV header: x,y,z,vs,vp,rho, with optional qs,qp together. Coordinates are
+# metres (X north, Y east, Z positive down); Vs/Vp are m/s; rho is tonne/m^3,
+# NOT kg/m^3; Q values are dimensionless. Rows may be unordered. Supply every
+# column of a rectangular uniform X/Y grid (at least two coordinates per axis)
+# and distinct nonnegative depths in each column. Require finite values,
+# Vs >= 0, Vp/rho > 0, and Qs/Qp > 0 when supplied.
+# Output: count-prefixed x.in, y.in, index.in, z.in, vs.in, vp.in, rho.in, and
+# optional qs.in/qp.in. Profiles are ordered Y outer/X inner, depths increasing;
+# index.in contains zero-based offsets. The output directory is created.
+# Existing generated files are overwritten without confirmation. Old Q files
+# are NOT removed when the new CSV has no Q columns; use a fresh directory.
+# All rows are held in memory. This checks format/ranges, not physical accuracy
+# or compatibility with a chosen depth reference. Validate the generated folder
+# with validate_3d_velocity_model.py; see script/README.md for a complete CSV.
+
 import argparse
 import csv
 import math

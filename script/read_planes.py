@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """Inspect native-float64 plane displacements with manual grid/timing (NumPy)."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/read_planes.py outputfiles/planes/planedisplacements.0 \
+#       --nx 361 --ny 361 --dt 0.1
+#   python3 script/read_planes.py --help
+#
+# Required: completed binary filename, --nx (along-strike POINT count), --ny
+# (down-dip POINT count), and --dt (time between SAVED snapshots, seconds).
+# Usually dt = simulation_delta_time_sec * output_planes_print_rate; it is not
+# the solver timestep alone. --first-time defaults to 0 s; set it for restarts.
+# Headerless native-float64 layout: (time, nx, ny, 3), C order, XYZ components
+# contiguous, down-dip index fastest. Displacements are metres, Z positive down.
+# Output: array shape, time span, and peak absolute GLOBAL Z displacement.
+# All snapshots are scanned for nonfinite XYZ values through a read-only memory
+# map. No output files are created; relative paths use the working directory.
+# Counts/timing are not read from parameters.in. A wrong shape with the same
+# product, or missing complete frames, cannot be identified from size alone.
+# See script/README.md; animations_mpi.py additionally renders horizontal planes.
+
 import argparse
 from pathlib import Path
 

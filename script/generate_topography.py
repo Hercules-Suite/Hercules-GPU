@@ -1,6 +1,26 @@
 #!/usr/bin/env python3
 """Generate the documentation's Gaussian hill in solver X-major order (NumPy)."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/generate_topography.py \
+#       --lx 40000 --ly 40000 --spacing 100 --height 800 --sigma 3000 \
+#       --out inputfiles/topography/topography.in
+#   python3 script/generate_topography.py --help
+#
+# Required: --lx (north extent), --ly (east extent), --spacing (both axes),
+# --height (peak elevation), --sigma (Gaussian width), and --out. All dimensions
+# and elevations are metres. Lengths/spacing/sigma must be positive and spacing
+# must divide both lengths. Heights are positive UP relative to the datum.
+# Optional: --center-x and --center-y default to the domain midpoint; --force
+# permits overwriting an existing output (otherwise it is rejected).
+# Output: topography.in format, one spacing value followed by all nodal heights
+# in X-outer/Y-inner order (east fastest), written to six decimal places.
+# Parent directories are created; relative paths use the working directory.
+# Arrays are held in memory. This creates only an illustrative Gaussian hill;
+# it does not taper the boundary flat, create seabed/material files, or choose
+# topographybase_zcoord. Configure those separately and regenerate the mesh.
+# See script/README.md for validation and boundary-taper examples.
+
 import argparse
 from pathlib import Path
 

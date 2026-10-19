@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Summarize station time and displacement; inspect its header for optional columns."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/read_stations.py outputfiles/stations/station.0
+#   python3 script/read_stations.py --help
+#
+# Required: one completed ASCII station.N file. Relative paths use the working
+# directory. The first four columns must be time [s], ux/uy/uz [m], with finite
+# values and strictly increasing time. Leading # comment headers are echoed.
+# Output: sample count, saved-time interval range, time span, column count,
+# and peak displacement VECTOR magnitude sqrt(ux^2+uy^2+uz^2).
+# Optional velocity/acceleration/pressure/stress columns are not checked or
+# summarized; inspect the echoed header for their meaning. This is not a PGA
+# calculation. The full table is loaded into memory; no files are written.
+# For flat binary station_displacements output, use read_drm.py --points.
+# See script/README.md for output-format details.
+
 import argparse
 from pathlib import Path
 

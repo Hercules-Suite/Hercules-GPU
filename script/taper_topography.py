@@ -50,6 +50,37 @@ DEFAULTS (40 km x 40 km benchmark domain; surface mesh ~78 m, PML ~10
 layers ~ 780 m): buffer 6000 m, flat_margin 1500 m (>= the ~780 m PML
 band, with margin), z_ref 0.0.  Tune to your domain / PML thickness.
 """
+
+# USAGE (Python 3 standard library; run this example from the repository root)
+#   mkdir -p inputfiles/topography_pml
+#   python3 script/taper_topography.py inputfiles/topography/topography.in \
+#       --out inputfiles/topography_pml/topography.in \
+#       --lx 40000 --ly 40000 --buffer 6000 --flat-margin 1500 \
+#       --pml-thickness 780 --z-ref 0
+#   python3 script/taper_topography.py --help
+#
+# Required: input filename. Supply your actual domain dimensions and resolved
+# CPML width; defaults describe a benchmark, not an arbitrary production case.
+# Defaults (metres): --lx/--ly 40000, --buffer 6000, --flat-margin 1500,
+# --pml-thickness 780, --z-ref 0. --out defaults to topography_tapered.in.
+# --z-ref auto uses the mean elevation of the first interior ring. It is an
+# ELEVATION reference, positive up, not a solver Z coordinate.
+# --buffer includes the flat collar plus the cosine ramp. Require
+# 0 < flat-margin < buffer < min(lx,ly)/2. Choose flat-margin > actual CPML
+# thickness with margin; --pml-thickness only controls a warning, NOT the mesh.
+# Input/output: spacing followed by X-outer/Y-inner nodal elevations. Spacing
+# and ordering are preserved; all output elevations round to four decimals,
+# including interior values. Whole grids are held in memory.
+# Create the output parent first. Existing output/in-place writes are refused
+# unless --force is supplied. Relative paths use the working directory.
+# Reports: grid size, taper settings, affected point count, maximum change,
+# and perimeter flatness. These are geometry checks, not a stability proof.
+# Set topography_directory to the new folder and rebuild the mesh when adopting
+# it. This script does NOT update seabed_geometry_file or material/source files.
+# Keep paired topography/bed elevations consistent: bed above the outer surface
+# is invalid. Tapering both to zero removes water in the flat collar; preserving
+# water requires a consistent submerged bed target. See script/README.md.
+
 import argparse
 import math
 import os

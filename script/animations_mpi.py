@@ -32,6 +32,37 @@ The display uses a continuous color palette and 4x linear grid upsampling.
 only; velocities and their reported extrema are calculated on the original grid.
 """
 
+# USAGE (Python 3; run these examples from the repository root)
+#   python3 script/animations_mpi.py \
+#       --plane-file outputfiles/planes/planedisplacements.0 \
+#       --nx 361 --ny 361 --dx 250 --dy 250 --dt 0.1 --check-only
+#   python3 script/animations_mpi.py \
+#       --plane-file outputfiles/planes/planedisplacements.0 \
+#       --nx 361 --ny 361 --dx 250 --dy 250 --dt 0.1 \
+#       --workers 4 --output-dir Animations_velocity_run1
+#   python3 script/animations_mpi.py --help
+#
+# Dependencies: NumPy; rendering also needs working PyGMT/GMT and xarray, plus
+# joblib for multiple workers. MPI placement is optional; mpi4py is not used.
+# Required: --plane-file, --nx, --ny, --dt. Supply a completed native-float64
+# displacement plane with >=2 points per axis and >=2 snapshots. Use the SAVED
+# interval, solver dt * plane print rate, in seconds. No parameters.in is read.
+# Rendering assumes strike=0 (mod 360), dip=0. X is north, Y east, Z down;
+# plots show X upward and Y rightward, in km relative to the plane origin.
+# Defaults: --dx 500 m, --dy 325 m, --first-time 0 s, --dpi 300,
+# --plot-upsample 4, --plot-interpolation linear (or cubic),
+# --title "Hercules vertical velocity", --output-dir Animations_velocity.
+# --workers: FRAME_WORKERS_PER_RANK, else FRAME_WORKERS_PER_NODE, else 1.
+# --velocity-limit: VELOCITY_LIMIT_CM_S, else 10 cm/s. --progress-every:
+# FRAME_PROGRESS_EVERY, else 100 frames (0 disables). CLI values override env.
+# Output: frame_00000.png, etc.; directory created, matching files overwritten,
+# stale frames retained. Use a new directory. Relative paths use the working
+# directory. Frames are NOT encoded into a video. Velocity is d(uz)/dt in cm/s,
+# positive down; display interpolation/colour limits do not change raw metrics.
+# --check-only writes nothing and checks first/middle/last frames, not the full
+# history. Match workers to allocated CPUs/memory; see script/README.md for MPI
+# placement, CPU affinity, restart timing, and display/session details.
+
 import argparse
 import atexit
 import math

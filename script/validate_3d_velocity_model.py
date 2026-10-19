@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 """Validate count-prefixed Hercules 3-D model files; requires NumPy."""
 
+# USAGE (Python 3 + NumPy; run this example from the repository root)
+#   python3 script/validate_3d_velocity_model.py inputfiles/materialfiles
+#   python3 script/validate_3d_velocity_model.py --help
+#
+# Required: one directory containing x.in, y.in, index.in, z.in, vs.in, vp.in,
+# and rho.in. If either qs.in or qp.in exists, both are required. Each file
+# starts with its value count. Paths are relative to the working directory.
+# Units: X/Y/Z in metres, Z positive down; Vs/Vp in m/s; rho in tonne/m^3;
+# Qs/Qp dimensionless. Material profiles use Y outer/X inner ordering, with
+# index.in holding zero-based offsets into the concatenated depth arrays.
+# Checks: finite values, count headers, uniform increasing X/Y axes, increasing
+# depths per column, matched array lengths, z/Vs >= 0, Vp/rho > 0, and Q > 0.
+# Output: "valid model: ..." on success; nonzero exit on invalid input.
+# No files are written or overwritten. Entire arrays must fit in memory.
+# This does not check domain coverage, depth-reference compatibility, or the
+# physical validity of the model. See script/README.md for the file format.
+
 import argparse
 from pathlib import Path
 

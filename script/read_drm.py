@@ -1,6 +1,29 @@
 #!/usr/bin/env python3
 """Inspect a flat native-float64 station or DRM displacement file (Python standard library)."""
 
+# USAGE (Python 3.9+ standard library; examples from the repository root)
+#   python3 script/read_drm.py outputfiles/drmdisplacements.0 \
+#       --box 100 100 50 1 --dt 0.01
+#   python3 script/read_drm.py outputfiles/station_displacements.0 \
+#       --points 19 --dt 0.01
+#   python3 script/read_drm.py --help
+#
+# Required: completed binary filename, --dt, and EXACTLY ONE of --box or
+# --points. --box LX LY DEPTH SPACING uses exterior box dimensions in metres;
+# lengths must divide by spacing exactly, LX/LY > 2*spacing, depth > spacing.
+# --points is the number of output_stations rows for flat binary station data.
+# --dt is the SAVED snapshot interval [s]: solver dt times the corresponding
+# DRM/station print rate. --first-time defaults to 0 s; set it for restarts.
+# Format: headerless native-float64 (time, point, XYZ) displacements in metres.
+# DRM point order: exterior front/back/left/right/bottom, then interior faces;
+# edges/corners repeat. Station point order matches the input station table.
+# Output: layout, DRM face offsets/shapes when applicable, time span and peak
+# absolute XYZ displacement. It scans one snapshot at a time and rejects
+# incomplete/nonfinite data; it does not read coordinate/material sidecars.
+# No files are written; relative paths use the current working directory.
+# Geometry/timing must match the run; matching byte counts alone cannot prove
+# this or detect missing complete frames. See script/README.md for sidecars.
+
 import argparse
 from array import array
 import math
