@@ -256,6 +256,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_thickness_m` | `0` (default), automatic thickness; positive physical width overrides `cpml_layers`; nonpositive values select automatic width | Optional; Float (m) |
 | `cpml_layers` | Integer; `10` (default); must be positive when thickness is automatic | Optional; Integer |
 | `cpml_reflection_target` | `0.001` (default); 0 < R < 1 | Optional; Float |
+| `cpml_reference_vp` | Omitted or nonpositive number → automatic maximum Vp over PML elements (default); positive number overrides with one uniform reference speed | Optional; Float (m/s) |
 | `cpml_poly_order` | `2` (default); 1 to 4 | Optional; Integer |
 | `cpml_kappa_max` | `1` (default); >= 1 | Optional; Float |
 | `cpml_alpha_max_hz` | Omitted or nonpositive number → `simulation_wave_max_freq_hz / 2` (default); positive number overrides; `auto` is not an input token | Optional; Float (Hz) |
@@ -263,6 +264,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_mpml_cross_fraction` | `0` (default); 0 to 0.5 | Optional; Float |
 | `cpml_acoustic_sponge_fraction` | `0` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
 | `cpml_alpha_floor_fraction` | `0.1` (default); 0 to 1 | Optional; Float |
+| `cpml_profile_slab` | `none` (default), `auto` | Optional; String (case-insensitive) |
 | `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float. CPML weighting applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
@@ -289,6 +291,13 @@ thinning the band; remove the second with `cpml_mpml_cross_fraction=0`.
 Disabling gravity changes the boundary physics. See the
 [formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details)
 and [guard evidence and validation limits](Extended%20README.md#absorbing-boundaries-and-cpml).
+
+With `cpml_profile_slab=auto` (opt-in) the damping profile is sampled per
+octree-aligned slab of the coarsest non-air PML element edge, so every element
+size in a slab shares one `d`/`alpha`/`kappa`; `cpml_reference_vp` keeps one
+uniform reference speed. Startup prints the maximum per-cell stretch
+`d_max*h/V` and warns above 10. See the
+[formulation, profile sampling and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details).
 
 ### Acoustic material and acoustic–elastic coupling
 
