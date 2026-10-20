@@ -415,8 +415,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 252);
-  assert.equal(documented.length, 252, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 254);
+  assert.equal(documented.length, 254, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -2296,6 +2296,51 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
   assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
   assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
+});
+
+test("documents slab-quantized CPML profile sampling and the per-cell stretch diagnostic", async () => {
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const slab = parameters.split("</tr>").find((row) => row.includes(">cpml_profile_slab</td>"));
+  const reference = parameters.split("</tr>").find((row) => row.includes(">cpml_reference_vp</td>"));
+  assert.ok(slab);
+  assert.ok(reference);
+  assert.match(slab, /Default: auto; auto \| none/);
+  assert.match(slab, /coarsest non-air PML element edge/);
+  assert.match(slab, /receive identical coefficients/);
+  assert.match(slab, /none keeps per-element-centre sampling/);
+  assert.match(reference, /Default: automatic \(stored as -1\); positive overrides/);
+  assert.match(reference, /one uniform speed over the whole PML/);
+  assert.match(reference, /startup d_max\*h\/V diagnostic/);
+  const physics = await (await render("/docs/physics")).text();
+  assert.match(physics, /quantized into octree-aligned slabs/);
+  assert.match(physics, /maximum per-cell stretch d_max\*h\/V/);
+  assert.match(physics, /warns when it exceeds 10/);
+  assert.match(physics, /cpml_profile_slab = auto/);
+  assert.match(physics, /cpml_reference_vp = -1\.0/);
+
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /\.theCpmlProfileSlab = CPML_PROFILE_SLAB_AUTO,/);
+  assert.match(solver, /\.theCpmlReferenceVp = -1\.0,/);
+  assert.match(solver, /parsetext\(fp, "cpml_profile_slab", 's', &cpml_profile_slab\)/);
+  assert.match(solver, /parsetext\(fp, "cpml_reference_vp", 'd', &cpml_reference_vp\)/);
+  for (const mode of ["auto", "none"]) {
+    assert.ok(solver.includes(`strcasecmp(cpml_profile_slab, "${mode}")`));
+  }
+  assert.match(solver, /int_message\[67\] = Param\.theCpmlProfileSlab/);
+  assert.match(solver, /Param\.theCpmlProfileSlab = int_message\[67\]/);
+  assert.match(solver, /double_message\[51\] = Param\.theCpmlReferenceVp/);
+  assert.match(solver, /Param\.theCpmlReferenceVp = double_message\[51\]/);
+  assert.match(solver, /MPI_Allreduce\(&local_slab_ticks, &global_slab_ticks, 1, MPI_LONG_LONG,\s*MPI_MAX, comm_solver\)/);
+  assert.match(solver, /g_cpmlBuild\.reference_vp = \(Param\.theCpmlReferenceVp > 0\.0\)/);
+  assert.match(solver, /static double cpml_profile_sample_coordinate\(/);
+  assert.equal((solver.match(/g_cpmlBuild\.slab_ticks,/g) ?? []).length, 4, "every compute_pml_profile_coeffs caller passes the slab");
+  assert.match(solver, /MPI_Allreduce\(&local_stretch, &global_stretch, 1, MPI_DOUBLE_INT,\s*MPI_MAXLOC, comm_solver\)/);
+  assert.match(solver, /CPML: max per-cell stretch d_max\*h\/V = %\.3g/);
+  assert.match(solver, /CPML WARNING: d_max\*h\/V = %\.3g exceeds 10/);
+  const damping = readFileSync(new URL("../../quake/forward/damping.h", import.meta.url), "utf8");
+  assert.match(damping, /CPML_PROFILE_SLAB_NONE = 0, CPML_PROFILE_SLAB_AUTO = 1/);
 });
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {

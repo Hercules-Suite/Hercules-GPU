@@ -2974,6 +2974,18 @@ results are specific to the recorded configuration and implementation.
 	Optional. Target theoretical reflection coefficient. `0.001` (default); valid `(0,1)`.
 	Smaller values increase damping strength but do not guarantee smaller
 	numerical reflection or better stability.
+- `cpml_reference_vp`
+	Optional, in m/s. Omitted or nonpositive (default, stored as `-1`) uses
+	the MPI-wide maximum Vp over PML elements, as SPECFEM3D does. A positive
+	value replaces that maximum with one reference speed that stays uniform
+	over the whole PML; it is never sized per element, because tangential
+	jumps of `d` between neighbouring PML elements destabilize the operator
+	far more than over-damping does. A reference below the model maximum
+	weakens `d` everywhere (`d` is proportional to the reference speed), which
+	helps slow sediments or water at the cost of weaker rock absorption. The
+	startup log reports the value used, the automatic maximum, and the
+	per-cell stretch diagnostic described in
+	[CPML coefficient and operator details](#cpml-coefficient-and-operator-details).
 - `cpml_poly_order`
 	Optional integer in `[1, 4]`. Default `2` (the standard
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
@@ -3032,6 +3044,25 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	its maximum. Zero and repeated poles are handled without divided-pole
 	singularities; their acceptance does not establish long-time stability
 	for every model.
+- `cpml_profile_slab`
+	Optional. `auto` (default) or `none`. How the damping profile is sampled
+	along each PML normal. The profile is always a function of the normal
+	coordinate only. With `auto`, that coordinate is quantized into
+	octree-aligned slabs whose width is the coarsest non-air PML element edge
+	(MPI-wide maximum, reduced like the automatic thickness and the reference
+	Vp), and `d`, `alpha` and `kappa` are evaluated at the centre of the slab
+	clipped to the PML band. Octree elements are aligned to multiples of their
+	own edge and none is wider than the slab, so every element size inside a
+	slab receives identical coefficients, and acoustic-elastic interface
+	fragments and output reconstruction points inside it use the same values;
+	a 2h element under h sediment elements no longer samples `d` half a cell
+	deeper than its neighbours. `none` keeps the earlier per-element-centre
+	sampling, which produces such tangential jumps at every 2:1 transition
+	inside the PML. On a PML band meshed at a single level the slab equals
+	the element, and `auto` reproduces the `none` coefficients exactly, so
+	uniform validation cases are unchanged. Setup-time only: the operator,
+	kernels and per-step work are unchanged. The startup log states the
+	active rule and the slab width.
 - `cpml_pml_material_damping`
 	Optional. `none` (default) | `rayleigh`. Whether material damping is
 	applied inside elastic PML elements. `none` means material damping is
@@ -3631,6 +3662,39 @@ Inactive axes have $d=0$, $\kappa=1$, $\alpha=0$. Positive
 $\pi$ times `simulation_wave_max_freq_hz`. Optional cross mixing adds a
 fraction of the other two damping profiles and normalized kappa profiles;
 it defaults to zero because this is no longer a separable coordinate mapping.
+$V_p$ is the automatic maximum over PML elements or the positive
+`cpml_reference_vp`; either way it is one value over the whole PML.
+
+With `cpml_profile_slab=auto` (default), $\xi_j$ is measured not from the
+element centre but from the centre of the octree-aligned slab that contains
+it. For slab width $w$ (the coarsest non-air PML element edge, MPI-wide
+maximum), element-centre coordinate $c_j$ along axis $j$, and the PML band
+$[b_0,b_1]$ of that face,
+
+```math
+k=\left\lfloor c_j/w\right\rfloor,\qquad
+c_j^{\star}=\tfrac12\bigl(\max\{kw,\,b_0\}+\min\{(k+1)w,\,b_1\}\bigr),
+```
+
+and $\xi_j$ is the distance of $c_j^{\star}$ from the inner PML edge. Every
+element inside a slab, whatever its size, and every interface fragment or
+output point inside it receives identical $d_j$, $\kappa_j$ and $\alpha_j$;
+the clip keeps a slab that straddles the inner edge or the outer boundary
+centred on its enrolled part. `none` uses $c_j$ itself. The slab index is
+formed in integer ticks, so points exactly on a slab face are assigned
+reproducibly.
+
+After enrollment the solver reduces the per-cell stretch
+$\max_j d_j\,h/V$ over all PML elements, with $V=V_s$ for solid and
+$V=V_p$ for acoustic elements, and prints the MPI-wide maximum with the
+element class, $h$ and $V$ (`CPML: max per-cell stretch d_max*h/V = ...`).
+For $R=0.001$ and $n=2$ it equals $10.4\,(V_p/V)(h/L)$. In a local harness
+of the production operator (2026-10-19) the explicit trapezoidal ADE scheme
+began to grow once this exceeded roughly 10 to 15, and refinement at fixed
+$d(\xi)$ removed the growth; the solver therefore prints a `CPML WARNING`
+line above 10 that suggests a larger `cpml_reflection_target`, more
+`cpml_layers`, or `cpml_kappa_max` above 1. The threshold is empirical and
+the diagnostic adds no per-step work.
 
 A section $c+g/(s+p)$ uses a trapezoidal recurrence with one persistent value:
 

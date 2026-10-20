@@ -667,6 +667,7 @@ static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
 static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        tick_t ruf[3], tick_t nearendp[3],
                                        tick_t farendp[3], double ticksize,
+                                       tick_t profile_slab_ticks,
                                        double pml_thickness_m, double Vp,
                                        double dt, int poly_order, double R,
                                        double kappa_max, double alpha_max,
@@ -707,7 +708,14 @@ typedef struct cpml_build_s {
 
   double   thickness_m;          /* realized PML thickness */
   double   alpha_max;            /* alpha_max used for profiles */
-  double   reference_vp;          /* global max Vp over CPML elements */
+  double   reference_vp;          /* Vp used by the damping profile */
+  double   automatic_reference_vp; /* MPI-wide max Vp over PML elements */
+  /* Profile sampling slab along each PML normal: the coarsest non-air PML
+   * element edge (MPI-wide maximum), in ticks and metres. 0 = legacy
+   * per-element-centre sampling (cpml_profile_slab=none). Scalars survive
+   * the release of the build arrays; output reconstruction reuses them. */
+  tick_t   slab_ticks;
+  double   slab_m;
   int64_t  active_axis_count;    /* sum of active PML axes over local elems */
 } cpml_build_t;
 static cpml_build_t g_cpmlBuild = {0};
@@ -756,6 +764,27 @@ static int cpml_active_axis_count(uint8_t face_mask) {
   if (face_mask & (PML_FACE_Y_MIN | PML_FACE_Y_MAX)) count++;
   if (face_mask & PML_FACE_Z_MAX) count++;
   return count;
+}
+
+/* Setup diagnostic helper: keep the largest per-cell stretch
+ * d_max_elem*h/V_local seen so far, with its element class (0 elastic,
+ * 1 acoustic), edge h and local speed V. Elements without a positive speed
+ * (air) are ignored. */
+static void cpml_track_cell_stretch(const double d[3], double h, double v,
+                                    int acoustic_class, double* ratio,
+                                    double* h_out, double* v_out,
+                                    int* class_out) {
+  if (!(v > 0.0) || !(h > 0.0)) return;
+  double d_max = d[0];
+  if (d[1] > d_max) d_max = d[1];
+  if (d[2] > d_max) d_max = d[2];
+  const double r = d_max * h / v;
+  if (r > *ratio) {
+    *ratio = r;
+    *h_out = h;
+    *v_out = v;
+    *class_out = acoustic_class;
+  }
 }
 
 enum cpml_rank_diag_count_idx_t {
@@ -1218,6 +1247,17 @@ static struct Param_t {
    * 3D material queries made from PML coordinates are clamped to the inner PML
    * box, so the PML is constant along each active PML-normal direction. */
   noyesflag_t theCpml3DMaterialExtension;
+  /* Damping-profile sampling along each PML normal. CPML_PROFILE_SLAB_AUTO
+   * (default) quantizes the normal coordinate into octree-aligned slabs of
+   * the coarsest non-air PML element edge so every element size inside a
+   * slab receives identical d/alpha/kappa; CPML_PROFILE_SLAB_NONE keeps the
+   * legacy per-element-centre sampling. Declared AFTER
+   * theCpml3DMaterialExtension to preserve C++ designated-init order. */
+  int theCpmlProfileSlab;
+  /* Reference Vp (m/s) for the damping profile. Positive values override
+   * the automatic MPI-wide maximum Vp over PML elements; the value stays
+   * uniform over the whole PML. Nonpositive (default -1) = automatic. */
+  double theCpmlReferenceVp;
   /* VT + BKT GPU stabilization (default NO -> strict no-op, bit-identical
    * to the validated v2/CPML baseline). YES enables the faithful CUDA
    * port of the CPU cut-cell visco-elastic operator TetraForcesBKT for
@@ -1315,6 +1355,8 @@ static struct Param_t {
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,
            .theCpml3DMaterialExtension = YES,
+           .theCpmlProfileSlab = CPML_PROFILE_SLAB_AUTO,
+           .theCpmlReferenceVp = -1.0,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
@@ -2393,9 +2435,9 @@ static inline int monitor_print(const char* format, ...) {
 
 static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
-  51 /* Must adjust this if adding double params */
+  52 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  67 /* Must adjust this if adding int params */
+  68 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2464,6 +2506,7 @@ static void read_parameters(int argc, char** argv) {
       Param.theAcousticPoroelasticPressurePenaltyFactor;
   double_message[49] = Param.theCpmlAcousticSpongeFraction;
   double_message[50] = Param.the3DVelocityModelAzimuth;
+  double_message[51] = Param.theCpmlReferenceVp;
 
   MPI_Bcast(double_message, LOCAL_INIT_DOUBLE_MESSAGE_LENGTH, MPI_DOUBLE, 0,
             comm_solver);
@@ -2519,6 +2562,7 @@ static void read_parameters(int argc, char** argv) {
   Param.thePoroelasticPermeabilityZ = double_message[46];
   Param.thePoroelasticSurfacePressurePenaltyFactor = double_message[47];
   Param.theAcousticPoroelasticPressurePenaltyFactor = double_message[48];
+  Param.theCpmlReferenceVp = double_message[51];
 
   /*Broadcast all integer params*/
   int_message[0] = Param.theTotalSteps;
@@ -2588,6 +2632,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[64] = Param.theAcousticInterfaceMethod;
   int_message[65] = Param.stationAsciiBufferKiB;
   int_message[66] = Param.acousticStationGradientRecovered;
+  int_message[67] = Param.theCpmlProfileSlab;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2660,6 +2705,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticInterfaceMethod = int_message[64];
   Param.stationAsciiBufferKiB = int_message[65];
   Param.acousticStationGradientRecovered = int_message[66];
+  Param.theCpmlProfileSlab = int_message[67];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3151,6 +3197,7 @@ static int32_t parse_parameters(const char* numericalin) {
       double cpml_alpha_floor_fraction = Param.theCpmlAlphaFloorFraction;
       double cpml_acoustic_sponge_fraction = Param.theCpmlAcousticSpongeFraction;
       double cpml_partition_weight = Param.theCpmlPartitionWeight;
+      double cpml_reference_vp = Param.theCpmlReferenceVp;
 
       (void)parsetext(fp, "cpml_thickness_m", 'd', &cpml_thickness_m);
       (void)parsetext(fp, "cpml_layers", 'i', &cpml_layers);
@@ -3168,6 +3215,27 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_acoustic_sponge_fraction);
       (void)parsetext(fp, "cpml_partition_weight", 'd',
                       &cpml_partition_weight);
+      /* Optional uniform reference Vp for the damping profile. Nonpositive
+       * or omitted keeps the automatic MPI-wide maximum over PML elements. */
+      (void)parsetext(fp, "cpml_reference_vp", 'd', &cpml_reference_vp);
+
+      /* Damping-profile sampling along each PML normal. 'auto' (default)
+       * quantizes the normal coordinate into octree-aligned slabs of the
+       * coarsest non-air PML element edge, so a 2h element and its h
+       * neighbours at the same normal position share one d/alpha/kappa;
+       * 'none' keeps the legacy per-element-centre sampling. */
+      char cpml_profile_slab[64] = "";
+      if (parsetext(fp, "cpml_profile_slab", 's', &cpml_profile_slab) == 0) {
+        if (strcasecmp(cpml_profile_slab, "auto") == 0) {
+          Param.theCpmlProfileSlab = CPML_PROFILE_SLAB_AUTO;
+        } else if (strcasecmp(cpml_profile_slab, "none") == 0) {
+          Param.theCpmlProfileSlab = CPML_PROFILE_SLAB_NONE;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_profile_slab must be 'auto' or 'none': got "
+                       "'%s'\n", cpml_profile_slab);
+        }
+      }
 
       char cpml_clamp_outer[64] = "";
       if (parsetext(fp, "cpml_clamp_outer", 's', &cpml_clamp_outer) == 0) {
@@ -3283,6 +3351,13 @@ static int32_t parse_parameters(const char* numericalin) {
                      "cpml_partition_weight=%g must be >= 1.0.\n",
                      cpml_partition_weight);
       }
+      if (!isfinite(cpml_reference_vp)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_reference_vp=%g must be finite (positive m/s "
+                     "overrides the automatic maximum PML Vp; nonpositive "
+                     "keeps it).\n",
+                     cpml_reference_vp);
+      }
 
       Param.theCpmlThicknessM = cpml_thickness_m;
       Param.theCpmlLayers = cpml_layers;
@@ -3295,6 +3370,7 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
       Param.theCpmlAcousticSpongeFraction = cpml_acoustic_sponge_fraction;
       Param.theCpmlPartitionWeight = cpml_partition_weight;
+      Param.theCpmlReferenceVp = cpml_reference_vp;
 
       /* Optional material damping inside the elastic PML zone. Rayleigh uses
        * a stretch-consistent CPML cross-pair. BKT-family material damping is
@@ -4748,6 +4824,18 @@ static int32_t parse_parameters(const char* numericalin) {
                   Param.theCpmlCflSafety);
     monitor_print("PML partition weight:               %f\n",
                   Param.theCpmlPartitionWeight);
+    monitor_print("PML profile sampling:               %s\n",
+                  (Param.theCpmlProfileSlab == CPML_PROFILE_SLAB_AUTO)
+                      ? "auto (slab-quantized along each PML normal)"
+                      : "none (per element centre)");
+    if (Param.theCpmlReferenceVp > 0.0) {
+      monitor_print("PML reference Vp (m/s):             %f "
+                    "(cpml_reference_vp override, uniform over PML)\n",
+                    Param.theCpmlReferenceVp);
+    } else {
+      monitor_print("PML reference Vp (m/s):             automatic "
+                    "(maximum Vp over PML elements)\n");
+    }
     monitor_print("PML 3D material extension:          %s\n",
                   (Param.theCpml3DMaterialExtension == YES)
                       ? "yes (clamp to inner PML)"
@@ -12163,6 +12251,11 @@ static void solver_init() {
       double global_vp_max = 0.0;
       long long local_pml_count = 0;
       long long global_pml_count = 0;
+      /* Coarsest non-air PML element edge (ticks): the profile slab width
+       * for cpml_profile_slab=auto. Reduced MPI-wide like thickness_m and
+       * reference_vp so every rank quantizes identically at shared faces. */
+      long long local_slab_ticks = 0;
+      long long global_slab_ticks = 0;
       for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
         elem_t* ep = &Global.myMesh->elemTable[ei];
         edata_t* ed = (edata_t*)ep->data;
@@ -12183,11 +12276,17 @@ static void solver_init() {
         if ((ed != NULL) && (ed->Vp > local_vp_max)) {
           local_vp_max = (double)ed->Vp;
         }
+        if ((ed != NULL) && (ed->Vp > 0.0f) &&
+            ((long long)edgeticks_ref > local_slab_ticks)) {
+          local_slab_ticks = (long long)edgeticks_ref;
+        }
       }
       MPI_Allreduce(&local_vp_max, &global_vp_max, 1, MPI_DOUBLE,
                     MPI_MAX, comm_solver);
       MPI_Allreduce(&local_pml_count, &global_pml_count, 1, MPI_LONG_LONG,
                     MPI_SUM, comm_solver);
+      MPI_Allreduce(&local_slab_ticks, &global_slab_ticks, 1, MPI_LONG_LONG,
+                    MPI_MAX, comm_solver);
       if ((global_pml_count > 0) && (global_vp_max <= 0.0)) {
         fprintf(stderr,
                 "Thread %d: CPML found %lld PML elements but no positive "
@@ -12196,7 +12295,19 @@ static void solver_init() {
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
       }
-      g_cpmlBuild.reference_vp = global_vp_max;
+      g_cpmlBuild.automatic_reference_vp = global_vp_max;
+      /* A positive cpml_reference_vp replaces the automatic maximum with one
+       * user value; either way the profile uses a single Vp over the whole
+       * PML (per-element Vp would make d jump tangentially). */
+      g_cpmlBuild.reference_vp = (Param.theCpmlReferenceVp > 0.0)
+                                     ? Param.theCpmlReferenceVp
+                                     : global_vp_max;
+      g_cpmlBuild.slab_ticks =
+          (Param.theCpmlProfileSlab == CPML_PROFILE_SLAB_AUTO)
+              ? (tick_t)global_slab_ticks
+              : (tick_t)0;
+      g_cpmlBuild.slab_m =
+          (double)g_cpmlBuild.slab_ticks * Global.myOctree->ticksize;
     }
     g_cpmlBuild.face_mask =
         (uint8_t*)calloc(Global.myMesh->lenum, sizeof(uint8_t));
@@ -12218,6 +12329,17 @@ static void solver_init() {
 #endif /* BOUNDARY */
 
   poro_groundwater_grid_load();
+
+#ifdef BOUNDARY
+  /* CPML setup diagnostic: largest per-cell stretch d_max*h/V_local over the
+   * local PML elements (V = Vs for solid, Vp for acoustic elements). The
+   * explicit ADE operator grows when this exceeds roughly 10-15. Reduced and
+   * reported once after enrollment; no per-step cost. */
+  double cpml_diag_ratio = 0.0;
+  double cpml_diag_h = 0.0;
+  double cpml_diag_v = 0.0;
+  int cpml_diag_class = -1; /* -1 none, 0 elastic, 1 acoustic */
+#endif
 
   /* For each element:
    * Initialize the data structures. tm1, tm2 and force have
@@ -12314,6 +12436,7 @@ static void solver_init() {
           compute_pml_profile_coeffs(
               pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
               Global.myOctree->farendp, Global.myOctree->ticksize,
+              g_cpmlBuild.slab_ticks,
               g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
               Param.theDeltaT, Param.theCpmlPolyOrder,
               Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
@@ -12337,6 +12460,9 @@ static void solver_init() {
           g_cpmlBuild.acoustic_coeff[pml_idx] = cpml_element(
               d_axis, alpha_axis, kappa_axis, dt, sponge_a, 0.0,
               nodalPressureMass, dt2*h/(double)edata->rho, 0.0);
+          cpml_track_cell_stretch(d_axis, h, (double)edata->Vp, 1,
+                                  &cpml_diag_ratio, &cpml_diag_h,
+                                  &cpml_diag_v, &cpml_diag_class);
           acoustic_kprod = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.mass;
           acoustic_damp = g_cpmlBuild.acoustic_coeff[pml_idx].inertia.damping;
 
@@ -12485,6 +12611,7 @@ static void solver_init() {
         compute_pml_profile_coeffs(
             pml_face_mask, ldb, ruf, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.slab_ticks,
             g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
             Param.theDeltaT, Param.theCpmlPolyOrder,
             Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
@@ -12504,6 +12631,9 @@ static void solver_init() {
             (double)edata->rho*h*h*h/8.0, 9.0*ep->c1, 9.0*ep->c2);
         cpml_damp_rate = g_cpmlBuild.elastic_coeff[pml_idx].inertia.damping;
         cpml_kappa_prod = g_cpmlBuild.elastic_coeff[pml_idx].inertia.mass;
+        cpml_track_cell_stretch(d_axis, h, (double)edata->Vs, 0,
+                                &cpml_diag_ratio, &cpml_diag_h,
+                                &cpml_diag_v, &cpml_diag_class);
       }
     }
 
@@ -12748,6 +12878,69 @@ static void solver_init() {
       }
     }
 
+    /* Setup-only profile diagnostics: sampling rule, reference speed and the
+     * MPI-wide maximum per-cell stretch d_max*h/V with the element it
+     * belongs to. MAXLOC finds the owning rank; that rank broadcasts h, V
+     * and the class. Two small collectives at setup; nothing per step. */
+    {
+      struct {
+        double value;
+        int rank;
+      } local_stretch = {cpml_diag_ratio, Global.myID},
+        global_stretch = {0.0, 0};
+      MPI_Allreduce(&local_stretch, &global_stretch, 1, MPI_DOUBLE_INT,
+                    MPI_MAXLOC, comm_solver);
+      double stretch_detail[3] = {cpml_diag_h, cpml_diag_v,
+                                  (double)cpml_diag_class};
+      MPI_Bcast(stretch_detail, 3, MPI_DOUBLE, global_stretch.rank,
+                comm_solver);
+      if (Global.myID == 0) {
+        if (g_cpmlBuild.slab_ticks > 0) {
+          monitor_print("CPML: profile sampling slab-quantized along each "
+                        "PML normal: slab %.3f m (coarsest non-air PML "
+                        "element edge, MPI-wide); every element size inside "
+                        "a slab receives identical d/alpha/kappa\n",
+                        g_cpmlBuild.slab_m);
+        } else {
+          monitor_print("CPML: profile sampling per element centre "
+                        "(cpml_profile_slab=none); 2:1 size transitions "
+                        "inside the PML sample d at different normal "
+                        "positions\n");
+        }
+        if (Param.theCpmlReferenceVp > 0.0) {
+          monitor_print("CPML: reference Vp %.3f m/s from cpml_reference_vp "
+                        "(uniform over the whole PML; automatic maximum PML "
+                        "Vp is %.3f m/s)\n",
+                        g_cpmlBuild.reference_vp,
+                        g_cpmlBuild.automatic_reference_vp);
+        } else {
+          monitor_print("CPML: reference Vp %.3f m/s = automatic maximum Vp "
+                        "over PML elements (uniform over the whole PML)\n",
+                        g_cpmlBuild.reference_vp);
+        }
+        const int stretch_class = (int)stretch_detail[2];
+        if (stretch_class < 0) {
+          monitor_print("CPML: max per-cell stretch d_max*h/V: no PML "
+                        "element with a positive wave speed\n");
+        } else {
+          monitor_print("CPML: max per-cell stretch d_max*h/V = %.3g "
+                        "(%s element, h = %.3f m, V = %.3f m/s; V is Vs for "
+                        "elastic and Vp for acoustic elements)\n",
+                        global_stretch.value,
+                        stretch_class ? "acoustic" : "elastic",
+                        stretch_detail[0], stretch_detail[1]);
+          if (global_stretch.value > 10.0) {
+            monitor_print("CPML WARNING: d_max*h/V = %.3g exceeds 10: the "
+                          "explicit CPML operator grows in over-damped slow "
+                          "cells. Weaken the profile with a larger "
+                          "cpml_reflection_target, more cpml_layers "
+                          "(thicker PML), or cpml_kappa_max > 1.\n",
+                          global_stretch.value);
+          }
+        }
+      }
+    }
+
     /* Upload coefficient records once; histories remain device-resident. */
     for (int type=0; type<2; ++type) {
       const int32_t count = type ? g_cpmlBuild.acoustic_count : g_cpmlBuild.elastic_count;
@@ -12958,6 +13151,7 @@ static void solver_init() {
         compute_pml_profile_coeffs(
             mask, point, point, Global.myOctree->nearendp,
             Global.myOctree->farendp, Global.myOctree->ticksize,
+            g_cpmlBuild.slab_ticks,
             g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp,
             Param.theDeltaT, Param.theCpmlPolyOrder,
             Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
@@ -24630,6 +24824,46 @@ static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
   return m;
 }
 
+/* Normal coordinate (m) at which the damping profile is sampled on one
+ * absorbing face whose PML band is [band_lo, band_hi] (m).
+ *
+ * profile_slab_ticks > 0 (cpml_profile_slab=auto): the sampling point c
+ * (element centre, ticks) is replaced by the centre of the octree-aligned slab
+ * [k*slab, (k+1)*slab) that contains it, clipped to the PML band. Octree
+ * elements are aligned to multiples of their own edge and no non-air PML
+ * element is wider than the slab, so every element inside a slab, whatever
+ * its size, samples identical d/alpha/kappa; a 2h element and the h elements
+ * beside it no longer differ by a half-cell along the normal. The clip keeps
+ * the slabs that straddle the inner edge (L not a multiple of the slab) or the
+ * outer boundary centred on their enrolled part. The result depends on the
+ * normal coordinate only, never on the element's own size or material.
+ *
+ * profile_slab_ticks <= 0 (cpml_profile_slab=none): legacy per-centre value.
+ */
+static double cpml_profile_sample_coordinate(double c_ticks, double ticksize,
+                                             tick_t profile_slab_ticks,
+                                             double band_lo, double band_hi) {
+  if (profile_slab_ticks <= 0) return c_ticks * ticksize;
+  const double slab = (double)profile_slab_ticks;
+  const double k = floor(c_ticks / slab);
+  const double lo_ticks = k * slab; /* exact integers in double */
+  const double hi_ticks = lo_ticks + slab;
+  double lo = lo_ticks * ticksize;
+  double hi = hi_ticks * ticksize;
+  /* Clip only slabs that genuinely straddle a band edge (quarter-tick
+   * tolerance, as in the thickness scan). An unclipped slab then returns
+   * exactly the legacy centre of a slab-sized element, so a PML band meshed
+   * at one level is bit-identical under 'auto' and 'none'. */
+  const double eps = 0.25 * ticksize;
+  const int clip_lo = (lo < band_lo - eps);
+  const int clip_hi = (hi > band_hi + eps);
+  if (!clip_lo && !clip_hi) return 0.5 * (lo_ticks + hi_ticks) * ticksize;
+  if (clip_lo) lo = band_lo;
+  if (clip_hi) hi = band_hi;
+  if (!(hi > lo)) return c_ticks * ticksize;
+  return 0.5 * (lo + hi);
+}
+
 /* Compute per-axis CPML ADE recurrence coefficients for one element.
  * Output triples are indexed by stretching axis j in {x=0,y=1,z=2}.
  * a/b/invKappa are the trapezoidal inverse section feed/decay/direct.
@@ -24638,11 +24872,15 @@ static uint8_t compute_pml_face_mask(tick_t ldb[3], tick_t ruf[3],
  *
  * The damping profile uses a single reference Vp for the whole CPML region.
  * This follows the SPECFEM-style assumption that the damping profile should
- * not introduce extra heterogeneity along the PML normal direction.
+ * not introduce extra heterogeneity along the PML normal direction. The
+ * normal coordinate is optionally slab-quantized (see
+ * cpml_profile_sample_coordinate) so that octree size transitions inside the
+ * PML do not create tangential jumps of d.
  */
 static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        tick_t ruf[3], tick_t nearendp[3],
                                        tick_t farendp[3], double ticksize,
+                                       tick_t profile_slab_ticks,
                                        double L, double reference_vp, double dt,
                                        int poly_order, double R,
                                        double kappa_max, double alpha_max,
@@ -24653,10 +24891,11 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double d_out[3],
                                        double alpha_out[3],
                                        double kappa_out[3]) {
-  const double c[3] = {
-      0.5 * ((double)ldb[0] + (double)ruf[0]) * ticksize,
-      0.5 * ((double)ldb[1] + (double)ruf[1]) * ticksize,
-      0.5 * ((double)ldb[2] + (double)ruf[2]) * ticksize};
+  /* Element centre in ticks: exact in double, so the slab index below is
+   * reproducible for centres and interface points exactly on a slab face. */
+  const double c_ticks[3] = {0.5 * ((double)ldb[0] + (double)ruf[0]),
+                             0.5 * ((double)ldb[1] + (double)ruf[1]),
+                             0.5 * ((double)ldb[2] + (double)ruf[2])};
   const double bounds_lo[3] = {(double)nearendp[0] * ticksize,
                                (double)nearendp[1] * ticksize,
                                0.0 /* z_min unused, free surface */};
@@ -24683,11 +24922,17 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
   for (int j = 0; j < 3; j++) {
     double xi = 0.0;
     if (lo_bits[j] && (face_mask & lo_bits[j])) {
-      double d_lo = (bounds_lo[j] + L) - c[j];
+      const double c_lo = cpml_profile_sample_coordinate(
+          c_ticks[j], ticksize, profile_slab_ticks, bounds_lo[j],
+          bounds_lo[j] + L);
+      double d_lo = (bounds_lo[j] + L) - c_lo;
       if (d_lo > xi) xi = d_lo;
     }
     if (hi_bits[j] && (face_mask & hi_bits[j])) {
-      double d_hi = c[j] - (bounds_hi[j] - L);
+      const double c_hi = cpml_profile_sample_coordinate(
+          c_ticks[j], ticksize, profile_slab_ticks, bounds_hi[j] - L,
+          bounds_hi[j]);
+      double d_hi = c_hi - (bounds_hi[j] - L);
       if (d_hi > xi) xi = d_hi;
     }
     if (xi < 0.0) xi = 0.0;
@@ -24760,8 +25005,9 @@ void solver_init_acoustic_output_cpml(int32_t eindex,
    * profile. No GPU memory downloads or extra field exchanges are needed. */
   compute_pml_profile_coeffs(
       mask, lo, hi, Global.myOctree->nearendp, Global.myOctree->farendp,
-      Global.myOctree->ticksize, g_cpmlBuild.thickness_m,
-      g_cpmlBuild.reference_vp, Param.theDeltaT, Param.theCpmlPolyOrder,
+      Global.myOctree->ticksize, g_cpmlBuild.slab_ticks,
+      g_cpmlBuild.thickness_m, g_cpmlBuild.reference_vp, Param.theDeltaT,
+      Param.theCpmlPolyOrder,
       Param.theCpmlReflectionTarget, Param.theCpmlKappaMax,
       g_cpmlBuild.alpha_max, Param.theCpmlMpmlCrossFraction,
       Param.theCpmlAlphaFloorFraction, state->a, state->b,

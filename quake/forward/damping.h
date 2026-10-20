@@ -40,6 +40,17 @@ typedef enum
 
 } abc_type_t;
 
+/* CPML damping-profile sampling along each absorbing normal
+ * (cpml_profile_slab). NONE: legacy per-element-centre sampling. AUTO:
+ * octree-aligned slabs of the coarsest non-air PML element edge; every
+ * element size inside a slab receives identical d/alpha/kappa. */
+typedef enum
+{
+
+  CPML_PROFILE_SLAB_NONE = 0, CPML_PROFILE_SLAB_AUTO = 1
+
+} cpml_profile_slab_t;
+
 void damping_addforce(mesh_t *myMesh, mysolver_t *mySolver, fmatrix_t (*theK1)[8], fmatrix_t (*theK2)[8]);
 void calc_conv(mesh_t *myMesh, mysolver_t *mySolver, double theFreq, double theDeltaT, double theDeltaTSquared, damping_type_t typeOfDamping);
 void constant_Q_addforce(mesh_t *myMesh, mysolver_t *mySolver, double theFreq, double theDeltaT, double theDeltaTSquared, damping_type_t typeOfDamping);
