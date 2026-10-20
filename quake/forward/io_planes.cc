@@ -1518,7 +1518,7 @@ static int32_t plane_output_use_omp(void) {
 				MPI_Comm_rank(MPI_COMM_WORLD, &g_planeOutputRankCached);
 			}
 			if (g_planeOutputRankCached == 0) {
-				fprintf(stderr,
+				fprintf(stdout,
 						"Plane output OpenMP: enabled (threads=%d)\n",
 						omp_get_max_threads());
 			}
@@ -2199,16 +2199,16 @@ void print_planeinfo(int32_t myID, int theNumberOfPlanes)
     int MaxStrip;
 
     if (myID == 0) {
-	fprintf( stderr, "\nPlane Output Stats___________________________\n");
+	fprintf( stdout, "\nPlane Output Stats___________________________\n");
 
 	for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	    fprintf( stderr, "Plane dimensions for plane #%d: %d,%d\n", iPlane,
+	    fprintf( stdout, "Plane dimensions for plane #%d: %d,%d\n", iPlane,
 		     thePlanes[iPlane].numberofstepsalongstrike,
 		     thePlanes[iPlane].numberofstepsdowndip );
 	}
 
 	for (iPlane = 0; iPlane < theNumberOfPlanes ;iPlane++) {
-	    fprintf( stderr, "Total strips for plane #%d: %d\n", iPlane,
+	    fprintf( stdout, "Total strips for plane #%d: %d\n", iPlane,
 		     thePlanes[iPlane].globalnumberofstripsthisplane );
 	}
     }
@@ -2217,15 +2217,15 @@ void print_planeinfo(int32_t myID, int theNumberOfPlanes)
 	MPI_Reduce( &thePlanes[ iPlane ].numberofstripsthisplane, &MaxStrip,
 		    1, MPI_INT, MPI_MAX, 0, comm_solver );
 	if (myID==0) {
-	    fprintf(stderr, "Max strips for a PE in plane #%d: %d\n",
+	    fprintf(stdout, "Max strips for a PE in plane #%d: %d\n",
 		    iPlane, MaxStrip);
 	}
     }
 
     if (myID==0) {
-	fprintf(stderr,
+	fprintf(stdout,
 		"\nDone Plane Output Stats___________________________\n");
-	fflush( stderr );
+	fflush( stdout );
     }
 }
 

@@ -504,7 +504,7 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface,
             MPI_Abort(MPI_COMM_WORLD, ERROR);
             exit(1);
         }
-        fprintf(stderr, "Seabed height tolerance: %.9g m; water depths <= "
+        fprintf(stdout, "Seabed height tolerance: %.9g m; water depths <= "
                 "tolerance are dry; wet-cell surface range must be <= tolerance.\n",
                 theSeabedHeightToleranceM);
         int clipped_nodes = 0;
@@ -529,7 +529,7 @@ void topo_seabed_init(int32_t myID, const char *path, int clip_above_surface,
                 theSeabedInfo[n] = theTopoInfo[n];
         }
         if (clip_above_surface) {
-            fprintf(stderr, "Seabed above-surface policy: clip; lowered %d / %d "
+            fprintf(stdout, "Seabed above-surface policy: clip; lowered %d / %d "
                     "nodes to the outer surface; maximum lowering %.9g m. "
                     "Coincident nodes are dry; input file unchanged: %s\n",
                     clipped_nodes, ntp, maximum_lowering_m, path);
@@ -1510,7 +1510,7 @@ topography_initparameters (const char *parametersin, const char *topo_dir) {
     fclose(fp);
     fclose(fp_topo);
 
-    fprintf(stderr, "Topography surface: bilinear grid shared by mesh air/solid "
+    fprintf(stdout, "Topography surface: bilinear grid shared by mesh air/solid "
             "classification, material depths and receivers; "
             "solver Z = %.9g - height (m).\n", thebase_zcoord);
     return 0;

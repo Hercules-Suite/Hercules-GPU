@@ -1430,7 +1430,7 @@ load_myForces_with_point_source(
 				   theTypeOfSource==PLANE  ? "PLANE" :
 				   theTypeOfSource==SRFH   ? "SRFH"  :
 				   theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
-	    fprintf(stderr,
+	    fprintf(stdout,
 		"[SRC DEBUG %s] rank=%d eindex=%d  mu=%.6e  area=%.6e  maxSlip=%.6e  "
 		"muArea=%.6e  M0=%.6e  edgesize=%.6e  src_local=(%.4e,%.4e,%.4e)  "
 		"strike=%.3f dip=%.3f rake=%.3f  "
@@ -1461,7 +1461,7 @@ load_myForces_with_point_source(
 				   theTypeOfSource==SRFH   ? "SRFH"  :
 				   theTypeOfSource==PLANEWITHKINKS ? "PLANEWITHKINKS" : "??");
 	    for (int a = 0; a < 8; a++) {
-		fprintf(stderr,
+		fprintf(stdout,
 		    "[SRC DEBUG %s] rank=%d eindex=%d node=%d  lnid=%d  "
 		    "nodalForce=(%.6e, %.6e, %.6e)\n",
 		    srcname, myID, eindex, a, pointSource->lnid[a],
