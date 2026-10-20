@@ -2341,7 +2341,7 @@ test("documents executable provenance and conditional startup configuration", as
   assert.match(output, /maximum frequency \(Hz\), dt \(s\)/);
   assert.match(output, /simulation start\/end times and configured duration \(end minus start\) in seconds/);
   assert.match(output, /binary stations do not use output_stations_directory/);
-  for (const key of ["topographybase_zcoord", "type_of_etree", "maximum_octant_level",
+  for (const key of ["simulation_node_per_wavelength", "topographybase_zcoord", "type_of_etree", "maximum_octant_level",
     "computation_method", "topography_directory", "source_directory",
     "source_directory_output", "3D_velocity_model_directory",
     "3D_velocity_model_depth_reference"]) {

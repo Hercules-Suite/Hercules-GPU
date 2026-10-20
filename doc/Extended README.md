@@ -338,7 +338,8 @@ flag. The ID alone does not identify local patches, compiler options, external
 libraries or input data; preserve those separately, and use a clean rebuild
 when reproducing a published executable.
 
-The same block reports maximum frequency in Hz, `dt` in seconds, simulation
+The same block reports maximum frequency in Hz, the parsed integer
+`simulation_node_per_wavelength`, `dt` in seconds, simulation
 start/end times and configured duration in seconds (end minus start, not
 wall-clock runtime),
 `region_origin_latitude_deg`, `region_origin_longitude_deg`,

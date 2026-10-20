@@ -2998,10 +2998,12 @@ static void monitor_config_value(FILE* fp, const char* key,
   monitor_print("%-35s %s\n", label, shown);
 }
 
-static void monitor_input_details(FILE* fp) {
+static void monitor_input_details(FILE* fp, int nodes_per_wavelength) {
   monitor_print("%-35s %s\n", "Hercules Git commit:", hercules_build_commit());
   monitor_print("%-35s %s\n", "Build tracked tree:", hercules_build_tree_state());
   monitor_print("%-35s %.12g\n", "Maximum frequency (Hz):", Param.theFreq);
+  monitor_print("%-35s %d\n", "simulation_node_per_wavelength:",
+                nodes_per_wavelength);
   monitor_print("%-35s %.12g\n", "Time step dt (s):", Param.theDeltaT);
   monitor_print("%-35s %.12g\n", "Simulation start time (s):", Param.theStartT);
   monitor_print("%-35s %.12g\n", "Simulation end time (s):", Param.theEndT);
@@ -4717,7 +4719,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   monitor_print("\n\n---------------- Some Input Data ----------------\n\n");
-  monitor_input_details(fp);
+  monitor_input_details(fp, samples);
   monitor_print("Vs cut:                             %f\n", Param.theVsCut);
   monitor_print("Softening factor:                   %f\n",
                 Param.theSofteningFactor);
