@@ -1566,8 +1566,13 @@ Notes:
 	damping and CFS restoring/memory terms on the four top-face nodes. The
 	vertical CPML stretch is intentionally excluded because `z` is normal to the
 	gravity surface. Corner PML faces include both tangential directions. This
-	adds no per-step work to non-surface PML elements. Each top node has its
-	own memory, consistent with the lumped surface mass. Changing this
+	adds no per-step work to non-surface PML elements. Because the surface term
+	omits the `z` stretch while the water element beneath it carries the full
+	`S_x*S_y*S_z` product, a gravity surface lying inside the bottom (`z_max`)
+	CPML band is unstable; setup aborts in that configuration unless
+	[`cpml_gravity_in_bottom_band=allow`](#absorbing-boundaries-and-cpml).
+	Each top node has its own memory, consistent with the lumped surface
+	mass. Changing this
 	option affects phase-B solver setup but not mesh generation, so an existing
 	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
@@ -3074,6 +3079,43 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	configs are unchanged). Lets you exercise the elastic and acoustic
 	PML stiffness paths independently. The active modes are printed at
 	startup.
+- `cpml_gravity_in_bottom_band`
+	Optional. `abort` (default) or `allow`. Setup-time guard for a known
+	acoustic CPML instability; it changes no operator, kernel or per-step code.
+	With `acoustic_free_surface_gravity=yes`, any acoustic element whose top
+	face is a gravity free surface and whose CPML profile carries the bottom
+	(`z_max`) damping `d_z > 0` grows exponentially. In the production-operator
+	harness (80 m water column, Vp 1500 m/s, rho 1025 kg/m^3, Izmir-like
+	`dt=0.0002 s`, `alpha_max=pi*8`, reference Vp 8080 m/s, bottom PML inside
+	the water) the growth is about `0.9/s` at `cpml_reflection_target=1e-4` in
+	the `0.4-0.5 Hz` band, with maxima at the surface. `cpml_kappa_max=10` and
+	`cpml_acoustic_sponge_fraction=0.3` do not suppress it (`0.90/s` and
+	`0.92/s`); a weaker profile only slows it (`0.40/s` at `R=0.1`, `0.34/s`
+	with `R=0.1`, kappa 10 and sponge 0.3). The same column is stable with
+	gravity off (pressure release, `-0.39/s`) and stable with gravity on when
+	the surface lies above the z band (800 m column, surface 141 m above the
+	bottom band, `-0.004/s`); deep water with lateral PML only is also stable.
+
+	Mechanism: the gravity-surface inertia uses the tangential `S_x*S_y`
+	product only, by design, because `z` is the face normal, while the bulk
+	element beneath the surface carries `J = S_x*S_y*S_z`. The mismatch at the
+	four surface nodes of a z-stretched element is the unstable mode. The
+	trigger is therefore geometric: the water surface sits inside the bottom
+	CPML band. This happens in water-only or deep-ocean models and in
+	benchmarks whose water reaches the bottom layer; models whose bottom PML
+	lies in rock (the Izmir cases, bottom at 39 km) are unaffected.
+
+	At setup the solver counts gravity-surface acoustic PML elements with
+	`PML_FACE_Z_MAX` membership or `d_z > 0` (the latter also covers M-PML
+	cross-mixed z damping), reduces the count over MPI, and with `abort`
+	stops on rank 0 with the count and the remedy: deepen the model so the
+	water surface lies above the bottom CPML band, thin the band (fewer
+	`cpml_layers` or a smaller `cpml_thickness_m`), or run with
+	`acoustic_free_surface_gravity=no`. `allow` continues and prints one
+	`CPML WARNING` line with the count; use it only for diagnostic runs. The
+	settings summary reports `PML gravity surface in bottom band`. With
+	`acoustic_free_surface_gravity=no` the count is always zero and the guard
+	is inert.
 - `topography_bkt_gpu_stabilize`
 	Optional, tri-state: `auto` (default), `yes`, or `no`. Fixes a
 	**pre-existing** GPU instability where `computation_method=vt`

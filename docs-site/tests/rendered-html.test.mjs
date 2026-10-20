@@ -415,8 +415,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 252);
-  assert.equal(documented.length, 252, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 253);
+  assert.equal(documented.length, 253, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -430,6 +430,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(!documented.includes("drm_points_file"));
   assert.ok(!documented.includes("drm_output_file"));
   assert.match(reference, /p\("cpml_clamp_outer", "Optional", "Yes\/no", "Default: yes"/);
+  assert.ok(documented.includes("cpml_gravity_in_bottom_band"));
+  assert.match(reference, /p\("cpml_gravity_in_bottom_band", "Optional", "String", "Default: abort; abort \| allow"/);
   assert.match(reference, /p\("acoustic_quality_factor", "Optional", "Float \(dimensionless\)", "Default: 0 \(lossless\)"/);
   assert.match(reference, /p\("acoustic_interface_face_filter", "Optional", "String", "Default: all;/);
 
@@ -463,6 +465,14 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
+  assert.match(solver, /\.theCpmlGravityInBottomBand\s*=\s*0\s*,/);
+  assert.match(solver, /char cpml_gravity_in_bottom_band\[64\]\s*=\s*""/);
+  for (const mode of ["abort", "allow"]) {
+    assert.ok(solver.includes(`strcasecmp(cpml_gravity_in_bottom_band, "${mode}")`));
+  }
+  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*68 /);
+  assert.match(solver, /int_message\[67\] = Param\.theCpmlGravityInBottomBand/);
+  assert.match(solver, /Param\.theCpmlGravityInBottomBand = int_message\[67\]/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
   assert.match(solver, /acoustic_interface_face_filter\[64\]\s*=\s*"all"/);
   assert.match(solver, /int acousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -623,6 +633,15 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
   assert.match(psolve, /gravity_surface_kprod = surface->inertia.mass/);
   assert.match(psolve, /surface->inertia = cpml_inertia[\s\S]*?2, 0\.0, dt/);
   assert.match(psolve, /psolve_launch_pml_acoustic_gravity_surface/);
+  // Setup guard: gravity top face on an element that also carries the bottom (z_max) stretch.
+  assert.match(psolve, /int32_t acoustic_gravity_bottom_band_count;/);
+  assert.match(psolve, /\(gravitySurfaceMass > 0\.0\) &&\s*\(\(\(pml_face_mask & PML_FACE_Z_MAX\) != 0\) \|\|\s*\(d_axis\[2\] > 0\.0\)\)\)\s*\{\s*g_cpmlBuild\.acoustic_gravity_bottom_band_count\+\+;/);
+  assert.match(psolve, /MPI_Allreduce\(&local_bottom_band, &global_bottom_band, 1,\s*MPI_LONG_LONG, MPI_SUM, comm_solver\)/);
+  assert.match(psolve, /Param\.theCpmlGravityInBottomBand == 1\)\s*\{\s*monitor_print\(\s*"CPML WARNING: %lld gravity free-surface acoustic PML elements "/);
+  assert.match(psolve, /solver_abort\(\s*__FUNCTION_NAME, NULL,\s*"CPML: %lld gravity free-surface acoustic PML elements lie "/);
+  assert.match(psolve, /deepen the model so the water surface lies above the bottom "\s*"CPML band/);
+  assert.match(psolve, /cpml_gravity_in_bottom_band=allow to continue with a "\s*"warning instead/);
+  assert.match(psolve, /"PML gravity surface in bottom band: %s\\n"/);
   assert.match(header, /ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9\.81/);
   assert.match(kernel, /pressureFreeSurfaceNodeFlagsDevice[\s\S]*?acousticFreeSurfaceGravity == 0/);
   assert.match(kernel, /kernelPMLAcousticGravitySurfaceStep/);
@@ -904,6 +923,12 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.ok(clampRow, "the CPML clamp must appear in the parameter reference");
   assert.match(clampRow, /Default: yes/);
   assert.match(clampRow, /Explicit no removes the clamp/);
+  const bottomBandRow = parameters.split("</tr>").find((row) => row.includes("cpml_gravity_in_bottom_band"));
+  assert.ok(bottomBandRow, "the gravity bottom-band guard must appear in the parameter reference");
+  assert.match(bottomBandRow, /Default: abort/);
+  assert.match(bottomBandRow, /grows exponentially/);
+  assert.match(bottomBandRow, /do not suppress it/);
+  assert.match(bottomBandRow, /deepen the model/);
 });
 
 test("keeps acoustic elements out of nonlinear constitutive maps", async () => {

@@ -269,6 +269,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_stiffness_mode` | `native` (default), `reduced` | Optional; String |
 | `cpml_stiffness_mode_acoustic` | `native`, `reduced`; inherit `cpml_stiffness_mode` (default) | Optional; String |
 | `cpml_pml_material_damping` | `none` (default) except for Rayleigh interiors; `rayleigh` (default) with Rayleigh interiors when omitted; explicit `none` is retained | Optional; String |
+| `cpml_gravity_in_bottom_band` | `abort` (default), `allow` | Optional; String. Setup guard for `acoustic_free_surface_gravity=yes`: a gravity water surface inside the bottom (`z_max`) CPML band grows exponentially (about 0.9/s at R=1e-4; kappa and the acoustic sponge do not help). `allow` only prints a CPML WARNING. |
 
 Automatic thickness is `cpml_layers` times the largest non-air element
 edge on a lateral or bottom boundary (MPI-wide maximum); air is also
@@ -279,8 +280,13 @@ to `no` to disable the outer displacement/acoustic-scalar clamp. The complete
 operator uses `cpml_mpml_cross_fraction=0` (default); explicit older `0.1`
 settings remain active. Use `native` Hex8 integration and the `effective`
 GPU stiffness path. CPML requires `use_checkpoint=0` and `checkpointing_rate=0`
-because the checkpoint format omits absorber histories. See the
-[formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details).
+because the checkpoint format omits absorber histories. With
+`acoustic_free_surface_gravity=yes`, the water surface must lie above the
+bottom CPML band (deepen the model, thin the band, or disable gravity);
+setup aborts with the offending element count unless
+`cpml_gravity_in_bottom_band=allow`. See the
+[formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details)
+and the [bottom-band gravity guard](Extended%20README.md#absorbing-boundaries-and-cpml).
 
 ### Acoustic material and acoustic–elastic coupling
 
