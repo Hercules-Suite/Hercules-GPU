@@ -1566,11 +1566,11 @@ Notes:
 	damping and CFS restoring/memory terms on the four top-face nodes. The
 	vertical CPML stretch is intentionally excluded because `z` is normal to the
 	gravity surface. Corner PML faces include both tangential directions. This
-	adds no per-step work to non-surface PML elements. Because the surface term
-	omits the `z` stretch while the water element beneath it carries the full
-	`S_x*S_y*S_z` product, a gravity surface lying inside the bottom (`z_max`)
-	CPML band is unstable; setup aborts in that configuration unless
-	[`cpml_gravity_in_bottom_band=allow`](#absorbing-boundaries-and-cpml).
+	adds no per-step work to non-surface PML elements. Gravity-surface elements
+	carrying a vertical CPML stretch are guarded at setup: geometric bottom-band
+	overlap and M-PML cross-z damping have separate diagnostics. See
+	[`cpml_gravity_in_bottom_band`](#absorbing-boundaries-and-cpml) for the
+	case-specific stability evidence, remedies and diagnostic override.
 	Each top node has its own memory, consistent with the lumped surface
 	mass. Changing this
 	option affects phase-B solver setup but not mesh generation, so an existing
@@ -3080,42 +3080,63 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	PML stiffness paths independently. The active modes are printed at
 	startup.
 - `cpml_gravity_in_bottom_band`
-	Optional. `abort` (default) or `allow`. Setup-time guard for a known
-	acoustic CPML instability; it changes no operator, kernel or per-step code.
-	With `acoustic_free_surface_gravity=yes`, any acoustic element whose top
-	face is a gravity free surface and whose CPML profile carries the bottom
-	(`z_max`) damping `d_z > 0` grows exponentially. In the production-operator
-	harness (80 m water column, Vp 1500 m/s, rho 1025 kg/m^3, Izmir-like
-	`dt=0.0002 s`, `alpha_max=pi*8`, reference Vp 8080 m/s, bottom PML inside
-	the water) the growth is about `0.9/s` at `cpml_reflection_target=1e-4` in
-	the `0.4-0.5 Hz` band, with maxima at the surface. `cpml_kappa_max=10` and
-	`cpml_acoustic_sponge_fraction=0.3` do not suppress it (`0.90/s` and
-	`0.92/s`); a weaker profile only slows it (`0.40/s` at `R=0.1`, `0.34/s`
-	with `R=0.1`, kappa 10 and sponge 0.3). The same column is stable with
-	gravity off (pressure release, `-0.39/s`) and stable with gravity on when
-	the surface lies above the z band (800 m column, surface 141 m above the
-	bottom band, `-0.004/s`); deep water with lateral PML only is also stable.
+	Optional, case-insensitive: `abort` (default) or `allow`. This shared
+	setup policy guards gravity-surface acoustic elements with vertical CPML
+	stretching, for `abc_type=cpml` and `acoustic_free_surface_gravity=yes`.
+	It changes no operator, kernel, timestep, source or output reconstruction.
+	Despite the parameter name, it covers two distinct triggers:
 
-	Mechanism: the gravity-surface inertia uses the tangential `S_x*S_y`
-	product only, by design, because `z` is the face normal, while the bulk
-	element beneath the surface carries `J = S_x*S_y*S_z`. The mismatch at the
-	four surface nodes of a z-stretched element is the unstable mode. The
-	trigger is therefore geometric: the water surface sits inside the bottom
-	CPML band. This happens in water-only or deep-ocean models and in
-	benchmarks whose water reaches the bottom layer; models whose bottom PML
-	lies in rock (the Izmir cases, bottom at 39 km) are unaffected.
+	1. **Bottom-band overlap:** the surface element's centroid has
+	   `PML_FACE_Z_MAX` membership. Deepen the domain or reduce the realized
+	   bottom-band thickness (`cpml_layers` or `cpml_thickness_m`) until these
+	   elements are outside the band. Water touching the domain bottom alone
+	   does not trigger the guard; the surface element must overlap the band.
+	2. **Cross-z-only damping:** outside the bottom band, lateral M-PML creates
+	   `d_z > 0` through `cpml_mpml_cross_fraction`. Set that fraction to `0`
+	   to remove this trigger. Deepening the model does not remove lateral
+	   cross damping; even a model with bottom PML entirely in rock can trigger
+	   this check. Stability is not established for general combinations of
+	   gravity surfaces and cross damping, so the guard is conservative.
 
-	At setup the solver counts gravity-surface acoustic PML elements with
-	`PML_FACE_Z_MAX` membership or `d_z > 0` (the latter also covers M-PML
-	cross-mixed z damping), reduces the count over MPI, and with `abort`
-	stops on rank 0 with the count and the remedy: deepen the model so the
-	water surface lies above the bottom CPML band, thin the band (fewer
-	`cpml_layers` or a smaller `cpml_thickness_m`), or run with
-	`acoustic_free_surface_gravity=no`. `allow` continues and prints one
-	`CPML WARNING` line with the count; use it only for diagnostic runs. The
-	settings summary reports `PML gravity surface in bottom band`. With
-	`acoustic_free_surface_gravity=no` the count is always zero and the guard
-	is inert.
+	Counts are disjoint: an element in the bottom band is counted only in the
+	first category, even when cross mixing is also enabled. MPI-wide counts
+	and both applicable remedies are printed before `abort` stops setup.
+	`allow` prints the same cause-specific `CPML WARNING` diagnostics and
+	continues; it is a diagnostic override, not a stability fix. Removing a
+	bottom-band overlap can expose the cross-z-only trigger if cross mixing
+	remains enabled. Setting `acoustic_free_surface_gravity=no` makes both
+	counts zero, but changes the physical boundary to pressure release; use
+	that choice only when the modeled problem permits it. The startup summary
+	reports `PML gravity vertical-stretch guard`.
+
+	**Evidence and limits.** A local production-operator harness tested an
+	80 m water column with Vp 1500 m/s, density 1025 kg/m^3, `dt=0.0002 s`,
+	`alpha_max=pi*8` rad/s, reference Vp 8080 m/s and a bottom band overlapping
+	the gravity surface. It measured growth about `0.94/s` at `R=1e-4` in the
+	`0.4-0.53 Hz` band. In those tests, kappa 10 and sponge 0.3 did not remove
+	the growth (about `0.90/s` and `0.92/s`); weaker damping reduced it
+	(`0.40/s` at `R=0.1`, `0.34/s` with kappa 10 and sponge 0.3). The paired
+	pressure-release case decayed, and an 800 m water column whose surface
+	was above the bottom band showed no exponential growth in its 20 s run.
+	These are finite-duration, configuration-specific observations, not
+	universal growth rates or proof that every flagged configuration diverges.
+
+	The surface inertia uses the tangential `S_x*S_y` product; the bulk uses
+	`S_x*S_y*S_z`. These different surface/volume Jacobians alone do not prove
+	an implementation error or uniquely establish the observed instability's
+	mechanism. The guard does not attempt an operator correction.
+
+	**Physics and validation scope.** Enrollment is shared by the pressure
+	and velocity-potential acoustic formulations. Only acoustic elements with
+	a gravity free surface are counted. Standalone elastic, viscoelastic,
+	poroelastic and nonlinear elastoplastic/hysteretic solid elements are
+	unaffected. Acoustic–elastic and porous–water models can trigger the guard
+	on their water free surface; the solid/water and porous/solid interface
+	operators, hydrostatic/geostatic initialization, GPU/MPI field exchanges
+	and station/plane reconstruction are unchanged. This setup guard does not
+	validate those coupled propagation paths. Host checks exercise profile
+	classification and abort/allow diagnostics; full CUDA/MPI execution of the
+	new guard and comprehensive coupled stability validation remain outstanding.
 - `topography_bkt_gpu_stabilize`
 	Optional, tri-state: `auto` (default), `yes`, or `no`. Fixes a
 	**pre-existing** GPU instability where `computation_method=vt`
