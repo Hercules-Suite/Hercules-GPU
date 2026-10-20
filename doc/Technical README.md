@@ -41,6 +41,12 @@ launches. See [launcher details](Extended%20README.md#launch-a-simulation).
 
 ## Configuration essentials
 
+The startup **Some Input Data** block records the build's Git commit and tracked
+tree state, frequency and timestep, domain, source paths, and active topography,
+3-D material, seabed and output-directory settings. The revision is embedded
+when building; source copies without Git metadata report `unknown`. Rebuild to
+update it. See [build provenance and startup summary](Extended%20README.md#build-provenance-and-startup-summary).
+
 Use one `parameters.in`; source-specific controls stay in `source.in` and its
 auxiliary files. Start from a current [benchmark case](../benchmark_inputs/).
 Use SI units and Z/depth positive downward. At zero PROJ azimuth, solver

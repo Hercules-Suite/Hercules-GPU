@@ -57,6 +57,7 @@
 #include "util.h"
 #include "commutil.h"
 #include "timers.h"
+#include "build_info.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -2984,6 +2985,57 @@ static int damping_bkt2_fused_requested(void) {
   return v;
 }
 
+/* Echo settings owned by later initialization stages without moving those
+ * stages, loading their data, or inventing defaults for required values. */
+static void monitor_config_value(FILE* fp, const char* key,
+                                 const char* fallback = "<not set>") {
+  char value[LINESIZE];
+  const int status = read_config_string(fp, key, value, sizeof(value));
+  const char* shown = (status == 1) ? value :
+                     (status == 0) ? fallback : "<unreadable>";
+  char label[LINESIZE];
+  snprintf(label, sizeof(label), "%s:", key);
+  monitor_print("%-35s %s\n", label, shown);
+}
+
+static void monitor_input_details(FILE* fp) {
+  monitor_print("%-35s %s\n", "Hercules Git commit:", hercules_build_commit());
+  monitor_print("%-35s %s\n", "Build tracked tree:", hercules_build_tree_state());
+  monitor_print("%-35s %.12g\n", "Maximum frequency (Hz):", Param.theFreq);
+  monitor_print("%-35s %.12g\n", "Time step dt (s):", Param.theDeltaT);
+  monitor_print("%-35s %.12g\n", "region_origin_latitude_deg:", Param.theRegionLat);
+  monitor_print("%-35s %.12g\n", "region_origin_longitude_deg:", Param.theRegionLong);
+  monitor_print("%-35s %.12g\n", "region_length_east_m:", Param.theDomainY);
+  monitor_print("%-35s %.12g\n", "region_length_north_m:", Param.theDomainX);
+  monitor_print("%-35s %.12g\n", "region_depth_deep_m:", Param.region_depth_deep_m);
+  if (Param.includeTopography == YES) {
+    monitor_config_value(fp, "topographybase_zcoord");
+    monitor_config_value(fp, "type_of_etree");
+    monitor_config_value(fp, "maximum_octant_level");
+    monitor_config_value(fp, "computation_method");
+    monitor_print("%-35s %s\n", "topography_directory:", Param.theTopoDir);
+  }
+  monitor_config_value(fp, "source_directory");
+  monitor_print("%-35s %s\n", "source_directory_output:", Param.theSourceOutputDir);
+  if (Param.threeDVelocityModel == YES) {
+    static const char* references[] = {"legacy", "model_z", "surface", "seabed"};
+    monitor_print("%-35s %s\n", "3D_velocity_model_directory:", Param.the3DVelModelDir);
+    monitor_print("%-35s %s\n", "3D_velocity_model_depth_reference:",
+                  references[Param.the3DDepthReference]);
+  }
+  if (Param.theSeabedGeometryFile[0] != '\0') {
+    monitor_print("%-35s %s\n", "seabed_geometry_file:", Param.theSeabedGeometryFile);
+    monitor_print("%-35s %.12g\n", "seabed_water_vp_m_s:", Param.theSeabedWaterVp);
+    monitor_print("%-35s %.12g\n", "seabed_water_density_kg_m3:", Param.theSeabedWaterRho);
+  }
+  if (Param.theNumberOfStations > 0 && Param.stationBinary != YES) {
+    monitor_config_value(fp, "output_stations_directory", Param.theStationsDirOut);
+  }
+  if (Param.theNumberOfPlanes > 0) {
+    monitor_print("%-35s %s\n", "output_planes_directory:", Param.thePlaneDirOut);
+  }
+}
+
 /**
  * Open material database and initialize various static global variables.
  *
@@ -4502,8 +4554,6 @@ static int32_t parse_parameters(const char* numericalin) {
   free(auxiliar);
 #endif
 
-  fclose(fp);
-
   /* Check whether a profile will be used and init global flag to YES */
   if (strcasecmp(Param.cvmdb_input_file, "profile") == 0) {
     Param.useProfile = YES;
@@ -4663,6 +4713,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   monitor_print("\n\n---------------- Some Input Data ----------------\n\n");
+  monitor_input_details(fp);
   monitor_print("Vs cut:                             %f\n", Param.theVsCut);
   monitor_print("Softening factor:                   %f\n",
                 Param.theSofteningFactor);
@@ -4697,7 +4748,7 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.includeAcoustic == YES) {
     monitor_print("Acoustic interface coupling:        %s\n",
                   acoustic_interface_coupling);
-    monitor_print("Acoustic interface method:         %s%s\n",
+    monitor_print("Acoustic interface method:          %s%s\n",
                   acoustic_interface_method,
                   acoustic_interface_method_explicit ? " (explicit)"
                       : (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS
@@ -4930,6 +4981,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
   monitor_print("\n-------------------------------------------------\n\n");
 
+  fclose(fp);
   fflush(Param.theMonitorFileFp);
 
   return 0;

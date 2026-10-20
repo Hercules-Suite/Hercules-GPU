@@ -2331,6 +2331,23 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
 });
 
+test("documents executable provenance and conditional startup configuration", async () => {
+  const build = await (await render("/docs/installation")).text();
+  assert.match(build, /full Git commit ID and tracked-tree state/);
+  assert.match(build, /never reads Git at runtime/);
+  assert.match(build, /reports unknown/);
+  const output = await (await render("/docs/output-files")).text();
+  assert.match(output, /Some Input Data/);
+  assert.match(output, /maximum frequency \(Hz\), dt \(s\)/);
+  assert.match(output, /binary stations do not use output_stations_directory/);
+  for (const key of ["topographybase_zcoord", "type_of_etree", "maximum_octant_level",
+    "computation_method", "topography_directory", "source_directory",
+    "source_directory_output", "3D_velocity_model_directory",
+    "3D_velocity_model_depth_reference"]) {
+    assert.ok(output.includes(key), `startup summary documents ${key}`);
+  }
+});
+
 test("parameter broadcasts have unique slots and matching pack/unpack fields", () => {
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;
