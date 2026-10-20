@@ -3003,6 +3003,10 @@ static void monitor_input_details(FILE* fp) {
   monitor_print("%-35s %s\n", "Build tracked tree:", hercules_build_tree_state());
   monitor_print("%-35s %.12g\n", "Maximum frequency (Hz):", Param.theFreq);
   monitor_print("%-35s %.12g\n", "Time step dt (s):", Param.theDeltaT);
+  monitor_print("%-35s %.12g\n", "Simulation start time (s):", Param.theStartT);
+  monitor_print("%-35s %.12g\n", "Simulation end time (s):", Param.theEndT);
+  monitor_print("%-35s %.12g\n", "Simulation duration (s):",
+                Param.theEndT - Param.theStartT);
   monitor_print("%-35s %.12g\n", "region_origin_latitude_deg:", Param.theRegionLat);
   monitor_print("%-35s %.12g\n", "region_origin_longitude_deg:", Param.theRegionLong);
   monitor_print("%-35s %.12g\n", "region_length_east_m:", Param.theDomainY);

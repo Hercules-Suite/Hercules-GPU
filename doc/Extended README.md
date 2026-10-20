@@ -338,7 +338,9 @@ flag. The ID alone does not identify local patches, compiler options, external
 libraries or input data; preserve those separately, and use a clean rebuild
 when reproducing a published executable.
 
-The same block reports maximum frequency in Hz, `dt` in seconds,
+The same block reports maximum frequency in Hz, `dt` in seconds, simulation
+start/end times and configured duration in seconds (end minus start, not
+wall-clock runtime),
 `region_origin_latitude_deg`, `region_origin_longitude_deg`,
 `region_length_east_m` (solver Y), `region_length_north_m` (solver X), and
 `region_depth_deep_m` (the deep boundary, not deep minus shallow extent).

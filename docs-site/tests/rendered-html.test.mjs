@@ -2339,6 +2339,7 @@ test("documents executable provenance and conditional startup configuration", as
   const output = await (await render("/docs/output-files")).text();
   assert.match(output, /Some Input Data/);
   assert.match(output, /maximum frequency \(Hz\), dt \(s\)/);
+  assert.match(output, /simulation start\/end times and configured duration \(end minus start\) in seconds/);
   assert.match(output, /binary stations do not use output_stations_directory/);
   for (const key of ["topographybase_zcoord", "type_of_etree", "maximum_octant_level",
     "computation_method", "topography_directory", "source_directory",
