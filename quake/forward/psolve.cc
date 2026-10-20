@@ -701,6 +701,10 @@ typedef struct cpml_build_s {
   int32_t* acoustic_elem_list;
   cpml_element_t* acoustic_coeff;
   int32_t acoustic_gravity_surface_count;
+  /* Disjoint gravity top-face guard counts: geometric bottom-band
+   * membership, or cross-mixed z damping outside that band. Setup only. */
+  int32_t acoustic_gravity_bottom_band_count;
+  int32_t acoustic_gravity_cross_z_count;
   int32_t acoustic_gravity_surface_capacity;
   int32_t* acoustic_gravity_surface_pml_index;
   cpml_surface_t* acoustic_gravity_surface_coeff;
@@ -1218,6 +1222,12 @@ static struct Param_t {
    * 3D material queries made from PML coordinates are clamped to the inner PML
    * box, so the PML is constant along each active PML-normal direction. */
   noyesflag_t theCpml3DMaterialExtension;
+  /* Guard gravity-surface elements with vertical CPML stretching: a
+   * bottom-band overlap is unstable in tested operator-harness cases;
+   * cross-mixed z damping is guarded conservatively and reported separately.
+   * 0 = abort at setup (default); 1 = allow with a CPML WARNING. Declared
+   * AFTER theCpml3DMaterialExtension to preserve C++ designated-init order. */
+  int theCpmlGravityInBottomBand;
   /* VT + BKT GPU stabilization (default NO -> strict no-op, bit-identical
    * to the validated v2/CPML baseline). YES enables the faithful CUDA
    * port of the CPU cut-cell visco-elastic operator TetraForcesBKT for
@@ -1315,6 +1325,7 @@ static struct Param_t {
            .theCpmlNativeStiffnessAcoustic = YES,
            .theCpmlPartitionWeight = 1.0,
            .theCpml3DMaterialExtension = YES,
+           .theCpmlGravityInBottomBand = 0,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
            .theAcousticInterfaceProjectionMode =
@@ -2395,7 +2406,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   51 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  67 /* Must adjust this if adding int params */
+  68 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2588,6 +2599,7 @@ static void read_parameters(int argc, char** argv) {
   int_message[64] = Param.theAcousticInterfaceMethod;
   int_message[65] = Param.stationAsciiBufferKiB;
   int_message[66] = Param.acousticStationGradientRecovered;
+  int_message[67] = Param.theCpmlGravityInBottomBand;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2660,6 +2672,7 @@ static void read_parameters(int argc, char** argv) {
   Param.theAcousticInterfaceMethod = int_message[64];
   Param.stationAsciiBufferKiB = int_message[65];
   Param.acousticStationGradientRecovered = int_message[66];
+  Param.theCpmlGravityInBottomBand = int_message[67];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3233,6 +3246,24 @@ static int32_t parse_parameters(const char* numericalin) {
           solver_abort(__FUNCTION_NAME, NULL,
                        "cpml_stiffness_mode_acoustic must be 'native' or "
                        "'reduced': got '%s'\n", cpml_stiffness_mode_ac);
+        }
+      }
+
+      /* Shared policy for geometric bottom-band overlap and M-PML cross-z
+       * damping at a gravity free surface. 'abort' (default) stops setup;
+       * 'allow' continues with cause-specific CPML WARNING diagnostics.
+       * Neither choice changes the operators or establishes stability. */
+      char cpml_gravity_in_bottom_band[64] = "";
+      if (parsetext(fp, "cpml_gravity_in_bottom_band", 's',
+                    &cpml_gravity_in_bottom_band) == 0) {
+        if (strcasecmp(cpml_gravity_in_bottom_band, "abort") == 0) {
+          Param.theCpmlGravityInBottomBand = 0;
+        } else if (strcasecmp(cpml_gravity_in_bottom_band, "allow") == 0) {
+          Param.theCpmlGravityInBottomBand = 1;
+        } else {
+          solver_abort(__FUNCTION_NAME, NULL,
+                       "cpml_gravity_in_bottom_band must be 'abort' or "
+                       "'allow': got '%s'\n", cpml_gravity_in_bottom_band);
         }
       }
 
@@ -4766,6 +4797,10 @@ static int32_t parse_parameters(const char* numericalin) {
                   (Param.theCpmlNativeStiffnessAcoustic == YES)
                       ? "full Hex8 CPML"
                       : "reduced (standalone 1-pt)");
+    monitor_print("PML gravity vertical-stretch guard: %s\n",
+                  (Param.theCpmlGravityInBottomBand == 1)
+                      ? "allow (CPML WARNING only; diagnostic use)"
+                      : "abort (default)");
     monitor_print("PML formulation:                    "
                   "complete second-order CFS-CPML (full Jacobian products)\n");
   }
@@ -12066,6 +12101,8 @@ static void solver_init() {
     g_cpmlBuild.elastic_count = 0;
     g_cpmlBuild.acoustic_count = 0;
     g_cpmlBuild.acoustic_gravity_surface_count = 0;
+    g_cpmlBuild.acoustic_gravity_bottom_band_count = 0;
+    g_cpmlBuild.acoustic_gravity_cross_z_count = 0;
     g_cpmlBuild.acoustic_gravity_surface_capacity = 0;
     g_cpmlBuild.active_axis_count = 0;
 
@@ -12326,6 +12363,17 @@ static void solver_init() {
           const double dt2 = Param.theDeltaTSquared;
           int32_t pml_idx = g_cpmlBuild.acoustic_count++;
           g_cpmlBuild.acoustic_elem_list[pml_idx] = eindex;
+
+          /* Setup guard: classify each gravity top face once. Vertical
+           * damping inherited from lateral M-PML is not bottom-band
+           * membership and requires a different diagnostic and remedy. */
+          if (gravitySurfaceMass > 0.0) {
+            if ((pml_face_mask & PML_FACE_Z_MAX) != 0) {
+              g_cpmlBuild.acoustic_gravity_bottom_band_count++;
+            } else if (d_axis[2] > 0.0) {
+              g_cpmlBuild.acoustic_gravity_cross_z_count++;
+            }
+          }
           /* Optional volume-only numerical damping. The separately built
            * gravity-surface inertia retains only its coordinate stretching. */
           const double sponge_a = Param.theCpmlAcousticSpongeFraction *
@@ -12748,6 +12796,56 @@ static void solver_init() {
       }
     }
 
+    /* Setup-only gravity/vertical-stretch guard. Preserve the conservative
+     * policy for both causes, but report disjoint counts and remedies before
+     * aborting so a mixed configuration does not hide either cause. */
+    {
+      long long local_gravity_counts[2] = {
+          (long long)g_cpmlBuild.acoustic_gravity_bottom_band_count,
+          (long long)g_cpmlBuild.acoustic_gravity_cross_z_count};
+      long long global_gravity_counts[2] = {0, 0};
+      MPI_Allreduce(local_gravity_counts, global_gravity_counts, 2,
+                    MPI_LONG_LONG, MPI_SUM, comm_solver);
+      if (((global_gravity_counts[0] > 0) ||
+           (global_gravity_counts[1] > 0)) && (Global.myID == 0)) {
+        if (global_gravity_counts[0] > 0) {
+          monitor_print(
+              "CPML WARNING: %lld gravity free-surface acoustic PML elements "
+              "overlap the bottom (z_max) CPML band. This overlap was "
+              "unstable in tested operator-harness configurations; growth "
+              "rates and sensitivity are case-specific. Remedy: deepen "
+              "the model or thin the band so the surface elements are "
+              "outside it. Any M-PML cross-z damping must be addressed "
+              "separately.\n", global_gravity_counts[0]);
+        }
+        if (global_gravity_counts[1] > 0) {
+          monitor_print(
+              "CPML WARNING: %lld gravity free-surface acoustic PML elements "
+              "outside the bottom band have vertical damping from lateral "
+              "M-PML cross mixing (d_z > 0). Stability of this combination "
+              "is not established for general configurations. Remedy: set "
+              "cpml_mpml_cross_fraction=0 to remove this trigger; deepening "
+              "the model does not remove lateral cross damping.\n",
+              global_gravity_counts[1]);
+        }
+        if (Param.theCpmlGravityInBottomBand == 1) {
+          monitor_print(
+              "CPML: continuing because cpml_gravity_in_bottom_band=allow; "
+              "this is a diagnostic override, not a stability fix.\n");
+        } else {
+          solver_abort(
+              __FUNCTION_NAME, NULL,
+              "CPML gravity vertical-stretch guard: %lld bottom-band and "
+              "%lld cross-z-only elements. Apply the cause-specific "
+              "remedies above, or use acoustic_free_surface_gravity=no "
+              "only if a pressure-release surface is intended (different "
+              "physics). Set cpml_gravity_in_bottom_band=allow to continue "
+              "for diagnostics without changing the operators.\n",
+              global_gravity_counts[0], global_gravity_counts[1]);
+        }
+      }
+    }
+
     /* Upload coefficient records once; histories remain device-resident. */
     for (int type=0; type<2; ++type) {
       const int32_t count = type ? g_cpmlBuild.acoustic_count : g_cpmlBuild.elastic_count;
@@ -13031,6 +13129,8 @@ static void solver_init() {
     free(g_cpmlBuild.acoustic_gravity_surface_coeff);
     g_cpmlBuild.acoustic_gravity_surface_coeff = NULL;
     g_cpmlBuild.acoustic_gravity_surface_count = 0;
+    g_cpmlBuild.acoustic_gravity_bottom_band_count = 0;
+    g_cpmlBuild.acoustic_gravity_cross_z_count = 0;
     g_cpmlBuild.acoustic_gravity_surface_capacity = 0;
   }
 #endif /* BOUNDARY */

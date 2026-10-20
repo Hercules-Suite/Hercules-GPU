@@ -1566,8 +1566,13 @@ Notes:
 	damping and CFS restoring/memory terms on the four top-face nodes. The
 	vertical CPML stretch is intentionally excluded because `z` is normal to the
 	gravity surface. Corner PML faces include both tangential directions. This
-	adds no per-step work to non-surface PML elements. Each top node has its
-	own memory, consistent with the lumped surface mass. Changing this
+	adds no per-step work to non-surface PML elements. Gravity-surface elements
+	carrying a vertical CPML stretch are guarded at setup: geometric bottom-band
+	overlap and M-PML cross-z damping have separate diagnostics. See
+	[`cpml_gravity_in_bottom_band`](#absorbing-boundaries-and-cpml) for the
+	case-specific stability evidence, remedies and diagnostic override.
+	Each top node has its own memory, consistent with the lumped surface
+	mass. Changing this
 	option affects phase-B solver setup but not mesh generation, so an existing
 	compatible mesh etree can be reused.
 - `acoustic_interface_diagnostics_file`
@@ -3074,6 +3079,64 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	configs are unchanged). Lets you exercise the elastic and acoustic
 	PML stiffness paths independently. The active modes are printed at
 	startup.
+- `cpml_gravity_in_bottom_band`
+	Optional, case-insensitive: `abort` (default) or `allow`. This shared
+	setup policy guards gravity-surface acoustic elements with vertical CPML
+	stretching, for `abc_type=cpml` and `acoustic_free_surface_gravity=yes`.
+	It changes no operator, kernel, timestep, source or output reconstruction.
+	Despite the parameter name, it covers two distinct triggers:
+
+	1. **Bottom-band overlap:** the surface element's centroid has
+	   `PML_FACE_Z_MAX` membership. Deepen the domain or reduce the realized
+	   bottom-band thickness (`cpml_layers` or `cpml_thickness_m`) until these
+	   elements are outside the band. Water touching the domain bottom alone
+	   does not trigger the guard; the surface element must overlap the band.
+	2. **Cross-z-only damping:** outside the bottom band, lateral M-PML creates
+	   `d_z > 0` through `cpml_mpml_cross_fraction`. Set that fraction to `0`
+	   to remove this trigger. Deepening the model does not remove lateral
+	   cross damping; even a model with bottom PML entirely in rock can trigger
+	   this check. Stability is not established for general combinations of
+	   gravity surfaces and cross damping, so the guard is conservative.
+
+	Counts are disjoint: an element in the bottom band is counted only in the
+	first category, even when cross mixing is also enabled. MPI-wide counts
+	and both applicable remedies are printed before `abort` stops setup.
+	`allow` prints the same cause-specific `CPML WARNING` diagnostics and
+	continues; it is a diagnostic override, not a stability fix. Removing a
+	bottom-band overlap can expose the cross-z-only trigger if cross mixing
+	remains enabled. Setting `acoustic_free_surface_gravity=no` makes both
+	counts zero, but changes the physical boundary to pressure release; use
+	that choice only when the modeled problem permits it. The startup summary
+	reports `PML gravity vertical-stretch guard`.
+
+	**Evidence and limits.** A local production-operator harness tested an
+	80 m water column with Vp 1500 m/s, density 1025 kg/m^3, `dt=0.0002 s`,
+	`alpha_max=pi*8` rad/s, reference Vp 8080 m/s and a bottom band overlapping
+	the gravity surface. It measured growth about `0.94/s` at `R=1e-4` in the
+	`0.4-0.53 Hz` band. In those tests, kappa 10 and sponge 0.3 did not remove
+	the growth (about `0.90/s` and `0.92/s`); weaker damping reduced it
+	(`0.40/s` at `R=0.1`, `0.34/s` with kappa 10 and sponge 0.3). The paired
+	pressure-release case decayed, and an 800 m water column whose surface
+	was above the bottom band showed no exponential growth in its 20 s run.
+	These are finite-duration, configuration-specific observations, not
+	universal growth rates or proof that every flagged configuration diverges.
+
+	The surface inertia uses the tangential `S_x*S_y` product; the bulk uses
+	`S_x*S_y*S_z`. These different surface/volume Jacobians alone do not prove
+	an implementation error or uniquely establish the observed instability's
+	mechanism. The guard does not attempt an operator correction.
+
+	**Physics and validation scope.** Enrollment is shared by the pressure
+	and velocity-potential acoustic formulations. Only acoustic elements with
+	a gravity free surface are counted. Standalone elastic, viscoelastic,
+	poroelastic and nonlinear elastoplastic/hysteretic solid elements are
+	unaffected. Acoustic–elastic and porous–water models can trigger the guard
+	on their water free surface; the solid/water and porous/solid interface
+	operators, hydrostatic/geostatic initialization, GPU/MPI field exchanges
+	and station/plane reconstruction are unchanged. This setup guard does not
+	validate those coupled propagation paths. Host checks exercise profile
+	classification and abort/allow diagnostics; full CUDA/MPI execution of the
+	new guard and comprehensive coupled stability validation remain outstanding.
 - `topography_bkt_gpu_stabilize`
 	Optional, tri-state: `auto` (default), `yes`, or `no`. Fixes a
 	**pre-existing** GPU instability where `computation_method=vt`
