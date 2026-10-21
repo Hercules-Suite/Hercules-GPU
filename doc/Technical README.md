@@ -300,7 +300,10 @@ elements separately from surface elements outside that band with lateral
 M-PML cross-z damping. Remove the first trigger by deepening the domain or
 thinning the band; remove the second with `cpml_mpml_cross_fraction=0`.
 `cpml_gravity_in_bottom_band=allow` bypasses the setup stop for diagnostics.
-Disabling gravity changes the boundary physics. See the
+Disabling gravity changes the boundary physics. Startup also prints
+`CPML acoustic-elastic interface:` fragment and PML-fragment counts with the
+coupling assumption, and a `CPML WARNING` if water meets a lateral PML band
+but no interface fragment was classified inside the PML. See the
 [formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details)
 and [guard evidence and validation limits](Extended%20README.md#absorbing-boundaries-and-cpml).
 

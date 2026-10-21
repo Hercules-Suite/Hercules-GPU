@@ -3522,6 +3522,29 @@ separately; neither finite output nor a quieter trace proves matching.
 The profile is sampled at element centers, so spatial refinement and a thicker
 layer can reduce the entrance discretization error.
 
+Two setup-time coupling diagnostics are printed on rank 0 for acoustic CPML
+runs; they add no per-step work. `CPML acoustic-elastic interface:` reports
+the global interface fragment count, how many fragment centres lie inside the
+PML (where the cofactor `J/S_j` is applied on both sides with six CFS
+histories per quadrature point per side), how many have a remote elastic side,
+and how many ranks hold PML fragments without a published side mask (zero by
+construction). The following `CPML acoustic-elastic interface assumption:` line
+states that the cofactor is sampled once at the fragment centre and names the
+exchanged quantities for the active formulation (`velocity_potential`:
+`p = -dphi/dt` traction and the solid normal velocity source; `pressure`:
+`p` traction and the solid normal acceleration source). A `CPML WARNING`
+follows when `acoustic_interface_coupling=yes`, water occupies a lateral PML
+band and an interface exists, but no fragment centre was classified inside
+the PML: the correction is then inactive, and a local coupled water-over-solid
+harness grew at about `0.45/s` at strong-profile settings without it while the
+corrected interface stayed bounded. Separately, a bottom (`z_max`) CPML band
+that reaches the water free surface with `acoustic_free_surface_gravity=yes`
+is reported by the `cpml_gravity_in_bottom_band` guard: the gravity-surface
+CPML inertia carries only the tangential `S_x*S_y` stretch, so a z-stretch at
+the free surface is not represented, and the same harness grew at about
+`0.9/s` there (the pressure-release top decayed). Keep the model deeper than
+the CPML thickness plus the water depth for such shallow test domains.
+
 Historical CPS results below describe earlier incomplete operators and are
 not acceptance evidence for the full formulation. Current implementation and
 validation scope are described in [operator details](#cpml-coefficient-and-operator-details).
