@@ -300,7 +300,14 @@ elements separately from surface elements outside that band with lateral
 M-PML cross-z damping. Remove the first trigger by deepening the domain or
 thinning the band; remove the second with `cpml_mpml_cross_fraction=0`.
 `cpml_gravity_in_bottom_band=allow` bypasses the setup stop for diagnostics.
-Disabling gravity changes the boundary physics. See the
+Disabling gravity changes the boundary physics. Startup also prints
+`CPML acoustic-elastic interface:` fragment and PML-fragment counts with the
+coupling assumption. Zero PML fragments produce an informational stdout line,
+not a missing-correction warning: an interface may lie entirely outside the
+PML even when water reaches it. A missing host side mask for enrolled PML
+fragments produces a `CPML WARNING` on stderr. Both streams retain their
+`monitor_file` copies. These host setup counts do not verify GPU execution
+or long-time stability. See the
 [formulation and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details)
 and [guard evidence and validation limits](Extended%20README.md#absorbing-boundaries-and-cpml).
 

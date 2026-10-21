@@ -3522,6 +3522,59 @@ separately; neither finite output nor a quieter trace proves matching.
 The profile is sampled at element centers, so spatial refinement and a thicker
 layer can reduce the entrance discretization error.
 
+Two setup-time coupling diagnostics are printed on rank 0 for acoustic CPML
+runs; they add no per-step work. `CPML acoustic-elastic interface:` reports
+the global interface fragment count, how many fragment centres lie inside the
+PML (where the cofactor `J/S_j` is configured on both sides with six CFS
+histories per quadrature point per side), how many have a remote elastic side,
+and how many ranks hold PML fragments without a published host side mask (zero
+by construction). A nonzero missing-mask count produces a `CPML WARNING`.
+These are host setup counts, not verification of device histories or kernel
+execution. The following `CPML acoustic-elastic interface assumption:` line
+states that the cofactor is sampled once at the fragment centre and names the
+exchanged quantities for the active formulation (`velocity_potential`:
+`p = -dphi/dt` traction and the solid normal velocity source; `pressure`:
+`p` traction and the solid normal acceleration source). With coupling disabled,
+the assumption line says that no interface correction is built. If interfaces
+exist but zero fragment centres lie in the PML, an informational stdout line
+reports that no correction is required by the centre-sampling rule. This can
+be valid even when water occupies a lateral PML band: for example, a solid
+inclusion can lie entirely inside a water domain, away from the PML. The two
+global populations do not establish an interface/PML intersection. Check the
+fragment geometry if an intersection was expected; zero counts alone are not
+evidence of a missing correction. Routine lines also go to `monitor_file`;
+actual warnings go to stderr and `monitor_file`. The existing setup reduction
+grows from three counters to five; it adds no collective or per-step work.
+
+A local conforming-mesh water-over-solid harness stayed bounded with the
+cofactor filters at its tested strong and weak profiles. Deliberately removing
+the filters gave roughly `0.45/s` growth at `10.85 Hz` for the strong profile;
+that is not the reported `1.465 Hz` Izmir mode and does not identify its cause.
+The harness has no hanging nodes, octree size transitions, fragment splitting,
+MPI or material damping. It does not validate arbitrary meshes or the
+poroelastic, viscoelastic and nonlinear coupled paths.
+
+Separately, the `cpml_gravity_in_bottom_band` guard reports gravity-surface
+elements whose centres lie inside the bottom (`z_max`) CPML band. The surface
+inertia uses tangential `S_x*S_y` stretching and the bulk inertia uses
+`S_x*S_y*S_z`; these different factors alone do not prove an implementation
+error. Instability was observed in local operator-harness tests (about `0.9/s`
+for one configuration), with case-specific rates and sensitivity. Deepen the
+domain or thin the realized band until the gravity-surface element centres
+lie outside it; use actual solver coordinates, including any topography
+offset. Water depth alone does not determine this clearance. Lateral M-PML
+cross-z damping remains a separate trigger, removed with
+`cpml_mpml_cross_fraction=0`. Switching to `abc_type=dashpot` changes the
+absorber, and `acoustic_free_surface_gravity=no` changes the surface to
+pressure release. The guard and its abort/allow policy are unchanged.
+
+These additions change only setup diagnostics. Acoustic pressure and
+velocity-potential formulations retain their existing coupling; elastic,
+viscoelastic, poroelastic and nonlinear elastoplastic/hysteretic updates,
+hydrostatic/geostatic initialization, GPU/MPI exchanges and output recovery
+are unchanged. Existing poroelastic and nonlinear exclusions inside CPML still
+apply. Host diagnostic checks do not replace CUDA/MPI propagation validation.
+
 Historical CPS results below describe earlier incomplete operators and are
 not acceptance evidence for the full formulation. Current implementation and
 validation scope are described in [operator details](#cpml-coefficient-and-operator-details).

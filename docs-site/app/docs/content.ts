@@ -989,6 +989,16 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
       },
       {
+        id: "pml-interface-diagnostics",
+        title: "Interface coverage and gravity-surface diagnostics",
+        paragraphs: [
+          "CPML acoustic-elastic interface: reports global interface-fragment and PML-fragment counts, remote solid-side fragments and ranks with enrolled PML fragments but no host side mask. The assumption line names the active pressure or velocity_potential coupling, or says that coupling is disabled. The cofactor J/S_j is configured at the fragment centre on both sides, with six independent CFS histories per quadrature point per side; point uses one point and face_mass uses four. These are host setup counts, not verification of device histories or kernel execution.",
+          "Zero PML fragments are informational, not a missing-correction warning. Water in a lateral PML band and an interface somewhere else do not establish an intersection: a solid inclusion may lie entirely inside the water domain, away from the PML. No correction is required by the centre-sampling rule when all fragment centres are outside. If an intersection was expected, inspect the fragment geometry and realized thickness. A nonzero count of ranks with enrolled PML fragments but no host side mask does produce a CPML WARNING. Routine diagnostics go to stdout and monitor_file; warnings go to stderr and monitor_file. The existing setup reduction grows from three counters to five, with no extra collective or per-step work.",
+          "With acoustic_free_surface_gravity=yes, cpml_gravity_in_bottom_band separately counts surface elements inside the geometric bottom band and surface elements outside it with lateral M-PML cross-z damping. Deepen the domain or thin the band until the surface element centres lie outside it, using actual solver coordinates including the topography offset. Water depth alone does not determine clearance. Set cpml_mpml_cross_fraction=0 to remove lateral cross-z damping. The abort/allow policy is unchanged; allow is a diagnostic override. The gravity surface uses tangential S_x*S_y inertia, while the bulk uses S_x*S_y*S_z; the different factors alone do not prove an implementation error. Instability was observed in specific operator-harness configurations, not established for every flagged case. Switching to dashpots changes the absorber; disabling gravity changes the surface to pressure release.",
+          "A local conforming-mesh harness stayed bounded with the cofactor filters at its tested profiles. Deliberately removing them produced about 0.45/s growth at 10.85 Hz for a strong profile; that differs from the reported 1.465 Hz Izmir mode and does not identify its cause. The harness omits hanging nodes, octree size transitions, fragment splitting, MPI and material damping. It does not validate arbitrary heterogeneous, poroelastic, viscoelastic or nonlinear coupled cases. The diagnostics change no operators, hydrostatic/geostatic initialization, GPU/MPI exchanges or output recovery; existing poroelastic and nonlinear exclusions inside CPML remain. Host diagnostic checks are not CUDA/MPI propagation validation.",
+        ],
+      },
+      {
         id: "pml-horizon-validation",
         title: "Horizon validation, October 2026",
         paragraphs: [

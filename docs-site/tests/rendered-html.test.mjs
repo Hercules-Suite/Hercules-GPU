@@ -641,7 +641,9 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
   assert.match(psolve, /global_gravity_counts\[0\] > 0/);
   assert.match(psolve, /global_gravity_counts\[1\] > 0/);
   assert.match(psolve, /CPML WARNING: %lld gravity free-surface acoustic PML elements/);
-  assert.match(psolve, /unstable in tested operator-harness configurations/);
+  assert.match(psolve, /Instability was "\s*"observed in local operator-harness tests/);
+  assert.match(psolve, /growth rates and "\s*"sensitivity are case-specific/);
+  assert.match(psolve, /element centres lie outside it/);
   assert.match(psolve, /outside the bottom band have vertical damping from lateral/);
   assert.match(psolve, /cpml_mpml_cross_fraction=0 to remove this trigger; deepening/);
   assert.match(psolve, /the model does not remove lateral cross damping/);
@@ -651,6 +653,24 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
   assert.match(header, /ACOUSTIC_GRAVITY_ACCELERATION_M_S2 9\.81/);
   assert.match(kernel, /pressureFreeSurfaceNodeFlagsDevice[\s\S]*?acousticFreeSurfaceGravity == 0/);
   assert.match(kernel, /kernelPMLAcousticGravitySurfaceStep/);
+});
+
+test("documents CPML interface counts without implying a missing correction", async () => {
+  const html = await (await render("/docs/physics")).text();
+  const section = html.match(/<section\b[^>]*id="pml-interface-diagnostics"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /host setup counts, not verification of device histories or kernel execution/);
+  assert.match(section, /Zero PML fragments are informational, not a missing-correction warning/);
+  assert.match(section, /do not establish an intersection/);
+  assert.match(section, /no extra collective or per-step work/);
+  assert.match(section, /warnings go to stderr and monitor_file/);
+  assert.match(section, /Water depth alone does not determine clearance/);
+  assert.match(section, /cpml_mpml_cross_fraction=0/);
+  assert.match(section, /10\.85 Hz/);
+  assert.match(section, /1\.465 Hz/);
+  assert.match(section, /does not identify its cause/);
+  assert.match(section, /hanging nodes, octree size transitions, fragment splitting, MPI and material damping/);
+  assert.match(section, /not CUDA\/MPI propagation validation/);
 });
 
 test("documents the phase launcher contract", async () => {

@@ -13007,12 +13007,18 @@ static void solver_init() {
         if (global_gravity_counts[0] > 0) {
           monitor_diagnostic(
               "CPML WARNING: %lld gravity free-surface acoustic PML elements "
-              "overlap the bottom (z_max) CPML band. This overlap was "
-              "unstable in tested operator-harness configurations; growth "
-              "rates and sensitivity are case-specific. Remedy: deepen "
-              "the model or thin the band so the surface elements are "
-              "outside it. Any M-PML cross-z damping must be addressed "
-              "separately.\n", global_gravity_counts[0]);
+              "overlap the bottom (z_max) CPML band. Instability was "
+              "observed in local operator-harness tests; growth rates and "
+              "sensitivity are case-specific. The gravity-surface inertia "
+              "uses tangential S_x*S_y stretching; stability with vertical "
+              "stretch at this surface is not established. Remedy: deepen "
+              "the domain or thin the band until the gravity-surface "
+              "element centres lie outside it. Alternatively, use "
+              "abc_type=dashpot, or acoustic_free_surface_gravity=no only "
+              "if a pressure-release surface is intended (different "
+              "boundary physics). Any M-PML "
+              "cross-z damping must be addressed separately.\n",
+              global_gravity_counts[0]);
         }
         if (global_gravity_counts[1] > 0) {
           monitor_diagnostic(
@@ -13356,21 +13362,76 @@ static void solver_init() {
     /* All solver ranks must enter this collective. Many 3D decompositions have
      * ranks with no local water-solid interface faces, especially for a flat
      * water layer, and letting those ranks skip the reduction deadlocks the
-     * interface-owning ranks during Phase B startup. */
-    int64_t local_iface_diag[3] = {
-        pml_face_count, remote_elastic_side_count,
-        remote_elastic_pml_side_count};
-    int64_t global_iface_diag[3] = {0, 0, 0};
-    MPI_Reduce(local_iface_diag, global_iface_diag, 3, MPI_LONG_LONG,
+     * interface-owning ranks during Phase B startup. Counts: all fragments,
+     * fragments with centre inside the PML, fragments with a remote elastic
+     * side (all / inside the PML), ranks whose PML fragments published no
+     * host side mask (impossible by construction; counted so a regression
+     * shows). This checks host publication, not device histories or kernel
+     * execution. Extend the existing setup collective; nothing per step. */
+    const int64_t pml_mask_null_rank =
+        ((pml_face_count > 0) &&
+         (Global.acousticInterfacePmlSideMask == NULL)) ? 1 : 0;
+    int64_t local_iface_diag[5] = {
+        Global.acousticInterfaceFaces, pml_face_count,
+        remote_elastic_side_count, remote_elastic_pml_side_count,
+        pml_mask_null_rank};
+    int64_t global_iface_diag[5] = {0, 0, 0, 0, 0};
+    MPI_Reduce(local_iface_diag, global_iface_diag, 5, MPI_LONG_LONG,
                MPI_SUM, 0, comm_solver);
-    if (Global.myID == 0 && global_iface_diag[0] > 0) {
-      fprintf(stdout,
-              "CPML: %lld acoustic-elastic interface fragments use a common "
-              "physical-face profile on both sides; remote-elastic=%lld "
-              "(remote fragments in PML=%lld)\n",
-              (long long)global_iface_diag[0],
-              (long long)global_iface_diag[1],
-              (long long)global_iface_diag[2]);
+    if ((Global.myID == 0) && acoustic_pressure_enabled()) {
+      const int face_mass =
+          (Param.theAcousticInterfaceProjectionMode ==
+           ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS);
+      monitor_print(
+          "CPML acoustic-elastic interface: %lld fragments, %lld with centre "
+          "inside the PML (cofactor J/S_j configured on both sides, 6 CFS "
+          "histories per quadrature point per side, %d point%s per "
+          "fragment), %lld with a remote elastic side (%lld of all fragments "
+          "remote); %lld ranks with PML fragments but no host side mask\n",
+          (long long)global_iface_diag[0], (long long)global_iface_diag[1],
+          face_mass ? 4 : 1, face_mass ? "s" : "",
+          (long long)global_iface_diag[3], (long long)global_iface_diag[2],
+          (long long)global_iface_diag[4]);
+      if (Param.acousticInterfaceCoupling != YES) {
+        monitor_print(
+            "CPML acoustic-elastic interface assumption: "
+            "acoustic_interface_coupling=no, so no interface terms and no "
+            "CPML interface correction are built\n");
+      } else if (Param.theAcousticVelocityPotential == 1) {
+        monitor_print(
+            "CPML acoustic-elastic interface assumption: interface cofactor "
+            "sampled once at the fragment centre (same J/S_j on both sides, "
+            "independent of neighbour size or MPI ownership); "
+            "velocity_potential: p = -dphi/dt traction on the solid, solid "
+            "normal velocity (u^{n+1}-u^n)/dt . n as the acoustic source\n");
+      } else {
+        monitor_print(
+            "CPML acoustic-elastic interface assumption: interface cofactor "
+            "sampled once at the fragment centre (same J/S_j on both sides, "
+            "independent of neighbour size or MPI ownership); pressure: p "
+            "traction on the solid, solid normal acceleration "
+            "(u^{n+1}-2u^n+u^{n-1})/dt^2 . n as the acoustic source\n");
+      }
+      if (global_iface_diag[4] > 0) {
+        monitor_diagnostic(
+            "CPML WARNING: %lld ranks hold interface fragments inside the "
+            "PML but published no host side mask; device setup cannot "
+            "enable the interface correction there\n",
+            (long long)global_iface_diag[4]);
+      }
+      if ((Param.acousticInterfaceCoupling == YES) &&
+          (global_iface_diag[0] > 0) && (global_iface_diag[1] == 0)) {
+        /* Water in a PML band and an interface elsewhere do not establish
+         * an interface/PML intersection. Zero enrolled fragments alone
+         * must not produce a missing-correction warning. */
+        monitor_print(
+            "CPML acoustic-elastic interface: no fragment centres lie "
+            "inside the PML; no interface correction is required by the "
+            "centre-sampling rule. If an intersection was expected, check "
+            "the fragment geometry and realized PML thickness %.3f m; "
+            "these counts alone do not establish a missing correction\n",
+            g_cpmlBuild.thickness_m);
+      }
     }
 
     /* Free the build-time host scratch. The compact per-type elem_lists
