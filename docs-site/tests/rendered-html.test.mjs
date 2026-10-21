@@ -865,10 +865,10 @@ test("defaults nonlinear execution to GPU with an explicit CPU override", async 
 
   assert.match(selector, /g_backend_request = 1/);
   assert.match(selector, /parse_boolean_cpu\(value\)[\s\S]*g_backend_request = 0/);
-  assert.match(gpu, /fprintf\(stderr,\s*"Nonlinear backend: GPU \(default backend/);
-  assert.match(cpu, /fprintf\(stderr,\s*"Nonlinear backend: CPU \(explicit/);
+  assert.match(gpu, /fprintf\(stdout,\s*"Nonlinear backend: GPU \(default backend/);
+  assert.match(cpu, /fprintf\(stdout,\s*"Nonlinear backend: CPU \(explicit/);
   assert.match(await (await render("/docs/gpu-execution")).text(),
-    /reported to standard error at startup/);
+    /reported to standard output at startup/);
 });
 
 test("documents MPI-IO as the default plane backend and the I/O-pool fallback", async () => {
@@ -911,12 +911,12 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.match(psolve, /g_cpmlBuild\.face_mask != NULL/);
   assert.match(psolve, /g_cpmlHostElementBits\[bit_index >> 3\]/);
   assert.match(psolve, /CPML membership is unavailable before nonlinear/);
-  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: derived thickness/);
-  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: %lld elastic/);
-  assert.match(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
-  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: derived thickness/);
-  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: %lld elastic/);
-  assert.doesNotMatch(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
+  assert.match(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.match(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.match(psolve, /fprintf\(stdout,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
+  assert.doesNotMatch(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: derived thickness/);
+  assert.doesNotMatch(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: %lld elastic/);
+  assert.doesNotMatch(psolve, /fprintf\(stderr,[\s\S]{0,80}"CPML: cpml_clamp_outer=yes/);
 
   const gpu = await (await render("/docs/gpu-execution")).text();
   assert.match(gpu, /solid elements in the absorbing band remain linear elastic/);
@@ -2329,6 +2329,28 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
   assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
   assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
+});
+
+test("documents executable provenance and conditional startup configuration", async () => {
+  const build = await (await render("/docs/installation")).text();
+  assert.match(build, /full Git commit ID and tracked-tree state/);
+  assert.match(build, /never reads Git at runtime/);
+  assert.match(build, /reports unknown/);
+  const output = await (await render("/docs/output-files")).text();
+  assert.match(output, /Some Input Data/);
+  assert.match(output, /Routine Hercules configuration, progress and timing go to stdout; warnings and errors go to stderr/);
+  assert.match(output, /Stdout is line-buffered for batch jobs/);
+  assert.match(output, /direct module messages are not automatically copied to monitor_file/);
+
+  assert.match(output, /maximum frequency \(Hz\), dt \(s\)/);
+  assert.match(output, /simulation start\/end times and configured duration \(end minus start\) in seconds/);
+  assert.match(output, /binary stations do not use output_stations_directory/);
+  for (const key of ["simulation_node_per_wavelength", "topographybase_zcoord", "type_of_etree", "maximum_octant_level",
+    "computation_method", "topography_directory", "source_directory",
+    "source_directory_output", "3D_velocity_model_directory",
+    "3D_velocity_model_depth_reference"]) {
+    assert.ok(output.includes(key), `startup summary documents ${key}`);
+  }
 });
 
 test("parameter broadcasts have unique slots and matching pack/unpack fields", () => {

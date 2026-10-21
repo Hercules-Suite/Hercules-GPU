@@ -1478,11 +1478,11 @@ int32_t nonlinear_initparameters ( const char *parametersin,
             maximum_relative_density = MAX(maximum_relative_density,
                                            relative_density);
         }
-        fprintf(stderr, "%s stiffness: %s\n", RIVA_SAND_MODEL_NAME(theMaterialModel),
+        fprintf(stdout, "%s stiffness: %s\n", RIVA_SAND_MODEL_NAME(theMaterialModel),
                 theRivaProperties[RIVA_PROPERTY_G0][0]==0.0
                     ? "mesh rho*Vs^2; per-point calibration at dynamic activation"
                     : "explicit dimensionless G0");
-        fprintf(stderr,
+        fprintf(stdout,
                 "%s property input: Dr in [%g, %g]; "
                 "G0, M, kd, h, m, zeta, e_max, e_min, Q, R, and n_G are "
                 "interpolated by Vs; all other RIVA-Sand controls retain "
@@ -1492,14 +1492,14 @@ int32_t nonlinear_initparameters ( const char *parametersin,
                 MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)
                     ? RIVA_IB_PARAMETER_SHA256 : RIVA_PARAMETER_SHA256);
         if (MATERIAL_MODEL_IS_RIVA_SAND_02(theMaterialModel)) {
-            fprintf(stderr, "%s: rivasand02_reversaltype=%d (%s), kernel %u, checkpoint %u\n",
+            fprintf(stdout, "%s: rivasand02_reversaltype=%d (%s), kernel %u, checkpoint %u\n",
                     RIVA_SAND_MODEL_NAME(theMaterialModel),theRivaReversalType,
                     theRivaReversalType==1 ? "previous increment" :
                     theRivaReversalType==2 ? "accumulated loading branch" : "host stress-ratio predictor",
                     RIVA_IB_KERNEL_REVISION,
                     riva_ib_checkpoint_revision(theMaterialModel==RIVA_SAND_CUSTOM_02,
                                                 theRivaReversalType,theRivaBiasVolume));
-            fprintf(stderr, "%s: rivasand02_biasvolume=%d (%s)\n",
+            fprintf(stdout, "%s: rivasand02_biasvolume=%d (%s)\n",
                     RIVA_SAND_MODEL_NAME(theMaterialModel),theRivaBiasVolume,
                     theRivaBiasVolume==0 ? "original bias volume" :
                     theRivaBiasVolume==1 ? "bias volume disabled; phase volume retained" :
@@ -1823,12 +1823,12 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 #else
         const int classification_threads = 1;
 #endif
-        fprintf(stderr,
+        fprintf(stdout,
                 "PDMY03 initialization: classifying %d local mesh elements "
                 "on rank 0 with %d host thread%s\n",
                 myMesh->lenum, classification_threads,
                 classification_threads == 1 ? "" : "s");
-        fflush(stderr);
+        fflush(stdout);
     }
 
     nonlinear_elements_count(myID, myMesh);
@@ -1855,7 +1855,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 host_bytes_per_element + 2*sizeof(double) +
                 8*(sizeof(pdmy03_state_t) +
                    (size_t)surface_stride*sizeof(tensor_t));
-            fprintf(stderr,
+            fprintf(stdout,
                     "PDMY03 initialization: %d nonlinear elements globally "
                     "(maximum %d on one rank), %d surfaces; estimated "
                     "maximum-rank host/device constitutive storage "
@@ -1866,7 +1866,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                              host_bytes_per_element)/(1024.0*1024.0),
                     (double)((size_t)max_local_nonlinear_count*
                              device_bytes_per_element)/(1024.0*1024.0));
-            fflush(stderr);
+            fflush(stdout);
         }
     }
 
@@ -1898,7 +1898,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                 global_poro_map_counts[POROELASTIC_MAP_INELIGIBLE] +
                 global_poro_map_counts[POROELASTIC_MAP_ELIGIBLE_UNMAPPED];
             const int64_t total = active + above + below + cpml + other;
-            fprintf(stderr,
+            fprintf(stdout,
                     "Nonlinear/BrickUP map: %lld of %lld nonlinear elements "
                     "are pore-pressure coupled; %lld above groundwater, "
                     "%lld below poroelastic_depth_max_m, %lld CPML, %lld "
@@ -1928,7 +1928,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             }
             if (MATERIAL_MODEL_IS_RIVA_SAND_FAMILY(theMaterialModel) &&
                 active > 0) {
-                fprintf(stderr,
+                fprintf(stdout,
                         "%s/BrickUP coupling: RIVA-Sand evolves effective "
                         "skeleton stress (including plastic volumetric "
                         "compatibility); BrickUP independently solves fluid "
@@ -2085,12 +2085,12 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 #else
         const int initialization_threads = 1;
 #endif
-        fprintf(stderr,
+        fprintf(stdout,
                 "PDMY03 initialization: preparing element constants and "
                 "geostatic state with %d host thread%s\n",
                 initialization_threads,
                 initialization_threads == 1 ? "" : "s");
-        fflush(stderr);
+        fflush(stdout);
     }
 #ifdef _OPENMP
 #pragma omp parallel for if(parallel_pdmy03_initialization) schedule(static) \
@@ -2615,13 +2615,13 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                    &global_poro_geostatic_count, 1, MPI_LONG_LONG, MPI_SUM, 0,
                    comm_solver);
         if (myID == 0 && global_geostatic_count > 0) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "Approximate geostatic state: integrated 1-D overburden "
                     "with K0 effective stress; center sigma_v' range "
                     "%.6e to %.6e Pa\n",
                     global_geostatic_min, global_geostatic_max);
             if (global_poro_geostatic_count > 0) {
-                fprintf(stderr,
+                fprintf(stdout,
                         "Approximate geostatic/BrickUP coupling: removed "
                         "alpha*rho_f*g*z_w from %lld nonlinear elements; "
                         "pore-pressure unknown stores excess pressure\n",
@@ -2658,10 +2658,10 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
             exit(1);
         }
     } else if (myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Nonlinear backend: CPU (explicit "
                 "HERCULES_NONLINEAR_BACKEND override, GSL reference path)\n");
-        fflush(stderr);
+        fflush(stdout);
     }
 
     if (theMaterialModel == PRESSURE_DEPEND_MULTIYIELD_03) {
@@ -2681,7 +2681,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
 #else
             const int initialization_threads = 1;
 #endif
-            fprintf(stderr,
+            fprintf(stdout,
                     "PDMY03 initialization complete: classify/map=%.2fs, "
                     "host-allocation=%.2fs, constants/geostatic=%.2fs "
                     "(%d thread%s), GPU-upload/allocation=%.2fs "
@@ -2690,7 +2690,7 @@ void nonlinear_solver_init(int32_t myID, mesh_t *myMesh,
                     maximum_phase_seconds[2], initialization_threads,
                     initialization_threads == 1 ? "" : "s",
                     maximum_phase_seconds[3]);
-            fflush(stderr);
+            fflush(stdout);
         }
     }
 

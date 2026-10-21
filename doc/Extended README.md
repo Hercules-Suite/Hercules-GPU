@@ -322,6 +322,75 @@ to a single production PTX-assembly job.
 Prefer an explicit outer job count such as `-j 8` over bare `-j`, which gives
 GNU Make no concurrency limit.
 
+### Build provenance and startup summary
+
+The rank-zero **Some Input Data** block in stdout and `monitor_file` includes
+`Hercules Git commit` (the full build-time Git object ID) and `Build tracked tree`
+(`clean`, `modified`, or `unavailable`). Make generates an ignored
+`quake/forward/build_revision.h` and embeds it through a small host-only object.
+Every build checks for a changed revision or tracked-tree state; unchanged
+metadata does not force recompilation, and a revision-only change recompiles
+only that object and relinks the solver. The executable never queries Git at
+runtime, so copying it to a job directory retains its build identity. A source
+copy without `.git`, or a build without working Git, reports `unknown` and
+`unavailable`. Untracked and ignored files are excluded from the tree-state
+flag. The ID alone does not identify local patches, compiler options, external
+libraries or input data; preserve those separately, and use a clean rebuild
+when reproducing a published executable.
+
+The same block reports maximum frequency in Hz, the parsed integer
+`simulation_node_per_wavelength`, `dt` in seconds, simulation
+start/end times and configured duration in seconds (end minus start, not
+wall-clock runtime),
+`region_origin_latitude_deg`, `region_origin_longitude_deg`,
+`region_length_east_m` (solver Y), `region_length_north_m` (solver X), and
+`region_depth_deep_m` (the deep boundary, not deep minus shallow extent).
+It also reports `source_directory` and `source_directory_output`, plus:
+
+- With topography: `topographybase_zcoord`, `type_of_etree`,
+  `maximum_octant_level`, `computation_method` and `topography_directory`.
+- With a 3-D velocity model: `3D_velocity_model_directory` and the canonical
+  `3D_velocity_model_depth_reference`, including the `legacy` default.
+- With explicit seabed geometry: `seabed_geometry_file`,
+  `seabed_water_vp_m_s` and `seabed_water_density_kg_m3`.
+- For configured ASCII stations: `output_stations_directory`, including its
+  default when omitted. Binary stations do not use that directory.
+- For configured planes: `output_planes_directory`, including its default.
+
+Topography controls and the source/ASCII-station paths are echoed from the
+input before their owning modules initialize; their existing validation and
+initialization order are unchanged. Missing required values are shown as
+`<not set>` rather than fabricated defaults. The summary describes the
+configuration and is not evidence that meshing or propagation completed.
+
+
+### Console output streams
+
+Routine Hercules configuration, meshing/solver progress, execution-path reports,
+CPML counts, geometry and source diagnostics, nonlinear/hydrostatic/geostatic
+initialization summaries, checkpoint success messages and timing tables go to
+**stdout**. Warnings and errors go to **stderr**, including timestep/stability
+warnings, invalid inputs, allocation failures and MPI/CUDA failures. Existing
+rank-zero guards and opt-in diagnostic controls still apply.
+
+`psolve` makes stdout line-buffered before MPI initialization so completed lines
+remain visible when redirected to a batch log. This adds no MPI barrier or
+cross-rank ordering guarantee. `monitor_file` retains the existing monitor
+messages: routine entries are mirrored to stdout and monitor warnings/errors to
+stderr. Messages printed directly by other modules are not automatically copied
+to `monitor_file`; preserve both console logs with it.
+
+For Slurm, keep the two streams separate in the batch script:
+
+```bash
+#SBATCH --output=hercules-%j.out
+#SBATCH --error=hercules-%j.err
+```
+
+Avoid `2>&1` or MPI stream-merging options if separate logs are wanted. Module
+commands, MPI launchers and external libraries may still send informational
+messages to stderr; Hercules does not redirect their output.
+
 ## Runtime performance controls
 
 Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected inside the solver/octor code when the corresponding envs are unset.
@@ -679,7 +748,7 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	otherwise-identical run and verify the fast kernels — they must match
 	the generic kernel to single-precision tolerance for a
 	spatially-uniform relaxation spectrum (the auto-detected common
-	case). A one-time rank-0 line is printed to the monitor/stderr when
+	case). A one-time rank-0 line is printed to the monitor/stdout when
 	the override is active so a forced run cannot be mistaken for a
 	normal one. Read once at startup; production runs leave it unset.
 - `HERCULES_BKT2_FUSED=0|1`
@@ -884,7 +953,7 @@ Notes:
 	CPU/GSL reference implementation. Setting `gpu` explicitly remains useful
 	for reproducible launch environments. This setting changes execution, not
 	the calibrated values in `parameters.in`. The selected nonlinear backend is
-	reported to standard error during solver startup.
+	reported to standard output during solver startup.
 - `HERCULES_NONLINEAR_STATS_INTERVAL`
 	Enables sampled Manzari-Dafalias GPU workload diagnostics when set to a
 	positive integer `N`; unset or `0` is the default and adds no diagnostic work.

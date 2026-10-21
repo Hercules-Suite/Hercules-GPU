@@ -465,40 +465,47 @@ hu_fread( void* ptr, size_t size, size_t n, FILE* fp )
 
 
 /**
- * print / split output to two files (stderr and the provided file pointer).
+ * Print to a console stream and, when present, a separate monitor file.
  *
- * \param fp     Pointer to the output file stream.
- * \param format Format string as in fprintf.
- * \param args   List of arguments in a properly initialized va_list.
+ * \param fp      Optional monitor file; NULL prints only to the console.
+ * \param console stdout for routine output, stderr for warnings and errors.
+ * \param format  Format string as in fprintf.
+ * \param args    List of arguments in a properly initialized va_list.
  */
 int
-hu_print_tee_va( FILE *fp, const char* format, va_list args )
+hu_print_tee_stream_va( FILE *fp, FILE *console, const char* format, va_list args )
 {
     int ret = 0;
 
     if (format != NULL) {
-	va_list my_args1, my_args2;
+        va_list file_args, console_args;
+        if (fp != NULL && fp != console) {
+            va_copy( file_args, args );
+            ret = vfprintf( fp, format, file_args );
+            va_end( file_args );
+        }
 
-	va_copy( my_args1, args );
-	ret = vfprintf( fp, format, my_args1 );
-	va_end( my_args1 );
-
-	/* restart printing and send it to standard error */
-	va_copy( my_args2, args );
-	vfprintf( stderr, format, my_args2 );
-	va_end( my_args2 );
+        /* Flush partial progress before a diagnostic, without an MPI barrier. */
+        if (console == stderr) fflush(stdout);
+        va_copy( console_args, args );
+        const int console_ret = vfprintf( console, format, console_args );
+        va_end( console_args );
+        if (fp == NULL || fp == console) ret = console_ret;
     }
 
     return ret;
 }
 
 
-/**
- * print / split output to two files (stderr and the provided file pointer).
- *
- * \param fp     Pointer to the output file stream.
- * \param format Format string as in fprintf.
- */
+/** Print routine output to stdout and the optional monitor file. */
+int
+hu_print_tee_va( FILE *fp, const char* format, va_list args )
+{
+    return hu_print_tee_stream_va( fp, stdout, format, args );
+}
+
+
+/** Print routine output to stdout and the optional monitor file. */
 int
 print_tee( FILE* fp, const char* format, ... )
 {

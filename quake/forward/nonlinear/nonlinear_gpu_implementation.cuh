@@ -4464,13 +4464,13 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
     g_mesh_host = mesh;
     g_active = 1;
     if (myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Nonlinear backend: GPU (default backend, double-precision "
                 "constitutive state, %d local elements on rank 0)\n", count);
         if (!allocate_previous_state_shadows) {
             const double saved_mib = (double)((size_t)count*
                 (3*sizeof(qptensors_t)+sizeof(qpvectors_t)))/(1024.0*1024.0);
-            fprintf(stderr,
+            fprintf(stdout,
                     "Nonlinear GPU specialized state: omitted unused legacy "
                     "previous-state shadows (%.1f MiB on rank 0)\n",
                     saved_mib);
@@ -4482,7 +4482,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                     NL_MD_INTEGRATION_FORWARD_EULER) {
                 if (config->md_forward_euler_substeps ==
                         NL_MD_FORWARD_EULER_SUBSTEPS_DEMAND) {
-                    fprintf(stderr,
+                    fprintf(stdout,
                             "Manzari-Dafalias integration: Forward Euler "
                             "(substeps=demand, max_substeps=%d, "
                             "yield_drift=reported, local_material=%.1f MiB, "
@@ -4492,7 +4492,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                                 ? "approximate K0 effective stress"
                                 : "solver stress history");
                 } else {
-                    fprintf(stderr,
+                    fprintf(stdout,
                             "Manzari-Dafalias integration: Forward Euler "
                             "(substeps=fixed, fixed_substeps=%d over the "
                             "plastic remainder, yield_drift=reported, "
@@ -4512,7 +4512,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 else if (config->md_recovery_mode == NL_MD_RECOVERY_OPENSEES)
                     recovery = "opensees";
                 if (md_unlimited_substeps_enabled(config->md_recovery_mode)) {
-                    fprintf(stderr,
+                    fprintf(stdout,
                         "Manzari-Dafalias integration: Modified Euler "
                         "(local_error=%g, substeps=unlimited, "
                         "no_substeps=%d correction cap, "
@@ -4525,7 +4525,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                             ? "approximate K0 effective stress"
                             : "solver stress history");
                 } else {
-                    fprintf(stderr,
+                    fprintf(stdout,
                         "Manzari-Dafalias integration: Modified Euler "
                         "(local_error=%g, max_substeps=%d, "
                         "yield_residual=%g Pa, recovery=%s, "
@@ -4545,7 +4545,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                 }
             }
             if (g_workload.interval > 0) {
-                fprintf(stderr,
+                fprintf(stdout,
                         "Manzari-Dafalias GPU workload statistics: every "
                         "%d time step%s (opt-in device scan and global MPI "
                         "reduction)\n",
@@ -4558,7 +4558,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             const double state_mib = (double)((size_t)count*NL_GPU_QP*
                 (sizeof(pdmy03_state_t)+(size_t)g_nl.pdmy03_surface_stride*
                  sizeof(tensor_t)))/(1024.0*1024.0);
-            fprintf(stderr,
+            fprintf(stdout,
                     "PressureDependMultiYield03 integration: standard "
                     "automatic nested surfaces (max_substeps=%d, "
                     "surface_stride=%d, local_material=%.1f MiB, "
@@ -4577,7 +4577,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*(2+NL_GPU_QP)*sizeof(double))/(1024.0*1024.0);
-            fprintf(stderr,
+            fprintf(stdout,
                     "%s integration: "
                     "OpenSees_RIVA %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_material=%.1f MiB, "
@@ -4598,7 +4598,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
             const double material_mib = (double)(
                 material_count*sizeof(riva_material_parameters_t)+
                 (size_t)count*(2+NL_GPU_QP)*sizeof(double))/(1024.0*1024.0);
-            fprintf(stderr,
+            fprintf(stdout,
                     "RIVA-Sand integration: %s, frozen internal controls %s "
                     "(fixed_substeps=%d, local_material=%.1f MiB, "
                     "local_history=%.1f MiB, "
@@ -4611,7 +4611,7 @@ int nonlinear_gpu_initialize(int32_t myID, mesh_t *mesh, mysolver_t *solver,
                         ? "approximate K0 effective stress"
                         : "solver stress history");
         }
-        fflush(stderr);
+        fflush(stdout);
     }
     return 0;
 }
@@ -4903,7 +4903,7 @@ static void nonlinear_gpu_report_workload(int32_t myID)
             ? 100.0*(double)global_sums[2]/(double)updated_points : 0.0;
         const double mean_substeps = updated_points > 0
             ? (double)global_sums[3]/(double)updated_points : 0.0;
-        fprintf(stderr,
+        fprintf(stdout,
                 "Nonlinear GPU workload: step=%d point_slots=%llu "
                 "zero_or_inactive=%llu updated=%llu one_step=%llu "
                 "multi_step=%llu multi_step_fraction=%.2f%% "
@@ -4913,7 +4913,7 @@ static void nonlinear_gpu_report_workload(int32_t myID)
                 updated_points, global_sums[1], global_sums[2],
                 multi_fraction, global_sums[3], mean_substeps,
                 global_maximum);
-        fflush(stderr);
+        fflush(stdout);
     }
     g_workload.pending = 0;
 }
@@ -4962,7 +4962,7 @@ static void nonlinear_gpu_report_riva_geostatic(int32_t myID)
     }
 
     if (myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "%s geostatic admission: initialized %llu "
                 "integration points at step %d; admitted %llu over-bound "
                 "compressive states; maximum admitted cone ratio %.9g\n",
@@ -4975,7 +4975,7 @@ static void nonlinear_gpu_report_riva_geostatic(int32_t myID)
                     "count and maximum cone ratio before production use.\n",
                     model_name);
         }
-        fflush(stderr);
+        fflush(stdout);
     }
     g_riva_geostatic.pending = 0;
     g_riva_geostatic.reported = 1;
@@ -5718,7 +5718,7 @@ int nonlinear_gpu_checkpoint_write(
     free(scratch);
     free(counts);
     if (!global_error && myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Checkpoint extension: saved%s%s%s state (%llu bytes)\n",
                 (local_flags & NL_CHECKPOINT_BRICKUP_PRESSURE) != 0
                     ? " BrickUP pressure" : "",
@@ -5909,12 +5909,12 @@ int nonlinear_gpu_checkpoint_read(
     if (!global_error && myID == 0) {
         if ((local_flags &
              NL_CHECKPOINT_RIVA_INTERMEDIATE_BIAS_RESEARCH_STATE) != 0) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "Checkpoint extension: restored BrickUP/RIVA-Sand "
                     "intermediate-bias research coupled state\n");
         } else {
             /* Preserve the production RIVA-Sand restart diagnostic. */
-            fprintf(stderr,
+            fprintf(stdout,
                     "Checkpoint extension: restored BrickUP/RIVA-Sand "
                     "coupled state\n");
         }

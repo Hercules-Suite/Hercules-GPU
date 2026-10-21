@@ -220,6 +220,9 @@ extern size_t hu_fread_trace( void* ptr, size_t size, size_t n, FILE* fp,
 #endif
 
 extern int    hu_print_tee_va( FILE *fp, const char* format, va_list args );
+/* Explicit console stream for diagnostics; fp may be NULL. */
+extern int    hu_print_tee_stream_va( FILE *fp, FILE *console,
+                                    const char* format, va_list args );
 
 extern int
 hu_parsetext_v(	FILE* fp, const char* string, const char type, void* result );

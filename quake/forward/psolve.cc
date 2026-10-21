@@ -57,6 +57,7 @@
 #include "util.h"
 #include "commutil.h"
 #include "timers.h"
+#include "build_info.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -590,6 +591,7 @@ typedef struct mesh_mpiio_archive_t {
 
 /* Mesh generation related routines */
 static inline int monitor_print(const char* format, ...);
+static inline int monitor_diagnostic(const char* format, ...);
 static int32_t toexpand(octant_t* leaf, double ticksize, const void* data);
 static void setrec(octant_t* leaf, double ticksize, void* data);
 static void mesh_generate(void);
@@ -981,7 +983,7 @@ double** readBasin(char* filename, int* x_count, int* y_count, int* z_count,
   // Open the file in read mode
   fp = fopen(filename, "r");
   if (fp == NULL) {
-    printf("Error opening file %s.\n", filename);
+    fprintf(stderr, "Error opening file %s.\n", filename);
     exit(1);
   }
   // Read the first line to get the counts
@@ -2430,15 +2432,21 @@ static inline int monitor_print(const char* format, ...) {
 
     va_start(args, format);
 
-    if (Param.theMonitorFileFp == NULL) {
-      ret = vfprintf(stderr, format, args);
-    } else {
-      ret = hu_print_tee_va(Param.theMonitorFileFp, format, args);
-    }
+    ret = hu_print_tee_va(Param.theMonitorFileFp, format, args);
 
     va_end(args);
   }
 
+  return ret;
+}
+
+/* Keep actionable diagnostics in stderr while retaining their monitor copy. */
+static inline int monitor_diagnostic(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  const int ret = hu_print_tee_stream_va(Param.theMonitorFileFp, stderr,
+                                        format, args);
+  va_end(args);
   return ret;
 }
 
@@ -2982,6 +2990,63 @@ static int damping_bkt2_fused_requested(void) {
     v = (e == NULL || e[0] != '0');
   }
   return v;
+}
+
+/* Echo settings owned by later initialization stages without moving those
+ * stages, loading their data, or inventing defaults for required values. */
+static void monitor_config_value(FILE* fp, const char* key,
+                                 const char* fallback = "<not set>") {
+  char value[LINESIZE];
+  const int status = read_config_string(fp, key, value, sizeof(value));
+  const char* shown = (status == 1) ? value :
+                     (status == 0) ? fallback : "<unreadable>";
+  char label[LINESIZE];
+  snprintf(label, sizeof(label), "%s:", key);
+  monitor_print("%-35s %s\n", label, shown);
+}
+
+static void monitor_input_details(FILE* fp, int nodes_per_wavelength) {
+  monitor_print("%-35s %s\n", "Hercules Git commit:", hercules_build_commit());
+  monitor_print("%-35s %s\n", "Build tracked tree:", hercules_build_tree_state());
+  monitor_print("%-35s %.12g\n", "Maximum frequency (Hz):", Param.theFreq);
+  monitor_print("%-35s %d\n", "simulation_node_per_wavelength:",
+                nodes_per_wavelength);
+  monitor_print("%-35s %.12g\n", "Time step dt (s):", Param.theDeltaT);
+  monitor_print("%-35s %.12g\n", "Simulation start time (s):", Param.theStartT);
+  monitor_print("%-35s %.12g\n", "Simulation end time (s):", Param.theEndT);
+  monitor_print("%-35s %.12g\n", "Simulation duration (s):",
+                Param.theEndT - Param.theStartT);
+  monitor_print("%-35s %.12g\n", "region_origin_latitude_deg:", Param.theRegionLat);
+  monitor_print("%-35s %.12g\n", "region_origin_longitude_deg:", Param.theRegionLong);
+  monitor_print("%-35s %.12g\n", "region_length_east_m:", Param.theDomainY);
+  monitor_print("%-35s %.12g\n", "region_length_north_m:", Param.theDomainX);
+  monitor_print("%-35s %.12g\n", "region_depth_deep_m:", Param.region_depth_deep_m);
+  if (Param.includeTopography == YES) {
+    monitor_config_value(fp, "topographybase_zcoord");
+    monitor_config_value(fp, "type_of_etree");
+    monitor_config_value(fp, "maximum_octant_level");
+    monitor_config_value(fp, "computation_method");
+    monitor_print("%-35s %s\n", "topography_directory:", Param.theTopoDir);
+  }
+  monitor_config_value(fp, "source_directory");
+  monitor_print("%-35s %s\n", "source_directory_output:", Param.theSourceOutputDir);
+  if (Param.threeDVelocityModel == YES) {
+    static const char* references[] = {"legacy", "model_z", "surface", "seabed"};
+    monitor_print("%-35s %s\n", "3D_velocity_model_directory:", Param.the3DVelModelDir);
+    monitor_print("%-35s %s\n", "3D_velocity_model_depth_reference:",
+                  references[Param.the3DDepthReference]);
+  }
+  if (Param.theSeabedGeometryFile[0] != '\0') {
+    monitor_print("%-35s %s\n", "seabed_geometry_file:", Param.theSeabedGeometryFile);
+    monitor_print("%-35s %.12g\n", "seabed_water_vp_m_s:", Param.theSeabedWaterVp);
+    monitor_print("%-35s %.12g\n", "seabed_water_density_kg_m3:", Param.theSeabedWaterRho);
+  }
+  if (Param.theNumberOfStations > 0 && Param.stationBinary != YES) {
+    monitor_config_value(fp, "output_stations_directory", Param.theStationsDirOut);
+  }
+  if (Param.theNumberOfPlanes > 0) {
+    monitor_print("%-35s %s\n", "output_planes_directory:", Param.thePlaneDirOut);
+  }
 }
 
 /**
@@ -4502,8 +4567,6 @@ static int32_t parse_parameters(const char* numericalin) {
   free(auxiliar);
 #endif
 
-  fclose(fp);
-
   /* Check whether a profile will be used and init global flag to YES */
   if (strcasecmp(Param.cvmdb_input_file, "profile") == 0) {
     Param.useProfile = YES;
@@ -4551,7 +4614,7 @@ static int32_t parse_parameters(const char* numericalin) {
       }
     } else if (wouldPromote != 0 && cpml_pml_damp_explicit &&
                Global.myID == 0) {
-      monitor_print("CPML WARNING: explicit cpml_pml_material_damping=none "
+      monitor_diagnostic("CPML WARNING: explicit cpml_pml_material_damping=none "
                     "omits the interior Rayleigh law in the absorber; validate "
                     "the resulting material-damping interface.\n");
     }
@@ -4663,6 +4726,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
 
   monitor_print("\n\n---------------- Some Input Data ----------------\n\n");
+  monitor_input_details(fp, samples);
   monitor_print("Vs cut:                             %f\n", Param.theVsCut);
   monitor_print("Softening factor:                   %f\n",
                 Param.theSofteningFactor);
@@ -4697,7 +4761,7 @@ static int32_t parse_parameters(const char* numericalin) {
   if (Param.includeAcoustic == YES) {
     monitor_print("Acoustic interface coupling:        %s\n",
                   acoustic_interface_coupling);
-    monitor_print("Acoustic interface method:         %s%s\n",
+    monitor_print("Acoustic interface method:          %s%s\n",
                   acoustic_interface_method,
                   acoustic_interface_method_explicit ? " (explicit)"
                       : (Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS
@@ -4930,6 +4994,7 @@ static int32_t parse_parameters(const char* numericalin) {
   }
   monitor_print("\n-------------------------------------------------\n\n");
 
+  fclose(fp);
   fflush(Param.theMonitorFileFp);
 
   return 0;
@@ -7864,7 +7929,7 @@ static void mesh_generate() {
    */
 
   if (Global.myOctree == NULL) {
-    monitor_print("Thread %d: mesh_generate: fail to create octree\n",
+    monitor_diagnostic("Thread %d: mesh_generate: fail to create octree\n",
                   Global.myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
@@ -12270,7 +12335,7 @@ static void solver_init() {
        * (if a checkpoint or replay needs it later) reflect what was used. */
       Param.theCpmlThicknessM = g_cpmlBuild.thickness_m;
       if (Global.myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "CPML: derived thickness %.3f m from %d layers x %.3f m "
                 "(%s max element edgesize; air excluded)\n",
                 g_cpmlBuild.thickness_m, Param.theCpmlLayers, basis_h,
@@ -12909,7 +12974,7 @@ static void solver_init() {
     MPI_Reduce(local_counts, global_counts, 2, MPI_LONG_LONG, MPI_SUM, 0,
                comm_solver);
     if (Global.myID == 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "CPML: %lld elastic + %lld acoustic PML elements globally "
               "(thickness %.3f m, alpha_max = %.3g rad/s, "
               "reference Vp = %.3f m/s)\n",
@@ -12940,7 +13005,7 @@ static void solver_init() {
       if (((global_gravity_counts[0] > 0) ||
            (global_gravity_counts[1] > 0)) && (Global.myID == 0)) {
         if (global_gravity_counts[0] > 0) {
-          monitor_print(
+          monitor_diagnostic(
               "CPML WARNING: %lld gravity free-surface acoustic PML elements "
               "overlap the bottom (z_max) CPML band. This overlap was "
               "unstable in tested operator-harness configurations; growth "
@@ -12950,7 +13015,7 @@ static void solver_init() {
               "separately.\n", global_gravity_counts[0]);
         }
         if (global_gravity_counts[1] > 0) {
-          monitor_print(
+          monitor_diagnostic(
               "CPML WARNING: %lld gravity free-surface acoustic PML elements "
               "outside the bottom band have vertical damping from lateral "
               "M-PML cross mixing (d_z > 0). Stability of this combination "
@@ -12960,7 +13025,7 @@ static void solver_init() {
               global_gravity_counts[1]);
         }
         if (Param.theCpmlGravityInBottomBand == 1) {
-          monitor_print(
+          monitor_diagnostic(
               "CPML: continuing because cpml_gravity_in_bottom_band=allow; "
               "this is a diagnostic override, not a stability fix.\n");
         } else {
@@ -13029,7 +13094,7 @@ static void solver_init() {
                         stretch_class ? "acoustic" : "elastic",
                         stretch_detail[0], stretch_detail[1]);
           if (global_stretch.value > 10.0) {
-            monitor_print("CPML WARNING: d_max*h/V = %.3g exceeds 10: the "
+            monitor_diagnostic("CPML WARNING: d_max*h/V = %.3g exceeds 10: the "
                           "local operator tests showed growth in some "
                           "over-damped cells; this is not a stability bound. "
                           "Check reflection and long-time stability when "
@@ -13176,7 +13241,7 @@ static void solver_init() {
       MPI_Reduce(&local_clamped, &global_clamped, 1, MPI_LONG_LONG, MPI_SUM,
                  0, comm_solver);
       if (Global.myID == 0) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "CPML: cpml_clamp_outer=yes; %lld outer-face nodes clamped "
                 "to u=0 globally\n",
                 (long long)global_clamped);
@@ -13582,7 +13647,7 @@ static void solver_init() {
             "simulation_delta_time_sec from this undrained value.\n",
             globalPoroelasticMinHOverVpUndrained);
         if (Param.theDeltaT > globalPoroelasticMinDtFactorUndrained) {
-          monitor_print(
+          monitor_diagnostic(
               "  *** WARNING: simulation_delta_time_sec = %.6e s exceeds the "
               "undrained poroelastic stability limit ~%.6e s "
               "(0.577*(1-zeta)*h/Vp_undrained). The run is likely UNSTABLE; "
@@ -27872,7 +27937,7 @@ static void station_write_mediums_file(
       }
     }
     if (totalRecords != Param.theNumberOfStations) {
-      monitor_print(
+      monitor_diagnostic(
           "WARNING: wrote %d of %d configured station medium records.\n",
           totalRecords, Param.theNumberOfStations);
     }
@@ -29044,7 +29109,7 @@ void output_stations_init(const char* numericalin) {
         "Station setup complete: total=%d max-rank-time=%.2fs\n",
         totalStations, setupSecondsMax);
     if (totalStations != Param.theNumberOfStations) {
-      monitor_print(
+      monitor_diagnostic(
           "WARNING: located %d of %d configured stations. "
           "Set HERCULES_STATION_ROUTE_MODE=all to compare the full-search path.\n",
           totalStations, Param.theNumberOfStations);
@@ -30201,6 +30266,11 @@ static void mesh_correct_properties(etree_t* cvm) {
 
 /*** Program's standard entry point. ***/
 int main(int argc, char** argv) {
+  /* Batch stdout is otherwise fully buffered, hiding completed progress lines.
+   * Set this before MPI/runtime output; retain buffering within each line. */
+  if (setvbuf(stdout, NULL, _IOLBF, BUFSIZ) != 0) {
+    fputs("Warning: could not enable line-buffered stdout.\n", stderr);
+  }
 #ifdef DEBUG
   int32_t flag;
   MPI_Status status;
@@ -30250,7 +30320,7 @@ int main(int argc, char** argv) {
     Param.IO_pool_pe_count = atoi(IO_PES_ENV_VAR);
   if (Param.IO_pool_pe_count >= Global.theGroupSize) {
     Param.IO_pool_pe_count = 0;
-    if (Global.myID == 0) printf("Warning: IO_PES too large.  Set to 0.\n");
+    if (Global.myID == 0) fprintf(stderr, "Warning: IO_PES too large.  Set to 0.\n");
   }
 
   /* Split off PEs into IO Pool */
@@ -30741,12 +30811,12 @@ int main(int argc, char** argv) {
     nonlinear_solver_init(Global.myID, Global.myMesh, Global.mySolver,
                           Param.theDomainZ);
     if ((Global.myID == 0) && (Param.theAbcType == ABC_CPML)) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Nonlinear/CPML policy: solid PML elements remain linear "
               "elastic and are excluded from constitutive updates\n");
     }
     if ((Global.myID == 0) && (Param.includeAcoustic == YES)) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Nonlinear/acoustic policy: acoustic elements are excluded "
               "from solid constitutive updates\n");
     }

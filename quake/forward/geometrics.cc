@@ -188,7 +188,7 @@ vector3D_t compute_domain_coords( vector3D_t point, double azimuth )
         // Create a PJ for the transformation using the constructed PROJ string
         P = proj_create(C, projString);
         if (P == NULL) {
-            printf("Projection creation failed\n");
+            fprintf(stderr, "Projection creation failed\n");
             // Terminate the program
             exit(1);
         }
@@ -199,7 +199,7 @@ vector3D_t compute_domain_coords( vector3D_t point, double azimuth )
     // Function to convert latitude and longitude to UTM coordinates
     UTMCoordinates_t convertLatLonToUTM(double latitude, double longitude, PJ *P) {
         if (latitude < -80.0 || latitude > 84.0) {
-            printf("Error: Invalid latitude value. Latitude must be between -80 and 84 degrees.\n");
+            fprintf(stderr, "Error: Invalid latitude value. Latitude must be between -80 and 84 degrees.\n");
             return (UTMCoordinates_t){-1, -1}; // Return error coordinates
         }
         PJ_COORD p;
@@ -234,7 +234,7 @@ vector3D_t compute_domain_coords( vector3D_t point, double azimuth )
         // NOTE: utmZone->refPoint is the origin in UTM coordinates
         UTMCoordinates_t utmCoordinates = convertLatLonToUTM(lat, lon, utmZone->P);
         if ( (utmZone->refPoint.e == -1 && utmZone->refPoint.n == -1) || (utmCoordinates.e == -1 && utmCoordinates.n == -1) ) {
-            printf("Conversion from latitude/longitude to UTM failed\n");
+            fprintf(stderr, "Conversion from latitude/longitude to UTM failed\n");
             return (vector3D_t){-1, -1, -1}; // Return error coordinates
         }
         horizontal_to_local(utmZone->domain_frame,

@@ -12,6 +12,10 @@ quake/forward/psolve
 quake/forward/q4showmeta
 quake/forward/qmesh
 quake/forward/single_query
+quake/forward/build_revision.h
+quake/forward/build_revision.h.tmp.*
+quake/forward/build_info.o.revision
+quake/forward/psolve.revision
 opensees_bae_comparison_output/
 /standalone/
 
