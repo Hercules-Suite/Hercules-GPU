@@ -798,7 +798,8 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Atomic force accumulation may change roundoff/);
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
   assert.match(physics, /Default CPML example/);
-  assert.match(physics, /cpml_reflection_target = 0\.001/);
+  assert.match(physics, /cpml_reflection_target = 0\.01/);
+  assert.match(physics, /cpml_kappa_max = 5/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
   assert.match(physics, /script\/taper_topography\.py/);
 
@@ -2326,8 +2327,8 @@ test("documents complete CPML products and the plain-CPML default", async () => 
 test("keeps requested CPML defaults and alpha Hz units synchronized with the parser", async () => {
   const html = await (await render("/docs/parameters-damping-cpml")).text();
   for (const [key, value] of [
-    ["cpml_reflection_target", "0.001"],
-    ["cpml_kappa_max", "1"],
+    ["cpml_reflection_target", "0.01"],
+    ["cpml_kappa_max", "5"],
     ["cpml_acoustic_sponge_fraction", "0"],
   ]) {
     const row = html.split("</tr>").find((part) => part.includes(`>${key}</td>`));
@@ -2340,8 +2341,8 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;
   const solver = readFileSync(source, "utf8");
-  assert.match(solver, /\.theCpmlReflectionTarget = 0\.001,/);
-  assert.match(solver, /\.theCpmlKappaMax = 1\.0,/);
+  assert.match(solver, /\.theCpmlReflectionTarget = 0\.01,/);
+  assert.match(solver, /\.theCpmlKappaMax = 5\.0,/);
   assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
   assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.0,/);
   assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);

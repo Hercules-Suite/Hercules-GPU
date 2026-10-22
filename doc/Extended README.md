@@ -3045,7 +3045,7 @@ results are specific to the recorded configuration and implementation.
 	Phase B imports that reuse baked properties keep those existing
 	values. Set `no` to restore the legacy raw 3D material queries.
 - `cpml_reflection_target`
-	Optional. Target theoretical reflection coefficient. `0.001` (default); valid `(0,1)`.
+	Optional. Target theoretical reflection coefficient. `0.01` (default); valid `(0,1)`.
 	Smaller values increase damping strength but do not guarantee smaller
 	numerical reflection or better stability.
 - `cpml_reference_vp`
@@ -3064,7 +3064,7 @@ results are specific to the recorded configuration and implementation.
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
 	across the PML.
 - `cpml_kappa_max`
-	Optional. `1.0` (default); must be at least one. Higher values change the
+	Optional. `5.0` (default); must be at least one. Higher values change the
 	real stretch in all stiffness, inertia and surface products. Validate
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
@@ -3504,14 +3504,15 @@ Checkpoint reads and writes are rejected with CPML: the legacy checkpoint
 format does not preserve absorber histories. Set `use_checkpoint=0` and
 `checkpointing_rate=0`. Non-PML checkpoint behavior is unchanged.
 
-The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=1`,
-`cpml_reflection_target=0.001`, `cpml_acoustic_sponge_fraction=0`,
+The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=5`,
+`cpml_reflection_target=0.01`, `cpml_acoustic_sponge_fraction=0`,
 automatic alpha in Hz equal to `simulation_wave_max_freq_hz/2`,
 `cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These defaults
 are not a universal stability or accuracy guarantee; slow gravity packets can
 require a lower alpha. Explicit input values always take precedence. To reproduce
-the CPML defaults used before this change, explicitly set
-`cpml_kappa_max=10`, `cpml_reflection_target=0.1`, and
+the v13.2 CPML defaults, explicitly set `cpml_kappa_max=1`,
+`cpml_reflection_target=0.001`, and `cpml_acoustic_sponge_fraction=0`.
+Older defaults used `cpml_kappa_max=10`, `cpml_reflection_target=0.1`, and
 `cpml_acoustic_sponge_fraction=0.3`. Automatic alpha and the acoustic interface
 method are unchanged by this defaults change. Rebuild the executable to adopt
 the new defaults; existing binaries retain their compiled defaults. Keep source and
