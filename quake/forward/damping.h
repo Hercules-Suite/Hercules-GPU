@@ -30,7 +30,8 @@ typedef enum
 } damping_type_t;
 
 /* Absorbing boundary condition selection.
- * ABC_DASHPOT: legacy Lysmer dashpots (folded into mass coefficients at setup).
+ * ABC_DASHPOT: solid Lysmer dashpots and scalar acoustic radiation damping
+ *              (folded into their respective mass coefficients at setup).
  * ABC_CPML:    unsplit Convolutional PML in ADE form (Komatitsch & Martin 2007).
  */
 typedef enum

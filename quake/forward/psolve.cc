@@ -69,6 +69,7 @@ extern "C" {
 }
 #endif
 #include "psolve.h"
+#include "acoustic_dashpot.h"
 #include "acoustic_open_pore_quadrature.h"
 #include "nrutila.h"
 #include "quakesource.h"
@@ -11934,6 +11935,7 @@ static void solver_init() {
   int64_t localPressureElements = 0;
   int64_t globalPressureElements = 0;
   int64_t localPressureSurfaceFaces = 0;
+  int64_t localPressureDashpotFaces[6] = {};
   int64_t globalPressureSurfaceFaces = 0;
   const double acousticSurfaceZ = acoustic_free_surface_z();
   int64_t localPoroelasticElements = 0;
@@ -12645,6 +12647,40 @@ static void solver_init() {
           }
         }
       }
+
+#ifdef BOUNDARY
+      if (Param.theAbcType == ABC_DASHPOT) {
+        const int32_t first = elemp->lnid[0];
+        const tick_t edge = (tick_t)1 << (PIXELLEVEL - elemp->level);
+        const tick_t lower[3] = {Global.myMesh->nodeTable[first].x,
+                                Global.myMesh->nodeTable[first].y,
+                                Global.myMesh->nodeTable[first].z};
+        const tick_t upper[3] = {lower[0] + edge, lower[1] + edge,
+                                lower[2] + edge};
+        const uint8_t faces = acoustic_dashpot_boundary_faces(
+            lower, upper, Global.myOctree->nearendp, Global.myOctree->farendp);
+        if (faces != 0) {
+          double nodal_dt_c[8];
+          acoustic_dashpot_lumped_dt_c(faces, edata->edgesize, edata->rho,
+                                       edata->Vp, Param.theDeltaT, nodal_dt_c);
+          for (int face = 0; face < 6; ++face)
+            localPressureDashpotFaces[face] += (faces >> face) & 1;
+          for (j = 0; j < 8; ++j) {
+            const int32_t node = elemp->lnid[j];
+            /* Centered boundary damping: (M+dt*C/2) q[n+1] =
+             * F + 2M q[n] - (M-dt*C/2) q[n-1]. Encode it using the
+             * existing scalar update's mass and dt*C arrays. Assemble
+             * both before hanging-node distribution/MPI contribution.
+             * Gravity surface mass remains additive; pressure-release
+             * nodes retain their dedicated update. CPML is unchanged. */
+            Global.mySolver->pressure_mass[node] +=
+                (solver_float)(0.5 * nodal_dt_c[j]);
+            Global.mySolver->pressure_damp[node] +=
+                (solver_float)nodal_dt_c[j];
+          }
+        }
+      }
+#endif
 
       localPressureElements++;
       continue;
@@ -13509,13 +13545,12 @@ static void solver_init() {
     compute_adjust(Global.mySolver->pressure_mass, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
     schedule_senddata(Global.mySolver->an_sched, Global.mySolver->pressure_mass,
                       1, CONTRIBUTION, AN_PRESSURE_MASS_MSG);
-    /* Step B: assemble the acoustic CPML nodal damping across ranks
+    /* Assemble acoustic CPML or dashpot nodal damping across ranks
      * exactly like pressure_mass -- it is a node-accumulated quantity,
      * so partition-boundary nodes must get the full cross-rank sum,
      * otherwise damping is under-counted (asymmetric) there. All ranks
      * call these collectives unconditionally (pressure_damp is allocated
-     * + zeroed for every rank; it is simply all-zero when there is no
-     * acoustic PML, so this is a strict no-op then). */
+     * + zeroed for every rank, including ranks with no acoustic absorber). */
     schedule_senddata(Global.mySolver->dn_sched, Global.mySolver->pressure_damp,
                       1, CONTRIBUTION, DN_PRESSURE_DAMP_MSG);
     compute_adjust(Global.mySolver->pressure_damp, 1, DISTRIBUTION, ACOUSTIC_CONSTRAINT_SCALAR);
@@ -13546,6 +13581,28 @@ static void solver_init() {
                   &globalPressureFreeSurfaceNodes, 1, MPI_INT64_T, MPI_SUM,
                   comm_solver);
     g_acousticPressureElementCount = globalPressureElements;
+    if (Param.theAbcType == ABC_DASHPOT) {
+      int64_t globalDashpotFaces[6] = {};
+      MPI_Allreduce(localPressureDashpotFaces, globalDashpotFaces, 6,
+                    MPI_INT64_T, MPI_SUM, comm_solver);
+      if (Global.myID == 0) {
+#ifdef BOUNDARY
+        monitor_print(
+            "Acoustic dashpot: first-order radiation, centered damping; "
+            "outer faces x_min=%lld x_max=%lld y_min=%lld y_max=%lld "
+            "z_max=%lld; top free surface and internal interfaces unchanged\n",
+            (long long)globalDashpotFaces[0], (long long)globalDashpotFaces[1],
+            (long long)globalDashpotFaces[2], (long long)globalDashpotFaces[3],
+            (long long)globalDashpotFaces[5]);
+        monitor_print(
+            "Acoustic dashpot assumption: local impedance rho*Vp; "
+            "oblique acoustic waves can reflect; no specialized "
+            "surface-gravity-wave radiation condition\n");
+#else
+        monitor_print("Acoustic dashpot: disabled (compiled without BOUNDARY)\n");
+#endif
+      }
+    }
     if (Global.myID == 0) {
       monitor_print(
           "Acoustic scalar formulation: %.1fM elements, %.1fM nodes, %.1fM free-surface nodes\n",

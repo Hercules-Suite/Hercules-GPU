@@ -430,8 +430,8 @@ typedef struct gpu_data_t {
     solver_float* pressureTm1Device;   // GPU nodal acoustic pressure at t
     solver_float* pressureTm2Device;   // GPU nodal acoustic pressure at t-dt/new
     solver_float* pressureForceDevice; // GPU nodal acoustic pressure RHS
-    solver_float* pressureMassDevice;  // GPU lumped acoustic pressure mass
-    solver_float* pressureDampDevice;  // GPU nodal acoustic CPML damping C
+    solver_float* pressureMassDevice;  // Acoustic mass (+dt*C/2 for dashpots)
+    solver_float* pressureDampDevice;  // GPU nodal acoustic boundary dt*C
                                        // (NULL/0 = no damping ->
                                        // bit-identical to the legacy update)
 
@@ -628,9 +628,9 @@ struct mysolver_t {
     solver_float* pressure_tm1;   /* Acoustic pressure at time-step t - 1 */
     solver_float* pressure_tm2;   /* Acoustic pressure at time-step t - 2 */
     solver_float* pressure_force; /* Acoustic pressure RHS accumulation */
-    solver_float* pressure_mass;  /* Acoustic pressure lumped mass */
-    solver_float* pressure_damp;  /* Acoustic CPML nodal damping C (
-                                   * 0 everywhere unless acoustic PML) */
+    solver_float* pressure_mass;  /* Acoustic mass (+dt*C/2 for dashpots) */
+    solver_float* pressure_damp;  /* Acoustic boundary nodal dt*C;
+                                  * zero away from dashpots/acoustic PML */
     solver_float* pore_pressure_tm1;   /* Poroelastic pore pressure at t - 1 */
     solver_float* pore_pressure_tm2;   /* Poroelastic pore pressure at t - 2 */
     solver_float* pore_pressure_force; /* Poroelastic pressure RHS */
