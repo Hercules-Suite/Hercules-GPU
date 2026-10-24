@@ -271,7 +271,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_reference_vp` | Omitted or nonpositive number → automatic maximum Vp over PML elements (default); positive number overrides with one uniform reference speed | Optional; Float (m/s) |
 | `cpml_poly_order` | `2` (default); 1 to 4 | Optional; Integer |
 | `cpml_kappa_max` | `5` (default); >= 1 | Optional; Float |
-| `cpml_alpha_max_hz` | Omitted or nonpositive number → `simulation_wave_max_freq_hz / 2` (default); positive number overrides; `auto` is not an input token | Optional; Float (Hz) |
+| `cpml_alpha_max_hz` | Omitted or nonpositive number → `0.5` Hz (default; fixed, independent of `simulation_wave_max_freq_hz`); positive number overrides; `auto` is not an input token. Sets the CFS cutoff `cpml_alpha_floor_fraction × alpha_max/(2π)` below which the clamped layer reflects long-period energy; `cpml_reflection_target` and `cpml_kappa_max` do not move it. Choose it from the lowest frequency the source radiates | Optional; Float (Hz) |
 | `cpml_cfl_safety` | `0.9` (default); 0 < value <= 1 | Optional; Float |
 | `cpml_mpml_cross_fraction` | `0` (default); 0 to 0.5 | Optional; Float |
 | `cpml_acoustic_sponge_fraction` | `0` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
@@ -326,7 +326,14 @@ With `cpml_profile_slab=auto` (opt-in) the damping profile is sampled per
 octree-aligned slab of the coarsest non-air PML element edge, so every element
 size in a slab shares one `d`/`alpha`/`kappa`; `cpml_reference_vp` keeps one
 uniform reference speed. Startup prints the maximum per-cell stretch
-`d_max*h/V` and warns above 10. See the
+`d_max*h/V` and warns above 10. It also prints `alpha_max` with its origin
+(automatic or explicit), the CFS cutoff frequency
+`cpml_alpha_floor_fraction × alpha_max/(2π)`, and the continuum round-trip
+reflection `|R|` of the clamped layer at 0.05, 0.1 and 0.2 Hz for the minimum
+solid PML Vs and for the reference Vp, with a `CPML WARNING` when `|R|(0.1 Hz)`
+for the reference Vp exceeds 0.5. Only `cpml_alpha_max_hz` moves that
+low-frequency transparency; the automatic value is a fixed 0.5 Hz and no longer
+follows `simulation_wave_max_freq_hz`. See the
 [formulation, profile sampling and memory cost](Extended%20README.md#cpml-coefficient-and-operator-details).
 
 ### Acoustic material and acoustic–elastic coupling

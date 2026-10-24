@@ -2349,7 +2349,7 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
     assert.ok(row?.includes(`Default: ${value};`), `${key} default`);
   }
   const alpha = html.split("</tr>").find((part) => part.includes(">cpml_alpha_max_hz</td>"));
-  assert.match(alpha, /Default: simulation_wave_max_freq_hz \/ 2/);
+  assert.match(alpha, /Default: 0\.5 Hz \(automatic; fixed, independent of simulation_wave_max_freq_hz; stored as -1\)/);
   assert.match(alpha, /Omitted or nonpositive values/);
   assert.match(alpha, /positive numeric value overrides/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
@@ -2359,8 +2359,10 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   assert.match(solver, /\.theCpmlKappaMax = 5\.0,/);
   assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
   assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.0,/);
-  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);
-  assert.match(solver, /auto: simulation_wave_max_freq_hz \/ 2\)\\n",\s*0\.5 \* Param\.theFreq/);
+  assert.match(solver, /#define CPML_AUTO_ALPHA_MAX_HZ 0\.5\n/);
+  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(2\.0 \* M_PI \* CPML_AUTO_ALPHA_MAX_HZ\)/);
+  assert.doesNotMatch(solver, /g_cpmlBuild\.alpha_max = [\s\S]{0,200}Param\.theFreq/);
+  assert.match(solver, /auto: fixed, independent of "\s*"simulation_wave_max_freq_hz\)\\n",\s*CPML_AUTO_ALPHA_MAX_HZ/);
   assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
   assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
   assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);
@@ -2457,6 +2459,34 @@ test("documents slab-quantized CPML profile sampling and the per-cell stretch di
   assert.match(solver, /CPML WARNING: d_max\*h\/V = %\.3g exceeds 10/);
   const damping = readFileSync(new URL("../../quake/forward/damping.h", import.meta.url), "utf8");
   assert.match(damping, /CPML_PROFILE_SLAB_NONE = 0, CPML_PROFILE_SLAB_AUTO = 1/);
+});
+
+test("documents the CPML low-frequency transparency diagnostic and the mesh-independent alpha", async () => {
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const alpha = parameters.split("</tr>").find((row) => row.includes(">cpml_alpha_max_hz</td>"));
+  assert.ok(alpha);
+  assert.match(alpha, /fixed automatic 0\.5 Hz/);
+  assert.match(alpha, /cpml_reflection_target and cpml_kappa_max do not move that cutoff/);
+  assert.match(alpha, /CPML WARNING when \|R\|\(0\.1 Hz\) for the reference Vp exceeds 0\.5/);
+  const floor = parameters.split("</tr>").find((row) => row.includes(">cpml_alpha_floor_fraction</td>"));
+  assert.ok(floor);
+  const physics = await (await render("/docs/physics")).text();
+  assert.match(physics, /round-trip reflection through the clamped layer/);
+  assert.match(physics, /Only cpml_alpha_max_hz moves this cutoff/);
+  assert.match(physics, /Automatic alpha = 0\.5 Hz, fixed; independent of simulation_wave_max_freq_hz/);
+  assert.match(physics, /uses a fixed 0\.5 Hz, independent of simulation_wave_max_freq_hz/);
+  assert.doesNotMatch(physics, /uses simulation_wave_max_freq_hz \/ 2 in Hz/);
+
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /static double cpml_low_frequency_reflection\(/);
+  assert.match(solver, /double   min_solid_vs;/);
+  assert.match(solver, /MPI_Allreduce\(&local_vs_min, &global_vs_min, 1, MPI_DOUBLE,\s*MPI_MIN, comm_solver\)/);
+  assert.match(solver, /CPML:   c = minimum solid PML Vs = %\.3f m\/s/);
+  assert.match(solver, /CPML:   c = reference Vp = %\.3f m\/s \(worst case\)/);
+  assert.match(solver, /CPML WARNING: \|R\|\(0\.1 Hz\) = %\.2f for c = reference Vp exceeds "\s*"0\.5/);
+  assert.match(solver, /cpml_alpha_max_hz alone sets this low-frequency "\s*"transparency/);
 });
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {

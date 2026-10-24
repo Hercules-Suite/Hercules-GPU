@@ -717,6 +717,9 @@ typedef struct cpml_build_s {
   double   alpha_max;            /* alpha_max used for profiles */
   double   reference_vp;          /* Vp used by the damping profile */
   double   automatic_reference_vp; /* MPI-wide max Vp over PML elements */
+  double   min_solid_vs;          /* MPI-wide min Vs over solid PML
+                                   * elements; 0 when there is none.
+                                   * Setup diagnostic only. */
   /* Profile sampling slab along each PML normal: the coarsest non-air PML
    * element edge (MPI-wide maximum), in ticks and metres. 0 = legacy
    * per-element-centre sampling (cpml_profile_slab=none). Scalars survive
@@ -794,6 +797,42 @@ static void cpml_track_cell_stretch(const double d[3], double h, double v,
   }
 }
 
+/* Setup diagnostic helper: continuum round-trip amplitude reflection
+ * |R|(f) = exp(-2 (w^2/c) int_0^L d/(alpha^2 + w^2) dxi) of a normally
+ * incident plane wave of speed c that crosses the clamped CPML twice, for
+ * the unmixed K&M profile d = d_max (xi/L)^p with
+ * d_max = (p+1) Vp_ref ln(1/R)/(2L) and alpha = alpha_max max(1-xi/L, floor).
+ * kappa only stretches the real coordinate and drops out of the amplitude;
+ * cpml_reflection_target enters through d_max. For c = Vp_ref the exponent
+ * is independent of L and Vp_ref (d_max*L is fixed by R), so that row
+ * depends only on p, R, alpha and the floor. Midpoint rule, host side,
+ * setup only. Returns 1 (full reflection) for degenerate inputs. */
+static double cpml_low_frequency_reflection(double L, double reference_vp,
+                                            double R, int poly_order,
+                                            double alpha_max,
+                                            double alpha_floor_fraction,
+                                            double c, double f_hz) {
+  if (!(L > 0.0) || !(reference_vp > 0.0) || !(c > 0.0) || !(f_hz > 0.0) ||
+      !(R > 0.0) || !(R < 1.0) || !(alpha_max >= 0.0)) {
+    return 1.0;
+  }
+  const double d_max =
+      -((double)poly_order + 1.0) * reference_vp * log(R) / (2.0 * L);
+  const double w = 2.0 * M_PI * f_hz;
+  const double alpha_floor = alpha_floor_fraction * alpha_max;
+  const int n = 4096;
+  double sum = 0.0;
+  for (int i = 0; i < n; i++) {
+    const double r = ((double)i + 0.5) / (double)n;
+    const double d = d_max * pow(r, (double)poly_order);
+    double alpha = alpha_max * (1.0 - r);
+    if (alpha < alpha_floor) alpha = alpha_floor;
+    sum += d / (alpha * alpha + w * w);
+  }
+  sum *= L / (double)n;
+  return exp(-2.0 * (w * w / c) * sum);
+}
+
 enum cpml_rank_diag_count_idx_t {
   CPML_RANK_DIAG_LOCAL_ELEMS = 0,
   CPML_RANK_DIAG_ELASTIC_ELEMS,
@@ -818,6 +857,17 @@ static long long* g_cpmlRankDiagCounts = NULL;
 static double* g_cpmlRankDiagTimes = NULL;
 
 #define CPML_PARTITION_BASE_WEIGHT 100
+
+/* Automatic CFS frequency shift, in Hz. alpha is a source-band quantity:
+ * below roughly cpml_alpha_floor_fraction*alpha_max the CFS stretch
+ * kappa + d/(alpha + i w) is almost real, the layer only stretches
+ * coordinates and the outer clamp reflects long-period energy. The former
+ * rule alpha_max = pi*simulation_wave_max_freq_hz tied that cutoff to the
+ * mesh (0.2 Hz at 4 Hz, 0.4 Hz at 8 Hz) while a large event radiates
+ * 0.05-0.2 Hz (Izmir diagnosis, 2026-10-24). The automatic value is
+ * therefore a fixed low frequency, the value the stable 1 Hz Izmir runs
+ * used; SPECFEM3D likewise ties alpha to the source dominant frequency. */
+#define CPML_AUTO_ALPHA_MAX_HZ 0.5
 static double g_cpmlPartitionThicknessM = 0.0;
 static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
                                           const void* data);
@@ -4898,12 +4948,14 @@ static int32_t parse_parameters(const char* numericalin) {
     monitor_print("PML kappa max:                      %f\n",
                   Param.theCpmlKappaMax);
     if (Param.theCpmlAlphaMaxHz > 0.0) {
-      monitor_print("PML alpha max (Hz):                 %f\n",
+      monitor_print("PML alpha max (Hz):                 %f "
+                    "(explicit cpml_alpha_max_hz)\n",
                     Param.theCpmlAlphaMaxHz);
     } else {
       monitor_print("PML alpha max (Hz):                 %g "
-                    "(auto: simulation_wave_max_freq_hz / 2)\n",
-                    0.5 * Param.theFreq);
+                    "(auto: fixed, independent of "
+                    "simulation_wave_max_freq_hz)\n",
+                    CPML_AUTO_ALPHA_MAX_HZ);
     }
     monitor_print("PML multiaxial cross fraction:      %f\n",
                   Param.theCpmlMpmlCrossFraction);
@@ -12345,14 +12397,21 @@ static void solver_init() {
       }
     }
 
-    /* Automatic Hz value is f_max / 2; alpha_max uses angular units (pi*f_max).
-     * Nonpositive inputs retain the legacy automatic selection. */
+    /* alpha_max uses angular units, 2*pi*f. A positive cpml_alpha_max_hz is
+     * explicit; omitted or nonpositive inputs select the fixed automatic
+     * frequency CPML_AUTO_ALPHA_MAX_HZ, which deliberately does not grow
+     * with simulation_wave_max_freq_hz (the low-frequency reflection
+     * diagnostic printed after enrollment shows why). */
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
-                                : (M_PI * Param.theFreq);
+                                : (2.0 * M_PI * CPML_AUTO_ALPHA_MAX_HZ);
     {
       double local_vp_max = 0.0;
       double global_vp_max = 0.0;
+      /* Slowest solid PML wave for the low-frequency reflection diagnostic;
+       * DBL_MAX marks "no solid PML element" until reduced. */
+      double local_vs_min = DBL_MAX;
+      double global_vs_min = DBL_MAX;
       long long local_pml_count = 0;
       long long global_pml_count = 0;
       /* Coarsest non-air PML element edge (ticks): the profile slab width
@@ -12380,6 +12439,10 @@ static void solver_init() {
         if ((ed != NULL) && (ed->Vp > local_vp_max)) {
           local_vp_max = (double)ed->Vp;
         }
+        if ((ed != NULL) && (ed->Vs > 0.0f) && !element_is_acoustic(ed) &&
+            ((double)ed->Vs < local_vs_min)) {
+          local_vs_min = (double)ed->Vs;
+        }
         if ((ed != NULL) && (ed->Vp > 0.0f) &&
             ((long long)edgeticks_ref > local_slab_ticks)) {
           local_slab_ticks = (long long)edgeticks_ref;
@@ -12387,6 +12450,8 @@ static void solver_init() {
       }
       MPI_Allreduce(&local_vp_max, &global_vp_max, 1, MPI_DOUBLE,
                     MPI_MAX, comm_solver);
+      MPI_Allreduce(&local_vs_min, &global_vs_min, 1, MPI_DOUBLE,
+                    MPI_MIN, comm_solver);
       MPI_Allreduce(&local_pml_count, &global_pml_count, 1, MPI_LONG_LONG,
                     MPI_SUM, comm_solver);
       MPI_Allreduce(&local_slab_ticks, &global_slab_ticks, 1, MPI_LONG_LONG,
@@ -12400,6 +12465,8 @@ static void solver_init() {
         exit(1);
       }
       g_cpmlBuild.automatic_reference_vp = global_vp_max;
+      g_cpmlBuild.min_solid_vs =
+          (global_vs_min < DBL_MAX) ? global_vs_min : 0.0;
       /* A positive cpml_reference_vp replaces the automatic maximum with one
        * user value; either way the profile uses a single Vp over the whole
        * PML (per-element Vp would make d jump tangentially). */
@@ -13145,6 +13212,85 @@ static void solver_init() {
                           global_stretch.value);
           }
         }
+      }
+    }
+
+    /* Setup-only low-frequency transparency diagnostic. Below roughly the
+     * alpha floor frequency cpml_alpha_floor_fraction*alpha_max/(2 pi) the
+     * CFS stretch kappa + d/(alpha + i w) is almost real: the layer only
+     * stretches coordinates and the outer clamp reflects long-period
+     * energy, whatever cpml_reflection_target and cpml_kappa_max are.
+     * Report the cutoff and the continuum round-trip |R| of the unmixed
+     * normal profile at 0.05, 0.1 and 0.2 Hz for the slowest solid PML Vs
+     * (most absorbed) and for the reference Vp (fastest, least absorbed;
+     * the WARNING keys off this row). All inputs are MPI-wide scalars, so
+     * rank 0 evaluates the integrals alone; nothing per step. */
+    if (Global.myID == 0) {
+      const double alpha_hz = g_cpmlBuild.alpha_max / (2.0 * M_PI);
+      const double cutoff_hz = Param.theCpmlAlphaFloorFraction * alpha_hz;
+      const double probe_hz[3] = {0.05, 0.1, 0.2};
+      const double L = g_cpmlBuild.thickness_m;
+      const double vp_ref = g_cpmlBuild.reference_vp;
+      const double R = Param.theCpmlReflectionTarget;
+      const int p = Param.theCpmlPolyOrder;
+      const double d_max = (L > 0.0) ? (-(p + 1.0) * vp_ref * log(R) /
+                                        (2.0 * L))
+                                     : 0.0;
+      double refl_vs[3], refl_vp[3];
+      for (int k = 0; k < 3; k++) {
+        refl_vs[k] = cpml_low_frequency_reflection(
+            L, vp_ref, R, p, g_cpmlBuild.alpha_max,
+            Param.theCpmlAlphaFloorFraction, g_cpmlBuild.min_solid_vs,
+            probe_hz[k]);
+        refl_vp[k] = cpml_low_frequency_reflection(
+            L, vp_ref, R, p, g_cpmlBuild.alpha_max,
+            Param.theCpmlAlphaFloorFraction, vp_ref, probe_hz[k]);
+      }
+      monitor_print("CPML: alpha_max = %.4g rad/s = 2*pi x %.4g Hz (%s); "
+                    "alpha floor %.4g rad/s gives the CFS cutoff frequency "
+                    "cpml_alpha_floor_fraction*alpha_max/(2 pi) = %.4g Hz, "
+                    "below which the layer only stretches coordinates and "
+                    "the outer clamp reflects\n",
+                    g_cpmlBuild.alpha_max, alpha_hz,
+                    (Param.theCpmlAlphaMaxHz > 0.0)
+                        ? "explicit cpml_alpha_max_hz"
+                        : "automatic, fixed and independent of "
+                          "simulation_wave_max_freq_hz",
+                    Param.theCpmlAlphaFloorFraction * g_cpmlBuild.alpha_max,
+                    cutoff_hz);
+      monitor_print("CPML: low-frequency round-trip reflection through the "
+                    "clamped layer, |R|(f) = exp(-2 (w^2/c) int_0^L "
+                    "d/(alpha^2+w^2) dxi), normal incidence, continuum "
+                    "unmixed profile (L = %.3f m, d_max = %.4g 1/s, "
+                    "p = %d, R = %g, Vp_ref = %.3f m/s):\n",
+                    L, d_max, p, R, vp_ref);
+      if (g_cpmlBuild.min_solid_vs > 0.0) {
+        monitor_print("CPML:   c = minimum solid PML Vs = %.3f m/s: "
+                      "|R|(0.05 Hz) = %.2f, |R|(0.1 Hz) = %.2f, "
+                      "|R|(0.2 Hz) = %.2f\n",
+                      g_cpmlBuild.min_solid_vs, refl_vs[0], refl_vs[1],
+                      refl_vs[2]);
+      } else {
+        monitor_print("CPML:   no solid PML element: S-wave row omitted\n");
+      }
+      monitor_print("CPML:   c = reference Vp = %.3f m/s (worst case): "
+                    "|R|(0.05 Hz) = %.2f, |R|(0.1 Hz) = %.2f, "
+                    "|R|(0.2 Hz) = %.2f\n",
+                    vp_ref, refl_vp[0], refl_vp[1], refl_vp[2]);
+      monitor_print("CPML: cpml_alpha_max_hz alone sets this low-frequency "
+                    "transparency: cpml_reflection_target scales d and "
+                    "cpml_kappa_max only the real stretch, so neither moves "
+                    "the cutoff. Choose alpha from the lowest frequency the "
+                    "source radiates, not from the mesh frequency.\n");
+      if (refl_vp[1] > 0.5) {
+        monitor_diagnostic(
+            "CPML WARNING: |R|(0.1 Hz) = %.2f for c = reference Vp exceeds "
+            "0.5: energy below about %.3g Hz is reflected by the clamped "
+            "layer and rings in the domain if the source radiates it (a "
+            "Mw 7 event radiates 0.05-0.2 Hz). Lower cpml_alpha_max_hz "
+            "(the automatic value is %g Hz); cpml_reflection_target and "
+            "cpml_kappa_max do not cure this.\n",
+            refl_vp[1], cutoff_hz, CPML_AUTO_ALPHA_MAX_HZ);
       }
     }
 
