@@ -2948,7 +2948,8 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 ## Absorbing boundaries and CPML
 
 Hercules supports two absorbing boundary conditions, selected at run
-time. The default is the legacy first-order Lysmer dashpot. The newer
+time. The default combines the solid Lysmer dashpot with a first-order
+scalar acoustic radiation boundary on outer water faces. The alternative
 option is an unsplit Convolutional Perfectly Matched Layer (C-PML,
 second-order weak form with complex frequency shift and full Jacobian products). The C-PML is per-element, wraps the five
 absorbing faces (`x_min`, `x_max`, `y_min`, `y_max`, `z_max`) and leaves
@@ -2958,8 +2959,10 @@ acoustic-pressure elements. Earlier CPS comparisons are summarized below and in 
 results are specific to the recorded configuration and implementation.
 
 - `abc_type`
-	Optional. `dashpot` (default) = legacy Lysmer dashpot. `cpml` =
-	unsplit C-PML. If unset, behavior is unchanged from earlier versions.
+	Optional. `dashpot` (default) = solid Lysmer dashpot plus scalar acoustic
+	radiation damping. `cpml` = unsplit C-PML. Scalar acoustic outer faces
+	were reflecting in older dashpot implementations; they now absorb even
+	when `abc_type` is omitted. See [Acoustic dashpot boundary](#acoustic-dashpot-boundary).
 - `cpml_thickness_m`
 	Target PML thickness in metres. When `> 0`, used directly. When `0`
 	or unset (default), the solver uses `cpml_layers ×` the largest non-air
@@ -3304,6 +3307,91 @@ gravity, CPML and field-specific constraints agreed with the previous build
 within `3.7e-12` relative L2 in plane output. The local-only investigation
 fixtures are not shipped. These checks establish geometry/output consistency,
 not continuum accuracy or full-Izmir long-time stability.
+
+### Acoustic dashpot boundary
+
+With `abc_type=dashpot` (default) and a `BOUNDARY` build, scalar acoustic
+elements receive a local first-order radiation condition on `x_min`, `x_max`,
+`y_min`, `y_max`, and `z_max`. The outward-normal condition for pressure or
+density-scaled velocity potential $q$, with local $c=V_p$, is
+
+```math
+\partial_n q + \frac{1}{c}\partial_t q=0,\qquad
+C_{ij}=\int_{\Gamma_{\mathrm{out}}}\frac{N_iN_j}{\rho c}\,dS.
+```
+
+Row-sum lumping contributes $h^2/(4\rho c)$ to each of the four nodes on a
+cubic Hex8 face. Contributions add at edges and corners. Setup identifies
+faces using the global octree bounds, so material interfaces and MPI partition
+cuts do not become absorbers. Air and solid elements do not enter this scalar
+assembly. The startup `Acoustic dashpot:` diagnostic reports MPI-wide acoustic
+element-face counts for all five sides and the assumed local impedance.
+
+Boundary damping uses a centered time derivative:
+
+```math
+\left(M+\frac{\Delta t}{2}C\right)q^{n+1}
+=\Delta t^2(f^n-Kq^n)+2Mq^n
+-\left(M-\frac{\Delta t}{2}C\right)q^{n-1}.
+```
+
+The existing acoustic update receives $M+\Delta t C/2$ as its mass and
+$\Delta t C$ as its damping coefficient. Both pass through the existing
+field-specific hanging-node distribution and MPI assembly. No new per-step
+kernel, transfer, synchronization or history buffer is needed. For the uncoupled
+linear acoustic system with positive lumped mass, this centered boundary term
+is passive under the usual undamped bulk CFL condition. It does not establish
+stability of every coupled or nonlinear configuration; retain their timestep
+checks and constitutive restrictions.
+
+The top normal is never damped. Pressure-release top nodes keep their dedicated
+pressure/potential update, including at lateral rims. With gravity enabled,
+the existing weak surface mass remains additive and lateral rim damping stays
+active. The local acoustic impedance matches normally outgoing plane waves;
+oblique waves can reflect. It is not a specialized radiation condition for slow
+surface-gravity waves and does not by itself establish the cause of late Izmir
+oscillations.
+
+Acoustic–elastic and acoustic–poroelastic interfaces retain their mechanical
+and hydraulic coupling, including sealed and open-pore modes. Applicable
+viscoelastic and nonlinear elastoplastic/hysteretic solid paths keep their
+constitutive updates and solid dashpots. Pure solid, poroelastic–elastic and
+legacy displacement-acoustic paths receive no new scalar term; this change
+does not add an absorber for pore-pressure diffusion. CPML coefficients,
+histories and outer clamps are unchanged. Station and plane formats are
+unchanged; pressure, velocity and acceleration follow the updated scalar field.
+
+Local analytical checks exercise the production setup helpers and extracted
+scalar update: global-face selection, additive corners, refined-face area,
+normal-incidence Gaussian-pulse reflection convergence, pressure-release
+precedence, and the three-dimensional discrete energy identity with and without
+gravity surface mass. These local-only harnesses are unavailable in a clean
+checkout. In the finest one-dimensional plane-wave limit test (400 cells),
+the residual Gaussian-pulse amplitude was about 0.020% of its incident peak;
+this is a numerical normal-incidence test, not a regional reflection estimate.
+
+Horizon CUDA/MPI checks on 2026-10-23 compared one and eight GPU ranks for
+pressure and velocity potential, gravity on/off, elastic coupling, sealed and
+open-pore BrickUP coupling, active BKT2 attenuation, and the synthetic
+`vonMises_ep` nonlinear path both with and without a poroelastic skeleton.
+The nonlinear geostatic, tolerance, substep, damping and material-table values
+were uncalibrated test-specific settings, not production recommendations.
+The adaptive case had 3,136 dangling nodes; a separate inverted-layer test
+enrolled water on the bottom and lateral faces. Host-staged and CUDA-aware
+MPI were compared for elastic and open-pore coupling. Station motion, pressure
+where defined, and requested nonlinear output agreed below $10^{-8}$ relative
+to each quantity's peak. These are short, four-second synthetic tests, not
+long-duration regional validation or validation of every constitutive model,
+diffusion/drainage setting, topography, or oblique-wave absorption. Legacy
+displacement acoustics was statically reviewed but not rerun. An Izmir run
+with this executable is still needed to assess the late coda.
+
+```ini
+# parameters.in: no extra coefficient or new control is required
+include_acoustic = yes
+acoustic_formulation = velocity_potential
+abc_type = dashpot
+```
 
 ### CPML execution and topography
 

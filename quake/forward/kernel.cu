@@ -947,15 +947,17 @@ __global__ void kernelAcousticPressureUpdate(int32_t nharbored,
   /* Gravity free-surface nodes carry their weak boundary contribution in
    * pressureMassDevice and therefore use the ordinary scalar update below. */
   const solver_float mass = gpuData->pressureMassDevice[nindex];
-  /* Step B: acoustic CPML mass-proportional damping. cd is the
+  /* Acoustic boundary damping. cd is the
    * assembled dt*C term (dt baked in at build, dt*C summed across
-   * elements and ranks like pressure_mass). cd == 0 everywhere unless
-   * an acoustic PML element contributes, in which case the update is
+   * elements and ranks like pressure_mass). For CPML the update is
    * the damped central difference
    *   mass*(p^{n+1}-2p^n+p^{n-1}) + dt*C*(p^n - p^{n-1}) = F
-   * mirroring the validated elastic v9 dashpot discretization. When
+   * mirroring the validated elastic v9 dashpot discretization. Scalar
+   * dashpots instead assemble mass=M+dt*C/2 and cd=dt*C, making this
+   * same expression the centered, passive boundary-damping update.
+   * The physical M includes any gravity free-surface mass. When
    * cd == 0 this reduces EXACTLY to the legacy update (bit-identical
-   * for any run without acoustic PML). */
+   * for nodes without acoustic boundary damping). */
   const solver_float cd = (gpuData->pressureDampDevice != NULL)
                               ? gpuData->pressureDampDevice[nindex]
                               : (solver_float)0.0;

@@ -264,7 +264,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 
 | Variable | Options / accepted values | Requirement / units |
 | --- | --- | --- |
-| `abc_type` | `dashpot` (default), `cpml` | Optional; String |
+| `abc_type` | `dashpot` (default): solid Lysmer and scalar acoustic radiation damping; `cpml` | Optional; String |
 | `cpml_thickness_m` | `0` (default), automatic thickness; positive physical width overrides `cpml_layers`; nonpositive values select automatic width | Optional; Float (m) |
 | `cpml_layers` | Integer; `10` (default); must be positive when thickness is automatic | Optional; Integer |
 | `cpml_reflection_target` | `0.01` (default); 0 < R < 1 | Optional; Float |
@@ -285,7 +285,18 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_pml_material_damping` | `none` (default) except for Rayleigh interiors; `rayleigh` (default) with Rayleigh interiors when omitted; explicit `none` is retained | Optional; String |
 | `cpml_gravity_in_bottom_band` | `abort` (default), `allow` (case-insensitive) | Optional; setup policy for gravity-surface acoustic CPML elements. Separately reports geometric bottom-band overlap and lateral M-PML cross-z damping; `allow` warns and continues for diagnostics. Known unstable bottom-band harness cases motivate the guard; no universal stability claim. |
 
-Automatic thickness is `cpml_layers` times the largest non-air element
+With `dashpot`, scalar acoustic water now absorbs on the four outer sides
+and bottom, using local `rho*Vp` impedance. Pressure and velocity-potential
+formulations use centered damping; the top free surface and internal coupling
+conditions retain their existing rules. No new input is required. This also
+changes water boundaries in cases that omit `abc_type`; old dashpot water
+results used reflecting outer faces. The condition targets outgoing acoustic
+waves, permits oblique reflection, and is not a specialized surface-gravity-wave
+absorber. It requires a `BOUNDARY` build, like the solid dashpot. See
+[Acoustic dashpot boundary](Extended%20README.md#acoustic-dashpot-boundary)
+for the formulation, applicability and validation limits.
+
+Automatic CPML thickness is `cpml_layers` times the largest non-air element
 edge on a lateral or bottom boundary (MPI-wide maximum); air is also
 excluded from the global fallback. Finer boundary regions contain more
 cells; use positive `cpml_thickness_m` to specify the physical width.

@@ -606,6 +606,20 @@ test("documents the default acoustic quality factor and its validation scope", a
   assert.match(html, /acoustic_quality_factor=0 in every run/);
 });
 
+test("documents acoustic dashpot applicability and the changed water boundary", async () => {
+  const html = await (await render("/docs/physics")).text();
+  const section = html.match(/<section[^>]*id="acoustic-dashpot"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /Older scalar-acoustic dashpot water faces were reflecting/);
+  assert.match(section, /cases that omit abc_type/);
+  assert.match(section, /pressure-release nodes keep their dedicated update/);
+  assert.match(section, /sealed and open-pore/);
+  assert.match(section, /oblique waves can reflect/);
+  assert.match(section, /not a specialized absorber for slow surface-gravity waves/);
+  assert.match(section, /centered boundary term/);
+  assert.match(section, /no new per-step communication/);
+});
+
 test("explains experimental constraints, remeshing and CPML limitations", async () => {
   const html = await (await render("/docs/physics")).text();
   assert.match(html, /id="acoustic-interface-method"/);
