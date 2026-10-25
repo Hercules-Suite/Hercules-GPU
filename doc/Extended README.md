@@ -3072,15 +3072,17 @@ results are specific to the recorded configuration and implementation.
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
 - `cpml_alpha_max_hz`
-	Optional. Default: `simulation_wave_max_freq_hz/2` in Hz. Omitted or
-	nonpositive inputs retain automatic selection (internal sentinel `-1`).
-	A positive numeric value overrides the automatic frequency; arithmetic
-	expressions are not evaluated in the input file. For `simulation_wave_max_freq_hz=4.36`,
-	the automatic value is `2.18` Hz. The angular coefficient is
-	`alpha_max=2*pi*cpml_alpha_max_hz`, giving `pi*simulation_wave_max_freq_hz`
-	for automatic selection. This automatic behavior is unchanged; see the
-	[coefficient formulas](#cpml-coefficient-and-operator-details) before
-	matching a source reference frequency.
+	Optional, in Hz. Default: `0.5` Hz, independent of
+	`simulation_wave_max_freq_hz`. Omitted or nonpositive inputs select this
+	fixed automatic value (internal sentinel `-1`). A positive numeric value
+	overrides it; arithmetic expressions are not evaluated in the input file.
+	The angular coefficient is `alpha_max=2*pi*cpml_alpha_max_hz`, giving
+	`pi` rad/s for automatic selection. Earlier releases through v13.3 used
+	`simulation_wave_max_freq_hz/2`; to reproduce that behavior, enter the
+	corresponding positive numeric value explicitly (`2.18` Hz for a
+	`4.36` Hz simulation). This default is not a universal absorption or
+	stability calibration; validate it for the source bandwidth and model.
+	See the [coefficient formulas](#cpml-coefficient-and-operator-details).
 - `cpml_cfl_safety`
 	Optional. Default `0.9`. The critical time step is multiplied by this
 	factor when `abc_type=cpml`, for margin against the corner-element
@@ -3594,15 +3596,18 @@ format does not preserve absorber histories. Set `use_checkpoint=0` and
 
 The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=5`,
 `cpml_reflection_target=0.01`, `cpml_acoustic_sponge_fraction=0`,
-automatic alpha in Hz equal to `simulation_wave_max_freq_hz/2`,
+automatic alpha `0.5` Hz, independent of `simulation_wave_max_freq_hz`,
 `cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These defaults
 are not a universal stability or accuracy guarantee; slow gravity packets can
 require a lower alpha. Explicit input values always take precedence. To reproduce
 the v13.2 CPML defaults, explicitly set `cpml_kappa_max=1`,
-`cpml_reflection_target=0.001`, and `cpml_acoustic_sponge_fraction=0`.
+`cpml_reflection_target=0.001`, `cpml_acoustic_sponge_fraction=0`, and a
+positive numeric `cpml_alpha_max_hz` equal to half the simulation maximum
+frequency (`2.18` for `4.36` Hz).
 Older defaults used `cpml_kappa_max=10`, `cpml_reflection_target=0.1`, and
-`cpml_acoustic_sponge_fraction=0.3`. Automatic alpha and the acoustic interface
-method are unchanged by this defaults change. Rebuild the executable to adopt
+`cpml_acoustic_sponge_fraction=0.3`. The acoustic interface method is unchanged.
+The fixed automatic alpha replaces the former maximum-frequency-dependent
+value; explicit positive alpha settings retain their existing behavior. Rebuild the executable to adopt
 the new defaults; existing binaries retain their compiled defaults. Keep source and
 receivers outside the absorbing layer, resolve the source bandwidth, and
 compare with a larger domain at identical mesh spacing and timestep. Measure
@@ -3931,8 +3936,8 @@ d_j=-\frac{(n+1)V_p\ln R}{2L}r_j^n,\qquad
 ```
 
 Inactive axes have $d=0$, $\kappa=1$, $\alpha=0$. Positive
-`cpml_alpha_max_hz` gives $\alpha_{max}=2\pi f$; otherwise the fallback is
-$\pi$ times `simulation_wave_max_freq_hz`. Optional cross mixing adds a
+`cpml_alpha_max_hz` gives $\alpha_{max}=2\pi f$; otherwise $f=0.5$ Hz,
+independent of `simulation_wave_max_freq_hz`. Optional cross mixing adds a
 fraction of the other two damping profiles and normalized kappa profiles;
 it defaults to zero because this is no longer a separable coordinate mapping.
 $V_p$ is the automatic maximum over PML elements or the positive

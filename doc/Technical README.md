@@ -271,7 +271,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_reference_vp` | Omitted or nonpositive number → automatic maximum Vp over PML elements (default); positive number overrides with one uniform reference speed | Optional; Float (m/s) |
 | `cpml_poly_order` | `2` (default); 1 to 4 | Optional; Integer |
 | `cpml_kappa_max` | `5` (default); >= 1 | Optional; Float |
-| `cpml_alpha_max_hz` | Omitted or nonpositive number → `simulation_wave_max_freq_hz / 2` (default); positive number overrides; `auto` is not an input token | Optional; Float (Hz) |
+| `cpml_alpha_max_hz` | Omitted or nonpositive number → `0.5` Hz (default), independent of `simulation_wave_max_freq_hz`; positive number overrides; `auto` is not an input token | Optional; Float (Hz) |
 | `cpml_cfl_safety` | `0.9` (default); 0 < value <= 1 | Optional; Float |
 | `cpml_mpml_cross_fraction` | `0` (default); 0 to 0.5 | Optional; Float |
 | `cpml_acoustic_sponge_fraction` | `0` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |

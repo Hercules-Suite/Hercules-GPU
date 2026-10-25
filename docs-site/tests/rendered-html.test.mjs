@@ -2349,7 +2349,8 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
     assert.ok(row?.includes(`Default: ${value};`), `${key} default`);
   }
   const alpha = html.split("</tr>").find((part) => part.includes(">cpml_alpha_max_hz</td>"));
-  assert.match(alpha, /Default: simulation_wave_max_freq_hz \/ 2/);
+  assert.match(alpha, /Default: 0\.5 Hz \(automatic; stored as -1\)/);
+  assert.match(alpha, /fixed 0\.5 Hz, independent of simulation_wave_max_freq_hz/);
   assert.match(alpha, /Omitted or nonpositive values/);
   assert.match(alpha, /positive numeric value overrides/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
@@ -2359,8 +2360,9 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   assert.match(solver, /\.theCpmlKappaMax = 5\.0,/);
   assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
   assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.0,/);
-  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(M_PI \* Param\.theFreq\)/);
-  assert.match(solver, /auto: simulation_wave_max_freq_hz \/ 2\)\\n",\s*0\.5 \* Param\.theFreq/);
+  assert.match(solver, /#define CPML_AUTO_ALPHA_MAX_HZ 0\.5\n/);
+  assert.match(solver, /g_cpmlBuild\.alpha_max = \(Param\.theCpmlAlphaMaxHz > 0\.0\)\s*\? \(2\.0 \* M_PI \* Param\.theCpmlAlphaMaxHz\)\s*: \(2\.0 \* M_PI \* CPML_AUTO_ALPHA_MAX_HZ\)/);
+  assert.match(solver, /auto: fixed, independent of "\s*"simulation_wave_max_freq_hz\)\\n",\s*CPML_AUTO_ALPHA_MAX_HZ/);
   assert.match(solver, /\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_FIELDS,/);
   assert.match(solver, /acoustic_interface_method_explicit =\s*\(parsetext\(fp, "acoustic_interface_method"/);
   assert.match(solver, /if \(!acoustic_interface_method_explicit &&\s*\(Param\.includeAcoustic != YES \|\| Param\.acousticInterfaceCoupling != YES \|\|\s*Param\.acousticPressureFormulation != YES\)\)\s*\{\s*Param\.theAcousticInterfaceMethod = ACOUSTIC_INTERFACE_ORIGINAL;/);

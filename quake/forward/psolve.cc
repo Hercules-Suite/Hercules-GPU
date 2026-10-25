@@ -818,6 +818,8 @@ static long long* g_cpmlRankDiagCounts = NULL;
 static double* g_cpmlRankDiagTimes = NULL;
 
 #define CPML_PARTITION_BASE_WEIGHT 100
+/* Automatic CFS frequency shift in Hz; positive inputs override it. */
+#define CPML_AUTO_ALPHA_MAX_HZ 0.5
 static double g_cpmlPartitionThicknessM = 0.0;
 static int32_t mesh_cpml_partition_weight(octant_t* leaf, double ticksize,
                                           const void* data);
@@ -4902,8 +4904,9 @@ static int32_t parse_parameters(const char* numericalin) {
                     Param.theCpmlAlphaMaxHz);
     } else {
       monitor_print("PML alpha max (Hz):                 %g "
-                    "(auto: simulation_wave_max_freq_hz / 2)\n",
-                    0.5 * Param.theFreq);
+                    "(auto: fixed, independent of "
+                    "simulation_wave_max_freq_hz)\n",
+                    CPML_AUTO_ALPHA_MAX_HZ);
     }
     monitor_print("PML multiaxial cross fraction:      %f\n",
                   Param.theCpmlMpmlCrossFraction);
@@ -12345,11 +12348,11 @@ static void solver_init() {
       }
     }
 
-    /* Automatic Hz value is f_max / 2; alpha_max uses angular units (pi*f_max).
-     * Nonpositive inputs retain the legacy automatic selection. */
+    /* Automatic alpha is fixed in Hz, independent of the mesh frequency.
+     * Positive inputs override it; convert either value to angular units. */
     g_cpmlBuild.alpha_max = (Param.theCpmlAlphaMaxHz > 0.0)
                                 ? (2.0 * M_PI * Param.theCpmlAlphaMaxHz)
-                                : (M_PI * Param.theFreq);
+                                : (2.0 * M_PI * CPML_AUTO_ALPHA_MAX_HZ);
     {
       double local_vp_max = 0.0;
       double global_vp_max = 0.0;
