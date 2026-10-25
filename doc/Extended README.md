@@ -3072,28 +3072,17 @@ results are specific to the recorded configuration and implementation.
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
 - `cpml_alpha_max_hz`
-	Optional, in Hz. Default: `0.5` Hz, a fixed value that does not follow
-	`simulation_wave_max_freq_hz`. Omitted or nonpositive inputs select it
-	(internal sentinel `-1`); a positive numeric value overrides it. Arithmetic
-	expressions are not evaluated in the input file. The angular coefficient is
-	`alpha_max=2*pi*cpml_alpha_max_hz`, so the default is `pi` rad/s. Until
-	2026-10-24 the automatic value was `simulation_wave_max_freq_hz/2`
-	(`2.18` Hz for `4.36` Hz); that tied the absorber to the mesh instead of
-	the source and left the 4 and 8 Hz Izmir layers transparent below about
-	0.2 and 0.4 Hz while the 1 Hz layer (0.5 Hz) absorbed the whole source
-	band. alpha controls the low-frequency behavior of the layer on its own:
-	below the cutoff `cpml_alpha_floor_fraction*alpha_max/(2*pi)` the
-	stretch `kappa + d/(alpha + i*omega)` is almost real, the layer only
-	stretches coordinates and the outer clamp reflects. `cpml_reflection_target`
-	scales `d` and `cpml_kappa_max` only the real stretch; neither moves that
-	cutoff. Choose the value from the lowest frequency the source radiates
-	(0.05 to 0.2 Hz for a Mw 7 event; SPECFEM3D uses the source dominant
-	frequency), not from the mesh frequency. Lower alpha also weakens the
-	explicit CFS restoring/memory terms, so re-check long-time stability
-	when combining it with small `cpml_reflection_target` or `cpml_kappa_max=1`.
-	Startup prints the cutoff and the predicted round-trip reflection at
-	0.05, 0.1 and 0.2 Hz; see the
-	[coefficient formulas](#cpml-coefficient-and-operator-details).
+	Optional, in Hz. Default: `0.5` Hz, independent of
+	`simulation_wave_max_freq_hz`. Omitted or nonpositive inputs select this
+	fixed automatic value (internal sentinel `-1`). A positive numeric value
+	overrides it; arithmetic expressions are not evaluated in the input file.
+	The angular coefficient is `alpha_max=2*pi*cpml_alpha_max_hz`, giving
+	`pi` rad/s for automatic selection. Earlier releases through v13.3 used
+	`simulation_wave_max_freq_hz/2`; to reproduce that behavior, enter the
+	corresponding positive numeric value explicitly (`2.18` Hz for a
+	`4.36` Hz simulation). This default is not a universal absorption or
+	stability calibration; validate it for the source bandwidth and model.
+	See the [coefficient formulas](#cpml-coefficient-and-operator-details).
 - `cpml_cfl_safety`
 	Optional. Default `0.9`. The critical time step is multiplied by this
 	factor when `abc_type=cpml`, for margin against the corner-element
@@ -3132,9 +3121,7 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	Optional. Default `0.1`; valid `[0,1]`. Lower bound on alpha relative to
 	its maximum. Zero and repeated poles are handled without divided-pole
 	singularities; their acceptance does not establish long-time stability
-	for every model. The floor at the outer edge sets the CFS cutoff
-	frequency `cpml_alpha_floor_fraction*alpha_max/(2*pi)` reported at
-	startup, below which the clamped layer reflects; see `cpml_alpha_max_hz`.
+	for every model.
 - `cpml_profile_slab`
 	Optional, case-insensitive. `none` (default) or `auto`. How the damping profile is sampled
 	along each PML normal. The profile is always a function of the normal
@@ -3609,18 +3596,18 @@ format does not preserve absorber histories. Set `use_checkpoint=0` and
 
 The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=5`,
 `cpml_reflection_target=0.01`, `cpml_acoustic_sponge_fraction=0`,
-automatic alpha `0.5` Hz (fixed, independent of `simulation_wave_max_freq_hz`),
+automatic alpha `0.5` Hz, independent of `simulation_wave_max_freq_hz`,
 `cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These defaults
 are not a universal stability or accuracy guarantee; slow gravity packets can
 require a lower alpha. Explicit input values always take precedence. To reproduce
 the v13.2 CPML defaults, explicitly set `cpml_kappa_max=1`,
-`cpml_reflection_target=0.001`, and `cpml_acoustic_sponge_fraction=0`.
+`cpml_reflection_target=0.001`, `cpml_acoustic_sponge_fraction=0`, and a
+positive numeric `cpml_alpha_max_hz` equal to half the simulation maximum
+frequency (`2.18` for `4.36` Hz).
 Older defaults used `cpml_kappa_max=10`, `cpml_reflection_target=0.1`, and
-`cpml_acoustic_sponge_fraction=0.3`. The acoustic interface method is unchanged
-by these defaults changes; the automatic alpha changed on 2026-10-24 from
-`simulation_wave_max_freq_hz/2` to a fixed `0.5` Hz because the mesh-tied value
-left the 4 and 8 Hz Izmir layers transparent below 0.2 to 0.4 Hz (see
-`cpml_alpha_max_hz`). Rebuild the executable to adopt
+`cpml_acoustic_sponge_fraction=0.3`. The acoustic interface method is unchanged.
+The fixed automatic alpha replaces the former maximum-frequency-dependent
+value; explicit positive alpha settings retain their existing behavior. Rebuild the executable to adopt
 the new defaults; existing binaries retain their compiled defaults. Keep source and
 receivers outside the absorbing layer, resolve the source bandwidth, and
 compare with a larger domain at identical mesh spacing and timestep. Measure
@@ -3949,8 +3936,8 @@ d_j=-\frac{(n+1)V_p\ln R}{2L}r_j^n,\qquad
 ```
 
 Inactive axes have $d=0$, $\kappa=1$, $\alpha=0$. Positive
-`cpml_alpha_max_hz` gives $\alpha_{max}=2\pi f$; otherwise $f=0.5$ Hz, a fixed
-value independent of `simulation_wave_max_freq_hz`. Optional cross mixing adds a
+`cpml_alpha_max_hz` gives $\alpha_{max}=2\pi f$; otherwise $f=0.5$ Hz,
+independent of `simulation_wave_max_freq_hz`. Optional cross mixing adds a
 fraction of the other two damping profiles and normalized kappa profiles;
 it defaults to zero because this is no longer a separable coordinate mapping.
 $V_p$ is the automatic maximum over PML elements or the positive
@@ -3990,37 +3977,6 @@ Changing `cpml_reflection_target`, PML thickness (`cpml_layers` only when
 thickness is automatic), or `cpml_kappa_max` requires reflection and
 long-time stability checks; increasing kappa does not change this diagnostic
 itself. The diagnostic adds no per-step work.
-
-The same setup pass reports how transparent the clamped layer is at low
-frequency. For a normally incident plane wave of speed $c$ the continuum
-stretch $S=\kappa+d/(\alpha+i\omega)$ attenuates the round trip to the outer
-clamp and back by
-
-```math
-|R|(\omega)=\exp\left(-\frac{2\omega^2}{c}\int_0^L\frac{d(\xi)}{\alpha(\xi)^2+\omega^2}\,d\xi\right),
-```
-
-so $\kappa$ drops out of the amplitude, $R$ enters only through $d_{\max}$,
-and below roughly the floor frequency $f_\alpha\alpha_{\max}/(2\pi)$ the
-stretch is almost real: the layer only stretches coordinates and the clamp
-reflects. With $d_{\max}L$ fixed by $R$, the exponent at a given $\omega$
-scales as $1/\alpha_{\max}^2$, which is why the former rule
-$\alpha_{\max}=\pi f_{\max}$ let the 4 and 8 Hz Izmir layers return 0.37 and
-0.76 of the 0.1 Hz S-wave amplitude ($c=3400$ m/s) while the 1 Hz layer
-returned under 0.01 (local diagnosis, 2026-10-24). The solver prints
-$\alpha_{\max}$ with its origin (automatic or explicit), the cutoff
-`cpml_alpha_floor_fraction*alpha_max/(2 pi)`, and $|R|$ at 0.05, 0.1 and
-0.2 Hz for $c$ equal to the MPI-wide minimum solid PML $V_s$ (most absorbed)
-and to $V_{p,\mathrm{ref}}$ (least absorbed; for this row the exponent is
-independent of $L$ and $V_{p,\mathrm{ref}}$ and depends only on $n$, $R$,
-$\alpha_{\max}$ and the floor). A `CPML WARNING` follows when the
-reference-Vp $|R|(0.1\,\mathrm{Hz})$ exceeds 0.5. With the defaults
-($R=0.01$, $n=2$, floor 0.1, automatic 0.5 Hz) the reference-Vp row reads
-0.32, 0.11 and 0.04. This is a continuum, normal-incidence, unmixed-profile
-estimate: it ignores discretization, oblique incidence, surface waves and
-M-PML mixing, and it says nothing about stability. Only `cpml_alpha_max_hz`
-moves the cutoff. The minimum $V_s$ costs one MPI reduction at setup; there is
-no per-step work.
 
 The profile helper is shared by elastic and acoustic enrollment,
 acoustic–solid interface fluxes and acoustic output reconstruction. Both
