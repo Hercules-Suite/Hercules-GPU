@@ -1888,6 +1888,26 @@ test("provides configuration and reader examples for output files", async () => 
   assert.match(html, /output_displacement_file/);
 });
 
+test("documents plane boundary ownership without moving interpolation points", async () => {
+  const response = await render("/docs/output-files");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /mesh-domain face, edge, or corner/);
+  assert.match(html, /adjacent interior element for ownership/);
+  assert.match(html, /interpolation and metadata retain the requested coordinates/);
+  assert.match(html, /rectangular domains cropped inside the octree root/);
+  assert.match(html, /points outside the mesh bounds are not assigned an element/);
+  assert.match(html, /exactly one owner for every plane point/);
+  assert.match(html, /Missing or duplicate ownership stops the job before time stepping/);
+  assert.match(html, /partially covered planes are not supported/);
+  assert.match(html, /prevents undefined MPI-IO gaps/);
+  assert.match(html, /before any displacement file is created or truncated/);
+  assert.match(html, /outside the mesh bounds/);
+  assert.match(html, /never trimmed automatically/);
+  assert.match(await (await render("/docs/parameters-output")).text(),
+    /setup rejects incomplete or duplicate coverage/);
+});
+
 test("documents plane amplitude diagnostics without equating geometry with CPML membership", async () => {
   const response = await render("/docs/output-files");
   assert.equal(response.status, 200);

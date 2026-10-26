@@ -27539,21 +27539,58 @@ static void source_init(const char* physicsin) {
   }
 }
 
-/**
- * Search a point in the domain of the local mesh.
- *
- *   input: coordinates
- *  output: 0 fail 1 success
- */
+/* Shared ownership coordinates for element lookup and the station rank
+ * prefilter. The physical point is retained separately for interpolation. */
+static int32_t point_lookup_ticks(vector3D_t point, tick_t ticks[3]) {
+  const double ticksize = Global.myMesh->ticksize;
+
+  for (int axis = 0; axis < 3; ++axis) {
+    const tick_t near = Global.myOctree->nearendp[axis];
+    const tick_t far = Global.myOctree->farendp[axis];
+    const double coordinate = point.x[axis];
+
+    /* Check physical bounds before integer conversion: an exterior point
+     * less than one tick away must not be truncated into the domain. */
+    if (!isfinite(coordinate) || coordinate < (double)near * ticksize ||
+        coordinate > (double)far * ticksize) {
+      return 0;
+    }
+
+    ticks[axis] = (tick_t)(coordinate / ticksize);
+    /* Octree children cover half-open intervals. At a cropped outer face,
+     * searching `far` selects a child that was removed during meshing.
+     * Choose the adjacent interior cell for ownership only; callers still
+     * interpolate at the original point, including edges and corners.
+     * The lower clamp also covers division roundoff at a nonzero near end. */
+    if (ticks[axis] < near) ticks[axis] = near;
+    if (ticks[axis] >= far) ticks[axis] = far - 1;
+  }
+  return 1;
+}
+
+/* Exposed for setup-time diagnostics such as the plane ownership check, so
+ * they classify points with exactly the bounds that ownership lookup uses. */
+int32_t point_in_mesh_bounds(vector3D_t point) {
+  tick_t ticks[3];
+  return point_lookup_ticks(point, ticks);
+}
+
+void mesh_domain_bounds(double lower[3], double upper[3]) {
+  const double ticksize = Global.myMesh->ticksize;
+  for (int axis = 0; axis < 3; ++axis) {
+    lower[axis] = (double)Global.myOctree->nearendp[axis] * ticksize;
+    upper[axis] = (double)Global.myOctree->farendp[axis] * ticksize;
+  }
+}
+
+/* Return 1 only if this rank owns the element containing the point. */
 int32_t search_point(vector3D_t point, octant_t** octant) {
-  tick_t xTick, yTick, zTick;
+  tick_t ticks[3];
+  *octant = NULL;
+  if (!point_lookup_ticks(point, ticks)) return 0;
 
-  xTick = point.x[0] / Global.myMesh->ticksize;
-  yTick = point.x[1] / Global.myMesh->ticksize;
-  zTick = point.x[2] / Global.myMesh->ticksize;
-
-  *octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
-                               AGGREGATE_SEARCH);
+  *octant = octor_searchoctant(Global.myOctree, ticks[0], ticks[1], ticks[2],
+                             PIXELLEVEL, AGGREGATE_SEARCH);
 
   if ((*octant == NULL) || ((*octant)->where == REMOTE)) {
     return 0;
@@ -29107,9 +29144,13 @@ static int32_t station_point_in_local_interval(vector3D_t point) {
     return 1;
   }
 
-  stationPoint.x = (tick_t)(point.x[0] / Global.myMesh->ticksize);
-  stationPoint.y = (tick_t)(point.x[1] / Global.myMesh->ticksize);
-  stationPoint.z = (tick_t)(point.x[2] / Global.myMesh->ticksize);
+  /* Use the same boundary ownership as search_point; otherwise the Morton
+   * interval prefilter can discard an outer-face station on its actual owner. */
+  tick_t ticks[3];
+  if (!point_lookup_ticks(point, ticks)) return 0;
+  stationPoint.x = ticks[0];
+  stationPoint.y = ticks[1];
+  stationPoint.z = ticks[2];
 
   if (octor_zcompare(&stationPoint, &intervals[Global.myID]) < 0) {
     return 0;

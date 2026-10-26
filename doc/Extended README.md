@@ -4467,6 +4467,70 @@ sampled XYZ values are buffered; the station mode does not use
 boxes, with distinct output paths and independent sampling rates. The legacy
 three-stage DRM replay workflow remains separate.
 
+## Plane points on domain faces
+
+Plane samples may lie exactly on the mesh's outer faces, edges, and corners,
+including the cropped faces of a rectangular domain. The shared `search_point`
+routine first checks finite physical coordinates against the closed mesh bounds.
+For ownership lookup only, a coordinate at an upper face uses the final interior
+octree tick (`farendp - 1`). The requested physical coordinates remain unchanged
+for Hex8 or VT tetrahedral interpolation and plane metadata. Points beyond the
+mesh bounds are rejected before integer conversion, including exterior points
+less than one tick away; they are not clamped into the model.
+
+Setup requires exactly one owner for every plane point. A collective check of
+the interpolation strips rejects missing or duplicate ownership before time
+stepping, reporting the plane number, both counts, and the first bad zero-based
+`(i,j)` index. A missing point and a duplicate cannot cancel each other as they
+could in a check of only the total point count. Correct the plane extents or
+coordinates; partially covered planes are not supported. The check uses one
+256 KiB temporary count buffer per solver rank, reduced in chunks, with no
+per-step work. It covers MPI-IO, hybrid, legacy, and dedicated-I/O output.
+The check runs before any displacement file is created or truncated, so a
+failed check leaves earlier output in place; with dedicated I/O ranks, those
+ranks wait for the result before opening files. The failure message separates
+unowned points outside the mesh bounds, which mean the `output_planes` row
+extends past the domain, from unowned points inside the bounds or duplicate
+owners, which indicate an element ownership defect, and prints the plane corner
+extents next to the mesh bounds. Planes are never trimmed to the domain
+automatically: the raw output has no header, so readers take the grid
+dimensions from `output_planes`, and a silently reduced grid would misalign
+every reader. Reduce the row's counts or spacing instead.
+This prevents undefined gaps in new MPI-IO output; unowned samples in older
+files remain invalid even when they happen to contain finite values or zeros.
+
+For example, a 100 km north by 81.25 km east domain can include the full
+401 by 326 surface grid at 250 m spacing. Its last eastward column at
+`Y = 81250 m` belongs to the elements immediately west of that face. Older
+builds could lose that column because octree search selected the pruned child
+east of the boundary, even though the full root-square faces worked.
+
+This is setup-time geometry shared by the legacy, hybrid, and MPI-IO plane
+backends. It applies independently of whether the containing element is
+elastic, viscoelastic, nonlinear elastoplastic, acoustic, or poroelastic.
+Interior material-interface ownership and the acoustic–elastic,
+poroelastic–acoustic, and poroelastic–elastic coupling equations are unchanged;
+so are time integration, GPU interpolation kernels, and field exchanges. Other
+callers of `search_point`, including ASCII stations and source placement paths
+using this routine, inherit the same ownership rule. The station Morton-interval
+rank prefilter uses the same lookup ticks so it cannot discard the interior
+owner of an outer-face station. The separate input guards
+for binary stations and structured DRM boxes still require coordinates below
+the upper domain limits.
+
+A host regression using the production lookup and local-coordinate routines on
+synthetic uniform and adaptive meshes reproduced the old 401-point omission
+and restored complete plane ownership. It also checked the old square domain,
+all six faces and corners, rejection of nonfinite/exterior coordinates, affine
+field interpolation for Hex8 and both VT tetrahedral decompositions, and unique
+ownership with simulated rank labels, including the station interval prefilter.
+A CPU-only MPI regression with one and four ranks checks complete coverage,
+empty ranks, missing and duplicate ownership, a hole paired with a duplicate,
+invalid strip entries, and failure with a waiting rank outside the solver
+communicator. These local-only checks do not constitute a full CUDA solver run
+or standalone/coupled physical propagation validation.
+Rebuild the solver and regenerate output to recover previously missing samples.
+
 ## Diagnose large plane displacements
 
 Use `script/read_planes.py` to check a completed displacement file's layout,

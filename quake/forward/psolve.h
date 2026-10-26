@@ -741,7 +741,15 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
  *   input: coordinates
  *  output: 0 fail 1 success
  */
+/* Closed domain faces belong to the adjacent interior element. Only lookup
+ * ticks are adjusted; retain `point` for interpolation. Nonfinite/exterior
+ * points fail, and a remote element is not owned by this rank. */
 int32_t search_point( vector3D_t point, octant_t **octant );
+/* 1 if `point` lies within the closed mesh bounds used for ownership lookup,
+ * 0 if it is nonfinite or exterior. Shared by the plane ownership check. */
+int32_t point_in_mesh_bounds( vector3D_t point );
+/* Physical mesh extent per axis in metres: lower = near end, upper = far end. */
+void mesh_domain_bounds( double lower[3], double upper[3] );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 
 /* Returns 1 iff the current run classifies `edata` as acoustic material
