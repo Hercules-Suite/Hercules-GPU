@@ -3825,6 +3825,15 @@ are rejected before SRFH coordinate records are loaded. This is an optional
 SRFH-only control, not a `parameters.in` key. It does not change point, force,
 base-force, plane or kinked-plane source conventions.
 
+The initialization log must report the requested depth reference. The optional
+reader supplies its own buffer for builds using Hercules' legacy `getline`
+replacement; read failures, including lines that exceed that reader's buffer,
+abort initialization instead of silently selecting `surface`. Host regression
+checks cover both the system reader and the linked legacy replacement. This
+parsing fix precedes coordinate conversion and the existing MPI broadcast; it
+does not change solid source forces, acoustic source support, constitutive laws,
+coupling, or GPU time integration.
+
 Each `coords.in` record remains `longitude latitude depth_m`, with depth
 positive downward in metres. Let $d$ be that depth, $b$ the
 `topographybase_zcoord` and $h$ the local outer-surface elevation from

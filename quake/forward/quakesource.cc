@@ -2660,8 +2660,11 @@ read_planewithkinks (FILE *fp)
 static int source_read_optional_string(FILE *fp, const char *key,
                                        char *value, size_t size)
 {
-  char *line = NULL;
-  size_t capacity = 0;
+  /* util.cc supplies a non-resizing getline replacement on some builds.
+   * It requires a caller-owned buffer; NULL would look like a missing key. */
+  size_t capacity = LINESIZE;
+  char *line = (char *)malloc(capacity);
+  if (line == NULL) return -1;
   int result = 0;
   rewind(fp);
   while (getline(&line, &capacity, fp) >= 0) {
@@ -2677,7 +2680,9 @@ static int source_read_optional_string(FILE *fp, const char *key,
     }
     break;
   }
-  if (ferror(fp)) result = -1;
+  /* The replacement can reject an overlong line without setting ferror.
+   * Only a real EOF may turn an unsuccessful scan into "option omitted". */
+  if (ferror(fp) || (result == 0 && !feof(fp))) result = -1;
   free(line);
   return result;
 }

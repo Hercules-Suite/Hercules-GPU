@@ -2070,7 +2070,7 @@ if __name__ == "__main__":
         ],
         codeLabel: "source.in — retain sea-level depths in coords.in",
         code: "type_of_source = srfh\nsrfh_depth_reference = sea_level\n# coords.in: longitude latitude depth_below_sea_level_m\n# Omit srfh_depth_reference (or set surface) for the existing convention.",
-        note: "The initialization log echoes the selected SRFH reference, sea-level datum Z and existing source surface shift. The default does not require changes to existing input files.",
+        note: "The initialization log echoes the selected SRFH reference, sea-level datum Z and existing source surface shift; verify that the reference matches source.in. The reader supports Hercules' legacy getline replacement and rejects read failures instead of silently using the default. The default does not require changes to existing input files.",
       },
       {
         id: "srfh-files",

@@ -1805,6 +1805,8 @@ test("documents and audits the SRFH source-depth reference parser", async () => 
   assert.match(html, /before the corrected coordinates are broadcast/);
   assert.match(html, /does not add acoustic pressure-source support/);
   assert.match(html, /coupled CUDA\/MPI propagation still requires target-system validation/);
+  assert.match(html, /verify that the reference matches source\.in/);
+  assert.match(html, /rejects read failures instead of silently using the default/);
 
   const reference = readFileSync(new URL("../app/docs/parameter-reference.ts", import.meta.url), "utf8");
   const definition = reference.match(/export const srfhDepthReferenceParameter[\s\S]*?\n};/)?.[0];
