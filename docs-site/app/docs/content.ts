@@ -2182,6 +2182,7 @@ if __name__ == "__main__":
         title: "Configure plane output",
         paragraphs: [
           "Each output_planes row defines a regular grid as latitude, longitude, depth, spacing along strike, number along strike, spacing down dip, number down dip, strike, and dip. The origin is the first grid point.",
+          "Plane points exactly on a mesh-domain face, edge, or corner use the adjacent interior element for ownership. Only the lookup ticks move inward; interpolation and metadata retain the requested coordinates. This also applies to rectangular domains cropped inside the octree root. Nonfinite points and points outside the mesh bounds are not assigned an element.",
           "Every backend preserves the planedisplacements.N raw binary layout: float64 x, y, z displacement triples for all grid points at one output time, followed by the next output time.",
         ],
         codeLabel: "parameters.in — one horizontal plane",

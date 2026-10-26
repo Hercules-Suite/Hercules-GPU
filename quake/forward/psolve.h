@@ -741,6 +741,9 @@ void mu_and_lambda(double *theMu, double *theLambda, edata_t *edata, int32_t ein
  *   input: coordinates
  *  output: 0 fail 1 success
  */
+/* Closed domain faces belong to the adjacent interior element. Only lookup
+ * ticks are adjusted; retain `point` for interpolation. Nonfinite/exterior
+ * points fail, and a remote element is not owned by this rank. */
 int32_t search_point( vector3D_t point, octant_t **octant );
 int32_t solver_get_octant_material( octant_t *octant, edata_t *material );
 

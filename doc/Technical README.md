@@ -480,6 +480,10 @@ adjacent active soil shares their nodes. Skeleton motion is unchanged.
 | `output_planes` | N rows of `lat lon depth d_strike n_strike d_dip n_dip strike dip`; degrees and m, integer counts; no default | Conditional; Table: N rows × 9 values |
 | `reconstruct_acoustic_plane_displacements` | `no` (default), `yes` | Optional; Yes/no |
 
+Plane points exactly on mesh-domain faces, edges, and corners use the adjacent
+interior element without moving their interpolation coordinates. See
+[plane boundary ownership](Extended%20README.md#plane-points-on-domain-faces).
+
 Acoustic station/plane output inside CPML includes the containing element's
 gradient stretch and point memory; use interior samples for physical motion.
 Acoustic reconstruction uses physical pressure in both formulations; for

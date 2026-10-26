@@ -27546,14 +27546,34 @@ static void source_init(const char* physicsin) {
  *  output: 0 fail 1 success
  */
 int32_t search_point(vector3D_t point, octant_t** octant) {
-  tick_t xTick, yTick, zTick;
+  tick_t ticks[3];
+  const double ticksize = Global.myMesh->ticksize;
+  *octant = NULL;
 
-  xTick = point.x[0] / Global.myMesh->ticksize;
-  yTick = point.x[1] / Global.myMesh->ticksize;
-  zTick = point.x[2] / Global.myMesh->ticksize;
+  for (int axis = 0; axis < 3; ++axis) {
+    const tick_t near = Global.myOctree->nearendp[axis];
+    const tick_t far = Global.myOctree->farendp[axis];
+    const double coordinate = point.x[axis];
 
-  *octant = octor_searchoctant(Global.myOctree, xTick, yTick, zTick, PIXELLEVEL,
-                               AGGREGATE_SEARCH);
+    /* Check physical bounds before integer conversion: an exterior point
+     * less than one tick away must not be truncated into the domain. */
+    if (!isfinite(coordinate) || coordinate < (double)near * ticksize ||
+        coordinate > (double)far * ticksize) {
+      return 0;
+    }
+
+    ticks[axis] = (tick_t)(coordinate / ticksize);
+    /* Octree children cover half-open intervals. At a cropped outer face,
+     * searching `far` selects a child that was removed during meshing.
+     * Choose the adjacent interior cell for ownership only; callers still
+     * interpolate at the original point, including edges and corners.
+     * The lower clamp also covers division roundoff at a nonzero near end. */
+    if (ticks[axis] < near) ticks[axis] = near;
+    if (ticks[axis] >= far) ticks[axis] = far - 1;
+  }
+
+  *octant = octor_searchoctant(Global.myOctree, ticks[0], ticks[1], ticks[2],
+                             PIXELLEVEL, AGGREGATE_SEARCH);
 
   if ((*octant == NULL) || ((*octant)->where == REMOTE)) {
     return 0;
