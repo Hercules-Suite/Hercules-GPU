@@ -1775,7 +1775,7 @@ test("documents every supported source model and its auxiliary inputs", async ()
     "extended_cell_size_along_strike_m", "extended_lat_deg",
     "extended_long_deg", "extended_strike_deg", "extended_dip_deg",
     "extended_minimum_edge_m", "extended_number_of_kinks",
-    "extended_kinks", "number_of_point_sources",
+    "extended_kinks", "number_of_point_sources", "srfh_depth_reference",
   ];
   for (const key of sourceKeys) assert.match(html, new RegExp(key));
   assert.match(html, /forcefunction\.in/);
@@ -1791,6 +1791,48 @@ test("documents every supported source model and its auxiliary inputs", async ()
   assert.match(html, /extended_number_of_kinks/);
   assert.match(html, /number_of_point_sources/);
   assert.match(html, /local solver X\/Y and Z positive downward/);
+});
+
+test("documents and audits the SRFH source-depth reference parser", async () => {
+  const html = await (await render("/docs/source-models")).text();
+  assert.match(html, /id="srfh-depth-reference"/);
+  assert.match(html, /surface \(default\)/);
+  assert.match(html, /sea_level/);
+  assert.match(html, /solver Z=d\+b-h/);
+  assert.match(html, /solver Z=d\+b/);
+  assert.match(html, /3D_velocity_model_depth_reference controls only material sampling/);
+  assert.match(html, /do not reuse depths that already include terrain elevation/);
+  assert.match(html, /before the corrected coordinates are broadcast/);
+  assert.match(html, /does not add acoustic pressure-source support/);
+  assert.match(html, /coupled CUDA\/MPI propagation still requires target-system validation/);
+  assert.match(html, /verify that the reference matches source\.in/);
+  assert.match(html, /rejects read failures instead of silently using the default/);
+
+  const reference = readFileSync(new URL("../app/docs/parameter-reference.ts", import.meta.url), "utf8");
+  const definition = reference.match(/export const srfhDepthReferenceParameter[\s\S]*?\n};/)?.[0];
+  assert.ok(definition);
+  assert.match(definition, /name: "srfh_depth_reference"/);
+  assert.match(definition, /requirement: "Optional"/);
+  assert.match(definition, /values: "surface \(default\) \| sea_level"/);
+  assert.match(definition, /In source\.in for type_of_source=srfh only/);
+
+  const sourcePath = new URL("../../quake/forward/quakesource.cc", import.meta.url);
+  if (!existsSync(sourcePath)) return;
+  const source = readFileSync(sourcePath, "utf8");
+  const reader = source.slice(source.indexOf("read_srfh_source ("), source.indexOf("search_nodes_octant:"));
+  assert.match(reader, /char depth_reference\[32\] = "surface"/);
+  assert.match(reader, /source_read_optional_string\(fp, "srfh_depth_reference"/);
+  for (const value of ["surface", "sea_level"]) {
+    assert.ok(reader.includes(`strcasecmp(depth_reference, "${value}")`));
+  }
+  assert.match(reader, /srfh_depth_reference must be surface or sea_level/);
+  assert.match(reader, /if \(sea_level_depth\) \{\s*theSourceDepthArray\[iSrc\] \+= topography_base;/);
+  assert.match(reader, /theSourceDepthArray\[iSrc\] \+= surfaceShift/);
+  assert.match(reader, /theSourceDepthArray\[iSrc\] \+= point_elevation/);
+  assert.match(source, /MPI_Bcast\( theSourceDepthArray,\s*count, MPI_DOUBLE, 0, comm_solver \)/);
+  const optionalParser = source.slice(source.indexOf("static int source_read_optional_string("), source.indexOf("read_srfh_source ("));
+  assert.match(optionalParser, /strcmp\(name, key\) != 0/);
+  assert.match(optionalParser, /strlen\(token\) >= size/);
 });
 
 test("provides configuration and reader examples for output files", async () => {

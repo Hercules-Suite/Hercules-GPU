@@ -24,6 +24,16 @@ type ParameterPage = {
   sections: ParameterSection[];
 };
 
+// Source-file controls are rendered on Source models, outside the
+// parameters.in catalog and its parser-key count.
+export const srfhDepthReferenceParameter: ParameterDefinition = {
+  name: "srfh_depth_reference",
+  requirement: "Optional",
+  type: "String (case-insensitive)",
+  values: "surface (default) | sea_level",
+  description: "In source.in for type_of_source=srfh only. Interpret coords.in depths in metres positive down: surface measures below the local outer surface; sea_level measures below the zero-elevation datum and adds topographybase_zcoord. Both retain any existing building surface shift; without topography they use the same flat datum. Independent of 3D_velocity_model_depth_reference and seabed depth. Other values are rejected.",
+};
+
 const p = (
   name: string,
   requirement: ParameterRequirement,
