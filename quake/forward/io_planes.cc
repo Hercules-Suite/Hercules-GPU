@@ -185,9 +185,45 @@ static void planes_mpi_check(int errorCode, const char* operation) {
     exit(1);
 }
 
+/* Physical coordinates of plane point `point` (row-major i*ndip + j), as
+ * used for strip construction and metadata. */
+static vector3D_t planes_point_coordinates(const plane_t* plane, int64_t point) {
+    const int i = (int)(point / plane->numberofstepsdowndip);
+    const int j = (int)(point % plane->numberofstepsdowndip);
+    vector3D_t local = {{i * plane->stepalongstrike, j * plane->stepdowndip, 0.0}};
+    vector3D_t xyz = compute_global_coords(plane->origincoords, local,
+                                           plane->dip, 0, plane->strike);
+    if (get_thebase_topo() != 0.0) {
+        xyz.x[2] += point_elevation(xyz.x[0], xyz.x[1]);
+    }
+    return xyz;
+}
+
+/* Axis-aligned extent of the plane's four corner points. */
+static void planes_corner_extents(const plane_t* plane, double lower[3],
+                                  double upper[3]) {
+    const int64_t ndip = plane->numberofstepsdowndip;
+    const int64_t nstrike = plane->numberofstepsalongstrike;
+    const int64_t corners[4] = {0, ndip - 1, (nstrike - 1) * ndip,
+                                nstrike * ndip - 1};
+    for (int c = 0; c < 4; ++c) {
+        const vector3D_t xyz = planes_point_coordinates(plane, corners[c]);
+        for (int axis = 0; axis < 3; ++axis) {
+            if ((c == 0) || (xyz.x[axis] < lower[axis])) lower[axis] = xyz.x[axis];
+            if ((c == 0) || (xyz.x[axis] > upper[axis])) upper[axis] = xyz.x[axis];
+        }
+    }
+}
+
 /* Check the union of interpolation strips, not just their total size: a hole
  * and a duplicate can cancel in a global count. Chunking bounds temporary
- * memory independently of plane size. Solver ranks only; no per-step work. */
+ * memory independently of plane size. Solver ranks only; no per-step work.
+ * Each setup path calls this before any displacement file is created or
+ * truncated, so a failed check leaves earlier output untouched. Unowned points
+ * are classified against the mesh bounds so the message separates a plane that
+ * extends past the domain from an element ownership defect. Planes are never
+ * trimmed automatically: the raw output has no header, so readers take the
+ * grid dimensions from output_planes. */
 static void planes_validate_ownership(int32_t myID, int theNumberOfPlanes) {
     const int chunkCapacity = 65536;
     if (theNumberOfPlanes <= 0) return;
@@ -202,8 +238,10 @@ static void planes_validate_ownership(int32_t myID, int theNumberOfPlanes) {
         const plane_t* plane = &thePlanes[p];
         const int64_t points = (int64_t)plane->numberofstepsalongstrike *
                                plane->numberofstepsdowndip;
-        int64_t missing = 0, duplicate = 0, firstBad = -1;
+        int64_t missing = 0, exterior = 0, duplicate = 0, firstBad = -1;
         int firstOwners = 0;
+
+        if (points <= 0) continue;
 
         for (int64_t start = 0; start < points; start += chunkCapacity) {
             const int count = (points - start < chunkCapacity)
@@ -224,26 +262,51 @@ static void planes_validate_ownership(int32_t myID, int theNumberOfPlanes) {
                              "plane ownership check");
             for (int i = 0; i < count; ++i) {
                 if (owners[i] == 1) continue;
-                if (owners[i] == 0) ++missing;
-                else ++duplicate;
+                const int64_t point = start + i;
+                if (owners[i] == 0) {
+                    ++missing;
+                    /* Only the reporting rank classifies; the abort decision
+                     * below depends on the reduced counts alone and is
+                     * identical on every rank. */
+                    if ((myID == 0) &&
+                        !point_in_mesh_bounds(planes_point_coordinates(plane, point))) {
+                        ++exterior;
+                    }
+                } else {
+                    ++duplicate;
+                }
                 if (firstBad < 0) {
-                    firstBad = start + i;
+                    firstBad = point;
                     firstOwners = owners[i];
                 }
             }
         }
         if (firstBad >= 0) {
             if (myID == 0) {
+                double meshLower[3], meshUpper[3], planeLower[3], planeUpper[3];
+                mesh_domain_bounds(meshLower, meshUpper);
+                planes_corner_extents(plane, planeLower, planeUpper);
                 fprintf(stderr,
                         "Plane %d ownership check failed: %" PRId64
-                        " unowned, %" PRId64 " multiply owned points. "
+                        " unowned points (%" PRId64 " outside the mesh bounds, %" PRId64
+                        " inside), %" PRId64 " multiply owned points. "
                         "First bad point (i=%" PRId64 ", j=%" PRId64
                         ") has %d owners (indices are zero-based). "
-                        "Every plane point must have exactly one owner; "
-                        "check output_planes extents and coordinates.\n",
-                        p, missing, duplicate,
+                        "Plane corners span X [%.3f, %.3f] m, Y [%.3f, %.3f] m, "
+                        "Z [%.3f, %.3f] m; mesh bounds are X [%.3f, %.3f] m, "
+                        "Y [%.3f, %.3f] m, Z [%.3f, %.3f] m. "
+                        "Unowned points outside the bounds mean this output_planes "
+                        "row extends past the domain: reduce its counts or spacing, "
+                        "because planes are never trimmed automatically. "
+                        "Unowned points inside the bounds or multiply owned points "
+                        "indicate an element ownership defect.\n",
+                        p, missing, exterior, missing - exterior, duplicate,
                         firstBad / plane->numberofstepsdowndip,
-                        firstBad % plane->numberofstepsdowndip, firstOwners);
+                        firstBad % plane->numberofstepsdowndip, firstOwners,
+                        planeLower[0], planeUpper[0], planeLower[1], planeUpper[1],
+                        planeLower[2], planeUpper[2],
+                        meshLower[0], meshUpper[0], meshLower[1], meshUpper[1],
+                        meshLower[2], meshUpper[2]);
                 fflush(stderr);
             }
             /* Finish the diagnostic before another rank aborts the job,
@@ -1677,7 +1740,8 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
         theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
         reconstructAcousticPlaneDisplacements);
 
-	planes_validate_ownership(myID, theNumberOfPlanes);
+	/* Ownership validation runs inside each setup path, before any
+	 * displacement file is created or truncated. */
 	if (!g_planeGpuOutputEnabled) {
 		planes_collect_displacement_nodes(theNumberOfPlanes);
 	}
@@ -1887,7 +1951,6 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 		found = 1;
 		for ( iPlane = 0; iPlane < theNumberOfPlanes; iPlane++ ) {
 		    int fret0, fret1;
-		    FILE* fp0;
 		    // FILE* fp1;
 		    fret0 = fscanf( fp_planes," %lf %lf %lf",
 				    &thePlanes[iPlane].origincoords.x[0],
@@ -1935,18 +1998,10 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
 				     planes_input_file);
                     }
 
-                    /* The scalable path opens these files collectively after
-                     * strip ownership is known. The legacy path retains the
-                     * rank-0 stdio writer and its byte-for-byte file layout. */
-                    if (!g_planeGpuMpiioEnabled) {
-                        sprintf(planedisplacementsout,
-                                "%s/planedisplacements.%d", thePlaneDirOut,
-                                iPlane);
-                        fp0 = hu_fopen(planedisplacementsout, "w");
-                        thePlanes[iPlane].fpoutputfile = fp0;
-                    } else {
-                        thePlanes[iPlane].fpoutputfile = NULL;
-                    }
+                    /* Displacement files are created only after the
+                     * ownership check below passes, so a failed check
+                     * cannot truncate earlier output. */
+                    thePlanes[iPlane].fpoutputfile = NULL;
 
                     // NOTE: Commented out by Clifford: Since planecoords files are not implemented, the files should not be created in the first place
 					// sprintf (planecoordsfile, "%s/planecoords.%d",
@@ -1989,6 +2044,22 @@ void Old_planes_setup(int32_t myID, int32_t *thePlanePrintRate, const char *theP
     }
 
     Old_output_planes_construct_strips(myID, theNumberOfPlanes);
+
+    /* Validate ownership before any displacement file is created or
+     * truncated, so a failed check leaves earlier output in place. */
+    planes_validate_ownership(myID, theNumberOfPlanes);
+
+    if ((myID == 0) && !g_planeGpuMpiioEnabled) {
+        /* The legacy and GPU-root paths retain the rank-0 stdio writer and
+         * its byte-for-byte file layout; the scalable path opens its files
+         * collectively in planes_mpiio_setup. */
+        for (iPlane = 0; iPlane < theNumberOfPlanes; iPlane++) {
+            sprintf(planedisplacementsout, "%s/planedisplacements.%d",
+                    thePlaneDirOut, iPlane);
+            thePlanes[iPlane].fpoutputfile =
+                hu_fopen(planedisplacementsout, "w");
+        }
+    }
 
     if (g_planeGpuMpiioEnabled) {
         planes_mpiio_setup(myID, theNumberOfPlanes, thePlaneDirOut);
@@ -2484,6 +2555,15 @@ void New_planes_setup(int32_t PENum, int32_t *thePlanePrintRate, char *thePlaneD
 
     New_output_planes_construct_strips(PENum, theNumberOfPlanes);
 
+    /* Validate ownership before the I/O ranks create any displacement file.
+     * They wait in planes_IO_PES_main for this flag; a failed check aborts
+     * the job before it is sent, so no earlier output is truncated. */
+    planes_validate_ownership(PENum, theNumberOfPlanes);
+    {
+        int coverageOk = 1;
+        MPI_Bcast(&coverageOk, 1, MPI_INT, 0, comm_IO);
+    }
+
     print_planeinfo(PENum, theNumberOfPlanes);
 
     return;
@@ -2856,6 +2936,16 @@ void planes_IO_PES_main(int32_t PEnum){
     /* Find size of largest strip */
     MPI_Bcast( &planes_GlobalLargestStripCount, 1, MPI_INT, 0, comm_IO );
 	MPI_Bcast( &planes_GlobalLargestPlanePayloadDoubles, 1, MPI_INT, 0, comm_IO );
+
+	/* Solver ranks validate plane ownership before any file is created. A
+	 * failed check aborts the job; a passed one releases this flag. */
+	{
+		int coverageOk = 0;
+		MPI_Bcast( &coverageOk, 1, MPI_INT, 0, comm_IO );
+		if (!coverageOk) {
+			return;
+		}
+	}
 
 	/* Idle IO pool PEs can leave, don't use collectives past here! */
 	MPI_Comm_size(comm_IO, &comm_size);

@@ -27568,6 +27568,21 @@ static int32_t point_lookup_ticks(vector3D_t point, tick_t ticks[3]) {
   return 1;
 }
 
+/* Exposed for setup-time diagnostics such as the plane ownership check, so
+ * they classify points with exactly the bounds that ownership lookup uses. */
+int32_t point_in_mesh_bounds(vector3D_t point) {
+  tick_t ticks[3];
+  return point_lookup_ticks(point, ticks);
+}
+
+void mesh_domain_bounds(double lower[3], double upper[3]) {
+  const double ticksize = Global.myMesh->ticksize;
+  for (int axis = 0; axis < 3; ++axis) {
+    lower[axis] = (double)Global.myOctree->nearendp[axis] * ticksize;
+    upper[axis] = (double)Global.myOctree->farendp[axis] * ticksize;
+  }
+}
+
 /* Return 1 only if this rank owns the element containing the point. */
 int32_t search_point(vector3D_t point, octant_t** octant) {
   tick_t ticks[3];

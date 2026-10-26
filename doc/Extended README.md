@@ -4486,7 +4486,16 @@ could in a check of only the total point count. Correct the plane extents or
 coordinates; partially covered planes are not supported. The check uses one
 256 KiB temporary count buffer per solver rank, reduced in chunks, with no
 per-step work. It covers MPI-IO, hybrid, legacy, and dedicated-I/O output.
-Output files may already have been truncated during setup when the check fails.
+The check runs before any displacement file is created or truncated, so a
+failed check leaves earlier output in place; with dedicated I/O ranks, those
+ranks wait for the result before opening files. The failure message separates
+unowned points outside the mesh bounds, which mean the `output_planes` row
+extends past the domain, from unowned points inside the bounds or duplicate
+owners, which indicate an element ownership defect, and prints the plane corner
+extents next to the mesh bounds. Planes are never trimmed to the domain
+automatically: the raw output has no header, so readers take the grid
+dimensions from `output_planes`, and a silently reduced grid would misalign
+every reader. Reduce the row's counts or spacing instead.
 This prevents undefined gaps in new MPI-IO output; unowned samples in older
 files remain invalid even when they happen to contain finite values or zeros.
 

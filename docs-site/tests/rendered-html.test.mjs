@@ -1901,6 +1901,9 @@ test("documents plane boundary ownership without moving interpolation points", a
   assert.match(html, /Missing or duplicate ownership stops the job before time stepping/);
   assert.match(html, /partially covered planes are not supported/);
   assert.match(html, /prevents undefined MPI-IO gaps/);
+  assert.match(html, /before any displacement file is created or truncated/);
+  assert.match(html, /outside the mesh bounds/);
+  assert.match(html, /never trimmed automatically/);
   assert.match(await (await render("/docs/parameters-output")).text(),
     /setup rejects incomplete or duplicate coverage/);
 });
