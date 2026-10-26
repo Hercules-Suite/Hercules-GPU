@@ -185,6 +185,78 @@ static void planes_mpi_check(int errorCode, const char* operation) {
     exit(1);
 }
 
+/* Check the union of interpolation strips, not just their total size: a hole
+ * and a duplicate can cancel in a global count. Chunking bounds temporary
+ * memory independently of plane size. Solver ranks only; no per-step work. */
+static void planes_validate_ownership(int32_t myID, int theNumberOfPlanes) {
+    const int chunkCapacity = 65536;
+    if (theNumberOfPlanes <= 0) return;
+
+    int* owners = (int*)malloc((size_t)chunkCapacity * sizeof(int));
+    if (owners == NULL) {
+        solver_abort("planes_validate_ownership", NULL,
+                     "Unable to allocate plane ownership check buffer");
+    }
+
+    for (int p = 0; p < theNumberOfPlanes; ++p) {
+        const plane_t* plane = &thePlanes[p];
+        const int64_t points = (int64_t)plane->numberofstepsalongstrike *
+                               plane->numberofstepsdowndip;
+        int64_t missing = 0, duplicate = 0, firstBad = -1;
+        int firstOwners = 0;
+
+        for (int64_t start = 0; start < points; start += chunkCapacity) {
+            const int count = (points - start < chunkCapacity)
+                ? (int)(points - start) : chunkCapacity;
+            memset(owners, 0, (size_t)count * sizeof(int));
+            for (int s = 0; s < plane->numberofstripsthisplane; ++s) {
+                const int64_t lo = plane->stripstart[s] > start
+                    ? plane->stripstart[s] : start;
+                const int64_t end = (int64_t)plane->stripend[s] + 1;
+                const int64_t hi = end < start + count ? end : start + count;
+                for (int64_t point = lo; point < hi; ++point) {
+                    if (plane->strip[s][point - plane->stripstart[s]].point_is_valid)
+                        ++owners[point - start];
+                }
+            }
+            planes_mpi_check(MPI_Allreduce(MPI_IN_PLACE, owners, count,
+                                            MPI_INT, MPI_SUM, comm_solver),
+                             "plane ownership check");
+            for (int i = 0; i < count; ++i) {
+                if (owners[i] == 1) continue;
+                if (owners[i] == 0) ++missing;
+                else ++duplicate;
+                if (firstBad < 0) {
+                    firstBad = start + i;
+                    firstOwners = owners[i];
+                }
+            }
+        }
+        if (firstBad >= 0) {
+            if (myID == 0) {
+                fprintf(stderr,
+                        "Plane %d ownership check failed: %" PRId64
+                        " unowned, %" PRId64 " multiply owned points. "
+                        "First bad point (i=%" PRId64 ", j=%" PRId64
+                        ") has %d owners (indices are zero-based). "
+                        "Every plane point must have exactly one owner; "
+                        "check output_planes extents and coordinates.\n",
+                        p, missing, duplicate,
+                        firstBad / plane->numberofstepsdowndip,
+                        firstBad % plane->numberofstepsdowndip, firstOwners);
+                fflush(stderr);
+            }
+            /* Finish the diagnostic before another rank aborts the job,
+             * including dedicated I/O ranks waiting outside comm_solver. */
+            MPI_Barrier(comm_solver);
+            free(owners);
+            MPI_Abort(MPI_COMM_WORLD, ERROR);
+            exit(1);
+        }
+    }
+    free(owners);
+}
+
 static int32_t planes_mpiio_batch_capacity(int32_t myID) {
     int32_t capacity = 64;
 
@@ -1605,6 +1677,7 @@ void planes_setup(int32_t myID, int32_t *thePlanePrintRate, char *thePlaneDirOut
         theDomainX, theDomainY, theDomainZ, planes_input_file, utmZone,
         reconstructAcousticPlaneDisplacements);
 
+	planes_validate_ownership(myID, theNumberOfPlanes);
 	if (!g_planeGpuOutputEnabled) {
 		planes_collect_displacement_nodes(theNumberOfPlanes);
 	}

@@ -481,7 +481,8 @@ adjacent active soil shares their nodes. Skeleton motion is unchanged.
 | `reconstruct_acoustic_plane_displacements` | `no` (default), `yes` | Optional; Yes/no |
 
 Plane points exactly on mesh-domain faces, edges, and corners use the adjacent
-interior element without moving their interpolation coordinates. See
+interior element without moving their interpolation coordinates. Setup rejects
+any plane point without exactly one owner, for every output backend. See
 [plane boundary ownership](Extended%20README.md#plane-points-on-domain-faces).
 
 Acoustic station/plane output inside CPML includes the containing element's

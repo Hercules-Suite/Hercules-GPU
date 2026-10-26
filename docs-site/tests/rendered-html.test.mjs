@@ -1897,6 +1897,12 @@ test("documents plane boundary ownership without moving interpolation points", a
   assert.match(html, /interpolation and metadata retain the requested coordinates/);
   assert.match(html, /rectangular domains cropped inside the octree root/);
   assert.match(html, /points outside the mesh bounds are not assigned an element/);
+  assert.match(html, /exactly one owner for every plane point/);
+  assert.match(html, /Missing or duplicate ownership stops the job before time stepping/);
+  assert.match(html, /partially covered planes are not supported/);
+  assert.match(html, /prevents undefined MPI-IO gaps/);
+  assert.match(await (await render("/docs/parameters-output")).text(),
+    /setup rejects incomplete or duplicate coverage/);
 });
 
 test("documents plane amplitude diagnostics without equating geometry with CPML membership", async () => {

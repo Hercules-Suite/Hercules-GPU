@@ -2183,6 +2183,7 @@ if __name__ == "__main__":
         paragraphs: [
           "Each output_planes row defines a regular grid as latitude, longitude, depth, spacing along strike, number along strike, spacing down dip, number down dip, strike, and dip. The origin is the first grid point.",
           "Plane points exactly on a mesh-domain face, edge, or corner use the adjacent interior element for ownership. Only the lookup ticks move inward; interpolation and metadata retain the requested coordinates. This also applies to rectangular domains cropped inside the octree root. Nonfinite points and points outside the mesh bounds are not assigned an element.",
+          "Setup requires exactly one owner for every plane point. Missing or duplicate ownership stops the job before time stepping and reports the plane number, counts, and first bad zero-based (i,j) index. Check the plane extents and coordinates; partially covered planes are not supported. The check applies to every output backend, including dedicated I/O ranks, and adds no per-step work. It prevents undefined MPI-IO gaps; older output with missing ownership must still be treated as invalid.",
           "Every backend preserves the planedisplacements.N raw binary layout: float64 x, y, z displacement triples for all grid points at one output time, followed by the next output time.",
         ],
         codeLabel: "parameters.in — one horizontal plane",

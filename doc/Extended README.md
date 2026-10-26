@@ -4478,6 +4478,18 @@ for Hex8 or VT tetrahedral interpolation and plane metadata. Points beyond the
 mesh bounds are rejected before integer conversion, including exterior points
 less than one tick away; they are not clamped into the model.
 
+Setup requires exactly one owner for every plane point. A collective check of
+the interpolation strips rejects missing or duplicate ownership before time
+stepping, reporting the plane number, both counts, and the first bad zero-based
+`(i,j)` index. A missing point and a duplicate cannot cancel each other as they
+could in a check of only the total point count. Correct the plane extents or
+coordinates; partially covered planes are not supported. The check uses one
+256 KiB temporary count buffer per solver rank, reduced in chunks, with no
+per-step work. It covers MPI-IO, hybrid, legacy, and dedicated-I/O output.
+Output files may already have been truncated during setup when the check fails.
+This prevents undefined gaps in new MPI-IO output; unowned samples in older
+files remain invalid even when they happen to contain finite values or zeros.
+
 For example, a 100 km north by 81.25 km east domain can include the full
 401 by 326 surface grid at 250 m spacing. Its last eastward column at
 `Y = 81250 m` belongs to the elements immediately west of that face. Older
@@ -4491,7 +4503,9 @@ Interior material-interface ownership and the acoustic–elastic,
 poroelastic–acoustic, and poroelastic–elastic coupling equations are unchanged;
 so are time integration, GPU interpolation kernels, and field exchanges. Other
 callers of `search_point`, including ASCII stations and source placement paths
-using this routine, inherit the same ownership rule. The separate input guards
+using this routine, inherit the same ownership rule. The station Morton-interval
+rank prefilter uses the same lookup ticks so it cannot discard the interior
+owner of an outer-face station. The separate input guards
 for binary stations and structured DRM boxes still require coordinates below
 the upper domain limits.
 
@@ -4500,8 +4514,12 @@ synthetic uniform and adaptive meshes reproduced the old 401-point omission
 and restored complete plane ownership. It also checked the old square domain,
 all six faces and corners, rejection of nonfinite/exterior coordinates, affine
 field interpolation for Hex8 and both VT tetrahedral decompositions, and unique
-ownership with simulated rank labels. These local-only checks do not constitute
-a full CUDA/MPI run or standalone/coupled physical propagation validation.
+ownership with simulated rank labels, including the station interval prefilter.
+A CPU-only MPI regression with one and four ranks checks complete coverage,
+empty ranks, missing and duplicate ownership, a hole paired with a duplicate,
+invalid strip entries, and failure with a waiting rank outside the solver
+communicator. These local-only checks do not constitute a full CUDA solver run
+or standalone/coupled physical propagation validation.
 Rebuild the solver and regenerate output to recover previously missing samples.
 
 ## Diagnose large plane displacements
