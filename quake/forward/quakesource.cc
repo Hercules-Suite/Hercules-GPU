@@ -2655,6 +2655,33 @@ read_planewithkinks (FILE *fp)
 
 
 
+/* Bounded optional string reader with the same leading-whitespace and exact
+ * key matching as parsetext. Leave the caller's default intact if omitted. */
+static int source_read_optional_string(FILE *fp, const char *key,
+                                       char *value, size_t size)
+{
+  char *line = NULL;
+  size_t capacity = 0;
+  int result = 0;
+  rewind(fp);
+  while (getline(&line, &capacity, fp) >= 0) {
+    char *state;
+    char *name = strtok_r(line, " =\t\r\n", &state);
+    if (name == NULL || strcmp(name, key) != 0) continue;
+    char *token = strtok_r(NULL, " =\t\r\n", &state);
+    if (token == NULL || strlen(token) >= size) {
+      result = -1;
+    } else {
+      strcpy(value, token);
+      result = 1;
+    }
+    break;
+  }
+  if (ferror(fp)) result = -1;
+  free(line);
+  return result;
+}
+
 /**
  *  read_srfh_source: read all the parameters fot the standard
  *                    rupture format hercules version.A matlab
@@ -2679,6 +2706,23 @@ read_srfh_source ( FILE *fp, FILE *fpcoords, FILE *fparea, FILE *fpstrike,
 {
   int32_t iSrc;
   int iTime;
+
+  /* This is a source-coordinate convention, independent of the material
+   * model's depth reference. Only rank 0 reads it; the converted solver-Z
+   * coordinates are distributed by broadcast_srfh_parameters(). */
+  char depth_reference[32] = "surface";
+  if (source_read_optional_string(fp, "srfh_depth_reference",
+                                  depth_reference,
+                                  sizeof(depth_reference)) < 0) {
+    fprintf(stderr, "Cannot read srfh_depth_reference from source.in\n");
+    return -1;
+  }
+  const int sea_level_depth = strcasecmp(depth_reference, "sea_level") == 0;
+  if (!sea_level_depth && strcasecmp(depth_reference, "surface") != 0) {
+    fprintf(stderr, "srfh_depth_reference must be surface or sea_level\n");
+    return -1;
+  }
+  const double topography_base = get_thebase_topo();
 
   if ( (parsetext(fp, "number_of_point_sources", 'i', &theNumberOfPointSources) != 0) ){
     fprintf(stderr, "Cannot query number of point source\n");
@@ -2707,6 +2751,11 @@ read_srfh_source ( FILE *fp, FILE *fpcoords, FILE *fparea, FILE *fpstrike,
     ABORT_PROGRAM ("Error source srfh matrices: read_srfh_source");
   }
 
+  fprintf(stdout, "\nSRFH depth reference: %s (coords.in, metres positive down; "
+          "sea-level datum Z=%g m; source surface shift=%g m)\n",
+          sea_level_depth ? "sea_level" : "surface", topography_base,
+          surfaceShift);
+
   /* read fault points description */
   for ( iSrc = 0; iSrc < theNumberOfPointSources; iSrc++ ){
     fscanf(fpcoords," %lf %lf %lf ", &(theSourceLonArray[iSrc]),
@@ -2724,16 +2773,21 @@ read_srfh_source ( FILE *fp, FILE *fpcoords, FILE *fparea, FILE *fpstrike,
     theSourceDepthArray[iSrc] += surfaceShift;
     theSourceTinitArray[iSrc] += globalDelayT;
 
-    /* Dorian: Source location wrt the free surface, i.e. hypocentral distance */
-    /* Dorian: keeping the z coordinate unmodified  */
-    if ( get_thebase_topo() != 0.0 ) {
-
-    	vector3D_t coords_aux = compute_domain_coords_linearinterp(
+    /* Preserve the historical addition order in surface mode, including
+     * the caller's building shift. With no topography both modes retain
+     * that same flat-datum behavior. Sea-level input needs no terrain or
+     * seabed correction: solver Z = input depth + topography base. */
+    if (topography_base != 0.0) {
+      if (sea_level_depth) {
+        theSourceDepthArray[iSrc] += topography_base;
+      } else {
+        vector3D_t coords_aux = compute_domain_coords_linearinterp(
             theSourceLonArray[iSrc], theSourceLatArray[iSrc],
             theSurfaceCornersLong, theSurfaceCornersLat,
             theRegionLengthEastM, theRegionLengthNorthM, utmZone);
-
-    	theSourceDepthArray[iSrc] += point_elevation ( coords_aux.x[0], coords_aux.x[1] );
+        theSourceDepthArray[iSrc] += point_elevation(coords_aux.x[0],
+                                                   coords_aux.x[1]);
+      }
     }
 
     theSourceSlipFunArray[iSrc] = (double *)malloc(sizeof(double) * theSourceNt1Array[iSrc]);

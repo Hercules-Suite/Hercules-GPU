@@ -3817,6 +3817,66 @@ that same ordering. Increasing the simulation duration must preserve the
 previously generated early-time forces. This batching is part of source setup;
 it does not change the GPU time-stepping path.
 
+### SRFH source depth reference
+
+For `type_of_source=srfh`, set `srfh_depth_reference` in `source.in` to
+`surface` (default) or `sea_level`. Values are case-insensitive; other values
+are rejected before SRFH coordinate records are loaded. This is an optional
+SRFH-only control, not a `parameters.in` key. It does not change point, force,
+base-force, plane or kinked-plane source conventions.
+
+Each `coords.in` record remains `longitude latitude depth_m`, with depth
+positive downward in metres. Let $d$ be that depth, $b$ the
+`topographybase_zcoord` and $h$ the local outer-surface elevation from
+`topography.in`. With topography enabled:
+
+```math
+Z_{\mathrm{surface}}=d+b-h,\qquad
+Z_{\mathrm{sea\_level}}=d+b.
+```
+
+`surface` preserves the historical convention and addition order. The outer
+surface is the land surface or water surface, not the seabed. `sea_level`
+uses the common zero-elevation datum even for elevated lakes or land below
+sea level. It never adds local terrain elevation or water depth. Both modes
+also retain the caller's existing building surface shift when applicable.
+Without topography, $b=0$ and both modes preserve the existing flat-datum
+coordinates and building shift; interpreting that datum as physical sea
+level requires the flat model's zero elevation to represent sea level.
+
+For example, a fault point 15000 m below sea level beneath 1000 m of land
+elevation requires `depth_m=16000` in `surface` mode or `depth_m=15000` in
+`sea_level` mode. With $b=3125$ m, both produce solver $Z=18125$ m. Offshore,
+where the outer surface is at sea level, both accept `depth_m=15000`.
+
+```text
+# source.in: keep original sea-level depths in coords.in
+type_of_source = srfh
+srfh_depth_reference = sea_level
+# coords.in: longitude latitude depth_below_sea_level_m
+```
+
+`3D_velocity_model_depth_reference` controls material sampling independently.
+When opting into `sea_level`, use the original sea-level depths, not copies
+that already include local terrain elevation. Regenerate source-force files
+after changing this option. A change in physical source position may change
+the containing element's rigidity and the computed scalar moment. The source
+initialization log reports the selected reference, sea-level datum Z and
+existing source surface shift.
+
+Conversion occurs once on rank 0, before the transformed source-depth array
+is broadcast and source elements are located. The elastic, viscoelastic,
+nonlinear elastoplastic/hysteretic and poroelastic solid source paths share
+these coordinates, including solids in acoustic–elastic,
+poroelastic–acoustic and poroelastic–elastic coupled simulations. No boundary
+or interface operator, force-time integration, GPU/MPI communication backend,
+station position or output quantity is changed. This coordinate option does
+not create an acoustic pressure-source implementation: SRFH shear-dislocation
+amplitudes use $\mu=\rho V_S^2$, which vanishes in pure acoustic elements.
+Host reader checks cover default compatibility, surface/sea-level position
+equivalence and invalid options. They do not validate standalone or coupled
+CUDA/MPI propagation; those comparisons require a target-system solver build.
+
 ### Source-force filtering
 
 In `source.in`, `source_is_filtered` is required (`0` or `1`). When it is `1`,

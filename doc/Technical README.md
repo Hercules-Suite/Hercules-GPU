@@ -696,6 +696,7 @@ the detailed source documentation.
 | --- | --- | --- |
 | `type_of_source` | `point`, `plane`, `planewithkinks`, `srfh`, `force`, `base_force`; no default | Required source family |
 | `source_function_type` | `ramp`, `sine`, `quadratic`, `ricker`, `exponential`, `discrete`; no default | Required; `base_force` requires `discrete` |
+| `srfh_depth_reference` | `surface` (default), `sea_level`; case-insensitive | Optional in `source.in`, SRFH only; interprets `coords.in` depths in m positive down. With topography: local outer surface or zero-elevation/sea-level datum. Independent of the material depth reference; see [SRFH source depths](Extended%20README.md#srfh-source-depth-reference). |
 | `average_risetime_sec` | Positive duration; no default | Required for ramp, sine, quadratic and exponential; s |
 | `ricker_Ts` | Time shift; no default | Required for Ricker; s |
 | `ricker_Tp` | Positive characteristic period; no default | Required for Ricker; s |

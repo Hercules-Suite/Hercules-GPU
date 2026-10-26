@@ -1,4 +1,4 @@
-import { parameterReferencePages, parameterReferenceSummary } from "./parameter-reference";
+import { parameterReferencePages, parameterReferenceSummary, srfhDepthReferenceParameter } from "./parameter-reference";
 
 export type DocTable = {
   headers: string[];
@@ -2044,7 +2044,8 @@ if __name__ == "__main__":
           headers: ["File or key", "Entries per point", "Meaning"],
           rows: [
             ["number_of_point_sources", "One value in source.in", "Number of point-source records read from every auxiliary file."],
-            ["coords.in", "longitude latitude depth_m", "Geographic location; depth is positive downward."],
+            [srfhDepthReferenceParameter.name, `${srfhDepthReferenceParameter.requirement}; ${srfhDepthReferenceParameter.values}`, srfhDepthReferenceParameter.description],
+            ["coords.in", "longitude latitude depth_m", "Geographic location; depth is positive downward in metres, interpreted according to srfh_depth_reference."],
             ["area.in", "area_m2", "Subfault area."],
             ["strike.in", "strike_deg", "Strike in degrees."],
             ["dip.in", "dip_deg", "Dip in degrees."],
@@ -2056,6 +2057,20 @@ if __name__ == "__main__":
         codeLabel: "source.in — SRFH controller",
         code: "source_is_filtered      = 1\nthreshold_frequency     = 4.5\nnumber_of_poles         = 14\ntype_of_source          = srfh\nsource_function_type    = discrete\nnumber_of_point_sources = 2",
         note: "All SRFH points must use the same dt in slipfunction.in. Hercules aborts when adjacent point records have different sample intervals.",
+      },
+      {
+        id: "srfh-depth-reference",
+        title: "SRFH source depth reference",
+        paragraphs: [
+          "Set srfh_depth_reference in source.in. surface (default) preserves existing behavior: coords.in depths are measured below the local outer surface, which can be land or the water surface. sea_level accepts vertical depths below the model's zero-elevation datum. Options are case-insensitive; unsupported values fail during SRFH initialization. This key applies only to SRFH coords.in, not to other source types, station depths or material-model depths.",
+          "Let d be the input depth, b=topographybase_zcoord and h the outer-surface elevation from topography.in, all in metres. With topography, surface computes solver Z=d+b-h; sea_level computes solver Z=d+b. Both also retain the existing building surface shift when applicable. Without topography, b=0 and both modes retain the existing flat-datum coordinate convention. A flat model must use zero elevation as sea level if that label is to represent a physical sea-level depth.",
+          "For a source 15000 m below sea level beneath terrain at elevation 1000 m, use d=16000 with surface or d=15000 with sea_level. Both give solver Z=18125 m when b=3125 m. Under an ocean surface at zero elevation the two input depths coincide. sea_level never adds the seabed depth; for elevated water surfaces it still uses the common zero-elevation datum.",
+          "3D_velocity_model_depth_reference controls only material sampling and does not change this source convention. Use original sea-level depths when enabling sea_level; do not reuse depths that already include terrain elevation. Regenerate source-force files after changing the reference. Changing the intended physical source locations can change containing-element rigidities and the resulting scalar moment.",
+          "The conversion runs once on the source-reading rank, before the corrected coordinates are broadcast and used to locate source elements. The existing elastic, viscoelastic, nonlinear-solid and poroelastic solid source paths share it, including solids in acoustic–elastic, poroelastic–acoustic and poroelastic–elastic simulations. Boundary/interface operators, GPU/MPI time stepping and station/output coordinates are unchanged. SRFH remains a shear-dislocation source; this option does not add acoustic pressure-source support in Vs=0 fluid elements. Host reader checks cover the coordinate conversion; coupled CUDA/MPI propagation still requires target-system validation.",
+        ],
+        codeLabel: "source.in — retain sea-level depths in coords.in",
+        code: "type_of_source = srfh\nsrfh_depth_reference = sea_level\n# coords.in: longitude latitude depth_below_sea_level_m\n# Omit srfh_depth_reference (or set surface) for the existing convention.",
+        note: "The initialization log echoes the selected SRFH reference, sea-level datum Z and existing source surface shift. The default does not require changes to existing input files.",
       },
       {
         id: "srfh-files",
