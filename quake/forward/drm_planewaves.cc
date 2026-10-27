@@ -2237,7 +2237,7 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
         broadcastMaterialDoubles(Soil_Qp_data, Params_soil.numData);
     }
     if (myID == 0) {
-        fprintf(stderr, "3D velocity model quality factors: %s\n",
+        fprintf(stdout, "3D velocity model quality factors: %s\n",
                 Params_soil.hasQualityFactors
                     ? "solid-only interpolation from qs.in and qp.in; "
                       "supplied Q is independent of the Vs minimum"
