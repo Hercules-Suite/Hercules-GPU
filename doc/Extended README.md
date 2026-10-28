@@ -1713,7 +1713,10 @@ Notes:
 	the elastic displacement field, so mixed water/solid planes remain a single
 	three-component displacement file. This requires `include_acoustic=yes` and
 	`acoustic_formulation=pressure` or `acoustic_formulation=velocity_potential`.
-	Default is `no`, which preserves the legacy plane-output behavior.
+	Default is `yes` for these scalar-acoustic configurations. Set explicit `no`
+	to disable reconstruction and retain the legacy plane-output behavior.
+	When acoustics is disabled or `acoustic_formulation=none`, an omitted key
+	resolves to `no`; explicit `yes` still requires a scalar-acoustic formulation.
 	With `velocity_potential`, the stored scalar is first converted to physical
 	pressure, `p[n] = -(phi[n] - phi[n-1])/dt`, before evaluating `-grad(p)/rho`.
 	This matches station reconstruction in both formulations. The existing

@@ -2199,7 +2199,7 @@ if __name__ == "__main__":
         ],
         codeLabel: "Python — script/read_planes.py",
         code: "# Runnable version from the repository root:\n# python3 script/read_planes.py output/planes/planedisplacements.0 --nx 101 --ny 81 --dt 0.02\n\nimport numpy as np\n\nn_strike = 101\nn_dip = 81\nprint_rate = 20\nsimulation_dt = 0.001\n\nraw = np.fromfile(\"output/planes/planedisplacements.0\", dtype=np.float64)\nvalues_per_snapshot = n_strike * n_dip * 3\nif raw.size % values_per_snapshot:\n    raise ValueError(\"file size does not match the configured plane grid\")\n\nu = raw.reshape(-1, n_strike, n_dip, 3)\ntime = np.arange(u.shape[0]) * print_rate * simulation_dt\nvertical = u[..., 2]\nprint(u.shape, time[-1], np.abs(vertical).max())",
-        note: "reconstruct_acoustic_plane_displacements=yes reconstructs motion at scalar-acoustic plane points from -grad(p)/rho. With acoustic_formulation=velocity_potential, it first computes p = -(phi[n] - phi[n-1])/dt, matching station reconstruction. Elastic points continue to use the elastic displacement field in the same file.",
+        note: "reconstruct_acoustic_plane_displacements defaults to yes for scalar-acoustic runs and reconstructs motion at acoustic plane points from -grad(p)/rho. Explicit no disables reconstruction; an omitted key resolves to no when no scalar-acoustic field is enabled. With acoustic_formulation=velocity_potential, it first computes p = -(phi[n] - phi[n-1])/dt, matching station reconstruction. Elastic points continue to use the elastic displacement field in the same file.",
       },
       {
         "id": "drm-box-configuration",

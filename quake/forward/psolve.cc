@@ -1338,7 +1338,7 @@ static struct Param_t {
            .includeAcoustic = NO,
            .acousticInterfaceCoupling = YES,
            .acousticPressureFormulation = NO,
-           .reconstructAcousticPlaneDisplacements = NO,
+           .reconstructAcousticPlaneDisplacements = YES,
            .theAcousticFreeSurfaceGravity = NO,
            .theTimingBarriersFlag = 0,
            .myNumberOfStations = 0,
@@ -3097,7 +3097,7 @@ static int32_t parse_parameters(const char* numericalin) {
        acoustic_pressure_formulation[64] = "no",
        acoustic_formulation[64] = "velocity_potential",
        acoustic_free_surface_gravity[64] = "no",
-       reconstruct_acoustic_plane_displacements[64] = "no",
+       reconstruct_acoustic_plane_displacements[64] = "yes",
        acoustic_poroelastic_interface[64] = "no_flow",
        include_poroelastic[64] = "no",
        surface_groundwatertable[64] = "no",
@@ -3121,6 +3121,7 @@ static int32_t parse_parameters(const char* numericalin) {
   int cpml_pml_damp_explicit = 0;
   int acoustic_formulation_explicit = 0;
   int acoustic_interface_method_explicit = 0;
+  int reconstruct_acoustic_plane_displacements_explicit = 0;
   int legacy_acoustic_pressure_formulation_explicit = 0;
   noyesflag_t have_buildings = UNSET;
   noyesflag_t have_parametricq = UNSET;
@@ -3141,7 +3142,7 @@ static int32_t parse_parameters(const char* numericalin) {
   noyesflag_t acousticInterfaceCoupling = YES;
   noyesflag_t acousticPressureFormulation = NO;
   noyesflag_t acousticFreeSurfaceGravity = NO;
-  noyesflag_t reconstructAcousticPlaneDisplacements = NO;
+  noyesflag_t reconstructAcousticPlaneDisplacements = YES;
   int acousticInterfaceProjectionMode = ACOUSTIC_INTERFACE_PROJECTION_POINT;
   int acousticInterfaceFaceFilter = ACOUSTIC_INTERFACE_FACE_FILTER_ALL;
   noyesflag_t includePoroelastic = NO;
@@ -3637,8 +3638,9 @@ static int32_t parse_parameters(const char* numericalin) {
                  &acoustic_formulation) == 0);
   parsetext(fp, "acoustic_free_surface_gravity", 's',
             &acoustic_free_surface_gravity);
-  parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
-            &reconstruct_acoustic_plane_displacements);
+  reconstruct_acoustic_plane_displacements_explicit =
+      (parsetext(fp, "reconstruct_acoustic_plane_displacements", 's',
+                 &reconstruct_acoustic_plane_displacements) == 0);
   parsetext(fp, "acoustic_poroelastic_interface", 's',
             &acoustic_poroelastic_interface);
   parsetext(fp, "acoustic_interface_diagnostics_file", 's',
@@ -4185,6 +4187,12 @@ static int32_t parse_parameters(const char* numericalin) {
                  acoustic_free_surface_gravity);
   }
 
+  /* Default reconstruction only where a scalar acoustic field is available.
+   * Explicit yes retains the compatibility validation below. */
+  if (!reconstruct_acoustic_plane_displacements_explicit &&
+      ((includeAcoustic != YES) || (acousticPressureFormulation != YES))) {
+    strcpy(reconstruct_acoustic_plane_displacements, "no");
+  }
   if (strcasecmp(reconstruct_acoustic_plane_displacements, "yes") == 0) {
     reconstructAcousticPlaneDisplacements = YES;
   } else if (strcasecmp(reconstruct_acoustic_plane_displacements, "no") == 0) {

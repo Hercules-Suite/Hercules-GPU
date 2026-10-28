@@ -478,7 +478,7 @@ adjacent active soil shares their nodes. Skeleton motion is unchanged.
 | `output_planes_print_rate` | Integer time steps; Required when number_output_planes>0; no default | Conditional; Integer time steps |
 | `output_planes_directory` | Directory path; `outputfiles/planes` (default) | Optional; Directory path |
 | `output_planes` | N rows of `lat lon depth d_strike n_strike d_dip n_dip strike dip`; degrees and m, integer counts; no default | Conditional; Table: N rows × 9 values |
-| `reconstruct_acoustic_plane_displacements` | `no` (default), `yes` | Optional; Yes/no |
+| `reconstruct_acoustic_plane_displacements` | `yes` (default for scalar acoustics), `no` (default otherwise) | Optional; Yes/no; explicit `no` disables reconstruction |
 
 Plane points exactly on mesh-domain faces, edges, and corners use the adjacent
 interior element without moving their interpolation coordinates. Setup rejects
