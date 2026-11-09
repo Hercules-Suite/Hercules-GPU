@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const staticExport = process.env.DOCS_STATIC_EXPORT === "1";
-const basePath = staticExport ? (process.env.NEXT_PUBLIC_DOCS_BASE_PATH ?? "/Hercules_GPU") : "";
+const basePath = staticExport ? (process.env.NEXT_PUBLIC_DOCS_BASE_PATH ?? "/Hercules-GPU") : "";
 const exportDirectory = fileURLToPath(new URL("../out/", import.meta.url));
 
 function filesUnder(directory) {
@@ -87,10 +87,12 @@ test("renders the Hercules documentation home", async () => {
   assert.doesNotMatch(html, /_vinext\/image\?url=.*hercules-octree-mesh-mark/);
   assert.ok(existsSync(join(fileURLToPath(new URL("../public/", import.meta.url)), "hercules-octree-mesh-mark.png")));
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+  assert.ok(html.includes('href="https://github.com/Hercules-Suite/Hercules-GPU"'));
+  assert.doesNotMatch(html, /href="https:\/\/github\.com\/zwyll\/Hercules_GPU/);
 });
 
 test("exports complete pages with working repository-prefixed links and assets", { skip: !staticExport }, () => {
-  const origin = new URL(process.env.DOCS_SITE_URL ?? "https://zwyll.github.io/Hercules_GPU/").origin;
+  const origin = new URL(process.env.DOCS_SITE_URL ?? "https://hercules-suite.github.io/Hercules-GPU/").origin;
   const navigation = readFileSync(new URL("../app/docs/navigation.ts", import.meta.url), "utf8");
   const slugs = [...navigation.matchAll(/slug: "([^"]+)"/g)].map((match) => match[1]);
   for (const slug of slugs) {
@@ -100,6 +102,7 @@ test("exports complete pages with working repository-prefixed links and assets",
 
   for (const file of filesUnder(exportDirectory).filter((path) => path.endsWith(".html"))) {
     const html = readFileSync(file, "utf8");
+    assert.doesNotMatch(html, /href="https:\/\/github\.com\/zwyll\/Hercules_GPU/);
     const documentPath = `${basePath}/${file.slice(exportDirectory.length).replace(/index\.html$/, "")}`;
     for (const tag of html.match(/<(?:a|link|img|script)\b[^>]*>/g) ?? []) {
       const reference = tag.match(/\b(?:href|src)="([^"]+)"/)?.[1]?.replaceAll("&amp;", "&");

@@ -44,14 +44,14 @@ credentials are needed to serve the exported files. Keep `out/` and `.next/`
 untracked. Both build paths require Node.js 22.13 or newer and the existing pnpm
 lockfile; neither compiles the solver.
 
-The default public address is `https://zwyll.github.io/Hercules_GPU/`. These
-build-time controls allow a different hosting location:
+The default public address is `https://hercules-suite.github.io/Hercules-GPU/`.
+These build-time controls allow a different hosting location:
 
 | Control | Default for `build:pages` | Meaning |
 | --- | --- | --- |
 | `DOCS_STATIC_EXPORT` | `1`, set by the command | Select static metadata and Next.js export. Leave unset for the Sites build. |
-| `NEXT_PUBLIC_DOCS_BASE_PATH` | `/Hercules_GPU` | URL prefix, beginning with `/` and without a trailing slash; use an empty string for a domain-root site. Next.js prefixes navigation links; the site prefixes public image URLs. |
-| `DOCS_SITE_URL` | `https://zwyll.github.io/Hercules_GPU/` | Absolute public site URL used for social-preview metadata. Set this together with the URL prefix when changing host or repository. |
+| `NEXT_PUBLIC_DOCS_BASE_PATH` | `/Hercules-GPU` | URL prefix, beginning with `/` and without a trailing slash; use an empty string for a domain-root site. Next.js prefixes navigation links; the site prefixes public image URLs. |
+| `DOCS_SITE_URL` | `https://hercules-suite.github.io/Hercules-GPU/` | Absolute public site URL used for social-preview metadata. Set this together with the URL prefix when changing host or repository. |
 
 For example, to export for a custom domain at its root:
 
@@ -61,7 +61,9 @@ NEXT_PUBLIC_DOCS_BASE_PATH='' DOCS_SITE_URL=https://docs.example.org/ pnpm run t
 
 The documentation workflow builds and audits both targets on pull requests and
 updates to `main`, including while the repository is private. Publication is
-disabled until all of these activation steps are complete:
+disabled until all of these activation steps are complete in
+`Hercules-Suite/Hercules-GPU`. Keep `DOCS_PAGES_ENABLED` unset or `false` in the
+personal development repository `zwyll/Hercules_GPU`:
 
 1. Make the repository public when ready. Changing its visibility is a separate
    maintainer action.
