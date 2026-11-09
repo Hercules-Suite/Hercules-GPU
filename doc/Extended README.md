@@ -4,7 +4,7 @@ This is the comprehensive engineering reference: runtime controls, numerical
 formulations, implementation details, input/output examples, and development
 and validation history. For a concise operational guide and parameter index,
 see [Technical README](Technical%20README.md). The
-[documentation site](https://hercules-gpu-docs.liling-dpim.chatgpt.site) provides
+[documentation site](https://hercules-suite.github.io/Hercules-GPU/) provides
 the full input reference; its [source](../docs-site/README.md) is maintained
 with the solver. Current parser and solver code under `quake/forward/` take
 precedence over historical notes.
