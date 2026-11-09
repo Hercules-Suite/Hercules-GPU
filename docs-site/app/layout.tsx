@@ -7,7 +7,7 @@ import "./globals.css";
 export async function generateMetadata(): Promise<Metadata> {
   let base: URL;
   if (process.env.DOCS_STATIC_EXPORT === "1") {
-    base = new URL(process.env.DOCS_SITE_URL ?? "https://zwyll.github.io/Hercules_GPU/");
+    base = new URL(process.env.DOCS_SITE_URL ?? "https://hercules-suite.github.io/Hercules-GPU/");
   } else {
     const requestHeaders = await headers();
     const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";

@@ -29,7 +29,7 @@ export function SiteHeader() {
               {link.label}
             </Link>
           ))}
-          <a href="https://github.com/zwyll/Hercules_GPU" target="_blank" rel="noreferrer">
+          <a href="https://github.com/Hercules-Suite/Hercules-GPU" target="_blank" rel="noreferrer">
             GitHub <span aria-hidden="true">↗</span>
           </a>
         </nav>
@@ -49,7 +49,7 @@ export function SiteHeader() {
                   {link.label}
                 </Link>
               ))}
-              <a href="https://github.com/zwyll/Hercules_GPU">GitHub ↗</a>
+              <a href="https://github.com/Hercules-Suite/Hercules-GPU">GitHub ↗</a>
             </div>
           </details>
         </div>

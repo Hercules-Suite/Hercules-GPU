@@ -99,3 +99,10 @@ layout.
 | [`docs-site/`](docs-site/README.md) | Documentation website source, tests, and publishing instructions |
 | `examples/` | Legacy examples and sample build configuration |
 | `run_phaseA_phaseB.sh` | Unified Phase A and Phase B launcher |
+
+## License
+
+Hercules GPU is distributed under the GNU General Public License, version 3
+(`GPL-3.0-only`). See [`LICENSE.txt`](LICENSE.txt). Existing copyright and
+attribution notices are retained. Third-party components remain subject to
+their respective licenses.
