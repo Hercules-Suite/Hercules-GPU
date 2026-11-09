@@ -3,7 +3,7 @@
 This is the concise operational reference and index. Detailed explanations,
 formulas, configuration examples, implementation notes, and historical results
 live in [Extended README](Extended%20README.md). The
-[parameter reference](https://hercules-gpu-docs.liling-dpim.chatgpt.site/docs/parameter-file)
+[parameter reference](https://hercules-suite.github.io/Hercules-GPU/docs/parameter-file/)
 contains the complete current input catalog; the parser under
 `quake/forward/` is authoritative.
 
@@ -877,7 +877,7 @@ Use `number_output_stations` and `output_stations_print_rate` as before. The
 binary is native float64 `[snapshot][station][XYZ]` in metres, in station-row
 order. See [station binary details](Extended%20README.md#single-file-station-binary-output).
 Plane files are native float64 displacement grids; formats and readers are in
-the [output guide](https://hercules-gpu-docs.liling-dpim.chatgpt.site/docs/output-files)
+the [output guide](https://hercules-suite.github.io/Hercules-GPU/docs/output-files/)
 and [script index](../script/README.md).
 `HERCULES_PLANE_METADATA=1` writes `plane_point_metadata.RANK.csv` once during
 setup, with actual point coordinates, containing-element material and CPML

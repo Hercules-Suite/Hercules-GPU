@@ -8,7 +8,7 @@ studies.
 
 ## Documentation
 
-- [Hercules GPU Documentation](https://hercules-gpu-docs.utexas.chatgpt.site) — installation, input parameters, source models, running, output, and validation
+- [Hercules GPU Documentation](https://hercules-suite.github.io/Hercules-GPU/) — installation, input parameters, source models, running, output, and validation
 - [Technical README](doc/Technical%20README.md) — concise build/run guidance and input/runtime variable index
 - [Extended README](doc/Extended%20README.md) — comprehensive solver controls, formulations, examples, implementation details, and historical validation notes
 - [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, output readers, and plane animations
@@ -62,7 +62,7 @@ Source-specific parameters remain in `source.in` and its associated auxiliary
 files.
 
 Begin with a current case under [`benchmark_inputs/`](benchmark_inputs/) and
-consult the [input-file documentation](https://hercules-gpu-docs.utexas.chatgpt.site/docs/input-files)
+consult the [input-file documentation](https://hercules-suite.github.io/Hercules-GPU/docs/input-files/)
 before adapting it to a production model.
 
 ## Run
