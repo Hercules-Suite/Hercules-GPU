@@ -1655,6 +1655,23 @@ if __name__ == "__main__":
         note: "computation_method=vt uses the volume-tetrahedra topographic treatment; fem retains whole-cube staircase behavior. type_of_etree=full uses fixed model Z; sqd uses surface-relative material depths. For the general 3-D files, follow the depth-reference example above. Nonlinear topography additionally requires include_nonlinear_analysis=yes.",
       },
       {
+        id: "topography-base-alignment",
+        title: "Choose the topography base and align water surfaces",
+        paragraphs: [
+          "topographybase_zcoord is the solver Z coordinate of zero elevation, in metres. It is required and positive, with no default. The parser does not require the base to equal the largest domain extent divided by a power of two, for either full or sqd. Choose it above the highest terrain and keep the complete surface inside the vertical domain.",
+          "Scalar acoustic pressure-release and gravity conditions require complete horizontal element top faces at the water surface. A surface cutting through an element does not receive that face operator. The alignment test uses a fraction of an octree tick; increasing seabed_height_tolerance_m does not repair misalignment.",
+          "Let L0 be the physical edge length of the level-zero octree, n an octree level, b the topography base and Hw the water-surface elevation. With the usual zero-origin geometry, the level-n spacing and alignment condition are:",
+        ],
+        equations: [String.raw`h_n=\frac{L_0}{2^n},\qquad b-H_w=m h_n,\qquad m\in\mathbb{Z}.`],
+        afterEquationsParagraphs: [
+          "At sea level Hw=0, any positive integer multiple b=mL0/2^n can align. The integer m counts grid intervals below solver Z=0 and is not another input parameter. For a 100000 m north by 81250 m east domain with 37500 m vertical extent, L0=100000 m. The example below uses n=7, spacing h=781.25 m and m=5: the base is 3906.25 m, not the element size. Other examples are 3125 m (level 5 and finer) and 4687.5 m (level 6 and finer). These are alignment examples, not defaults or resolution recommendations.",
+          "Water-surface elements must actually reach level n or finer and have complete, exposed horizontal top faces. Check the Acoustic free-surface geometry face count. With topography_surface_refinement=wavelength, maximum_octant_level alone does not force that refinement. For elevated water bodies, align b-Hw separately. Alignment does not establish mesh accuracy or stability.",
+          "When changing the base, shift fixed model_z material coordinates by the same increment to preserve physical elevations, and regenerate the mesh and source-force files. SRFH surface and sea_level source depths are converted with the new base; do not add the increment to those input depths. Holding the solver bottom coordinate fixed while increasing the base reduces the depth available below sea level.",
+        ],
+        codeLabel: "parameters.in — base example for a 100000 m octree scale",
+        code: "# Sea-level surface aligned at level 7 and finer:\n# 100000 / 128 = 781.25 m; 5 * 781.25 = 3906.25 m\ntopographybase_zcoord = 3906.25\n# Keep valid topography inputs and sufficient actual surface refinement.",
+      },
+      {
         id: "topography-wavelength-refinement",
         title: "Opt in to wavelength-based surface sizing",
         paragraphs: [

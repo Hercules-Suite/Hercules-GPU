@@ -531,7 +531,7 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 | `maximum_octant_level` | Integer 0 to 30; no default | Required with topography; forced surface target in `maximum_level` mode, geometry bookkeeping in both modes; not a global cap |
 | `topography_surface_refinement` | `maximum_level` (default), `wavelength`; case-insensitive | Optional; read only with topography enabled; skip forced surface sizing and its consistency check with `wavelength`; ordinary Vs/Vp wavelength rules and 2:1 balancing remain |
 | `computation_method` | `Required with topography`; no default; vt \| fem | Conditional; String |
-| `topographybase_zcoord` | Float (m); Required with topography; > 0; no default | Conditional; Float (m) |
+| `topographybase_zcoord` | Float (m); > 0; no default | Required with topography; solver Z of zero elevation; choose above the highest terrain and align flat acoustic surfaces to element faces as described below |
 | `type_of_etree` | `Required with topography`; no default; sqd \| full; no default | Conditional; String |
 | `min_enclosed_volume_perc` | `0.1` (default) | Optional; Float |
 | `consider_nonlinear_topography` | `no` (default), `yes` | Optional; Yes/no |
@@ -541,6 +541,15 @@ Mesh air/solid classification and receiver/material queries share a bilinear
 surface, `Z = topographybase_zcoord - height`. Regenerate meshes made with
 the earlier triangular classifier before rerunning affected surface outputs;
 see [surface sampling](Extended%20README.md#topographic-surface-geometry-and-sampling).
+The parser does not require a power-of-two base value. At sea level, a base
+$b=mL_0/2^n$, with positive integer $m$ and level-zero octree edge $L_0$,
+aligns with faces of level $n$ and finer elements. For $L_0=100000$ m,
+$b=5\times100000/128=3906.25$ m aligns at level 7 and finer. Actual
+water-surface elements must satisfy this alignment for pressure-release or
+gravity conditions; for water elevation $H_w$, align $b-H_w$ instead.
+See [base selection and alignment](Extended%20README.md#choosing-the-topography-base-and-water-surface-alignment)
+for examples, mesh checks and coordinate updates after changing the base.
+
 Use `topography_surface_refinement=wavelength` with `mesh_input_mode=0` to
 regenerate a mesh without the forced surface target. Retain the required
 `maximum_octant_level`. Coarser surface cells may reduce terrain accuracy;

@@ -3261,6 +3261,62 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	Flat-PML topography cells stay on the cube-stiffness + CPML path
 	exactly as before.
 
+### Choosing the topography base and water-surface alignment
+
+`topographybase_zcoord` is the solver Z coordinate of zero elevation, in
+metres. The topography parser requires a positive value, with no default;
+it does **not** require the base to equal the largest domain extent divided
+by a power of two. This applies to both `type_of_etree=full` and `sqd`.
+Choose the base above the highest terrain elevation and keep the complete
+surface inside the vertical domain. For elevation $H$, the surface is at
+$Z=b-H$, where $b=\mathtt{topographybase\_zcoord}$.
+
+Scalar acoustic water introduces a separate mesh-alignment requirement.
+Both the pressure-release condition and the optional gravity free-surface
+condition use complete horizontal Hex8 top faces. A water surface cutting
+through an element does not receive that face operator. The face-alignment
+test uses a fraction of an octree tick, independently of
+`seabed_height_tolerance_m`; increasing the seabed tolerance does not repair
+an unaligned water surface.
+
+Let $L_0$ be the physical edge length of the level-zero octree and $n$ an
+octree level. For the usual zero-origin geometry, the spacing and alignment
+condition for a flat water surface at elevation $H_w$ are:
+
+```math
+h_n=\frac{L_0}{2^n},\qquad b-H_w=m h_n,\qquad m\in\mathbb{Z}.
+```
+
+At sea level, $H_w=0$, so **any positive integer multiple**
+$b=mL_0/2^n$ can provide alignment. The special case $m=1$ is convenient
+but not required. Here $m$ counts grid intervals below solver Z=0; it is
+not an additional input parameter. For a 100000 m north by 81250 m east
+domain with 37500 m vertical extent, $L_0=100000$ m:
+
+| Base $b$ (m) | Construction | Sea-level alignment |
+| --- | --- | --- |
+| 3125 | $100000/2^5$ | Level 5 and finer |
+| 4687.5 | $3\times100000/2^6$ | Level 6 and finer |
+| 3906.25 | $5\times100000/2^7$ | Level 7 and finer |
+
+In the last example, $h_7=781.25$ m and the base is $5h_7$; the base itself
+is not the element size. These are alignment examples, not defaults or
+wavelength-resolution recommendations. Water-surface elements must actually
+reach level $n$ or finer and have complete, exposed horizontal top faces.
+Check the startup `Acoustic free-surface geometry` face count, especially
+with `topography_surface_refinement=wavelength`; setting a large
+`maximum_octant_level` alone does not force refinement in that mode.
+For elevated water bodies, apply the condition to $b-H_w$ separately.
+
+Changing the base shifts the solver coordinates of the physical geometry.
+To preserve physical elevations, shift fixed `model_z` material coordinates
+by the same base increment and regenerate the mesh and source-force files.
+SRFH `surface` and `sea_level` source depths are converted using the new
+base; those input depths do not need the base increment added. With an
+unchanged solver bottom coordinate, increasing the base reduces the depth
+available below sea level. Surface alignment alone does not establish
+accuracy or stability of the resulting mesh.
+
 ### Topographic surface geometry and sampling
 
 The topography grid defines a bilinear height field shared by mesh air/solid
