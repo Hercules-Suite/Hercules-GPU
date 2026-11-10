@@ -17,7 +17,7 @@ function filesUnder(directory) {
   });
 }
 
-async function render(path = "/") {
+async function renderMarkup(path = "/") {
   if (staticExport) {
     const file = join(exportDirectory, path, "index.html");
     return existsSync(file)
@@ -37,6 +37,37 @@ async function render(path = "/") {
     },
     { waitUntil() {}, passThroughOnException() {} },
   );
+}
+
+// Content/parser audits compare readable text independent of inline parameter
+// styling. Typography checks below use renderMarkup to inspect the actual tags.
+async function render(path = "/") {
+  const response = await renderMarkup(path);
+  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameterName">([A-Za-z0-9_]+)<\/code>/g, "$1");
+  return new Response(html, { status: response.status, headers: response.headers });
+}
+
+function legacyTopicLinks(html) {
+  return (html.match(/<a\b[^>]*data-legacy-section="[^"]+"[^>]*>/g) ?? []).map((tag) => ({
+    id: tag.match(/data-legacy-section="([^"]+)"/)[1],
+    href: tag.match(/href="([^"]+)"/)[1],
+  }));
+}
+
+// Cross-topic content audits follow the overview's canonical guide links.
+// Individual topic tests render their new page directly.
+async function renderGuideFamily(path) {
+  const response = await render(path);
+  assert.equal(response.status, 200);
+  const overview = await response.text();
+  const paths = new Set(legacyTopicLinks(overview)
+    .map(({ href }) => href.split("#")[0].slice(basePath.length).replace(/\/$/, "")));
+  const pages = await Promise.all([...paths].map(async (target) => {
+    const child = await render(target);
+    assert.equal(child.status, 200, target);
+    return child.text();
+  }));
+  return new Response([overview, ...pages].join("\n"));
 }
 
 test("documents compact scalar MPI schedules and device profiling limits", async () => {
@@ -209,7 +240,7 @@ test("documents octree-compatible domain sizing and refinement level selection",
   assert.match(architecture, /region_length_north_m/);
   assert.match(architecture, /region_length_east_m/);
 
-  const topographyResponse = await render("/docs/input-files");
+  const topographyResponse = await render("/docs/topography");
   assert.equal(topographyResponse.status, 200);
   const topography = await topographyResponse.text();
   assert.match(topography, /Choose maximum_octant_level/);
@@ -401,7 +432,7 @@ test("documents acoustic station recovery and its historical fallback", async ()
   assert.match(row, /linear \| element/);
   assert.match(row, /inside CPML/);
   assert.match(row, /plane output/);
-  const guide = await (await render("/docs/physics")).text();
+  const guide = await (await render("/docs/acoustic-elastic")).text();
   assert.match(guide, /Sender and receiver mappings use global node ID order for every interface method/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (existsSync(source)) {
@@ -524,8 +555,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
 });
 
 test("documents elevation-only seabed geometry and depth-reference contract", async () => {
-  const html = await (await render("/docs/input-files")).text();
-  const section = html.match(/<section\b[^>]*id="explicit-seabed-geometry"[\s\S]*?<\/section>/)?.[0];
+  const html = await (await render("/docs/seabed-geometry")).text();
+  const section = html; // The original section is now a dedicated, subdivided guide.
   assert.ok(section);
   for (const name of ["seabed_geometry_file", "seabed_height_tolerance_m", "seabed_above_surface_policy", "3D_velocity_model_depth_reference", "seabed_water_vp_m_s", "seabed_water_density_kg_m3"]) {
     assert.ok(section.includes(name), `missing seabed input example: ${name}`);
@@ -598,7 +629,7 @@ test("documents elevation-only seabed geometry and depth-reference contract", as
 });
 
 test("documents the default acoustic quality factor and its validation scope", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await renderGuideFamily("/docs/physics")).text();
   const section = html.match(/<section\b[^>]*id="acoustic-quality-factor"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
   assert.match(section, /acoustic_quality_factor defaults to 0/);
@@ -610,7 +641,7 @@ test("documents the default acoustic quality factor and its validation scope", a
 });
 
 test("documents acoustic dashpot applicability and the changed water boundary", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/absorbing-boundaries")).text();
   const section = html.match(/<section[^>]*id="acoustic-dashpot"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
   assert.match(section, /Older scalar-acoustic dashpot water faces were reflecting/);
@@ -624,7 +655,7 @@ test("documents acoustic dashpot applicability and the changed water boundary", 
 });
 
 test("explains experimental constraints, remeshing and CPML limitations", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/acoustic-elastic")).text();
   assert.match(html, /id="acoustic-interface-method"/);
   assert.match(html, /acoustic_interface_method = field-specific-constraints/);
   assert.match(html, /Phase B imports do not refine/);
@@ -673,7 +704,7 @@ test("wires the optional acoustic gravity free surface through setup and CUDA", 
 });
 
 test("documents CPML interface counts without implying a missing correction", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/absorbing-boundaries")).text();
   const section = html.match(/<section\b[^>]*id="pml-interface-diagnostics"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
   assert.match(section, /host setup counts, not verification of device histories or kernel execution/);
@@ -715,7 +746,7 @@ test("lists GSL as a required build dependency", async () => {
 });
 
 test("documents nonlinear and plastic simulation capability", async () => {
-  const physicsResponse = await render("/docs/physics");
+  const physicsResponse = await renderGuideFamily("/docs/physics");
   assert.equal(physicsResponse.status, 200);
   const physics = await physicsResponse.text();
   assert.match(physics, /Nonlinear\/plastic solid/);
@@ -1753,7 +1784,7 @@ test("scopes legacy von Mises constants to Istanbul inputs", () => {
 });
 
 test("documents every supported source model and its auxiliary inputs", async () => {
-  const response = await render("/docs/source-models");
+  const response = await renderGuideFamily("/docs/source-models");
   assert.equal(response.status, 200);
 
   const html = await response.text();
@@ -1797,7 +1828,7 @@ test("documents every supported source model and its auxiliary inputs", async ()
 });
 
 test("documents and audits the SRFH source-depth reference parser", async () => {
-  const html = await (await render("/docs/source-models")).text();
+  const html = await (await render("/docs/srfh-sources")).text();
   assert.match(html, /id="srfh-depth-reference"/);
   assert.match(html, /surface \(default\)/);
   assert.match(html, /sea_level/);
@@ -1938,7 +1969,7 @@ test("converts velocity potential to pressure before reconstructing acoustic pla
   assert.match(html, /inverse gradient stretch/);
   assert.match(html, /separate memory at each observation point/);
   assert.doesNotMatch(html, /routine has no CPML memory correction/);
-  const models = await (await render("/docs/physics")).text();
+  const models = await (await renderGuideFamily("/docs/physics")).text();
   assert.match(models, /Acoustic free-surface geometry/);
   assert.match(models, /acoustic free surfaces follow local topography over water/);
   assert.match(models, /Without explicit seabed geometry/);
@@ -2114,7 +2145,7 @@ test("reports the conventional BrickUP station pore-pressure ratio", () => {
 });
 
 test("documents independent BrickUP constraints and final station eligibility", async () => {
-  const coupling = await (await render("/docs/physics")).text();
+  const coupling = await (await renderGuideFamily("/docs/physics")).text();
   assert.match(coupling, /include_acoustic=no still builds the pore-pressure map automatically/);
   assert.match(coupling, /VT cut-cell models keep geometric pressure constraints/);
   assert.match(coupling, /standalone extension still requires target-system CUDA\/MPI/);
@@ -2128,7 +2159,7 @@ test("documents independent BrickUP constraints and final station eligibility", 
 });
 
 test("documents four-point open-pore hydraulic integration and its validation scope", async () => {
-  const physics = await (await render("/docs/physics")).text();
+  const physics = await (await render("/docs/poroelastic-coupling")).text();
   assert.match(physics, /four-point \(2x2 Gauss\) hydraulic integration/);
   assert.match(physics, /acoustic_interface_projection still controls mechanical traction\/motion only/);
   assert.match(physics, /Capacity and target share the same rule/);
@@ -2142,7 +2173,7 @@ test("documents four-point open-pore hydraulic integration and its validation sc
 });
 
 test("documents the basin-bottom grid format and renders a usable numeric example", async () => {
-  const response = await render("/docs/input-files");
+  const response = await render("/docs/basin-models");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /id="basin-configuration"/);
@@ -2185,7 +2216,7 @@ test("documents the basin-bottom grid format and renders a usable numeric exampl
 });
 
 test("provides complete examples for 3-D material and topography inputs", async () => {
-  const response = await render("/docs/input-files");
+  const response = await renderGuideFamily("/docs/input-files");
   assert.equal(response.status, 200);
 
   const html = await response.text();
@@ -2241,7 +2272,7 @@ test("provides complete examples for 3-D material and topography inputs", async 
 });
 
 test("documents paired topography and seabed repair", async () => {
-  const html = await (await render("/docs/input-files")).text();
+  const html = await (await render("/docs/topography-tapering")).text();
   const section = html.match(/<section\b[^>]*id="repair-tapered-geometry"[\s\S]*?<\/section>/)?.[0];
   assert.ok(section);
   assert.match(section, /script\/repair_tapered_geometry\.py/);
@@ -2387,7 +2418,7 @@ test("preserves explicit G0 and caches velocity-derived RIVA-Sand stiffness", ()
 
 
 test("documents complete CPML products and the plain-CPML default", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/absorbing-boundaries")).text();
   assert.match(html, /Complete second-order operator/);
   assert.match(html, /cpml_mpml_cross_fraction is now 0/);
   assert.match(html, /cpml_acoustic_sponge_fraction is an optional experimental acoustic bulk absorber/);
@@ -2494,7 +2525,7 @@ test("documents slab-quantized CPML profile sampling and the per-cell stretch di
   assert.match(reference, /Default: automatic \(stored as -1\); positive overrides/);
   assert.match(reference, /one uniform speed over the whole PML/);
   assert.match(reference, /startup d_max\*h\/V diagnostic/);
-  const physics = await (await render("/docs/physics")).text();
+  const physics = await (await render("/docs/absorbing-boundaries")).text();
   assert.match(physics, /quantized into octree-aligned slabs/);
   assert.match(physics, /maximum per-cell stretch d_max\*h\/V/);
   assert.match(physics, /warns when it exceeds 10/);
@@ -2527,7 +2558,7 @@ test("documents slab-quantized CPML profile sampling and the per-cell stretch di
 });
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/absorbing-boundaries")).text();
   assert.match(html, /Material extension clamps in absolute model coordinates/);
   assert.match(html, /depth below the surface at the clamped X\/Y location/);
   assert.match(html, /Building surface offsets/);
@@ -2539,7 +2570,7 @@ test("explains CPML material extension in model coordinates and mesh regeneratio
 
 
 test("documents CPML automatic thickness excluding air", async () => {
-  const physics = await (await render("/docs/physics")).text();
+  const physics = await (await render("/docs/absorbing-boundaries")).text();
   assert.match(physics, /largest non-air element edge/);
   assert.match(physics, /Air elements \(negative Vp\) are excluded/);
   assert.match(physics, /global fallback/);
@@ -2556,7 +2587,7 @@ test("documents CPML automatic thickness excluding air", async () => {
 
 
 test("documents independent domain/material rotations and output frame conversion", async () => {
-  const html = await (await render("/docs/input-files")).text();
+  const html = await (await render("/docs/coordinates")).text();
   for (const phrase of ["Rotated domains and material grids", "3D_velocity_model_azimuth_deg",
     "coordinate_frame.txt", "CPML extension clamps in solver coordinates", "Rebuild persisted meshes",
     "true north", "vector_to_utm", "solver-aligned material grid"])
@@ -2579,7 +2610,7 @@ test("documents independent domain/material rotations and output frame conversio
 
 
 test("documents large 3-D material counts and per-rank memory", async () => {
-  const response = await render("/docs/input-files");
+  const response = await render("/docs/velocity-models");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /sample counts and profile start offsets are signed 64-bit/);
@@ -2589,7 +2620,7 @@ test("documents large 3-D material counts and per-rank memory", async () => {
 
 
 test("documents deferred CPML partitioning and the limits of GPU memory snapshots", async () => {
-  const html = await (await render("/docs/physics")).text();
+  const html = await (await render("/docs/absorbing-boundaries")).text();
   for (const phrase of ["Completed-mesh partitioning and GPU memory",
     "ordinary partitions are still used throughout progressive construction",
     "local acoustic-interface matching", "equal-rank unified run",
@@ -2603,4 +2634,96 @@ test("documents deferred CPML partitioning and the limits of GPU memory snapshot
   assert.match(weight, /Default: 1; &gt;= 1/);
   assert.match(weight, /Construction and mesh-only runs use ordinary partitions/);
   assert.match(weight, /not a GPU-memory cap/);
+});
+
+
+test("provides a setup index and compact, grouped topic navigation", async () => {
+  const index = await (await render("/docs/simulation-setup")).text();
+  for (const step of ["1. Organize your case", "2. Define materials and geometry", "3. Choose physics and sources", "4. Run and check"])
+    assert.ok(index.includes(step), step);
+  for (const slug of ["parameter-file", "velocity-models", "coordinates", "topography", "seabed-geometry", "physics", "source-models"])
+    assert.ok(index.includes(`${basePath}/docs/${slug}`), slug);
+  const velocity = await (await render("/docs/velocity-models")).text();
+  const toc = velocity.match(/<aside class="onThisPage">[\s\S]*?<\/aside>/)?.[0];
+  assert.ok(toc);
+  for (const label of ["Model inputs", "Worked example", "Depth references", "Interpolation &amp; tools", "Files &amp; ordering"])
+    assert.ok(toc.includes(label), label);
+  assert.match(toc, /aria-current="location"/);
+  assert.match(velocity, /<details class="mobilePageContents"/);
+  assert.match(velocity, /<details class="mobileDocsContents"/);
+  assert.match(velocity, /<a\b(?=[^>]*aria-current="page")(?=[^>]*href="[^"]*\/docs\/velocity-models\/?")[^>]*>/);
+});
+
+test("keeps every moved topic bookmark linked to one canonical, shorter guide", async () => {
+  const canonical = new Map();
+  for (const source of ["input-files", "physics", "source-models"]) {
+    const html = await (await render(`/docs/${source}`)).text();
+    const originalIds = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+    assert.equal(new Set(originalIds).size, originalIds.length, `${source}: duplicate anchors`);
+    const redirects = legacyTopicLinks(html);
+    assert.ok(redirects.length > 0, `${source}: missing old topic links`);
+    assert.ok((html.match(/class="docSection"/g) ?? []).length <= 8, `${source}: overview is still too long`);
+    for (const { id, href } of redirects) {
+      const [path, fragment] = href.split("#");
+      assert.equal(fragment, id);
+      const target = path.slice(basePath.length).replace(/\/$/, "");
+      assert.notEqual(target, `/docs/${source}`);
+      if (!canonical.has(target)) {
+        const response = await render(target);
+        assert.equal(response.status, 200, target);
+        canonical.set(target, await response.text());
+      }
+      assert.ok(canonical.get(target).includes(`id="${id}"`), `${href}: missing destination anchor`);
+    }
+  }
+  assert.equal(canonical.size, 15);
+  for (const [path, html] of canonical) {
+    const sections = html.match(/class="docSection"/g) ?? [];
+    assert.ok(sections.length <= 12, `${path}: needs smaller topic pages`);
+    const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+    assert.equal(new Set(ids).size, ids.length, `${path}: duplicate anchors`);
+  }
+});
+
+
+test("formats documented parameters consistently without treating math symbols or files as parameters", async () => {
+  const markup = async (path) => (await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
+  const topography = await markup("/docs/topography");
+  assert.match(topography, /<h2>Choose <code class="parameterName">maximum_octant_level<\/code><\/h2>/);
+  assert.match(topography, /<code class="parameterName">include_topography<\/code>=yes/);
+  assert.match(topography, /<math[^>]*>[\s\S]*?V_\{S,\\min\}\^\{\\mathrm\{model\}\}/);
+  assert.doesNotMatch(topography, /<code class="parameterName">(?:model_z|topography\.in|V|S)<\/code>/);
+  const sources = await markup("/docs/source-models");
+  assert.match(sources, /<code class="parameterName">ricker_Ts<\/code>/);
+  const srfh = await markup("/docs/srfh-sources");
+  assert.match(srfh, /<code class="parameterName">srfh_depth_reference<\/code>/);
+  assert.match(srfh, /<code class="parameterName">number_of_point_sources<\/code>/);
+  const reference = await markup("/docs/parameters-output");
+  assert.match(reference, /<code class="parameterName">monitor_file<\/code>/);
+  assert.doesNotMatch(reference, /<code class="parameterName"><code/);
+});
+
+test("illustrates all material depth references with accessible, correctly hosted diagrams", async () => {
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /Without seabed_geometry_file, use legacy \(the default\)/);
+  assert.match(html, /The three explicit options require include_acoustic=yes/);
+  assert.match(html, /does not change source depths in coords.in/);
+  assert.match(html, /1120 \/ 1120 \/ 1120 m/);
+  assert.match(html, /220 \/ 120 \/ 120 m/);
+  assert.match(html, /220 \/ 80 \/ 20 m/);
+  assert.match(html, /does not require flat geological layers/);
+  assert.match(html, /model_z and surface coincide, while seabed remains bed-relative/);
+  for (const mode of ["model-z", "surface", "seabed", "legacy"]) {
+    const name = `depth-reference-${mode}`;
+    assert.ok(html.includes(`id="${name}"`));
+    const figure = html.match(new RegExp(`<figure class="docFigure">(?:(?!</figure>)[\\s\\S])*?src="${basePath}/figures/${name}\\.svg"(?:(?!</figure>)[\\s\\S])*?</figure>`))?.[0];
+    assert.ok(figure, `${mode}: missing figure or incorrect hosting prefix`);
+    assert.match(figure, /alt="[^"]{50,}"/);
+    assert.match(figure, /<figcaption>/);
+    assert.ok(figure.includes(`href="${basePath}/figures/${name}.svg"`));
+    const svg = readFileSync(new URL(`../public/figures/${name}.svg`, import.meta.url), "utf8");
+    assert.match(svg, /role="img" aria-labelledby="title desc"/);
+    assert.match(svg, /<title id="title">[^<]+<\/title>/);
+    assert.match(svg, /<desc id="desc">[^<]+<\/desc>/);
+  }
 });

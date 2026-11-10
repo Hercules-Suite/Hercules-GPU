@@ -1,3 +1,4 @@
+import { organizeSetupGuides } from "./setup-guides";
 import { parameterReferencePages, parameterReferenceSummary, srfhDepthReferenceParameter } from "./parameter-reference";
 
 export type DocTable = {
@@ -5,7 +6,23 @@ export type DocTable = {
   rows: string[][];
 };
 
+export type DocLink = { href: string; title: string; description: string };
+
+export type DocFigure = {
+  id: string;
+  title: string;
+  description: string;
+  src: string;
+  alt: string;
+  caption: string;
+  width: number;
+  height: number;
+};
+
 export type DocSection = {
+  tocTitle?: string;
+  tocGroup?: string;
+  links?: DocLink[];
   id: string;
   title: string;
   paragraphs?: string[];
@@ -16,9 +33,12 @@ export type DocSection = {
   codeLabel?: string;
   note?: string;
   table?: DocTable;
+  figures?: DocFigure[];
 };
 
 export type DocPageContent = {
+  parent?: string;
+  legacySections?: { id: string; title: string; href: string }[];
   eyebrow: string;
   title: string;
   summary: string;
@@ -74,7 +94,7 @@ function nonlinearModelExample({
   ].join("\n");
 }
 
-export const docPages: Record<string, DocPageContent> = {
+const authoredPages: Record<string, DocPageContent> = {
   "getting-started": {
     eyebrow: "Start here",
     title: "Run your first Hercules simulation",
@@ -1459,11 +1479,59 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "The # filename labels are not file content. This example omits qs.in and qp.in; when both are absent, Hercules uses the legacy relations Qs=0.1 Vs and Qp=2 Qs. Regenerate or re-correct a persisted mesh after changing any material or quality-factor file.",
       },
       {
+        id: "velocity-model-depth-reference",
+        title: "Choose 3D_velocity_model_depth_reference",
+        paragraphs: [
+          "This parameter tells Hercules where zero depth is for the layer-top values in z.in. All four options use metres, positive downward. It changes the interpretation of material depths; it does not change source depths in coords.in, which use their own source controls such as srfh_depth_reference.",
+          "Without seabed_geometry_file, use legacy (the default). With that file, explicitly choose model_z, surface, or seabed; legacy is rejected. The three explicit options require include_acoustic=yes, 3D_velocity_model=yes, solid-only material profiles, and the water properties seabed_water_vp_m_s and seabed_water_density_kg_m3. Water is assigned from geometry before the solid profile is sampled. See the Seabed & water guide for the complete setup.",
+          "The three figures below encode exactly the same layer, at elevation −120 m. Column A has ground at +100 m; B and C have water surfaces at 0 m and beds at −40 and −100 m. With topographybase_zcoord=1000 m, solver Z = 1000 − elevation, so that layer is at Z=1120 m. The blue arrows measure the values to write in z.in. The upper air interval is omitted, as marked by the axis break.",
+        ],
+        table: {
+          headers: ["Option", "Where is zero?", "Layer-top z.in values: A / B / C"],
+          rows: [
+            ["model_z", "One common solver Z=0 plane, at elevation topographybase_zcoord with topography enabled.", "1120 / 1120 / 1120 m"],
+            ["surface", "Each column's outer surface: ground on land, water surface over water.", "220 / 120 / 120 m"],
+            ["seabed", "Each column's bed: ground on land, bottom of the water column offshore.", "220 / 80 / 20 m"],
+            ["legacy (default)", "Existing type_of_etree convention without seabed geometry; see the separate full/sqd example below.", "Depends on full / sqd"],
+          ],
+        },
+        figures: [
+          {
+            id: "depth-reference-model-z",
+            title: "model_z — one common solver zero",
+            description: "Fixed means that every column measures from the same zero plane; the zero does not move with the terrain or bed. Here z.in = 1000 − (−120) = 1120 m everywhere. It does not require flat geological layers: different z.in values in different columns can describe a sloping layer.",
+            src: "/figures/depth-reference-model-z.svg",
+            alt: "model_z example: a layer at elevation −120 m has z.in=1120 m in land, shallow-water and deep-water columns, all measured from solver Z=0 at elevation +1000 m.",
+            caption: "Choose model_z when the material file already uses solver Z coordinates. A sea-level depth of 120 m is not a solver Z of 120 m in this example; it becomes Z=1120 m.",
+            width: 920, height: 520,
+          },
+          {
+            id: "depth-reference-surface",
+            title: "surface — start at the outer surface",
+            description: "Subtract the layer elevation from each column's outer-surface elevation. On land this gives 100 − (−120) = 220 m. Both water surfaces are at zero, so both offshore values are 0 − (−120) = 120 m. The offshore depth includes the water column.",
+            src: "/figures/depth-reference-surface.svg",
+            alt: "surface example: z.in values 220, 120 and 120 m locate the same layer at elevation −120 m beneath ground at +100 m and two water surfaces at 0 m.",
+            caption: "The outer surface is the ground on dry cells and the water surface on wet cells. It is not the seabed offshore, even though the material profiles contain only solid properties.",
+            width: 920, height: 520,
+          },
+          {
+            id: "depth-reference-seabed",
+            title: "seabed — start at the ground or bed",
+            description: "Subtract the layer elevation from the local ground/bed elevation. The land value is still 220 m, but B gives −40 − (−120) = 80 m and C gives −100 − (−120) = 20 m. These offshore depths exclude the water column.",
+            src: "/figures/depth-reference-seabed.svg",
+            alt: "seabed example: z.in values 220, 80 and 20 m locate the same layer at elevation −120 m beneath ground at +100 m and beds at −40 and −100 m.",
+            caption: "Choose seabed for solid profiles measured below local ground or the seabed. On dry ground, surface and seabed have the same origin.",
+            width: 920, height: 520,
+          },
+        ],
+        note: "The figures show individual column coordinates, not a mesh or a shoreline interpolation example; the displayed z.in values are selected layer entries, not complete files. With topography enabled, each explicit option works with either full or sqd. With include_topography=no, the outer surface is at solver Z=0: model_z and surface coincide, while seabed remains bed-relative. Convert z.in when changing references to preserve the physical model, then rebuild the material mesh. Imported mesh materials do not change merely because this parameter changes.",
+      },
+      {
         id: "velocity-model-lookup",
         title: "How Hercules samples the model",
         paragraphs: [
           "At each of the four horizontal grid columns surrounding a query point, Hercules selects the deepest listed z that does not exceed the local depth. Values are therefore piecewise constant with depth within each profile; a listed z acts as the top depth of that material interval. Above the first listed depth, Hercules uses the first sample, and below the last listed depth it uses the last sample.",
-          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. The general 3-D reader samples the columns at the same physical elevation. Without explicit seabed geometry, type_of_etree selects the vertical reference described below; computation_method independently selects VT or FEM boundary treatment.",
+          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. The general 3-D reader samples the columns at the same physical elevation. The depth-reference options above determine the local profile depth in each column; computation_method independently selects VT or FEM boundary treatment.",
           "In legacy mode, queries outside xmin <= x < xmax or ymin <= y < ymax use the background model. With full or topography disabled, a query Z below the smallest numeric z.in value also uses the background. In sqd, depths have different surface origins, so endpoint extension is applied separately after converting each column depth; there is no global minimum-depth rejection.",
         ],
       },
@@ -1471,6 +1539,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         id: "velocity-model-topography-depths",
         title: "3-D material depths with full and sqd topography",
         paragraphs: [
+          "legacy is the default for 3D_velocity_model_depth_reference and applies only without seabed_geometry_file. Its reference is selected by the existing topography convention, rather than a single universal below-ground or sea-level rule.",
           "In legacy mode, with include_topography=yes and type_of_etree=sqd, z.in stores positive-downward layer-top depths below each column's own terrain surface. The caller supplies d = Z - Z_surface(query). The reader uses d_i = d + h_i - h_query, where heights h are positive upward. h_query comes directly from the actual topography grid at the solver query point, including when that grid is finer than, offset from, or rotated relative to the velocity grid.",
           "With type_of_etree=full, z.in stores layer tops in fixed model Z coordinates and every column is queried at Z, with no column terrain shift. The fixed model origin includes the existing mesh-origin convention; existing building offsets are removed before material lookup. With topography disabled, the fixed-coordinate lookup is retained. Changing full to sqd requires converting z.in to the corresponding reference, not just changing the parameter.",
           "For example, topographybase_zcoord=1000 m and terrain heights 0 and 100 m give surface Z values 1000 and 900 m. A horizontal interface at elevation -40 m is at Z=1040 m: encode its layer tops as 40 and 140 m in sqd, or 1040 m in both columns in full. At the midpoint, Z=1030 m is 80 m below the surface; sqd queries depths 30 and 130 m, and full queries Z=1030 m. Both select the material above the interface.",
@@ -1479,6 +1548,15 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           "Validation covers local analytical material queries and CPML sampling, not new GPU/MPI wave-propagation benchmarks. The correction selects Vs, Vp, density, and optional Qs/Qp together and therefore affects elastic, viscoelastic, nonlinear elastoplastic and poroelastic initialization, plus acoustic/solid classification and coupled interfaces. Existing VT/FEM and coupled-formulation restrictions still apply.",
         ],
         equations: [String.raw`d_i=d+Z_{\mathrm{surface}}(q)-Z_{\mathrm{surface}}(i)=d+h_i-h_q\quad(\mathrm{sqd}),\qquad Z_i=Z\quad(\mathrm{full}).`],
+        figures: [{
+          id: "depth-reference-legacy",
+          title: "legacy — follow the full or sqd convention",
+          description: "Both panels represent the same two land profiles and the same layer. With full, the layer tops share solver Z=1040 m. With sqd, their depths below the two ground surfaces are 40 and 140 m.",
+          src: "/figures/depth-reference-legacy.svg",
+          alt: "Legacy example with topography enabled and base 1000 m: ground elevations are 0 and 100 m, and the layer elevation is −40 m. full stores 1040/1040 m; sqd stores 40/140 m. Without topography, legacy uses fixed solver coordinates.",
+          caption: "Without topography, legacy retains fixed solver coordinates and type_of_etree is unused. The explicit model_z, surface and seabed choices above do not inherit the full/sqd distinction.",
+          width: 920, height: 520,
+        }],
       },
       {
         id: "explicit-seabed-geometry",
@@ -2536,3 +2614,5 @@ if __name__ == "__main__":
     ],
   },
 };
+
+export const docPages = organizeSetupGuides(authoredPages);

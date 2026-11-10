@@ -1,9 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 import { MathFormula, MathText } from "../../components/math-text";
 import { docPages } from "../content";
+import { TableOfContents } from "../table-of-contents";
+import { LegacySectionRedirect } from "../legacy-section-redirect";
 import { allNavItems, navItemForSlug } from "../navigation";
+import { assetPath } from "../../site-path";
 
 export function generateStaticParams() {
   return allNavItems.map((item) => ({ slug: item.slug }));
@@ -24,6 +28,9 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
   const page = docPages[slug];
   if (!page) notFound();
 
+  const tocSections = page.sections.map((section) => ({ id: section.id, title: section.tocTitle ?? section.title, group: section.tocGroup }));
+  if (page.legacySections?.length) tocSections.push({ id: "full-topic-index", title: "Full topic index", group: "All topics" });
+  const parent = page.parent ? navItemForSlug(page.parent) : undefined;
   const index = allNavItems.findIndex((item) => item.slug === slug);
   const previous = index > 0 ? allNavItems[index - 1] : undefined;
   const next = index < allNavItems.length - 1 ? allNavItems[index + 1] : undefined;
@@ -31,23 +38,32 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
   return (
     <main className={`docsMain ${page.eyebrow === "Parameter reference" ? "parameterReferenceMain" : ""}`}>
       <article className="docsArticle">
+        {page.legacySections?.length ? <LegacySectionRedirect destinations={Object.fromEntries(page.legacySections.map((section) => [section.id, section.href]))} /> : null}
         <div className="docBreadcrumbs">
           <Link href="/docs">Docs</Link>
           <span>/</span>
+          {parent && <><Link href={`/docs/${parent.slug}`}>{parent.title}</Link><span>/</span></>}
           <span>{navItemForSlug(slug)?.title}</span>
         </div>
         <header className="docHeader">
           <span className="docEyebrow">{page.eyebrow}</span>
-          <h1>{page.title}</h1>
-          <p className="docLead">{page.summary}</p>
+          <h1><MathText text={page.title} /></h1>
+          <p className="docLead"><MathText text={page.summary} /></p>
           <div className="docUpdated">
             Current Hercules GPU code path
           </div>
         </header>
 
+        <TableOfContents mobile sections={tocSections} />
         {page.sections.map((section) => (
           <section className="docSection" id={section.id} key={section.id}>
-            <h2>{section.title}</h2>
+            <h2><MathText text={section.title} /></h2>
+            {section.links && <div className="guideLinks">
+              {section.links.map((link) => <Link href={link.href} key={link.href}>
+                <strong><MathText text={link.title} /><span aria-hidden="true"> →</span></strong>
+                <span><MathText text={link.description} /></span>
+              </Link>)}
+            </div>}
             {section.paragraphs?.map((paragraph) => <p key={paragraph}><MathText text={paragraph} /></p>)}
             {section.equations?.map((equation) => (
               <MathFormula display expression={equation} key={equation} />
@@ -68,7 +84,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                 <table className={section.table.headers[0] === "Parameter" ? "parameterTable" : undefined}>
                   <thead>
                     <tr>
-                      {section.table.headers.map((header) => <th key={header}>{header}</th>)}
+                      {section.table.headers.map((header) => <th key={header}><MathText text={header} /></th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -89,6 +105,25 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                 </table>
               </div>
             )}
+            {section.figures && <div className="docFigures">
+              {section.figures.length > 1 && <nav className="figureJumpLinks" aria-label="Section diagrams">
+                <span>Jump to a diagram:</span>
+                {section.figures.map((figure) => <a href={`#${figure.id}`} key={figure.id}>{figure.title.split(" — ")[0]}</a>)}
+              </nav>}
+              {section.figures.map((figure) => <div id={figure.id} className="docFigureSection" key={figure.id}>
+                <h3><MathText text={figure.title} /></h3>
+                <p><MathText text={figure.description} /></p>
+                <figure className="docFigure">
+                  <div className="figureViewport" tabIndex={0} role="region" aria-label={`${figure.title} diagram; scroll horizontally on narrow screens`}>
+                    <Image unoptimized src={assetPath(figure.src)} alt={figure.alt} width={figure.width} height={figure.height} />
+                  </div>
+                  <figcaption>
+                    <MathText text={figure.caption} />{" "}
+                    <a href={assetPath(figure.src)}>Open full-size diagram</a>
+                  </figcaption>
+                </figure>
+              </div>)}
+            </div>}
             {section.code && (
               <div className="codeBlock">
                 <div className="codeHeader">
@@ -106,6 +141,15 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           </section>
         ))}
 
+        {page.legacySections?.length ? <section className="docSection" id="full-topic-index">
+          <h2>Full topic index</h2>
+          <details className="legacyTopicIndex">
+            <summary>Browse all {page.legacySections.length} detailed topics</summary>
+            <ul>{page.legacySections.map((section) => <li id={section.id} key={section.id}>
+              <Link data-legacy-section={section.id} href={section.href}><MathText text={section.title} /></Link>
+            </li>)}</ul>
+          </details>
+        </section> : null}
         <nav className="docPagination" aria-label="Adjacent documentation pages">
           {previous ? (
             <Link href={`/docs/${previous.slug}`}>
@@ -122,16 +166,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
         </nav>
       </article>
 
-      <aside className="onThisPage" aria-label="On this page">
-        <strong>On this page</strong>
-        {page.sections.map((section) => (
-          <a href={`#${section.id}`} key={section.id}>{section.title}</a>
-        ))}
-        <div className="tocRule" />
-        <a href="https://github.com/Hercules-Suite/Hercules-GPU" target="_blank" rel="noreferrer">
-          Edit on GitHub ↗
-        </a>
-      </aside>
+      <TableOfContents sections={tocSections} />
     </main>
   );
 }

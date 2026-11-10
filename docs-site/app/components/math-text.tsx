@@ -1,5 +1,6 @@
 import katex from "katex";
 import type { ReactNode } from "react";
+import { ParameterText } from "./parameter-text";
 
 type MathFormulaProps = {
   expression: string;
@@ -31,7 +32,12 @@ export function MathText({ text }: { text: string }) {
     const inline = part.startsWith("\\(") && part.endsWith("\\)");
     const display = part.startsWith("\\[") && part.endsWith("\\]");
 
-    if (!inline && !display) return part;
+    if (!inline && !display) return <ParameterText text={part} key={index} />;
+
+    // A standalone parameter/assignment is code, not a mathematical symbol.
+    // Keep actual formulas in KaTeX, including their accessible MathML.
+    const literal = inline && part.slice(2, -2).trim().match(/^\\mathtt\{([^{}]+)\}$/);
+    if (literal) return <ParameterText text={literal[1].replaceAll("\\_", "_")} key={index} />;
 
     return (
       <MathFormula

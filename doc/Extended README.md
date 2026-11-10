@@ -2512,6 +2512,29 @@ velocity axes beyond maximum query coordinates. CPML clamps queries in solver
 coordinates before geometry and material lookup; the bathymetry reconstruction
 uses the same lateral clamp and reads bed depths directly.
 
+**Comparing the four depth-reference options.** The 3-D velocity-model guide
+includes the diagrams linked below, one for each option. For the three explicit
+options, consider one physical layer at
+elevation −120 m with `topographybase_zcoord=1000` m. Profile A is dry land at
++100 m; B and C have water surfaces at 0 m and beds at −40 and −100 m:
+
+| Reference | Zero of the layer-top coordinates | `z.in` entries A / B / C |
+| --- | --- | --- |
+| [`model_z` diagram](../docs-site/public/figures/depth-reference-model-z.svg) | Common solver Z=0 plane, at elevation +1000 m in this example | 1120 / 1120 / 1120 m |
+| [`surface` diagram](../docs-site/public/figures/depth-reference-surface.svg) | Each column's outer surface (ground or water surface) | 220 / 120 / 120 m |
+| [`seabed` diagram](../docs-site/public/figures/depth-reference-seabed.svg) | Each column's ground or bed | 220 / 80 / 20 m |
+| [`legacy` diagram](../docs-site/public/figures/depth-reference-legacy.svg) | Existing `full`/`sqd` convention, without `seabed_geometry_file` | Separate dry-land example in the figure |
+
+“Fixed solver Z” means a common reference plane, not a requirement for flat
+layers: varying the entries between columns can describe a sloping interface.
+`surface` includes water-column depth; `seabed` excludes it. These are selected
+layer-top entries, not complete input files or a conforming-mesh illustration.
+Convert `z.in` when changing references to preserve physical layer positions,
+and rebuild the material mesh. `legacy` is the default without geometry;
+non-legacy values require `seabed_geometry_file`, and that file requires an
+explicit non-legacy choice. This parameter does not set source depths;
+SRFH `coords.in` uses `srfh_depth_reference` independently.
+
 Physics and runtime integration:
 
 - Elastic, viscoelastic and nonlinear elastoplastic/plastic and hysteretic

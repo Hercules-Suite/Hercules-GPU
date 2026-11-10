@@ -1,4 +1,7 @@
+import { setupGuides } from "./setup-guides";
+
 export type NavItem = {
+  children?: NavItem[];
   slug: string;
   title: string;
   description: string;
@@ -53,26 +56,12 @@ export const navGroups: NavGroup[] = [
   {
     label: "Setting up simulations",
     items: [
-      {
-        slug: "parameter-file",
-        title: "Parameter file",
-        description: "Syntax and organization of the single parameters.in file.",
-      },
-      {
-        slug: "physics",
-        title: "Physical models",
-        description: "Elastic, nonlinear plasticity, acoustic, poroelastic, damping, and PML.",
-      },
-      {
-        slug: "input-files",
-        title: "Input files and directories",
-        description: "Source, material, topography, and auxiliary inputs.",
-      },
-      {
-        slug: "source-models",
-        title: "Source models",
-        description: "Point, force, finite-fault, kinked-fault, and SRFH sources.",
-      },
+      { slug: "simulation-setup", title: "Setup contents", description: "A step-by-step directory of simulation setup guides." },
+      { slug: "parameter-file", title: "Parameter file", description: "Syntax and organization of the single parameters.in file." },
+      ...setupGuides.filter((guide) => !guide.parent).map((guide) => ({
+        slug: guide.slug, title: guide.title, description: guide.description,
+        children: setupGuides.filter((child) => child.parent === guide.slug).map((child) => ({ slug: child.slug, title: child.title, description: child.description })),
+      })),
     ],
   },
   {
@@ -142,7 +131,7 @@ export const navGroups: NavGroup[] = [
   },
 ];
 
-export const allNavItems = navGroups.flatMap((group) => group.items);
+export const allNavItems = navGroups.flatMap((group) => group.items.flatMap((item) => [item, ...(item.children ?? [])]));
 
 export function navItemForSlug(slug: string) {
   return allNavItems.find((item) => item.slug === slug);
