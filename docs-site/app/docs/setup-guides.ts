@@ -35,7 +35,7 @@ export const setupGuides: SetupGuide[] = [
     description: "File formats, profile ordering, depth references, conversion, and validation.",
     source: "input-files",
     parent: "input-files",
-    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Depth & interpolation", "velocity-model-lookup velocity-model-topography-depths"), group("Preparation tools", "velocity-model-converter velocity-model-converter-script velocity-model-validation")],
+    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Depth references", "velocity-model-depth-reference velocity-model-topography-depths"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Interpolation & tools", "velocity-model-lookup velocity-model-converter velocity-model-converter-script velocity-model-validation")],
   },
   {
     slug: "basin-models",
@@ -161,7 +161,7 @@ const shortTitles: Record<string, string> = {
   "velocity-model-configuration": "Configuration", "velocity-model-files": "Files & ordering",
   "velocity-model-example": "Example overview", "velocity-model-example-axes": "Axes & index.in",
   "velocity-model-example-ranges": "Profile index ranges", "velocity-model-example-arrays": "Material arrays",
-  "velocity-model-lookup": "Model interpolation", "velocity-model-topography-depths": "Depth references: full & sqd",
+  "velocity-model-lookup": "Model interpolation", "velocity-model-depth-reference": "Depth reference options", "velocity-model-topography-depths": "Legacy: full & sqd",
   "velocity-model-converter": "Convert CSV inputs", "velocity-model-converter-script": "Converter script", "velocity-model-validation": "Validate model files",
   "topography-configuration": "Configuration", "topography-format": "topography.in format", "topography-base-alignment": "Base & water-surface alignment",
   "topography-maximum-level": "Maximum octant level", "topography-wavelength-refinement": "Wavelength refinement", "topography-surface-consistency": "Surface & receivers",

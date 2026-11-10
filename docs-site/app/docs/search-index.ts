@@ -17,6 +17,7 @@ function sectionValues(section: DocSection): string[] {
     section.title,
     section.tocTitle ?? "",
     ...(section.links?.flatMap((link) => [link.title, link.description]) ?? []),
+    ...(section.figures?.flatMap((figure) => [figure.title, figure.description, figure.alt, figure.caption]) ?? []),
     ...(section.paragraphs ?? []),
     ...(section.equations ?? []),
     ...(section.afterEquationsParagraphs ?? []),

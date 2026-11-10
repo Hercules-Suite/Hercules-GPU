@@ -184,7 +184,12 @@ The domain must have zero CVM mesh offsets (normally `cvmdb_input_file=profile`)
 Topography refinement is skipped; wavelength/interface refinement and 2:1
 balancing remain. Omitting the seabed file retains Vs-based water classification.
 Set `3D_velocity_model_depth_reference` explicitly to `seabed`, `surface`,
-or `model_z`; `legacy` (default) applies without the file. With topography on,
+or `model_z`; `legacy` (default) applies without the file. Non-legacy choices
+require the file. See the [illustrated coordinate comparison](Extended%20README.md#explicit-seabed-geometry)
+and the individual diagrams for [model_z](../docs-site/public/figures/depth-reference-model-z.svg),
+[surface](../docs-site/public/figures/depth-reference-surface.svg),
+[seabed](../docs-site/public/figures/depth-reference-seabed.svg), and
+[legacy](../docs-site/public/figures/depth-reference-legacy.svg). With topography on,
 each explicit reference works with either `full` or `sqd`. With it off,
 `surface` and `model_z` coincide, `seabed` remains bed-relative, and
 `type_of_etree` and other topography-only controls are unused. Supply `seabed_water_vp_m_s` and

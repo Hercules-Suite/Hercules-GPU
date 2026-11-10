@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 import { MathFormula, MathText } from "../../components/math-text";
 import { docPages } from "../content";
 import { TableOfContents } from "../table-of-contents";
 import { LegacySectionRedirect } from "../legacy-section-redirect";
 import { allNavItems, navItemForSlug } from "../navigation";
+import { assetPath } from "../../site-path";
 
 export function generateStaticParams() {
   return allNavItems.map((item) => ({ slug: item.slug }));
@@ -103,6 +105,25 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                 </table>
               </div>
             )}
+            {section.figures && <div className="docFigures">
+              {section.figures.length > 1 && <nav className="figureJumpLinks" aria-label="Section diagrams">
+                <span>Jump to a diagram:</span>
+                {section.figures.map((figure) => <a href={`#${figure.id}`} key={figure.id}>{figure.title.split(" — ")[0]}</a>)}
+              </nav>}
+              {section.figures.map((figure) => <div id={figure.id} className="docFigureSection" key={figure.id}>
+                <h3><MathText text={figure.title} /></h3>
+                <p><MathText text={figure.description} /></p>
+                <figure className="docFigure">
+                  <div className="figureViewport" tabIndex={0} role="region" aria-label={`${figure.title} diagram; scroll horizontally on narrow screens`}>
+                    <Image unoptimized src={assetPath(figure.src)} alt={figure.alt} width={figure.width} height={figure.height} />
+                  </div>
+                  <figcaption>
+                    <MathText text={figure.caption} />{" "}
+                    <a href={assetPath(figure.src)}>Open full-size diagram</a>
+                  </figcaption>
+                </figure>
+              </div>)}
+            </div>}
             {section.code && (
               <div className="codeBlock">
                 <div className="codeHeader">

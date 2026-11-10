@@ -2646,7 +2646,7 @@ test("provides a setup index and compact, grouped topic navigation", async () =>
   const velocity = await (await render("/docs/velocity-models")).text();
   const toc = velocity.match(/<aside class="onThisPage">[\s\S]*?<\/aside>/)?.[0];
   assert.ok(toc);
-  for (const label of ["Model inputs", "Worked example", "Depth &amp; interpolation", "Preparation tools", "Files &amp; ordering"])
+  for (const label of ["Model inputs", "Worked example", "Depth references", "Interpolation &amp; tools", "Files &amp; ordering"])
     assert.ok(toc.includes(label), label);
   assert.match(toc, /aria-current="location"/);
   assert.match(velocity, /<details class="mobilePageContents"/);
@@ -2701,4 +2701,29 @@ test("formats documented parameters consistently without treating math symbols o
   const reference = await markup("/docs/parameters-output");
   assert.match(reference, /<code class="parameterName">monitor_file<\/code>/);
   assert.doesNotMatch(reference, /<code class="parameterName"><code/);
+});
+
+test("illustrates all material depth references with accessible, correctly hosted diagrams", async () => {
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /Without seabed_geometry_file, use legacy \(the default\)/);
+  assert.match(html, /The three explicit options require include_acoustic=yes/);
+  assert.match(html, /does not change source depths in coords.in/);
+  assert.match(html, /1120 \/ 1120 \/ 1120 m/);
+  assert.match(html, /220 \/ 120 \/ 120 m/);
+  assert.match(html, /220 \/ 80 \/ 20 m/);
+  assert.match(html, /does not require flat geological layers/);
+  assert.match(html, /model_z and surface coincide, while seabed remains bed-relative/);
+  for (const mode of ["model-z", "surface", "seabed", "legacy"]) {
+    const name = `depth-reference-${mode}`;
+    assert.ok(html.includes(`id="${name}"`));
+    const figure = html.match(new RegExp(`<figure class="docFigure">(?:(?!</figure>)[\\s\\S])*?src="${basePath}/figures/${name}\\.svg"(?:(?!</figure>)[\\s\\S])*?</figure>`))?.[0];
+    assert.ok(figure, `${mode}: missing figure or incorrect hosting prefix`);
+    assert.match(figure, /alt="[^"]{50,}"/);
+    assert.match(figure, /<figcaption>/);
+    assert.ok(figure.includes(`href="${basePath}/figures/${name}.svg"`));
+    const svg = readFileSync(new URL(`../public/figures/${name}.svg`, import.meta.url), "utf8");
+    assert.match(svg, /role="img" aria-labelledby="title desc"/);
+    assert.match(svg, /<title id="title">[^<]+<\/title>/);
+    assert.match(svg, /<desc id="desc">[^<]+<\/desc>/);
+  }
 });
