@@ -59,6 +59,14 @@ body {
 a { color: inherit; text-decoration: none; }
 button, input { font: inherit; }
 code { font-family: var(--font-mono); }
+.parameterName, .katex .mathtt {
+  font-family: var(--font-mono);
+  color: var(--accent-strong);
+  font-weight: 650;
+  font-style: normal;
+}
+.parameterName { font-size: .9em; overflow-wrap: anywhere; }
+.tableWrap td:first-child .parameterName { font-size: inherit; }
 ::selection { background: var(--accent-pale); }
 
 /* Header */
@@ -307,14 +315,9 @@ code { font-family: var(--font-mono); }
 .overviewSummary li { margin: 7px 0; padding-left: 3px; color: var(--ink); font-size: 14px; line-height: 1.65; }
 
 .mathExpression { color: var(--ink-strong); }
-.mathInline {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-inline: .06em;
-  vertical-align: -.18em;
-}
+/* Native inline math needs visible overflow for superscripts and italic
+   overhangs. Only display equations are horizontal scroll containers. */
+.mathInline { display: inline; }
 .mathDisplay {
   display: block;
   max-width: 100%;

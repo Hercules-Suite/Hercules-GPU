@@ -45,8 +45,8 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
         </div>
         <header className="docHeader">
           <span className="docEyebrow">{page.eyebrow}</span>
-          <h1>{page.title}</h1>
-          <p className="docLead">{page.summary}</p>
+          <h1><MathText text={page.title} /></h1>
+          <p className="docLead"><MathText text={page.summary} /></p>
           <div className="docUpdated">
             Current Hercules GPU code path
           </div>
@@ -55,11 +55,11 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
         <TableOfContents mobile sections={tocSections} />
         {page.sections.map((section) => (
           <section className="docSection" id={section.id} key={section.id}>
-            <h2>{section.title}</h2>
+            <h2><MathText text={section.title} /></h2>
             {section.links && <div className="guideLinks">
               {section.links.map((link) => <Link href={link.href} key={link.href}>
-                <strong>{link.title}<span aria-hidden="true"> →</span></strong>
-                <span>{link.description}</span>
+                <strong><MathText text={link.title} /><span aria-hidden="true"> →</span></strong>
+                <span><MathText text={link.description} /></span>
               </Link>)}
             </div>}
             {section.paragraphs?.map((paragraph) => <p key={paragraph}><MathText text={paragraph} /></p>)}
@@ -82,7 +82,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                 <table className={section.table.headers[0] === "Parameter" ? "parameterTable" : undefined}>
                   <thead>
                     <tr>
-                      {section.table.headers.map((header) => <th key={header}>{header}</th>)}
+                      {section.table.headers.map((header) => <th key={header}><MathText text={header} /></th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -125,7 +125,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           <details className="legacyTopicIndex">
             <summary>Browse all {page.legacySections.length} detailed topics</summary>
             <ul>{page.legacySections.map((section) => <li id={section.id} key={section.id}>
-              <Link data-legacy-section={section.id} href={section.href}>{section.title}</Link>
+              <Link data-legacy-section={section.id} href={section.href}><MathText text={section.title} /></Link>
             </li>)}</ul>
           </details>
         </section> : null}

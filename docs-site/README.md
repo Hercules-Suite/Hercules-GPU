@@ -117,6 +117,14 @@ pages in the browser; the index links also work without JavaScript. Search
 indexes the canonical pages. The rendered tests check the destinations and
 preserved technical content in both build targets.
 
+Prose, headings, notes, and table descriptions share a renderer that gives
+recognized parameter names the same monospace face and weight as the reference
+tables. Names come from the parameter catalog and source/runtime key tables;
+write them literally rather than adding HTML. Use KaTeX delimiters for actual
+mathematical notation, and put long equations in display delimiters (`\[...\]`)
+so they can scroll within their own block on narrow screens. Inline symbols use
+normal text flow without a separate scrollbar.
+
 The repository's [Technical README](../doc/Technical%20README.md) is the concise
 operational guide and variable index. Put lengthy engineering explanations,
 examples, numerical derivations, and implementation/validation notes in

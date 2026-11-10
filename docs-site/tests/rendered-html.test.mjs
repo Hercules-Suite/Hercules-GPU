@@ -17,7 +17,7 @@ function filesUnder(directory) {
   });
 }
 
-async function render(path = "/") {
+async function renderMarkup(path = "/") {
   if (staticExport) {
     const file = join(exportDirectory, path, "index.html");
     return existsSync(file)
@@ -37,6 +37,14 @@ async function render(path = "/") {
     },
     { waitUntil() {}, passThroughOnException() {} },
   );
+}
+
+// Content/parser audits compare readable text independent of inline parameter
+// styling. Typography checks below use renderMarkup to inspect the actual tags.
+async function render(path = "/") {
+  const response = await renderMarkup(path);
+  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameterName">([A-Za-z0-9_]+)<\/code>/g, "$1");
+  return new Response(html, { status: response.status, headers: response.headers });
 }
 
 function legacyTopicLinks(html) {
@@ -2675,4 +2683,22 @@ test("keeps every moved topic bookmark linked to one canonical, shorter guide", 
     const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
     assert.equal(new Set(ids).size, ids.length, `${path}: duplicate anchors`);
   }
+});
+
+
+test("formats documented parameters consistently without treating math symbols or files as parameters", async () => {
+  const markup = async (path) => (await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
+  const topography = await markup("/docs/topography");
+  assert.match(topography, /<h2>Choose <code class="parameterName">maximum_octant_level<\/code><\/h2>/);
+  assert.match(topography, /<code class="parameterName">include_topography<\/code>=yes/);
+  assert.match(topography, /<math[^>]*>[\s\S]*?V_\{S,\\min\}\^\{\\mathrm\{model\}\}/);
+  assert.doesNotMatch(topography, /<code class="parameterName">(?:model_z|topography\.in|V|S)<\/code>/);
+  const sources = await markup("/docs/source-models");
+  assert.match(sources, /<code class="parameterName">ricker_Ts<\/code>/);
+  const srfh = await markup("/docs/srfh-sources");
+  assert.match(srfh, /<code class="parameterName">srfh_depth_reference<\/code>/);
+  assert.match(srfh, /<code class="parameterName">number_of_point_sources<\/code>/);
+  const reference = await markup("/docs/parameters-output");
+  assert.match(reference, /<code class="parameterName">monitor_file<\/code>/);
+  assert.doesNotMatch(reference, /<code class="parameterName"><code/);
 });
