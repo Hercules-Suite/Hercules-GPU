@@ -15,6 +15,8 @@ export type DocumentationSearchItem = {
 function sectionValues(section: DocSection): string[] {
   return [
     section.title,
+    section.tocTitle ?? "",
+    ...(section.links?.flatMap((link) => [link.title, link.description]) ?? []),
     ...(section.paragraphs ?? []),
     ...(section.equations ?? []),
     ...(section.afterEquationsParagraphs ?? []),

@@ -3,6 +3,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { MathFormula, MathText } from "../../components/math-text";
 import { docPages } from "../content";
+import { TableOfContents } from "../table-of-contents";
+import { LegacySectionRedirect } from "../legacy-section-redirect";
 import { allNavItems, navItemForSlug } from "../navigation";
 
 export function generateStaticParams() {
@@ -24,6 +26,9 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
   const page = docPages[slug];
   if (!page) notFound();
 
+  const tocSections = page.sections.map((section) => ({ id: section.id, title: section.tocTitle ?? section.title, group: section.tocGroup }));
+  if (page.legacySections?.length) tocSections.push({ id: "full-topic-index", title: "Full topic index", group: "All topics" });
+  const parent = page.parent ? navItemForSlug(page.parent) : undefined;
   const index = allNavItems.findIndex((item) => item.slug === slug);
   const previous = index > 0 ? allNavItems[index - 1] : undefined;
   const next = index < allNavItems.length - 1 ? allNavItems[index + 1] : undefined;
@@ -31,9 +36,11 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
   return (
     <main className={`docsMain ${page.eyebrow === "Parameter reference" ? "parameterReferenceMain" : ""}`}>
       <article className="docsArticle">
+        {page.legacySections?.length ? <LegacySectionRedirect destinations={Object.fromEntries(page.legacySections.map((section) => [section.id, section.href]))} /> : null}
         <div className="docBreadcrumbs">
           <Link href="/docs">Docs</Link>
           <span>/</span>
+          {parent && <><Link href={`/docs/${parent.slug}`}>{parent.title}</Link><span>/</span></>}
           <span>{navItemForSlug(slug)?.title}</span>
         </div>
         <header className="docHeader">
@@ -45,9 +52,16 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           </div>
         </header>
 
+        <TableOfContents mobile sections={tocSections} />
         {page.sections.map((section) => (
           <section className="docSection" id={section.id} key={section.id}>
             <h2>{section.title}</h2>
+            {section.links && <div className="guideLinks">
+              {section.links.map((link) => <Link href={link.href} key={link.href}>
+                <strong>{link.title}<span aria-hidden="true"> →</span></strong>
+                <span>{link.description}</span>
+              </Link>)}
+            </div>}
             {section.paragraphs?.map((paragraph) => <p key={paragraph}><MathText text={paragraph} /></p>)}
             {section.equations?.map((equation) => (
               <MathFormula display expression={equation} key={equation} />
@@ -106,6 +120,15 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           </section>
         ))}
 
+        {page.legacySections?.length ? <section className="docSection" id="full-topic-index">
+          <h2>Full topic index</h2>
+          <details className="legacyTopicIndex">
+            <summary>Browse all {page.legacySections.length} detailed topics</summary>
+            <ul>{page.legacySections.map((section) => <li id={section.id} key={section.id}>
+              <Link data-legacy-section={section.id} href={section.href}>{section.title}</Link>
+            </li>)}</ul>
+          </details>
+        </section> : null}
         <nav className="docPagination" aria-label="Adjacent documentation pages">
           {previous ? (
             <Link href={`/docs/${previous.slug}`}>
@@ -122,16 +145,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
         </nav>
       </article>
 
-      <aside className="onThisPage" aria-label="On this page">
-        <strong>On this page</strong>
-        {page.sections.map((section) => (
-          <a href={`#${section.id}`} key={section.id}>{section.title}</a>
-        ))}
-        <div className="tocRule" />
-        <a href="https://github.com/Hercules-Suite/Hercules-GPU" target="_blank" rel="noreferrer">
-          Edit on GitHub ↗
-        </a>
-      </aside>
+      <TableOfContents sections={tocSections} />
     </main>
   );
 }

@@ -272,11 +272,11 @@ code { font-family: var(--font-mono); }
 .docsMain {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 800px) 180px;
+  grid-template-columns: minmax(0, 780px) 224px;
   justify-content: center;
   align-items: start;
-  gap: 64px;
-  padding: 44px 54px 90px;
+  gap: 40px;
+  padding: 44px 40px 90px;
 }
 .docsArticle { min-width: 0; }
 .docsArticle.wide { grid-column: 1 / -1; width: min(920px, 100%); }
@@ -370,11 +370,39 @@ code { font-family: var(--font-mono); }
 .parameterTable td[data-requirement="Optional"] { color: #35665c; }
 .parameterTable td[data-requirement="Legacy"] { color: var(--ink-soft); }
 
-.onThisPage { position: sticky; top: 92px; padding-left: 17px; border-left: 1px solid var(--line); display: grid; gap: 8px; }
-.onThisPage > strong { margin-bottom: 3px; color: var(--ink-strong); font-size: 11px; font-weight: 700; }
-.onThisPage a { color: var(--ink-soft); font-size: 10px; line-height: 1.45; }
-.onThisPage a:hover { color: var(--accent); }
-.tocRule { height: 1px; margin: 6px 0; background: var(--line); }
+.onThisPage { position: sticky; top: 92px; max-height: calc(100dvh - 112px); display: flex; flex-direction: column; border-left: 1px solid var(--line); padding-left: 18px; }
+.tocHeading { display: flex; flex-direction: column; gap: 4px; padding-bottom: 14px; }
+.tocHeading strong { color: var(--ink-strong); font-size: 12px; }
+.tocHeading > span { color: var(--ink-soft); font-size: 11px; }
+.tocScroll { overflow-y: auto; min-height: 0; overscroll-behavior: contain; padding-right: 8px; }
+.tocGroup + .tocGroup { margin-top: 18px; }
+.tocGroupTitle { margin: 0 0 6px; color: var(--ink-strong); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.tocGroup ul { list-style: none; margin: 0; padding: 0; }
+.tocGroup li { margin: 0; }
+.tocGroup a { display: block; padding: 5px 8px; border-left: 2px solid transparent; color: var(--ink-soft); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.tocGroup a:hover { color: var(--accent); background: var(--surface-muted); }
+.tocGroup a[aria-current="location"] { border-color: var(--accent); color: var(--accent-strong); font-weight: 650; background: var(--accent-pale); }
+.tocFooter { display: block; flex: 0 0 auto; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 11px; }
+.mobilePageContents, .mobileDocsContents { display: none; }
+.mobilePageContents { margin-top: 22px; padding: 14px 16px; border: 1px solid var(--line); background: var(--surface-muted); }
+.mobilePageContents summary, .mobileDocsContents > summary, .legacyTopicIndex summary { color: var(--ink-strong); cursor: pointer; font-size: 13px; font-weight: 650; }
+.mobilePageContents summary span { margin-left: 10px; color: var(--ink-soft); font-size: 11px; font-weight: 400; }
+.mobilePageContents nav { margin-top: 18px; }
+.sidebarTopic { margin: 4px 0; }
+.sidebarTopic > summary { padding: 5px 8px; color: var(--ink-soft); font-size: 12px; line-height: 1.45; cursor: pointer; }
+.sidebarTopic[open] > summary { color: var(--ink-strong); font-weight: 650; }
+.sidebarChildren { border-left: 1px solid var(--line-strong); margin: 4px 0 9px 14px; padding-left: 8px; }
+.sidebarChildren a.active::before { left: -9px; width: 2px; }
+.docBreadcrumbs { flex-wrap: wrap; }
+.guideLinks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.guideLinks > a { display: flex; flex-direction: column; gap: 7px; padding: 17px 18px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.guideLinks > a:hover { border-color: var(--accent); background: var(--surface-muted); }
+.guideLinks strong { color: var(--accent-strong); font-size: 14px; line-height: 1.4; }
+.guideLinks strong span { white-space: nowrap; }
+.guideLinks > a > span { color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.legacyTopicIndex { padding: 15px 18px; border: 1px solid var(--line); background: var(--surface-muted); }
+.legacyTopicIndex li a { color: var(--accent); }
+.sidebarTopic summary:focus-visible, .tocGroup a:focus-visible, .guideLinks a:focus-visible, .mobilePageContents summary:focus-visible, .mobileDocsContents summary:focus-visible, .legacyTopicIndex summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .docPagination { margin-top: 52px; padding-top: 20px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .docPagination a { min-height: 66px; padding: 11px 13px; border: 1px solid var(--line); display: grid; align-content: center; }
@@ -426,6 +454,7 @@ code { font-family: var(--font-mono); }
   .mobileMenu { display: block; }
   .docsMain { grid-template-columns: minmax(0, 780px); padding-inline: 42px; }
   .onThisPage { display: none; }
+  .mobilePageContents { display: block; }
   .parameterTableHint { display: block; }
 }
 
@@ -464,12 +493,12 @@ code { font-family: var(--font-mono); }
   .searchResults { position: fixed; z-index: 103; top: 50px; left: 14px; right: 14px; width: auto; }
   .docsShell { display: block; }
   .docsSidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-  .sidebarScroll { padding: 11px 14px; display: flex; gap: 7px; overflow-x: auto; }
-  .sidebarHome { flex: 0 0 auto; margin: 0; padding: 6px 9px; border: 1px solid var(--line); }
-  .sidebarGroup { display: contents; }
-  .sidebarGroup h2 { display: none; }
-  .sidebarGroup a { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--line); background: var(--surface); font-size: 10px; }
+  .sidebarScroll { display: none; }
+  .mobileDocsContents { display: block; padding: 12px 20px; }
+  .mobileDocsContents > summary > span { display: block; margin: 4px 0 0 16px; color: var(--ink-soft); font-size: 11px; font-weight: 400; }
+  .mobileDocsTree { margin-top: 18px; max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain; }
   .sidebarGroup a.active::before { display: none; }
+  .guideLinks { grid-template-columns: 1fr; }
   .docsMain { padding: 33px 20px 70px; }
   .docHeader h1,
   .docsOverview h1 { font-size: 34px; }

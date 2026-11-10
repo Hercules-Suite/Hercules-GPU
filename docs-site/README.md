@@ -103,6 +103,20 @@ Documentation navigation lives in `app/docs/navigation.ts`; page content lives
 in `app/docs/content.ts`. Add a navigation entry and a matching content record
 to publish another guide through the shared documentation layout.
 
+The setup contents page (`/docs/simulation-setup`) links to focused guides.
+`app/docs/setup-guides.ts` assigns the existing input, physics, and source
+sections to those guides and supplies their sidebar groups and short page
+contents labels. Each authored section must have exactly one destination; the
+builder rejects missing or duplicate assignments. Update this mapping when
+adding a section to one of those three source groups. The seabed material is
+split further into short sections in the same module.
+
+Keep existing section IDs when moving a topic. The original overview URLs
+retain a full topic index and redirect old section bookmarks to their new
+pages in the browser; the index links also work without JavaScript. Search
+indexes the canonical pages. The rendered tests check the destinations and
+preserved technical content in both build targets.
+
 The repository's [Technical README](../doc/Technical%20README.md) is the concise
 operational guide and variable index. Put lengthy engineering explanations,
 examples, numerical derivations, and implementation/validation notes in

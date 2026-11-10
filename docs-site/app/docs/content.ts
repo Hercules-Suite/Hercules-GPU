@@ -1,3 +1,4 @@
+import { organizeSetupGuides } from "./setup-guides";
 import { parameterReferencePages, parameterReferenceSummary, srfhDepthReferenceParameter } from "./parameter-reference";
 
 export type DocTable = {
@@ -5,7 +6,12 @@ export type DocTable = {
   rows: string[][];
 };
 
+export type DocLink = { href: string; title: string; description: string };
+
 export type DocSection = {
+  tocTitle?: string;
+  tocGroup?: string;
+  links?: DocLink[];
   id: string;
   title: string;
   paragraphs?: string[];
@@ -19,6 +25,8 @@ export type DocSection = {
 };
 
 export type DocPageContent = {
+  parent?: string;
+  legacySections?: { id: string; title: string; href: string }[];
   eyebrow: string;
   title: string;
   summary: string;
@@ -74,7 +82,7 @@ function nonlinearModelExample({
   ].join("\n");
 }
 
-export const docPages: Record<string, DocPageContent> = {
+const authoredPages: Record<string, DocPageContent> = {
   "getting-started": {
     eyebrow: "Start here",
     title: "Run your first Hercules simulation",
@@ -2536,3 +2544,5 @@ if __name__ == "__main__":
     ],
   },
 };
+
+export const docPages = organizeSetupGuides(authoredPages);
