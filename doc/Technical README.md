@@ -285,6 +285,8 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float. CPML weighting applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
+| `cpml_material_extension_reference` | `elevation` (default), `surface` | Optional; String (case-insensitive). SQD topography: a laterally extended PML query keeps its physical Z (`elevation`) or its depth below the local surface (`surface`) |
+| `cpml_material_extension_refinement` | `no` (default), `yes` | Optional; Yes/no. Refine the PML with the extended material; with `cpml_layers` the octree is refined twice |
 | `cpml_stiffness_mode` | `native` (default), `reduced` | Optional; String |
 | `cpml_stiffness_mode_acoustic` | `native`, `reduced`; inherit `cpml_stiffness_mode` (default) | Optional; String |
 | `cpml_pml_material_damping` | `none` (default) except for Rayleigh interiors; `rayleigh` (default) with Rayleigh interiors when omitted; explicit `none` is retained | Optional; String |

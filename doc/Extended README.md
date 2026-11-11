@@ -3052,6 +3052,30 @@ results are specific to the recorded configuration and implementation.
 	CUDA error, rank/device and available memory before existing fatal handling.
 	Allocations in other modules retain their own error handling. These checks
 	add no work or synchronization inside the timestep loop.
+- `cpml_material_extension_reference`
+	Optional. `elevation` (default) or `surface`. Used with
+	`cpml_3d_material_extension=yes` and SQD topography. A query inside a
+	lateral PML strip is moved to the inner PML box. `elevation` keeps its
+	physical Z and measures depth below the surface at the moved location:
+	where the inner box is higher, the PML surface receives material from
+	depth; where it is lower, the top layer fills the PML down to the height
+	difference. `surface` keeps the depth below the local surface of the
+	query point, so the near-surface layers of the inner box keep their
+	thickness through the absorber. The bottom clamp is unchanged. Rebuild
+	the mesh after changing it.
+- `cpml_material_extension_refinement`
+	Optional. `no` (default) or `yes`. With `no`, octree refinement uses
+	the local, unextended material while the final element properties use
+	the extended material, so PML elements can be too coarse for the soft
+	material they receive (large `d_max*h/V`) or very small for the fast
+	material they receive (small critical time step). With `yes`, refinement
+	uses the extended material as well. With `cpml_thickness_m` one
+	refinement pass is needed. With `cpml_layers` the thickness depends on
+	the refined tree, so the tree is refined first without the extension,
+	the thickness is taken as `cpml_layers` x the largest boundary leaf, and
+	the tree is rebuilt with the extension at that thickness until the
+	thickness repeats (normally two passes; the log prints each pass).
+	Refinement time grows accordingly; the mesh size does not.
 - `cpml_3d_material_extension`
 	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
 	and `3D_velocity_model=yes`. When enabled, material queries made
