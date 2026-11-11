@@ -31,7 +31,7 @@ function sectionValues(section: DocSection): string[] {
 }
 
 function sectionPreview(section: DocSection): string {
-  const firstDetail =
+  const rawDetail =
     section.paragraphs?.[0] ??
     section.bullets?.[0] ??
     section.note ??
@@ -39,6 +39,7 @@ function sectionPreview(section: DocSection): string {
     section.codeLabel ??
     "Open this section";
 
+  const firstDetail = rawDetail.replace(/`([^`\n]+)`/g, "$1");
   return firstDetail.length > 118 ? `${firstDetail.slice(0, 115)}…` : firstDetail;
 }
 

@@ -43,7 +43,7 @@ async function renderMarkup(path = "/") {
 // styling. Typography checks below use renderMarkup to inspect the actual tags.
 async function render(path = "/") {
   const response = await renderMarkup(path);
-  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameterName">([A-Za-z0-9_]+)<\/code>/g, "$1");
+  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameter(?:Name|Value)">([^<]*)<\/code>/g, "$1");
   return new Response(html, { status: response.status, headers: response.headers });
 }
 
@@ -2729,7 +2729,7 @@ test("formats documented parameters consistently without treating math symbols o
   const markup = async (path) => (await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
   const topography = await markup("/docs/topography");
   assert.match(topography, /<h2>Choose <code class="parameterName">maximum_octant_level<\/code><\/h2>/);
-  assert.match(topography, /<code class="parameterName">include_topography<\/code>=yes/);
+  assert.match(topography, /<code class="parameterName">include_topography<\/code>=<code class="parameterValue">yes<\/code>/);
   assert.match(topography, /<math[^>]*>[\s\S]*?V_\{S,\\min\}\^\{\\mathrm\{model\}\}/);
   assert.doesNotMatch(topography, /<code class="parameterName">(?:model_z|topography\.in|V|S)<\/code>/);
   const sources = await markup("/docs/source-models");
@@ -2740,6 +2740,21 @@ test("formats documented parameters consistently without treating math symbols o
   const reference = await markup("/docs/parameters-output");
   assert.match(reference, /<code class="parameterName">monitor_file<\/code>/);
   assert.doesNotMatch(reference, /<code class="parameterName"><code/);
+});
+
+test("distinguishes literal parameter options and assigned values from prose and equations", async () => {
+  const html = (await (await renderMarkup("/docs/velocity-models")).text()).replaceAll("<!-- -->", "");
+  assert.match(html, /<code class="parameterName">3D_velocity_model_column_sampling<\/code> defaults to <code class="parameterValue">same_elevation<\/code>,/);
+  assert.match(html, /<code class="parameterValue">same_depth<\/code> instead uses/);
+  assert.match(html, /<code class="parameterName">3D_velocity_model_depth_reference<\/code>=<code class="parameterValue">legacy<\/code>:/);
+  assert.match(html, /<code class="parameterName">mesh_input_mode<\/code>=<code class="parameterValue">0<\/code> after/);
+  assert.match(html, /[Tt]he <code class="parameterValue">surface<\/code> reference/);
+  assert.match(html, /outer surface is flat at Z=0/);
+  assert.doesNotMatch(html, /outer <code|solver <code class="parameterValue">Z/);
+  assert.match(html, /<math\b/);
+  assert.doesNotMatch(html, /<code class="parameter(?:Name|Value)">[^<]*<code/);
+  const reference = (await (await renderMarkup("/docs/parameters-material-mesh")).text()).replaceAll("<!-- -->", "");
+  assert.match(reference, /<td class="parameterValues"[^>]*>Default: <code class="parameterValue">same_elevation<\/code>; <code class="parameterValue">same_elevation<\/code> \| <code class="parameterValue">same_depth<\/code><\/td>/);
 });
 
 test("illustrates all material depth references with accessible, correctly hosted diagrams", async () => {
@@ -2800,7 +2815,7 @@ test("documents and wires 3D_velocity_model_column_sampling", async () => {
   assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
   for (const label of ["SAME_ELEVATION", "SAME_DEPTH", "70 m", "−30 m", "20 m", "900 m/s", "300 m/s"])
     assert.ok(diagram.includes(label), `sampling figure includes ${label}`);
-  const entry = reference.split("\n").find((line) => line.includes('p("3D_velocity_model_column_sampling"'));
+  const entry = reference.split("\n").find((line) => line.includes('p("3D_velocity_model_column_sampling"'))?.replaceAll("`", "");
   assert.ok(entry);
   for (const text of [entry, html]) {
     assert.match(text, /With legacy depths,/);

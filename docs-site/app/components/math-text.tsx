@@ -24,7 +24,7 @@ export function MathFormula({ expression, display = false }: MathFormulaProps) {
   );
 }
 
-const mathSegment = /(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
+const mathSegment = /(`[^`\n]+`|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
 
 export function MathText({ text }: { text: string }) {
   const parts = text.split(mathSegment);

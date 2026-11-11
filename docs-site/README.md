@@ -120,7 +120,14 @@ preserved technical content in both build targets.
 Prose, headings, notes, and table descriptions share a renderer that gives
 recognized parameter names the same monospace face and weight as the reference
 tables. Names come from the parameter catalog and source/runtime key tables;
-write them literally rather than adding HTML. Use KaTeX delimiters for actual
+write them literally rather than adding HTML. Parameter values use a lighter
+monospace style with a subtle background. Assignments to recognized keys and
+underscored options from the parameter catalog are formatted automatically.
+Enclose other standalone option names or example values in backticks, such as
+`surface`, `full`, or `0.0025`, when they refer to input values; leave ordinary
+physical descriptions such as "the ground surface" unmarked. Keep markup out
+of IDs, paths, image alternative text, and code blocks. Value columns in the
+reference tables also use monospace. Use KaTeX delimiters for actual
 mathematical notation, and put long equations in display delimiters (`\[...\]`)
 so they can scroll within their own block on narrow screens. Inline symbols use
 normal text flow without a separate scrollbar.

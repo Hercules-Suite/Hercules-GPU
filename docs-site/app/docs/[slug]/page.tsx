@@ -9,6 +9,12 @@ import { LegacySectionRedirect } from "../legacy-section-redirect";
 import { allNavItems, navItemForSlug } from "../navigation";
 import { assetPath } from "../../site-path";
 
+const parameterValueColumns = new Set([
+  "Default / accepted values", "Values", "Option", "Value",
+  "type_of_source", "source_function_type", "Available material_model values",
+  "Recommended scalable setting",
+]);
+
 export function generateStaticParams() {
   return allNavItems.map((item) => ({ slug: item.slug }));
 }
@@ -92,6 +98,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                       <tr key={row.join("-")}>
                         {row.map((cell, cellIndex) => (
                           <td
+                            className={parameterValueColumns.has(section.table?.headers[cellIndex] ?? "") ? "parameterValues" : undefined}
                             data-label={section.table?.headers[0] === "Parameter" ? section.table.headers[cellIndex] : undefined}
                             data-requirement={cellIndex === 1 ? cell : undefined}
                             key={`${cell}-${cellIndex}`}
