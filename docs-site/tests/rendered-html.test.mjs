@@ -2602,6 +2602,23 @@ test("explains CPML material extension in model coordinates and mesh regeneratio
   assert.match(html, /depth 7000 m below that surface/);
   assert.match(html, /Regenerate with mesh_input_mode=0/);
   assert.match(html, /Recorrecting imported properties does not repeat wavelength refinement/);
+  const section = html.match(/<section\b[^>]*\bid="pml-heterogeneous-topography"[^>]*>[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /id="cpml-material-extension-reference"/);
+  assert.ok(section.includes(`src="${basePath}/figures/cpml-material-extension-reference.svg"`));
+  assert.ok(section.includes(`href="${basePath}/figures/cpml-material-extension-reference.svg"`));
+  assert.match(section, /alt="CPML extension comparison[^"<>]+"/);
+  assert.match(section, /elevation reads at 120 m below its surface; surface reads at 20 m/);
+  assert.match(section, /exactly at a material-grid node/);
+  assert.match(section, /extension step precedes the independent 3D_velocity_model_column_sampling rule/);
+  const diagram = readFileSync(new URL("../public/figures/cpml-material-extension-reference.svg", import.meta.url), "utf8");
+  assert.match(diagram, /role="img" aria-labelledby="title desc"/);
+  assert.match(diagram, /<title id="title">[^<]+<\/title>/);
+  assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
+  for (const label of ["elevation (default)", "surface", "120 m", "20 m", "1020 m", "920 m", "1500 m/s", "300 m/s", "bottom clamp inactive"])
+    assert.ok(diagram.includes(label), `CPML figure includes ${label}`);
+  const overview = await (await render("/docs/physics")).text();
+  assert.doesNotMatch(html + overview, /Horizon validation, October 2026|pml-horizon-validation/);
 });
 
 

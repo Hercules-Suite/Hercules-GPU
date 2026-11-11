@@ -3187,6 +3187,18 @@ W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
 	use the same extended water/solid column. For `surface`, the effective bed
 	in the original column is the inner bed plus the original surface Z minus
 	the inner surface Z. Rebuild the mesh after changing the reference.
+
+	![CPML elevation and surface extension compare the same physical query: the inner material column is sampled at 120 m depth for elevation or 20 m depth for surface.](../docs-site/public/figures/cpml-material-extension-reference.svg)
+
+	In this SQD dry-land example, `topographybase_zcoord=1000 m`, the original
+	ground elevation is 0 m, and the query is 20 m deep (`Z=1020 m`). The inner
+	CPML boundary has ground at +100 m (`Z_surface=900 m`). `elevation` reads
+	`1020-900=120 m` below that inner surface; `surface` keeps 20 m and therefore
+	reads at `Z=920 m`. A 50 m soft layer over rock at the inner column gives
+	1500 m/s and 300 m/s, respectively. The inner X/Y is exactly a material-grid
+	node, and the bottom clamp is inactive. The query's physical location and
+	mesh surface stay fixed. `3D_velocity_model_column_sampling` is applied
+	after this CPML lookup remapping.
 - `cpml_3d_material_extension`
 	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
 	and `3D_velocity_model=yes`. When enabled, both octree refinement and

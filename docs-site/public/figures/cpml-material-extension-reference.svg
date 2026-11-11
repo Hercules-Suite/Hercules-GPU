@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="590" viewBox="0 0 920 590" role="img" aria-labelledby="title desc">
+<title id="title">CPML material extension: elevation versus surface</title>
+<desc id="desc">SQD dry-land example with topographybase_zcoord=1000 m and CPML 3-D material extension enabled. The original query is 20 m below ground at elevation 0 m, so its model Z is 1020 m. Both options move its horizontal material lookup to the inner CPML boundary, where ground elevation is 100 m and surface Z is 900 m. elevation keeps lookup Z=1020 m and reads depth 120 m, in 1500 m/s rock. surface keeps depth 20 m and reads lookup Z=920 m, in the 300 m/s soft layer. The inner profile has a 50 m soft layer over rock. Its horizontal location is a material-grid node, and the bottom clamp is inactive. The orange physical query and black mesh surface are identical in both panels; only the blue material lookup moves.</desc>
+<rect x="0" y="0" width="920" height="590" fill="white"/>
+<text x="28" y="30" font-family="Arial,Helvetica,sans-serif" font-size="21" fill="#1c3044" text-anchor="start" font-weight="700">CPML material extension: elevation or surface</text>
+<text x="28" y="55" font-family="Arial,Helvetica,sans-serif" font-size="17" fill="#53687b" text-anchor="start" font-weight="400">SQD topography · the same query is mapped to the inner CPML column.</text>
+<text x="28" y="80" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="start" font-weight="400">Inner profile: 50 m at 300 m/s over 1500 m/s rock. Model Z = 1000 − elevation H.</text>
+<path d="M460 99 L460 534" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<g transform="translate(0 0)">
+<text x="230" y="112" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="17" fill="#1c3044" text-anchor="middle" font-weight="700">elevation (default)</text>
+<text x="230" y="136" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Keep physical model Z</text>
+<text x="128" y="171" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Interior</text>
+<text x="310" y="171" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">CPML band</text>
+<rect x="180" y="190" width="240" height="230" fill="#f4f7f9"/>
+<rect x="118" y="220" width="62" height="50" fill="#efe4cf"/>
+<rect x="118" y="270" width="62" height="150" fill="#dde3e9"/>
+<path d="M118 270 L180 270" fill="none" stroke="#53687b" stroke-width="1.5" stroke-dasharray="6 4"/>
+<path d="M180 185 L180 425" fill="none" stroke="#bdcbd5" stroke-width="1.5" stroke-dasharray="6 5"/>
+<path d="M420 190 L420 420" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<path d="M118 220 L180 220 L360 320 L420 320" fill="none" stroke="#1c3044" stroke-width="2"/>
+<text x="28" y="196" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">H ↑ (m)</text>
+<text x="64" y="225" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+100</text>
+<path d="M72 220 L90 220" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="275" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+50</text>
+<path d="M72 270 L90 270" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="325" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">0</text>
+<path d="M72 320 L90 320" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="375" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">−50</text>
+<path d="M72 370 L90 370" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="118" y="208" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="start" font-weight="400">H=+100</text>
+<text x="360" y="308" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="middle" font-weight="400">H=0</text>
+<text x="149" y="258" font-family="Arial,Helvetica,sans-serif" font-size="12" fill="#53687b" text-anchor="middle" font-weight="400">soft</text>
+<text x="149" y="397" font-family="Arial,Helvetica,sans-serif" font-size="12" fill="#53687b" text-anchor="middle" font-weight="400">rock</text>
+<path d="M360 340 L188 340" fill="none" stroke="#126b8c" stroke-width="2.5" stroke-dasharray="6 4"/>
+<path d="M196.00 344.00 L188 340 L196.00 336.00" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="180" cy="340" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<circle cx="360" cy="340" r="6" fill="#a44515" stroke="white" stroke-width="1.5"/>
+<text x="360" y="363" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#a44515" text-anchor="middle" font-weight="700">Q</text>
+<path d="M390 320 L398 320 L398 340 L390 340" fill="none" stroke="#53687b" stroke-width="1"/>
+<text x="405" y="335" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#1c3044" text-anchor="start" font-weight="400">20 m</text>
+<text x="298" y="395" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#a44515" text-anchor="middle" font-weight="400">Original query Z=1020 m</text>
+<text x="180" y="444" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="middle" font-weight="400">Inner CPML boundary</text>
+<text x="360" y="444" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="middle" font-weight="400">Original X/Y</text>
+<rect x="28" y="462" width="404" height="72" fill="#f4f7f9" stroke="#bdcbd5"/>
+<text x="230" y="482" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="middle" font-weight="400">d_inner = 1020 − 900 = 120 m</text>
+<text x="230" y="502" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">Z_lookup = 1020 m; H = −20 m</text>
+<text x="230" y="524" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="17" fill="#126b8c" text-anchor="middle" font-weight="700">Vs = 1500 m/s · rock</text>
+</g>
+<g transform="translate(460 0)">
+<text x="230" y="112" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="17" fill="#1c3044" text-anchor="middle" font-weight="700">surface</text>
+<text x="230" y="136" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Keep original surface depth</text>
+<text x="128" y="171" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Interior</text>
+<text x="310" y="171" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">CPML band</text>
+<rect x="180" y="190" width="240" height="230" fill="#f4f7f9"/>
+<rect x="118" y="220" width="62" height="50" fill="#efe4cf"/>
+<rect x="118" y="270" width="62" height="150" fill="#dde3e9"/>
+<path d="M118 270 L180 270" fill="none" stroke="#53687b" stroke-width="1.5" stroke-dasharray="6 4"/>
+<path d="M180 185 L180 425" fill="none" stroke="#bdcbd5" stroke-width="1.5" stroke-dasharray="6 5"/>
+<path d="M420 190 L420 420" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<path d="M118 220 L180 220 L360 320 L420 320" fill="none" stroke="#1c3044" stroke-width="2"/>
+<text x="28" y="196" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">H ↑ (m)</text>
+<text x="64" y="225" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+100</text>
+<path d="M72 220 L90 220" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="275" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+50</text>
+<path d="M72 270 L90 270" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="325" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">0</text>
+<path d="M72 320 L90 320" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="64" y="375" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">−50</text>
+<path d="M72 370 L90 370" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="118" y="208" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="start" font-weight="400">H=+100</text>
+<text x="360" y="308" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="middle" font-weight="400">H=0</text>
+<text x="149" y="258" font-family="Arial,Helvetica,sans-serif" font-size="12" fill="#53687b" text-anchor="middle" font-weight="400">soft</text>
+<text x="149" y="397" font-family="Arial,Helvetica,sans-serif" font-size="12" fill="#53687b" text-anchor="middle" font-weight="400">rock</text>
+<path d="M360 340 L188 244.44444444444446" fill="none" stroke="#126b8c" stroke-width="2.5" stroke-dasharray="6 4"/>
+<path d="M193.05 251.83 L188 244.44444444444446 L196.94 244.83" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="180" cy="240" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<circle cx="360" cy="340" r="6" fill="#a44515" stroke="white" stroke-width="1.5"/>
+<text x="360" y="363" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#a44515" text-anchor="middle" font-weight="700">Q</text>
+<path d="M390 320 L398 320 L398 340 L390 340" fill="none" stroke="#53687b" stroke-width="1"/>
+<text x="405" y="335" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#1c3044" text-anchor="start" font-weight="400">20 m</text>
+<text x="298" y="395" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#a44515" text-anchor="middle" font-weight="400">Original query Z=1020 m</text>
+<text x="180" y="444" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="middle" font-weight="400">Inner CPML boundary</text>
+<text x="360" y="444" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="middle" font-weight="400">Original X/Y</text>
+<rect x="28" y="462" width="404" height="72" fill="#f4f7f9" stroke="#bdcbd5"/>
+<text x="230" y="482" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="middle" font-weight="400">d_inner = 20 m (unchanged)</text>
+<text x="230" y="502" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">Z_lookup = 900 + 20 = 920 m; H = +80 m</text>
+<text x="230" y="524" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="17" fill="#126b8c" text-anchor="middle" font-weight="700">Vs = 300 m/s · soft layer</text>
+</g>
+<text x="28" y="559" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="start" font-weight="400">Blue arrows move the material lookup. Orange Q and the black mesh surface do not move.</text>
+<text x="28" y="582" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="start" font-weight="400">Lateral extension only; bottom clamp inactive. Column sampling is applied afterward.</text>
+</svg>

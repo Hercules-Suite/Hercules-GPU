@@ -122,7 +122,7 @@ export const setupGuides: SetupGuide[] = [
     description: "Boundary setup, partitioning, operator details, and validation limits.",
     source: "physics",
     parent: "physics",
-    groups: [group("Boundary setup", "acoustic-dashpot pml pml-baseline pml-material-damping pml-heterogeneous-topography"), group("Implementation & checks", "pml-partition-memory pml-complete-operator pml-interface-diagnostics pml-horizon-validation")],
+    groups: [group("Boundary setup", "acoustic-dashpot pml pml-baseline pml-material-damping pml-heterogeneous-topography"), group("Implementation & checks", "pml-partition-memory pml-complete-operator pml-interface-diagnostics")],
   },
   {
     slug: "source-models",
@@ -169,7 +169,7 @@ const shortTitles: Record<string, string> = {
   "topography-cpml": "Why taper the surface?", "topography-taper-command": "Run taper_topography.py", "topography-taper-options": "Taper dimensions", "topography-taper-enable": "Enable & verify", "repair-tapered-geometry": "Repair paired seabed geometry",
   "model-riva-sand-intermediate-bias-research": "RIVASand02", "model-riva-sand-custom02": "RIVASandCustom02", "model-riva-sand-custom": "Custom material interface",
   "coupling-acoustic-elastic": "Setup example", "acoustic-quality-factor": "Acoustic quality factor", "acoustic-interface-method": "Interface methods & constraints", "acoustic-station-gradient": "Recover station motion",
-  "pml": "CPML setup rules", "pml-baseline": "Default example", "pml-material-damping": "Material damping in CPML", "pml-heterogeneous-topography": "3-D materials & topography", "pml-partition-memory": "Partitioning & memory", "pml-complete-operator": "Second-order operator", "pml-interface-diagnostics": "Interface diagnostics", "pml-horizon-validation": "Validation scope",
+  "pml": "CPML setup rules", "pml-baseline": "Default example", "pml-material-damping": "Material damping in CPML", "pml-heterogeneous-topography": "3-D materials & topography", "pml-partition-memory": "Partitioning & memory", "pml-complete-operator": "Second-order operator", "pml-interface-diagnostics": "Interface diagnostics",
   "srfh-depth-reference": "Source depth reference", "srfh-files": "Auxiliary-file example",
 };
 

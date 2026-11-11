@@ -1038,15 +1038,6 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         ],
       },
       {
-        id: "pml-horizon-validation",
-        title: "Horizon validation, October 2026",
-        paragraphs: [
-          "The 100 s homogeneous 10 km versus 20 km comparison preserves mesh spacing, source and physical receivers. With native integration and zero cross-axis mixing, the median/worst 1 Hz displacement errors over the same 25 interior receivers fell from 11.47%/32.99% in the earlier implementation to 1.10%/2.69%. Eight added side/bottom/corner receivers give 1.88%/4.98% over 33 interior receivers. The comparison retains DC and uses no amplitude or time fit. Raw velocity errors remain larger because the source contains unresolved high frequencies.",
-          "Coupled flat-water comparisons gave median/worst displacement errors of 0.65%/2.06% with gravity off and 1.68%/3.33% with gravity on. Separate CUDA tests of the production helpers cover P/S incidence through 80 degrees, Rayleigh packets and slow gravity waves. The full elastic solver remained finite through 1,000 s; late velocity RMS decreased at every recorded station. One/four-rank and host/CUDA-aware exchange comparisons remained finite. A matched single-run timing check increased total solver wall time from 14.13 to 17.16 seconds, about 21%; compute and absorber memory costs are higher. Detailed metrics, scope and retained local evidence are in doc/Extended README.md.",
-          "These results cover double-precision homogeneous cases, not arbitrary heterogeneous meshes, attenuation combinations or curved free surfaces. These are historical comparisons with their recorded inputs, not validation of every current default combination. The investigation harnesses are local-only and unavailable in a clean checkout. CPML checkpoint/restart remains unsupported.",
-        ],
-      },
-      {
         id: "pml-baseline",
         title: "Default CPML example",
         codeLabel: "parameters.in — current CPML defaults",
@@ -1074,6 +1065,15 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           "For example, with the surface at model Z = 2000 m and the bottom PML entrance at Z = 9000 m, a query at Z = 9500 m has an input depth of 7500 m. The extended material is sampled at Z = 9000 m, or depth 7000 m below that surface. At a corner, `elevation` measures final depth from the clamped column surface; `surface` measures it from the original surface.",
           "When topography reaches a lateral PML, taper it to the flat boundary datum before running. script/taper_topography.py provides the repository workflow. The material extension controls properties, while the taper controls geometry; both are needed for a clean heterogeneous PML interface.",
         ],
+        figures: [{
+          id: "cpml-material-extension-reference",
+          title: "cpml_material_extension_reference — compare the two options",
+          description: "This dry-land example uses cpml_3d_material_extension=yes, include_topography=yes, type_of_etree=sqd, 3D_velocity_model_depth_reference=legacy, and topographybase_zcoord=1000 m. The original CPML query is 20 m below ground at elevation 0 m, so its model Z is 1020 m. The inner boundary has ground at elevation +100 m, or surface Z=900 m, and a 50 m soft layer over rock. Both options move the horizontal lookup to that inner boundary: `elevation` reads at 120 m below its surface; `surface` reads at 20 m. The shaded profile lies exactly at a material-grid node, so no horizontal blending is needed for these values.",
+          src: "/figures/cpml-material-extension-reference.svg",
+          alt: "CPML extension comparison for one query at model Z=1020 m, 20 m below ground. At the inner column with surface Z=900 m, elevation reads depth 120 m and 1500 m/s rock; surface reads depth 20 m at lookup Z=920 m and 300 m/s soft material. The physical query and mesh surface remain unchanged.",
+          caption: "The blue arrows remap the material lookup; the orange query and black mesh surface stay fixed. Only the inner material profile is shaded; the pale CPML band marks the geometric region. The bottom clamp is inactive in this example. At a bottom/lateral corner it first limits the original absolute model Z, then `elevation` measures the resulting depth from the inner surface while `surface` measures it from the original surface. Negative burial depths are clamped to zero when converted. This extension step precedes the independent 3D_velocity_model_column_sampling rule. With `full` or no topography, the two extension references give identical results; with explicit seabed geometry, `surface` still refers to the outer ground/water surface, not the bed.",
+          width: 920, height: 590,
+        }],
         codeLabel: "parameters.in — heterogeneous acoustic/elastic CPML additions",
         code: "3D_velocity_model = yes\ninclude_acoustic = yes\ninclude_topography = yes\n\nabc_type = cpml\ncpml_3d_material_extension = yes\ncpml_material_extension_reference = elevation\ncpml_stiffness_mode = native\ncpml_stiffness_mode_acoustic = native\ncpml_kappa_max = 5.0\ncpml_clamp_outer = yes",
         note: "Regenerate with mesh_input_mode=0 after changing extension, reference, thickness or material inputs. Recorrecting imported properties does not repeat wavelength refinement; Phase B reuse retains old properties and leaf sizes. Local CPU geometry/thickness and mesh-lifecycle checks are not CUDA/MPI propagation benchmarks. Elastic, acoustic and coupled acoustic–elastic, poroelastic–acoustic and poroelastic–elastic models still need target-system before/after comparisons, including applicable viscoelastic and nonlinear elastoplastic/plastic and hysteretic interiors. CPML retains its linear elastic/acoustic policy, Rayleigh option and exclusion of active BrickUP, nonlinear and BKT histories. Timestepping kernels, host/CUDA-aware MPI exchanges and station/output definitions are unchanged.",
