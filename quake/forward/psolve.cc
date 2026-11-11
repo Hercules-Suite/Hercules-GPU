@@ -58,6 +58,7 @@
 #include "commutil.h"
 #include "timers.h"
 #include "build_info.h"
+#include "cpml_partition_model.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -827,6 +828,13 @@ static int mesh_prepare_cpml_partition_weight(void);
 static int mesh_partitiontree(const char* context,
                               bool completed_solver_mesh = false);
 static bool g_solverMeshPartitioned = false;
+static bool g_cpmlPartitionAutomatic = false;
+static bool g_cpmlPartitionCacheReady = false;
+static bool g_cpmlPartitionPrepared = false;
+static uint64_t g_cpmlPartitionCacheKey = 0;
+static void mesh_prepare_cpml_partition_auto(void);
+static void solver_learn_cpml_partition_weight(void);
+static int gpu_device_index(int32_t myID, int* device_count);
 
 static void compute_setab(double freq, double* aBasePtr, double* bBasePtr);
 static int32_t mesh_element_index_for_octant(octant_t* octant,
@@ -1306,6 +1314,7 @@ static struct Param_t {
   double thePoroelasticPermeabilityZ;
   double thePoroelasticSurfacePressurePenaltyFactor;
   noyesflag_t thePoroelasticUndrainedFastPath;
+  char theCpmlPartitionCache[256];
 } Param = {.FourDOutFp = NULL,
            .theMonitorFileFp = NULL,
            .theMonitorFileName = NULL,
@@ -2573,6 +2582,9 @@ static void read_parameters(int argc, char** argv) {
   Param.the3DVelocityModelAzimuth = double_message[50];
   Param.theAcousticQualityFactor = double_message[36];
   Param.theCpmlPartitionWeight = double_message[37];
+  // Zero is an internal wire encoding for the explicit string "auto".
+  g_cpmlPartitionAutomatic = Param.theCpmlPartitionWeight == 0.0;
+  if (g_cpmlPartitionAutomatic) Param.theCpmlPartitionWeight = 1.0;
   Param.thePoroelasticDepthMaxM = double_message[38];
   Param.thePoroelasticPorosity = double_message[39];
   Param.thePoroelasticBiotAlpha = double_message[40];
@@ -2737,6 +2749,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(Param.FourDOutFile, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.cvmdb_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.mesh_etree_output_file, 256, MPI_CHAR, 0, comm_solver);
+  MPI_Bcast(Param.theCpmlPartitionCache, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.planes_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.basin_input_file, 256, MPI_CHAR, 0, comm_solver);
   MPI_Bcast(Param.thePlaneDirOut, 256, MPI_CHAR, 0, comm_solver);
@@ -3295,8 +3308,22 @@ static int32_t parse_parameters(const char* numericalin) {
                       &cpml_alpha_floor_fraction);
       (void)parsetext(fp, "cpml_acoustic_sponge_fraction", 'd',
                       &cpml_acoustic_sponge_fraction);
-      (void)parsetext(fp, "cpml_partition_weight", 'd',
-                      &cpml_partition_weight);
+      std::string weight_text = "1";
+      bool automatic_weight = false;
+      if (cpml_partition::read_control(fp, "cpml_partition_weight", weight_text) < 0 ||
+          !cpml_partition::parse_weight(weight_text, cpml_partition_weight,
+                                        automatic_weight)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "cpml_partition_weight must be auto or a finite number "
+                     "in [1, %.10g].\n", cpml_partition::max_numeric_weight);
+      }
+      std::string cache_path;
+      if (cpml_partition::read_control(fp, "cpml_partition_cache", cache_path) < 0 ||
+          cache_path.size() >= sizeof(Param.theCpmlPartitionCache)) {
+        solver_abort(__FUNCTION_NAME, NULL,
+                     "Cannot read cpml_partition_cache (maximum 255 bytes).\n");
+      }
+      strcpy(Param.theCpmlPartitionCache, cache_path.c_str());
       /* Optional uniform reference Vp for the damping profile. Nonpositive
        * or omitted keeps the automatic MPI-wide maximum over PML elements. */
       (void)parsetext(fp, "cpml_reference_vp", 'd', &cpml_reference_vp);
@@ -3469,7 +3496,8 @@ static int32_t parse_parameters(const char* numericalin) {
       Param.theCpmlMpmlCrossFraction = cpml_mpml_cross_fraction;
       Param.theCpmlAlphaFloorFraction = cpml_alpha_floor_fraction;
       Param.theCpmlAcousticSpongeFraction = cpml_acoustic_sponge_fraction;
-      Param.theCpmlPartitionWeight = cpml_partition_weight;
+      Param.theCpmlPartitionWeight = automatic_weight ? 0.0 : cpml_partition_weight;
+      g_cpmlPartitionAutomatic = automatic_weight;
       Param.theCpmlReferenceVp = cpml_reference_vp;
 
       /* Optional material damping inside the elastic PML zone. Rayleigh uses
@@ -4929,8 +4957,12 @@ static int32_t parse_parameters(const char* numericalin) {
     }
     monitor_print("PML CFL safety factor:              %f\n",
                   Param.theCpmlCflSafety);
-    monitor_print("PML partition weight:               %f\n",
-                  Param.theCpmlPartitionWeight);
+    if (g_cpmlPartitionAutomatic)
+      monitor_print("PML partition weight:               auto "
+                    "(cached cost estimate; uncached fallback 1)\n");
+    else
+      monitor_print("PML partition weight:               %f\n",
+                    Param.theCpmlPartitionWeight);
     monitor_print("PML profile sampling:               %s\n",
                   (Param.theCpmlProfileSlab == CPML_PROFILE_SLAB_AUTO)
                       ? "auto (slab-quantized along each PML normal)"
@@ -7753,6 +7785,8 @@ void setrec(octant_t* leaf, double ticksize, void* data) {
 }
 #endif /* USECVMDB */
 
+#include "cpml_partition_auto.h"
+
 static int mesh_prepare_cpml_partition_weight(void) {
 #ifdef BOUNDARY
   if ((Param.theAbcType != ABC_CPML) || (Param.theCpmlPartitionWeight <= 1.0)) {
@@ -7873,6 +7907,8 @@ static int mesh_partitiontree(const char* context, bool completed_solver_mesh) {
   /* Construction (including local interface matching) must retain ordinary
    * partitions. Weighted ownership is applied only after the last refinement
    * and balance pass, on the communicator that will actually run the solver. */
+  if (completed_solver_mesh && !Param.theMeshOnlyMode)
+    mesh_prepare_cpml_partition_auto();
   if (completed_solver_mesh && !Param.theMeshOnlyMode &&
       mesh_prepare_cpml_partition_weight()) {
     if (Global.myID == 0)
@@ -10470,6 +10506,8 @@ static void mesh_rebuild_acoustic_interfaces(void) {
  * extracted element data aliases leaf payloads (octor_extractmesh), so
  * deleting only the mesh preserves corrected material/Q/geostatic records. */
 static void mesh_partition_completed_solver(void) {
+  if (!Param.theMeshOnlyMode && !g_solverMeshPartitioned)
+    mesh_prepare_cpml_partition_auto();
   if (Param.theMeshOnlyMode || g_solverMeshPartitioned ||
       Param.theAbcType != ABC_CPML || Param.theCpmlPartitionWeight <= 1.0)
     return;
@@ -11694,7 +11732,7 @@ void mu_and_lambda(double* theMu, double* theLambda, edata_t* edata,
  *           specifications.
  *
  */
-static void gpu_init(int32_t myID) {
+static int gpu_device_index(int32_t myID, int* device_count) {
   int myDevID, devCount;
   int localRank = 0;
   const char* rankEnv;
@@ -11746,6 +11784,13 @@ static void gpu_init(int32_t myID) {
   }
 
   myDevID = (localRank % devCount);
+  *device_count = devCount;
+  return myDevID;
+}
+
+static void gpu_init(int32_t myID) {
+  int devCount = 0;
+  const int myDevID = gpu_device_index(myID, &devCount);
   if (cudaSetDevice(myDevID) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to set device\n", myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -22290,6 +22335,7 @@ static void solver_cpml_rank_diag_collect(void) {
     g_cpmlRankDiagReady = 1;
     g_cpmlRankDiagSize = commSize;
   }
+  solver_learn_cpml_partition_weight();
 #endif /* BOUNDARY */
 }
 

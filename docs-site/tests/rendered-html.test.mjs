@@ -449,8 +449,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 255);
-  assert.equal(documented.length, 255, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 256);
+  assert.equal(documented.length, 256, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("cpml_partition_cache"));
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -540,7 +541,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
     "output_debug_file",
     "output_planes",
   ]);
-  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bparsedarray2?|\briva_read_reversal_type|\briva_read_bias_volume|\bread_boxes)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
+  const parserPattern = /(?:\b(?:hu_)?parsetext(?:_v)?|\bhu_config_get_[A-Za-z0-9_]+|\bcpml_partition::read_control|\bparsedarray2?|\briva_read_reversal_type|\briva_read_bias_volume|\bread_boxes)\s*\(\s*[^,]+,\s*"([^"]+)"/gs;
   for (const filename of parserFiles) {
     const source = readFileSync(`${sourceRoot}${filename}`, "utf8");
     for (const match of source.matchAll(parserPattern)) parsed.add(match[1]);
@@ -2631,9 +2632,25 @@ test("documents deferred CPML partitioning and the limits of GPU memory snapshot
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
   const weight = parameters.split("</tr>").find((row) => row.includes(">cpml_partition_weight</td>"));
   assert.ok(weight);
-  assert.match(weight, /Default: 1; &gt;= 1/);
+  assert.match(weight, /Default: 1; finite \[1, 21474836\.47\] \| auto/);
   assert.match(weight, /Construction and mesh-only runs use ordinary partitions/);
   assert.match(weight, /not a GPU-memory cap/);
+});
+
+test("documents measured CPML cost reuse, overrides and validation limits", async () => {
+  const html = await (await render("/docs/absorbing-boundaries")).text();
+  for (const phrase of ["An uncached run uses weight 1", "4.3763",
+    "Compute Physics", "relative RMS error at most 0.10",
+    "HERCULES_CPML_COST_V1", "Nonlinear elastoplastic/plastic and hysteretic analyses disable",
+    "full CUDA/MPI compilation and standalone/coupled propagation validation",
+    "cpml_partition_cache = /shared/case/mesh/cpml-cost.cache"])
+    assert.ok(html.includes(phrase), phrase);
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const cache = parameters.split("</tr>").find((row) => row.includes(">cpml_partition_cache</td>"));
+  assert.ok(cache);
+  assert.match(cache, /Default: disabled with numeric weight/);
+  assert.match(cache, /collects calibration without overriding that weight/);
+  assert.match(cache, /Existing non-cache files and symlinks are not overwritten/);
 });
 
 
