@@ -282,7 +282,7 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_acoustic_sponge_fraction` | `0` (default); finite and >= 0; 0 disables | Optional; Float (dimensionless) |
 | `cpml_alpha_floor_fraction` | `0.1` (default); 0 to 1 | Optional; Float |
 | `cpml_profile_slab` | `none` (default), `auto` | Optional; String (case-insensitive) |
-| `cpml_partition_weight` | `1` (default); >= 1 | Optional; Float. CPML weighting applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. Check startup GPU memory reports; this is not a memory cap. |
+| `cpml_partition_weight` | `4.38` (default); >= 1; `1` restores equal leaf counts | Optional; dimensionless Float. Fixed work estimate `N_ordinary + 4.38 * N_CPML`; an explicit numeric value overrides the default. Applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. No calibration cache. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
 | `cpml_material_extension_reference` | `elevation` (default), `surface` | Optional; String (case-insensitive). SQD topography: a laterally extended PML query keeps its physical Z (`elevation`) or its depth below the local surface (`surface`) |

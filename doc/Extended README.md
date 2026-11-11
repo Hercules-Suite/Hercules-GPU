@@ -3011,9 +3011,28 @@ results are specific to the recorded configuration and implementation.
 	fix, changing absorption and material-extension bounds. A positive
 	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
-	Optional. Default `1.0`, which preserves the standard equal-leaf-count
-	octree partition. Values `> 1.0` count the CPML boundary band as heavier
+	Optional dimensionless numeric value, at least `1`. Default `4.38`, using
+	the fixed work estimate below. An explicit numeric value overrides the
+	default; `1.0` restores the standard equal-leaf-count octree partition.
+	There is no calibration cache or automatic timing-based adjustment.
+	Values `> 1.0` count the CPML boundary band as heavier
 	work, so boundary-heavy solver ranks may receive fewer total elements.
+
+```math
+W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
+```
+
+	The existing integer partitioner scales these costs by 100: ordinary
+	leaves have cost 100 and CPML-band leaves have cost 438 at the default.
+	The coefficient rounds a measured estimate of 4.3763 from equal-sized
+	ranks in one Horizon elastic/BKT2 case: a PML-free rank took 215.79 s of
+	force `kernel_wait`, while a rank with 47.4493% CPML elements took
+	561.49 s. This is an effective work estimate, not an isolated kernel cost
+	or a universal optimum. Earlier builds defaulted to `1.0`; rebuild to
+	adopt the new default. Existing inputs that explicitly set `1` or `4`
+	retain those values; set `cpml_partition_weight = 4.38` to request this
+	model explicitly.
+
 	**Ordinary partitions are always used during mesh construction**, including
 	progressive refinement, 2:1 balancing, building carving, and local acoustic
 	interface matching. Weighting is deferred until the completed mesh is
@@ -3030,6 +3049,14 @@ results are specific to the recorded configuration and implementation.
 	physics initialization. Mesh archive layout can change with ownership;
 	its physical leaves and payloads should remain equivalent. Existing
 	poroelastic/nonlinear restrictions inside CPML remain in effect.
+	The shared partition path applies the same fixed coefficient to elastic
+	and acoustic CPML bands, including acoustic–elastic, poroelastic–acoustic
+	and poroelastic–elastic models with applicable viscoelastic or nonlinear
+	elastoplastic/plastic and hysteretic solids. Boundary/interface operators,
+	time integration, both GPU/MPI exchange backends and station/output
+	definitions are unchanged. The elastic/BKT2 measurement does not validate
+	the coefficient for every formulation or coupling; full CUDA/MPI validation
+	of the new default remains outstanding.
 
 	This is a work-balancing surrogate, **not a GPU-memory cap**. Compare the
 	`CPML rank/load diagnostics`, communication waits, and setup memory reports.
