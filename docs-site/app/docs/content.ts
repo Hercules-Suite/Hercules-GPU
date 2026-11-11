@@ -1581,7 +1581,7 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           src: "/figures/column-sampling-comparison.svg",
           alt: "Two panels compare a 50 m soft layer at 300 m/s over 1500 m/s rock. Column A is 100 m higher than B. At the midpoint query 20 m below ground, same_elevation samples A at 70 m and B at minus 30 m, giving 900 m/s. same_depth samples both at 20 m, giving 300 m/s.",
           caption: "The shading shows the intended terrain-following layer, and the colored paths show the samples used by each rule. B's above-surface sample in same_elevation uses its first material value. This illustrates legacy SQD interpolation; equal elevation remains appropriate for horizontal interfaces encoded at different column depths. For a flat outer surface with a varying explicit seabed, the same distinction applies using the bed as the reference.",
-          width: 1080, height: 886,
+          width: 920, height: 590,
         }],
         note: "The explicit model_z, surface and seabed references still require seabed_geometry_file and its acoustic setup. With topography enabled, legacy SQD and explicit surface/seabed references can differ between sampling rules; legacy FULL remains fixed-Z. Regenerate the mesh when changing a sampling rule that changes material values.",
       },
