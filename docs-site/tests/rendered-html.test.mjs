@@ -454,6 +454,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
+  assert.match(reference, /p\("cpml_partition_weight", "Optional", "Float \(dimensionless\)", "Default: 4\.38; >= 1"/);
+  assert.ok(!documented.includes("cpml_partition_cache"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
   assert.match(reference, /p\("rivasand02_reversaltype", "Optional", "Integer \(dimensionless\)", "Default: 3; 1 \| 2 \| 3/);
@@ -2631,9 +2633,18 @@ test("documents deferred CPML partitioning and the limits of GPU memory snapshot
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
   const weight = parameters.split("</tr>").find((row) => row.includes(">cpml_partition_weight</td>"));
   assert.ok(weight);
-  assert.match(weight, /Default: 1; &gt;= 1/);
+  assert.match(weight, /Default: 4\.38; &gt;= 1/);
   assert.match(weight, /Construction and mesh-only runs use ordinary partitions/);
   assert.match(weight, /not a GPU-memory cap/);
+  assert.match(html, /cost 100 to ordinary leaves and 438 to CPML-band leaves/);
+  assert.match(html, /Explicit numeric values override the default; 1 restores equal leaf counts/);
+  assert.match(html, /cpml_partition_weight = 4\.38/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (existsSync(source)) {
+    const solver = readFileSync(source, "utf8");
+    assert.match(solver, /\.theCpmlPartitionWeight = 4\.38,/);
+    assert.doesNotMatch(solver, /cpml_partition_cache|cpml_partition_auto/);
+  }
 });
 
 

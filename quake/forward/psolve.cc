@@ -1368,7 +1368,8 @@ static struct Param_t {
            .theCpmlClampOuter = YES,
            .theCpmlNativeStiffness = YES,
            .theCpmlNativeStiffnessAcoustic = YES,
-           .theCpmlPartitionWeight = 1.0,
+           /* Fixed work model: N_ordinary + 4.38 * N_CPML. */
+           .theCpmlPartitionWeight = 4.38,
            .theCpml3DMaterialExtension = YES,
            .theCpmlGravityInBottomBand = 0,
            .theCpmlProfileSlab = CPML_PROFILE_SLAB_NONE,
