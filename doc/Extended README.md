@@ -2259,7 +2259,51 @@ for fine terrain on a coarse material grid and for translated/rotated grids.
 The general 3-D convention samples at equal physical elevation; it does not
 interpolate corresponding layers at equal burial depth. Terrain-following
 interfaces can be encoded by column depths, but horizontal property blending
-can smooth their discontinuities between columns.
+can smooth their discontinuities between columns. The optional
+`3D_velocity_model_column_sampling=same_depth` selects equal burial depth
+instead; see the next subsection.
+
+#### Column sampling between material columns
+
+`3D_velocity_model_column_sampling` (optional, case-insensitive) selects how a
+query between four material columns reads them when the column depths are
+relative to each column's own surface: `type_of_etree=sqd` with
+`include_topography=yes`, or explicit seabed geometry with the `surface` or
+`seabed` reference.
+
+| Value | Depth read in column $i$ | Keeps intact |
+| --- | --- | --- |
+| `same_elevation` (default) | $d_i=d+h_i-h_q$ (seabed references: $Z-Z_{\mathrm{ref}}(i)$) | interfaces that are horizontal in physical elevation |
+| `same_depth` | $d_i=d$, the query's depth below its own reference ($Z-Z_{\mathrm{ref}}(q)$ with seabed geometry) | layers that follow the terrain, e.g. Vs30-based near-surface tapers |
+
+Here $d$ is the query depth below the outer surface at the query point,
+$h$ heights positive upward, and $Z_{\mathrm{ref}}$ the outer surface
+(`surface`) or the ground/bed (`seabed`). The bilinear weights, the layer-top
+lookup, endpoint extension, the water test and the CPML clamp are unchanged.
+With `type_of_etree=full`, topography off, or `model_z` the option has no
+effect (all columns share one depth origin); the setup monitor says so.
+
+Example: columns A and B are 500 m apart, A's surface 100 m above B's, and
+both hold 300 m/s over the top 50 m and 1500 m/s below. A query midway, 20 m
+below its surface, reads A at 70 m (1500 m/s) and B 30 m above its surface
+(top layer, 300 m/s) with `same_elevation`, giving 900 m/s; `same_depth` reads
+both at 20 m and gives 300 m/s. Conversely, a horizontal interface encoded at
+40 and 140 m (example above) is kept by `same_elevation` and blended by
+`same_depth`. Choose the rule that matches how the profiles were built: columns
+queried at depth below their own surface with a terrain-following taper favour
+`same_depth`; profiles describing horizontal layers favour `same_elevation`.
+The two rules agree in flat terrain and differ by roughly the relief between
+neighbouring columns relative to the layer thickness.
+
+The setting changes element material, quality factors and the acoustic/solid
+classification from Vs, so it affects elastic, viscoelastic, nonlinear
+elastoplastic/plastic and hysteretic, poroelastic and acoustic initialization
+and the coupled interfaces through the same reader. Time stepping, GPU/MPI
+exchanges and station definitions are unchanged. Imported meshes keep their
+stored properties: regenerate with `mesh_input_mode=0` after changing it.
+Validation: default runs reproduce the previous lookup arithmetic; the
+`same_depth` path has a static review and solver build, not a wave-propagation
+benchmark.
 
 For a concrete example, take $B=1000$ m and two columns with heights 0 and
 100 m. A horizontal layer boundary at elevation $-40$ m has fixed
@@ -2505,7 +2549,8 @@ occupies $Z_s\le Z<Z_b$ where $Z_b-Z_s>\mathtt{seabed\_height\_tolerance\_m}$; t
 The actual fine geometry is used even with coarse/rotated velocity columns.
 
 Solid columns retain piecewise-constant vertical lookup and bilinear horizontal
-interpolation at equal physical elevation. First/last solid endpoints extend
+interpolation at equal physical elevation (or at equal depth below each column's
+reference with `3D_velocity_model_column_sampling=same_depth`). First/last solid endpoints extend
 beyond listed depths. A solid query outside the half-open velocity footprint
 aborts rather than using an ambiguously referenced background model. Extend
 velocity axes beyond maximum query coordinates. CPML clamps queries in solver

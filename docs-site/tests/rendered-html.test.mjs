@@ -449,8 +449,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 255);
-  assert.equal(documented.length, 255, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 256);
+  assert.equal(documented.length, 256, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -2483,7 +2483,7 @@ test("documents executable provenance and conditional startup configuration", as
   for (const key of ["simulation_node_per_wavelength", "topographybase_zcoord", "type_of_etree", "maximum_octant_level",
     "computation_method", "topography_directory", "source_directory",
     "source_directory_output", "3D_velocity_model_directory",
-    "3D_velocity_model_depth_reference"]) {
+    "3D_velocity_model_depth_reference", "3D_velocity_model_column_sampling"]) {
     assert.ok(output.includes(key), `startup summary documents ${key}`);
   }
 });
@@ -2737,4 +2737,22 @@ test("illustrates all material depth references with accessible, correctly hoste
     assert.match(svg, /<title id="title">[^<]+<\/title>/);
     assert.match(svg, /<desc id="desc">[^<]+<\/desc>/);
   }
+});
+
+test("documents and wires 3D_velocity_model_column_sampling", async () => {
+  const reference = readFileSync(fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url)), "utf8");
+  assert.match(reference, /p\("3D_velocity_model_column_sampling", "Optional", "String \(case-insensitive\)", "Default: same_elevation; same_elevation \| same_depth"/);
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /3D_velocity_model_column_sampling=same_depth/);
+  assert.match(html, /900 m\/s with same_elevation and 300 m\/s with same_depth/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /hu_config_get_string_opt\(fp, "3D_velocity_model_column_sampling"/);
+  assert.match(solver, /3D_velocity_model_column_sampling must be same_elevation or same_depth/);
+  assert.match(solver, /MPI_Bcast\(&Param\.the3DColumnSampling, 1, MPI_INT, 0, comm_solver\)/);
+  assert.match(solver, /general3DVelocityModel_set_column_sampling\(Param\.the3DColumnSampling == 1\)/);
+  const reader = readFileSync(new URL("../../quake/forward/drm_planewaves.cc", import.meta.url), "utf8");
+  assert.match(reader, /const double column_depth = same_depth \? query_reference_depth/);
+  assert.match(reader, /const int same_depth = column_relative && \(Soil_column_sampling == 1\)/);
 });

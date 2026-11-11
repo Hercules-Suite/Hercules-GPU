@@ -1669,10 +1669,20 @@ static double Soil_surface_swy = NAN;
 static horizontal_frame_t Soil_frame = {1.0, 0.0};
 static int Soil_depth_reference = 0;
 static double Soil_water_vp = 0.0, Soil_water_rho = 0.0;
+/* Horizontal interpolation between the four columns around a query for
+ * column-relative depths (SQD topography, or explicit seabed with the surface
+ * or seabed reference): 0 = read every column at the query's physical
+ * elevation (default), 1 = read every column at the query's depth below its
+ * own reference surface, so terrain-following layers stay intact. */
+static int Soil_column_sampling = 0;
 
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg) {
     Soil_frame = horizontal_frame(relative_azimuth_deg);
     Soil_surface_swx = Soil_surface_swy = NAN;
+}
+
+void general3DVelocityModel_set_column_sampling(int same_depth) {
+    Soil_column_sampling = same_depth ? 1 : 0;
 }
 static struct Params_soil_t {
     int numLayerID;
@@ -1869,6 +1879,22 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
         if (!explicit_seabed)
             query_surface_z = point_elevation(solver_x, solver_y);
     }
+    /* same_depth: every column is read at the query's depth below its own
+     * reference (outer surface, or ground/bed for the seabed reference). */
+    const int same_depth = column_relative && (Soil_column_sampling == 1);
+    double query_reference_depth = 0.0;
+    if (same_depth) {
+        if (explicit_seabed) {
+            double reference_z;
+            if (Soil_depth_reference == 3)
+                topo_seabed_sample(solver_x, solver_y, &reference_z);
+            else
+                reference_z = point_elevation(solver_x, solver_y);
+            query_reference_depth = physical_z - reference_z;
+        } else {
+            query_reference_depth = z_input;  /* SQD: already below the query surface */
+        }
+    }
 
     xi  = (x_input - x_coord[0])/x_spacing*2.0 - 1.0;
     eta = (y_input - y_coord[0])/y_spacing*2.0 - 1.0;
@@ -1882,8 +1908,10 @@ int getMaterialFrom3DVelocityModel(double x_input, double y_input,
          * equivalently d + h(i) - h(q) for heights positive upward.
          * Subtract surfaces first to retain flat-terrain depths exactly.
          * Legacy FULL stores layer tops in fixed model Z. Explicit geometry
-         * uses its declared column reference independently of FULL/SQD. */
-        const double column_depth = explicit_seabed
+         * uses its declared column reference independently of FULL/SQD.
+         * 3D_velocity_model_column_sampling=same_depth uses d_i = d instead. */
+        const double column_depth = same_depth ? query_reference_depth
+            : explicit_seabed
             ? physical_z - (column_relative ? Soil_surface_z[Rec_node_ID[i]] : 0.0)
             : (surface_relative
                 ? z_input + (query_surface_z - Soil_surface_z[Rec_node_ID[i]])
