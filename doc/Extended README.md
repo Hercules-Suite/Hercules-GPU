@@ -3012,13 +3012,8 @@ results are specific to the recorded configuration and implementation.
 	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
 	Optional. Default `1.0`, which preserves the standard equal-leaf-count
-	octree partition. Accepts a finite dimensionless number in
-	`[1, 21474836.47]` or `auto` (case-insensitive). The numeric upper bound
-	prevents overflow of the integer partition cost. Values `> 1.0` count the CPML boundary band as heavier
+	octree partition. Values `> 1.0` count the CPML boundary band as heavier
 	work, so boundary-heavy solver ranks may receive fewer total elements.
-	`auto` uses a matching measured cost before final partitioning, with a
-	cold-cache fallback of `1`; it learns a new estimate after the run for later
-	simulations. See [Automatic CPML partition weighting](#automatic-cpml-partition-weighting).
 	**Ordinary partitions are always used during mesh construction**, including
 	progressive refinement, 2:1 balancing, building carving, and local acoustic
 	interface matching. Weighting is deferred until the completed mesh is
@@ -3057,15 +3052,6 @@ results are specific to the recorded configuration and implementation.
 	CUDA error, rank/device and available memory before existing fatal handling.
 	Allocations in other modules retain their own error handling. These checks
 	add no work or synchronization inside the timestep loop.
-- `cpml_partition_cache`
-	Optional whitespace-free path (at most 255 bytes), read only for
-	`abc_type=cpml`. With a numeric partition weight, omission disables cost
-	learning/reuse (default). With `auto`, omission selects
-	`<mesh_etree_output_file>.cpml-cost` (conditional default), or
-	`hercules.cpml-cost` if the mesh path is empty. An explicit path with a
-	numeric weight enables collection only: that numeric weight always wins.
-	Relative paths resolve from the run directory. The parent directory must
-	exist. See the cache format, replacement policy and limitations below.
 - `cpml_3d_material_extension`
 	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
 	and `3D_velocity_model=yes`. When enabled, material queries made
@@ -3297,104 +3283,6 @@ a_{\mathrm{ac}}=\gamma_{\mathrm{ac}}(d_x+d_y+d_z),\qquad
 	correct viscoelastic solution, matching the validated CPU operator.
 	Flat-PML topography cells stay on the cube-stiffness + CPML path
 	exactly as before.
-
-### Automatic CPML partition weighting
-
-Set `cpml_partition_weight=auto` to learn from completed simulations and apply
-a matching calibration after meshing/import, before physics initialization.
-This does not benchmark kernels at startup or repartition an initialized solver.
-An uncached run uses weight `1`. To start from an existing case-specific estimate,
-use a numeric weight and an explicit cache on the first run, then select `auto`
-with that same cache path on later runs:
-
-```ini
-abc_type = cpml
-# First run: a measured case-specific estimate, not a general default
-cpml_partition_weight = 4.38
-cpml_partition_cache = /shared/case/mesh/cpml-cost.cache
-# Later runs: replace the weight line with cpml_partition_weight = auto
-```
-
-For rank `$r$`, let `$N_r$` be its total elements and `$P_r$` its elastic plus
-acoustic CPML elements. The fitted model is
-
-```math
-T_r=c_N(N_r-P_r)+c_P P_r,
-\qquad \frac{T_r}{N_r}=c_N+(c_P-c_N)\frac{P_r}{N_r},
-\qquad w=\frac{c_P}{c_N}.
-```
-
-For equal-sized partitions, a PML-free rank with `215.79 s` and a rank with
-PML fraction `0.47449308` and `561.49 s` give
-`$w=1+(561.49/215.79-1)/0.47449308\approx4.3763$`. These particular numbers
-are cumulative force `kernel_wait` measurements from one 512-rank elastic/BKT2
-case, not isolated kernel costs or a universal hardware ratio. The automatic
-implementation fits the same relation across all nonempty ranks using the
-existing **Compute Physics** timer, which also covers displacement and scalar
-pressure work. Consequently its estimate need not equal the force-only ratio.
-Source/I/O and separately timed force/displacement MPI exchanges are excluded;
-source-force preparation and any synchronization inside Compute Physics remain
-part of the effective measured cost. The fitted seconds/element are cumulative
-over the run; divide by the timestep count for per-step costs.
-
-Acceptance requires at least 100 timesteps, four nonempty ranks, 0.1 s of
-compute on each, a PML-fraction span of at least 0.05, finite positive fitted
-costs, and relative RMS timing residual at most 0.10. Accepted weights are
-clamped to `[1, 16]`; values below one cannot express cheaper PML work with the
-current partitioner. Rejected fits retain the previous cache. Rank counts
-already collected for CPML diagnostics are reused, with one additional timing
-gather at finalization. There are no new timestep kernels, timers, field
-transfers or synchronizations.
-
-Cache lookup requires a clean identified build and a homogeneous GPU layout
-without multiple ranks per visible GPU. The key includes the GPU model,
-compute capability, device memory/SM count, CUDA and MPI versions, rank layout,
-precision, build/executable identity, relevant performance overrides, retained
-parameter text and referenced-file path/size/mtime metadata. Imported mesh
-identity is included. Output destinations, the requested weight and linear
-source-directory changes are excluded. Reuse across linear sources assumes
-comparable source work, such as the same point-source count. This conservative
-key can miss after harmless input reformatting or rebuilding. It does not hash
-large input contents or recursively fingerprint directory contents; remove the
-cache when changing data inside referenced directories or materially changing
-source work. A changed mesh/physics/rank configuration generally needs a new
-calibration. Mesh-only runs neither read nor update it.
-
-The cache is one whitespace-separated text record:
-
-```text
-HERCULES_CPML_COST_V1 <16-hex-digit-configuration-key> <weight> <rank-count> <relative-RMS-error>
-```
-
-Inspect it with `cat /shared/case/mesh/cpml-cost.cache`; the configuration key is
-also printed in the startup log. Use the solver-generated record, since a
-manually invented key will not match. A missing, malformed or mismatched record
-causes fallback to weight `1` in automatic mode. Successful calibration replaces
-the record atomically; one cache holds one configuration, so concurrent jobs
-can replace each other's complete records. Existing non-cache files and symlinks
-are not overwritten. An unwritable path is reported without failing the
-simulation. No directory is created automatically.
-
-The setup/finalization hooks cover elastic, viscoelastic, acoustic pressure and
-velocity-potential, poroelastic, acoustic–elastic, poroelastic–acoustic and
-poroelastic–elastic configurations through the shared completed-mesh partition
-and compute timer. A single coefficient may be unsuitable when different
-physics or interface work dominates different ranks; the residual check rejects
-poor scalar fits but is not a performance guarantee. **Nonlinear elastoplastic,
-plastic and hysteretic analyses disable learning and cache reuse**, including
-coupled nonlinear configurations, because yielding and substepping depend on
-the source-driven state; a numeric weight remains available. Automatic mode
-falls back to `1` there and logs the reason. Existing linear-elastic treatment
-of porous/nonlinear candidates inside CPML remains unchanged.
-
-Weighting changes ownership only: boundary/interface physics, time integration,
-both MPI field-exchange backends, and station/output definitions retain their
-existing implementations. Local host checks cover the measured ratio, unequal
-partitions, rejection criteria, parser and cache behavior, and mocked setup/
-finalization. These investigation harnesses are local-only, unavailable in a
-clean checkout. Full CUDA/MPI compilation and standalone/coupled propagation
-comparisons of this automatic mode remain outstanding; earlier manual-weight
-timings do not validate it or nonlinear tuning.
 
 ### Choosing the topography base and water-surface alignment
 
