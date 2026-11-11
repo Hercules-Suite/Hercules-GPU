@@ -148,6 +148,7 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 | `3D_velocity_model_azimuth_deg` | Finite degrees; inherit `region_azimuth_leftface_deg` (default); nonzero explicit overrides require PROJ | Optional; Float (degrees) |
 | `3D_velocity_model_origin_latitude_deg` | Float (degrees); Required when 3D_velocity_model=yes; no default | Conditional; Float (degrees) |
 | `3D_velocity_model_origin_longitude_deg` | Float (degrees); Required when 3D_velocity_model=yes; no default | Conditional; Float (degrees) |
+| `3D_velocity_model_column_sampling` | `same_elevation` (default), `same_depth`; case-insensitive | Optional; String. Read the four columns at equal physical elevation or equal depth below their references. Legacy: active with `sqd` topography; no effect for `full` or topography off. Explicit geometry: `surface`/`seabed` references support both `full` and `sqd`; `seabed` remains active with topography off, while flat `surface` gives identical results. No effect for `model_z`. Independent of the CPML extension reference; regenerate the mesh after changing it ([details](Extended%20README.md#column-sampling-between-material-columns)) |
 
 Material axes follow solver axes by
 default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,
@@ -160,7 +161,9 @@ chunked MPI initialization; full material arrays remain replicated per rank.
 See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
 Without explicit seabed geometry, `type_of_etree=sqd` uses `z.in` depths below each column's
 surface and samples at equal physical elevation using the actual query-point
-terrain. `full` uses fixed model Z without a terrain shift. Rebuild the solver
+terrain (`3D_velocity_model_column_sampling=same_depth` reads every column at
+the query depth below its own surface instead). `full` uses fixed model Z
+without a terrain shift. Rebuild the solver
 and regenerate meshes with `mesh_input_mode=0` to apply the corrected lookup;
 see [depth conventions and example](Extended%20README.md#3d-material-depths-with-topography).
 

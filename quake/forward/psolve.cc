@@ -1115,6 +1115,7 @@ static struct Param_t {
   int theSeabedClipAboveSurface; /* 0=error (default), 1=clip at setup */
   double theSeabedHeightToleranceM;
   int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
+  int the3DColumnSampling; /* 0=same_elevation (default), 1=same_depth */
   double theSeabedWaterVp, theSeabedWaterRho;
   char theTopoDir[256];
   char theStationMediumsFile[256];
@@ -2768,6 +2769,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(&Param.theSeabedClipAboveSurface, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedHeightToleranceM, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
+  MPI_Bcast(&Param.the3DColumnSampling, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
@@ -3059,6 +3061,8 @@ static void monitor_input_details(FILE* fp, int nodes_per_wavelength) {
     monitor_print("%-35s %s\n", "3D_velocity_model_directory:", Param.the3DVelModelDir);
     monitor_print("%-35s %s\n", "3D_velocity_model_depth_reference:",
                   references[Param.the3DDepthReference]);
+    monitor_print("%-35s %s\n", "3D_velocity_model_column_sampling:",
+                  Param.the3DColumnSampling == 1 ? "same_depth" : "same_elevation");
   }
   if (Param.theSeabedGeometryFile[0] != '\0') {
     monitor_print("%-35s %s\n", "seabed_geometry_file:", Param.theSeabedGeometryFile);
@@ -4563,6 +4567,19 @@ static int32_t parse_parameters(const char* numericalin) {
   else if (strcasecmp(depth_reference, "seabed") == 0) Param.the3DDepthReference = 3;
   else solver_abort(__FUNCTION_NAME, NULL,
                    "3D_velocity_model_depth_reference must be legacy, model_z, surface or seabed\n");
+  char column_sampling[64] = "same_elevation";
+  char* column_sampling_ptr = column_sampling;
+  size_t column_sampling_size = sizeof(column_sampling);
+  if (hu_config_get_string_opt(fp, "3D_velocity_model_column_sampling",
+                               &column_sampling_ptr, &column_sampling_size) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Cannot read 3D_velocity_model_column_sampling "
+                 "(same_elevation or same_depth)\n");
+  }
+  if (strcasecmp(column_sampling, "same_elevation") == 0) Param.the3DColumnSampling = 0;
+  else if (strcasecmp(column_sampling, "same_depth") == 0) Param.the3DColumnSampling = 1;
+  else solver_abort(__FUNCTION_NAME, NULL,
+                   "3D_velocity_model_column_sampling must be same_elevation or same_depth\n");
   const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
   const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
   if (Param.theSeabedGeometryFile[0] != '\0') {
@@ -30653,6 +30670,7 @@ int main(int argc, char** argv) {
   } else if (Param.threeDVelocityModel == YES && need_material_queries) {
     /* Initialize 3D velocity model */
     general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
+    general3DVelocityModel_set_column_sampling(Param.the3DColumnSampling == 1);
   } else if (((Param.IstanbulVelocityModel == YES) ||
               (Param.threeDVelocityModel == YES)) &&
              (Global.myID == 0)) {
@@ -30746,6 +30764,14 @@ int main(int argc, char** argv) {
                     Param.the3DDepthReference == 1 ? "fixed model Z" :
                     Param.the3DDepthReference == 2 ? "below outer surface" :
                     "below seabed (ground on dry cells)");
+      monitor_print("3D column sampling:                 %s\n",
+                    Param.the3DDepthReference == 1
+                        ? (Param.the3DColumnSampling == 1
+                               ? "fixed model Z; same_depth has no effect"
+                               : "fixed model Z")
+                        : (Param.the3DColumnSampling == 1
+                               ? "same depth below each column's reference (terrain-following)"
+                               : "same physical elevation in every column"));
     }
   }
   if (Param.includeTopography == YES) {
@@ -30770,8 +30796,12 @@ int main(int argc, char** argv) {
     monitor_print(
         "3D material depths:                 %s\n",
         ((Param.includeTopography == YES) && (get_theetree_type() == SQD))
-            ? "SQD surface-relative profiles; same-elevation column sampling using the actual topography grid"
-            : "fixed model Z; no column terrain shift (FULL or topography off)");
+            ? (Param.the3DColumnSampling == 1
+                   ? "SQD surface-relative profiles; same-depth column sampling (each column read at the query depth below its own surface)"
+                   : "SQD surface-relative profiles; same-elevation column sampling using the actual topography grid")
+            : (Param.the3DColumnSampling == 1
+                   ? "fixed model Z; no column terrain shift (FULL or topography off); same_depth has no effect"
+                   : "fixed model Z; no column terrain shift (FULL or topography off)"));
   }
 
   if (Param.includeIncidentPlaneWaves == YES) {

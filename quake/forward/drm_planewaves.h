@@ -63,6 +63,7 @@ int general3DVelocityModel_hasQualityFactors(void);
 void general3DVelocityModel_set_seabed(int reference, double vp, double rho);
 /* Grid +X azimuth relative to solver +X; called on every rank at setup. */
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg);
+void general3DVelocityModel_set_column_sampling(int same_depth);
 void general3DVelocityModel_init(int32_t myID, const char *the3DVelModelDir);
 
 #endif /* DRM_PLANEWAVES_H_ */
