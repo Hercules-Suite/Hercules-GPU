@@ -2271,6 +2271,13 @@ relative to each column's own surface: `type_of_etree=sqd` with
 `include_topography=yes`, or explicit seabed geometry with the `surface` or
 `seabed` reference.
 
+![Comparison of same-elevation and same-depth sampling: a midpoint query in a 50 m terrain-following soft layer reads rock and soft material at equal elevation (900 m/s), or soft material in both columns at equal burial depth (300 m/s).](../docs-site/public/figures/column-sampling-comparison.svg)
+
+Both panels show the same query and intended layer. The paths mark the column
+sampling locations; the above-surface sample uses the column's first material
+value. This two-column slice is identical in the other horizontal direction,
+so the four-column interpolation reduces to equal weights from A and B.
+
 | Value | Depth read in column $i$ | Keeps intact |
 | --- | --- | --- |
 | `same_elevation` (default) | $d_i=d+h_i-h_q$ (seabed references: $Z-Z_{\mathrm{ref}}(i)$) | interfaces that are horizontal in physical elevation |

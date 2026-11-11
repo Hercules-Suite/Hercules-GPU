@@ -1531,27 +1531,6 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
         note: "The figures show individual column coordinates, not a mesh or a shoreline interpolation example; the displayed z.in values are selected layer entries, not complete files. With topography enabled, each explicit option works with either full or sqd. With include_topography=no, the outer surface is at solver Z=0: model_z and surface coincide, while seabed remains bed-relative. Convert z.in when changing references to preserve the physical model, then rebuild the material mesh. Imported mesh materials do not change merely because this parameter changes.",
       },
       {
-        id: "velocity-model-lookup",
-        title: "Column sampling with and without topography",
-        paragraphs: [
-          "At each of the four horizontal grid columns surrounding a query point, Hercules selects the deepest listed z that does not exceed the local depth. Values are therefore piecewise constant with depth within each profile; a listed z acts as the top depth of that material interval. Above the first listed depth, Hercules uses the first sample, and below the last listed depth it uses the last sample.",
-          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. 3D_velocity_model_column_sampling defaults to same_elevation, which samples all columns at the query's physical elevation. same_depth instead uses the query's depth below its reference surface in every column when the material depths are column-relative. The depth-reference options above determine the local profile depth in each column; computation_method independently selects VT or FEM boundary treatment.",
-          "Without topography (include_topography=no), type_of_etree is unused. Without seabed_geometry_file, keep 3D_velocity_model_depth_reference=legacy: both column-sampling choices read the same fixed model Z, so same_depth does not change the material. It does not create terrain or a varying surface reference. With an explicit seabed file, the outer surface is flat at Z=0 but the bed can still vary; the table below distinguishes these cases.",
-          "Flat-surface ocean example with include_topography=no and the seabed depth reference: beds are at Z=40 m and Z=140 m, and the interpolated midpoint bed is Z=90 m. A solid query at Z=110 m is 20 m below that bed. same_elevation reads the columns at 70 m and -30 m relative to their beds (the latter uses the first solid sample); same_depth reads both at 20 m. If both solid profiles contain 300 m/s in their top 50 m and 1500 m/s below, the midpoint is 900 m/s with same_elevation and 300 m/s with same_depth. Water classification still comes from the geometry before solid interpolation.",
-          "In legacy mode, queries outside xmin <= x < xmax or ymin <= y < ymax use the background model. With full or topography disabled, a query Z below the smallest numeric z.in value also uses the background. In sqd, depths have different surface origins, so endpoint extension is applied separately after converting each column depth; there is no global minimum-depth rejection.",
-        ],
-        table: {
-          headers: ["With include_topography=no", "Column lookup", "Effect of same_depth"],
-          rows: [
-            ["No seabed file; legacy (default)", "Every column is read at the same fixed model Z.", "None; both options give identical material values."],
-            ["Explicit seabed file; model_z", "Every column is read at Z.", "None; fixed-Z sampling ignores the option."],
-            ["Explicit seabed file; surface", "Every column is referenced to the flat outer surface at Z=0.", "Both options coincide because their reference surface is flat."],
-            ["Explicit seabed file; seabed", "same_elevation uses Z - Z_bed(i); same_depth uses Z - Z_bed(query) in every column.", "Can change the solid material when the bed varies, even though topography is disabled."],
-          ],
-        },
-        note: "The explicit model_z, surface and seabed references still require seabed_geometry_file and its acoustic setup. With topography enabled, legacy SQD and explicit surface/seabed references can differ between sampling rules; legacy FULL remains fixed-Z. Regenerate the mesh when changing a sampling rule that changes material values.",
-      },
-      {
         id: "velocity-model-topography-depths",
         title: "3-D material depths with full and sqd topography",
         paragraphs: [
@@ -1575,6 +1554,36 @@ D &= \sum_{i=0}^{N} a_i\,\frac{L_{\max}}{2^i}, &&a_i\in\{0,1\}.
           caption: "Without topography, legacy retains fixed solver coordinates and type_of_etree is unused. The explicit model_z, surface and seabed choices above do not inherit the full/sqd distinction.",
           width: 920, height: 520,
         }],
+      },
+      {
+        id: "velocity-model-lookup",
+        title: "Column sampling with and without topography",
+        paragraphs: [
+          "At each of the four horizontal grid columns surrounding a query point, Hercules selects the deepest listed z that does not exceed the local depth. Values are therefore piecewise constant with depth within each profile; a listed z acts as the top depth of that material interval. Above the first listed depth, Hercules uses the first sample, and below the last listed depth it uses the last sample.",
+          "Hercules then bilinearly interpolates Vs, Vp, density, and optional Qs/Qp across those four columns. 3D_velocity_model_column_sampling defaults to same_elevation, which samples all columns at the query's physical elevation. same_depth instead uses the query's depth below its reference surface in every column when the material depths are column-relative. The depth-reference options above determine the local profile depth in each column; computation_method independently selects VT or FEM boundary treatment.",
+          "Without topography (include_topography=no), type_of_etree is unused. Without seabed_geometry_file, keep 3D_velocity_model_depth_reference=legacy: both column-sampling choices read the same fixed model Z, so same_depth does not change the material. It does not create terrain or a varying surface reference. With an explicit seabed file, the outer surface is flat at Z=0 but the bed can still vary; the table below distinguishes these cases.",
+          "Flat-surface ocean example with include_topography=no and the seabed depth reference: beds are at Z=40 m and Z=140 m, and the interpolated midpoint bed is Z=90 m. A solid query at Z=110 m is 20 m below that bed. same_elevation reads the columns at 70 m and -30 m relative to their beds (the latter uses the first solid sample); same_depth reads both at 20 m. If both solid profiles contain 300 m/s in their top 50 m and 1500 m/s below, the midpoint is 900 m/s with same_elevation and 300 m/s with same_depth. Water classification still comes from the geometry before solid interpolation.",
+          "In legacy mode, queries outside xmin <= x < xmax or ymin <= y < ymax use the background model. With full or topography disabled, a query Z below the smallest numeric z.in value also uses the background. In sqd, depths have different surface origins, so endpoint extension is applied separately after converting each column depth; there is no global minimum-depth rejection.",
+        ],
+        table: {
+          headers: ["With include_topography=no", "Column lookup", "Effect of same_depth"],
+          rows: [
+            ["No seabed file; legacy (default)", "Every column is read at the same fixed model Z.", "None; both options give identical material values."],
+            ["Explicit seabed file; model_z", "Every column is read at Z.", "None; fixed-Z sampling ignores the option."],
+            ["Explicit seabed file; surface", "Every column is referenced to the flat outer surface at Z=0.", "Both options coincide because their reference surface is flat."],
+            ["Explicit seabed file; seabed", "same_elevation uses Z - Z_bed(i); same_depth uses Z - Z_bed(query) in every column.", "Can change the solid material when the bed varies, even though topography is disabled."],
+          ],
+        },
+        figures: [{
+          id: "column-sampling-comparison",
+          title: "same_elevation and same_depth — compare the sampling paths",
+          description: "Both panels show a terrain-following 50 m soft layer and the same query, 20 m below the midpoint surface. The left panel reads neighboring columns at one physical elevation; the right reads both at 20 m below their own surfaces. The drawing is a two-column slice with identical profiles in the other horizontal direction, so the four-column interpolation reduces to equal weights from A and B.",
+          src: "/figures/column-sampling-comparison.svg",
+          alt: "Two panels compare a 50 m soft layer at 300 m/s over 1500 m/s rock. Column A is 100 m higher than B. At the midpoint query 20 m below ground, same_elevation samples A at 70 m and B at minus 30 m, giving 900 m/s. same_depth samples both at 20 m, giving 300 m/s.",
+          caption: "The shading shows the intended terrain-following layer, and the colored paths show the samples used by each rule. B's above-surface sample in same_elevation uses its first material value. This illustrates legacy SQD interpolation; equal elevation remains appropriate for horizontal interfaces encoded at different column depths. For a flat outer surface with a varying explicit seabed, the same distinction applies using the bed as the reference.",
+          width: 1080, height: 886,
+        }],
+        note: "The explicit model_z, surface and seabed references still require seabed_geometry_file and its acoustic setup. With topography enabled, legacy SQD and explicit surface/seabed references can differ between sampling rules; legacy FULL remains fixed-Z. Regenerate the mesh when changing a sampling rule that changes material values.",
       },
       {
         id: "explicit-seabed-geometry",

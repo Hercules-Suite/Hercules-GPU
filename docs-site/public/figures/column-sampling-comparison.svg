@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="886" viewBox="0 0 1080 886" role="img" aria-labelledby="title desc">
+<title id="title">SAME_ELEVATION versus SAME_DEPTH column sampling</title>
+<desc id="desc">Both panels show a 50 m thick terrain-following soft layer with Vs=300 m/s over rock with Vs=1500 m/s. Columns A and B are 500 m apart, with ground elevations 100 m and 0 m. The midpoint query has elevation 30 m, or 20 m burial depth. SAME_ELEVATION reads A at 70 m and B at minus 30 m, using its first material value above the surface, and returns 900 m/s. SAME_DEPTH reads both columns at 20 m and returns 300 m/s. This two-column slice has identical profiles in the other horizontal direction; each side contributes half of the four-column interpolated value.</desc>
+<rect x="0" y="0" width="1080" height="886" rx="0" fill="#f7f9fc" stroke="none"/>
+<text x="24" y="35" font-family="Arial,Helvetica,sans-serif" font-size="27" font-weight="700" fill="#1c3044" text-anchor="start">Same query, different column samples</text>
+<text x="24" y="62" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#53687b" text-anchor="start">A and B are 500 m apart; A is 100 m higher. The query is 20 m below the midpoint ground.</text>
+<rect x="24" y="82" width="18" height="18" rx="3" fill="#f7e6b6" stroke="#c6a557"/>
+<text x="50" y="97" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#1c3044" text-anchor="start">Soft layer: 300 m/s · 50 m thick</text>
+<rect x="355" y="82" width="18" height="18" rx="3" fill="#dde3e9" stroke="#9eabb9"/>
+<text x="381" y="97" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#1c3044" text-anchor="start">Rock: 1500 m/s</text>
+<circle cx="610" cy="91" r="7" fill="#ffc547" stroke="#1c3044" stroke-width="1.5"/>
+<text x="627" y="97" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#1c3044" text-anchor="start">Same physical query in both panels</text>
+<g transform="translate(24 120)">
+<rect x="0" y="0" width="504" height="714" rx="12" fill="white" stroke="#cbd5df"/>
+<text x="28" y="38" font-family="Consolas,Liberation Mono,monospace" font-size="23" font-weight="700" fill="#1a69a1" text-anchor="start">SAME_ELEVATION</text>
+<rect x="372" y="18" width="104" height="28" rx="14" fill="#eaf2f9" stroke="none"/>
+<text x="424" y="37" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="700" fill="#1a69a1" text-anchor="middle">default</text>
+<text x="28" y="67" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#53687b" text-anchor="start">Keep physical elevation fixed</text>
+<text x="28" y="98" font-family="Consolas,Liberation Mono,monospace" font-size="16" font-weight="400" fill="#1a69a1" text-anchor="start">d_i = d + h_i - h_query</text>
+<rect x="76" y="160" width="360" height="288" rx="0" fill="#f1f7fb" stroke="none"/>
+<path d="M76 180 L436 320 L436 390 L76 250 Z" fill="#f7e6b6"/>
+<path d="M76 250 L436 390 L436 448 L76 448 Z" fill="#dde3e9"/>
+<text x="24" y="141" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="start">h (m)</text>
+<path d="M44 160 L44 448" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="185" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">100</text>
+<path d="M40 180 L48 180" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="255" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">50</text>
+<path d="M40 250 L48 250" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="325" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">0</text>
+<path d="M40 320 L48 320" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="395" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">−50</text>
+<path d="M40 390 L48 390" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="76" y="145" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="700" fill="#1c3044" text-anchor="start">A: ground at 100 m</text>
+<text x="436" y="145" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="700" fill="#1c3044" text-anchor="end">B: ground at 0 m</text>
+<path d="M76 160 L76 448" stroke="#889bad" stroke-width="1" fill="none" stroke-dasharray="3 5"/>
+<path d="M436 160 L436 448" stroke="#889bad" stroke-width="1" fill="none" stroke-dasharray="3 5"/>
+<path d="M76 180 L436 320" stroke="#1c3044" stroke-width="2.5" fill="none"/>
+<path d="M76 250 L436 390" stroke="#8c7750" stroke-width="1.8" fill="none" stroke-dasharray="5 4"/>
+<path d="M76 278 L436 278" stroke="#1a69a1" stroke-width="2.8" fill="none" stroke-dasharray="8 5"/>
+<circle cx="76" cy="278" r="6" fill="white" stroke="#1a69a1" stroke-width="2.5"/>
+<circle cx="436" cy="278" r="6" fill="white" stroke="#1a69a1" stroke-width="2.5"/>
+<path d="M436 284 L436 320" stroke="#1a69a1" stroke-width="2" fill="none" stroke-dasharray="3 4"/>
+<rect x="432" y="316" width="8" height="8" rx="0" fill="#f7e6b6" stroke="#1a69a1"/>
+<text x="270" y="193" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="400" fill="#1a69a1" text-anchor="start">30 m above B&#x27;s surface</text>
+<text x="270" y="215" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="400" fill="#1a69a1" text-anchor="start">B uses its first material value</text>
+<path d="M417 225 L435 266" stroke="#1a69a1" stroke-width="1" fill="none"/>
+<circle cx="256" cy="250" r="3" fill="white" stroke="#1c3044" stroke-width="1.5"/>
+<path d="M260 250 L282 250" stroke="#1c3044" stroke-width="1" fill="none"/>
+<path d="M282 250 L282 278" stroke="#1c3044" stroke-width="1" fill="none"/>
+<path d="M278 278 L286 278" stroke="#1c3044" stroke-width="1" fill="none"/>
+<text x="290" y="269" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="700" fill="#1c3044" text-anchor="start">20 m</text>
+<circle cx="256" cy="278" r="7" fill="#ffc547" stroke="#1c3044" stroke-width="2"/>
+<text x="267" y="304" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="700" fill="#1c3044" text-anchor="start">query: h = 30 m</text>
+<path d="M76 462 L436 462" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<path d="M76 457 L76 467" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<path d="M436 457 L436 467" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="256" y="486" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#53687b" text-anchor="middle">500 m · query halfway</text>
+<text x="28" y="520" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" fill="#53687b" text-anchor="start">READ AT COLUMN A</text>
+<text x="270" y="520" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" fill="#53687b" text-anchor="start">READ AT COLUMN B</text>
+<text x="28" y="546" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="700" fill="#1a69a1" text-anchor="start">70 m → rock</text>
+<text x="270" y="546" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="700" fill="#1a69a1" text-anchor="start">−30 m → first layer</text>
+<text x="28" y="571" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#1c3044" text-anchor="start">1500 m/s</text>
+<text x="270" y="571" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#1c3044" text-anchor="start">300 m/s</text>
+<rect x="28" y="590" width="448" height="78" rx="8" fill="#eef5fb" stroke="none"/>
+<text x="252" y="619" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#1a69a1" text-anchor="middle">½ × 1500 + ½ × 300</text>
+<text x="252" y="650" font-family="Arial,Helvetica,sans-serif" font-size="25" font-weight="700" fill="#1a69a1" text-anchor="middle">Vₛ = 900 m/s</text>
+<text x="252" y="695" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#53687b" text-anchor="middle">Blends rock and soft material at equal elevation.</text>
+</g>
+<g transform="translate(552 120)">
+<rect x="0" y="0" width="504" height="714" rx="12" fill="white" stroke="#cbd5df"/>
+<text x="28" y="38" font-family="Consolas,Liberation Mono,monospace" font-size="23" font-weight="700" fill="#14775c" text-anchor="start">SAME_DEPTH</text>
+<text x="28" y="67" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#53687b" text-anchor="start">Keep depth below each surface fixed</text>
+<text x="28" y="98" font-family="Consolas,Liberation Mono,monospace" font-size="16" font-weight="400" fill="#14775c" text-anchor="start">d_i = d = 20 m</text>
+<rect x="76" y="160" width="360" height="288" rx="0" fill="#f1f7fb" stroke="none"/>
+<path d="M76 180 L436 320 L436 390 L76 250 Z" fill="#f7e6b6"/>
+<path d="M76 250 L436 390 L436 448 L76 448 Z" fill="#dde3e9"/>
+<text x="24" y="141" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="start">h (m)</text>
+<path d="M44 160 L44 448" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="185" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">100</text>
+<path d="M40 180 L48 180" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="255" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">50</text>
+<path d="M40 250 L48 250" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="325" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">0</text>
+<path d="M40 320 L48 320" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="36" y="395" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="400" fill="#53687b" text-anchor="end">−50</text>
+<path d="M40 390 L48 390" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="76" y="145" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="700" fill="#1c3044" text-anchor="start">A: ground at 100 m</text>
+<text x="436" y="145" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="700" fill="#1c3044" text-anchor="end">B: ground at 0 m</text>
+<path d="M76 160 L76 448" stroke="#889bad" stroke-width="1" fill="none" stroke-dasharray="3 5"/>
+<path d="M436 160 L436 448" stroke="#889bad" stroke-width="1" fill="none" stroke-dasharray="3 5"/>
+<path d="M76 180 L436 320" stroke="#1c3044" stroke-width="2.5" fill="none"/>
+<path d="M76 250 L436 390" stroke="#8c7750" stroke-width="1.8" fill="none" stroke-dasharray="5 4"/>
+<path d="M76 208 L436 348" stroke="#14775c" stroke-width="2.8" fill="none" stroke-dasharray="8 5"/>
+<circle cx="76" cy="208" r="6" fill="white" stroke="#14775c" stroke-width="2.5"/>
+<circle cx="436" cy="348" r="6" fill="white" stroke="#14775c" stroke-width="2.5"/>
+<circle cx="256" cy="250" r="3" fill="white" stroke="#1c3044" stroke-width="1.5"/>
+<path d="M260 250 L282 250" stroke="#1c3044" stroke-width="1" fill="none"/>
+<path d="M282 250 L282 278" stroke="#1c3044" stroke-width="1" fill="none"/>
+<path d="M278 278 L286 278" stroke="#1c3044" stroke-width="1" fill="none"/>
+<text x="290" y="269" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="700" fill="#1c3044" text-anchor="start">20 m</text>
+<circle cx="256" cy="278" r="7" fill="#ffc547" stroke="#1c3044" stroke-width="2"/>
+<text x="267" y="304" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="700" fill="#1c3044" text-anchor="start">query: h = 30 m</text>
+<path d="M76 462 L436 462" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<path d="M76 457 L76 467" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<path d="M436 457 L436 467" stroke="#90a2b4" stroke-width="1" fill="none"/>
+<text x="256" y="486" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#53687b" text-anchor="middle">500 m · query halfway</text>
+<text x="28" y="520" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" fill="#53687b" text-anchor="start">READ AT COLUMN A</text>
+<text x="270" y="520" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" fill="#53687b" text-anchor="start">READ AT COLUMN B</text>
+<text x="28" y="546" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="700" fill="#14775c" text-anchor="start">20 m → soft layer</text>
+<text x="270" y="546" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="700" fill="#14775c" text-anchor="start">20 m → soft layer</text>
+<text x="28" y="571" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#1c3044" text-anchor="start">300 m/s</text>
+<text x="270" y="571" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#1c3044" text-anchor="start">300 m/s</text>
+<rect x="28" y="590" width="448" height="78" rx="8" fill="#eaf6f0" stroke="none"/>
+<text x="252" y="619" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="400" fill="#14775c" text-anchor="middle">½ × 300 + ½ × 300</text>
+<text x="252" y="650" font-family="Arial,Helvetica,sans-serif" font-size="25" font-weight="700" fill="#14775c" text-anchor="middle">Vₛ = 300 m/s</text>
+<text x="252" y="695" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="400" fill="#53687b" text-anchor="middle">Preserves this constant-thickness soft layer.</text>
+</g>
+<text x="540" y="864" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="400" fill="#53687b" text-anchor="middle">Shading: intended terrain-following layer. Colored dots: column samples. Vertical scale exaggerated.</text>
+</svg>

@@ -2685,7 +2685,7 @@ test("provides a setup index and compact, grouped topic navigation", async () =>
   const velocity = await (await render("/docs/velocity-models")).text();
   const toc = velocity.match(/<aside class="onThisPage">[\s\S]*?<\/aside>/)?.[0];
   assert.ok(toc);
-  for (const label of ["Model inputs", "Worked example", "Depth references", "Interpolation &amp; tools", "Files &amp; ordering"])
+  for (const label of ["Model inputs", "Worked example", "Depth references", "Conversion &amp; validation", "Files &amp; ordering"])
     assert.ok(toc.includes(label), label);
   assert.match(toc, /aria-current="location"/);
   assert.match(velocity, /<details class="mobilePageContents"/);
@@ -2785,6 +2785,21 @@ test("documents and wires 3D_velocity_model_column_sampling", async () => {
   assert.match(lookup, /beds are at Z=40 m and Z=140 m/);
   assert.match(lookup, /same_depth reads both at 20 m/);
   assert.match(lookup, /Water classification still comes from the geometry before solid interpolation/);
+  const sections = [...html.matchAll(/<section\b[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => match[1]);
+  const depthsIndex = sections.indexOf("velocity-model-topography-depths");
+  assert.ok(depthsIndex >= 0);
+  assert.equal(sections[depthsIndex + 1], "velocity-model-lookup", "column sampling immediately follows the FULL/SQD section");
+  assert.match(lookup, /id="column-sampling-comparison"/);
+  assert.ok(lookup.includes(`src="${basePath}/figures/column-sampling-comparison.svg"`));
+  assert.ok(lookup.includes(`href="${basePath}/figures/column-sampling-comparison.svg"`));
+  assert.match(lookup, /alt="Two panels compare a 50 m soft layer[^"]+"/);
+  assert.match(lookup, /diagram; scroll horizontally on narrow screens/);
+  const diagram = readFileSync(new URL("../public/figures/column-sampling-comparison.svg", import.meta.url), "utf8");
+  assert.match(diagram, /role="img" aria-labelledby="title desc"/);
+  assert.match(diagram, /<title id="title">[^<]+<\/title>/);
+  assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
+  for (const label of ["SAME_ELEVATION", "SAME_DEPTH", "70 m", "−30 m", "20 m", "900 m/s", "300 m/s"])
+    assert.ok(diagram.includes(label), `sampling figure includes ${label}`);
   const entry = reference.split("\n").find((line) => line.includes('p("3D_velocity_model_column_sampling"'));
   assert.ok(entry);
   for (const text of [entry, html]) {

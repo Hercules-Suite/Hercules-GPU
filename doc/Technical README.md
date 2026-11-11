@@ -156,6 +156,8 @@ options read the same fixed model Z. With an explicit seabed file, `model_z`
 and flat `surface` also give identical results under both options, while
 `seabed` can differ when the bed varies. See the
 [no-topography table and example](Extended%20README.md#column-sampling-between-material-columns).
+The [sampling comparison figure](../docs-site/public/figures/column-sampling-comparison.svg)
+shows equal-elevation and equal-depth lookup on the same terrain-following layer.
 
 Material axes follow solver axes by
 default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,

@@ -35,7 +35,7 @@ export const setupGuides: SetupGuide[] = [
     description: "File formats, profile ordering, depth references, conversion, and validation.",
     source: "input-files",
     parent: "input-files",
-    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Depth references", "velocity-model-depth-reference velocity-model-topography-depths"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Interpolation & tools", "velocity-model-lookup velocity-model-converter velocity-model-converter-script velocity-model-validation")],
+    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Depth references", "velocity-model-depth-reference velocity-model-topography-depths velocity-model-lookup"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Conversion & validation", "velocity-model-converter velocity-model-converter-script velocity-model-validation")],
   },
   {
     slug: "basin-models",
