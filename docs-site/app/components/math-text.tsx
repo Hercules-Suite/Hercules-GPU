@@ -26,18 +26,18 @@ export function MathFormula({ expression, display = false }: MathFormulaProps) {
 
 const mathSegment = /(`[^`\n]+`|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
 
-export function MathText({ text }: { text: string }) {
+export function MathText({ text, linkParameters = true }: { text: string; linkParameters?: boolean }) {
   const parts = text.split(mathSegment);
   const rendered: ReactNode[] = parts.map((part, index) => {
     const inline = part.startsWith("\\(") && part.endsWith("\\)");
     const display = part.startsWith("\\[") && part.endsWith("\\]");
 
-    if (!inline && !display) return <ParameterText text={part} key={index} />;
+    if (!inline && !display) return <ParameterText text={part} linkParameters={linkParameters} key={index} />;
 
     // A standalone parameter/assignment is code, not a mathematical symbol.
     // Keep actual formulas in KaTeX, including their accessible MathML.
     const literal = inline && part.slice(2, -2).trim().match(/^\\mathtt\{([^{}]+)\}$/);
-    if (literal) return <ParameterText text={literal[1].replaceAll("\\_", "_")} key={index} />;
+    if (literal) return <ParameterText text={literal[1].replaceAll("\\_", "_")} linkParameters={linkParameters} key={index} />;
 
     return (
       <MathFormula

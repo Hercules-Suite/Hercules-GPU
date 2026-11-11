@@ -41,9 +41,15 @@ async function renderMarkup(path = "/") {
 
 // Content/parser audits compare readable text independent of inline parameter
 // styling. Typography checks below use renderMarkup to inspect the actual tags.
+function withoutParameterLinks(html) {
+  return html.replace(/<a\b(?=[^>]*\bclass="parameterLink")[^>]*>([\s\S]*?)<\/a>/g, "$1");
+}
+
 async function render(path = "/") {
   const response = await renderMarkup(path);
-  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameter(?:Name|Value)">([^<]*)<\/code>/g, "$1");
+  const html = withoutParameterLinks(await response.text()).replaceAll("<!-- -->", "")
+    .replace(/<div class="tableCellContent">([\s\S]*?)<\/div>/g, "$1")
+    .replace(/<code class="parameter(?:Name|Value)">([^<]*)<\/code>/g, "$1");
   return new Response(html, { status: response.status, headers: response.headers });
 }
 
@@ -2726,7 +2732,7 @@ test("keeps every moved topic bookmark linked to one canonical, shorter guide", 
 
 
 test("formats documented parameters consistently without treating math symbols or files as parameters", async () => {
-  const markup = async (path) => (await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
+  const markup = async (path) => withoutParameterLinks(await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
   const topography = await markup("/docs/topography");
   assert.match(topography, /<h2>Choose <code class="parameterName">maximum_octant_level<\/code><\/h2>/);
   assert.match(topography, /<code class="parameterName">include_topography<\/code>=<code class="parameterValue">yes<\/code>/);
@@ -2743,7 +2749,7 @@ test("formats documented parameters consistently without treating math symbols o
 });
 
 test("distinguishes literal parameter options and assigned values from prose and equations", async () => {
-  const html = (await (await renderMarkup("/docs/velocity-models")).text()).replaceAll("<!-- -->", "");
+  const html = withoutParameterLinks(await (await renderMarkup("/docs/velocity-models")).text()).replaceAll("<!-- -->", "");
   assert.match(html, /<code class="parameterName">3D_velocity_model_column_sampling<\/code> defaults to <code class="parameterValue">same_elevation<\/code>,/);
   assert.match(html, /<code class="parameterValue">same_depth<\/code> instead uses/);
   assert.match(html, /<code class="parameterName">3D_velocity_model_depth_reference<\/code>=<code class="parameterValue">legacy<\/code>:/);
@@ -2754,7 +2760,64 @@ test("distinguishes literal parameter options and assigned values from prose and
   assert.match(html, /<math\b/);
   assert.doesNotMatch(html, /<code class="parameter(?:Name|Value)">[^<]*<code/);
   const reference = (await (await renderMarkup("/docs/parameters-material-mesh")).text()).replaceAll("<!-- -->", "");
-  assert.match(reference, /<td class="parameterValues"[^>]*>Default: <code class="parameterValue">same_elevation<\/code>; <code class="parameterValue">same_elevation<\/code> \| <code class="parameterValue">same_depth<\/code><\/td>/);
+  assert.match(reference, /<td class="parameterValues"[^>]*><div class="tableCellContent">Default: <code class="parameterValue">same_elevation<\/code>; <code class="parameterValue">same_elevation<\/code> \| <code class="parameterValue">same_depth<\/code><\/div><\/td>/);
+});
+
+test("links parameter mentions to unique definition rows on both documentation hosts", async () => {
+  const pages = new Map();
+  async function page(path) {
+    if (!pages.has(path)) {
+      const response = await renderMarkup(path);
+      assert.equal(response.status, 200, path);
+      pages.set(path, (await response.text()).replaceAll("<!-- -->", ""));
+    }
+    return pages.get(path);
+  }
+  const velocity = await page("/docs/velocity-models");
+  assert.ok(velocity.includes(`href="${basePath}/docs/parameters-material-mesh#parameter-3D_velocity_model_column_sampling"`));
+  assert.ok(velocity.includes(`href="${basePath}/docs/parameters-damping-cpml#parameter-cpml_material_extension_reference"`));
+  const srfh = await page("/docs/srfh-sources");
+  assert.ok(srfh.includes(`href="${basePath}/docs/srfh-sources#parameter-srfh_depth_reference"`));
+  await page("/docs/configuration");
+  await page("/docs/running");
+  await page("/docs/source-models");
+
+  const referencePaths = new Set([...velocity.matchAll(/href="([^"]*\/docs\/parameters-[^"#?]+)"/g)]
+    .map((match) => match[1].slice(basePath.length).replace(/\/$/, "")));
+  const definitions = new Set();
+  for (const path of referencePaths) {
+    const html = await page(path);
+    for (const match of html.matchAll(/<tr\b[^>]*\bid="parameter-([^"]+)"[^>]*>/g)) {
+      assert.ok(!definitions.has(match[1]), `${match[1]}: duplicate canonical definition`);
+      definitions.add(match[1]);
+    }
+  }
+  const catalog = readFileSync(new URL("../app/docs/parameter-reference.ts", import.meta.url), "utf8");
+  const names = [...catalog.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual([...definitions].sort(), names.sort(), "every catalog parameter has a row anchor");
+
+  const checked = new Set();
+  // Newly reached definition pages are audited too, covering cross-references,
+  // source keys, grouped-key rows, runtime controls, and repeated guide tables.
+  for (const [path, html] of pages) {
+    const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+    assert.equal(new Set(ids).size, ids.length, `${path}: duplicate anchors`);
+    assert.doesNotMatch(html, /<a\b[^>]*>(?:(?!<\/a>)[\s\S])*?<a\b/, `${path}: nested link`);
+    for (const block of html.matchAll(/<pre\b[^>]*>([\s\S]*?)<\/pre>/g))
+      assert.doesNotMatch(block[1], /<a\b/, `${path}: configuration samples stay plain text`);
+    for (const link of html.matchAll(/<a\b(?=[^>]*\bclass="parameterLink")[^>]*>([\s\S]*?)<\/a>/g)) {
+      assert.match(link[1], /^<code class="parameterName">[^<]+<\/code>$/, "only parameter names become definition links");
+      const href = link[0].match(/href="([^"]+)"/)[1];
+      if (checked.has(href)) continue;
+      checked.add(href);
+      assert.ok(href.startsWith(`${basePath}/docs/`), `incorrect hosting prefix: ${href}`);
+      const [targetPath, anchor] = href.slice(basePath.length).split("#");
+      assert.ok(anchor?.startsWith("parameter-"), `missing definition anchor: ${href}`);
+      const target = await page(targetPath);
+      assert.ok(target.includes(`<tr id="${anchor}" class="parameterDefinition">`), `missing definition row: ${href}`);
+    }
+  }
+  assert.ok(checked.size > names.length, "source/runtime tables also have linked definitions");
 });
 
 test("illustrates all material depth references with accessible, correctly hosted diagrams", async () => {

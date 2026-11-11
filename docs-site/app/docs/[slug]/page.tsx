@@ -8,6 +8,7 @@ import { TableOfContents } from "../table-of-contents";
 import { LegacySectionRedirect } from "../legacy-section-redirect";
 import { allNavItems, navItemForSlug } from "../navigation";
 import { assetPath } from "../../site-path";
+import { parameterRowAnchor } from "../parameter-links";
 
 const parameterValueColumns = new Set([
   "Default / accepted values", "Values", "Option", "Value",
@@ -66,8 +67,8 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
             <h2><MathText text={section.title} /></h2>
             {section.links && <div className="guideLinks">
               {section.links.map((link) => <Link href={link.href} key={link.href}>
-                <strong><MathText text={link.title} /><span aria-hidden="true"> →</span></strong>
-                <span><MathText text={link.description} /></span>
+                <strong><MathText text={link.title} linkParameters={false} /><span aria-hidden="true"> →</span></strong>
+                <span><MathText text={link.description} linkParameters={false} /></span>
               </Link>)}
             </div>}
             {section.paragraphs?.map((paragraph) => <p key={paragraph}><MathText text={paragraph} /></p>)}
@@ -94,8 +95,8 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                     </tr>
                   </thead>
                   <tbody>
-                    {section.table.rows.map((row) => (
-                      <tr key={row.join("-")}>
+                    {section.table.rows.map((row, rowIndex) => (
+                      <tr id={parameterRowAnchor(slug, section.id, rowIndex)} className={parameterRowAnchor(slug, section.id, rowIndex) ? "parameterDefinition" : undefined} key={row.join("-")}>
                         {row.map((cell, cellIndex) => (
                           <td
                             className={parameterValueColumns.has(section.table?.headers[cellIndex] ?? "") ? "parameterValues" : undefined}
@@ -103,7 +104,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
                             data-requirement={cellIndex === 1 ? cell : undefined}
                             key={`${cell}-${cellIndex}`}
                           >
-                            <MathText text={cell} />
+                            <div className="tableCellContent"><MathText text={cell} /></div>
                           </td>
                         ))}
                       </tr>
@@ -153,7 +154,7 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
           <details className="legacyTopicIndex">
             <summary>Browse all {page.legacySections.length} detailed topics</summary>
             <ul>{page.legacySections.map((section) => <li id={section.id} key={section.id}>
-              <Link data-legacy-section={section.id} href={section.href}><MathText text={section.title} /></Link>
+              <Link data-legacy-section={section.id} href={section.href}><MathText text={section.title} linkParameters={false} /></Link>
             </li>)}</ul>
           </details>
         </section> : null}

@@ -132,6 +132,15 @@ mathematical notation, and put long equations in display delimiters (`\[...\]`)
 so they can scroll within their own block on narrow screens. Inline symbols use
 normal text flow without a separate scrollbar.
 
+Parameter mentions link to their canonical definition rows. The main Parameter
+reference takes precedence over repeated guide tables; source-file keys and
+launcher/runtime controls link to their own existing tables. Stable
+`parameter-...` row anchors are derived from the catalogs in
+`app/docs/parameter-links.ts`, and the destination row is highlighted when
+opened. Keep references as literal names so new catalog entries link
+automatically. Inside an existing link, pass `linkParameters={false}` to
+`MathText` to avoid nested links. Configuration code blocks stay copyable text.
+
 The repository's [Technical README](../doc/Technical%20README.md) is the concise
 operational guide and variable index. Put lengthy engineering explanations,
 examples, numerical derivations, and implementation/validation notes in
