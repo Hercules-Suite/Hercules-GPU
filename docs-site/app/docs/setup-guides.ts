@@ -35,7 +35,7 @@ export const setupGuides: SetupGuide[] = [
     description: "File formats, profile ordering, depth references, conversion, and validation.",
     source: "input-files",
     parent: "input-files",
-    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Depth references", "velocity-model-depth-reference velocity-model-topography-depths"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Interpolation & tools", "velocity-model-lookup velocity-model-converter velocity-model-converter-script velocity-model-validation")],
+    groups: [group("Model inputs", "velocity-model-configuration velocity-model-files"), group("Depth references", "velocity-model-depth-reference velocity-model-topography-depths velocity-model-lookup"), group("Worked example", "velocity-model-example velocity-model-example-axes velocity-model-example-ranges velocity-model-example-arrays"), group("Conversion & validation", "velocity-model-converter velocity-model-converter-script velocity-model-validation")],
   },
   {
     slug: "basin-models",
@@ -122,7 +122,7 @@ export const setupGuides: SetupGuide[] = [
     description: "Boundary setup, partitioning, operator details, and validation limits.",
     source: "physics",
     parent: "physics",
-    groups: [group("Boundary setup", "acoustic-dashpot pml pml-baseline pml-material-damping pml-heterogeneous-topography"), group("Implementation & checks", "pml-partition-memory pml-complete-operator pml-interface-diagnostics pml-horizon-validation")],
+    groups: [group("Boundary setup", "acoustic-dashpot pml pml-baseline pml-material-damping pml-heterogeneous-topography"), group("Implementation & checks", "pml-partition-memory pml-complete-operator pml-interface-diagnostics")],
   },
   {
     slug: "source-models",
@@ -161,7 +161,7 @@ const shortTitles: Record<string, string> = {
   "velocity-model-configuration": "Configuration", "velocity-model-files": "Files & ordering",
   "velocity-model-example": "Example overview", "velocity-model-example-axes": "Axes & index.in",
   "velocity-model-example-ranges": "Profile index ranges", "velocity-model-example-arrays": "Material arrays",
-  "velocity-model-lookup": "Model interpolation", "velocity-model-depth-reference": "Depth reference options", "velocity-model-topography-depths": "Legacy: full & sqd",
+  "velocity-model-lookup": "Column sampling", "velocity-model-depth-reference": "Depth reference options", "velocity-model-topography-depths": "Legacy: full & sqd",
   "velocity-model-converter": "Convert CSV inputs", "velocity-model-converter-script": "Converter script", "velocity-model-validation": "Validate model files",
   "topography-configuration": "Configuration", "topography-format": "topography.in format", "topography-base-alignment": "Base & water-surface alignment",
   "topography-maximum-level": "Maximum octant level", "topography-wavelength-refinement": "Wavelength refinement", "topography-surface-consistency": "Surface & receivers",
@@ -169,7 +169,7 @@ const shortTitles: Record<string, string> = {
   "topography-cpml": "Why taper the surface?", "topography-taper-command": "Run taper_topography.py", "topography-taper-options": "Taper dimensions", "topography-taper-enable": "Enable & verify", "repair-tapered-geometry": "Repair paired seabed geometry",
   "model-riva-sand-intermediate-bias-research": "RIVASand02", "model-riva-sand-custom02": "RIVASandCustom02", "model-riva-sand-custom": "Custom material interface",
   "coupling-acoustic-elastic": "Setup example", "acoustic-quality-factor": "Acoustic quality factor", "acoustic-interface-method": "Interface methods & constraints", "acoustic-station-gradient": "Recover station motion",
-  "pml": "CPML setup rules", "pml-baseline": "Default example", "pml-material-damping": "Material damping in CPML", "pml-heterogeneous-topography": "3-D materials & topography", "pml-partition-memory": "Partitioning & memory", "pml-complete-operator": "Second-order operator", "pml-interface-diagnostics": "Interface diagnostics", "pml-horizon-validation": "Validation scope",
+  "pml": "CPML setup rules", "pml-baseline": "Default example", "pml-material-damping": "Material damping in CPML", "pml-heterogeneous-topography": "3-D materials & topography", "pml-partition-memory": "Partitioning & memory", "pml-complete-operator": "Second-order operator", "pml-interface-diagnostics": "Interface diagnostics",
   "srfh-depth-reference": "Source depth reference", "srfh-files": "Auxiliary-file example",
 };
 

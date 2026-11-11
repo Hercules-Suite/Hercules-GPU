@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="590" viewBox="0 0 920 590" role="img" aria-labelledby="title desc">
+<title id="title">SAME_ELEVATION versus SAME_DEPTH column sampling</title>
+<desc id="desc">Both panels show a 50 m thick terrain-following soft layer with Vs=300 m/s over rock with Vs=1500 m/s. Columns A and B are 500 m apart, with ground elevations 100 m and 0 m. The midpoint query has elevation 30 m, or 20 m burial depth. SAME_ELEVATION reads A at 70 m and B at minus 30 m, using its first material value above the surface, and returns 900 m/s. SAME_DEPTH reads both columns at 20 m and returns 300 m/s. This two-column slice has identical profiles in the other horizontal direction; each side contributes half of the four-column interpolated value.</desc>
+<rect x="0" y="0" width="920" height="590" fill="white"/>
+<text x="28" y="30" font-family="Arial,Helvetica,sans-serif" font-size="21" fill="#1c3044" text-anchor="start" font-weight="700">Column sampling: same query, different column depths</text>
+<text x="28" y="55" font-family="Arial,Helvetica,sans-serif" font-size="17" fill="#53687b" text-anchor="start" font-weight="400">A and B are 500 m apart; A is 100 m higher. Query: 20 m below midpoint ground.</text>
+<rect x="28" y="69" width="14" height="14" fill="#efe4cf" stroke="#bdcbd5"/>
+<text x="50" y="81" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="start" font-weight="400">Soft layer: 300 m/s · 50 m thick</text>
+<rect x="300" y="69" width="14" height="14" fill="#dde3e9" stroke="#bdcbd5"/>
+<text x="322" y="81" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="start" font-weight="400">Rock: 1500 m/s</text>
+<circle cx="491" cy="76" r="5" fill="#a44515"/>
+<text x="503" y="81" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="start" font-weight="400">Same physical query in both panels</text>
+<path d="M460 101 L460 551" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<g transform="translate(0 0)">
+<text x="230" y="114" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="16" fill="#1c3044" text-anchor="middle" font-weight="700">SAME_ELEVATION (default)</text>
+<text x="230" y="138" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Keep physical elevation fixed</text>
+<text x="28" y="168" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">H ↑ (m)</text>
+<text x="72" y="195" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+100</text>
+<path d="M80 190 L92 190" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="255" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+50</text>
+<path d="M80 250 L92 250" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="315" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">0</text>
+<path d="M80 310 L92 310" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="375" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">−50</text>
+<path d="M80 370 L92 370" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<path d="M96 190 L404 310 L404 370 L96 250 Z" fill="#efe4cf" stroke="#efe4cf" stroke-width="0"/>
+<path d="M96 250 L404 370 L404 402 L96 402 Z" fill="#dde3e9" stroke="#dde3e9" stroke-width="0"/>
+<path d="M96 190 L96 402" fill="none" stroke="#bdcbd5" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M404 190 L404 402" fill="none" stroke="#bdcbd5" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M96 190 L404 310" fill="none" stroke="#1c3044" stroke-width="2"/>
+<path d="M96 250 L404 370" fill="none" stroke="#53687b" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="96" y="178" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="start" font-weight="400">A · Ground H=+100</text>
+<text x="404" y="178" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="end" font-weight="400">B · Ground H=0</text>
+<path d="M96 274 L404 274" fill="none" stroke="#126b8c" stroke-width="2" stroke-dasharray="6 4"/>
+<circle cx="96" cy="274" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<circle cx="404" cy="274" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<path d="M82 190 L82 274" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="82" cy="190" r="3" fill="#126b8c"/>
+<path d="M77 267 L82 274 L87 267" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<path d="M418 310 L418 274" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="418" cy="310" r="3" fill="#126b8c"/>
+<path d="M413 281 L418 274 L423 281" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="250" cy="250" r="3" fill="white" stroke="#1c3044" stroke-width="1"/>
+<path d="M254 250 L270 250 L270 274 M266 274 L274 274" fill="none" stroke="#53687b" stroke-width="1"/>
+<text x="277" y="267" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#1c3044" text-anchor="start" font-weight="400">20 m</text>
+<circle cx="250" cy="274" r="6" fill="#a44515" stroke="white" stroke-width="1.5"/>
+<text x="250" y="300" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#a44515" text-anchor="middle" font-weight="400">Query H=+30 m</text>
+<text x="282" y="207" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">Above B’s ground:</text>
+<text x="282" y="227" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">use its first value</text>
+<path d="M376 236 L402 267" fill="none" stroke="#53687b" stroke-width="1"/>
+<path d="M96 415 L404 415 M96 410 L96 420 M404 410 L404 420" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="250" y="436" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="middle" font-weight="400">500 m · query halfway</text>
+<text x="139" y="460" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">A: 70 m → rock</text>
+<text x="341" y="460" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">B: −30 m → first layer</text>
+<text x="139" y="481" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#1c3044" text-anchor="middle" font-weight="400">1500 m/s</text>
+<text x="341" y="481" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#1c3044" text-anchor="middle" font-weight="400">300 m/s</text>
+<rect x="60" y="494" width="360" height="57" fill="#f4f7f9" stroke="#bdcbd5"/>
+<text x="240" y="516" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">½ × 1500 + ½ × 300</text>
+<text x="240" y="540" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="18" fill="#126b8c" text-anchor="middle" font-weight="700">Vs = 900 m/s</text>
+</g>
+<g transform="translate(460 0)">
+<text x="230" y="114" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="16" fill="#1c3044" text-anchor="middle" font-weight="700">SAME_DEPTH</text>
+<text x="230" y="138" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">Keep depth below each ground surface fixed</text>
+<text x="28" y="168" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#53687b" text-anchor="start" font-weight="400">H ↑ (m)</text>
+<text x="72" y="195" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+100</text>
+<path d="M80 190 L92 190" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="255" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">+50</text>
+<path d="M80 250 L92 250" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="315" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">0</text>
+<path d="M80 310 L92 310" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="72" y="375" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="end" font-weight="400">−50</text>
+<path d="M80 370 L92 370" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<path d="M96 190 L404 310 L404 370 L96 250 Z" fill="#efe4cf" stroke="#efe4cf" stroke-width="0"/>
+<path d="M96 250 L404 370 L404 402 L96 402 Z" fill="#dde3e9" stroke="#dde3e9" stroke-width="0"/>
+<path d="M96 190 L96 402" fill="none" stroke="#bdcbd5" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M404 190 L404 402" fill="none" stroke="#bdcbd5" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M96 190 L404 310" fill="none" stroke="#1c3044" stroke-width="2"/>
+<path d="M96 250 L404 370" fill="none" stroke="#53687b" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="96" y="178" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="start" font-weight="400">A · Ground H=+100</text>
+<text x="404" y="178" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#1c3044" text-anchor="end" font-weight="400">B · Ground H=0</text>
+<path d="M96 214 L404 334" fill="none" stroke="#126b8c" stroke-width="2" stroke-dasharray="6 4"/>
+<circle cx="96" cy="214" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<circle cx="404" cy="334" r="5" fill="white" stroke="#126b8c" stroke-width="2"/>
+<path d="M82 190 L82 214" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="82" cy="190" r="3" fill="#126b8c"/>
+<path d="M77 207 L82 214 L87 207" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<path d="M418 310 L418 334" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="418" cy="310" r="3" fill="#126b8c"/>
+<path d="M413 327 L418 334 L423 327" fill="none" stroke="#126b8c" stroke-width="2.5"/>
+<circle cx="250" cy="250" r="3" fill="white" stroke="#1c3044" stroke-width="1"/>
+<path d="M254 250 L270 250 L270 274 M266 274 L274 274" fill="none" stroke="#53687b" stroke-width="1"/>
+<text x="277" y="267" font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#1c3044" text-anchor="start" font-weight="400">20 m</text>
+<circle cx="250" cy="274" r="6" fill="#a44515" stroke="white" stroke-width="1.5"/>
+<text x="250" y="300" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#a44515" text-anchor="middle" font-weight="400">Query H=+30 m</text>
+<path d="M96 415 L404 415 M96 410 L96 420 M404 410 L404 420" fill="none" stroke="#bdcbd5" stroke-width="1"/>
+<text x="250" y="436" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="middle" font-weight="400">500 m · query halfway</text>
+<text x="139" y="460" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">A: 20 m → soft layer</text>
+<text x="341" y="460" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#126b8c" text-anchor="middle" font-weight="400">B: 20 m → soft layer</text>
+<text x="139" y="481" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#1c3044" text-anchor="middle" font-weight="400">300 m/s</text>
+<text x="341" y="481" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#1c3044" text-anchor="middle" font-weight="400">300 m/s</text>
+<rect x="60" y="494" width="360" height="57" fill="#f4f7f9" stroke="#bdcbd5"/>
+<text x="240" y="516" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#53687b" text-anchor="middle" font-weight="400">½ × 300 + ½ × 300</text>
+<text x="240" y="540" font-family="SFMono-Regular,Consolas,Liberation Mono,monospace" font-size="18" fill="#126b8c" text-anchor="middle" font-weight="700">Vs = 300 m/s</text>
+</g>
+<text x="28" y="577" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#53687b" text-anchor="start" font-weight="400">Blue arrows: column depths. Dashed blue paths: samples. Orange dots: query. Vertical scale exaggerated.</text>
+</svg>

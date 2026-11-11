@@ -148,6 +148,16 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 | `3D_velocity_model_azimuth_deg` | Finite degrees; inherit `region_azimuth_leftface_deg` (default); nonzero explicit overrides require PROJ | Optional; Float (degrees) |
 | `3D_velocity_model_origin_latitude_deg` | Float (degrees); Required when 3D_velocity_model=yes; no default | Conditional; Float (degrees) |
 | `3D_velocity_model_origin_longitude_deg` | Float (degrees); Required when 3D_velocity_model=yes; no default | Conditional; Float (degrees) |
+| `3D_velocity_model_column_sampling` | `same_elevation` (default), `same_depth`; case-insensitive | Optional; String. Read the four columns at equal physical elevation or equal depth below their references. Legacy: active with `sqd` topography; no effect for `full` or topography off. Explicit geometry: `surface`/`seabed` references support both `full` and `sqd`; `seabed` remains active with topography off, while flat `surface` gives identical results. No effect for `model_z`. Independent of the CPML extension reference; regenerate the mesh after changing it ([details](Extended%20README.md#column-sampling-between-material-columns)) |
+
+With `include_topography=no`, `type_of_etree` is unused. Without a seabed file,
+keep `3D_velocity_model_depth_reference=legacy` (default): both column-sampling
+options read the same fixed model Z. With an explicit seabed file, `model_z`
+and flat `surface` also give identical results under both options, while
+`seabed` can differ when the bed varies. See the
+[no-topography table and example](Extended%20README.md#column-sampling-between-material-columns).
+The [sampling comparison figure](../docs-site/public/figures/column-sampling-comparison.svg)
+shows equal-elevation and equal-depth lookup on the same terrain-following layer.
 
 Material axes follow solver axes by
 default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,
@@ -160,7 +170,9 @@ chunked MPI initialization; full material arrays remain replicated per rank.
 See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
 Without explicit seabed geometry, `type_of_etree=sqd` uses `z.in` depths below each column's
 surface and samples at equal physical elevation using the actual query-point
-terrain. `full` uses fixed model Z without a terrain shift. Rebuild the solver
+terrain (`3D_velocity_model_column_sampling=same_depth` reads every column at
+the query depth below its own surface instead). `full` uses fixed model Z
+without a terrain shift. Rebuild the solver
 and regenerate meshes with `mesh_input_mode=0` to apply the corrected lookup;
 see [depth conventions and example](Extended%20README.md#3d-material-depths-with-topography).
 
@@ -284,7 +296,8 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_profile_slab` | `none` (default), `auto` | Optional; String (case-insensitive) |
 | `cpml_partition_weight` | `4.38` (default); >= 1; `1` restores equal leaf counts | Optional; dimensionless Float. Fixed work estimate `N_ordinary + 4.38 * N_CPML`; an explicit numeric value overrides the default. Applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. No calibration cache. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
-| `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
+| `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; With CPML and a 3-D model, extend both refinement queries and final materials. Positive explicit thickness uses one pass; automatic width uses up to three passes and checks the completed mesh before export. Regenerate with `mesh_input_mode=0`; see [details](Extended%20README.md#absorbing-boundaries-and-cpml) |
+| `cpml_material_extension_reference` | `elevation` (default), `surface` | Optional; String (case-insensitive). With extension and SQD topography, keep physical Z (`elevation`) or original surface depth (`surface`); FULL/no topography are equivalent. Explicit-seabed geometry uses the same reference. Regenerate mesh; see [details](Extended%20README.md#absorbing-boundaries-and-cpml) and the [comparison figure](../docs-site/public/figures/cpml-material-extension-reference.svg) |
 | `cpml_stiffness_mode` | `native` (default), `reduced` | Optional; String |
 | `cpml_stiffness_mode_acoustic` | `native`, `reduced`; inherit `cpml_stiffness_mode` (default) | Optional; String |
 | `cpml_pml_material_damping` | `none` (default) except for Rayleigh interiors; `rayleigh` (default) with Rayleigh interiors when omitted; explicit `none` is retained | Optional; String |

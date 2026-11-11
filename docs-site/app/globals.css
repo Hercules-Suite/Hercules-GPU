@@ -66,6 +66,25 @@ code { font-family: var(--font-mono); }
   font-style: normal;
 }
 .parameterName { font-size: .9em; overflow-wrap: anywhere; }
+.parameterLink { text-decoration: underline dotted; text-underline-offset: .18em; }
+.parameterLink:hover { text-decoration-style: solid; background: var(--accent-pale); }
+.parameterLink:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.parameterDefinition { scroll-margin-top: 1rem; }
+.parameterDefinition:target > td { background: var(--accent-pale); }
+.parameterValue {
+  padding: .08em .28em;
+  border-radius: 3px;
+  background: var(--surface-muted);
+  color: var(--ink-strong);
+  font-size: .9em;
+  font-weight: 400;
+  font-style: normal;
+  overflow-wrap: anywhere;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.parameterValues { font-family: var(--font-mono); font-size: .9em; }
+.parameterValues .parameterName, .parameterValues .parameterValue { font-size: inherit; }
 .tableWrap td:first-child .parameterName { font-size: inherit; }
 ::selection { background: var(--accent-pale); }
 
@@ -375,6 +394,7 @@ code { font-family: var(--font-mono); }
 .parameterTable th:nth-child(4) { width: 20%; }
 .parameterTable th:nth-child(5) { width: 34%; }
 .parameterTable td { overflow-wrap: anywhere; }
+.tableCellContent { min-width: 0; }
 .parameterTable td[data-requirement] { font-size: 10px; font-weight: 700; letter-spacing: .025em; text-transform: uppercase; }
 .parameterTable td[data-requirement="Required"] { color: #8b2e24; }
 .parameterTable td[data-requirement="Conditional"] { color: #84540a; }

@@ -41,9 +41,15 @@ async function renderMarkup(path = "/") {
 
 // Content/parser audits compare readable text independent of inline parameter
 // styling. Typography checks below use renderMarkup to inspect the actual tags.
+function withoutParameterLinks(html) {
+  return html.replace(/<a\b(?=[^>]*\bclass="parameterLink")[^>]*>([\s\S]*?)<\/a>/g, "$1");
+}
+
 async function render(path = "/") {
   const response = await renderMarkup(path);
-  const html = (await response.text()).replaceAll("<!-- -->", "").replace(/<code class="parameterName">([A-Za-z0-9_]+)<\/code>/g, "$1");
+  const html = withoutParameterLinks(await response.text()).replaceAll("<!-- -->", "")
+    .replace(/<div class="tableCellContent">([\s\S]*?)<\/div>/g, "$1")
+    .replace(/<code class="parameter(?:Name|Value)">([^<]*)<\/code>/g, "$1");
   return new Response(html, { status: response.status, headers: response.headers });
 }
 
@@ -449,8 +455,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 255);
-  assert.equal(documented.length, 255, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 257);
+  assert.equal(documented.length, 257, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -506,7 +512,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
   for (const mode of ["abort", "allow"]) {
     assert.ok(solver.includes(`strcasecmp(cpml_gravity_in_bottom_band, "${mode}")`));
   }
-  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*69 /);
+  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*70 /);
   assert.match(solver, /int_message\[67\] = Param\.theCpmlGravityInBottomBand/);
   assert.match(solver, /Param\.theCpmlGravityInBottomBand = int_message\[67\]/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -2483,9 +2489,37 @@ test("documents executable provenance and conditional startup configuration", as
   for (const key of ["simulation_node_per_wavelength", "topographybase_zcoord", "type_of_etree", "maximum_octant_level",
     "computation_method", "topography_directory", "source_directory",
     "source_directory_output", "3D_velocity_model_directory",
-    "3D_velocity_model_depth_reference"]) {
+    "3D_velocity_model_depth_reference", "3D_velocity_model_column_sampling"]) {
     assert.ok(output.includes(key), `startup summary documents ${key}`);
   }
+});
+
+test("documents automatic CPML material refinement and the surface reference", async () => {
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const reference = parameters.split("</tr>").find((row) => row.includes("cpml_material_extension_reference"));
+  const extension = parameters.split("</tr>").find((row) => row.includes("cpml_3d_material_extension</td>"));
+  assert.ok(reference);
+  assert.ok(extension);
+  assert.match(reference, /Default: elevation; elevation \| surface/);
+  assert.match(reference, /FULL\/no topography give identical results/);
+  assert.match(extension, /both refinement queries and final material/);
+  assert.match(extension, /up to three total passes/);
+  assert.match(extension, /recorrecting imported properties does not redo wavelength refinement/);
+  const physics = await (await render("/docs/absorbing-boundaries")).text();
+  assert.match(physics, /cpml_material_extension_reference = elevation/);
+  assert.match(physics, /before mesh export, including mesh-only Phase A/);
+  assert.match(physics, /effective bed Z is the inner bed Z plus the original surface Z minus the inner surface Z/);
+  assert.match(physics, /not CUDA\/MPI propagation benchmarks/);
+  assert.doesNotMatch(parameters + physics, /cpml_material_extension_refinement/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /\.theCpmlMaterialExtensionReference =\s*CPML_MATERIAL_EXTENSION_REFERENCE_ELEVATION/);
+  for (const option of ["elevation", "surface"])
+    assert.ok(solver.includes(`strcasecmp(cpml_material_extension_reference, "${option}")`));
+  assert.match(solver, /int_message\[69\] = Param\.theCpmlMaterialExtensionReference;/);
+  assert.match(solver, /Param\.theCpmlMaterialExtensionReference = int_message\[69\];/);
+  assert.doesNotMatch(solver, /cpml_material_extension_refinement|theCpmlMaterialExtensionRefinement/);
 });
 
 test("parameter broadcasts have unique slots and matching pack/unpack fields", () => {
@@ -2561,13 +2595,30 @@ test("documents slab-quantized CPML profile sampling and the per-cell stretch di
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {
   const html = await (await render("/docs/absorbing-boundaries")).text();
-  assert.match(html, /Material extension clamps in absolute model coordinates/);
-  assert.match(html, /depth below the surface at the clamped X\/Y location/);
-  assert.match(html, /Building surface offsets/);
+  assert.match(html, /elevation \(default\) preserves physical Z/);
+  assert.match(html, /measures depth from the surface at the clamped X\/Y location/);
+  assert.match(html, /bottom clamp still uses absolute original model Z, with building offsets restored and removed/);
   assert.match(html, /input depth of 7500 m/);
   assert.match(html, /depth 7000 m below that surface/);
-  assert.match(html, /Rebuild or recorrect an imported mesh/);
-  assert.match(html, /corrected topographic bottom\/corner extension/);
+  assert.match(html, /Regenerate with mesh_input_mode=0/);
+  assert.match(html, /Recorrecting imported properties does not repeat wavelength refinement/);
+  const section = html.match(/<section\b[^>]*\bid="pml-heterogeneous-topography"[^>]*>[\s\S]*?<\/section>/)?.[0];
+  assert.ok(section);
+  assert.match(section, /id="cpml-material-extension-reference"/);
+  assert.ok(section.includes(`src="${basePath}/figures/cpml-material-extension-reference.svg"`));
+  assert.ok(section.includes(`href="${basePath}/figures/cpml-material-extension-reference.svg"`));
+  assert.match(section, /alt="CPML extension comparison[^"<>]+"/);
+  assert.match(section, /elevation reads at 120 m below its surface; surface reads at 20 m/);
+  assert.match(section, /exactly at a material-grid node/);
+  assert.match(section, /extension step precedes the independent 3D_velocity_model_column_sampling rule/);
+  const diagram = readFileSync(new URL("../public/figures/cpml-material-extension-reference.svg", import.meta.url), "utf8");
+  assert.match(diagram, /role="img" aria-labelledby="title desc"/);
+  assert.match(diagram, /<title id="title">[^<]+<\/title>/);
+  assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
+  for (const label of ["elevation (default)", "surface", "120 m", "20 m", "1020 m", "920 m", "1500 m/s", "300 m/s", "bottom clamp inactive"])
+    assert.ok(diagram.includes(label), `CPML figure includes ${label}`);
+  const overview = await (await render("/docs/physics")).text();
+  assert.doesNotMatch(html + overview, /Horizon validation, October 2026|pml-horizon-validation/);
 });
 
 
@@ -2657,7 +2708,7 @@ test("provides a setup index and compact, grouped topic navigation", async () =>
   const velocity = await (await render("/docs/velocity-models")).text();
   const toc = velocity.match(/<aside class="onThisPage">[\s\S]*?<\/aside>/)?.[0];
   assert.ok(toc);
-  for (const label of ["Model inputs", "Worked example", "Depth references", "Interpolation &amp; tools", "Files &amp; ordering"])
+  for (const label of ["Model inputs", "Worked example", "Depth references", "Conversion &amp; validation", "Files &amp; ordering"])
     assert.ok(toc.includes(label), label);
   assert.match(toc, /aria-current="location"/);
   assert.match(velocity, /<details class="mobilePageContents"/);
@@ -2698,10 +2749,10 @@ test("keeps every moved topic bookmark linked to one canonical, shorter guide", 
 
 
 test("formats documented parameters consistently without treating math symbols or files as parameters", async () => {
-  const markup = async (path) => (await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
+  const markup = async (path) => withoutParameterLinks(await (await renderMarkup(path)).text()).replaceAll("<!-- -->", "");
   const topography = await markup("/docs/topography");
   assert.match(topography, /<h2>Choose <code class="parameterName">maximum_octant_level<\/code><\/h2>/);
-  assert.match(topography, /<code class="parameterName">include_topography<\/code>=yes/);
+  assert.match(topography, /<code class="parameterName">include_topography<\/code>=<code class="parameterValue">yes<\/code>/);
   assert.match(topography, /<math[^>]*>[\s\S]*?V_\{S,\\min\}\^\{\\mathrm\{model\}\}/);
   assert.doesNotMatch(topography, /<code class="parameterName">(?:model_z|topography\.in|V|S)<\/code>/);
   const sources = await markup("/docs/source-models");
@@ -2712,6 +2763,78 @@ test("formats documented parameters consistently without treating math symbols o
   const reference = await markup("/docs/parameters-output");
   assert.match(reference, /<code class="parameterName">monitor_file<\/code>/);
   assert.doesNotMatch(reference, /<code class="parameterName"><code/);
+});
+
+test("distinguishes literal parameter options and assigned values from prose and equations", async () => {
+  const html = withoutParameterLinks(await (await renderMarkup("/docs/velocity-models")).text()).replaceAll("<!-- -->", "");
+  assert.match(html, /<code class="parameterName">3D_velocity_model_column_sampling<\/code> defaults to <code class="parameterValue">same_elevation<\/code>,/);
+  assert.match(html, /<code class="parameterValue">same_depth<\/code> instead uses/);
+  assert.match(html, /<code class="parameterName">3D_velocity_model_depth_reference<\/code>=<code class="parameterValue">legacy<\/code>:/);
+  assert.match(html, /<code class="parameterName">mesh_input_mode<\/code>=<code class="parameterValue">0<\/code> after/);
+  assert.match(html, /[Tt]he <code class="parameterValue">surface<\/code> reference/);
+  assert.match(html, /outer surface is flat at Z=0/);
+  assert.doesNotMatch(html, /outer <code|solver <code class="parameterValue">Z/);
+  assert.match(html, /<math\b/);
+  assert.doesNotMatch(html, /<code class="parameter(?:Name|Value)">[^<]*<code/);
+  const reference = (await (await renderMarkup("/docs/parameters-material-mesh")).text()).replaceAll("<!-- -->", "");
+  assert.match(reference, /<td class="parameterValues"[^>]*><div class="tableCellContent">Default: <code class="parameterValue">same_elevation<\/code>; <code class="parameterValue">same_elevation<\/code> \| <code class="parameterValue">same_depth<\/code><\/div><\/td>/);
+});
+
+test("links parameter mentions to unique definition rows on both documentation hosts", async () => {
+  const pages = new Map();
+  async function page(path) {
+    if (!pages.has(path)) {
+      const response = await renderMarkup(path);
+      assert.equal(response.status, 200, path);
+      pages.set(path, (await response.text()).replaceAll("<!-- -->", ""));
+    }
+    return pages.get(path);
+  }
+  const velocity = await page("/docs/velocity-models");
+  assert.ok(velocity.includes(`href="${basePath}/docs/parameters-material-mesh#parameter-3D_velocity_model_column_sampling"`));
+  assert.ok(velocity.includes(`href="${basePath}/docs/parameters-damping-cpml#parameter-cpml_material_extension_reference"`));
+  const srfh = await page("/docs/srfh-sources");
+  assert.ok(srfh.includes(`href="${basePath}/docs/srfh-sources#parameter-srfh_depth_reference"`));
+  await page("/docs/configuration");
+  await page("/docs/running");
+  await page("/docs/source-models");
+
+  const referencePaths = new Set([...velocity.matchAll(/href="([^"]*\/docs\/parameters-[^"#?]+)"/g)]
+    .map((match) => match[1].slice(basePath.length).replace(/\/$/, "")));
+  const definitions = new Set();
+  for (const path of referencePaths) {
+    const html = await page(path);
+    for (const match of html.matchAll(/<tr\b[^>]*\bid="parameter-([^"]+)"[^>]*>/g)) {
+      assert.ok(!definitions.has(match[1]), `${match[1]}: duplicate canonical definition`);
+      definitions.add(match[1]);
+    }
+  }
+  const catalog = readFileSync(new URL("../app/docs/parameter-reference.ts", import.meta.url), "utf8");
+  const names = [...catalog.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual([...definitions].sort(), names.sort(), "every catalog parameter has a row anchor");
+
+  const checked = new Set();
+  // Newly reached definition pages are audited too, covering cross-references,
+  // source keys, grouped-key rows, runtime controls, and repeated guide tables.
+  for (const [path, html] of pages) {
+    const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+    assert.equal(new Set(ids).size, ids.length, `${path}: duplicate anchors`);
+    assert.doesNotMatch(html, /<a\b[^>]*>(?:(?!<\/a>)[\s\S])*?<a\b/, `${path}: nested link`);
+    for (const block of html.matchAll(/<pre\b[^>]*>([\s\S]*?)<\/pre>/g))
+      assert.doesNotMatch(block[1], /<a\b/, `${path}: configuration samples stay plain text`);
+    for (const link of html.matchAll(/<a\b(?=[^>]*\bclass="parameterLink")[^>]*>([\s\S]*?)<\/a>/g)) {
+      assert.match(link[1], /^<code class="parameterName">[^<]+<\/code>$/, "only parameter names become definition links");
+      const href = link[0].match(/href="([^"]+)"/)[1];
+      if (checked.has(href)) continue;
+      checked.add(href);
+      assert.ok(href.startsWith(`${basePath}/docs/`), `incorrect hosting prefix: ${href}`);
+      const [targetPath, anchor] = href.slice(basePath.length).split("#");
+      assert.ok(anchor?.startsWith("parameter-"), `missing definition anchor: ${href}`);
+      const target = await page(targetPath);
+      assert.ok(target.includes(`<tr id="${anchor}" class="parameterDefinition">`), `missing definition row: ${href}`);
+    }
+  }
+  assert.ok(checked.size > names.length, "source/runtime tables also have linked definitions");
 });
 
 test("illustrates all material depth references with accessible, correctly hosted diagrams", async () => {
@@ -2737,4 +2860,60 @@ test("illustrates all material depth references with accessible, correctly hoste
     assert.match(svg, /<title id="title">[^<]+<\/title>/);
     assert.match(svg, /<desc id="desc">[^<]+<\/desc>/);
   }
+});
+
+test("documents and wires 3D_velocity_model_column_sampling", async () => {
+  const reference = readFileSync(fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url)), "utf8");
+  assert.match(reference, /p\("3D_velocity_model_column_sampling", "Optional", "String \(case-insensitive\)", "Default: same_elevation; same_elevation \| same_depth"/);
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /3D_velocity_model_column_sampling=same_depth/);
+  assert.match(html, /900 m\/s with same_elevation and 300 m\/s with same_depth/);
+  const lookup = html.match(/<section\b[^>]*\bid="velocity-model-lookup"[^>]*>[\s\S]*?<\/section>/)?.[0];
+  assert.ok(lookup, "column sampling keeps its existing bookmark");
+  assert.match(lookup, /Column sampling with and without topography/);
+  assert.match(lookup, /Without topography \(include_topography=no\), type_of_etree is unused/);
+  assert.match(lookup, /With include_topography=no/);
+  for (const mode of ["model_z", "surface", "seabed"]) {
+    assert.ok(lookup.includes(`Explicit seabed file; ${mode}`));
+  }
+  assert.match(lookup, /No seabed file; legacy \(default\)/);
+  assert.match(lookup, /beds are at Z=40 m and Z=140 m/);
+  assert.match(lookup, /same_depth reads both at 20 m/);
+  assert.match(lookup, /Water classification still comes from the geometry before solid interpolation/);
+  const sections = [...html.matchAll(/<section\b[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => match[1]);
+  const depthsIndex = sections.indexOf("velocity-model-topography-depths");
+  assert.ok(depthsIndex >= 0);
+  assert.equal(sections[depthsIndex + 1], "velocity-model-lookup", "column sampling immediately follows the FULL/SQD section");
+  assert.match(lookup, /id="column-sampling-comparison"/);
+  assert.ok(lookup.includes(`src="${basePath}/figures/column-sampling-comparison.svg"`));
+  assert.ok(lookup.includes(`href="${basePath}/figures/column-sampling-comparison.svg"`));
+  assert.match(lookup, /alt="Two panels compare a 50 m soft layer[^"]+"/);
+  assert.match(lookup, /diagram; scroll horizontally on narrow screens/);
+  const diagram = readFileSync(new URL("../public/figures/column-sampling-comparison.svg", import.meta.url), "utf8");
+  assert.match(diagram, /role="img" aria-labelledby="title desc"/);
+  assert.match(diagram, /<title id="title">[^<]+<\/title>/);
+  assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
+  for (const label of ["SAME_ELEVATION", "SAME_DEPTH", "70 m", "−30 m", "20 m", "900 m/s", "300 m/s"])
+    assert.ok(diagram.includes(label), `sampling figure includes ${label}`);
+  const entry = reference.split("\n").find((line) => line.includes('p("3D_velocity_model_column_sampling"'))?.replaceAll("`", "");
+  assert.ok(entry);
+  for (const text of [entry, html]) {
+    assert.match(text, /With legacy depths,/);
+    assert.match(text, /no effect for full or topography off/);
+    assert.match(text, /With explicit seabed geometry, surface and seabed references support both full and sqd/);
+    assert.match(text, /seabed reference remains active with topography off/);
+    assert.match(text, /surface reference then uses flat Z=0, so both sampling rules coincide/);
+    assert.match(text, /independent of cpml_material_extension_reference/);
+    assert.doesNotMatch(text, /[Nn]o effect with full topography, topography off, or model_z/);
+  }
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /hu_config_get_string_opt\(fp, "3D_velocity_model_column_sampling"/);
+  assert.match(solver, /3D_velocity_model_column_sampling must be same_elevation or same_depth/);
+  assert.match(solver, /MPI_Bcast\(&Param\.the3DColumnSampling, 1, MPI_INT, 0, comm_solver\)/);
+  assert.match(solver, /general3DVelocityModel_set_column_sampling\(Param\.the3DColumnSampling == 1\)/);
+  const reader = readFileSync(new URL("../../quake/forward/drm_planewaves.cc", import.meta.url), "utf8");
+  assert.match(reader, /const double column_depth = same_depth \? query_reference_depth/);
+  assert.match(reader, /const int same_depth = column_relative && \(Soil_column_sampling == 1\)/);
 });
