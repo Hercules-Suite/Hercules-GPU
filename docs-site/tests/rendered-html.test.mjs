@@ -2773,6 +2773,18 @@ test("documents and wires 3D_velocity_model_column_sampling", async () => {
   const html = await (await render("/docs/velocity-models")).text();
   assert.match(html, /3D_velocity_model_column_sampling=same_depth/);
   assert.match(html, /900 m\/s with same_elevation and 300 m\/s with same_depth/);
+  const lookup = html.match(/<section\b[^>]*\bid="velocity-model-lookup"[^>]*>[\s\S]*?<\/section>/)?.[0];
+  assert.ok(lookup, "column sampling keeps its existing bookmark");
+  assert.match(lookup, /Column sampling with and without topography/);
+  assert.match(lookup, /Without topography \(include_topography=no\), type_of_etree is unused/);
+  assert.match(lookup, /With include_topography=no/);
+  for (const mode of ["model_z", "surface", "seabed"]) {
+    assert.ok(lookup.includes(`Explicit seabed file; ${mode}`));
+  }
+  assert.match(lookup, /No seabed file; legacy \(default\)/);
+  assert.match(lookup, /beds are at Z=40 m and Z=140 m/);
+  assert.match(lookup, /same_depth reads both at 20 m/);
+  assert.match(lookup, /Water classification still comes from the geometry before solid interpolation/);
   const entry = reference.split("\n").find((line) => line.includes('p("3D_velocity_model_column_sampling"'));
   assert.ok(entry);
   for (const text of [entry, html]) {

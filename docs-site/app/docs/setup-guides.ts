@@ -161,7 +161,7 @@ const shortTitles: Record<string, string> = {
   "velocity-model-configuration": "Configuration", "velocity-model-files": "Files & ordering",
   "velocity-model-example": "Example overview", "velocity-model-example-axes": "Axes & index.in",
   "velocity-model-example-ranges": "Profile index ranges", "velocity-model-example-arrays": "Material arrays",
-  "velocity-model-lookup": "Model interpolation", "velocity-model-depth-reference": "Depth reference options", "velocity-model-topography-depths": "Legacy: full & sqd",
+  "velocity-model-lookup": "Column sampling", "velocity-model-depth-reference": "Depth reference options", "velocity-model-topography-depths": "Legacy: full & sqd",
   "velocity-model-converter": "Convert CSV inputs", "velocity-model-converter-script": "Converter script", "velocity-model-validation": "Validate model files",
   "topography-configuration": "Configuration", "topography-format": "topography.in format", "topography-base-alignment": "Base & water-surface alignment",
   "topography-maximum-level": "Maximum octant level", "topography-wavelength-refinement": "Wavelength refinement", "topography-surface-consistency": "Surface & receivers",

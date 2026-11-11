@@ -2288,6 +2288,26 @@ reference remains active with topography off because the bed may still vary.
 The `surface` reference then uses the flat Z=0 surface, so both sampling rules
 coincide. The `model_z` reference always uses fixed Z and ignores the option.
 
+**Without topography (`include_topography=no`).** `type_of_etree` is unused;
+the material depth reference determines whether column sampling can differ:
+
+| Geometry and depth reference | `same_elevation` (default) | `same_depth` |
+| --- | --- | --- |
+| No seabed file; `legacy` (default) | Read fixed model Z in every column | Identical; no effect |
+| Explicit seabed file; `model_z` | Read Z in every column | Identical; ignored for fixed-Z depths |
+| Explicit seabed file; `surface` | Read depth below the flat outer surface at Z=0 | Identical because the reference surface is flat |
+| Explicit seabed file; `seabed` | Read $Z-Z_b(i)$ in column $i$ | Read $Z-Z_b(q)$ in every column; can differ when the bed varies |
+
+Thus a flat outer surface does not imply a flat seabed. For example, beds at
+Z=40 and 140 m give a midpoint bed at Z=90 m. A solid query at Z=110 m is
+20 m below that bed. With the `seabed` reference, `same_elevation` reads the
+columns at 70 and -30 m relative to their beds (using the first solid sample
+above a bed), while `same_depth` reads both at 20 m. For identical solid
+profiles with 300 m/s in their top 50 m and 1500 m/s below, the results are
+900 and 300 m/s respectively. The geometry-defined water test is unchanged.
+All explicit references still require `seabed_geometry_file` and its acoustic
+setup; without that file, leave the depth reference at `legacy`.
+
 Column sampling is evaluated after the CPML query clamp and is independent of
 `cpml_material_extension_reference`. For example, `elevation` extension first
 preserves physical Z when moving a query to the inner CPML boundary; with

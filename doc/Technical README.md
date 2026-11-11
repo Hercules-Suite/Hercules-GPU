@@ -150,6 +150,13 @@ See the [detailed parameter entries](../docs-site/app/docs/parameter-reference.t
 | `3D_velocity_model_origin_longitude_deg` | Float (degrees); Required when 3D_velocity_model=yes; no default | Conditional; Float (degrees) |
 | `3D_velocity_model_column_sampling` | `same_elevation` (default), `same_depth`; case-insensitive | Optional; String. Read the four columns at equal physical elevation or equal depth below their references. Legacy: active with `sqd` topography; no effect for `full` or topography off. Explicit geometry: `surface`/`seabed` references support both `full` and `sqd`; `seabed` remains active with topography off, while flat `surface` gives identical results. No effect for `model_z`. Independent of the CPML extension reference; regenerate the mesh after changing it ([details](Extended%20README.md#column-sampling-between-material-columns)) |
 
+With `include_topography=no`, `type_of_etree` is unused. Without a seabed file,
+keep `3D_velocity_model_depth_reference=legacy` (default): both column-sampling
+options read the same fixed model Z. With an explicit seabed file, `model_z`
+and flat `surface` also give identical results under both options, while
+`seabed` can differ when the bed varies. See the
+[no-topography table and example](Extended%20README.md#column-sampling-between-material-columns).
+
 Material axes follow solver axes by
 default; explicit `0` keeps UTM north/east axes with PROJ. Without PROJ,
 omission or explicit `0` retains solver-aligned axes; explicit nonzero
