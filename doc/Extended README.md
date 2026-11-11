@@ -2996,8 +2996,9 @@ results are specific to the recorded configuration and implementation.
 	taking an MPI-wide maximum. Air elements (`Vp < 0`) are excluded, including
 	from the global non-air fallback used if no material element touches an
 	absorbing face. Material extension and optional CPML partition weighting
-	use the same exclusion rule. The realized thickness is logged to standard
-	error at startup with `air excluded`; PML element counts and the optional
+	use the same exclusion rule and stored edge-size representation. The
+	realized thickness is logged to standard output at startup with
+	`air excluded`; PML element counts and the optional
 	outer-clamp count use the same startup stream.
 - `cpml_layers`
 	Optional integer. Default `10`. Used only when `cpml_thickness_m` is
@@ -3080,50 +3081,77 @@ W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
 	Allocations in other modules retain their own error handling. These checks
 	add no work or synchronization inside the timestep loop.
 - `cpml_material_extension_reference`
-	Optional. `elevation` (default) or `surface`. Used with
-	`cpml_3d_material_extension=yes` and SQD topography. A query inside a
-	lateral PML strip is moved to the inner PML box. `elevation` keeps its
-	physical Z and measures depth below the surface at the moved location:
-	where the inner box is higher, the PML surface receives material from
-	depth; where it is lower, the top layer fills the PML down to the height
-	difference. `surface` keeps the depth below the local surface of the
-	query point, so the near-surface layers of the inner box keep their
-	thickness through the absorber. The bottom clamp is unchanged. Rebuild
-	the mesh after changing it.
-- `cpml_material_extension_refinement`
-	Optional. `no` (default) or `yes`. With `no`, octree refinement uses
-	the local, unextended material while the final element properties use
-	the extended material, so PML elements can be too coarse for the soft
-	material they receive (large `d_max*h/V`) or very small for the fast
-	material they receive (small critical time step). With `yes`, refinement
-	uses the extended material as well. With `cpml_thickness_m` one
-	refinement pass is needed. With `cpml_layers` the thickness depends on
-	the refined tree, so the tree is refined first without the extension,
-	the thickness is taken as `cpml_layers` x the largest boundary leaf, and
-	the tree is rebuilt with the extension at that thickness until the
-	thickness repeats (normally two passes; the log prints each pass).
-	Refinement time grows accordingly; the mesh size does not.
+	Optional, case-insensitive. `elevation` (default) or `surface`. Applies to
+	`cpml_3d_material_extension=yes` with `include_topography=yes` and
+	`type_of_etree=sqd`; both options are equivalent for FULL or no topography.
+	A lateral query is moved to the inner PML box. `elevation` keeps physical
+	Z and converts to depth below the moved column's surface. Where the inner
+	column is higher, the outer near-surface point receives deeper material;
+	where it is lower, negative depth is clamped to the top layer. `surface`
+	keeps depth below the original local surface, preserving the sampled
+	column's shallow-layer thickness. Neither option changes the actual mesh
+	surface or replaces topographic tapering. The bottom clamp still acts on
+	absolute model Z at the original query, including building offsets.
+	Explicit-seabed bathymetry normals and acoustic free-surface enrollment
+	use the same extended water/solid column. For `surface`, the effective bed
+	in the original column is the inner bed plus the original surface Z minus
+	the inner surface Z. Rebuild the mesh after changing the reference.
 - `cpml_3d_material_extension`
 	Optional. `yes` (default) or `no`. Used only with `abc_type=cpml`
-	and `3D_velocity_model=yes`. When enabled, material queries made
-	from inside the CPML are clamped to the inner PML box before reading
-	the 3D velocity model, so Vs/Vp/rho and the acoustic/elastic water
-	classification are extended normally into the absorber instead of
-	letting a coarse `materialfiles` grid create a new coastline or
-	bathymetry inside the PML. Corners clamp along every active PML
-	normal in absolute model coordinates. For SQD topography, restore
-	model Z from depth below the original local surface before clamping
-	at the bottom, then convert back using the surface at the clamped
-	X/Y location. Building surface offsets are also restored and removed.
-	For example, a surface at model Z = 2000 m and a bottom-PML entrance
-	at Z = 9000 m map a point at Z = 9500 m (relative depth 7500 m)
-	to Z = 9000 m (relative depth 7000 m). At bottom/lateral corners,
-	the final relative depth uses the clamped column's surface.
-	This changes sampled element material properties, so rebuild
-	or re-correct an imported etree after changing this setting or
-	adopting the corrected topographic bottom/corner conversion;
-	Phase B imports that reuse baked properties keep those existing
-	values. Set `no` to restore the legacy raw 3D material queries.
+	and `3D_velocity_model=yes`. When enabled, both octree refinement and
+	final element assignment sample the extended material. Queries inside
+	CPML clamp to the inner PML box before reading Vs/Vp/rho, quality factors
+	and the water/solid classification. This prevents refinement using a
+	different material from the final absorber. `no` uses local, unextended
+	queries for both operations. Mesh sizes and timestep limits can change.
+
+	A positive `cpml_thickness_m` supplies the width before refinement and
+	needs one generation pass. Otherwise, a preliminary unextended tree
+	supplies `cpml_layers` times its largest non-air absorbing-boundary edge.
+	Hercules rebuilds with that width, including balancing, building carving,
+	material correction and local acoustic interface matching. It compares
+	the completed mesh's width before export, including mesh-only Phase A.
+	Normally two passes suffice; after at most three total passes a mismatch
+	aborts with a request to set `cpml_thickness_m` explicitly. The log reports
+	assumed and completed widths. Refinement, partitioning and solver setup
+	use integer-tick face membership and the same stored element edge size,
+	so float serialization cannot trigger a false thickness mismatch.
+
+	With the default `elevation` reference, a surface at model Z = 2000 m
+	and a bottom-PML entrance at Z = 9000 m map a query at Z = 9500 m
+	(relative depth 7500 m) to Z = 9000 m (relative depth 7000 m).
+	At bottom/lateral corners, that default measures the final relative depth
+	from the clamped column's surface; `surface` uses the original surface.
+	Building offsets are restored before the bottom clamp and removed after it.
+	Regenerate with `mesh_input_mode=0` after changing extension, reference,
+	thickness or material inputs. Recorrecting an imported mesh changes its
+	properties but does not repeat wavelength refinement; a Phase B import
+	that reuses stored properties retains the old material and leaf sizes.
+
+	Example (automatic thickness; all shown CPML values are defaults):
+
+	```ini
+	abc_type = cpml
+	3D_velocity_model = yes
+	cpml_3d_material_extension = yes
+	cpml_material_extension_reference = elevation
+	cpml_thickness_m = 0
+	cpml_layers = 10
+	```
+
+	The setup change applies to elastic and acoustic material sampling,
+	including acoustic–elastic models and the elastic/acoustic CPML buffers
+	of poroelastic–elastic and poroelastic–acoustic models. CPML cells remain
+	linear: nonlinear elastoplastic/plastic and hysteretic solids and active
+	BrickUP poroelasticity stay outside CPML. Rayleigh damping may continue
+	inside elastic CPML; BKT histories retain their existing interior-only
+	policy. Interface geometry, initial material/Q and geostatic sampling can
+	change with the mesh; timestepping kernels, both host and CUDA-aware MPI
+	exchanges, and station/output definitions are unchanged. Local CPU helper
+	and mesh-lifecycle checks are not CUDA/MPI propagation benchmarks.
+	Reflection, timestep, gravity-surface motion, standalone and coupled
+	poroelasticity, and applicable viscoelastic/nonlinear responses still
+	require before/after comparisons on the target system.
 - `cpml_reflection_target`
 	Optional. Target theoretical reflection coefficient. `0.01` (default); valid `(0,1)`.
 	Smaller values increase damping strength but do not guarantee smaller
@@ -3538,9 +3566,11 @@ abc_type = dashpot
 	inner-PML material column/row, matching the usual flat-PML material
 	extension used by spectral-element PML setups. For SQD topography,
 	query depth is measured below the local surface, while CPML bounds
-	use mesh coordinates. The extension clamps the physical query point
-	in mesh coordinates, including the bottom limit, then converts back
-	to depth below the surface at the extended horizontal location.
+	use mesh coordinates. With `cpml_material_extension_reference=elevation`
+	(default), the extension clamps physical model Z, including the bottom
+	limit, then converts back to depth below the extended column's surface.
+	`surface` preserves the original surface-relative depth after the same
+	bottom clamp. Both refinement and final assignment use the selected rule.
 	This handles a nonzero topography datum consistently; it does not
 	by itself establish stability for a heterogeneous CPML model.
 - Material damping on PML elements follows `cpml_pml_material_damping`

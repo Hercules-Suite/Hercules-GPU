@@ -449,8 +449,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 255);
-  assert.equal(documented.length, 255, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 256);
+  assert.equal(documented.length, 256, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -506,7 +506,7 @@ test("documents every parameters.in key parsed by the current source tree", () =
   for (const mode of ["abort", "allow"]) {
     assert.ok(solver.includes(`strcasecmp(cpml_gravity_in_bottom_band, "${mode}")`));
   }
-  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*69 /);
+  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*70 /);
   assert.match(solver, /int_message\[67\] = Param\.theCpmlGravityInBottomBand/);
   assert.match(solver, /Param\.theCpmlGravityInBottomBand = int_message\[67\]/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -2488,6 +2488,34 @@ test("documents executable provenance and conditional startup configuration", as
   }
 });
 
+test("documents automatic CPML material refinement and the surface reference", async () => {
+  const parameters = await (await render("/docs/parameters-damping-cpml")).text();
+  const reference = parameters.split("</tr>").find((row) => row.includes("cpml_material_extension_reference"));
+  const extension = parameters.split("</tr>").find((row) => row.includes("cpml_3d_material_extension</td>"));
+  assert.ok(reference);
+  assert.ok(extension);
+  assert.match(reference, /Default: elevation; elevation \| surface/);
+  assert.match(reference, /FULL\/no topography give identical results/);
+  assert.match(extension, /both refinement queries and final material/);
+  assert.match(extension, /up to three total passes/);
+  assert.match(extension, /recorrecting imported properties does not redo wavelength refinement/);
+  const physics = await (await render("/docs/absorbing-boundaries")).text();
+  assert.match(physics, /cpml_material_extension_reference = elevation/);
+  assert.match(physics, /before mesh export, including mesh-only Phase A/);
+  assert.match(physics, /effective bed Z is the inner bed Z plus the original surface Z minus the inner surface Z/);
+  assert.match(physics, /not CUDA\/MPI propagation benchmarks/);
+  assert.doesNotMatch(parameters + physics, /cpml_material_extension_refinement/);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /\.theCpmlMaterialExtensionReference =\s*CPML_MATERIAL_EXTENSION_REFERENCE_ELEVATION/);
+  for (const option of ["elevation", "surface"])
+    assert.ok(solver.includes(`strcasecmp(cpml_material_extension_reference, "${option}")`));
+  assert.match(solver, /int_message\[69\] = Param\.theCpmlMaterialExtensionReference;/);
+  assert.match(solver, /Param\.theCpmlMaterialExtensionReference = int_message\[69\];/);
+  assert.doesNotMatch(solver, /cpml_material_extension_refinement|theCpmlMaterialExtensionRefinement/);
+});
+
 test("parameter broadcasts have unique slots and matching pack/unpack fields", () => {
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;
@@ -2561,13 +2589,13 @@ test("documents slab-quantized CPML profile sampling and the per-cell stretch di
 
 test("explains CPML material extension in model coordinates and mesh regeneration", async () => {
   const html = await (await render("/docs/absorbing-boundaries")).text();
-  assert.match(html, /Material extension clamps in absolute model coordinates/);
-  assert.match(html, /depth below the surface at the clamped X\/Y location/);
-  assert.match(html, /Building surface offsets/);
+  assert.match(html, /elevation \(default\) preserves physical Z/);
+  assert.match(html, /measures depth from the surface at the clamped X\/Y location/);
+  assert.match(html, /bottom clamp still uses absolute original model Z, with building offsets restored and removed/);
   assert.match(html, /input depth of 7500 m/);
   assert.match(html, /depth 7000 m below that surface/);
-  assert.match(html, /Rebuild or recorrect an imported mesh/);
-  assert.match(html, /corrected topographic bottom\/corner extension/);
+  assert.match(html, /Regenerate with mesh_input_mode=0/);
+  assert.match(html, /Recorrecting imported properties does not repeat wavelength refinement/);
 });
 
 

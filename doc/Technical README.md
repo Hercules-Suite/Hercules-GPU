@@ -284,9 +284,8 @@ and [Quality-factor files](Extended%20README.md#quality-factor-files).
 | `cpml_profile_slab` | `none` (default), `auto` | Optional; String (case-insensitive) |
 | `cpml_partition_weight` | `4.38` (default); >= 1; `1` restores equal leaf counts | Optional; dimensionless Float. Fixed work estimate `N_ordinary + 4.38 * N_CPML`; an explicit numeric value overrides the default. Applies only to the completed solver mesh; construction and mesh-only runs use ordinary partitions. No calibration cache. Check startup GPU memory reports; this is not a memory cap. |
 | `cpml_clamp_outer` | `no`, `yes` (default) | Optional; Yes/no |
-| `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; Yes/no |
-| `cpml_material_extension_reference` | `elevation` (default), `surface` | Optional; String (case-insensitive). SQD topography: a laterally extended PML query keeps its physical Z (`elevation`) or its depth below the local surface (`surface`) |
-| `cpml_material_extension_refinement` | `no` (default), `yes` | Optional; Yes/no. Refine the PML with the extended material; with `cpml_layers` the octree is refined twice |
+| `cpml_3d_material_extension` | `no`, `yes` (default) | Optional; With CPML and a 3-D model, extend both refinement queries and final materials. Positive explicit thickness uses one pass; automatic width uses up to three passes and checks the completed mesh before export. Regenerate with `mesh_input_mode=0`; see [details](Extended%20README.md#absorbing-boundaries-and-cpml) |
+| `cpml_material_extension_reference` | `elevation` (default), `surface` | Optional; String (case-insensitive). With extension and SQD topography, keep physical Z (`elevation`) or original surface depth (`surface`); FULL/no topography are equivalent. Explicit-seabed geometry uses the same reference. Regenerate mesh; see [details](Extended%20README.md#absorbing-boundaries-and-cpml) |
 | `cpml_stiffness_mode` | `native` (default), `reduced` | Optional; String |
 | `cpml_stiffness_mode_acoustic` | `native`, `reduced`; inherit `cpml_stiffness_mode` (default) | Optional; String |
 | `cpml_pml_material_damping` | `none` (default) except for Rayleigh interiors; `rayleigh` (default) with Rayleigh interiors when omitted; explicit `none` is retained | Optional; String |

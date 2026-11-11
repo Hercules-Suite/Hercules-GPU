@@ -683,6 +683,8 @@ static void compute_pml_profile_coeffs(uint8_t face_mask, tick_t ldb[3],
                                        double kappa_out[3]);
 #endif /* BOUNDARY */
 static double cpml_material_extension_thickness(void);
+static double cpml_octree_boundary_leaf_h(void);
+static double cpml_mesh_boundary_leaf_h(int* used_fallback);
 static void cpml_extend_3d_material_query(double* north_m, double* east_m,
                                           double* depth_m);
 
@@ -764,8 +766,8 @@ static int cpml_reserve_acoustic_gravity_surface(int32_t required) {
 static uint8_t* g_cpmlHostElementBits = NULL;
 static size_t g_cpmlHostElementCount = 0;
 static double g_cpmlMaterialExtensionThicknessM = -1.0;
-/* Thickness used by refinement-time material queries when
- * cpml_material_extension_refinement=yes; set by mesh_generate(). */
+/* Frozen extension thickness throughout each mesh-generation pass, including
+ * material correction and acoustic interface matching. */
 static double g_cpmlRefinementExtensionThicknessM = 0.0;
 
 static int cpml_active_axis_count(uint8_t face_mask) {
@@ -1283,12 +1285,6 @@ static struct Param_t {
    * keeps the depth below the local free surface of the query point, so
    * near-surface layers keep their thickness through the absorber. */
   int theCpmlMaterialExtensionReference;
-  /* cpml_material_extension_refinement: YES applies the material extension
-   * also to octree refinement queries, so PML element sizes follow the
-   * material the elements finally receive. NO (default, legacy) refines
-   * the PML with the local, unextended material. Both declared AFTER
-   * theCpmlProfileSlab to preserve C++ designated-init order. */
-  noyesflag_t theCpmlMaterialExtensionRefinement;
   /* Reference Vp (m/s) for the damping profile. Positive values override
    * the automatic MPI-wide maximum Vp over PML elements; the value stays
    * uniform over the whole PML. Nonpositive (default -1) = automatic. */
@@ -1395,7 +1391,6 @@ static struct Param_t {
            .theCpmlProfileSlab = CPML_PROFILE_SLAB_NONE,
            .theCpmlMaterialExtensionReference =
                CPML_MATERIAL_EXTENSION_REFERENCE_ELEVATION,
-           .theCpmlMaterialExtensionRefinement = NO,
            .theCpmlReferenceVp = -1.0,
            .theTopoBktGpuStabilize = UNSET,
            .theAcousticVelocityPotential = 1,
@@ -2483,7 +2478,7 @@ static void read_parameters(int argc, char** argv) {
 #define LOCAL_INIT_DOUBLE_MESSAGE_LENGTH \
   52 /* Must adjust this if adding double params */
 #define LOCAL_INIT_INT_MESSAGE_LENGTH \
-  71 /* Must adjust this if adding int params */
+  70 /* Must adjust this if adding int params */
 
   double double_message[LOCAL_INIT_DOUBLE_MESSAGE_LENGTH];
   int int_message[LOCAL_INIT_INT_MESSAGE_LENGTH];
@@ -2681,7 +2676,6 @@ static void read_parameters(int argc, char** argv) {
   int_message[67] = Param.theCpmlGravityInBottomBand;
   int_message[68] = Param.theCpmlProfileSlab;
   int_message[69] = Param.theCpmlMaterialExtensionReference;
-  int_message[70] = (int)Param.theCpmlMaterialExtensionRefinement;
 
   MPI_Bcast(int_message, LOCAL_INIT_INT_MESSAGE_LENGTH, MPI_INT, 0,
             comm_solver);
@@ -2757,7 +2751,6 @@ static void read_parameters(int argc, char** argv) {
   Param.theCpmlGravityInBottomBand = int_message[67];
   Param.theCpmlProfileSlab = int_message[68];
   Param.theCpmlMaterialExtensionReference = int_message[69];
-  Param.theCpmlMaterialExtensionRefinement = (noyesflag_t)int_message[70];
 
   /*Broadcast all string params*/
   MPI_Bcast(Param.parameters_input_file, 256, MPI_CHAR, 0, comm_solver);
@@ -3389,20 +3382,6 @@ static int32_t parse_parameters(const char* numericalin) {
                        "cpml_material_extension_reference must be "
                        "'elevation' or 'surface': got '%s'\n",
                        cpml_material_extension_reference);
-        }
-      }
-
-      char cpml_material_extension_refinement[64] = "";
-      if (parsetext(fp, "cpml_material_extension_refinement", 's',
-                    &cpml_material_extension_refinement) == 0) {
-        if (strcasecmp(cpml_material_extension_refinement, "yes") == 0) {
-          Param.theCpmlMaterialExtensionRefinement = YES;
-        } else if (strcasecmp(cpml_material_extension_refinement, "no") == 0) {
-          Param.theCpmlMaterialExtensionRefinement = NO;
-        } else {
-          solver_abort(__FUNCTION_NAME, NULL,
-                       "cpml_material_extension_refinement must be 'yes' or "
-                       "'no': got '%s'\n", cpml_material_extension_refinement);
         }
       }
 
@@ -5013,10 +4992,8 @@ static int32_t parse_parameters(const char* numericalin) {
                      CPML_MATERIAL_EXTENSION_REFERENCE_SURFACE)
                         ? "surface (same depth below the local surface)"
                         : "elevation (same physical Z, legacy)");
-      monitor_print("PML material extension refinement:  %s\n",
-                    (Param.theCpmlMaterialExtensionRefinement == YES)
-                        ? "yes (refinement uses the extended material)"
-                        : "no (refinement uses the local material, legacy)");
+      monitor_print("PML material extension refinement:  automatic with 3D model "
+                    "(regenerate mesh to apply)\n");
     }
     monitor_print("PML outer Dirichlet clamp:          %s\n",
                   (Param.theCpmlClampOuter == YES) ? "yes" : "no");
@@ -5527,96 +5504,56 @@ int getBasinMaterial(cvmpayload_t* g_props, vector3D_t basinVelModel_origin,
   return res;
 }
 
+/* Use octree ticks for face membership, and the stored float edge size for
+ * the physical thickness. This keeps refinement, exported/imported materials,
+ * partitioning and solver setup identical even for nonintegral domain sizes. */
+static int cpml_touches_absorbing_face(tick_t x, tick_t y, tick_t z,
+                                      tick_t edge) {
+  const tick_t* lo = Global.myOctree->nearendp;
+  const tick_t* hi = Global.myOctree->farendp;
+  return x <= lo[0] || x + edge >= hi[0] ||
+         y <= lo[1] || y + edge >= hi[1] || z + edge >= hi[2];
+}
+
+static double cpml_mesh_boundary_leaf_h(int* used_fallback) {
+  double local_h[2] = {0.0, 0.0}; /* absorbing boundary, any non-air leaf */
+  for (int32_t e = 0; e < Global.myMesh->lenum; ++e) {
+    const elem_t* element = &Global.myMesh->elemTable[e];
+    const edata_t* material = (const edata_t*)element->data;
+    if (material->Vp < 0.0f || material->edgesize <= 0.0f) continue;
+    const double h = (double)material->edgesize;
+    const node_t* node = &Global.myMesh->nodeTable[element->lnid[0]];
+    const tick_t edge = (tick_t)1 << (PIXELLEVEL - element->level);
+    if (h > local_h[1]) local_h[1] = h;
+    if (h > local_h[0] &&
+        cpml_touches_absorbing_face(node->x, node->y, node->z, edge))
+      local_h[0] = h;
+  }
+  double global_h[2];
+  MPI_Allreduce(local_h, global_h, 2, MPI_DOUBLE, MPI_MAX, comm_solver);
+  if (used_fallback != NULL) *used_fallback = (global_h[0] <= 0.0);
+  return global_h[0] > 0.0 ? global_h[0] : global_h[1];
+}
+
 static double cpml_material_extension_thickness(void) {
 #ifdef BOUNDARY
   if ((Param.theAbcType != ABC_CPML) ||
-      (Param.theCpml3DMaterialExtension != YES)) {
+      (Param.theCpml3DMaterialExtension != YES) ||
+      (Param.threeDVelocityModel != YES) || (Global.myOctree == NULL)) {
     return 0.0;
   }
-
-  /* The octree refinement pass calls get3DMaterial() before Global.myMesh is
-   * extracted. Do not extend those provisional refinement queries: the final
-   * element properties are re-sampled by mesh_correct_properties(), where the
-   * mesh and realized CPML geometry are available. */
-  if ((Global.myMesh == NULL) || (Global.myOctree == NULL)) {
-    /* cpml_material_extension_refinement=yes: mesh_generate() fixes the
-     * thickness before refining (cpml_thickness_m, or cpml_layers x the
-     * largest boundary leaf of a preliminary refinement pass), so the
-     * octree is refined with the material the PML elements receive. */
-    if ((Param.theCpmlMaterialExtensionRefinement == YES) &&
-        (g_cpmlRefinementExtensionThicknessM > 0.0)) {
-      return g_cpmlRefinementExtensionThicknessM;
-    }
-    return 0.0;
+  if (Param.theCpmlThicknessM > 0.0) return Param.theCpmlThicknessM;
+  /* The same frozen width must be used before and after mesh extraction,
+   * including new leaves introduced by local acoustic interface matching. */
+  if (g_cpmlRefinementExtensionThicknessM > 0.0)
+    return g_cpmlRefinementExtensionThicknessM;
+  if (g_cpmlBuild.thickness_m > 0.0) return g_cpmlBuild.thickness_m;
+  /* Only the preliminary automatic-width pass uses unextended material. */
+  if (Global.myMesh == NULL) return 0.0;
+  if (g_cpmlMaterialExtensionThicknessM < 0.0) {
+    g_cpmlMaterialExtensionThicknessM =
+        (double)Param.theCpmlLayers * cpml_mesh_boundary_leaf_h(NULL);
   }
-
-  if (Param.theCpmlThicknessM > 0.0) {
-    return Param.theCpmlThicknessM;
-  }
-
-  if (g_cpmlBuild.thickness_m > 0.0) {
-    return g_cpmlBuild.thickness_m;
-  }
-
-  if (g_cpmlMaterialExtensionThicknessM >= 0.0) {
-    return g_cpmlMaterialExtensionThicknessM;
-  }
-
-  if (Param.theCpmlLayers <= 0) {
-    return 0.0;
-  }
-
-  const double ticksize = Global.myOctree->ticksize;
-  const double eps = ticksize * 0.25;
-  const double lo[3] = {
-      (double)Global.myOctree->nearendp[0] * ticksize,
-      (double)Global.myOctree->nearendp[1] * ticksize,
-      (double)Global.myOctree->nearendp[2] * ticksize};
-  const double hi[3] = {
-      (double)Global.myOctree->farendp[0] * ticksize,
-      (double)Global.myOctree->farendp[1] * ticksize,
-      (double)Global.myOctree->farendp[2] * ticksize};
-  double local_bnd_h = 0.0;
-  double local_any_h = 0.0;
-
-  for (int32_t eindex = 0; eindex < Global.myMesh->lenum; eindex++) {
-    elem_t* elemp = &Global.myMesh->elemTable[eindex];
-    edata_t* edata = (edata_t*)elemp->data;
-    /* Negative Vp marks air; exclude it from boundary and fallback maxima. */
-    if (edata->Vp < 0.0f) continue;
-    node_t* node0 = &Global.myMesh->nodeTable[elemp->lnid[0]];
-    const double h = edata->edgesize;
-    const double c0[3] = {(double)node0->x * ticksize,
-                          (double)node0->y * ticksize,
-                          (double)node0->z * ticksize};
-    int on_face = 0;
-
-    if (h <= 0.0) {
-      continue;
-    }
-    if (h > local_any_h) {
-      local_any_h = h;
-    }
-    for (int ax = 0; ax < 2; ax++) {
-      if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
-      if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
-    }
-    if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
-    if (on_face && (h > local_bnd_h)) {
-      local_bnd_h = h;
-    }
-  }
-
-  double global_bnd_h = 0.0;
-  double global_any_h = 0.0;
-  MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
-                comm_solver);
-  MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
-                comm_solver);
-
-  const double basis_h = (global_bnd_h > 0.0) ? global_bnd_h : global_any_h;
-  g_cpmlMaterialExtensionThicknessM =
-      (basis_h > 0.0) ? (double)Param.theCpmlLayers * basis_h : 0.0;
   return g_cpmlMaterialExtensionThicknessM;
 #else
   return 0.0;
@@ -5726,6 +5663,27 @@ static void cpml_extend_3d_material_query(double* north_m, double* east_m,
   (void)east_m;
   (void)depth_m;
 #endif
+}
+
+/* Bed of the extended material column, expressed back in the original model
+ * coordinates. Water classification in get3DMaterial uses the clamped column;
+ * coupling normals and acoustic free-surface enrollment must use it too. */
+static int cpml_extended_seabed_depth(double north, double east,
+                                     double* bed_z) {
+  const double building_shift =
+      Param.includeBuildings == YES ? get_surface_shift() : 0.0;
+  const int surface_relative =
+      Param.includeTopography == YES && get_theetree_type() == SQD;
+  const double original_surface = point_elevation(north, east);
+  double query_depth = surface_relative ? 0.0 : original_surface;
+  cpml_extend_3d_material_query(&north, &east, &query_depth);
+  if (!topo_seabed_sample(north, east, bed_z)) return 0;
+  if (surface_relative && Param.theCpmlMaterialExtensionReference ==
+                              CPML_MATERIAL_EXTENSION_REFERENCE_SURFACE) {
+    *bed_z += original_surface - point_elevation(north, east);
+  }
+  *bed_z += building_shift;
+  return *bed_z > original_surface + building_shift;
 }
 
 /*
@@ -6365,15 +6323,20 @@ static int mesh_find_acoustic_elastic_transition_depth(
   }
 
   if (topo_seabed_enabled()) {
-    /* Use the same lateral CPML extension as material assignment. Read the
-     * explicit bed directly; never reconstruct it from interpolated Vs. */
-    double query_depth = depth_hint_m;
-    if (get_theetree_type() == SQD)
-      query_depth -= point_elevation(north_m, east_m);
-    cpml_extend_3d_material_query(&north_m, &east_m, &query_depth);
+    /* Read the bed in the same reference as the assigned water/solid mask. */
     double bed_z;
-    if (!topo_seabed_sample(north_m, east_m, &bed_z) ||
+    if (!cpml_extended_seabed_depth(north_m, east_m, &bed_z) ||
         bed_z < z_domain_min || bed_z > z_domain_max) return 0;
+    const double L = cpml_material_extension_thickness();
+    if (L > 0.0) {
+      const double ticksize = Global.myOctree->ticksize;
+      const double bottom = Global.theZForMeshOrigin +
+          (double)Global.myOctree->farendp[2] * ticksize - L;
+      const double top = Global.theZForMeshOrigin +
+          (double)Global.myOctree->nearendp[2] * ticksize;
+      /* Clamping above the bed leaves water all the way to the boundary. */
+      if (top < bottom && bed_z > bottom) return 0;
+    }
     *depth_out = bed_z;
     return 1;
   }
@@ -7852,58 +7815,8 @@ static int mesh_prepare_cpml_partition_weight(void) {
   if (Param.theCpmlThicknessM > 0.0) {
     g_cpmlPartitionThicknessM = Param.theCpmlThicknessM;
   } else {
-    const double ticksize = Global.myOctree->ticksize;
-    const double eps = ticksize * 0.25;
-    const double lo[3] = {
-        (double)Global.myOctree->nearendp[0] * ticksize,
-        (double)Global.myOctree->nearendp[1] * ticksize,
-        (double)Global.myOctree->nearendp[2] * ticksize};
-    const double hi[3] = {
-        (double)Global.myOctree->farendp[0] * ticksize,
-        (double)Global.myOctree->farendp[1] * ticksize,
-        (double)Global.myOctree->farendp[2] * ticksize};
-    double local_bnd_h = 0.0;
-    double local_any_h = 0.0;
-
-    for (octant_t* leaf = octor_getfirstleaf(Global.myOctree); leaf != NULL;
-         leaf = octor_getnextleaf(leaf)) {
-      if (leaf->where != LOCAL) continue;
-      const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
-      const double h = (double)edgeticks * ticksize;
-      const double c0[3] = {(double)leaf->lx * ticksize,
-                            (double)leaf->ly * ticksize,
-                            (double)leaf->lz * ticksize};
-      int on_face = 0;
-
-      if (h <= 0.0) continue;
-
-      for (int ax = 0; ax < 2; ax++) {
-        if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
-        if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
-      }
-      if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
-      /* Read material only when this leaf can increase either maximum. */
-      if ((h <= local_any_h) && (!on_face || h <= local_bnd_h)) continue;
-      edata_t edata;
-      if (octor_getleafrec(Global.myOctree, leaf, &edata) != 0) {
-        solver_abort(__FUNCTION_NAME, NULL,
-                     "Cannot read octree material for CPML thickness.\n");
-      }
-      /* Match material extension and solver sizing, including the fallback. */
-      if (edata.Vp < 0.0f) continue;
-      if (h > local_any_h) local_any_h = h;
-      if (on_face && h > local_bnd_h) local_bnd_h = h;
-    }
-
-    double global_bnd_h = 0.0;
-    double global_any_h = 0.0;
-    MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
-                  comm_solver);
-    MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
-                  comm_solver);
-    const double basis_h =
-        (global_bnd_h > 0.0) ? global_bnd_h : global_any_h;
-    g_cpmlPartitionThicknessM = (double)Param.theCpmlLayers * basis_h;
+    g_cpmlPartitionThicknessM =
+        (double)Param.theCpmlLayers * cpml_octree_boundary_leaf_h();
   }
 
   if (g_cpmlPartitionThicknessM <= 0.0) {
@@ -7991,51 +7904,24 @@ static int mesh_partitiontree(const char* context, bool completed_solver_mesh) {
  * the octree so it is available before mesh extraction. */
 static double cpml_octree_boundary_leaf_h(void) {
 #ifdef BOUNDARY
-  const double ticksize = Global.myOctree->ticksize;
-  const double eps = ticksize * 0.25;
-  const double lo[3] = {(double)Global.myOctree->nearendp[0] * ticksize,
-                        (double)Global.myOctree->nearendp[1] * ticksize,
-                        (double)Global.myOctree->nearendp[2] * ticksize};
-  const double hi[3] = {(double)Global.myOctree->farendp[0] * ticksize,
-                        (double)Global.myOctree->farendp[1] * ticksize,
-                        (double)Global.myOctree->farendp[2] * ticksize};
-  double local_bnd_h = 0.0;
-  double local_any_h = 0.0;
-
+  double local_h[2] = {0.0, 0.0};
   for (octant_t* leaf = octor_getfirstleaf(Global.myOctree); leaf != NULL;
        leaf = octor_getnextleaf(leaf)) {
     if (leaf->where != LOCAL) continue;
-    const tick_t edgeticks = OCTOR_GETOCTTICKS(leaf);
-    const double h = (double)edgeticks * ticksize;
-    const double c0[3] = {(double)leaf->lx * ticksize,
-                          (double)leaf->ly * ticksize,
-                          (double)leaf->lz * ticksize};
-    int on_face = 0;
-
-    if (h <= 0.0) continue;
-    for (int ax = 0; ax < 2; ax++) {
-      if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
-      if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
-    }
-    if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
-    if ((h <= local_any_h) && (!on_face || h <= local_bnd_h)) continue;
-    edata_t edata;
-    if (octor_getleafrec(Global.myOctree, leaf, &edata) != 0) {
+    edata_t material;
+    if (octor_getleafrec(Global.myOctree, leaf, &material) != 0)
       solver_abort(__FUNCTION_NAME, NULL,
                    "Cannot read octree material for CPML thickness.\n");
-    }
-    if (edata.Vp < 0.0f) continue; /* air */
-    if (h > local_any_h) local_any_h = h;
-    if (on_face && h > local_bnd_h) local_bnd_h = h;
+    if (material.Vp < 0.0f || material.edgesize <= 0.0f) continue;
+    const double h = (double)material.edgesize;
+    if (h > local_h[1]) local_h[1] = h;
+    if (h > local_h[0] && cpml_touches_absorbing_face(
+            leaf->lx, leaf->ly, leaf->lz, OCTOR_GETOCTTICKS(leaf)))
+      local_h[0] = h;
   }
-
-  double global_bnd_h = 0.0;
-  double global_any_h = 0.0;
-  MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
-                comm_solver);
-  MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
-                comm_solver);
-  return (global_bnd_h > 0.0) ? global_bnd_h : global_any_h;
+  double global_h[2];
+  MPI_Allreduce(local_h, global_h, 2, MPI_DOUBLE, MPI_MAX, comm_solver);
+  return global_h[0] > 0.0 ? global_h[0] : global_h[1];
 #else
   return 0.0;
 #endif
@@ -8067,18 +7953,19 @@ static void mesh_generate() {
     }
   }
 
-  /* cpml_material_extension_refinement=yes: refinement queries use the
-   * extended PML material. With cpml_thickness_m the thickness is known up
-   * front (one pass). With cpml_layers it is cpml_layers x the largest
-   * boundary leaf, known only from a refined tree: pass 1 refines without the
-   * extension, later passes rebuild the tree with the extension at the
-   * thickness of the previous pass until the thickness repeats. */
+  /* Material extension also controls refinement. Explicit thickness needs
+   * one pass. Automatic thickness starts from an unextended provisional tree,
+   * then rebuilds until the completed mesh agrees with the assumed width. */
   const int cpml_refine_ext =
+#ifdef BOUNDARY
       (Param.theAbcType == ABC_CPML) &&
       (Param.theCpml3DMaterialExtension == YES) &&
-      (Param.theCpmlMaterialExtensionRefinement == YES) &&
       (Param.threeDVelocityModel == YES);
+#else
+      0;
+#endif
   int cpml_pass = 0;
+  g_cpmlMaterialExtensionThicknessM = -1.0;
   g_cpmlRefinementExtensionThicknessM =
       (cpml_refine_ext && (Param.theCpmlThicknessM > 0.0))
           ? Param.theCpmlThicknessM
@@ -8116,32 +8003,32 @@ cpml_refinement_pass:
   }
 
   if (cpml_pass == 0) { /* once per run, not per CPML refinement pass */
-  /* Essential for DRM implementation */
-  if (Param.drmImplement == YES) {
-    drm_fix_coordinates(Global.myOctree->ticksize);
-  }
+    /* Essential for DRM implementation */
+    if (Param.drmImplement == YES) {
+      drm_fix_coordinates(Global.myOctree->ticksize);
+    }
 
 #ifdef USECVMDB
-  Global.theCVMQueryStage = 0; /* Query CVM database to refine the mesh */
+    Global.theCVMQueryStage = 0; /* Query CVM database to refine the mesh */
 #else
-  /* Use flat data record file and distibute the data in memories */
-  if (Global.myID == 0) {
-    monitor_print("slicing CVMDB ...");
-  }
-  Timer_Start("Slice CVM");
-  Global.theCVMRecord = sliceCVM(Param.theCVMFlatFile);
-  MPI_Barrier(comm_solver);
-  Timer_Stop("Slice CVM");
-  if (Global.theCVMRecord == NULL) {
-    fprintf(stderr, "Thread %d: Error obtaining the CVM records from %s\n",
-            Global.myID, Param.theCVMFlatFile);
-    MPI_Abort(MPI_COMM_WORLD, ERROR);
-    exit(1);
-  };
-  if (Global.myID == 0) {
-    monitor_print("done : %9.2f seconds\n",
-                  Timer_Value("Slice CVM", (TimerKind)0));
-  }
+    /* Use flat data record file and distibute the data in memories */
+    if (Global.myID == 0) {
+      monitor_print("slicing CVMDB ...");
+    }
+    Timer_Start("Slice CVM");
+    Global.theCVMRecord = sliceCVM(Param.theCVMFlatFile);
+    MPI_Barrier(comm_solver);
+    Timer_Stop("Slice CVM");
+    if (Global.theCVMRecord == NULL) {
+      fprintf(stderr, "Thread %d: Error obtaining the CVM records from %s\n",
+              Global.myID, Param.theCVMFlatFile);
+      MPI_Abort(MPI_COMM_WORLD, ERROR);
+      exit(1);
+    };
+    if (Global.myID == 0) {
+      monitor_print("done : %9.2f seconds\n",
+                    Timer_Value("Slice CVM", (TimerKind)0));
+    }
 #endif
   } /* cpml_pass == 0 */
 
@@ -8248,38 +8135,25 @@ cpml_refinement_pass:
     MPI_Barrier(comm_solver);
   }
 
-  if (cpml_refine_ext && (Param.theCpmlThicknessM <= 0.0)) {
+  if (cpml_refine_ext && g_cpmlRefinementExtensionThicknessM <= 0.0) {
     const double h_bnd = cpml_octree_boundary_leaf_h();
     const double L = (double)Param.theCpmlLayers * h_bnd;
+    if (!(L > 0.0))
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "CPML material extension: no non-air boundary leaf for "
+                   "automatic thickness (cpml_layers=%d)\n", Param.theCpmlLayers);
     if (Global.myID == 0) {
-      monitor_print("CPML refinement extension, pass %d: refined with %.3f m; "
-                    "boundary leaves give %d layers x %.3f m = %.3f m\n",
-                    cpml_pass + 1, g_cpmlRefinementExtensionThicknessM,
+      monitor_print("CPML refinement extension, preliminary pass: "
+                    "%d layers x %.9g m = %.9g m; rebuilding with extended material\n",
                     Param.theCpmlLayers, h_bnd, L);
       fflush(stdout);
     }
-    if (!(L > 0.0)) {
-      solver_abort(__FUNCTION_NAME, NULL,
-                   "CPML refinement extension: no boundary leaf for the "
-                   "thickness (cpml_layers=%d)\n", Param.theCpmlLayers);
-    }
-    if (fabs(L - g_cpmlRefinementExtensionThicknessM) > 1e-9 * L) {
-      if (cpml_pass >= 2) {
-        solver_abort(__FUNCTION_NAME, NULL,
-                     "CPML refinement extension: thickness did not repeat "
-                     "after %d passes (last %.3f m, now %.3f m); set "
-                     "cpml_thickness_m explicitly\n",
-                     cpml_pass + 1, g_cpmlRefinementExtensionThicknessM, L);
-      }
-      g_cpmlRefinementExtensionThicknessM = L;
-      octor_deletetree(Global.myOctree);
-      Global.myOctree = NULL;
-      cpml_pass++;
-      step = 1;
-      goto cpml_refinement_pass;
-    }
-    /* Final properties use the same thickness as refinement. */
-    g_cpmlMaterialExtensionThicknessM = L;
+    g_cpmlRefinementExtensionThicknessM = L;
+    octor_deletetree(Global.myOctree);
+    Global.myOctree = NULL;
+    cpml_pass++;
+    step = 1;
+    goto cpml_refinement_pass;
   }
 
   /* gggg */
@@ -8375,6 +8249,44 @@ cpml_refinement_pass:
     monitor_print("%9.2f\n\n",
                   Timer_Value("Mesh correct properties", (TimerKind)0));
     fflush(stdout);
+  }
+
+  if (cpml_refine_ext && Param.theCpmlThicknessM <= 0.0) {
+    const double h_bnd = cpml_mesh_boundary_leaf_h(NULL);
+    const double L = (double)Param.theCpmlLayers * h_bnd;
+    if (Global.myID == 0) {
+      monitor_print("CPML refinement extension, pass %d: refined with %.9g m; "
+                    "completed mesh gives %d layers x %.9g m = %.9g m\n",
+                    cpml_pass + 1, g_cpmlRefinementExtensionThicknessM,
+                    Param.theCpmlLayers, h_bnd, L);
+      fflush(stdout);
+    }
+    if (!(L > 0.0) || (cpml_pass >= 2 &&
+                      L != g_cpmlRefinementExtensionThicknessM)) {
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "CPML material extension: completed-mesh thickness did not "
+                   "converge after %d passes (used %.9g m, now %.9g m); "
+                   "set cpml_thickness_m explicitly\n",
+                   cpml_pass + 1, g_cpmlRefinementExtensionThicknessM, L);
+    }
+    if (L != g_cpmlRefinementExtensionThicknessM) {
+      /* No metadata from the discarded mesh may survive into the next pass. */
+      mesh_release_acoustic_interface_data();
+      g_acousticNeighbors.clear();
+      g_acousticNeighborRequests.clear();
+      g_acousticMatchingRequests.clear();
+      g_acousticMatchingOwned.clear();
+      octor_deletemesh(Global.myMesh);
+      Global.myMesh = NULL;
+      octor_deletetree(Global.myOctree);
+      Global.myOctree = NULL;
+      g_cpmlMaterialExtensionThicknessM = -1.0;
+      g_cpmlRefinementExtensionThicknessM = L;
+      cpml_pass++;
+      step = 1;
+      goto cpml_refinement_pass;
+    }
+    g_cpmlMaterialExtensionThicknessM = L;
   }
 
 #ifdef USECVMDB
@@ -12008,13 +11920,16 @@ static int acoustic_element_has_free_surface(const elem_t* element,
     const double y0 = Global.theYForMeshOrigin +
                      (double)Global.myMesh->nodeTable[node].y * ticksize;
     double bed_z;
-    if (!topo_seabed_sample(x0 + 0.5*h, y0 + 0.5*h, &bed_z)) return 0;
+    if (!cpml_extended_seabed_depth(x0 + 0.5*h, y0 + 0.5*h, &bed_z)) return 0;
     surfaceZ = point_elevation(x0 + 0.5*h, y0 + 0.5*h);
+    if (Param.includeBuildings == YES) surfaceZ += get_surface_shift();
     if (fabs(topZ + Global.theZForMeshOrigin - surfaceZ) > tol) return 0;
     /* The pressure-release/gravity operator covers a complete horizontal
      * face. Do not enroll a face crossing a shore or another water level. */
     for (int i=0; i<2; ++i) for (int j=0; j<2; ++j)
-      if (fabs(point_elevation(x0+i*h, y0+j*h) - surfaceZ) > tol) return 0;
+      if (fabs(point_elevation(x0+i*h, y0+j*h) +
+               (Param.includeBuildings == YES ? get_surface_shift() : 0.0) -
+               surfaceZ) > tol) return 0;
     return 1;
   }
   if (fabs(topZ - surfaceZ) > tol) return 0;
@@ -12498,50 +12413,8 @@ static void solver_init() {
     if (Param.theCpmlThicknessM > 0.0) {
       g_cpmlBuild.thickness_m = Param.theCpmlThicknessM;
     } else {
-      const double ticksize = Global.myOctree->ticksize;
-      const double eps = ticksize * 0.25;
-      const double lo[3] = {
-          (double)Global.myOctree->nearendp[0] * ticksize,
-          (double)Global.myOctree->nearendp[1] * ticksize,
-          (double)Global.myOctree->nearendp[2] * ticksize};
-      const double hi[3] = {
-          (double)Global.myOctree->farendp[0] * ticksize,
-          (double)Global.myOctree->farendp[1] * ticksize,
-          (double)Global.myOctree->farendp[2] * ticksize};
-      double local_bnd_h = 0.0;   /* non-air max on an absorbing face */
-      double local_any_h = 0.0;   /* non-air max (defensive fallback)  */
-      for (int32_t ei = 0; ei < Global.myMesh->lenum; ei++) {
-        elem_t* ep = &Global.myMesh->elemTable[ei];
-        edata_t* ed = (edata_t*)ep->data;
-        /* Air must not set the thickness, even through the fallback. */
-        if (ed->Vp < 0.0f) continue;
-        double h = (double)ed->edgesize;
-        if (h <= 0.0) continue;
-        if (h > local_any_h) local_any_h = h;
-        int32_t lnid0 = ep->lnid[0];
-        const double c0[3] = {
-            (double)Global.myMesh->nodeTable[lnid0].x * ticksize,
-            (double)Global.myMesh->nodeTable[lnid0].y * ticksize,
-            (double)Global.myMesh->nodeTable[lnid0].z * ticksize};
-        int on_face = 0;
-        /* x, y: both min and max faces are absorbing. */
-        for (int ax = 0; ax < 2; ax++) {
-          if ((c0[ax] - lo[ax]) <= eps) on_face = 1;
-          if ((hi[ax] - (c0[ax] + h)) <= eps) on_face = 1;
-        }
-        /* z: only z_max (deep/far) absorbs; z_min is the free surface. */
-        if ((hi[2] - (c0[2] + h)) <= eps) on_face = 1;
-        if (on_face && h > local_bnd_h) local_bnd_h = h;
-      }
-      double global_bnd_h = 0.0, global_any_h = 0.0;
-      MPI_Allreduce(&local_bnd_h, &global_bnd_h, 1, MPI_DOUBLE, MPI_MAX,
-                    comm_solver);
-      MPI_Allreduce(&local_any_h, &global_any_h, 1, MPI_DOUBLE, MPI_MAX,
-                    comm_solver);
-      /* If no non-air element touches an absorbing face, use the global
-       * non-air maximum. An all-air mesh leaves both maxima at zero. */
-      int used_fallback = (global_bnd_h <= 0.0);
-      double basis_h = used_fallback ? global_any_h : global_bnd_h;
+      int used_fallback = 0;
+      const double basis_h = cpml_mesh_boundary_leaf_h(&used_fallback);
       g_cpmlBuild.thickness_m = (double)Param.theCpmlLayers * basis_h;
       /* Cache the realized thickness so the log line and the MPI broadcast
        * (if a checkpoint or replay needs it later) reflect what was used. */
@@ -12552,7 +12425,7 @@ static void solver_init() {
         solver_abort(__FUNCTION_NAME, NULL,
                      "CPML thickness %.3f m of the extracted mesh differs from "
                      "the %.3f m used by refinement "
-                     "(cpml_material_extension_refinement=yes)\n",
+                     "(cpml_3d_material_extension=yes)\n",
                      g_cpmlBuild.thickness_m,
                      g_cpmlRefinementExtensionThicknessM);
       }
