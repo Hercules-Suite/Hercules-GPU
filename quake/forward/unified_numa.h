@@ -51,9 +51,10 @@ inline bool unified_numa_plan(const std::vector<int>& rank_nodes,
     plan->ranks.assign(gpu_nodes.size(), -1);
     plan->nodes.assign(gpu_nodes.size(), -1);
     plan->cpus.assign(gpu_nodes.size(), std::vector<int>());
-    /* Reserve known GPU domains first. Unknown GPUs use the least populated
-     * available domain, with first original rank as a deterministic tie-break.
-     * This preserves material locality but cannot establish GPU locality. */
+    /* Reserve known GPU domains first, then balance unknown-GPU counts over
+     * available domains (ties use the first original rank). Group their GPU
+     * ordinals into contiguous domain blocks below. This preserves material
+     * locality but cannot establish GPU locality without reported topology. */
     for (int pass = 0; pass < 2; ++pass) {
         for (size_t slot = 0; slot < gpu_nodes.size(); ++slot) {
             const int gpu_node = gpu_nodes[slot];
@@ -86,6 +87,30 @@ inline bool unified_numa_plan(const std::vector<int>& rank_nodes,
             d.slots.push_back((int)slot);
         }
     }
+    /* Keep the balanced, capacity-limited domain counts, but avoid alternating
+     * GPU ordinals between domains. On a two-domain/four-GPU node, unknown
+     * GPUs 0/1 belong to the first domain and 2/3 to the second. Known GPU
+     * assignments remain authoritative, even when they interrupt these blocks. */
+    std::vector<size_t> unknown_slots;
+    std::vector<int> unknown_ranks;
+    for (size_t slot = 0; slot < gpu_nodes.size(); ++slot) {
+        if (gpu_nodes[slot] < 0) {
+            unknown_slots.push_back(slot);
+            unknown_ranks.push_back(plan->ranks[slot]);
+        }
+    }
+    std::sort(unknown_ranks.begin(), unknown_ranks.end(), [&](int a, int b) {
+        const int first_a = domains.at(rank_nodes[a]).ranks.front();
+        const int first_b = domains.at(rank_nodes[b]).ranks.front();
+        return first_a != first_b ? first_a < first_b : a < b;
+    });
+    for (size_t i = 0; i < unknown_slots.size(); ++i) {
+        plan->ranks[unknown_slots[i]] = unknown_ranks[i];
+        plan->nodes[unknown_slots[i]] = rank_nodes[unknown_ranks[i]];
+    }
+    for (auto& item : domains) item.second.slots.clear();
+    for (size_t slot = 0; slot < plan->nodes.size(); ++slot)
+        domains[plan->nodes[slot]].slots.push_back((int)slot);
     for (auto& item : domains) {
         domain_t& d = item.second;
         std::sort(d.slots.begin(), d.slots.end());

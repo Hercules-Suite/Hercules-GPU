@@ -2696,6 +2696,7 @@ test("documents and wires optional NUMA material storage", async () => {
     "--hetero-nodes --map-by core --bind-to core",
     "no override is needed for the default one-thread Phase A",
     "dense Phase-B local indices", "0,1,72,73", "GPU locality unverified",
+    "unknown GPU ordinals in contiguous blocks", "Known GPU assignments keep priority",
     "Original solver rank 0 must survive", "divided within each selected material domain"])
     assert.ok(html.includes(phrase), phrase);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);

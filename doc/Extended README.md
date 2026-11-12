@@ -2288,8 +2288,13 @@ in `quake/forward/psolve.cc`.
 	Domains without survivors contribute no Phase-B CPUs. Set
 	`PHASE_B_OMP_NUM_THREADS` to fit the reported per-rank CPU share, especially
 	when the launcher inferred it from the whole-node allocation.
-- If a target GPU's NUMA domain is unavailable, its survivor is selected from
-	the least populated available domain (ties use the earliest original rank).
+- If target GPU NUMA domains are unavailable, first reserve all known GPU
+	assignments, then balance the remaining GPU counts across domains with rank
+	and CPU capacity (ties use the earliest original rank). Assign the unknown
+	GPU ordinals in contiguous blocks, ordered by each domain's earliest original
+	rank. With four unknown GPUs and two equal domains, GPUs `0,1` use the first
+	domain and GPUs `2,3` the second. Known assignments keep priority and can
+	interrupt these blocks when only some GPU domains are unknown.
 	The log explicitly marks GPU locality **unverified**; material-domain
 	locality is still preserved. Known GPU domains require enough Phase-A ranks
 	and CPUs. Original solver rank 0 must remain among the survivors because it

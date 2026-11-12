@@ -10713,7 +10713,7 @@ static int mesh_unified_numa_selection(MPI_Comm local_comm, int gpu_count,
               length, host, original, slots[original], gpu, plan.nodes[gpu],
               counts[original], gpu_nodes[gpu] >= 0
                   ? "GPU NUMA locality verified from PCI topology"
-                  : "GPU NUMA topology unavailable; balanced domain selection, GPU locality unverified");
+                  : "GPU NUMA topology unavailable; contiguous domain blocks, GPU locality unverified");
     }
   }
   int slot = -1;
