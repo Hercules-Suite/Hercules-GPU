@@ -743,6 +743,11 @@ test("documents the phase launcher contract", async () => {
   assert.match(html, /file, not a directory/);
   assert.match(html, /Hercules_GPU/);
   assert.doesNotMatch(html, /GPU_new/);
+  assert.match(html, /UNIFIED_MPI_ARGS/);
+  assert.match(html, /--hetero-nodes --map-by core --bind-to core/);
+  assert.match(html, /when unset or empty/);
+  assert.match(html, /A nonempty override replaces the complete list/);
+  assert.match(html, /Phase-A bindings must collectively cover the CPUs intended for Phase B/);
 });
 
 test("lists GSL as a required build dependency", async () => {
@@ -2687,7 +2692,9 @@ test("documents and wires optional NUMA material storage", async () => {
   for (const phrase of ["one copy per occupied NUMA domain", "72-fold", "MPOL_BIND",
     "restores the previous thread memory policy", "up to 32 page locations per array",
     "abort without falling back", "change only", "union of initial rank CPU masks",
-    "does not relocate those copies", "no libnuma build dependency"])
+    "does not relocate those copies", "no libnuma build dependency",
+    "--hetero-nodes --map-by core --bind-to core",
+    "no override is needed for the default one-thread Phase A"])
     assert.ok(html.includes(phrase), phrase);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;

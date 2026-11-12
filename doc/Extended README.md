@@ -832,6 +832,17 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it uses
 	`OMP_NUM_THREADS` when set; otherwise it auto-derives a per-rank value
 	for multi-rank-per-node launches.
+- Unified MPI arguments:
+	`UNIFIED_MPI_ARGS="--hetero-nodes --map-by core --bind-to core"` (default)
+	when unset or empty. This starts Phase A with core mapping/binding for
+	both `node` and `numa` material storage. These are Open MPI arguments;
+	[`--hetero-nodes`](https://docs.open-mpi.org/en/v5.0.10/man-openmpi/man1/mpirun.1.html)
+	requests treatment of allocated nodes as having different topologies.
+	A nonempty `UNIFIED_MPI_ARGS` replaces the entire default argument list.
+	For multithreaded Phase A, supply a binding with enough CPUs per rank;
+	NUMA material storage also requires those CPUs to be in one domain.
+	Phase B divides the union of the initial rank CPU masks among active ranks,
+	so Phase-A bindings must collectively cover the CPUs intended for Phase B.
 - Phase B mapping defaults:
 	`PHASE_B_MAP_MODE=auto` is the default and is the conservative recommended setting.
 	For multi-rank-per-node GPU runs it uses node-level Open MPI placement such as
@@ -2246,8 +2257,11 @@ in `quake/forward/psolve.cc`.
 	For one-thread-per-rank Open MPI Phase A, an example is
 	`PHASE_A_MPI_ARGS="--map-by core --bind-to core --report-bindings"` with
 	`run_phaseA_phaseB.sh`. Multithreaded ranks need enough CPUs within one NUMA
-	domain. Unified launches default to `UNIFIED_MPI_ARGS="--bind-to none"`;
-	override it with suitable binding for NUMA mode. The unified handoff now
+	domain. Unified launches default to
+	`UNIFIED_MPI_ARGS="--hetero-nodes --map-by core --bind-to core"` for both
+	storage modes; no override is needed for the default one-thread Phase A.
+	Override the complete argument list when a wider binding is needed.
+	The unified handoff
 	uses the union of initial rank CPU masks when assigning Phase-B CPUs.
 	It retains the original material copies and warns if new active-rank
 	bindings change/span domains, so Phase-B locality is not guaranteed and

@@ -796,7 +796,7 @@ for interactions and performance implications.
 | `PHASE_B_IN` | Input-file path; case `inputfiles/Test_B.in`, otherwise `Input/Test_B.in` under the launcher parent (default) | Two-phase input when `BASE_IN` is omitted |
 | `PHASE_A_MPI_ARGS` | Space-separated MPI arguments; empty (default) | Additional two-phase meshing arguments |
 | `PHASE_B_MPI_ARGS` | Space-separated MPI arguments; empty (default) | Additional two-phase solver arguments |
-| `UNIFIED_MPI_ARGS` | Space-separated MPI arguments; `--bind-to none` (default) | Unified launch manages CPU affinity during handoff. Override with binding within one NUMA domain per rank for `3D_velocity_model_memory=numa`; the handoff uses the union of initial CPU masks and warns if later bindings lose material locality. |
+| `UNIFIED_MPI_ARGS` | Space-separated MPI arguments; `--hetero-nodes --map-by core --bind-to core` (default) when unset or empty | Unified Open MPI launch starts with core mapping/binding in both material storage modes. A nonempty override replaces the complete argument list. Multithreaded Phase A needs a wider binding within one NUMA domain for `3D_velocity_model_memory=numa`; the handoff uses the union of initial CPU masks and warns if later bindings lose material locality. |
 | `HERCULES_PHASE_MODE` | `unified` (default), `two-phase` | One MPI job with mesh handoff, or separate jobs |
 | `HERCULES_UNIFIED_IDLE_POLL_USEC` | Integer 100..1000000; `10000` (default) | Inactive-rank polling interval, microseconds |
 | `HERCULES_UNIFIED_MPI_YIELD_WHEN_IDLE` | `0` (default), `1` | Unified Open MPI progress policy |
