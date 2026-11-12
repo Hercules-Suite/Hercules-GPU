@@ -1697,6 +1697,9 @@ void general3DVelocityModel_set_column_sampling(int same_depth) {
 void general3DVelocityModel_set_memory_mode(int per_numa) {
     Soil_memory_mode = per_numa ? 1 : 0;
 }
+int general3DVelocityModel_numa_domain(void) {
+    return Soil_memory_mode ? Soil_numa_node : -1;
+}
 static struct Params_soil_t {
     int numLayerID;
     int numPointX;

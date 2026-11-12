@@ -66,6 +66,8 @@ void general3DVelocityModel_set_rotation(double relative_azimuth_deg);
 void general3DVelocityModel_set_column_sampling(int same_depth);
 /* 0=node (default), 1=NUMA domain. Set before initialization. */
 void general3DVelocityModel_set_memory_mode(int per_numa);
+/* Original material domain, or -1 when NUMA storage is not initialized. */
+int general3DVelocityModel_numa_domain(void);
 /* Active ranks only, after unified handoff changes their CPU binding. */
 void general3DVelocityModel_check_memory_binding(void);
 void general3DVelocityModel_init(int32_t myID, const char *the3DVelModelDir);

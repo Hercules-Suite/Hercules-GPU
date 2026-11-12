@@ -727,8 +727,10 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	node are derived from `PHASE_B_NP / allocated_nodes`; no GPU count is
 	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
 	and `PHASE_B_OMP_NUM_THREADS` when it cannot be inferred from the allocation.
-	On Linux, the selected ranks divide the node's allowed CPU affinity mask into
-	disjoint blocks before enabling their Phase-B OpenMP threads.
+	On Linux, the selected ranks divide the union of Phase-A CPU masks into
+	disjoint blocks before enabling their Phase-B OpenMP threads. With an active
+	`3D_velocity_model_memory=numa` model, selection and division stay within
+	detected NUMA domains; see [NUMA model storage](#3d-velocity-model-files).
 - `HERCULES_UNIFIED_IDLE_POLL_USEC=100..1000000`
 	Sets how often inactive Phase-A ranks enter MPI to test for their Phase-B
 	completion message. The default is `10000` microseconds. Between tests they
@@ -841,7 +843,8 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	A nonempty `UNIFIED_MPI_ARGS` replaces the entire default argument list.
 	For multithreaded Phase A, supply a binding with enough CPUs per rank;
 	NUMA material storage also requires those CPUs to be in one domain.
-	Phase B divides the union of the initial rank CPU masks among active ranks,
+	Phase B divides the union of the initial rank CPU masks among active ranks
+	(within each selected domain for NUMA model storage),
 	so Phase-A bindings must collectively cover the CPUs intended for Phase B.
 - Phase B mapping defaults:
 	`PHASE_B_MAP_MODE=auto` is the default and is the conservative recommended setting.
@@ -2261,16 +2264,49 @@ in `quake/forward/psolve.cc`.
 	`UNIFIED_MPI_ARGS="--hetero-nodes --map-by core --bind-to core"` for both
 	storage modes; no override is needed for the default one-thread Phase A.
 	Override the complete argument list when a wider binding is needed.
-	The unified handoff
-	uses the union of initial rank CPU masks when assigning Phase-B CPUs.
-	It retains the original material copies and warns if new active-rank
-	bindings change/span domains, so Phase-B locality is not guaranteed and
-	copies are not relocated. Compare Global Init, Octor Refinetree, total
+	The unified handoff uses the union of initial rank CPU masks when assigning
+	Phase-B CPUs. NUMA mode selects survivors and divides CPUs within their
+	original material domains as described below. It retains the original
+	material copies; no relocation is needed. Compare Global Init, Octor Refinetree, total
 	meshing time, actual node memory, mesh counts and timestep limits across
 	repeated runs. Refinement reads the in-memory material arrays rather than
 	rereading the model files. Storage selection alone does not require mesh
 	regeneration for scientific equivalence, but imported meshes skip the
 	refinement work being benchmarked.
+- With an initialized NUMA model, unified handoff selects the lowest available
+	original local ranks in the target GPUs' NUMA domains. GPU IDs are visible
+	CUDA ordinals `0..N-1` for `N` Phase-B ranks per node; CUDA PCI bus IDs and Linux
+	`/sys/bus/pci/devices/.../numa_node` provide their domains, respecting
+	`CUDA_VISIBLE_DEVICES` ordering. Each selected domain's CPU union is divided
+	into disjoint blocks among its survivors. New **dense Phase-B local indices**
+	`0..N-1` follow surviving world-rank order; GPU selection uses the explicit
+	index-to-device assignment, not stale launcher local-rank environment values.
+	For 144 single-core ranks on two 72-core domains, with GPUs 0/1 on the first
+	and GPUs 2/3 on the second, survivors are `0,1,72,73`, assigned Phase-B
+	indices `0,1,2,3` and CPU blocks `0..35`, `36..71`, `72..107`, `108..143`.
+	This is an example of detected topology, not a hard-coded rank/socket rule.
+	Domains without survivors contribute no Phase-B CPUs. Set
+	`PHASE_B_OMP_NUM_THREADS` to fit the reported per-rank CPU share, especially
+	when the launcher inferred it from the whole-node allocation.
+- If a target GPU's NUMA domain is unavailable, its survivor is selected from
+	the least populated available domain (ties use the earliest original rank).
+	The log explicitly marks GPU locality **unverified**; material-domain
+	locality is still preserved. Known GPU domains require enough Phase-A ranks
+	and CPUs. Original solver rank 0 must remain among the survivors because it
+	owns monitor/setup state; bind it within a selected GPU domain when using
+	only a subset of visible GPUs. Inconsistent CUDA PCI visibility, changed
+	pre-handoff material affinity, an impossible selection or a failed/restricted
+	CPU binding aborts with a diagnostic. No CPU or GPU IDs are inferred from
+	socket numbering, and NUMA domains may outnumber sockets.
+- Each node reports original local rank, new Phase-B local index, GPU ordinal,
+	material domain, CPU count and whether GPU locality was established from PCI
+	topology. The existing post-handoff affinity check remains; a successful
+	domain-preserving handoff should produce no changed-domain warning.
+	`node` mode and runs without an initialized NUMA model retain first-local-rank
+	selection. Two-phase launches keep their existing placement controls. All
+	original ranks still mesh, and model-copy ownership/cleanup remains with the
+	original sharing groups. NUMA mode can also change survivor placement, so
+	interpret total A/B timings accordingly; no time-stepping speedup is promised.
 - Shared arrays are published with window synchronization before lookups and
 	remain read-only. The original sharing groups retain ownership through unified
 	Phase-A/Phase-B communicator replacement; parked ranks rejoin collective

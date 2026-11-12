@@ -29,7 +29,9 @@ static inline bool material_numa_error(char *error, size_t capacity,
 /* Every CPU allowed to this rank must belong to the same NUMA domain. Do not
  * infer locality from the CPU it happens to be executing on at one instant.
  * Dynamic masks handle sparse CPU numbering and hosts with >1024 CPUs. */
-static inline bool material_numa_domain(int *node, char *error, size_t capacity) {
+static inline bool material_numa_domain(int *node, char *error, size_t capacity,
+                                        std::vector<int> *cpus = NULL) {
+    if (cpus != NULL) cpus->clear();
 #ifdef __linux__
     *node = -1;
     for (int ncpu = 128; ncpu <= (1 << 20); ncpu *= 2) {
@@ -75,6 +77,7 @@ static inline bool material_numa_domain(int *node, char *error, size_t capacity)
                 return false;
             }
             *node = cpu_node;
+            if (cpus != NULL) cpus->push_back(cpu);
         }
         CPU_FREE(mask);
         if (*node >= 0) return true;

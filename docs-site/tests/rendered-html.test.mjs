@@ -2694,7 +2694,9 @@ test("documents and wires optional NUMA material storage", async () => {
     "abort without falling back", "change only", "union of initial rank CPU masks",
     "does not relocate those copies", "no libnuma build dependency",
     "--hetero-nodes --map-by core --bind-to core",
-    "no override is needed for the default one-thread Phase A"])
+    "no override is needed for the default one-thread Phase A",
+    "dense Phase-B local indices", "0,1,72,73", "GPU locality unverified",
+    "Original solver rank 0 must survive", "divided within each selected material domain"])
     assert.ok(html.includes(phrase), phrase);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (!existsSync(source)) return;
@@ -2705,6 +2707,9 @@ test("documents and wires optional NUMA material storage", async () => {
   assert.match(solver, /MPI_Bcast\(&Param\.the3DMemoryMode, 1, MPI_INT, 0, comm_solver\)/);
   assert.match(solver, /general3DVelocityModel_set_memory_mode\(Param\.the3DMemoryMode\)/);
   assert.match(solver, /general3DVelocityModel_check_memory_binding\(\)/);
+  assert.match(solver, /mesh_unified_numa_selection\(local_comm/);
+  assert.match(solver, /localRank = g_unifiedPhaseBLocalRank/);
+  assert.match(solver, /myDevID = g_unifiedPhaseBGpuDevice >= 0/);
 });
 
 

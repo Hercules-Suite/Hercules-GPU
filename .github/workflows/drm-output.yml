@@ -8,6 +8,7 @@ on:
       - "quake/forward/flat_output_mpi.h"
       - "quake/forward/psolve.cc"
       - "quake/forward/material_numa.h"
+      - "quake/forward/unified_numa.h"
       - "quake/forward/topography.cc"
       - "benchmark_inputs/drm_flat_output/**"
       - ".github/workflows/drm-output.yml"
@@ -19,6 +20,7 @@ on:
       - "quake/forward/flat_output_mpi.h"
       - "quake/forward/psolve.cc"
       - "quake/forward/material_numa.h"
+      - "quake/forward/unified_numa.h"
       - "quake/forward/topography.cc"
       - "benchmark_inputs/drm_flat_output/**"
       - ".github/workflows/drm-output.yml"
@@ -51,7 +53,9 @@ jobs:
           c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/points_test.cc -o /tmp/drm-points-test
           /tmp/drm-points-test
       - name: Check Linux material memory helper compilation
-        run: c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++ quake/forward/material_numa.h
+        run: |
+          c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++ quake/forward/material_numa.h
+          c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++ quake/forward/unified_numa.h
       - name: Check DRM ASCII coordinates
         run: |
           c++ -std=c++11 -Wall -Wextra -pedantic benchmark_inputs/drm_flat_output/coordinates_test.cc -o /tmp/drm-coordinates-test
