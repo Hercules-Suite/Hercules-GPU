@@ -2190,12 +2190,13 @@ in `quake/forward/psolve.cc`.
 	2,147,483,647. MPI initialization transfers large material arrays in bounded
 	chunks; the count-prefixed text format is unchanged and old files remain valid.
 	Build the updated reader before using models above 2,147,483,647 samples.
-- Input arrays automatically use **one shared host-memory copy per node's
-	solver group**, using MPI-3 `MPI_COMM_TYPE_SHARED` and shared windows.
+- `3D_velocity_model_memory` is optional and case-insensitive: `node` (default)
+	uses **one shared host-memory copy per node's solver group**, using MPI-3 `MPI_COMM_TYPE_SHARED` and shared windows.
 	Each group stores the complete model; only its leader receives the large
 	broadcasts. Dedicated IO-pool ranks do not participate. This also works
-	with one solver rank per node and uneven group sizes. No new input control
-	or change to file formats, interpolation, depth references, or units is needed.
+	with one solver rank per node and uneven group sizes. File formats,
+	interpolation, depth references, and units are unchanged. The option has no
+	effect when the 3-D reader is skipped.
 	Budget `32 * samples + 8 * profiles + 8 * (nx + ny)` bytes per group for
 	Z, Vs, Vp, density, offsets, and axes; Qs/Qp add `16 * samples` bytes per
 	group. The mutable surface/bed cache remains **private per rank**, costing
@@ -2212,8 +2213,52 @@ in `quake/forward/psolve.cc`.
 	allocation errors abort with a diagnostic rather than silently reverting
 	to per-rank copies. The startup report gives the group count, rank-count
 	range, and shared input-array size.
+- `3D_velocity_model_memory=numa` selects one copy per **occupied NUMA domain**
+	inside each MPI shared node group. Domains need not match sockets. For 144
+	ranks and two domains, model storage falls from 144 copies to two (72-fold);
+	`node` needs one copy (144-fold). Each complete copy must fit its domain,
+	along with other allocations; the root still needs temporary parsed storage.
+	Both modes send one model between physical-node leaders, then `numa`
+	distributes the extra copies between domain leaders within each node.
+- NUMA mode requires Linux CPU affinity, readable `/sys/devices/system/cpu/`
+	topology and permitted `get_mempolicy`/`set_mempolicy` syscalls; no libnuma
+	library or build flag is required. Every rank's allowed CPU set must lie
+	within one NUMA domain, including CPUs used by its OpenMP threads. The
+	reader does not modify CPU affinity. During allocation/distribution it
+	temporarily applies `MPOL_BIND` for the domain, first-touches every page
+	on the domain leader and checks up to 32 page locations per array. It then
+	restores the previous thread memory policy. Missing topology, spanning or
+	unbound affinity, policy errors or sampled remote pages abort with a
+	diagnostic and no silent fallback. A single-domain node may use its full
+	CPU mask. Startup reports the selected mode, node/copy counts, copies/node,
+	ranks/copy and GiB/copy; each NUMA leader also reports hostname, domain ID,
+	leader rank and sampled-local address count. Samples describe initial
+	placement, not an exhaustive check or protection against later OS migration.
+- For A/B measurements, keep the binary, model, parameters, nodes, ranks, CPU
+	binding and thread count identical, changing only this option. For example:
+
+	```ini
+	3D_velocity_model = yes
+	3D_velocity_model_memory = numa  # compare against node (default)
+	mesh_input_mode = 0              # exercise meshing in both runs
+	```
+
+	For one-thread-per-rank Open MPI Phase A, an example is
+	`PHASE_A_MPI_ARGS="--map-by core --bind-to core --report-bindings"` with
+	`run_phaseA_phaseB.sh`. Multithreaded ranks need enough CPUs within one NUMA
+	domain. Unified launches default to `UNIFIED_MPI_ARGS="--bind-to none"`;
+	override it with suitable binding for NUMA mode. The unified handoff now
+	uses the union of initial rank CPU masks when assigning Phase-B CPUs.
+	It retains the original material copies and warns if new active-rank
+	bindings change/span domains, so Phase-B locality is not guaranteed and
+	copies are not relocated. Compare Global Init, Octor Refinetree, total
+	meshing time, actual node memory, mesh counts and timestep limits across
+	repeated runs. Refinement reads the in-memory material arrays rather than
+	rereading the model files. Storage selection alone does not require mesh
+	regeneration for scientific equivalence, but imported meshes skip the
+	refinement work being benchmarked.
 - Shared arrays are published with window synchronization before lookups and
-	remain read-only. The original node groups retain ownership through unified
+	remain read-only. The original sharing groups retain ownership through unified
 	Phase-A/Phase-B communicator replacement; parked ranks rejoin collective
 	window cleanup after release, before MPI finalization, including mesh-only
 	exits. No communication or synchronization is added to material lookup or

@@ -455,8 +455,10 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 257);
-  assert.equal(documented.length, 257, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 258);
+  assert.equal(documented.length, 258, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("3D_velocity_model_memory"));
+  assert.match(reference, /p\("3D_velocity_model_memory", "Optional", "String \(case-insensitive\)", "Default: node; node \| numa"/);
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -2674,6 +2676,28 @@ test("documents large 3-D material counts and shared model memory", async () => 
   assert.match(html, /parked ranks rejoin collective cleanup after release/);
   assert.match(html, /multi-node performance still require target-system validation/);
   assert.doesNotMatch(html, /replicated in host memory on every solver rank/);
+});
+
+
+test("documents and wires optional NUMA material storage", async () => {
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /3D_velocity_model_memory=numa/);
+  const markup = await (await renderMarkup("/docs/velocity-models")).text();
+  assert.ok(markup.includes(`href="${basePath}/docs/parameters-material-mesh#parameter-3D_velocity_model_memory"`));
+  for (const phrase of ["one copy per occupied NUMA domain", "72-fold", "MPOL_BIND",
+    "restores the previous thread memory policy", "up to 32 page locations per array",
+    "abort without falling back", "change only", "union of initial rank CPU masks",
+    "does not relocate those copies", "no libnuma build dependency"])
+    assert.ok(html.includes(phrase), phrase);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /char material_memory\[64\] = "node"/);
+  assert.match(solver, /hu_config_get_string_opt\(fp, "3D_velocity_model_memory"/);
+  assert.match(solver, /3D_velocity_model_memory must be node or numa/);
+  assert.match(solver, /MPI_Bcast\(&Param\.the3DMemoryMode, 1, MPI_INT, 0, comm_solver\)/);
+  assert.match(solver, /general3DVelocityModel_set_memory_mode\(Param\.the3DMemoryMode\)/);
+  assert.match(solver, /general3DVelocityModel_check_memory_binding\(\)/);
 });
 
 

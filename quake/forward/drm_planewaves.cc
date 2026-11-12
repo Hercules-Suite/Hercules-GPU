@@ -17,6 +17,7 @@
  *  @copyright_notice_end
  */
 
+#include "material_numa.h"
 #include <inttypes.h>
 #include <limits>
 #include <errno.h>
@@ -1663,9 +1664,12 @@ static double *Soil_point_z;
 /* Own the input tables independently of comm_solver: the unified mesh
  * handoff replaces that communicator while these tables are still in use.
  * Only the original solver ranks participate (never the dedicated IO pool). */
-static MPI_Comm Soil_node_comm = MPI_COMM_NULL;
+static MPI_Comm Soil_shared_comm = MPI_COMM_NULL;
 static MPI_Win Soil_windows[9];
 static int Soil_window_count = 0;
+static int Soil_memory_mode = 0; /* 0=node (default), 1=numa */
+static int Soil_numa_node = -1;
+static int Soil_numa_pages_checked = 0;
 /* Solver Z of each column's reference surface, positive downward: outer
  * topography for legacy SQD/surface, ground/bed for explicit seabed depths. */
 static double *Soil_surface_z = NULL;
@@ -1689,6 +1693,9 @@ void general3DVelocityModel_set_rotation(double relative_azimuth_deg) {
 
 void general3DVelocityModel_set_column_sampling(int same_depth) {
     Soil_column_sampling = same_depth ? 1 : 0;
+}
+void general3DVelocityModel_set_memory_mode(int per_numa) {
+    Soil_memory_mode = per_numa ? 1 : 0;
 }
 static struct Params_soil_t {
     int numLayerID;
@@ -2116,13 +2123,45 @@ static void materialMpiCheck(int result, const char *operation) {
     exit(1);
 }
 
-/* Every node allocates one copy; only its leader receives the broadcasts.
+static void materialNumaCheck(bool valid, const char *message) {
+    if (valid) return;
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    fprintf(stderr, "Rank %d: 3D_velocity_model_memory=numa: %s\n",
+            rank, message);
+    MPI_Abort(MPI_COMM_WORLD, ERROR);
+    exit(1);
+}
+
+/* The unified handoff may widen/reassign CPU masks after initialization.
+ * Storage remains valid, but its original NUMA locality may no longer hold.
+ * Called by ACTIVE solver ranks only, never by the parked original groups. */
+void general3DVelocityModel_check_memory_binding(void) {
+    if (!Soil_memory_mode || Soil_shared_comm == MPI_COMM_NULL) return;
+    char error[256];
+    int node = -1, rank, changed, total;
+    changed = !material_numa_domain(&node, error, sizeof(error)) ||
+              node != Soil_numa_node;
+    materialMpiCheck(MPI_Allreduce(&changed, &total, 1, MPI_INT, MPI_SUM,
+                                   comm_solver), "NUMA binding check");
+    MPI_Comm_rank(comm_solver, &rank);
+    if (rank == 0 && total) {
+        fprintf(stdout, "3D velocity model NUMA locality: %d active rank(s) "
+                "changed/spanned domains after unified handoff. Original "
+                "material copies remain valid; Phase-B locality is not guaranteed.\n",
+                total);
+    }
+}
+
+/* Every sharing group allocates one copy. Physical-node leaders receive the
+ * inter-node broadcasts, then local NUMA leaders receive additional copies.
  * The parser's private root allocation is freed one array at a time, bounding
  * extra root-node storage by the largest single array, not a second model.
  * MPI's traditional count remains int even with 64-bit indexing. */
 template <typename T>
 static void shareMaterialArray(T **values, int64_t count, MPI_Datatype datatype,
-                               int myID, int local_rank, MPI_Comm leaders) {
+                               int myID, int local_rank, MPI_Comm leaders,
+                               MPI_Comm local_leaders) {
     if (count <= 0 || (uint64_t)count > SIZE_MAX / sizeof(T) ||
         (uint64_t)count >
             (uint64_t)std::numeric_limits<MPI_Aint>::max() / sizeof(T) ||
@@ -2135,7 +2174,7 @@ static void shareMaterialArray(T **values, int64_t count, MPI_Datatype datatype,
     MPI_Win *win = &Soil_windows[Soil_window_count++];
     void *base = NULL;
     materialMpiCheck(MPI_Win_allocate_shared(local_rank == 0 ? bytes : 0,
-                       sizeof(T), MPI_INFO_NULL, Soil_node_comm, &base, win),
+                       sizeof(T), MPI_INFO_NULL, Soil_shared_comm, &base, win),
                      "MPI_Win_allocate_shared (check node shared-memory capacity)");
     materialMpiCheck(MPI_Win_set_errhandler(*win, MPI_ERRORS_RETURN),
                      "MPI_Win_set_errhandler");
@@ -2155,6 +2194,12 @@ static void shareMaterialArray(T **values, int64_t count, MPI_Datatype datatype,
     }
     T *shared = (T *)base;
     materialMpiCheck(MPI_Win_lock_all(0, *win), "MPI_Win_lock_all");
+    if (Soil_memory_mode && local_rank == 0) {
+        char error[256];
+        const bool placed = material_numa_touch(shared, (size_t)bytes,
+            Soil_numa_node, &Soil_numa_pages_checked, error, sizeof(error));
+        materialNumaCheck(placed, error);
+    }
     if (myID == 0) {
         memcpy(shared, *values, (size_t)bytes);
         free(*values);
@@ -2164,15 +2209,19 @@ static void shareMaterialArray(T **values, int64_t count, MPI_Datatype datatype,
         for (int64_t offset = 0; offset < count; offset += chunk_size) {
             const int chunk = (int)((count - offset < chunk_size)
                                    ? count - offset : chunk_size);
-            materialMpiCheck(MPI_Bcast(shared + offset, chunk, datatype, 0,
-                                       leaders), "leader MPI_Bcast");
+            if (leaders != MPI_COMM_NULL)
+                materialMpiCheck(MPI_Bcast(shared + offset, chunk, datatype, 0,
+                                           leaders), "node leader MPI_Bcast");
+            if (local_leaders != MPI_COMM_NULL)
+                materialMpiCheck(MPI_Bcast(shared + offset, chunk, datatype, 0,
+                                           local_leaders), "NUMA leader MPI_Bcast");
         }
     }
     /* Publish the leader's stores/receive before any local reader proceeds.
      * Win_sync must be inside a passive-target epoch; the barrier alone is
      * not a memory synchronization. No RMA or collectives occur in lookup. */
     materialMpiCheck(MPI_Win_sync(*win), "publish MPI_Win_sync");
-    materialMpiCheck(MPI_Barrier(Soil_node_comm), "publication MPI_Barrier");
+    materialMpiCheck(MPI_Barrier(Soil_shared_comm), "publication MPI_Barrier");
     materialMpiCheck(MPI_Win_sync(*win), "reader MPI_Win_sync");
     materialMpiCheck(MPI_Win_unlock_all(*win), "MPI_Win_unlock_all");
     *values = shared;
@@ -2265,11 +2314,62 @@ general3DVelocityModel_initparameters (const char *the3DVelModelDir) {
 }
 
 void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
-    if (Soil_node_comm != MPI_COMM_NULL) {
+    if (Soil_shared_comm != MPI_COMM_NULL) {
         fprintf(stderr, "3D shared material model initialized twice\n");
         MPI_Abort(MPI_COMM_WORLD, ERROR);
         exit(1);
     }
+    char numa_error[256];
+    if (Soil_memory_mode) {
+        const bool found = material_numa_domain(&Soil_numa_node, numa_error,
+                                                sizeof(numa_error));
+        materialNumaCheck(found, numa_error);
+    }
+    int local_rank, local_size, node_rank;
+    MPI_Comm node_comm, leaders = MPI_COMM_NULL, local_leaders = MPI_COMM_NULL;
+    materialMpiCheck(MPI_Comm_split_type(comm_solver, MPI_COMM_TYPE_SHARED,
+                       myID, MPI_INFO_NULL, &node_comm), "node split");
+    materialMpiCheck(MPI_Comm_rank(node_comm, &node_rank), "node rank");
+    materialMpiCheck(MPI_Comm_split(node_comm,
+                       Soil_memory_mode ? Soil_numa_node : 0, myID,
+                       &Soil_shared_comm), "material shared-group split");
+    materialMpiCheck(MPI_Comm_set_errhandler(Soil_shared_comm, MPI_ERRORS_RETURN),
+                     "shared MPI_Comm_set_errhandler");
+    materialMpiCheck(MPI_Comm_rank(Soil_shared_comm, &local_rank), "shared rank");
+    materialMpiCheck(MPI_Comm_size(Soil_shared_comm, &local_size), "shared size");
+    /* Lowest solver rank leads its physical node and its own copy group.
+     * Inter-node traffic stays at one copy per node in both modes. */
+    materialMpiCheck(MPI_Comm_split(comm_solver,
+                       node_rank == 0 ? 0 : MPI_UNDEFINED, myID, &leaders),
+                     "node leader split");
+    if (Soil_memory_mode) {
+        materialMpiCheck(MPI_Comm_split(node_comm,
+                           local_rank == 0 ? 0 : MPI_UNDEFINED, myID,
+                           &local_leaders), "local NUMA leader split");
+    }
+    if (leaders != MPI_COMM_NULL)
+        materialMpiCheck(MPI_Comm_set_errhandler(leaders, MPI_ERRORS_RETURN),
+                         "leader MPI_Comm_set_errhandler");
+    if (local_leaders != MPI_COMM_NULL)
+        materialMpiCheck(MPI_Comm_set_errhandler(local_leaders, MPI_ERRORS_RETURN),
+                         "NUMA leader MPI_Comm_set_errhandler");
+    int node_leader = node_rank == 0, copy_leader = local_rank == 0;
+    int nodes, copies, copies_per_node, min_copies, max_copies, min_ranks, max_ranks;
+    materialMpiCheck(MPI_Allreduce(&copy_leader, &copies_per_node, 1, MPI_INT,
+                                   MPI_SUM, node_comm), "copies per node");
+    materialMpiCheck(MPI_Allreduce(&node_leader, &nodes, 1, MPI_INT, MPI_SUM,
+                                   comm_solver), "node count");
+    materialMpiCheck(MPI_Allreduce(&copy_leader, &copies, 1, MPI_INT, MPI_SUM,
+                                   comm_solver), "copy count");
+    materialMpiCheck(MPI_Allreduce(&copies_per_node, &min_copies, 1, MPI_INT,
+                                   MPI_MIN, comm_solver), "minimum copies per node");
+    materialMpiCheck(MPI_Allreduce(&copies_per_node, &max_copies, 1, MPI_INT,
+                                   MPI_MAX, comm_solver), "maximum copies per node");
+    materialMpiCheck(MPI_Allreduce(&local_size, &min_ranks, 1, MPI_INT,
+                                   MPI_MIN, comm_solver), "minimum ranks per copy");
+    materialMpiCheck(MPI_Allreduce(&local_size, &max_ranks, 1, MPI_INT,
+                                   MPI_MAX, comm_solver), "maximum ranks per copy");
+    materialMpiCheck(MPI_Comm_free(&node_comm), "node MPI_Comm_free");
     /* Capturing data from file --- only done by PE0 */
     if (myID == 0) {
         if ( general3DVelocityModel_initparameters(the3DVelModelDir) != 0 ) {
@@ -2299,62 +2399,62 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     Params_soil.minPointZ = double_message[0];
     Params_soil.maxPointZ = double_message[1];
 
-    int local_rank, local_size;
-    MPI_Comm leaders = MPI_COMM_NULL;
-    /* Rank ordering makes solver rank zero the first node leader and root
-     * of leaders, including when the IO pool excludes ranks on some nodes. */
-    materialMpiCheck(MPI_Comm_split_type(comm_solver, MPI_COMM_TYPE_SHARED,
-                       myID, MPI_INFO_NULL, &Soil_node_comm), "node split");
-    materialMpiCheck(MPI_Comm_set_errhandler(Soil_node_comm, MPI_ERRORS_RETURN),
-                     "node MPI_Comm_set_errhandler");
-    materialMpiCheck(MPI_Comm_rank(Soil_node_comm, &local_rank), "node rank");
-    materialMpiCheck(MPI_Comm_size(Soil_node_comm, &local_size), "node size");
-    materialMpiCheck(MPI_Comm_split(comm_solver,
-                       local_rank == 0 ? 0 : MPI_UNDEFINED, myID, &leaders),
-                     "leader split");
-    if (local_rank == 0) {
-        materialMpiCheck(MPI_Comm_set_errhandler(leaders, MPI_ERRORS_RETURN),
-                         "leader MPI_Comm_set_errhandler");
+    /* Scope the Linux thread policy to allocation/distribution. Every rank
+     * in a copy group targets the same domain, including MPI setup touches. */
+    material_numa_policy_t policy;
+    if (Soil_memory_mode) {
+        const bool bound = policy.begin(Soil_numa_node, numa_error, sizeof(numa_error));
+        materialNumaCheck(bound, numa_error);
     }
     shareMaterialArray(&Soil_layer_start, Params_soil.numLayerID, MPI_INT64_T,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_point_x, Params_soil.numPointX, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_point_y, Params_soil.numPointY, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_point_z, Params_soil.numData, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_Vs_data, Params_soil.numData, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_Vp_data, Params_soil.numData, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     shareMaterialArray(&Soil_rho_data, Params_soil.numData, MPI_DOUBLE,
-                       myID, local_rank, leaders);
+                       myID, local_rank, leaders, local_leaders);
     if (Params_soil.hasQualityFactors) {
         shareMaterialArray(&Soil_Qs_data, Params_soil.numData, MPI_DOUBLE,
-                           myID, local_rank, leaders);
+                           myID, local_rank, leaders, local_leaders);
         shareMaterialArray(&Soil_Qp_data, Params_soil.numData, MPI_DOUBLE,
-                           myID, local_rank, leaders);
+                           myID, local_rank, leaders, local_leaders);
     }
-    if (local_rank == 0) {
-        int nodes, min_ranks, max_ranks;
-        materialMpiCheck(MPI_Comm_size(leaders, &nodes), "leader size");
-        materialMpiCheck(MPI_Reduce(&local_size, &min_ranks, 1, MPI_INT,
-                                   MPI_MIN, 0, leaders), "minimum node ranks");
-        materialMpiCheck(MPI_Reduce(&local_size, &max_ranks, 1, MPI_INT,
-                                   MPI_MAX, 0, leaders), "maximum node ranks");
-        if (myID == 0) {
-            const double bytes = sizeof(double) *
-                ((4.0 + 2.0 * Params_soil.hasQualityFactors) * Params_soil.numData
-                 + Params_soil.numPointX + (double)Params_soil.numPointY)
-                + sizeof(int64_t) * (double)Params_soil.numLayerID;
-            fprintf(stdout, "3D velocity model storage: MPI shared memory, "
-                    "%d node group(s), %d..%d solver ranks/group, "
-                    "%.3f GiB input arrays/group; leader-only broadcasts. "
-                    "Surface cache remains rank-local.\n",
-                    nodes, min_ranks, max_ranks, bytes / (1024.0*1024.0*1024.0));
+    if (Soil_memory_mode) {
+        const bool restored = policy.restore(numa_error, sizeof(numa_error));
+        materialNumaCheck(restored, numa_error);
+        if (local_rank == 0) {
+            char host[MPI_MAX_PROCESSOR_NAME];
+            int length;
+            materialMpiCheck(MPI_Get_processor_name(host, &length), "processor name");
+            fprintf(stdout, "3D material NUMA copy: host=%.*s node=%d "
+                    "leader=%d ranks=%d; MPOL_BIND, %d sampled addresses local.\n",
+                    length, host, Soil_numa_node, myID, local_size,
+                    Soil_numa_pages_checked);
         }
+    }
+    if (local_leaders != MPI_COMM_NULL)
+        materialMpiCheck(MPI_Comm_free(&local_leaders), "NUMA leader MPI_Comm_free");
+    if (leaders != MPI_COMM_NULL)
         materialMpiCheck(MPI_Comm_free(&leaders), "leader MPI_Comm_free");
+    if (myID == 0) {
+        const double bytes = sizeof(double) *
+            ((4.0 + 2.0 * Params_soil.hasQualityFactors) * Params_soil.numData
+             + Params_soil.numPointX + (double)Params_soil.numPointY)
+            + sizeof(int64_t) * (double)Params_soil.numLayerID;
+        fprintf(stdout, "3D velocity model storage: MPI shared memory, "
+                "mode=%s, %d node group(s), %d copy group(s), %d..%d copies/node, "
+                "%d..%d solver ranks/copy, %.3f GiB input arrays/copy; "
+                "one inter-node broadcast per chunk. Surface cache remains rank-local.\n",
+                Soil_memory_mode ? "numa" : "node", nodes, copies,
+                min_copies, max_copies, min_ranks, max_ranks,
+                bytes / (1024.0*1024.0*1024.0));
     }
     if (myID == 0) {
         fprintf(stdout, "3D velocity model quality factors: %s\n",
@@ -2367,17 +2467,19 @@ void general3DVelocityModel_init (int32_t myID, const char *the3DVelModelDir) {
     return;
 }
 
-/* Collective over the ORIGINAL node group, after the last material query.
+/* Collective over the ORIGINAL sharing group, after the last material query.
  * The unified run must release its parked ranks before active ranks call
  * this; each parked rank calls it after its wait. IO-only/uninitialized ranks
  * have no window and return immediately. Never free() shared array pointers. */
 void general3DVelocityModel_finalize(void) {
-    if (Soil_node_comm == MPI_COMM_NULL) return;
+    if (Soil_shared_comm == MPI_COMM_NULL) return;
     for (int i = 0; i < Soil_window_count; ++i) {
         materialMpiCheck(MPI_Win_free(&Soil_windows[i]), "MPI_Win_free");
     }
     Soil_window_count = 0;
-    materialMpiCheck(MPI_Comm_free(&Soil_node_comm), "node MPI_Comm_free");
+    Soil_numa_node = -1;
+    Soil_numa_pages_checked = 0;
+    materialMpiCheck(MPI_Comm_free(&Soil_shared_comm), "shared MPI_Comm_free");
     Soil_layer_start = NULL;
     Soil_point_x = Soil_point_y = Soil_point_z = NULL;
     Soil_Vs_data = Soil_Vp_data = Soil_rho_data = NULL;

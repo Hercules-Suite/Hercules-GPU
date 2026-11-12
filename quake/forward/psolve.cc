@@ -1116,6 +1116,7 @@ static struct Param_t {
   double theSeabedHeightToleranceM;
   int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
   int the3DColumnSampling; /* 0=same_elevation (default), 1=same_depth */
+  int the3DMemoryMode; /* 0=node (default), 1=numa */
   double theSeabedWaterVp, theSeabedWaterRho;
   char theTopoDir[256];
   char theStationMediumsFile[256];
@@ -2770,6 +2771,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(&Param.theSeabedHeightToleranceM, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.the3DColumnSampling, 1, MPI_INT, 0, comm_solver);
+  MPI_Bcast(&Param.the3DMemoryMode, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
@@ -3063,6 +3065,8 @@ static void monitor_input_details(FILE* fp, int nodes_per_wavelength) {
                   references[Param.the3DDepthReference]);
     monitor_print("%-35s %s\n", "3D_velocity_model_column_sampling:",
                   Param.the3DColumnSampling == 1 ? "same_depth" : "same_elevation");
+    monitor_print("%-35s %s\n", "3D_velocity_model_memory:",
+                  Param.the3DMemoryMode == 1 ? "numa" : "node");
   }
   if (Param.theSeabedGeometryFile[0] != '\0') {
     monitor_print("%-35s %s\n", "seabed_geometry_file:", Param.theSeabedGeometryFile);
@@ -4580,6 +4584,18 @@ static int32_t parse_parameters(const char* numericalin) {
   else if (strcasecmp(column_sampling, "same_depth") == 0) Param.the3DColumnSampling = 1;
   else solver_abort(__FUNCTION_NAME, NULL,
                    "3D_velocity_model_column_sampling must be same_elevation or same_depth\n");
+  char material_memory[64] = "node";
+  char* material_memory_ptr = material_memory;
+  size_t material_memory_size = sizeof(material_memory);
+  if (hu_config_get_string_opt(fp, "3D_velocity_model_memory",
+                               &material_memory_ptr, &material_memory_size) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Cannot read 3D_velocity_model_memory (node or numa)\n");
+  }
+  if (strcasecmp(material_memory, "node") == 0) Param.the3DMemoryMode = 0;
+  else if (strcasecmp(material_memory, "numa") == 0) Param.the3DMemoryMode = 1;
+  else solver_abort(__FUNCTION_NAME, NULL,
+                   "3D_velocity_model_memory must be node or numa\n");
   const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
   const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
   if (Param.theSeabedGeometryFile[0] != '\0') {
@@ -10682,9 +10698,25 @@ static int mesh_unified_memory_handoff(void) {
   MPI_Comm_rank(local_comm, &local_rank);
   MPI_Comm_size(local_comm, &local_size);
 #ifdef __linux__
-  CPU_ZERO(&node_cpu_mask);
-  have_node_cpu_mask = (sched_getaffinity(0, sizeof(node_cpu_mask),
-                                          &node_cpu_mask) == 0);
+  {
+    /* Phase A may bind each rank to a core/NUMA domain. Phase B divides the
+     * UNION of those allowed CPUs, not each surviving rank's small mask. */
+    cpu_set_t rank_cpu_mask;
+    int rank_cpus[CPU_SETSIZE] = {0}, node_cpus[CPU_SETSIZE] = {0};
+    CPU_ZERO(&rank_cpu_mask);
+    int have_rank_mask = sched_getaffinity(0, sizeof(rank_cpu_mask),
+                                           &rank_cpu_mask) == 0;
+    MPI_Allreduce(&have_rank_mask, &have_node_cpu_mask, 1, MPI_INT, MPI_MIN,
+                  local_comm);
+    if (have_rank_mask) {
+      for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        rank_cpus[cpu] = CPU_ISSET(cpu, &rank_cpu_mask) ? 1 : 0;
+    }
+    MPI_Allreduce(rank_cpus, node_cpus, CPU_SETSIZE, MPI_INT, MPI_MAX, local_comm);
+    CPU_ZERO(&node_cpu_mask);
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+      if (node_cpus[cpu]) CPU_SET(cpu, &node_cpu_mask);
+  }
 #endif
   node_leader = (local_rank == 0) ? 1 : 0;
   MPI_Allreduce(&node_leader, &node_count, 1, MPI_INT, MPI_SUM,
@@ -30669,6 +30701,7 @@ int main(int argc, char** argv) {
     Istanbul_init(Global.myID);
   } else if (Param.threeDVelocityModel == YES && need_material_queries) {
     /* Initialize 3D velocity model */
+    general3DVelocityModel_set_memory_mode(Param.the3DMemoryMode);
     general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
     general3DVelocityModel_set_column_sampling(Param.the3DColumnSampling == 1);
   } else if (((Param.IstanbulVelocityModel == YES) ||
@@ -30851,6 +30884,7 @@ int main(int argc, char** argv) {
       MPI_Finalize();
       return 0;
     }
+    general3DVelocityModel_check_memory_binding();
   }
 
   mesh_partition_completed_solver();
