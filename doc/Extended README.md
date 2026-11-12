@@ -727,8 +727,10 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	node are derived from `PHASE_B_NP / allocated_nodes`; no GPU count is
 	hard-coded. Unified mode requires `BASE_IN`, an explicit Phase-A rank count,
 	and `PHASE_B_OMP_NUM_THREADS` when it cannot be inferred from the allocation.
-	On Linux, the selected ranks divide the node's allowed CPU affinity mask into
-	disjoint blocks before enabling their Phase-B OpenMP threads.
+	On Linux, the selected ranks divide the union of Phase-A CPU masks into
+	disjoint blocks before enabling their Phase-B OpenMP threads. With an active
+	`3D_velocity_model_memory=numa` model, selection and division stay within
+	detected NUMA domains; see [NUMA model storage](#3d-velocity-model-files).
 - `HERCULES_UNIFIED_IDLE_POLL_USEC=100..1000000`
 	Sets how often inactive Phase-A ranks enter MPI to test for their Phase-B
 	completion message. The default is `10000` microseconds. Between tests they
@@ -832,6 +834,18 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 	Phase B uses `PHASE_B_OMP_NUM_THREADS` when set; otherwise it uses
 	`OMP_NUM_THREADS` when set; otherwise it auto-derives a per-rank value
 	for multi-rank-per-node launches.
+- Unified MPI arguments:
+	`UNIFIED_MPI_ARGS="--hetero-nodes --map-by core --bind-to core"` (default)
+	when unset or empty. This starts Phase A with core mapping/binding for
+	both `node` and `numa` material storage. These are Open MPI arguments;
+	[`--hetero-nodes`](https://docs.open-mpi.org/en/v5.0.10/man-openmpi/man1/mpirun.1.html)
+	requests treatment of allocated nodes as having different topologies.
+	A nonempty `UNIFIED_MPI_ARGS` replaces the entire default argument list.
+	For multithreaded Phase A, supply a binding with enough CPUs per rank;
+	NUMA material storage also requires those CPUs to be in one domain.
+	Phase B divides the union of the initial rank CPU masks among active ranks
+	(within each selected domain for NUMA model storage),
+	so Phase-A bindings must collectively cover the CPUs intended for Phase B.
 - Phase B mapping defaults:
 	`PHASE_B_MAP_MODE=auto` is the default and is the conservative recommended setting.
 	For multi-rank-per-node GPU runs it uses node-level Open MPI placement such as
@@ -2190,14 +2204,134 @@ in `quake/forward/psolve.cc`.
 	2,147,483,647. MPI initialization transfers large material arrays in bounded
 	chunks; the count-prefixed text format is unchanged and old files remain valid.
 	Build the updated reader before using models above 2,147,483,647 samples.
-	Every solver rank holds the full model in host memory: approximately
-	`32 * samples + 8 * profiles` bytes for Z, Vs, Vp, density and profile offsets,
-	plus `8 * profiles` bytes for the SQD surface cache when needed, and another
-	`16 * samples` bytes if Qs/Qp are supplied.
-	For example, 3,003 by 6,003 columns with 121 levels require about 65.3 GiB
-	per solver rank with the SQD cache and without Q files, before mesh/solver allocations. Plan the
-	rank count per node accordingly; large-file support does not distribute the
-	material arrays among ranks. Text parsing remains serial on solver rank zero.
+- `3D_velocity_model_memory` is optional and case-insensitive: `node` (default)
+	uses **one shared host-memory copy per node's solver group**, using MPI-3 `MPI_COMM_TYPE_SHARED` and shared windows.
+	Each group stores the complete model; only its leader receives the large
+	broadcasts. Dedicated IO-pool ranks do not participate. This also works
+	with one solver rank per node and uneven group sizes. File formats,
+	interpolation, depth references, and units are unchanged. The option has no
+	effect when the 3-D reader is skipped.
+	Budget `32 * samples + 8 * profiles + 8 * (nx + ny)` bytes per group for
+	Z, Vs, Vp, density, offsets, and axes; Qs/Qp add `16 * samples` bytes per
+	group. The mutable surface/bed cache remains **private per rank**, costing
+	`8 * profiles` bytes per rank when column-relative lookup needs it.
+	For example, 3,003 by 6,003 columns with 121 levels need about **65.14 GiB
+	per node group**, plus **0.134 GiB per rank** for that cache, without Q files
+	and before mesh/solver allocations. With 144 solver ranks per node, the
+	input arrays take 1/144 of their previous aggregate storage; this factor
+	does not apply to caches, mesh data, or GPU allocations.
+	Text parsing remains serial on solver rank zero. Root copies and frees
+	each parsed array in turn, so reserve up to one additional array on its
+	node during initialization (`8 * samples` bytes, about 16.25 GiB in the
+	example). Shared-memory backing capacity must accommodate the model;
+	allocation errors abort with a diagnostic rather than silently reverting
+	to per-rank copies. The startup report gives the group count, rank-count
+	range, and shared input-array size.
+- `3D_velocity_model_memory=numa` selects one copy per **occupied NUMA domain**
+	inside each MPI shared node group. Domains need not match sockets. For 144
+	ranks and two domains, model storage falls from 144 copies to two (72-fold);
+	`node` needs one copy (144-fold). Each complete copy must fit its domain,
+	along with other allocations; the root still needs temporary parsed storage.
+	Both modes send one model between physical-node leaders, then `numa`
+	distributes the extra copies between domain leaders within each node.
+- NUMA mode requires Linux CPU affinity, readable `/sys/devices/system/cpu/`
+	topology and permitted `get_mempolicy`/`set_mempolicy` syscalls; no libnuma
+	library or build flag is required. Every rank's allowed CPU set must lie
+	within one NUMA domain, including CPUs used by its OpenMP threads. The
+	reader does not modify CPU affinity. During allocation/distribution it
+	temporarily applies `MPOL_BIND` for the domain, first-touches every page
+	on the domain leader and checks up to 32 page locations per array. It then
+	restores the previous thread memory policy. Missing topology, spanning or
+	unbound affinity, policy errors or sampled remote pages abort with a
+	diagnostic and no silent fallback. A single-domain node may use its full
+	CPU mask. Startup reports the selected mode, node/copy counts, copies/node,
+	ranks/copy and GiB/copy; each NUMA leader also reports hostname, domain ID,
+	leader rank and sampled-local address count. Samples describe initial
+	placement, not an exhaustive check or protection against later OS migration.
+- For A/B measurements, keep the binary, model, parameters, nodes, ranks, CPU
+	binding and thread count identical, changing only this option. For example:
+
+	```ini
+	3D_velocity_model = yes
+	3D_velocity_model_memory = numa  # compare against node (default)
+	mesh_input_mode = 0              # exercise meshing in both runs
+	```
+
+	For one-thread-per-rank Open MPI Phase A, an example is
+	`PHASE_A_MPI_ARGS="--map-by core --bind-to core --report-bindings"` with
+	`run_phaseA_phaseB.sh`. Multithreaded ranks need enough CPUs within one NUMA
+	domain. Unified launches default to
+	`UNIFIED_MPI_ARGS="--hetero-nodes --map-by core --bind-to core"` for both
+	storage modes; no override is needed for the default one-thread Phase A.
+	Override the complete argument list when a wider binding is needed.
+	The unified handoff uses the union of initial rank CPU masks when assigning
+	Phase-B CPUs. NUMA mode selects survivors and divides CPUs within their
+	original material domains as described below. It retains the original
+	material copies; no relocation is needed. Compare Global Init, Octor Refinetree, total
+	meshing time, actual node memory, mesh counts and timestep limits across
+	repeated runs. Refinement reads the in-memory material arrays rather than
+	rereading the model files. Storage selection alone does not require mesh
+	regeneration for scientific equivalence, but imported meshes skip the
+	refinement work being benchmarked.
+- With an initialized NUMA model, unified handoff selects the lowest available
+	original local ranks in the target GPUs' NUMA domains. GPU IDs are visible
+	CUDA ordinals `0..N-1` for `N` Phase-B ranks per node; CUDA PCI bus IDs and Linux
+	`/sys/bus/pci/devices/.../numa_node` provide their domains, respecting
+	`CUDA_VISIBLE_DEVICES` ordering. Each selected domain's CPU union is divided
+	into disjoint blocks among its survivors. New **dense Phase-B local indices**
+	`0..N-1` follow surviving world-rank order; GPU selection uses the explicit
+	index-to-device assignment, not stale launcher local-rank environment values.
+	For 144 single-core ranks on two 72-core domains, with GPUs 0/1 on the first
+	and GPUs 2/3 on the second, survivors are `0,1,72,73`, assigned Phase-B
+	indices `0,1,2,3` and CPU blocks `0..35`, `36..71`, `72..107`, `108..143`.
+	This is an example of detected topology, not a hard-coded rank/socket rule.
+	Domains without survivors contribute no Phase-B CPUs. Set
+	`PHASE_B_OMP_NUM_THREADS` to fit the reported per-rank CPU share, especially
+	when the launcher inferred it from the whole-node allocation.
+- If target GPU NUMA domains are unavailable, first reserve all known GPU
+	assignments, then balance the remaining GPU counts across domains with rank
+	and CPU capacity (ties use the earliest original rank). Assign the unknown
+	GPU ordinals in contiguous blocks, ordered by each domain's earliest original
+	rank. With four unknown GPUs and two equal domains, GPUs `0,1` use the first
+	domain and GPUs `2,3` the second. Known assignments keep priority and can
+	interrupt these blocks when only some GPU domains are unknown.
+	The log explicitly marks GPU locality **unverified**; material-domain
+	locality is still preserved. Known GPU domains require enough Phase-A ranks
+	and CPUs. Original solver rank 0 must remain among the survivors because it
+	owns monitor/setup state; bind it within a selected GPU domain when using
+	only a subset of visible GPUs. Inconsistent CUDA PCI visibility, changed
+	pre-handoff material affinity, an impossible selection or a failed/restricted
+	CPU binding aborts with a diagnostic. No CPU or GPU IDs are inferred from
+	socket numbering, and NUMA domains may outnumber sockets.
+- Each node reports original local rank, new Phase-B local index, GPU ordinal,
+	material domain, CPU count and whether GPU locality was established from PCI
+	topology. The existing post-handoff affinity check remains; a successful
+	domain-preserving handoff should produce no changed-domain warning.
+	`node` mode and runs without an initialized NUMA model retain first-local-rank
+	selection. Two-phase launches keep their existing placement controls. All
+	original ranks still mesh, and model-copy ownership/cleanup remains with the
+	original sharing groups. NUMA mode can also change survivor placement, so
+	interpret total A/B timings accordingly; no time-stepping speedup is promised.
+- Shared arrays are published with window synchronization before lookups and
+	remain read-only. The original sharing groups retain ownership through unified
+	Phase-A/Phase-B communicator replacement; parked ranks rejoin collective
+	window cleanup after release, before MPI finalization, including mesh-only
+	exits. No communication or synchronization is added to material lookup or
+	time stepping. MPI may already optimize broadcasts hierarchically, so the
+	memory reduction is not a promised network or runtime speedup. Measure
+	initialization time and actual node memory on the target system; NUMA page
+	placement can affect lookup throughput. Summing process RSS can count the
+	same shared pages repeatedly.
+- This storage change feeds the existing elastic, viscoelastic, acoustic,
+	poroelastic, and nonlinear elastoplastic/plastic and hysteretic material
+	paths, including acoustic–elastic, poroelastic–acoustic, and
+	poroelastic–elastic coupling where already supported. It changes neither
+	phase classification, boundary/interface operators, initialization physics,
+	time integration, CUDA-aware field exchanges nor station/output quantities;
+	existing formulation restrictions still apply. Bitwise array and lookup
+	comparisons and MPI lifecycle checks assess storage correctness; full
+	CUDA/MPI standalone and coupled propagation, mesh/timestep equivalence,
+	and multi-node performance remain target-system validation requirements.
 - `index.in` stores the zero-based start of each vertical profile in the
 	concatenated arrays; it does not contain a final end offset. Profile `p`
 	uses `[index[p], index[p+1])`, while the final profile uses

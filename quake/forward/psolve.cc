@@ -90,6 +90,7 @@ extern "C" {
 
 #include "topography.h"
 #include "drm_planewaves.h"
+#include "unified_numa.h"
 #include "io_drm.h"
 #include "drm_output_quality.h"
 #include "flat_output_mpi.h"
@@ -148,6 +149,10 @@ static int g_unifiedMeshHandoffActive = 1;
 static int g_unifiedReleaseRootWorld = -1;
 static int g_unifiedInactiveCount = 0;
 static int* g_unifiedInactiveWorldRanks = NULL;
+/* Dense index among surviving node-local ranks; launcher IDs remain Phase A. */
+static int g_unifiedPhaseBLocalRank = -1;
+static int g_unifiedPhaseBGpuDevice = -1;
+static char g_unifiedPhaseBGpuBusId[32] = {0};
 
 static int32_t g_topoForceMode = -1;
 static int32_t g_topoForceModeReported = 0;
@@ -1116,6 +1121,7 @@ static struct Param_t {
   double theSeabedHeightToleranceM;
   int the3DDepthReference; /* 0=legacy, 1=model_z, 2=surface, 3=seabed */
   int the3DColumnSampling; /* 0=same_elevation (default), 1=same_depth */
+  int the3DMemoryMode; /* 0=node (default), 1=numa */
   double theSeabedWaterVp, theSeabedWaterRho;
   char theTopoDir[256];
   char theStationMediumsFile[256];
@@ -2770,6 +2776,7 @@ static void read_parameters(int argc, char** argv) {
   MPI_Bcast(&Param.theSeabedHeightToleranceM, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.the3DDepthReference, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.the3DColumnSampling, 1, MPI_INT, 0, comm_solver);
+  MPI_Bcast(&Param.the3DMemoryMode, 1, MPI_INT, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterVp, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(&Param.theSeabedWaterRho, 1, MPI_DOUBLE, 0, comm_solver);
   MPI_Bcast(Param.theTopoDir, 256, MPI_CHAR, 0, comm_solver);
@@ -3063,6 +3070,8 @@ static void monitor_input_details(FILE* fp, int nodes_per_wavelength) {
                   references[Param.the3DDepthReference]);
     monitor_print("%-35s %s\n", "3D_velocity_model_column_sampling:",
                   Param.the3DColumnSampling == 1 ? "same_depth" : "same_elevation");
+    monitor_print("%-35s %s\n", "3D_velocity_model_memory:",
+                  Param.the3DMemoryMode == 1 ? "numa" : "node");
   }
   if (Param.theSeabedGeometryFile[0] != '\0') {
     monitor_print("%-35s %s\n", "seabed_geometry_file:", Param.theSeabedGeometryFile);
@@ -4580,6 +4589,18 @@ static int32_t parse_parameters(const char* numericalin) {
   else if (strcasecmp(column_sampling, "same_depth") == 0) Param.the3DColumnSampling = 1;
   else solver_abort(__FUNCTION_NAME, NULL,
                    "3D_velocity_model_column_sampling must be same_elevation or same_depth\n");
+  char material_memory[64] = "node";
+  char* material_memory_ptr = material_memory;
+  size_t material_memory_size = sizeof(material_memory);
+  if (hu_config_get_string_opt(fp, "3D_velocity_model_memory",
+                               &material_memory_ptr, &material_memory_size) < 0) {
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Cannot read 3D_velocity_model_memory (node or numa)\n");
+  }
+  if (strcasecmp(material_memory, "node") == 0) Param.the3DMemoryMode = 0;
+  else if (strcasecmp(material_memory, "numa") == 0) Param.the3DMemoryMode = 1;
+  else solver_abort(__FUNCTION_NAME, NULL,
+                   "3D_velocity_model_memory must be node or numa\n");
   const int has_water_vp = hu_config_get_double_opt(fp, "seabed_water_vp_m_s", &Param.theSeabedWaterVp) == 1;
   const int has_water_rho = hu_config_get_double_opt(fp, "seabed_water_density_kg_m3", &Param.theSeabedWaterRho) == 1;
   if (Param.theSeabedGeometryFile[0] != '\0') {
@@ -10617,11 +10638,103 @@ static void mesh_partition_completed_solver(void) {
   Timer_Stop("Completed Solver Partition");
 }
 
-/* Redistribute a CPU-rank mesh to a smaller architecture-neutral set of GPU
- * ranks without terminating the MPI job.  The selected ranks are the first
- * HERCULES_UNIFIED_PHASE_B_RANKS / node local ranks on each node, so the
- * existing local-rank CUDA device mapping remains valid on systems with any
- * number of GPUs per node. */
+/* All original ranks participate. Return a dense Phase-B slot or -1 for a
+ * parked rank. CPU masks are built from the original, domain-local affinities.
+ * GPU ordinals are the visible CUDA ordinals, independent of MPI world IDs. */
+static int mesh_unified_numa_selection(MPI_Comm local_comm, int gpu_count,
+                                      int material_node,
+                                      std::vector<int>* phase_b_cpus) {
+  int rank, size, current_node;
+  MPI_Comm_rank(local_comm, &rank);
+  MPI_Comm_size(local_comm, &size);
+  char error[512];
+  std::vector<int> cpus;
+  if (!material_numa_domain(&current_node, error, sizeof(error), &cpus))
+    solver_abort(__FUNCTION_NAME, NULL, "NUMA handoff: %s\n", error);
+  if (current_node != material_node)
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "NUMA handoff: CPU domain changed from material domain %d to %d before selection\n",
+                 material_node, current_node);
+  std::vector<int> nodes(size), counts(size), offsets(size);
+  int count = (int)cpus.size();
+  MPI_Gather(&current_node, 1, MPI_INT, nodes.data(), 1, MPI_INT, 0, local_comm);
+  MPI_Gather(&count, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, local_comm);
+  std::vector<int> flat;
+  if (rank == 0) {
+    int64_t total = 0;
+    for (int r = 0; r < size; ++r) {
+      offsets[r] = (int)total;
+      total += counts[r];
+      if (total > INT_MAX)
+        solver_abort(__FUNCTION_NAME, NULL, "NUMA affinity gather exceeds MPI count range\n");
+    }
+    flat.resize((size_t)total);
+  }
+  MPI_Gatherv(cpus.data(), count, MPI_INT, flat.data(), counts.data(),
+                offsets.data(), MPI_INT, 0, local_comm);
+  std::vector<int> slots(size, -1), devices(size, -1);
+  std::vector<char> bus_ids((size_t)gpu_count * sizeof(g_unifiedPhaseBGpuBusId), 0);
+  if (rank == 0) {
+    std::vector<std::vector<int> > rank_cpus(size);
+    for (int r = 0; r < size; ++r)
+      rank_cpus[r].assign(flat.begin() + offsets[r],
+                         flat.begin() + offsets[r] + counts[r]);
+    std::vector<int> gpu_nodes(gpu_count, -1);
+    for (int gpu = 0; gpu < gpu_count; ++gpu) {
+      char *bus = &bus_ids[(size_t)gpu * sizeof(g_unifiedPhaseBGpuBusId)];
+      if (cudaDeviceGetPCIBusId(bus, sizeof(g_unifiedPhaseBGpuBusId), gpu) == cudaSuccess)
+        gpu_nodes[gpu] = unified_gpu_numa_node(bus);
+      else
+        bus[0] = '\0';
+    }
+    unified_numa_plan_t plan;
+    if (!unified_numa_plan(nodes, rank_cpus, gpu_nodes, &plan, error, sizeof(error)))
+      solver_abort(__FUNCTION_NAME, NULL, "NUMA handoff: %s\n", error);
+    flat.clear();
+    std::fill(counts.begin(), counts.end(), 0);
+    std::fill(offsets.begin(), offsets.end(), 0);
+    char host[MPI_MAX_PROCESSOR_NAME];
+    int length;
+    MPI_Get_processor_name(host, &length);
+    for (int slot = 0; slot < gpu_count; ++slot) {
+      const int original = plan.ranks[slot];
+      devices[original] = slot;
+      offsets[original] = (int)flat.size();
+      counts[original] = (int)plan.cpus[slot].size();
+      flat.insert(flat.end(), plan.cpus[slot].begin(), plan.cpus[slot].end());
+    }
+    int next_slot = 0;
+    for (int original = 0; original < size; ++original) {
+      const int gpu = devices[original];
+      if (gpu < 0) continue;
+      slots[original] = next_slot++;
+      fprintf(stdout, "Unified NUMA handoff: host=%.*s original-local-rank=%d "
+              "phase-B-local-rank=%d GPU=%d material-node=%d CPUs=%d; %s.\n",
+              length, host, original, slots[original], gpu, plan.nodes[gpu],
+              counts[original], gpu_nodes[gpu] >= 0
+                  ? "GPU NUMA locality verified from PCI topology"
+                  : "GPU NUMA topology unavailable; contiguous domain blocks, GPU locality unverified");
+    }
+  }
+  int slot = -1;
+  MPI_Scatter(slots.data(), 1, MPI_INT, &slot, 1, MPI_INT, 0, local_comm);
+  MPI_Scatter(devices.data(), 1, MPI_INT, &g_unifiedPhaseBGpuDevice, 1, MPI_INT,
+                 0, local_comm);
+  MPI_Scatter(counts.data(), 1, MPI_INT, &count, 1, MPI_INT, 0, local_comm);
+  phase_b_cpus->resize(count);
+  MPI_Scatterv(flat.data(), counts.data(), offsets.data(), MPI_INT,
+                 phase_b_cpus->data(), count, MPI_INT, 0, local_comm);
+  MPI_Bcast(bus_ids.data(), (int)bus_ids.size(), MPI_CHAR, 0, local_comm);
+  if (slot >= 0)
+    memcpy(g_unifiedPhaseBGpuBusId,
+           &bus_ids[(size_t)g_unifiedPhaseBGpuDevice * sizeof(g_unifiedPhaseBGpuBusId)],
+           sizeof(g_unifiedPhaseBGpuBusId));
+  return slot;
+}
+
+/* Redistribute a CPU-rank mesh without terminating the MPI job. NUMA model
+ * storage selects survivors in the domains of the target GPUs. Other storage
+ * modes retain the first local ranks. Both assign dense Phase-B GPU indices. */
 static int mesh_unified_memory_handoff(void) {
   const char* target_env = getenv("HERCULES_UNIFIED_PHASE_B_RANKS");
   const char* omp_env = getenv("HERCULES_UNIFIED_PHASE_B_OMP_THREADS");
@@ -10647,6 +10760,10 @@ static int mesh_unified_memory_handoff(void) {
   int32_t i;
   char* target_end = NULL;
   long target_requested;
+  const int material_node = general3DVelocityModel_numa_domain();
+  const bool numa_handoff = material_node >= 0;
+  int phase_b_local_rank = -1;
+  std::vector<int> phase_b_cpus;
 #ifdef __linux__
   cpu_set_t node_cpu_mask;
   int have_node_cpu_mask = 0;
@@ -10682,9 +10799,25 @@ static int mesh_unified_memory_handoff(void) {
   MPI_Comm_rank(local_comm, &local_rank);
   MPI_Comm_size(local_comm, &local_size);
 #ifdef __linux__
-  CPU_ZERO(&node_cpu_mask);
-  have_node_cpu_mask = (sched_getaffinity(0, sizeof(node_cpu_mask),
-                                          &node_cpu_mask) == 0);
+  {
+    /* Phase A may bind each rank to a core/NUMA domain. Phase B divides the
+     * UNION of those allowed CPUs, not each surviving rank's small mask. */
+    cpu_set_t rank_cpu_mask;
+    int rank_cpus[CPU_SETSIZE] = {0}, node_cpus[CPU_SETSIZE] = {0};
+    CPU_ZERO(&rank_cpu_mask);
+    int have_rank_mask = sched_getaffinity(0, sizeof(rank_cpu_mask),
+                                           &rank_cpu_mask) == 0;
+    MPI_Allreduce(&have_rank_mask, &have_node_cpu_mask, 1, MPI_INT, MPI_MIN,
+                  local_comm);
+    if (have_rank_mask) {
+      for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        rank_cpus[cpu] = CPU_ISSET(cpu, &rank_cpu_mask) ? 1 : 0;
+    }
+    MPI_Allreduce(rank_cpus, node_cpus, CPU_SETSIZE, MPI_INT, MPI_MAX, local_comm);
+    CPU_ZERO(&node_cpu_mask);
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+      if (node_cpus[cpu]) CPU_SET(cpu, &node_cpu_mask);
+  }
 #endif
   node_leader = (local_rank == 0) ? 1 : 0;
   MPI_Allreduce(&node_leader, &node_count, 1, MPI_INT, MPI_SUM,
@@ -10714,7 +10847,17 @@ static int mesh_unified_memory_handoff(void) {
     MPI_Abort(MPI_COMM_WORLD, ERROR);
     exit(1);
   }
-  active = (local_rank < target_per_node);
+  phase_b_local_rank = numa_handoff
+      ? mesh_unified_numa_selection(local_comm, target_per_node, material_node,
+                                    &phase_b_cpus)
+      : (local_rank < target_per_node ? local_rank : -1);
+  active = phase_b_local_rank >= 0;
+  if (active) g_unifiedPhaseBLocalRank = phase_b_local_rank;
+  /* Keep the original solver root and its monitor/setup state. Dense local
+   * indices follow survivor world-rank order; GPU ordinals may differ. */
+  if (world_rank == 0 && !active)
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "NUMA handoff must retain solver rank 0; bind it within a domain of the selected visible GPUs\n");
   MPI_Comm_split(MPI_COMM_WORLD, active ? 0 : MPI_UNDEFINED, world_rank,
                  &target_comm);
   if (active) {
@@ -10732,8 +10875,12 @@ static int mesh_unified_memory_handoff(void) {
     Timer_Reduce("Unified Handoff Setup",
                  (TimerKind)(MAX | MIN | AVERAGE), MPI_COMM_WORLD);
 #ifdef __linux__
-    if (have_node_cpu_mask) {
-      mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
+    if (numa_handoff) {
+      char error[256];
+      if (!unified_numa_bind(phase_b_cpus, error, sizeof(error)))
+        solver_abort(__FUNCTION_NAME, NULL, "NUMA handoff: %s\n", error);
+    } else if (have_node_cpu_mask) {
+      mesh_unified_bind_phase_b_cpus(&node_cpu_mask, phase_b_local_rank,
                                      target_per_node, world_rank);
     }
 #endif
@@ -11067,8 +11214,12 @@ static int mesh_unified_memory_handoff(void) {
   mesh_sanitize_and_report_acoustic("In-memory handed-off mesh");
   mesh_rebuild_acoustic_interfaces();
 #ifdef __linux__
-  if (have_node_cpu_mask) {
-    mesh_unified_bind_phase_b_cpus(&node_cpu_mask, local_rank,
+  if (numa_handoff) {
+    char error[256];
+    if (!unified_numa_bind(phase_b_cpus, error, sizeof(error)))
+      solver_abort(__FUNCTION_NAME, NULL, "NUMA handoff: %s\n", error);
+  } else if (have_node_cpu_mask) {
+    mesh_unified_bind_phase_b_cpus(&node_cpu_mask, phase_b_local_rank,
                                    target_per_node, world_rank);
   }
 #endif
@@ -11852,7 +12003,9 @@ static void gpu_init(int32_t myID) {
   if (rankEnv == NULL) {
     rankEnv = getenv("MPI_LOCALRANKID");
   }
-  if (rankEnv != NULL) {
+  if (g_unifiedPhaseBLocalRank >= 0) {
+    localRank = g_unifiedPhaseBLocalRank;
+  } else if (rankEnv != NULL) {
     localRank = atoi(rankEnv);
   }
 
@@ -11873,7 +12026,20 @@ static void gpu_init(int32_t myID) {
     exit(1);
   }
 
-  myDevID = (localRank % devCount);
+  myDevID = g_unifiedPhaseBGpuDevice >= 0
+      ? g_unifiedPhaseBGpuDevice : (localRank % devCount);
+  if (myDevID >= devCount)
+    solver_abort(__FUNCTION_NAME, NULL,
+                 "Unified GPU %d is not visible on this survivor (%d devices)\n",
+                 myDevID, devCount);
+  if (g_unifiedPhaseBGpuBusId[0] != '\0') {
+    char bus[sizeof(g_unifiedPhaseBGpuBusId)];
+    if (cudaDeviceGetPCIBusId(bus, sizeof(bus), myDevID) != cudaSuccess ||
+        strcasecmp(bus, g_unifiedPhaseBGpuBusId) != 0)
+      solver_abort(__FUNCTION_NAME, NULL,
+                   "Unified GPU %d visibility differs between node leader and survivor; use consistent CUDA_VISIBLE_DEVICES on the node\n",
+                   myDevID);
+  }
   if (cudaSetDevice(myDevID) != cudaSuccess) {
     fprintf(stderr, "Thread %d: Failed to set device\n", myID);
     MPI_Abort(MPI_COMM_WORLD, ERROR);
@@ -30669,6 +30835,7 @@ int main(int argc, char** argv) {
     Istanbul_init(Global.myID);
   } else if (Param.threeDVelocityModel == YES && need_material_queries) {
     /* Initialize 3D velocity model */
+    general3DVelocityModel_set_memory_mode(Param.the3DMemoryMode);
     general3DVelocityModel_init(Global.myID, Param.the3DVelModelDir);
     general3DVelocityModel_set_column_sampling(Param.the3DColumnSampling == 1);
   } else if (((Param.IstanbulVelocityModel == YES) ||
@@ -30847,9 +31014,11 @@ int main(int argc, char** argv) {
     }
     if (!mesh_unified_memory_handoff()) {
       mesh_unified_inactive_wait();
+      general3DVelocityModel_finalize();
       MPI_Finalize();
       return 0;
     }
+    general3DVelocityModel_check_memory_binding();
   }
 
   mesh_partition_completed_solver();
@@ -30979,6 +31148,8 @@ int main(int argc, char** argv) {
       Global.myMesh = NULL;
     }
 
+    mesh_unified_release_inactive();
+    general3DVelocityModel_finalize();
     MPI_Finalize();
     return 0;
   }
@@ -31313,7 +31484,7 @@ int main(int argc, char** argv) {
 IO_PES_REJOIN:
 
   mesh_unified_release_inactive();
-
+  general3DVelocityModel_finalize();
   MPI_Finalize();
 
   return 0;

@@ -641,7 +641,7 @@ if [[ "${HERCULES_PHASE_MODE}" == "unified" ]]; then
     echo "ERROR: set PHASE_B_OMP_NUM_THREADS to a positive integer for unified mode" >&2
     exit 1
   fi
-  UNIFIED_MPI_ARGS_VALUE="${UNIFIED_MPI_ARGS:---bind-to none}"
+  UNIFIED_MPI_ARGS_VALUE="${UNIFIED_MPI_ARGS:---hetero-nodes --map-by core --bind-to core}"
   # shellcheck disable=SC2206
   U_ARGS=(${UNIFIED_MPI_ARGS_VALUE})
   U_ENV_VARS=(

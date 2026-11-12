@@ -455,8 +455,10 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 257);
-  assert.equal(documented.length, 257, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 258);
+  assert.equal(documented.length, 258, "parameter definitions must not be duplicated");
+  assert.ok(documented.includes("3D_velocity_model_memory"));
+  assert.match(reference, /p\("3D_velocity_model_memory", "Optional", "String \(case-insensitive\)", "Default: node; node \| numa"/);
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
@@ -741,6 +743,11 @@ test("documents the phase launcher contract", async () => {
   assert.match(html, /file, not a directory/);
   assert.match(html, /Hercules_GPU/);
   assert.doesNotMatch(html, /GPU_new/);
+  assert.match(html, /UNIFIED_MPI_ARGS/);
+  assert.match(html, /--hetero-nodes --map-by core --bind-to core/);
+  assert.match(html, /when unset or empty/);
+  assert.match(html, /A nonempty override replaces the complete list/);
+  assert.match(html, /Phase-A bindings must collectively cover the CPUs intended for Phase B/);
 });
 
 test("lists GSL as a required build dependency", async () => {
@@ -2662,13 +2669,48 @@ test("documents independent domain/material rotations and output frame conversio
 });
 
 
-test("documents large 3-D material counts and per-rank memory", async () => {
+test("documents large 3-D material counts and shared model memory", async () => {
   const response = await render("/docs/velocity-models");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /sample counts and profile start offsets are signed 64-bit/);
-  assert.match(html, /replicated in host memory on every solver rank/);
-  assert.match(html, /65\.3 GiB per solver rank/);
+  assert.match(html, /one shared host-memory copy per node/);
+  assert.match(html, /65\.14 GiB per node group plus 0\.134 GiB per rank/);
+  assert.match(html, /surface\/bed cache stays private per rank/);
+  assert.match(html, /16\.25 GiB/);
+  assert.match(html, /parked ranks rejoin collective cleanup after release/);
+  assert.match(html, /multi-node performance still require target-system validation/);
+  assert.doesNotMatch(html, /replicated in host memory on every solver rank/);
+});
+
+
+test("documents and wires optional NUMA material storage", async () => {
+  const html = await (await render("/docs/velocity-models")).text();
+  assert.match(html, /3D_velocity_model_memory=numa/);
+  const markup = await (await renderMarkup("/docs/velocity-models")).text();
+  assert.ok(markup.includes(`href="${basePath}/docs/parameters-material-mesh#parameter-3D_velocity_model_memory"`));
+  for (const phrase of ["one copy per occupied NUMA domain", "72-fold", "MPOL_BIND",
+    "restores the previous thread memory policy", "up to 32 page locations per array",
+    "abort without falling back", "change only", "union of initial rank CPU masks",
+    "does not relocate those copies", "no libnuma build dependency",
+    "--hetero-nodes --map-by core --bind-to core",
+    "no override is needed for the default one-thread Phase A",
+    "dense Phase-B local indices", "0,1,72,73", "GPU locality unverified",
+    "unknown GPU ordinals in contiguous blocks", "Known GPU assignments keep priority",
+    "Original solver rank 0 must survive", "divided within each selected material domain"])
+    assert.ok(html.includes(phrase), phrase);
+  const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
+  if (!existsSync(source)) return;
+  const solver = readFileSync(source, "utf8");
+  assert.match(solver, /char material_memory\[64\] = "node"/);
+  assert.match(solver, /hu_config_get_string_opt\(fp, "3D_velocity_model_memory"/);
+  assert.match(solver, /3D_velocity_model_memory must be node or numa/);
+  assert.match(solver, /MPI_Bcast\(&Param\.the3DMemoryMode, 1, MPI_INT, 0, comm_solver\)/);
+  assert.match(solver, /general3DVelocityModel_set_memory_mode\(Param\.the3DMemoryMode\)/);
+  assert.match(solver, /general3DVelocityModel_check_memory_binding\(\)/);
+  assert.match(solver, /mesh_unified_numa_selection\(local_comm/);
+  assert.match(solver, /localRank = g_unifiedPhaseBLocalRank/);
+  assert.match(solver, /myDevID = g_unifiedPhaseBGpuDevice >= 0/);
 });
 
 

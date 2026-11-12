@@ -126,6 +126,8 @@ build_info.o: build_info.cc build_info.h build_revision.h FORCE_BUILD_REVISION
 # These translation units share UTMZone_t and the horizontal frame helpers.
 psolve.o geometrics.o quakesource.o io_planes.o io_drm.o topography.o \
 drm_planewaves.o nonlinear.o: geometrics.h horizontal_frame.h
+drm_planewaves.o: material_numa.h
+psolve.o: unified_numa.h material_numa.h
 
 TARGET = qmesh psolve single_query q4showmeta
 
