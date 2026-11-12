@@ -166,7 +166,10 @@ overrides require PROJ. Rotated PROJ domains require a profile
 background and disable the legacy Istanbul reader. Rebuild meshes/sources
 when either frame changes; PROJ output directories include `coordinate_frame.txt`.
 The 3-D material reader supports 64-bit sample counts/profile offsets with
-chunked MPI initialization; full material arrays remain replicated per rank.
+chunked MPI initialization. Input arrays automatically use one shared host-memory
+copy per node's solver group (MPI-3 shared windows); only node leaders receive
+the large broadcasts. The mutable surface/bed cache remains private per rank.
+Root parses once and temporarily needs up to one extra array during transfer.
 See [file layout and memory sizing](Extended%20README.md#3d-velocity-model-files).
 Without explicit seabed geometry, `type_of_etree=sqd` uses `z.in` depths below each column's
 surface and samples at equal physical elevation using the actual query-point

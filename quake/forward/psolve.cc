@@ -30847,6 +30847,7 @@ int main(int argc, char** argv) {
     }
     if (!mesh_unified_memory_handoff()) {
       mesh_unified_inactive_wait();
+      general3DVelocityModel_finalize();
       MPI_Finalize();
       return 0;
     }
@@ -30979,6 +30980,8 @@ int main(int argc, char** argv) {
       Global.myMesh = NULL;
     }
 
+    mesh_unified_release_inactive();
+    general3DVelocityModel_finalize();
     MPI_Finalize();
     return 0;
   }
@@ -31313,7 +31316,7 @@ int main(int argc, char** argv) {
 IO_PES_REJOIN:
 
   mesh_unified_release_inactive();
-
+  general3DVelocityModel_finalize();
   MPI_Finalize();
 
   return 0;

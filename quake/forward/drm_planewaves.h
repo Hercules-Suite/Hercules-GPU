@@ -65,5 +65,8 @@ void general3DVelocityModel_set_seabed(int reference, double vp, double rho);
 void general3DVelocityModel_set_rotation(double relative_azimuth_deg);
 void general3DVelocityModel_set_column_sampling(int same_depth);
 void general3DVelocityModel_init(int32_t myID, const char *the3DVelModelDir);
+/* All original model participants call after their last query, before
+ * MPI_Finalize; release unified inactive ranks first. No-op if uninitialized. */
+void general3DVelocityModel_finalize(void);
 
 #endif /* DRM_PLANEWAVES_H_ */

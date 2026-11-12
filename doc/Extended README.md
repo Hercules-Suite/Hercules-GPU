@@ -2190,14 +2190,48 @@ in `quake/forward/psolve.cc`.
 	2,147,483,647. MPI initialization transfers large material arrays in bounded
 	chunks; the count-prefixed text format is unchanged and old files remain valid.
 	Build the updated reader before using models above 2,147,483,647 samples.
-	Every solver rank holds the full model in host memory: approximately
-	`32 * samples + 8 * profiles` bytes for Z, Vs, Vp, density and profile offsets,
-	plus `8 * profiles` bytes for the SQD surface cache when needed, and another
-	`16 * samples` bytes if Qs/Qp are supplied.
-	For example, 3,003 by 6,003 columns with 121 levels require about 65.3 GiB
-	per solver rank with the SQD cache and without Q files, before mesh/solver allocations. Plan the
-	rank count per node accordingly; large-file support does not distribute the
-	material arrays among ranks. Text parsing remains serial on solver rank zero.
+- Input arrays automatically use **one shared host-memory copy per node's
+	solver group**, using MPI-3 `MPI_COMM_TYPE_SHARED` and shared windows.
+	Each group stores the complete model; only its leader receives the large
+	broadcasts. Dedicated IO-pool ranks do not participate. This also works
+	with one solver rank per node and uneven group sizes. No new input control
+	or change to file formats, interpolation, depth references, or units is needed.
+	Budget `32 * samples + 8 * profiles + 8 * (nx + ny)` bytes per group for
+	Z, Vs, Vp, density, offsets, and axes; Qs/Qp add `16 * samples` bytes per
+	group. The mutable surface/bed cache remains **private per rank**, costing
+	`8 * profiles` bytes per rank when column-relative lookup needs it.
+	For example, 3,003 by 6,003 columns with 121 levels need about **65.14 GiB
+	per node group**, plus **0.134 GiB per rank** for that cache, without Q files
+	and before mesh/solver allocations. With 144 solver ranks per node, the
+	input arrays take 1/144 of their previous aggregate storage; this factor
+	does not apply to caches, mesh data, or GPU allocations.
+	Text parsing remains serial on solver rank zero. Root copies and frees
+	each parsed array in turn, so reserve up to one additional array on its
+	node during initialization (`8 * samples` bytes, about 16.25 GiB in the
+	example). Shared-memory backing capacity must accommodate the model;
+	allocation errors abort with a diagnostic rather than silently reverting
+	to per-rank copies. The startup report gives the group count, rank-count
+	range, and shared input-array size.
+- Shared arrays are published with window synchronization before lookups and
+	remain read-only. The original node groups retain ownership through unified
+	Phase-A/Phase-B communicator replacement; parked ranks rejoin collective
+	window cleanup after release, before MPI finalization, including mesh-only
+	exits. No communication or synchronization is added to material lookup or
+	time stepping. MPI may already optimize broadcasts hierarchically, so the
+	memory reduction is not a promised network or runtime speedup. Measure
+	initialization time and actual node memory on the target system; NUMA page
+	placement can affect lookup throughput. Summing process RSS can count the
+	same shared pages repeatedly.
+- This storage change feeds the existing elastic, viscoelastic, acoustic,
+	poroelastic, and nonlinear elastoplastic/plastic and hysteretic material
+	paths, including acoustic–elastic, poroelastic–acoustic, and
+	poroelastic–elastic coupling where already supported. It changes neither
+	phase classification, boundary/interface operators, initialization physics,
+	time integration, CUDA-aware field exchanges nor station/output quantities;
+	existing formulation restrictions still apply. Bitwise array and lookup
+	comparisons and MPI lifecycle checks assess storage correctness; full
+	CUDA/MPI standalone and coupled propagation, mesh/timestep equivalence,
+	and multi-node performance remain target-system validation requirements.
 - `index.in` stores the zero-based start of each vertical profile in the
 	concatenated arrays; it does not contain a final end offset. Profile `p`
 	uses `[index[p], index[p+1])`, while the final profile uses

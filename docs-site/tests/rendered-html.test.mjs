@@ -2662,13 +2662,18 @@ test("documents independent domain/material rotations and output frame conversio
 });
 
 
-test("documents large 3-D material counts and per-rank memory", async () => {
+test("documents large 3-D material counts and shared model memory", async () => {
   const response = await render("/docs/velocity-models");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /sample counts and profile start offsets are signed 64-bit/);
-  assert.match(html, /replicated in host memory on every solver rank/);
-  assert.match(html, /65\.3 GiB per solver rank/);
+  assert.match(html, /one shared host-memory copy per node/);
+  assert.match(html, /65\.14 GiB per node group plus 0\.134 GiB per rank/);
+  assert.match(html, /surface\/bed cache stays private per rank/);
+  assert.match(html, /16\.25 GiB/);
+  assert.match(html, /parked ranks rejoin collective cleanup after release/);
+  assert.match(html, /multi-node performance still require target-system validation/);
+  assert.doesNotMatch(html, /replicated in host memory on every solver rank/);
 });
 
 
