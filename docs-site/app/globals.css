@@ -466,6 +466,7 @@ code { font-family: var(--font-mono); }
 }
 .overviewHeroMark img { display: block; width: min(230px, 100%); height: auto; }
 .overviewHeroMark figcaption { margin-top: 10px; color: var(--ink-soft); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.overviewCitation a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: .18em; }
 .overviewSummary { max-width: 760px; margin-top: 22px; padding: 17px 20px; border-left: 3px solid var(--line-strong); background: var(--surface-muted); }
 .overviewSummary p { margin: 0; color: var(--ink); font-size: 14px; }
 .overviewSummary code { color: var(--accent-strong); font-size: .95em; }

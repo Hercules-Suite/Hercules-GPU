@@ -14,6 +14,15 @@ studies.
 - [Input and output utilities](script/README.md) — model conversion, topography preparation, validation, output readers, and plane animations
 - [`benchmark_inputs/`](benchmark_inputs/) — reproducible input cases and model-specific examples
 
+## Citing Hercules GPU
+
+If you use Hercules GPU in your research, please cite this published workshop paper.
+
+Wenyang Zhang and Yinzhi Wang (2026). [Modernizing Hercules for GPU-Accelerated
+Earthquake Ground Motion Simulation on NVIDIA GPUs](https://doi.ieeecomputersociety.org/10.1109/SCW72768.2026.00233).
+*SC26 Workshops*, High Performance Computing for Environmental and Earth
+Sciences (HPC4EES). DOI `10.1109/SCW72768.2026.00233`.
+
 ## Capabilities
 
 - Adaptive octree mesh generation and partitioning

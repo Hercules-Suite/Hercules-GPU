@@ -38,6 +38,20 @@ export default function DocsOverview() {
             <figcaption>Adaptive octree finite elements</figcaption>
           </figure>
         </section>
+        <section className="docSection overviewCitation" aria-labelledby="cite-hercules-gpu">
+          <h2 id="cite-hercules-gpu">Citing Hercules GPU</h2>
+          <p>If you use Hercules GPU in your research, please cite this published workshop paper.</p>
+          <p>
+            Wenyang Zhang and Yinzhi Wang (2026).{" "}
+            <cite>
+              <a href="https://doi.ieeecomputersociety.org/10.1109/SCW72768.2026.00233">
+                Modernizing Hercules for GPU-Accelerated Earthquake Ground Motion Simulation on NVIDIA GPUs
+              </a>
+            </cite>.{" "}
+            <em>SC26 Workshops</em>, High Performance Computing for Environmental and Earth
+            Sciences (HPC4EES). DOI 10.1109/SCW72768.2026.00233.
+          </p>
+        </section>
         <div className="overviewSummary">
           <p>This documentation covers the complete simulation workflow:</p>
           <ul>
