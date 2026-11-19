@@ -51,6 +51,12 @@ static struct {
 } Param;
 static struct { mysolver_t* mySolver; } Global = {&solver};
 static std::atomic<int> ancillaryCalls(0);
+// Observe full-Biot dispatch separately from the ASCII-only ancillary hooks.
+// GPU fluid interpolation and file contents are outside this host harness.
+static std::vector<int> biotOutputSteps;
+static int biotCloseCalls = 0;
+static void biot_output_stations(int step) { biotOutputSteps.push_back(step); }
+static void biot_close_stations() { ++biotCloseCalls; }
 static void Timer_Start(const char*) {}
 static void Timer_Stop(const char*) {}
 static void solver_station_tensor_kick(int) { ++ancillaryCalls; }
@@ -127,6 +133,8 @@ int main(int argc, char** argv) {
         assert(Param.stationBinary == NO); // Zero initialization preserves ASCII default.
         Param.stationBinary = binary;
         ancillaryCalls = 0;
+        biotOutputSteps.clear();
+        biotCloseCalls = 0;
         if (binary) {
 #ifdef STATION_TEST_MPI
             stationBinaryWriter.open(MPI_COMM_WORLD, argv[1], 4, ids, 1);
@@ -159,7 +167,9 @@ int main(int argc, char** argv) {
                 assert(fscanf(stations[i].fpoutputfile, "%lf", &extra) == EOF);
             }
         } else assert(ancillaryCalls == 0);
+        assert((biotOutputSteps == std::vector<int>{0, 2, 4, 6, 8}));
         solver_close_station_outputs();
+        assert(biotCloseCalls == 1);
     }
 #ifdef STATION_TEST_MPI
     if (rank == 0) {

@@ -251,4 +251,14 @@ __host__ __device__ void MultAddMatVecGPU( fmatrix_t* M, fvector_t* V1,
 
 __device__ double atomicAdd(double* address, double val);
 
+__global__ void kernelBiotPressureTraction(int32_t count, gpu_data_t* data,
+                                         double dt2, double alpha);
+__global__ void kernelBiotPressureForce(int32_t count, gpu_data_t* data,
+                                      double alpha);
+__global__ void kernelBiotDisplacement(int32_t count, gpu_data_t* data, double dt);
+__global__ void kernelBiotBoundary(int32_t count, gpu_data_t* data, double dt);
+__global__ void kernelBiotStabilization(int32_t count, gpu_data_t* data,
+    const solver_float* input, solver_float* output, double scale);
+__global__ void kernelBiotStabilizationNormalize(int32_t count, gpu_data_t* data);
+
 #endif /* KERNEL_H_ */

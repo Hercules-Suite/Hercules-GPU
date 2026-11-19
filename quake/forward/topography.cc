@@ -181,6 +181,18 @@ static int topo_compare_int32_asc(const void *lhs, const void *rhs) {
     return (a > b) - (a < b);
 }
 
+/* Both mapping builders append elements in increasing local element order.
+ * Setup and material queries must not scan every surface cell for every volume
+ * cell: that becomes quadratic on refined VT meshes. */
+static int32_t topo_element_index(int32_t element) {
+    int32_t lo=0,hi=myTopoElementsCount;
+    while (lo<hi) {
+        const int32_t mid=lo+(hi-lo)/2;
+        if (myTopoElementsMapping[mid]<element) lo=mid+1; else hi=mid;
+    }
+    return lo<myTopoElementsCount && myTopoElementsMapping[lo]==element ? lo : -1;
+}
+
 double get_thebase_topo() {
     return thebase_zcoord;
 }
@@ -192,7 +204,8 @@ int get_cube_partition(int32_t eindex) {
     topoconstants_t  *ecp;
 
     /* look for element in myTopolist elements */
-    for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         myeindex = myTopoElementsMapping[topo_eindex];
 
@@ -219,7 +232,8 @@ void get_tetraProps(int32_t eindex, double tetrVols[5], int *topoPart ) {
     	return;
 
     /* look for element in myTopolist elements */
-    for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         myeindex = myTopoElementsMapping[topo_eindex];
 
@@ -261,7 +275,8 @@ noyesflag_t isTopoElement (mesh_t *myMesh, int32_t eindex, int32_t topoNonlin_fl
     // elemp = &myMesh->elemTable[eindex];
     // edata = (edata_t *)elemp->data;
 
-    for ( topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++ ) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         int32_t          eindexT;
 
@@ -311,7 +326,8 @@ int BelongstoTopography (mesh_t *myMesh, int32_t eindex) {
     if ( theTopoMethod == FEM )
         return NO;
 
-    for ( topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++ ) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         int32_t          eindexT;
 
@@ -350,7 +366,8 @@ int IsDampingElement (mesh_t *myMesh, int32_t eindex) {
         return YES;
 
     /*  check if this is a topo element and update topobkt variable   */
-    for ( topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++ ) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         int32_t          eindexT;
 
@@ -404,10 +421,12 @@ int topo_correctproperties ( edata_t *edata )
  * normal_scale, when requested, is the length of the local height-field
  * normal. Dividing a vertical offset by it gives a tangent-normal offset,
  * not the exact shortest distance to the curved bilinear patch. */
-static double topo_surface_z(double x, double y, double *normal_scale)
+static double topo_surface_z(double x, double y, double *normal_scale,
+                             double *normal = NULL)
 {
     if (thebase_zcoord == 0.0) {
         if (normal_scale != NULL) *normal_scale = 1.0;
+        if (normal != NULL) { normal[0]=normal[1]=0; normal[2]=-1; }
         return 0.0;
     }
 
@@ -426,10 +445,14 @@ static double topo_surface_z(double x, double y, double *normal_scale)
     const double h0 = (1.0 - u) * h00 + u * h10;
     const double h1 = (1.0 - u) * h01 + u * h11;
 
-    if (normal_scale != NULL) {
+    if (normal_scale != NULL || normal != NULL) {
         const double dx = ((1.0 - v) * (h10 - h00) + v * (h11 - h01)) / So;
         const double dy = ((1.0 - u) * (h01 - h00) + u * (h11 - h10)) / So;
-        *normal_scale = sqrt(1.0 + dx * dx + dy * dy);
+        const double length=sqrt(1.0 + dx * dx + dy * dy);
+        if (normal_scale != NULL) *normal_scale=length;
+        if (normal != NULL) {
+            normal[0]=-dx/length; normal[1]=-dy/length; normal[2]=-1/length;
+        }
     }
     return thebase_zcoord - ((1.0 - v) * h0 + v * h1);
 }
@@ -438,6 +461,10 @@ static double topo_surface_z(double x, double y, double *normal_scale)
 double point_elevation(double x, double y)
 {
     return topo_surface_z(x, y, NULL);
+}
+
+void topo_surface_normal(double x, double y, double normal[3]) {
+    topo_surface_z(x,y,NULL,normal);
 }
 
 static double theSeabedHeightToleranceM = 0.01;
@@ -1121,6 +1148,15 @@ void TetraHVol_2 ( double xo, double yo, double zo, double esize,
 }
 
 
+int topo_cut_geometry(double x, double y, double z, double h,
+                      double fractions[5], int *partition) {
+    if (theTopoMethod != VT || x==0 || y==0 ||
+        x+h==theDomainLong_ns || y+h==theDomainLong_ew ||
+        topo_crossings(x,y,z,h)!=1) return 0;
+    TetraHVol_2(x,y,z,h,fractions,partition);
+    return 1;
+}
+
 double interp_lin ( double xi, double yi, double xf, double yf, double xo  ){
     return ( yi + ( yf - yi ) / ( xf - xi ) * xo );
 }
@@ -1616,7 +1652,8 @@ void toponodes_mass(int32_t eindex, double nodes_mass[8], double M,
     int32_t M_Nodes[5][4];
 
     /* look for element in myTopolist elements */
-    for (topo_eindex = 0; topo_eindex < myTopoElementsCount; topo_eindex++) {
+    topo_eindex = topo_element_index(eindex);
+    if (topo_eindex >= 0) {
 
         topoconstants_t  *ecp;
 
@@ -2279,6 +2316,12 @@ void compute_addforce_topoEffective ( mesh_t     *myMesh,
             e_t         *ep;
 
             eindex = myTopoElementsMapping[topo_eindex];
+
+            /* The Cartesian CPML operator already owns these cells. Match
+             * the GPU topography mapper: adding native tetrahedral stiffness
+             * here would count their skeleton stiffness a second time. */
+            if (cpml_pml_flattened_element(eindex))
+                continue;
 
             /* Capture the table of elements from the mesh and the size
              * This is what gives me the connectivity to nodes */

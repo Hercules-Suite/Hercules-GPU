@@ -83,7 +83,11 @@ tetrahedral displacement routine from `topography.cc`. It checks default ASCII
 and binary output for regular hexahedra, cut-cell tetrahedra, a supplied acoustic
 displacement state, duplicate station locations, and skipped sampling steps.
 Binary mode leaves text file handles null and checks that ancillary output is
-not called. This does not test acoustic reconstruction itself or GPU transfers.
+not called. The harness also checks full-Biot output-hook dispatch on each
+sampled step and one full-Biot close-hook dispatch in both output modes,
+including empty MPI ranks. These hooks are observation stubs; this does not
+test fluid reconstruction, fluid file contents, acoustic reconstruction itself
+or GPU transfers.
 The host version uses an in-memory sink. To also test the production MPI writer
 with interleaved ownership, an empty rank, and OpenMP interpolation:
 

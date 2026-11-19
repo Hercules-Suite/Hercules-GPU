@@ -10,7 +10,11 @@ enum { SCALAR_MPI_ACOUSTIC, SCALAR_MPI_PORE, SCALAR_MPI_TARGET,
        SCALAR_MPI_FIELDS };
 static schedule_t* g_scalarMpiSchedules[SCALAR_MPI_FIELDS][2] = {};
 static int g_gpuMpiProfile = 0;
-static double g_gpuMpiMetrics[10][11] = {};
+enum { GPU_MPI_PROFILE_FIELDS=13, GPU_MPI_PROFILE_METRICS=11 };
+static double g_gpuMpiMetrics[GPU_MPI_PROFILE_FIELDS][GPU_MPI_PROFILE_METRICS] = {};
+// Override only while a consistent-mass field exchange is in progress. Keep
+// its reused tags/schedules unchanged and separate its traffic in the report.
+static int g_gpuMpiMassScope=-1;
 
 static int scalar_mpi_field(int tag) {
   switch (tag) {
@@ -262,7 +266,8 @@ struct gpu_mpi_profile_t {
   gpu_mpi_profile_t() = default;
   gpu_mpi_profile_t(int tag, messenger_t* send, messenger_t* recv) {
     if (!g_gpuMpiProfile || (!send && !recv)) return;
-    int field = -1;
+    int field = g_gpuMpiMassScope;
+    if (field<0)
     switch (tag) {
       case DN_FORCE_MSG: case AN_FORCE_MSG: field = 0; break;
       case DN_DISP_MSG: case AN_DISP_MSG: field = 1; break;
@@ -272,11 +277,13 @@ struct gpu_mpi_profile_t {
       case DN_PORE_PRESSURE_MSG: case AN_PORE_PRESSURE_MSG: field = 5; break;
       case DN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG:
       case AN_PORE_PRESSURE_OPEN_PORE_TARGET_MSG: field = 6; break;
+      case 180: case 181: case 182: case 183: field = 12; break;
     }
     if (field < 0) return;
     metrics = g_gpuMpiMetrics[field];
     metrics[0] += 1;
-    const int width = field < 2 ? sizeof(fvector_t) : sizeof(solver_float);
+    const int width = (field<2 || field==10 || field==12)
+        ? sizeof(fvector_t) : sizeof(solver_float);
     for (auto* m = send; m; m = m->next) { metrics[1] += (double)m->nodecount * width; metrics[3] += 1; }
     for (auto* m = recv; m; m = m->next) { metrics[2] += (double)m->nodecount * width; metrics[4] += 1; }
     start = MPI_Wtime();
@@ -291,21 +298,25 @@ struct gpu_mpi_profile_t {
 
 static void solver_report_gpu_mpi_profile() {
   if (!g_gpuMpiProfile) return;
-  double sum[10][11], low[10][11], high[10][11];
-  MPI_Reduce(g_gpuMpiMetrics, sum, 110, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
-  MPI_Reduce(g_gpuMpiMetrics, low, 110, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
-  MPI_Reduce(g_gpuMpiMetrics, high, 110, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
+  double sum[GPU_MPI_PROFILE_FIELDS][GPU_MPI_PROFILE_METRICS],
+      low[GPU_MPI_PROFILE_FIELDS][GPU_MPI_PROFILE_METRICS],
+      high[GPU_MPI_PROFILE_FIELDS][GPU_MPI_PROFILE_METRICS];
+  const int count=GPU_MPI_PROFILE_FIELDS*GPU_MPI_PROFILE_METRICS;
+  MPI_Reduce(g_gpuMpiMetrics, sum, count, MPI_DOUBLE, MPI_SUM, 0, comm_solver);
+  MPI_Reduce(g_gpuMpiMetrics, low, count, MPI_DOUBLE, MPI_MIN, 0, comm_solver);
+  MPI_Reduce(g_gpuMpiMetrics, high, count, MPI_DOUBLE, MPI_MAX, 0, comm_solver);
   if (Global.myID != 0) return;
   const char* fields[] = {"solid force", "displacement", "acoustic RHS", "acoustic field",
                           "pore RHS", "pore field", "open-pore target",
-                          "acoustic+pore RHS", "acoustic+pore field", "pore RHS+target"};
+                          "acoustic+pore RHS", "acoustic+pore field", "pore RHS+target",
+                          "Biot mass mechanics", "Biot mass storage", "Biot fluid"};
   const char* metrics[] = {"nonempty calls", "send bytes", "receive bytes", "send messages", "receive messages",
       "post receive seconds", "pack/ready seconds", "post send seconds", "wait receive seconds",
       "unpack/ready seconds", "wait send seconds"};
   monitor_print("GPU MPI profile: cumulative rank average/min/max, device helpers and scalar batches; "
                 "pack/unpack include pending GPU work (unpack is enqueue-only with overlap); "
                 "scalar phases are nested in Compute Physics\n");
-  for (int f = 0; f < 10; ++f) {
+  for (int f = 0; f < GPU_MPI_PROFILE_FIELDS; ++f) {
     if (sum[f][0] == 0) continue;
     for (int m = 0; m < 11; ++m)
       monitor_print("GPU MPI %s %s: %.9g / %.9g / %.9g\n", fields[f], metrics[m],

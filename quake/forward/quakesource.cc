@@ -191,6 +191,10 @@ static int     theForceNt1   = 0;
 static double  theForceTinit = 0.0;
 static double  theForceDt    = 0.0;
 static double *theForceSlipFun = NULL;
+static double theBiotStressMoment = 0, theBiotPressureMoment = 0;
+static double *theBiotIntegral = NULL;
+static int32_t theBiotSourceElement = -1, theBiotSourceNodes[8];
+static double theBiotSourceWeights[8];
 
 /* OpenSees-style compliant-base force source. The tabulated function is a
  * velocity history in m/s. Nodal force is
@@ -444,6 +448,28 @@ interpolate_linear( double time, int numsamples, double samplingtime,
 }
 
 
+int source_get_biot_point(int32_t nodes[8], double weights[8],
+                          double* stress_moment, double* pressure_moment) {
+    *stress_moment = theBiotStressMoment;
+    *pressure_moment = theBiotPressureMoment;
+    memcpy(nodes, theBiotSourceNodes, sizeof(theBiotSourceNodes));
+    memcpy(weights, theBiotSourceWeights, sizeof(theBiotSourceWeights));
+    return theBiotSourceElement;
+}
+
+double source_biot_history(double time) {
+    const double t = time - theForceTinit;
+    if (theTypeOfSource != BIOT_EXPLOSION || t <= 0) return 0;
+    const double end = (theForceNt1 - 1) * theForceDt;
+    if (t >= end) return theBiotIntegral[theForceNt1 - 1];
+    const int j = (int)floor(t / theForceDt);
+    if (j >= theForceNt1 - 1) return theBiotIntegral[theForceNt1 - 1];
+    const double x = t - j * theForceDt;
+    return theBiotIntegral[j] + x * theForceSlipFun[j] +
+        0.5*x*x*(theForceSlipFun[j+1]-theForceSlipFun[j])/theForceDt;
+}
+
+
 /**
  *
  * compute_source_function: compute the slip source function:
@@ -472,6 +498,10 @@ compute_source_function (ptsrc_t* pointSource)
   for (iTime=0; iTime < numStepsNecessary; iTime++) {
 
     T = pointSource->dt * iTime;
+    if (theTypeOfSource == BIOT_EXPLOSION) {
+      pointSource->displacement[iTime] = source_biot_history(T);
+      continue;
+    }
     tao= T / pointSource->T0;
 
     if (pointSource->delayTime < T) {
@@ -605,7 +635,8 @@ static void source_initnodalforce ( ptsrc_t *sourcePtr )
 
     for (j = 0; j < 3; j++) {
 	for ( k = 0; k < 3; k++) {
-	    v[j][k] = n[j] * t[k] + n[k] * t[j];
+	    v[j][k] = theTypeOfSource == BIOT_EXPLOSION ? (j == k ? 1.0 : 0.0)
+            : n[j] * t[k] + n[k] * t[j];
 	}
     }
 
@@ -1399,7 +1430,7 @@ load_myForces_with_point_source(
 	/* notice that this is a fake slip to obtain the M0 given as data */
 	pointSource->maxSlip  = 1;
     }
-    else if (theTypeOfSource == FORCE) {
+    else if (theTypeOfSource == FORCE || theTypeOfSource == BIOT_EXPLOSION) {
 	/* The amplitude is carried by forceVec (Newtons); the time history
 	 * is the unit-amplitude STF. */
 	pointSource->muArea  = 1.0;
@@ -1414,6 +1445,17 @@ load_myForces_with_point_source(
     }
 
     pointSource->edgesize = myMesh->ticksize * edgeticks;
+    if (theTypeOfSource == BIOT_EXPLOSION) {
+        theBiotSourceElement = eindex;
+        memcpy(theBiotSourceNodes, pointSource->lnid, sizeof(theBiotSourceNodes));
+        const double loc[3] = {pointSource->x, pointSource->y, pointSource->z};
+        for (int j=0; j<8; ++j) {
+            double w=1;
+            for (int d=0; d<3; ++d)
+                w *= 0.5 + (((j>>d)&1) ? 1 : -1)*loc[d]/pointSource->edgesize;
+            theBiotSourceWeights[j]=w;
+        }
+    }
 
     /* --- diagnostic prints, gated by HERCULES_SRC_DEBUG env var (default off) -
      * Set HERCULES_SRC_DEBUG=1 to log per-source amplitude inputs (mu, area,
@@ -2166,7 +2208,7 @@ static int read_filter(FILE *fp){
  */
 static int read_common_all_formats ( FILE *fp ) {
 
-    double average_risetime_sec, ricker_Ts = 0, ricker_Tp = 0;
+    double average_risetime_sec = 0, ricker_Ts = 0, ricker_Tp = 0;
     char  source_function_type[64];
     source_function_t sourceFunctionType;
 
@@ -2312,8 +2354,8 @@ static int read_point_source(FILE *fp){
 
 static int read_force_source(FILE *fp){
 
-  double hypocenter_lat_deg, hypocenter_long_deg, hypocenter_depth_m;
-  double force_x_n, force_y_n, force_z_n;
+  double hypocenter_lat_deg=0, hypocenter_long_deg=0, hypocenter_depth_m=0;
+  double force_x_n=0, force_y_n=0, force_z_n=0;
 
   if ( (parsetext(fp,"lonlat_or_cartesian", 'i',&theLonlatOrCartesian) != 0) ){
     fprintf(stderr,
@@ -2341,6 +2383,19 @@ static int read_force_source(FILE *fp){
     return -1;
   }
 
+  if (theTypeOfSource == BIOT_EXPLOSION) {
+    if (theSourceFunctionType != DISCRETE || theSourceIsFiltered != 0 ||
+        parsetext(fp, "biot_stress_moment_nm", 'd', &theBiotStressMoment) ||
+        parsetext(fp, "biot_pressure_moment_nm", 'd', &theBiotPressureMoment) ||
+        !isfinite(theBiotStressMoment) || !isfinite(theBiotPressureMoment) ||
+        !isfinite(hypocenter_lat_deg) || !isfinite(hypocenter_long_deg) ||
+        !isfinite(hypocenter_depth_m) ||
+        (theLonlatOrCartesian != 0 && theLonlatOrCartesian != 1)) {
+      fprintf(stderr, "biot_explosion requires finite coordinates and biot_{stress,pressure}_moment_nm, "
+                      "source_function_type=discrete and source_is_filtered=0\n");
+      return -1;
+    }
+  } else {
   /* Body-force components in Newtons (Cartesian, in the simulation frame:
    * x/y = solver-local axes, z = downwards). */
   if ( (parsetext(fp,"force_x_n", 'd',&force_x_n) != 0) ||
@@ -2350,6 +2405,7 @@ static int read_force_source(FILE *fp){
     return -1;
   }
 
+  }
   theHypocenterLatDeg  = hypocenter_lat_deg;
   theHypocenterLongDeg = hypocenter_long_deg;
   theHypocenterDepthM  = hypocenter_depth_m;
@@ -3666,7 +3722,7 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
 
     /* first we build the source */
 
-    if (theTypeOfSource == FORCE) {
+    if (theTypeOfSource == FORCE || theTypeOfSource == BIOT_EXPLOSION) {
 	/* Body-force: no strike/dip/rake; carry Fx,Fy,Fz instead. */
 	pntSrc.strike = 0;
 	pntSrc.dip    = 0;
@@ -3697,7 +3753,7 @@ compute_myForces_point(const char* physicsin, UTMZone_t* utmZone)
     /* DISCRETE STF for FORCE: hand the tabulated unit waveform to
      * compute_source_function via the same fields SRFH uses. tinit
      * shifts the pulse start in absolute simulation time. */
-    if (theTypeOfSource == FORCE &&
+    if ((theTypeOfSource == FORCE || theTypeOfSource == BIOT_EXPLOSION) &&
 	theSourceFunctionType == DISCRETE) {
 	pntSrc.nt1             = theForceNt1;
 	pntSrc.dtfunction      = theForceDt;
@@ -4506,10 +4562,10 @@ broadcast_point_source_parameters( void )
 static void
 broadcast_force_source_parameters( void )
 {
-    double    d_buf[6];
+    double    d_buf[8];
     const int d_len = DOUBLE_ARRAY_LENGTH( d_buf );
 
-    if (theTypeOfSource != FORCE) {
+    if (theTypeOfSource != FORCE && theTypeOfSource != BIOT_EXPLOSION) {
 	return;
     }
 
@@ -4521,6 +4577,8 @@ broadcast_force_source_parameters( void )
     d_buf[3] = theForceVecN_x;
     d_buf[4] = theForceVecN_y;
     d_buf[5] = theForceVecN_z;
+    d_buf[6] = theBiotStressMoment;
+    d_buf[7] = theBiotPressureMoment;
 
     MPI_Bcast( d_buf, d_len, MPI_DOUBLE, 0, comm_solver );
 
@@ -4530,6 +4588,8 @@ broadcast_force_source_parameters( void )
     theForceVecN_x       = d_buf[3];
     theForceVecN_y       = d_buf[4];
     theForceVecN_z       = d_buf[5];
+    theBiotStressMoment = d_buf[6];
+    theBiotPressureMoment = d_buf[7];
 
     /* DISCRETE STF: nt1/tinit/dt header + the sample array. */
     if (theSourceFunctionType == DISCRETE) {
@@ -4546,6 +4606,19 @@ broadcast_force_source_parameters( void )
 	    }
 	}
 	MPI_Bcast( theForceSlipFun, theForceNt1, MPI_DOUBLE, 0, comm_solver );
+        if (theTypeOfSource == BIOT_EXPLOSION) {
+            if (!isfinite(theForceDt) || !isfinite(theForceTinit) || theForceTinit < 0)
+                ABORT_PROGRAM("Invalid biot_explosion history time header");
+            theBiotIntegral=(double*)calloc(theForceNt1,sizeof(double));
+            if (!theBiotIntegral) ABORT_PROGRAM("Cannot allocate Biot source integral");
+            for (int j=0; j<theForceNt1; ++j) {
+                if (!isfinite(theForceSlipFun[j])) ABORT_PROGRAM("Non-finite Biot source sample");
+                if (j) theBiotIntegral[j]=theBiotIntegral[j-1]+0.5*theForceDt*
+                    (theForceSlipFun[j-1]+theForceSlipFun[j]);
+                if (!isfinite(theBiotIntegral[j])) ABORT_PROGRAM("Non-finite Biot source integral");
+            }
+        }
+
     }
 }
 
@@ -4764,6 +4837,10 @@ source_read_type( FILE* fpsrc )
 	source_type = FORCE;
     }
 
+    else if (strcasecmp(type_of_source, "biot_explosion") == 0) {
+        source_type = BIOT_EXPLOSION;
+    }
+
     else if (strcasecmp( type_of_source, "base_force" ) == 0) {
 	source_type = BASE_FORCE;
     }
@@ -4843,7 +4920,7 @@ static int source_init_parameters(const char* physicsin, const char *source_dire
 	}
     }
 
-    if ( theTypeOfSource == FORCE ) {
+    if ( theTypeOfSource == FORCE || theTypeOfSource == BIOT_EXPLOSION ) {
 	if( read_force_source( fpsrc ) == -1 ) {
 	    return -1;
 	}
@@ -5021,7 +5098,7 @@ int compute_print_source(const char *physicsin, const char *source_directory_out
      * the same coordinate lookup, element search, octree cycle plumbing,
      * and STF evaluator apply; only the nodal force weighting differs
      * (handled by source_initnodalforce_body inside load_myForces_with_point_source). */
-    if ( theTypeOfSource == FORCE )
+    if ( theTypeOfSource == FORCE || theTypeOfSource == BIOT_EXPLOSION )
 	if ( compute_myForces_point(physicsin, utmZone) == -1 ){
 	    fprintf(stdout,"Err compute_myForces_point (FORCE) failed");
 	    ABORTEXIT;

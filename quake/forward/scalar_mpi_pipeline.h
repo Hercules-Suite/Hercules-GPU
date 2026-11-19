@@ -304,7 +304,7 @@ static void solver_init_mpi_pipeline(mysolver_t* solver) {
   g_scalarMpiBatch = opts[0]; g_gpuMpiOverlap = opts[1];
   const bool a = acoustic_pressure_enabled() && g_acousticPressureElementCount > 0;
   const bool p = poroelastic_gpu_active();
-  const bool open = acoustic_poroelastic_open_pore_enabled();
+  const bool open = !full_biot_enabled() && acoustic_poroelastic_open_pore_enabled();
   const bool ad = a && acoustic_pressure_device_sync_enabled();
   const bool pd = p && gpu_device_sync_enabled();
   g_scalarSealedBatch = g_scalarMpiBatch && a && p && !open && ad == pd;

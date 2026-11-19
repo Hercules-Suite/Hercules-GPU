@@ -90,7 +90,7 @@ typedef enum {
 
 typedef enum {
 
-  POINT = 0, PLANE, SRFH, PLANEWITHKINKS, FORCE, BASE_FORCE
+  POINT = 0, PLANE, SRFH, PLANEWITHKINKS, FORCE, BASE_FORCE, BIOT_EXPLOSION
 
 } source_type_t;
 
@@ -240,3 +240,10 @@ int source_get_local_loaded_nodes_count();
 
 double get_srfhdt();
 source_type_t get_sourceType();
+
+/* Coupled isotropic source: tensile stress rate -Ms*S*I and pressure rate
+ * +Mp*S. S is the discrete rate in forcefunction.in; history is its integral.
+ * Returns the locally owned containing element, or -1 on non-owning ranks. */
+int source_get_biot_point(int32_t nodes[8], double weights[8],
+                          double* stress_moment, double* pressure_moment);
+double source_biot_history(double time);

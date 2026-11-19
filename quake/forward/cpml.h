@@ -34,6 +34,7 @@ typedef struct {
     double nodal_mass_dt2;
     double mu, lambda; /* dt^2*h times moduli; acoustic mu=dt^2*h/rho */
     double b_over_dt;
+    int consistent_porous; /* full-Biot kernel supplies paired Q1 inertia */
 } cpml_element_t;
 
 typedef struct {
@@ -64,6 +65,10 @@ static inline cpml_filter_t cpml_filter(double c, double g, double p,
 template <typename T>
 CPML_HD static inline double cpml_apply(const cpml_filter_t& f, double x,
                                         T* state) {
+    /* Coefficients are fixed and CPML histories start at zero (CPML restart
+     * is unsupported). A zero-feed section therefore has no memory. Retain
+     * its direct factor: zero damping does not require unit kappa. */
+    if (f.feed == 0.0) return f.direct*x;
     const double old = (double)*state;
     const double y = f.direct*x + old;
     *state = (T)(f.decay*old + f.feed*x);

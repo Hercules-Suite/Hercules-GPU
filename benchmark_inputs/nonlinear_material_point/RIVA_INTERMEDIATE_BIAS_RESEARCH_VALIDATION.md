@@ -74,7 +74,7 @@ Run the complete local suite with:
 
 ```bash
 benchmark_inputs/nonlinear_material_point/run_riva_intermediate_bias_research_suite.sh \
-  /Users/wzhang/software/PJ_model/rivasand_intermediate_bias_flow_port \
+  /path/to/rivasand_intermediate_bias_flow_port \
   /opt/homebrew/bin/g++-15
 ```
 

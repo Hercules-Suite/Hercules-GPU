@@ -99,9 +99,67 @@ test("documents compact scalar MPI schedules and device profiling limits", async
   const controls = await (await render("/docs/configuration")).text();
   assert.match(controls, /HERCULES_SCALAR_MPI_SCHEDULE/);
   assert.match(controls, /HERCULES_GPU_MPI_PROFILE/);
+  for (const name of ["HERCULES_BIOT_MASS_PREDICTOR_CACHE", "HERCULES_BIOT_MASS_FUSION", "HERCULES_BIOT_MASS_COMPACT", "HERCULES_BIOT_MASS_HALO_BATCH", "HERCULES_BIOT_MASS_HALO_PACK", "HERCULES_BIOT_MASS_PROFILE", "HERCULES_BIOT_MASS_BATCH_SOLVES", "HERCULES_BIOT_MASS_ONE_ROUND"]) {
+    const row = controls.split("</tr>").find((entry) => entry.includes(`>${name}</td>`));
+    assert.ok(row, `missing runtime row for ${name}`);
+    assert.match(row, /0 \| 1/);
+    assert.match(row, /same on all ranks, inactive with lumped mass/);
+    assert.match(row, new RegExp(`default: ${["COMPACT", "PROFILE", "HALO_PACK", "BATCH_SOLVES", "ONE_ROUND"].some((suffix) => name.endsWith(suffix)) ? "0" : "1"}`));
+  }
+  const porous = await (await render("/docs/poroelastic-coupling")).text();
+  assert.match(porous, /HERCULES_BIOT_MASS_FUSION=1 \(default\)/);
+  assert.match(porous, /HERCULES_BIOT_MASS_COMPACT=0 \(default\)/);
+  assert.match(porous, /HERCULES_BIOT_MASS_PREDICTOR_CACHE=1 \(default, double precision\)/);
+  assert.match(porous, /fresh true residual before acceptance/);
+  assert.match(porous, /Single precision defaults to 0/);
+  assert.match(porous, /Two extra vectors are needed per stored solution/);
+  assert.match(porous, /HERCULES_BIOT_MASS_HALO_BATCH=1 \(default\)/);
+  assert.match(porous, /full-system stopping normalization/);
+  assert.match(porous, /including those with no retained nodes/);
+  assert.match(porous, /host backend stages only packets/);
+  assert.match(porous, /existing reduction waits/);
+  assert.match(porous, /CPU waits include pending GPU work and rank imbalance/);
+  assert.match(porous, /harbored node copies/);
+  assert.match(porous, /strongly stiff regime is not established/);
   assert.match(controls, /HERCULES_SCALAR_MPI_BATCH/);
   assert.match(controls, /HERCULES_GPU_MPI_OVERLAP/);
   assert.match(controls, /HERCULES_PORE_PRESSURE_UPDATE/);
+});
+
+test("documents opt-in full-Biot weak drainage and its balance output", async () => {
+  const html = await (await render("/docs/poroelastic-coupling")).text();
+  assert.match(html, /id="coupling-biot-weak-drain"/);
+  assert.match(html, /poroelastic_surface_pressure_enforcement/);
+  assert.match(html, /omission selects[\s\S]*?strong[\s\S]*?on flat\/FEM and[\s\S]*?natural[\s\S]*?on VT/);
+  assert.match(html, /hydraulic BC itself still defaults to[\s\S]*?undrained/);
+  assert.match(html, /stabilization auxiliary retains C/);
+  assert.match(html, /submerged quadrature points/);
+  assert.match(html, /biot_surface_balance.txt/);
+  assert.match(html, /BrickUP also accepts opt-in strong enforcement/);
+  assert.match(html, /Q1 rather than full-Biot P1 trace support/);
+  assert.match(html, /No strong reaction budget is currently output/);
+  assert.match(html, /Strong is not uniformly better on cuts/);
+  assert.match(html, /BRICKUP_STRONG_DRAIN_VALIDATION/);
+  assert.match(html, /number_output_stations/);
+  const controls = await (await render("/docs/configuration")).text();
+  assert.match(controls, /HERCULES_BIOT_SURFACE_DIAGNOSTICS/);
+  assert.match(controls, /Weak-drainage integrated balance/);
+});
+
+test("documents fixed full-Biot groundwater and its discrete hydraulic boundary", async () => {
+  const html = await (await render("/docs/poroelastic-coupling")).text();
+  assert.match(html, /id="coupling-biot-groundwater"/);
+  assert.match(html, /whole elements are activated by their center depth/);
+  assert.match(html, /Other material\/depth-limit contacts remain/);
+  assert.match(html, /retained P1 face triangles clipped to terrain/);
+  assert.match(html, /North is the outer loop and east the inner loop/);
+  assert.match(html, /A constant groundwater depth follows topography/);
+  assert.match(html, /negative values abort/);
+  assert.match(html, /not unsaturated\/capillary flow or a moving water table/);
+  assert.match(html, /additional groundwater-interface tests/);
+  assert.match(html, /cut position changes the ranking/);
+  const markup = await (await renderMarkup("/docs/poroelastic-coupling")).text();
+  assert.match(markup, /href="[^"]*#parameter-groundwaterlevel_file"/);
 });
 
 test("renders the Hercules documentation home", async () => {
@@ -334,14 +392,15 @@ test("renders the categorized parameter reference", async () => {
   assert.match(methodRow, /Default: field-specific-constraints for coupled scalar acoustics/);
   assert.match(methodRow, /When omitted, uses shared-geometric-constraints if acoustics, scalar acoustics or interface coupling is disabled/);
   assert.match(methodRow, /Explicit unsupported choices still abort/);
-  assert.match(methodRow, /Coupled VT topography must explicitly select shared-geometric-constraints/);
+  assert.match(methodRow, /Coupled VT supports native field-specific-constraints/);
+  assert.match(methodRow, /Full-Biot open pores with porous CPML require field-specific-constraints/);
   assert.match(methodRow, /local-matching/);
   assert.match(methodRow, /imported mismatched meshes abort/);
   assert.match(methodRow, /Field-specific constraints support FEM topography/);
   assert.match(methodRow, /computation_method=fem/);
   assert.match(methodRow, /owner-confirmed carved voids/);
   assert.match(methodRow, /separate acoustic, solid and pore-pressure maps/);
-  assert.match(methodRow, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
+  assert.match(methodRow, /Both support buildings, eligible nonlinear constitutive models and poroelastic solids \(brick_up or full_biot\)/);
   assert.match(methodRow, /Local matching requires include_topography=no/);
   assert.match(methodRow, /does not guarantee CPML stability/);
   const projectionRow = html.split("</tr>").find((row) => row.includes("acoustic_interface_projection"));
@@ -455,14 +514,14 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const referencePath = fileURLToPath(new URL("../app/docs/parameter-reference.ts", import.meta.url));
   const reference = readFileSync(referencePath, "utf8");
   const documented = [...reference.matchAll(/\bp\("([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(documented).size, 258);
-  assert.equal(documented.length, 258, "parameter definitions must not be duplicated");
+  assert.equal(new Set(documented).size, 268);
+  assert.equal(documented.length, 268, "parameter definitions must not be duplicated");
   assert.ok(documented.includes("3D_velocity_model_memory"));
   assert.match(reference, /p\("3D_velocity_model_memory", "Optional", "String \(case-insensitive\)", "Default: node; node \| numa"/);
   assert.ok(documented.includes("topography_surface_refinement"));
   assert.match(reference, /p\("topography_surface_refinement", "Optional", "String \(case-insensitive\)", "Default: maximum_level; maximum_level \| wavelength"/);
   assert.ok(documented.includes("cpml_acoustic_sponge_fraction"));
-  assert.match(reference, /p\("cpml_partition_weight", "Optional", "Float \(dimensionless\)", "Default: 4\.38; >= 1"/);
+  assert.match(reference, /p\("cpml_partition_weight", "Optional", "Float \(dimensionless\)", "Default: porous 1, elastic\/acoustic 4\.38; >= 1"/);
   assert.ok(!documented.includes("cpml_partition_cache"));
   assert.ok(documented.includes("rivasand02_biasvolume"));
   assert.match(reference, /p\("rivasand02_biasvolume", "Optional", "Integer \(dimensionless\)", "Default: 1; 0 \| 1 \| 2/);
@@ -494,8 +553,9 @@ test("documents every parameters.in key parsed by the current source tree", () =
   for (const method of ["shared-geometric-constraints", "field-specific-constraints", "local-matching"]) {
     assert.ok(solver.includes(`strcasecmp(acoustic_interface_method, "${method}")`));
   }
-  assert.match(solver, /get_topo_meth\(\) != FEM/);
-  assert.match(solver, /VT cut-tetrahedron constraints/);
+  const fieldSetup = readFileSync(new URL("../../quake/forward/acoustic_interface_setup.h", import.meta.url), "utf8");
+  assert.match(fieldSetup, /biot_tet_weights/);
+  assert.match(fieldSetup, /compatible same-field Hex8\/P1 traces/);
   assert.match(solver, /acoustic_interface_method=local-matching does not support/);
   const interfaceGuard = solver.slice(
     solver.indexOf("if (Param.theAcousticInterfaceMethod != ACOUSTIC_INTERFACE_ORIGINAL &&"),
@@ -504,8 +564,8 @@ test("documents every parameters.in key parsed by the current source tree", () =
   assert.doesNotMatch(interfaceGuard, /Param\.include(?:Buildings|NonlinearAnalysis|Poroelastic)/);
   assert.doesNotMatch(interfaceGuard, /Param\.theAcousticVelocityPotential/);
   assert.match(interfaceGuard, /Param\.acousticPressureFormulation != YES/);
-  assert.match(reference, /Both alternatives require include_acoustic=yes, acoustic_interface_coupling=yes, pressure or velocity_potential, and full Hex8 solids/);
-  assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and BrickUP poroelasticity/);
+  assert.match(reference, /Both alternatives require include_acoustic=yes, acoustic_interface_coupling=yes, pressure or velocity_potential, and supported solid traces/);
+  assert.match(reference, /Both support buildings, eligible nonlinear constitutive models and poroelastic solids \(brick_up or full_biot\)/);
   assert.match(reference, /separate acoustic, solid and pore-pressure maps/);
   assert.match(solver, /\.theCpmlClampOuter\s*=\s*YES\b/);
   assert.match(solver, /strcasecmp\(cpml_clamp_outer, "no"\) == 0\)\s*\{\s*Param\.theCpmlClampOuter = NO;/);
@@ -514,7 +574,47 @@ test("documents every parameters.in key parsed by the current source tree", () =
   for (const mode of ["abort", "allow"]) {
     assert.ok(solver.includes(`strcasecmp(cpml_gravity_in_bottom_band, "${mode}")`));
   }
-  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*70 /);
+  assert.match(solver, /LOCAL_INIT_INT_MESSAGE_LENGTH \\\s*\n\s*78 /);
+  assert.match(solver, /poroelastic_surface_pressure_enforcement\[64\] = "natural"/);
+  assert.match(solver, /int_message\[76\] = Param\.thePoroelasticSurfacePressureEnforcement/);
+  assert.match(solver, /Param\.thePoroelasticSurfacePressureEnforcement = int_message\[76\]/);
+  assert.match(solver, /Weak\/strong surface-pressure enforcement requires active poroelasticity/);
+  const weakRow = reference.split("\n").find((entry) => entry.includes('p("poroelastic_surface_pressure_enforcement"'));
+  assert.ok(weakRow?.includes("Default: strong for active full_biot + drained on flat/FEM; natural otherwise (including VT)"));
+  assert.match(solver, /if \(!surface_pressure_enforcement_explicit\)\s*Param\.thePoroelasticSurfacePressureEnforcement = -1;/);
+  const surfaceDefault = solver.slice(solver.indexOf("static void poroelastic_resolve_surface_pressure_enforcement(void)"), solver.indexOf("int poroelastic_analysis_enabled(void)"));
+  assert.match(surfaceDefault, /if \(defaulted\)[\s\S]*full_biot_enabled\(\)[\s\S]*POROELASTIC_SURFACE_PRESSURE_DRAINED[\s\S]*!topography \|\| get_topo_meth\(\) == FEM[\s\S]*\? 2 : 0/);
+  assert.match(surfaceDefault, /geometry-dependent default/);
+  assert.match(surfaceDefault, /explicit input/);
+  assert.match(solver, /topo_init\(Global\.myID, Param\.parameters_input_file, Param\.theTopoDir\);\s*\}\s*poroelastic_resolve_surface_pressure_enforcement\(\);/);
+  assert.match(reference, /Y=beta\*c_fast\/M/);
+  for (const mode of ["natural", "weak", "strong"]) {
+    assert.ok(solver.includes(`strcasecmp(poroelastic_surface_pressure_enforcement,"${mode}")`));
+  }
+  assert.ok(weakRow?.includes("suppresses pressure variation within affected cut tetrahedra"));
+  assert.ok(weakRow?.includes("For brick_up, natural (default compatibility spelling) and weak"));
+  assert.ok(weakRow?.includes("without a new solve or exchange"));
+  const reducedSurface = readFileSync(new URL("../../quake/forward/poroelastic_brickup_drain_setup.h", import.meta.url), "utf8");
+  assert.match(solver, /biot_initialize\(\);\s*brickup_surface_initialize\(\);/);
+  assert.match(solver, /poro_drain_plane && !brickup_surface_strong\(\)/);
+  assert.match(reducedSurface, /brickup_surface_validate_restart/);
+  assert.match(reducedSurface, /biot_surface_initialize\(\)/);
+  const groundwaterRow = reference.split("\n").find((entry) => entry.includes('p("groundwaterlevel_file"'));
+  assert.ok(groundwaterRow?.includes("Full Biot requires nonnegative ground-relative depths"));
+  assert.match(solver, /surface_groundwatertable\[64\] = "no"/);
+  assert.match(solver, /parsetext\(fp, "groundwaterlevel_file", 's', Param\.theGroundwaterLevelFile\)/);
+  assert.match(solver, /full_biot_enabled\(\) && values\[i\] < 0\.0/);
+  const biotSetup = readFileSync(new URL("../../quake/forward/poroelastic_biot_setup.h", import.meta.url), "utf8");
+  assert.doesNotMatch(biotSetup, /full_biot requires surface_groundwatertable=no/);
+  const cpmlSetup = biotSetup.slice(biotSetup.indexOf("static void poro_cpml_initialize"), biotSetup.indexOf("static bool biot_vt_enabled"));
+  assert.doesNotMatch(cpmlSetup, /Param\.surfaceGroundwaterTable/);
+  assert.match(cpmlSetup, /zero geostatic ramp and no checkpoint\/restart/);
+  assert.match(cpmlSetup, /regular Cartesian buffer/);
+  assert.match(reference, /Both formulations support fixed groundwater through regular CPML buffers/);
+  assert.match(reference, /compliance and memory tail use the same Cartesian J filter as storage/);
+  assert.match(biotSetup, /POROELASTIC_MAP_ABOVE_GROUNDWATER/);
+  assert.match(biotSetup, /\(exposed \|\| groundwater\)/);
+  assert.match(biotSetup, /biot_surface_add_vt_groundwater_face/);
   assert.match(solver, /int_message\[67\] = Param\.theCpmlGravityInBottomBand/);
   assert.match(solver, /Param\.theCpmlGravityInBottomBand = int_message\[67\]/);
   assert.match(solver, /\.theAcousticInterfaceFaceFilter\s*=\s*ACOUSTIC_INTERFACE_FACE_FILTER_ALL/);
@@ -562,6 +662,108 @@ test("documents every parameters.in key parsed by the current source tree", () =
   const extra = documented.filter((name) => !parsed.has(name)).sort();
   assert.deepEqual(missing, [], `undocumented parsed parameters: ${missing.join(", ")}`);
   assert.deepEqual(extra, [], `documented names not found in the parser audit: ${extra.join(", ")}`);
+});
+
+test("documents full Biot selection, inertia and hydraulic boundary contracts", async () => {
+  const html = await (await render("/docs/poroelastic-coupling")).text();
+  const reference = await (await render("/docs/parameters-coupled-physics")).text();
+  const solver = readFileSync(new URL("../../quake/forward/psolve.cc", import.meta.url), "utf8");
+  assert.match(html, /id="coupling-full-biot"/);
+  assert.match(html, /volume-weighted relative fluid displacement/);
+  assert.match(html, /station\.fluid\.ID/);
+  assert.match(html, /fluid force and displacement exchanges/i);
+  assert.match(html, /id="coupling-poroelastic-cpml"/);
+  assert.match(html, /porous VT cut cell inside CPML aborts explicitly/);
+  assert.match(reference, /poroelastic_tortuosity/);
+  for (const name of ["poroelastic_mass_matrix", "poroelastic_mass_tolerance", "poroelastic_mass_max_iterations", "poroelastic_mass_preconditioner", "poroelastic_mass_initial_guess", "poroelastic_mass_krylov", "poroelastic_mass_operator"])
+    assert.match(reference, new RegExp(name));
+  assert.match(html, /projected distributed PCG/);
+  assert.match(solver, /strcasecmp\(poroelastic_mass_matrix, "consistent"\)/);
+  assert.match(solver, /hu_config_get_double_opt\(fp, "poroelastic_mass_tolerance"/);
+  assert.match(solver, /thePoroelasticMassTolerance\s*=\s*sizeof\(solver_float\)==8\?1e-6:1e-5/);
+  assert.match(reference, /Default: 1e-6 \(double precision\); 1e-5 \(single precision\)/);
+  assert.match(html, /0\.0113%/);
+  assert.match(solver, /hu_config_get_int_opt\(fp, "poroelastic_mass_max_iterations"/);
+  assert.match(solver, /thePoroelasticMassMaxIterations = 200/);
+  assert.match(solver, /Param\.thePoroelasticMassMatrix = int_message\[70\]/);
+  assert.match(solver, /Param\.thePoroelasticMassTolerance = double_message\[54\]/);
+  assert.match(solver, /Param\.thePoroelasticMassPreconditioner = int_message\[72\]/);
+  assert.match(solver, /strcasecmp\(poroelastic_mass_preconditioner, "element_inverse"\)/);
+  assert.match(solver, /Param\.thePoroelasticMassInitialGuess = int_message\[73\]/);
+  const guessRow = reference.split("</tr>").find((entry) => entry.includes('id="parameter-poroelastic_mass_initial_guess"'));
+  assert.ok(guessRow, "missing initial-guess parameter definition");
+  for (const option of ["zero", "previous", "linear", "quadratic"]) {
+    assert.ok(solver.includes(`strcasecmp(poroelastic_mass_initial_guess, "${option}")`));
+    assert.ok(guessRow.includes(option));
+  }
+  assert.match(solver, /Param\.thePoroelasticMassKrylov = int_message\[74\]/);
+  assert.match(solver, /strcasecmp\(poroelastic_mass_krylov, "single_reduction"\)/);
+  assert.match(solver, /Param\.thePoroelasticMassOperator = int_message\[75\]/);
+  assert.match(solver, /strcasecmp\(poroelastic_mass_operator, "auto"\)/);
+  const matrixRow = reference.split("</tr>").find((entry) => entry.includes('id="parameter-poroelastic_mass_matrix"'));
+  assert.ok(matrixRow?.includes("Default: consistent for active full_biot; lumped otherwise;"));
+  assert.match(matrixRow, /Regular porous CPML also uses consistent Q1 inertia and storage/);
+  assert.match(html, /matching polynomial and convolution memory terms/);
+  assert.match(html, /no porous CPML weights/);
+  assert.match(html, /Omitting[\s\S]{0,120}poroelastic_mass_matrix[\s\S]{0,120}selects[\s\S]{0,80}consistent/);
+  assert.match(solver, /char poroelastic_mass_matrix\[64\] = "lumped";[\s\S]{0,250}if \(includePoroelastic == YES &&\s*Param\.thePoroelasticFormulation == POROELASTIC_FORMULATION_FULL_BIOT\)\s*strcpy\(poroelastic_mass_matrix, "consistent"\);\s*parsetext\(fp, "poroelastic_mass_matrix", 's', poroelastic_mass_matrix\);/);
+  assert.match(solver, /if \(Param\.thePoroelasticMassMatrix &&\s*\(includePoroelastic!=YES \|\|\s*Param\.thePoroelasticFormulation!=POROELASTIC_FORMULATION_FULL_BIOT\)\)/);
+  for (const [name, value, field, numeric] of [
+    ["poroelastic_mass_preconditioner", "element_inverse", "Preconditioner", 1],
+    ["poroelastic_mass_initial_guess", "quadratic", "InitialGuess", 3],
+    ["poroelastic_mass_krylov", "standard", "Krylov", 0],
+    ["poroelastic_mass_operator", "auto", "Operator", 1],
+  ]) {
+    assert.ok(solver.includes(`char ${name}[64] = "${value}";`), `${name} parser default`);
+    assert.ok(solver.includes(`.thePoroelasticMass${field} = ${numeric},`), `${name} initializer`);
+    const row = reference.split("</tr>").find((entry) => entry.includes(`id="parameter-${name}"`));
+    assert.ok(row?.includes(`Default: ${value};`), `${name} documented default`);
+  }
+  const massSetup = readFileSync(new URL("../../quake/forward/poroelastic_mass_setup.h", import.meta.url), "utf8");
+  assert.match(massSetup, /g_biotMassPredictorCacheDefault=sizeof\(solver_float\)==sizeof\(double\)/);
+  assert.match(massSetup, /biot_mass_option\("HERCULES_BIOT_MASS_PREDICTOR_CACHE",g_biotMassPredictorCacheDefault\) &&/);
+  assert.match(massSetup, /Param\.thePoroelasticMassInitialGuess!=0/);
+  for (const option of ["BATCH_SOLVES", "ONE_ROUND"]) {
+    assert.ok(massSetup.includes(`biot_mass_option("HERCULES_BIOT_MASS_${option}",0)`));
+    assert.match(reference, new RegExp(`HERCULES_BIOT_MASS_${option}`));
+  }
+  assert.match(massSetup, /g_biotMassCompact=false/);
+  assert.match(massSetup, /biot_mass_option\("HERCULES_BIOT_MASS_COMPACT",0\)/);
+  assert.match(html, /Explicit settings override the defaults/);
+  assert.match(html, /True-residual verification remains required on every solve/);
+
+  assert.match(reference, /poroelastic_pressure_stabilization/);
+  assert.match(html, /spurious grid branch/);
+  assert.match(html, /independent continuum Green tensor/);
+  assert.match(html, /FEM topography/);
+  assert.match(html, /vertical risers/);
+  assert.match(html, /mesh-face normal/);
+  assert.match(html, /native volume-fraction P1 tetrahedra/);
+  assert.match(html, /O\(h\) boundary approximation/);
+  assert.match(html, /reciprocal tetrahedral solid\/fluid traces|same tetrahedral trace weights/);
+  assert.match(html, /Flat\/FEM Hex8 open pores accept/);
+  assert.match(html, /reciprocal pressure\/relative-motion weights/);
+  assert.match(reference, /Full-Biot VT requires[\s\S]*face_mass/i);
+  const biotSetup = readFileSync(new URL("../../quake/forward/poroelastic_biot_setup.h", import.meta.url), "utf8");
+  assert.match(biotSetup, /biot_vt_enabled\(\)[\s\S]{0,220}ACOUSTIC_INTERFACE_PROJECTION_FACE_MASS/);
+  assert.match(biotSetup, /acoustic_poroelastic_open_pore_enabled\(\) &&\s*Param\.acousticInterfaceCoupling != YES/);
+  assert.match(html, /independent Biot modal reflection solutions/);
+  assert.match(html, /25 Hz hill remains under-resolved/);
+  assert.match(reference, /whole-cell stair steps/);
+  assert.match(html, /including with[\s\S]*station_binary/);
+  assert.match(solver, /hu_config_get_double_opt\(fp, "poroelastic_pressure_stabilization",\s*&Param\.thePoroelasticPressureStabilization\)/);
+  assert.match(solver, /thePoroelasticPressureStabilization = 0\.0025/);
+  const stabilizationRow = reference.split("</tr>").find((entry) => entry.includes('id="parameter-poroelastic_pressure_stabilization"'));
+  assert.ok(stabilizationRow?.includes("Default: 0.0025;"));
+  assert.match(html, /stderr and the monitor file/);
+  assert.match(solver, /Param\.thePoroelasticPressureStabilization = double_message\[53\]/);
+  assert.match(solver, /hu_config_get_double_opt\(fp, "poroelastic_tortuosity",\s*&Param\.thePoroelasticTortuosity\)/);
+  assert.match(solver, /strcasecmp\(poroelastic_formulation, "full_biot"\)/);
+  assert.match(solver, /double_message\[52\] = Param\.thePoroelasticTortuosity/);
+  assert.match(solver, /Param\.thePoroelasticTortuosity = double_message\[52\]/);
+  assert.match(solver, /thePoroelasticTortuosity = 1\.0/);
+  assert.match(solver, /!isfinite\(Param\.thePoroelasticTortuosity\)/);
+  assert.match(solver, /thePoroelasticFluidViscosity == 0\.0 &&\s*Param\.thePoroelasticFormulation != POROELASTIC_FORMULATION_FULL_BIOT/);
 });
 
 test("documents elevation-only seabed geometry and depth-reference contract", async () => {
@@ -676,7 +878,7 @@ test("explains experimental constraints, remeshing and CPML limitations", async 
   assert.match(html, /acoustic_formulation=pressure or velocity_potential/);
   assert.match(html, /Pressure mode couples solid normal acceleration/);
   assert.match(html, /Unresolved remote neighbors still abort/);
-  assert.match(html, /VT cut-tetrahedron topography remains unsupported/);
+  assert.match(html, /Field-specific constraints also support native VT P1 solid/);
 });
 
 test("wires the optional acoustic gravity free surface through setup and CUDA", () => {
@@ -832,6 +1034,17 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Acoustic–elastic example/);
   assert.match(physics, /acoustic_interface_projection = point/);
   assert.match(physics, /Poroelastic–elastic example/);
+  assert.match(physics, /no independent fluid-inertia or relative-fluid-velocity state/);
+  assert.match(physics, /zero permeability is a sealed limit, not an inviscid limit/);
+  assert.match(physics, /does not validate the complete poroelastic implementation/);
+  assert.match(physics, /Poroelastic CPML retains saturated cells/);
+  assert.match(physics, /controlled 10-second thickness follow-up/);
+  assert.match(physics, /shared-constraint coastal open-pore case still grows with 128 m/);
+  assert.match(physics, /supplies no pore-pressure diffusion absorber/);
+  assert.match(physics, /initial undrained normal impedance/);
+  assert.match(physics, /Both the fast and explicit pressure paths/);
+  assert.match(physics, /retain the legacy drained approximation/);
+  assert.match(physics, /without tangent or frequency-dependent impedance updates/);
   assert.match(physics, /Nonlinear PDMY03–BrickUP example/);
   assert.match(physics, /RIVA-Sand–BrickUP example/);
   assert.match(physics, /BrickUP independently advances excess fluid pressure/);
@@ -862,7 +1075,7 @@ test("documents nonlinear and plastic simulation capability", async () => {
   assert.match(physics, /Qs=C\+alpha×Vs_km_s\^beta/);
   assert.match(physics, /Default CPML example/);
   assert.match(physics, /cpml_reflection_target = 0\.01/);
-  assert.match(physics, /cpml_kappa_max = 5/);
+  assert.match(physics, /cpml_kappa_max = 3/);
   assert.match(physics, /cpml_pml_material_damping = rayleigh/);
   assert.match(physics, /script\/taper_topography\.py/);
 
@@ -1007,7 +1220,7 @@ test("keeps CPML elements out of nonlinear constitutive maps", async () => {
   assert.match(gpu, /excluded from both CPU and GPU nonlinear constitutive maps/);
 
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
-  assert.match(parameters, /Solid PML elements always use linear elasticity/);
+  assert.match(parameters, /Solid PML skeletons use linear elasticity/);
   assert.match(parameters, /excluded from nonlinear constitutive updates/);
   const clampRow = parameters.split("</tr>").find((row) => row.includes("cpml_clamp_outer"));
   assert.ok(clampRow, "the CPML clamp must appear in the parameter reference");
@@ -1803,7 +2016,7 @@ test("documents every supported source model and its auxiliary inputs", async ()
   assert.equal(response.status, 200);
 
   const html = await response.text();
-  for (const sourceType of ["point", "force", "base_force", "plane", "planewithkinks", "srfh"]) {
+  for (const sourceType of ["point", "force", "base_force", "biot_explosion", "plane", "planewithkinks", "srfh"]) {
     assert.match(html, new RegExp(`>${sourceType}<`));
   }
   const sourceKeys = [
@@ -1813,7 +2026,7 @@ test("documents every supported source model and its auxiliary inputs", async ()
     "lonlat_or_cartesian", "hypocenter_lat_deg", "hypocenter_long_deg",
     "hypocenter_x", "hypocenter_y", "hypocenter_depth_m",
     "source_strike_deg", "source_dip_deg", "source_rake_deg",
-    "force_x_n", "force_y_n", "force_z_n", "base_force_rho_kgm3",
+    "force_x_n", "force_y_n", "force_z_n", "biot_stress_moment_nm", "biot_pressure_moment_nm", "base_force_rho_kgm3",
     "base_force_vs_mps", "base_force_direction_x", "base_force_direction_y",
     "base_force_direction_z", "base_force_scale", "base_force_depth_m",
     "base_force_tolerance_m", "number_of_time_windows", "time_windows",
@@ -2163,14 +2376,15 @@ test("documents independent BrickUP constraints and final station eligibility", 
   const coupling = await (await renderGuideFamily("/docs/physics")).text();
   assert.match(coupling, /include_acoustic=no still builds the pore-pressure map automatically/);
   assert.match(coupling, /VT cut-cell models keep geometric pressure constraints/);
-  assert.match(coupling, /standalone extension still requires target-system CUDA\/MPI/);
+  assert.match(coupling, /tests flat standalone and selected coupled cases on Horizon with refinement and MPI controls/);
+  assert.match(coupling, /does not validate FEM\/VT propagation, general hydraulic interfaces or yielding\/hysteretic response/);
   assert.match(coupling, /open_pore also builds actual solid traces with shared-geometric point projection/);
   const output = await (await render("/docs/output-files")).text();
   assert.match(output, /Station pressure eligibility is finalized after solver setup/);
   assert.match(output, /Elastic-only CPML receivers are labeled elastic with pressure undefined/);
   assert.match(output, /Their Pressure\(Pa\) and Ru\(-\) values are nan/);
   const reference = await (await render("/docs/parameters-coupled-physics")).text();
-  assert.match(reference, /Coarse dry\/CPML cells do not constrain pore pressure/);
+  assert.match(reference, /Coarse dry cells do not constrain pore pressure/);
 });
 
 test("documents four-point open-pore hydraulic integration and its validation scope", async () => {
@@ -2183,7 +2397,7 @@ test("documents four-point open-pore hydraulic integration and its validation sc
   assert.match(physics, /Earlier Horizon open-pore benchmarks used centroid hydraulic integration/);
   assert.match(physics, /Target-system CUDA\/MPI propagation and performance checks remain required/);
   const reference = await (await render("/docs/parameters-coupled-physics")).text();
-  assert.match(reference, /Open-pore hydraulic capacity and pressure targets always use four-point/);
+  assert.match(reference, /open-pore hydraulic capacity and pressure targets always use four-point/i);
   assert.match(reference, /same quadrature for boundary capacity/);
 });
 
@@ -2453,7 +2667,7 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   const html = await (await render("/docs/parameters-damping-cpml")).text();
   for (const [key, value] of [
     ["cpml_reflection_target", "0.01"],
-    ["cpml_kappa_max", "5"],
+    ["cpml_kappa_max", "3"],
     ["cpml_acoustic_sponge_fraction", "0"],
   ]) {
     const row = html.split("</tr>").find((part) => part.includes(`>${key}</td>`));
@@ -2468,7 +2682,7 @@ test("keeps requested CPML defaults and alpha Hz units synchronized with the par
   if (!existsSync(source)) return;
   const solver = readFileSync(source, "utf8");
   assert.match(solver, /\.theCpmlReflectionTarget = 0\.01,/);
-  assert.match(solver, /\.theCpmlKappaMax = 5\.0,/);
+  assert.match(solver, /\.theCpmlKappaMax = 3\.0,/);
   assert.match(solver, /\.theCpmlAlphaMaxHz = -1\.0,/);
   assert.match(solver, /\.theCpmlAcousticSpongeFraction = 0\.0,/);
   assert.match(solver, /#define CPML_AUTO_ALPHA_MAX_HZ 0\.5\n/);
@@ -2726,16 +2940,26 @@ test("documents deferred CPML partitioning and the limits of GPU memory snapshot
   const parameters = await (await render("/docs/parameters-damping-cpml")).text();
   const weight = parameters.split("</tr>").find((row) => row.includes(">cpml_partition_weight</td>"));
   assert.ok(weight);
-  assert.match(weight, /Default: 4\.38; &gt;= 1/);
+  assert.match(weight, /Default: porous 1, elastic\/acoustic 4\.38; &gt;= 1/);
   assert.match(weight, /Construction and mesh-only runs use ordinary partitions/);
   assert.match(weight, /not a GPU-memory cap/);
-  assert.match(html, /cost 100 to ordinary leaves and 438 to CPML-band leaves/);
-  assert.match(html, /Explicit numeric values override the default; 1 restores equal leaf counts/);
+  assert.match(weight, /An explicit numeric value overrides every CPML material/);
+  assert.match(weight, /does not calibrate mixed elastic\/porous models/);
+  assert.match(html, /cost 100 to ordinary and saturated porous CPML leaves, and 438 to elastic\/acoustic CPML leaves/);
+  assert.match(html, /Explicit numeric values override every CPML material/);
+  assert.match(weight, /including groundwater, terrain and the poroelastic depth limit/);
+  assert.match(weight, /Applies to brick_up and full_biot with any supported mass option/);
   assert.match(html, /cpml_partition_weight = 4\.38/);
   const source = new URL("../../quake/forward/psolve.cc", import.meta.url);
   if (existsSync(source)) {
     const solver = readFileSync(source, "utf8");
     assert.match(solver, /\.theCpmlPartitionWeight = 4\.38,/);
+    assert.match(solver, /\.theCpmlPartitionWeightExplicit = 0,/);
+    assert.match(solver, /theCpmlPartitionWeightExplicit =\s*\(parsetext\(fp, "cpml_partition_weight"/);
+    assert.match(solver, /int_message\[77\] = Param\.theCpmlPartitionWeightExplicit/);
+    assert.match(solver, /Param\.theCpmlPartitionWeightExplicit = int_message\[77\]/);
+    assert.match(solver, /if \(!Param\.theCpmlPartitionWeightExplicit && poroelastic_enabled\(\)\)/);
+    assert.match(solver, /if \(poroelastic_material_candidate\(/);
     assert.doesNotMatch(solver, /cpml_partition_cache|cpml_partition_auto/);
   }
 });
@@ -2958,4 +3182,20 @@ test("documents and wires 3D_velocity_model_column_sampling", async () => {
   const reader = readFileSync(new URL("../../quake/forward/drm_planewaves.cc", import.meta.url), "utf8");
   assert.match(reader, /const double column_depth = same_depth \? query_reference_depth/);
   assert.match(reader, /const int same_depth = column_relative && \(Soil_column_sampling == 1\)/);
+});
+
+
+test("documents the coupled Biot source parser and rate convention", async () => {
+  const source = readFileSync(new URL("../../quake/forward/quakesource.cc", import.meta.url), "utf8");
+  const reference = readFileSync(new URL("../app/docs/parameter-reference.ts", import.meta.url), "utf8");
+  const html = await (await renderGuideFamily("/docs/source-models")).text();
+  assert.match(source, /strcasecmp\(type_of_source, "biot_explosion"\)/);
+  for (const key of ["biot_stress_moment_nm", "biot_pressure_moment_nm"]) {
+    assert.match(source, new RegExp(`parsetext\\(fp, "${key}"`));
+    assert.match(reference, new RegExp(`name: "${key}"`));
+    assert.match(html, new RegExp(`id="parameter-${key}"`));
+  }
+  assert.match(html, /integrates the piecewise-linear rate exactly from zero/);
+  assert.match(html, /source_is_filtered/);
+  assert.match(html, /VT topographic tetrahedra/);
 });

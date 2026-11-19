@@ -27,6 +27,7 @@
 #include "psolve.h"
 #include "quake_util.h"
 #include "topography.h"
+#include "poroelastic_mass.h"
 
 /* Device-only launch details live behind this host-callable interface.  This
  * keeps the large psolve translation unit free of CUDA launch syntax so the
@@ -59,6 +60,13 @@ void psolve_launch_station_tensor(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t stationCount, int32_t outputStride, int32_t strainOffset,
     int32_t stressOffset, gpu_data_t* gpuData);
+/* One owned Hex8 point: weights already include the pressure moment / M. */
+typedef struct poroelastic_source_t {
+  int32_t nodes[8];
+  double weights[8];
+} poroelastic_source_t;
+void psolve_launch_poroelastic_source(cudaStream_t stream,
+    poroelastic_source_t source, double increment, solver_float* rhs);
 void psolve_launch_source_force_scatter(
     int grid, int block, size_t shared, cudaStream_t stream, int32_t count,
     const int32_t* lnidList, const vector3D_t* srcForces,
@@ -219,6 +227,9 @@ void psolve_launch_poroelastic_pressure_update(
     int32_t nharbored, gpu_data_t* gpuData, int useDrainMass,
     int useOpenPore);
 
+void psolve_launch_biot_surface_rhs(cudaStream_t stream, int32_t nodes,
+    gpu_data_t* data);
+
 void psolve_launch_poroelastic_pressure_update_nodes(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t nharbored, gpu_data_t* gpuData, int useDrainMass,
@@ -244,5 +255,19 @@ void psolve_launch_pore_pressure_station_interpolate(
 void psolve_launch_displacement(
     int grid, int block, size_t shared, cudaStream_t stream,
     int32_t nharbored, gpu_data_t* gpuData, noyesflag_t printAccel);
+
+void psolve_launch_biot_traction(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double dt2, double alpha);
+void psolve_launch_biot_continuity(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double alpha);
+void psolve_launch_biot_displacement(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double dt, int32_t boundaryCount);
+void psolve_launch_biot_stations(cudaStream_t stream, int32_t count,
+    const int32_t* nodes, const double* coords, gpu_data_t* data,
+    double dt, double porosity, double* output);
+void psolve_launch_biot_stabilization(cudaStream_t stream, int32_t count,
+    gpu_data_t* data, const solver_float* input, solver_float* output, double scale);
+void psolve_launch_biot_stabilization_normalize(cudaStream_t stream,
+    int32_t count, gpu_data_t* data);
 
 #endif /* PSOLVE_GPU_LAUNCH_H_ */

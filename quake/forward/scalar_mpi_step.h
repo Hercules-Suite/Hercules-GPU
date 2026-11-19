@@ -37,9 +37,9 @@ static void scalar_update_nodes(mysolver_t* s, int field, int part) {
   else
     psolve_launch_poroelastic_pressure_update_nodes((count + 255) / 256, 256, 0,
         s->streams[CUDA_STREAM_MAIN], count, s->gpuDataDevice,
-        Param.thePoroelasticSurfacePressureBC == POROELASTIC_SURFACE_PRESSURE_DRAINED &&
+        !full_biot_enabled() && Param.thePoroelasticSurfacePressureBC == POROELASTIC_SURFACE_PRESSURE_DRAINED &&
             Param.thePoroelasticSurfacePressurePenaltyFactor > 0.0,
-        acoustic_poroelastic_open_pore_enabled() &&
+        !full_biot_enabled() && acoustic_poroelastic_open_pore_enabled() &&
             s->gpuData->porePressureOpenPoreMassDevice && s->gpuData->porePressureOpenPoreTargetDevice,
         p.nodes[part]);
   solver_pore_pressure_device_check(cudaGetLastError(), "Scalar MPI partitioned update");
@@ -71,7 +71,8 @@ static void scalar_run_group(mysolver_t* s, mesh_t* mesh, int group,
   scalar_batch_begin(dn, values, s); scalar_batch_finish(dn, values, s);
   scalar_group_adjust(group, device, true, values, s);
   scalar_batch_begin(an, values, s);
-  const bool overlap = device && g_gpuMpiOverlap;
+  const bool overlap = device && g_gpuMpiOverlap &&
+      !(pore && Param.thePoroelasticMassMatrix);
   if (overlap) {
     Timer_Start("Scalar interior update enqueue");
     if (acoustic) scalar_update_nodes(s, 0, 0);
@@ -88,6 +89,7 @@ static void scalar_run_group(mysolver_t* s, mesh_t* mesh, int group,
     if (acoustic) scalar_update_nodes(s, 0, 1);
     if (pore) scalar_update_nodes(s, 1, 1);
     Timer_Stop("Scalar boundary update enqueue");
+    if (pore) biot_surface_finish_update(s);
   } else {
     if (acoustic) scalar_acoustic_update(s, mesh, device);
     if (pore) scalar_pore_update(s, mesh, device);
@@ -129,7 +131,7 @@ static void solver_run_acoustic_pressure_step(mysolver_t* s, mesh_t* mesh) {
 static void solver_run_poroelastic_pressure_step(mysolver_t* s, mesh_t* mesh) {
   if (!poroelastic_gpu_active()) return;
   const int device = gpu_device_sync_enabled();
-  const bool open = acoustic_poroelastic_open_pore_enabled();
+  const bool open = !full_biot_enabled() && acoustic_poroelastic_open_pore_enabled();
   if (g_scalarMpiBatch || g_gpuMpiOverlap) {
     scalar_run_group(s, mesh, open && g_scalarMpiBatch ? SCALAR_BATCH_OPEN : SCALAR_BATCH_PORE,
                      false, true, open, device);

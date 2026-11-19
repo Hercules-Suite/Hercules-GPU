@@ -119,6 +119,10 @@ int    compute_tetra_displ      (double *dis_x, double *dis_y, double *dis_z,
 						 	 	 int32_t statID, mysolver_t *mySolver);
 int    topo_setrec              ( octant_t *leaf, double    ticksize, edata_t  *edata, etree_t  *cvm );
 double point_elevation          ( double xo, double yo );
+void topo_surface_normal(double x, double y, double normal[3]);
+/* Same selection and quadrature as topo_solver_init, for remote face traces. */
+int topo_cut_geometry(double x, double y, double z, double h,
+                      double fractions[5], int *partition);
 
 /* Optional ground/bed grid; all coordinates are solver metres. Water exists
  * where the outer surface (flat Z=0 with topography off) is more than

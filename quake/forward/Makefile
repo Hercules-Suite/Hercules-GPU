@@ -169,13 +169,18 @@ io_drm.o: io_drm.cc io_drm.h drm_output_points.h drm_output_coordinates.h drm_ou
 io_checkpoint.o: io_checkpoint.cc io_checkpoint.h psolve.h nonlinear_gpu.h
 psolve.o: psolve.cc build_info.h pore_diagnostic_schedule.h scalar_mpi_schedule.h scalar_mpi_pipeline.h scalar_mpi_step.h acoustic_interface_setup.h acoustic_interface_trace.h \
           acoustic_open_pore_quadrature.h acoustic_dashpot.h \
+          poroelastic_biot.h poroelastic_biot_setup.h poroelastic_biot_runtime.h poroelastic_cpml.h \
+          poroelastic_drain_setup.h poroelastic_brickup_drain_setup.h \
+          poroelastic_mass.h poroelastic_mass_setup.h poroelastic_mass_runtime.h poroelastic_mass_profile.h \
+          poroelastic_mass_compact_setup.h poroelastic_mass_comm.h \
+          poroelastic_mass_batch.h poroelastic_mass_one_round.h \
           acoustic_receiver_setup.h acoustic_receiver_gradient.h psolve.h psolve_gpu_launch.h output.h quakesource.h nonlinear.h nonlinear_gpu.h io_planes.h \
           io_checkpoint.h io_drm.h drm_output_quality.h flat_output_mpi.h stiffness.h damping.h quake_util.h timers.h \
 		  buildings.h meshformatlab.h drm.h topography.h drm_planewaves.h \
 		  basin.h kernel.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h \
+psolve_gpu_launch.o: psolve_gpu_launch.cu psolve_gpu_launch.h psolve.h poroelastic_mass.h poroelastic_mass.cuh \
 		kernel.h topography.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -diag-suppress=2464 -c $< -o $@
 
@@ -195,7 +200,7 @@ NONLINEAR_GPU_DEPS = nonlinear/nonlinear_gpu_implementation.cuh \
 nonlinear/nonlinear_gpu_%.o: nonlinear/nonlinear_gpu_%.cu $(NONLINEAR_GPU_DEPS)
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
-kernel.o: kernel.cu kernel.h psolve.h acoustic_open_pore_quadrature.h
+kernel.o: kernel.cu kernel.h psolve.h acoustic_open_pore_quadrature.h poroelastic_biot.h poroelastic_cpml.h cpml.h
 	$(NVCC) $(CPPFLAGS) $(NVFLAGS) -c $< -o $@
 
 all: $(TARGET)

@@ -106,7 +106,7 @@ export const setupGuides: SetupGuide[] = [
     description: "Elastic, nonlinear, and acoustic interfaces with saturated materials.",
     source: "physics",
     parent: "physics",
-    groups: [group("Solid & pore-pressure coupling", "coupling-poroelastic coupling-nonlinear-poroelastic coupling-riva-sand-poroelastic"), group("Water & sediment", "coupling-acoustic-poroelastic")],
+    groups: [group("Solid & pore-pressure coupling", "coupling-poroelastic coupling-full-biot coupling-biot-groundwater coupling-biot-weak-drain coupling-poroelastic-cpml coupling-nonlinear-poroelastic coupling-riva-sand-poroelastic"), group("Water & sediment", "coupling-acoustic-poroelastic")],
   },
   {
     slug: "attenuation",
@@ -134,10 +134,10 @@ export const setupGuides: SetupGuide[] = [
   {
     slug: "point-force-sources",
     title: "Point & force sources",
-    description: "Moment tensors, point forces, force histories, and compliant-base forcing.",
+    description: "Moment tensors, point forces, coupled poroelastic sources, and compliant-base forcing.",
     source: "source-models",
     parent: "source-models",
-    groups: [group("Source types", "point-source force-source force-history base-force")],
+    groups: [group("Source types", "point-source force-source force-history base-force biot-explosion")],
   },
   {
     slug: "finite-fault-sources",

@@ -48,9 +48,20 @@ python3 post/case3_compare.py
 - **`poroelastic_undrained_fast_path = yes`** (default) folds `alpha^2 M` into the native
   elastic volumetric stiffness and leaves pore pressure as a diagnostic; this is the path
   intended to match the undrained-equivalent elastic twin.
-- The poro-vs-twin check is insensitive to absorbing-boundary reflections (shared by both
-  runs). Scale the domain/record up only if you add the **optional** CPS reflectivity
-  cross-check (build the equivalent-elastic `.mod` under `benchmark_inputs/`).
+- Active sealed poroelastic cells now use the undrained normal dashpot
+  impedance in both fast and explicit pressure paths, with unchanged shear
+  impedance. This case meets the zero-permeability, undrained-surface and
+  no-open-pore eligibility conditions. An exact undrained elastic twin therefore
+  has matching mechanical dashpots as well as fast-path stiffness, up to
+  material rounding. Historical results at `2fd4f81` used drained porous
+  coefficients and had different outer reflections. Local dashpots still
+  reflect oblique waves and have no Darcy absorber; twin agreement is a
+  shared-code check, not independent boundary validation. In the measured
+  fine-grid follow-up, the full-record fast-path difference falls from 1.407%
+  to 0.119%; the remaining difference is not declared solved. See the
+  [measured follow-up](../WOLF_2022_VALIDATION.md#sealed-dashpot-correction-follow-up).
+- The optional CPS reflectivity cross-check needs the equivalent-elastic model
+  and a domain/record for which artificial outer-boundary effects are excluded.
 
 This case is a template — adjust the profile, source, offsets, and domain size to your
 actual site; keep the gotchas above.

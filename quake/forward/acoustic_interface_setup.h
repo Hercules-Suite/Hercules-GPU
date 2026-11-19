@@ -3,9 +3,10 @@
 
 /* Private psolve.cc implementation: include after material/neighbor discovery.
  * Acoustic/solid maps follow acoustic_interface_method. The pore-pressure
- * map is independent of acoustics on regular Hex8 meshes.
- * Field maps also support FEM topography: retained cells have the same Hex8
- * traces, while air cells and carved voids carry no physical field.
+ * map is independent of acoustics on regular Hex8/FEM meshes; native VT maps
+ * are selected with field-specific-constraints.
+ * Field maps support FEM Hex8 and native VT P1 traces. Air cells and carved
+ * voids carry no physical field; acoustic and regular CPML traces remain Q1.
  */
 struct acoustic_constraint_map_t {
   bool enabled = false;
@@ -19,18 +20,32 @@ struct acoustic_constraint_map_t {
 static acoustic_constraint_map_t g_acousticConstraintMaps[3];
 static bool g_acousticConstraintsReady = false;
 
+/* A native VT face midpoint can use two diagonal vertices rather than the
+ * four Q1 face vertices. The octree has already imported the geometric
+ * parents; only select from that owned/ghost set, retaining its MPI schedules.
+ * Both distribution and assignment use the identical positive trace weights. */
 static void acoustic_constraint_append(acoustic_constraint_map_t& map,
-                                        const dnode_t& node) {
-  const int32_t id = (int32_t)map.node_base3.size();
-  map.node_base3.push_back(3 * node.ldnid);
-  map.weights.push_back((solver_float)1.0 / node.deps);
+    const dnode_t& node,
+    const std::map<point_t,double,acoustic_point_less>& trace) {
+  const int32_t id=map.node_base3.size();
+  map.node_base3.push_back(3*node.ldnid);
+  map.weights.push_back((solver_float)(1.0/trace.size()));
   map.order.push_back(id);
   if (map.offsets.empty()) map.offsets.push_back(0);
-  for (int32link_t* parent = node.lanid; parent; parent = parent->next)
-    map.parent_base3.push_back(3 * parent->id);
-  if (map.parent_base3.size() > (size_t)INT_MAX)
-    solver_abort(__FUNCTION_NAME, NULL, "Field constraint map exceeds INT_MAX\n");
-  map.offsets.push_back((int32_t)map.parent_base3.size());
+  for (const auto& entry:trace) {
+    if (fabs(entry.second-1.0/trace.size())>1e-12)
+      solver_abort(__FUNCTION_NAME,NULL,"Nonuniform native field trace requires remeshing\n");
+    int found=-1;
+    for (int32link_t* parent=node.lanid;parent;parent=parent->next) {
+      const node_t& n=Global.myMesh->nodeTable[parent->id];
+      if (n.x==entry.first.x && n.y==entry.first.y && n.z==entry.first.z) found=parent->id;
+    }
+    if (found<0) solver_abort(__FUNCTION_NAME,NULL,"Native field trace parent missing from geometric halo\n");
+    map.parent_base3.push_back(3*found);
+  }
+  if (map.parent_base3.size()>(size_t)INT_MAX)
+    solver_abort(__FUNCTION_NAME,NULL,"Field constraint map exceeds INT_MAX\n");
+  map.offsets.push_back(map.parent_base3.size());
 }
 
 static void acoustic_constraint_finish(acoustic_constraint_map_t& map) {
@@ -123,7 +138,9 @@ static void acoustic_constraint_upload(T** device, const std::vector<T>& host) {
 
 static bool poroelastic_field_constraints_enabled() {
   return poroelastic_enabled() &&
-      (Param.includeTopography != YES || get_topo_meth() == FEM);
+      (Param.includeTopography != YES || get_topo_meth() == FEM ||
+       (full_biot_enabled() &&
+        Param.theAcousticInterfaceMethod == ACOUSTIC_INTERFACE_FIELDS));
 }
 
 static void acoustic_constraints_build() {
@@ -132,7 +149,9 @@ static void acoustic_constraints_build() {
   const bool pore_fields = poroelastic_field_constraints_enabled();
   if (Global.myID == 0 && poroelastic_enabled() && !pore_fields)
     monitor_print("Pore-pressure constraints: shared geometric (VT cut-cell "
-                  "topography; field-specific Hex8 traces are unsupported).\n");
+                  "topography; full_biot with coupled scalar acoustics and "
+                  "field-specific-constraints enables native P1 pressure traces; "
+                  "brick_up retains its existing pressure interpolation).\n");
   if (!acoustic_fields && !pore_fields) return;
   const int field_mask =
       (acoustic_fields ? (1 << ACOUSTIC_CONSTRAINT_SCALAR) |
@@ -145,7 +164,7 @@ static void acoustic_constraints_build() {
     solver_abort(__FUNCTION_NAME, NULL, "Field constraint node index overflow\n");
   // Interface discovery cached material candidates before solver initialization.
   // Refresh remote leaves once so pore maps use final activity, not candidates
-  // that became elastic-only inside CPML. Subsequent discovery uses the same flags.
+  // before final porous CPML enrollment. Subsequent discovery uses the same flags.
   if (poroelastic_enabled()) {
     const point_t* intervals = octor_getintervaltable(Global.myOctree);
     for (const auto& entry : g_acousticNeighbors)
@@ -175,6 +194,7 @@ static void acoustic_constraints_build() {
     const dnode_t& dangling = mesh->dnodeTable[i];
     const node_t& node = mesh->nodeTable[dangling.ldnid];
     bool active[3] = {false, false, false}, keep[3] = {false, false, false};
+    std::map<point_t,double,acoustic_point_less> traces[3];
     std::map<point_t, double, acoustic_point_less> given;
     if (dangling.deps == 0)
       solver_abort(__FUNCTION_NAME, NULL, "Field constraint has no parents\n");
@@ -188,7 +208,7 @@ static void acoustic_constraints_build() {
       tick_t low[3], high[3]; int fields;
       if (!acoustic_constraint_probe(node, o, low, high, &fields)) continue;
       fields &= field_mask;
-      // A coarse dry/CPML neighbor must not constrain pore pressure, nor
+      // A coarse dry neighbor must not constrain pore pressure, nor
       // impose its trace-stencil requirements on an independent pore map.
       if (fields == 0) continue;
       for (int field = 0; field < 3; ++field)
@@ -198,37 +218,52 @@ static void acoustic_constraints_build() {
       for (int j = 0; j < 3; ++j)
         if (pos[j] != low[j] && pos[j] != high[j]) vertex = false;
       if (vertex) continue;
-      for (int field = 0; field < 3; ++field)
-        if (fields & (1 << field)) keep[field] = true;
-      // Retain a constraint only when it is the exact same-field Hex8 trace.
-      // Mixed-corner meshes can require different stencils; do not guess them.
-      std::map<point_t, double, acoustic_point_less> expected;
-      for (int c = 0; c < 8; ++c) {
-        double weight = 1.0; tick_t v[3];
-        for (int j = 0; j < 3; ++j) {
-          const bool upper = c & (1 << j);
-          v[j] = upper ? high[j] : low[j];
-          const double f = double(pos[j] - low[j]) / double(high[j] - low[j]);
-          weight *= upper ? f : 1.0 - f;
+      double fraction[5],N[8],x[3]; int partition=0;
+      const double tick=mesh->ticksize,h=(high[0]-low[0])*tick;
+      bool native=Param.includeTopography==YES && get_topo_meth()==VT;
+      if (native && Param.theAbcType==ABC_CPML && compute_pml_face_mask(
+          low,high,Global.myOctree->nearendp,Global.myOctree->farendp,tick,
+          g_cpmlBuild.thickness_m)) native=false; // regular CPML cubes
+      if (native) native=topo_cut_geometry(low[0]*tick,low[1]*tick,
+          low[2]*tick,h,fraction,&partition)!=0;
+      int tet=-1;
+      if (native) {
+        for (int d=0;d<3;++d) x[d]=double(pos[d]-low[d])/double(high[d]-low[d]);
+        tet=biot_tet_weights(partition,x,N);
+        if (tet<0) solver_abort(__FUNCTION_NAME,NULL,"Invalid native field trace point\n");
+      }
+      for (int field=0;field<3;++field) {
+        if (!(fields&(1<<field))) continue;
+        const bool p1=native && field!=ACOUSTIC_CONSTRAINT_SCALAR;
+        if (p1 && !(fraction[tet]>0)) continue;
+        std::map<point_t,double,acoustic_point_less> expected;
+        for (int c=0;c<8;++c) {
+          double weight=1; tick_t v[3];
+          for (int d=0;d<3;++d) {
+            const bool upper=c&(1<<d); v[d]=upper?high[d]:low[d];
+            const double f=double(pos[d]-low[d])/double(high[d]-low[d]);
+            weight*=upper?f:1-f;
+          }
+          if (p1) weight=N[c];
+          if (weight>1e-14) expected[{v[0],v[1],v[2]}]+=weight;
         }
-        if (weight > 0.0) expected[{v[0], v[1], v[2]}] += weight;
+        const auto& required=keep[field]?traces[field]:(p1?expected:given);
+        bool equal=required.size()==expected.size();
+        for (const auto& entry:expected) {
+          const auto found=required.find(entry.first);
+          if (found==required.end() || fabs(found->second-entry.second)>1e-12) equal=false;
+        }
+        if (!equal) solver_abort(__FUNCTION_NAME,NULL,
+            "Unsupported field-specific-constraints stencil at (%g,%g,%g) m, field %d. "
+            "Remesh to provide compatible same-field Hex8/P1 traces.\n",
+            node.x*tick,node.y*tick,node.z*tick,field);
+        traces[field]=expected; keep[field]=true;
       }
-      bool equal = given.size() == expected.size();
-      for (const auto& p : expected) {
-        const auto found = given.find(p.first);
-        if (found == given.end() || fabs(found->second - p.second) > 1.e-12) equal = false;
-      }
-      if (!equal)
-        solver_abort(__FUNCTION_NAME, NULL,
-                     "Unsupported field-specific-constraints stencil at (%g,%g,%g) m, field mask %d. "
-                     "Remesh to provide an exact same-field Hex8 trace.\n",
-                     node.x * mesh->ticksize, node.y * mesh->ticksize,
-                     node.z * mesh->ticksize, fields);
     }
     for (int field = 0; field < 3; ++field) {
       if (!g_acousticConstraintMaps[field].enabled) continue;
       ++counts[3 * field + (keep[field] ? 0 : (active[field] ? 1 : 2))];
-      if (keep[field]) acoustic_constraint_append(g_acousticConstraintMaps[field], dangling);
+      if (keep[field]) acoustic_constraint_append(g_acousticConstraintMaps[field], dangling, traces[field]);
     }
   }
   for (auto& map : g_acousticConstraintMaps) {
@@ -246,13 +281,13 @@ static void acoustic_constraints_build() {
   MPI_Allreduce(counts, total, 9, MPI_INT64_T, MPI_SUM, comm_solver);
   if (Global.myID == 0 && acoustic_fields)
     monitor_print("Field constraints (keep/release/absent): acoustic %lld/%lld/%lld; "
-                  "solid %lld/%lld/%lld. Same-field Hex8 traces checked.\n",
+                  "solid %lld/%lld/%lld. Same-field Hex8/native P1 traces checked.\n",
                   (long long)total[0], (long long)total[1], (long long)total[2],
                   (long long)total[3], (long long)total[4], (long long)total[5]);
   if (Global.myID == 0 && pore_fields)
     monitor_print("Field constraints (keep/release/absent): pore pressure %lld/%lld/%lld. "
-                  "Final active poroelastic Hex8 cells; independent of acoustic "
-                  "interface method; CPML remains elastic-only.\n",
+                  "Final active poroelastic cells, including porous CPML; "
+                  "same-field Hex8/native P1 traces checked.\n",
                   (long long)total[6], (long long)total[7], (long long)total[8]);
   g_acousticConstraintsReady = true;
 }

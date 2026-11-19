@@ -24,11 +24,13 @@
 
 #include "psolve.h"
 #include "acoustic_open_pore_quadrature.h"
+#include "poroelastic_biot.h"
 #include "kernel.h"
 #include "quake_util.h"
 #include "damping.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "poroelastic_drain.cuh"
 
 
 /**
@@ -385,6 +387,13 @@ void kernelStiffnessCalcLocal(int32_t lenum,
     if (gpuData->pmlFlagArrayDevice != NULL &&
         gpuData->pmlFlagArrayDevice[eindex] != 0) return;
 
+    /* Pressure/potential acoustic cells have their own scalar stiffness.
+     * Reject them before gathering solid displacements, including cells
+     * whose interface nodes carry nonzero solid motion. This flag array is
+     * absent for the legacy displacement formulation, which still uses K. */
+    if (gpuData->acousticElementFlagsArrayDevice != NULL &&
+        gpuData->acousticElementFlagsArrayDevice[eindex] != 0) return;
+
     int32_t *lnid = &(gpuData->lnidArrayDevice[eindex]);
 
     /* Rayleigh stiffness-proportional damping b*K, ported to the main
@@ -504,6 +513,10 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
     return;
   }
 
+  const bool biotOpen = gpuData->biotForceDevice &&
+      gpuData->acousticInterfaceAdjacentPoroelasticDevice &&
+      gpuData->acousticInterfaceAdjacentPoroelasticDevice[faceIndex];
+
   const int32_t eindex =
       gpuData->acousticInterfaceElementIdsDevice[faceIndex];
   const double face_coeff =
@@ -593,7 +606,8 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                                      ACOUSTIC_INTERFACE_PML_ELASTIC_SIDE, traction);
 
         for (int i = 0; i < 8; i++) {
-          const double weight =
+          const double weight = gpuData->biotInterfaceWeightsDevice ?
+              gpuData->biotInterfaceWeightsDevice[32*faceIndex+8*(2*g0+g1)+i] :
               acoustic_shape_value_at(i, q_force_center[0],
                                       q_force_center[1], q_force_center[2]);
           if (weight == 0.0) {
@@ -610,6 +624,13 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
                     (solver_float)(q_coeff * weight * traction[1]));
           atomicAdd((solver_float*)&nodalForce->f[2],
                     (solver_float)(q_coeff * weight * traction[2]));
+          if (biotOpen) {
+            /* Fluid natural traction is -p_water*n_solid. Here normal is
+             * outward from water, so it has the same sign as solid traction. */
+            for (int d=0; d<3; ++d)
+              atomicAdd(&gpuData->biotForceDevice[lnid].f[d],
+                        (solver_float)(q_coeff * weight * traction[d]));
+          }
         }
       }
     }
@@ -657,6 +678,10 @@ __global__ void kernelAcousticPressureDisplacementCoupling(int32_t faceCount,
               (solver_float)(face_coeff * weight * traction[1]));
     atomicAdd((solver_float*)&nodalForce->f[2],
               (solver_float)(face_coeff * weight * traction[2]));
+    if (biotOpen)
+      for (int d=0; d<3; ++d)
+        atomicAdd(&gpuData->biotForceDevice[lnid].f[d],
+                  (solver_float)(face_coeff * weight * traction[d]));
   }
 }
 
@@ -761,6 +786,10 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     return;
   }
 
+  const bool biotOpen = gpuData->biotW1Device &&
+      gpuData->acousticInterfaceAdjacentPoroelasticDevice &&
+      gpuData->acousticInterfaceAdjacentPoroelasticDevice[faceIndex];
+
   const int32_t eindex =
       gpuData->acousticInterfaceElementIdsDevice[faceIndex];
   const double face_coeff =
@@ -830,7 +859,8 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
             adjacent_half[tangent_axes[1]] * gauss[g1];
 
         for (int i = 0; i < 8; i++) {
-          const double weight =
+          const double weight = gpuData->biotInterfaceWeightsDevice ?
+              gpuData->biotInterfaceWeightsDevice[32*faceIndex+8*(2*g0+g1)+i] :
               acoustic_shape_value_at(i, q_accel_center[0],
                                       q_accel_center[1],
                                       q_accel_center[2]);
@@ -845,8 +875,14 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
           const fvector_t u_curr = gpuData->tm1Device[lnid];
           const fvector_t u_prev = vp ? u_curr : gpuData->tm3Device[lnid];
           for (int j=0; j<3; ++j) {
-            const double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
+            double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
                 : ((double)u_next.f[j]-2.0*u_curr.f[j]+u_prev.f[j])*invDeltaT2;
+            if (biotOpen) {
+              const double wn = gpuData->biotW2Device[lnid].f[j];
+              const double wc = gpuData->biotW1Device[lnid].f[j];
+              const double wp = gpuData->biotW3Device[lnid].f[j];
+              motion += vp ? (wn-wc)*invDt : (wn-2*wc+wp)*invDeltaT2;
+            }
             q_source[j] += weight*motion*normal[j];
           }
         }
@@ -894,8 +930,14 @@ __global__ void kernelAcousticPressureInterfaceForce(int32_t faceCount,
     const fvector_t u_curr = gpuData->tm1Device[lnid];
     const fvector_t u_prev = vp ? u_curr : gpuData->tm3Device[lnid];
     for (int j=0; j<3; ++j) {
-      const double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
+      double motion = vp ? ((double)u_next.f[j]-u_curr.f[j])*invDt
           : ((double)u_next.f[j]-2.0*u_curr.f[j]+u_prev.f[j])*invDeltaT2;
+      if (biotOpen) {
+        const double wn = gpuData->biotW2Device[lnid].f[j];
+        const double wc = gpuData->biotW1Device[lnid].f[j];
+        const double wp = gpuData->biotW3Device[lnid].f[j];
+        motion += vp ? (wn-wc)*invDt : (wn-2*wc+wp)*invDeltaT2;
+      }
       source[j] += weight*motion*normal[j];
     }
   }
@@ -993,7 +1035,68 @@ __device__ static double poro_node_sign_device(int node, int axis)
   return (node & (1 << axis)) ? 1.0 : -1.0;
 }
 
-__global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
+template<bool fullBiot>
+__device__ static bool poro_cpml_pressure_traction(int pi,gpu_data_t* data,
+    double dt2,double alpha) {
+  const int ci=data->poroCpmlIndexDevice?data->poroCpmlIndexDevice[pi]:-1;
+  if (ci<0) return false;
+  const poro_cpml_t& c=data->poroCpmlCoeffDevice[ci];
+  const int ei=data->poroelasticElemMapperDevice[pi];
+  const size_t stride=data->poroCpmlCount;
+  solver_float* state=data->poroCpmlStateDevice+ci;
+  int ids[8]; double p[8],f[8][3],fu[8][3]={},fw[8][3]={};
+  double u[8][3],w[8][3],du[8][3],dw[8][3];
+  for (int j=0;j<8;++j) {
+    const int n=ids[j]=data->lnidArrayDevice[ei+j*data->lenum];
+    p[j]=data->porePressureTm1Device[n];
+    if (fullBiot) for (int d=0;d<3;++d) {
+      u[j][d]=data->tm1Device[n].f[d]; w[j][d]=data->biotW1Device[n].f[d];
+      du[j][d]=u[j][d]-data->tm2Device[n].f[d];
+      dw[j][d]=w[j][d]-data->biotW2Device[n].f[d];
+    }
+  }
+  poro_cpml_traction(c,p,f,state,stride);
+  if (fullBiot) {
+    if (c.consistent) poro_cpml_consistent_inertia(c,u,w,du,dw,fu,fw,state,stride);
+    else poro_cpml_fluid_inertia(c,u,w,du,dw,fu,fw,state,stride);
+  }
+  for (int j=0;j<8;++j) for (int d=0;d<3;++d) {
+    atomicAdd(&data->forceDevice[ids[j]].f[d],(solver_float)(dt2*alpha*f[j][d]+fu[j][d]));
+    if (fullBiot) atomicAdd(&data->biotForceDevice[ids[j]].f[d],
+        (solver_float)(dt2*f[j][d]+fw[j][d]));
+  }
+  return true;
+}
+
+template<bool fullBiot>
+__device__ static bool poro_cpml_pressure_force(int pi,gpu_data_t* data,
+    double alpha,double mx,double my,double mz) {
+  const int ci=data->poroCpmlIndexDevice?data->poroCpmlIndexDevice[pi]:-1;
+  if (ci<0) return false;
+  const poro_cpml_t& c=data->poroCpmlCoeffDevice[ci];
+  const int ei=data->poroelasticElemMapperDevice[pi];
+  const size_t stride=data->poroCpmlCount;
+  solver_float* state=data->poroCpmlStateDevice+ci;
+  int ids[8]; double p[8],delta[8][3],rhs[8];
+  for (int j=0;j<8;++j) {
+    const int n=ids[j]=data->lnidArrayDevice[ei+j*data->lenum];
+    p[j]=data->porePressureTm1Device[n];
+    for (int d=0;d<3;++d) {
+      delta[j][d]=alpha*((double)data->tm2Device[n].f[d]-data->tm1Device[n].f[d]);
+      if (fullBiot) delta[j][d]+=(double)data->biotW2Device[n].f[d]-data->biotW1Device[n].f[d];
+    }
+  }
+  poro_cpml_continuity<!fullBiot>(c,delta,p,rhs,state,stride);
+  if (!fullBiot) {
+    const double mobility[3]={mx,my,mz};
+    poro_cpml_diffusion(c,mobility,p,rhs,state,stride);
+  }
+  for (int j=0;j<8;++j) atomicAdd(data->porePressureForceDevice+ids[j],(solver_float)rhs[j]);
+  return true;
+}
+
+template <bool fullBiot>
+__device__ __forceinline__ void poroelastic_pressure_traction(int32_t elemCount,
                                                   gpu_data_t* gpuData,
                                                   double deltaT2,
                                                   double biotAlpha)
@@ -1005,6 +1108,8 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
   if (pindex >= elemCount) {
     return;
   }
+
+  if (poro_cpml_pressure_traction<fullBiot>(pindex,gpuData,deltaT2,biotAlpha)) return;
 
   const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
   const double h = gpuData->poroelasticElemHDevice[pindex];
@@ -1051,7 +1156,7 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
               Np * (double)gpuData->porePressureTm1Device[lnid];
         }
 
-        const double scale = biotAlpha * pressureAtGp * detJ;
+        const double scale = (fullBiot ? 1.0 : biotAlpha) * pressureAtGp * detJ;
         for (int j = 0; j < 8; j++) {
           qForce[j][0] += scale * dNdx[j][0];
           qForce[j][1] += scale * dNdx[j][1];
@@ -1065,6 +1170,13 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
     const int32_t lnid =
         gpuData->lnidArrayDevice[eindex + j * gpuData->lenum];
     fvector_t* nodalForce = gpuData->forceDevice + lnid;
+    if (fullBiot) {
+      for (int d = 0; d < 3; ++d) {
+        atomicAdd(&gpuData->biotForceDevice[lnid].f[d],
+                  (solver_float)(deltaT2 * qForce[j][d]));
+        qForce[j][d] *= biotAlpha;
+      }
+    }
     atomicAdd((solver_float*)&nodalForce->f[0],
               (solver_float)(deltaT2 * qForce[j][0]));
     atomicAdd((solver_float*)&nodalForce->f[1],
@@ -1074,7 +1186,43 @@ __global__ void kernelPoroelasticPressureTraction(int32_t elemCount,
   }
 }
 
-template <bool reconstruct>
+__global__ void kernelPoroelasticPressureTraction(int32_t count, gpu_data_t* data,
+                                                 double dt2, double alpha) {
+  poroelastic_pressure_traction<false>(count, data, dt2, alpha);
+}
+
+__global__ void kernelBiotPressureTraction(int32_t count, gpu_data_t* data,
+                                         double dt2, double alpha) {
+  const int pi=blockIdx.x*blockDim.x+threadIdx.x;
+  if (pi>=count) return;
+  if (poro_cpml_pressure_traction<true>(pi,data,dt2,alpha)) return;
+  if (data->biotCutIndexDevice && data->biotCutIndexDevice[pi]>=0) {
+    const biot_cut_t cut=data->biotCutsDevice[data->biotCutIndexDevice[pi]];
+    const int ei=data->poroelasticElemMapperDevice[pi];
+    const double h=data->poroelasticElemHDevice[pi];
+    double f[8][3]={},p[8]; int ids[8];
+    for (int j=0; j<8; ++j) {
+      ids[j]=data->lnidArrayDevice[ei+j*data->lenum];
+      p[j]=data->porePressureTm1Device[ids[j]];
+    }
+    for (int t=0; t<5; ++t) {
+      if (!(cut.fraction[t]>0)) continue;
+      int nodes[4]; double grad[4][3];
+      const double v=biot_tet_geometry(cut.partition,t,nodes,grad)*h*h*cut.fraction[t];
+      double mean=0; for (int a=0; a<4; ++a) mean+=p[nodes[a]]/4;
+      for (int a=0; a<4; ++a) for (int d=0; d<3; ++d)
+        f[nodes[a]][d]+=v*grad[a][d]*mean;
+    }
+    for (int j=0; j<8; ++j) for (int d=0; d<3; ++d) {
+      atomicAdd(&data->forceDevice[ids[j]].f[d],(solver_float)(dt2*alpha*f[j][d]));
+      atomicAdd(&data->biotForceDevice[ids[j]].f[d],(solver_float)(dt2*f[j][d]));
+    }
+    return;
+  }
+  poroelastic_pressure_traction<true>(count, data, dt2, alpha);
+}
+
+template <bool reconstruct, bool fullBiot = false>
 __device__ __forceinline__ void poroelastic_pressure_force(int32_t elemCount,
                                                gpu_data_t* gpuData,
                                                double deltaT,
@@ -1088,9 +1236,11 @@ __device__ __forceinline__ void poroelastic_pressure_force(int32_t elemCount,
   const double gp = 0.57735026918962576451;
   const double gcoord[2] = {-gp, gp};
 
-  if ((pindex >= elemCount) || ((biotAlpha == 0.0) && !haveDiffusion)) {
+  if ((pindex >= elemCount) || (!fullBiot && (biotAlpha == 0.0) && !haveDiffusion)) {
     return;
   }
+  if (!reconstruct && poro_cpml_pressure_force<fullBiot>(pindex,gpuData,
+      biotAlpha,mobilityX,mobilityY,mobilityZ)) return;
 
   const int32_t eindex = gpuData->poroelasticElemMapperDevice[pindex];
   const double h = gpuData->poroelasticElemHDevice[pindex];
@@ -1113,6 +1263,7 @@ __device__ __forceinline__ void poroelastic_pressure_force(int32_t elemCount,
         const double zeta = gcoord[gz];
         double Np[8];
         double divDeltaU = 0.0;
+        double divDeltaW = 0.0;
 
         for (int j = 0; j < 8; j++) {
           const double sx = poro_node_sign_device(j, 0);
@@ -1137,9 +1288,16 @@ __device__ __forceinline__ void poroelastic_pressure_force(int32_t elemCount,
           divDeltaU += dNdx0 * ((double)unew.f[0] - (double)uold.f[0]);
           divDeltaU += dNdx1 * ((double)unew.f[1] - (double)uold.f[1]);
           divDeltaU += dNdx2 * ((double)unew.f[2] - (double)uold.f[2]);
+          if (fullBiot) {
+            const fvector_t wn = gpuData->biotW2Device[lnid];
+            const fvector_t wo = gpuData->biotW1Device[lnid];
+            divDeltaW += dNdx0 * ((double)wn.f[0] - (double)wo.f[0]) +
+                         dNdx1 * ((double)wn.f[1] - (double)wo.f[1]) +
+                         dNdx2 * ((double)wn.f[2] - (double)wo.f[2]);
+          }
         }
 
-        const double scale = biotAlpha * divDeltaU * detJ;
+        const double scale = (biotAlpha * divDeltaU + divDeltaW) * detJ;
         for (int j = 0; j < 8; j++) {
           qtDeltaU[j] += scale * Np[j];
         }
@@ -1234,6 +1392,173 @@ __global__ void kernelPoroelasticPressureForce(
     double mobilityY, double mobilityZ, int haveDiffusion, double biotAlpha) {
   poroelastic_pressure_force<false>(elemCount, gpuData, deltaT, mobilityX,
       mobilityY, mobilityZ, haveDiffusion, biotAlpha);
+}
+
+__global__ void kernelBiotPressureForce(int32_t count, gpu_data_t* data,
+                                      double alpha) {
+  const int pi=blockIdx.x*blockDim.x+threadIdx.x;
+  if (pi>=count) return;
+  if (poro_cpml_pressure_force<true>(pi,data,alpha,0,0,0)) return;
+  if (data->biotCutIndexDevice && data->biotCutIndexDevice[pi]>=0) {
+    const biot_cut_t cut=data->biotCutsDevice[data->biotCutIndexDevice[pi]];
+    const int ei=data->poroelasticElemMapperDevice[pi];
+    const double h=data->poroelasticElemHDevice[pi];
+    double delta[8][3],rhs[8]={}; int ids[8];
+    for (int j=0; j<8; ++j) {
+      const int n=ids[j]=data->lnidArrayDevice[ei+j*data->lenum];
+      for (int d=0; d<3; ++d)
+        delta[j][d]=alpha*((double)data->tm2Device[n].f[d]-data->tm1Device[n].f[d])+
+                   (double)data->biotW2Device[n].f[d]-data->biotW1Device[n].f[d];
+    }
+    for (int t=0; t<5; ++t) {
+      if (!(cut.fraction[t]>0)) continue;
+      int nodes[4]; double grad[4][3];
+      const double v=biot_tet_geometry(cut.partition,t,nodes,grad)*h*h*cut.fraction[t];
+      double div=0;
+      for (int a=0; a<4; ++a) for (int d=0; d<3; ++d)
+        div+=grad[a][d]*delta[nodes[a]][d];
+      for (int a=0; a<4; ++a) rhs[nodes[a]]-=v*div/4;
+    }
+    for (int j=0; j<8; ++j)
+      atomicAdd(data->porePressureForceDevice+ids[j],(solver_float)rhs[j]);
+    return;
+  }
+  poroelastic_pressure_force<false, true>(count, data, 0, 0, 0, 0, 0, alpha);
+}
+
+/* K_a = sum_e integral(grad(N)^T diag(sqrt(nu4))/M grad(N)) dV.
+ * Applying K_a C^-1 K_a in continuity gives nonnegative pressure-energy
+ * dissipation, preserves the constant-pressure nullspace and total fluid
+ * content, and preferentially damps the collocated-grid branch. nu4=O(h^3)
+ * vanishes with refinement. This is numerical stabilization, not Darcy flow. */
+__global__ void kernelBiotStabilization(int32_t count, gpu_data_t* data,
+    const solver_float* input, solver_float* output, double scale) {
+  const int32_t pi = blockIdx.x*blockDim.x + threadIdx.x;
+  if (pi >= count) return;
+  const int ei = data->poroelasticElemMapperDevice[pi];
+  const double h = data->poroelasticElemHDevice[pi];
+  const double weight = data->poroelasticElemDetJDevice[pi] /
+                        data->poroelasticStorageMDevice[pi];
+  const fvector_t coeff = data->biotStabilizationCoeffDevice[pi];
+  double values[8], rhs[8] = {};
+  for (int j=0; j<8; ++j)
+    values[j] = input[data->lnidArrayDevice[ei+j*data->lenum]];
+  if (data->biotCutIndexDevice && data->biotCutIndexDevice[pi]>=0) {
+    const biot_cut_t cut=data->biotCutsDevice[data->biotCutIndexDevice[pi]];
+    for (int t=0; t<5; ++t) {
+      if (!(cut.fraction[t]>0)) continue;
+      int nodes[4]; double grad[4][3],gp[3]={};
+      const double v=biot_tet_geometry(cut.partition,t,nodes,grad)*h*cut.fraction[t]/
+                     data->poroelasticStorageMDevice[pi];
+      for (int a=0; a<4; ++a) for (int d=0; d<3; ++d)
+        gp[d]+=grad[a][d]*values[nodes[a]];
+      for (int a=0; a<4; ++a) for (int d=0; d<3; ++d)
+        rhs[nodes[a]]+=v*coeff.f[d]*grad[a][d]*gp[d];
+    }
+  } else for (int g=0; g<8; ++g) {
+    double x[3];
+    for (int d=0; d<3; ++d) x[d]=poro_node_sign_device(g,d)*0.57735026918962576451;
+    double grad[8][3], gp[3]={};
+    for (int j=0; j<8; ++j) {
+      for (int d=0; d<3; ++d) {
+        const int a=(d+1)%3,b=(d+2)%3;
+        grad[j][d]=poro_node_sign_device(j,d)*
+            (1+poro_node_sign_device(j,a)*x[a])*(1+poro_node_sign_device(j,b)*x[b])/(4*h);
+        gp[d]+=grad[j][d]*values[j];
+      }
+    }
+    for (int j=0; j<8; ++j) for (int d=0; d<3; ++d)
+      rhs[j]+=weight*coeff.f[d]*grad[j][d]*gp[d];
+  }
+  for (int j=0; j<8; ++j)
+    atomicAdd(output+data->lnidArrayDevice[ei+j*data->lenum], (solver_float)(scale*rhs[j]));
+}
+
+__global__ void kernelBiotStabilizationNormalize(int32_t count, gpu_data_t* data) {
+  const int32_t n=blockIdx.x*blockDim.x+threadIdx.x;
+  if (n >= count) return;
+  const double mass=data->porePressureMassDevice[n];
+  const bool fixed=data->biotSurfaceFixedDevice && data->biotSurfaceFixedDevice[n];
+  data->biotStabilizationWorkDevice[n] = mass>0 && !fixed ?
+      data->biotStabilizationWorkDevice[n]/mass : 0;
+}
+
+/* The solid update has already applied its force and damping. Reuse the
+ * assembled force and backward-difference damping for the coupled mass solve.
+ * MPI sharing and hanging-node assignment follow before continuity is used. */
+__global__ void kernelBiotDisplacement(int32_t count, gpu_data_t* data, double dt) {
+  const int32_t n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= count) return;
+  const double ms = data->mass_simpleArrayDevice[n];
+  const fvector_t mass = data->biotMassDevice[n];
+  const fvector_t w = data->biotW1Device[n];
+  const fvector_t old = data->biotW2Device[n];
+  data->biotW3Device[n] = old;
+  for (int d = 0; d < 3; ++d) {
+    double wn = 0;
+    const double drag = data->biotDragDevice[n].f[d];
+    if (ms > 0 && mass.f[1] > 0 && drag >= 0) {
+      const double u = data->tm1Device[n].f[d];
+      const double up = data->tm3Device[n].f[d];
+      /* Avoid recovering force by subtracting three large displacements,
+       * which loses accuracy when permanent displacement exceeds dt^2*a.
+       * mass_minusaM = ms - dt*C for the existing solid damping convention. */
+      const double Fu = (double)data->forceDevice[n].f[d] -
+          (ms - (double)data->mass_minusaMArrayDevice[d][n]) * (u-up);
+      double du, dw;
+      biot_increment(ms, mass.f[0], mass.f[1], dt * drag,
+                     u-up, (double)w.f[d]-old.f[d], Fu,
+                     data->biotForceDevice[n].f[d], &du, &dw);
+      data->tm2Device[n].f[d] = (solver_float)(u + du);
+      wn = (double)w.f[d] + dw;
+    }
+    data->biotW2Device[n].f[d] = (solver_float)wn;
+  }
+  /* The ordinary solid clamp runs before this coupled correction. Preserve
+   * it and terminate all relative-fluid components at the outer PML face. */
+  if (data->pmlClampNodeMaskDevice && data->pmlClampNodeMaskDevice[n])
+    for (int d=0;d<3;++d) {
+      data->tm2Device[n].f[d]=0; data->biotW2Device[n].f[d]=0;
+    }
+}
+
+/* Enforce n.w=0 in the native VT surface support band. Solve anisotropic drag
+ * in allowed eigenmodes, including the inertial reaction on the solid. This
+ * runs only for compact owned surface nodes, before vector MPI sharing. */
+__global__ void kernelBiotBoundary(int32_t count, gpu_data_t* data, double dt) {
+  const int b=blockIdx.x*blockDim.x+threadIdx.x;
+  if (b>=count) return;
+  const biot_boundary_t bc=data->biotBoundaryDevice[b];
+  const int n=bc.node;
+  const double ms=data->mass_simpleArrayDevice[n];
+  const fvector_t mass=data->biotMassDevice[n];
+  if (!(ms>0) || !(mass.f[1]>0)) return;
+  const double ratio=mass.f[0]/ms, effective=mass.f[1]-mass.f[0]*ratio;
+  double Fu[3], oldw[3], dw[3]={};
+  for (int d=0; d<3; ++d) {
+    const double olddu=(double)data->tm1Device[n].f[d]-data->tm3Device[n].f[d];
+    Fu[d]=(double)data->forceDevice[n].f[d]-(ms-data->mass_minusaMArrayDevice[d][n])*olddu;
+    oldw[d]=(double)data->biotW1Device[n].f[d]-data->biotW3Device[n].f[d];
+  }
+  for (int a=0; a<bc.modes; ++a) {
+    double prev=0,force=0;
+    for (int d=0; d<3; ++d) {
+      prev+=bc.basis[a][d]*oldw[d];
+      force+=bc.basis[a][d]*(data->biotForceDevice[n].f[d]-ratio*Fu[d]);
+    }
+    const double r=dt*bc.drag[a]/effective;
+    const double next=exp(-r)*prev+(r==0?1:-expm1(-r)/r)*force/effective;
+    for (int d=0; d<3; ++d) dw[d]+=bc.basis[a][d]*next;
+  }
+  for (int d=0; d<3; ++d) {
+    const double u=data->tm1Device[n].f[d], up=data->tm3Device[n].f[d];
+    data->tm2Device[n].f[d]=(solver_float)(2*u-up+Fu[d]/ms-ratio*(dw[d]-oldw[d]));
+    data->biotW2Device[n].f[d]=(solver_float)(data->biotW1Device[n].f[d]+dw[d]);
+  }
+  if (data->pmlClampNodeMaskDevice && data->pmlClampNodeMaskDevice[n])
+    for (int d=0;d<3;++d) {
+      data->tm2Device[n].f[d]=0; data->biotW2Device[n].f[d]=0;
+    }
 }
 
 /* Linear undrained diagnostic: p = -M_lumped^-1 Q^T u for zero initial
@@ -1331,7 +1656,8 @@ __device__ __forceinline__ void poroelastic_pressure_update(int32_t nharbored,
 
   const solver_float mass = gpuData->porePressureMassDevice[nindex];
   solver_float pnew = 0.0;
-  if (mass > 0.0) {
+  const bool fixed=gpuData->biotSurfaceFixedDevice && gpuData->biotSurfaceFixedDevice[nindex];
+  if (mass > 0.0 && !fixed) {
     const solver_float pfree =
         (reconstruct ? (solver_float)0.0 : gpuData->porePressureTm1Device[nindex]) +
         gpuData->porePressureForceDevice[nindex] / mass;
@@ -1344,7 +1670,14 @@ __device__ __forceinline__ void poroelastic_pressure_update(int32_t nharbored,
     const solver_float openTarget =
         useOpenPore ? gpuData->porePressureOpenPoreTargetDevice[nindex]
                     : (solver_float)0.0;
-    if ((drainMass > (solver_float)0.0) ||
+    if (gpuData->biotDrainCapacityDevice) {
+      const double oldp=gpuData->porePressureTm1Device[nindex];
+      const double rhs=gpuData->porePressureForceDevice[nindex]-
+          2*gpuData->biotDrainCapacityDevice[nindex]*oldp;
+      pnew=oldp+rhs/
+          (mass+gpuData->biotDrainCapacityDevice[nindex]);
+      biot_drain_record(gpuData,nindex,oldp,(double)pnew-oldp,rhs);
+    } else if ((drainMass > (solver_float)0.0) ||
         (openMass > (solver_float)0.0)) {
       pnew = (mass * pfree + openTarget) /
              (mass + drainMass + openMass);
@@ -2487,6 +2820,21 @@ __global__  void kernelDispCalc(int32_t nharbored,
       return;
     }
 
+    /* Scalar-acoustic-only nodes have no assembled solid mass. Keep their
+     * zero displacement and optional acceleration history, without reading
+     * tm1 or force. Shared solid/porous interface nodes retain positive mass
+     * and follow the ordinary update below; geometric constraints may have
+     * populated tm2, so simply leaving the old buffer untouched is unsafe. */
+    mass_simple = gpuData->mass_simpleArrayDevice[nindex];
+    if (!(mass_simple > 0)) {
+      if (gpuData->tm3Device != NULL) {
+        gpuData->tm3Device[nindex] = gpuData->tm2Device[nindex];
+      }
+      const fvector_t zero = {{0, 0, 0}};
+      gpuData->tm2Device[nindex] = zero;
+      return;
+    }
+
     tm1Disp = gpuData->tm1Device[nindex];
     tm2Disp = gpuData->tm2Device[nindex];
     nodalForce = gpuData->forceDevice[nindex];
@@ -2495,8 +2843,7 @@ __global__  void kernelDispCalc(int32_t nharbored,
       gpuData->tm3Device[nindex] = tm2Disp;
     }
 
-    mass_simple = gpuData->mass_simpleArrayDevice[nindex];
-    if (mass_simple > 0) {
+    {
       solver_float inv_mass_simple = (solver_float)1.0 / mass_simple;
 
       mass2_minusaM = gpuData->mass2_minusaMArrayDevice[0][nindex];
@@ -2519,10 +2866,6 @@ __global__  void kernelDispCalc(int32_t nharbored,
           (nodalForce.f[2] + mass2_minusaM * tm1Disp.f[2] -
            mass_minusaM * tm2Disp.f[2]) *
           inv_mass_simple;
-    } else {
-      tm2Disp.f[0] = 0;
-      tm2Disp.f[1] = 0;
-      tm2Disp.f[2] = 0;
     }
 
     /* Optional CPML outer-face Dirichlet clamp. pmlClampNodeMaskDevice is
@@ -2987,7 +3330,7 @@ __global__ void kernelPMLElasticStep(int32_t lenum, gpu_data_t* gpuData,
         const int32_t ln=gpuData->lnidArrayDevice[e+n*lenum];
         for (int i=0;i<3;++i) {
             const size_t channel=(size_t)offset+3*(3*n+i);
-            const double inertia=c.nodal_mass_dt2*cpml_inertia_force(
+            const double inertia=c.consistent_porous?0:c.nodal_mass_dt2*cpml_inertia_force(
                 c.inertia,u[n][i],state+channel*count,(size_t)count);
             atomicAdd(&gpuData->forceDevice[ln].f[i],
                 (solver_float)((double)stiff_force[n].f[i]+inertia));
@@ -3407,12 +3750,6 @@ __global__ void kernelPorePressureStationInterpolate(
     const int32_t station = blockIdx.x * blockDim.x + threadIdx.x;
     if (station >= stationCount) return;
 
-    const double sx[8] = {-1, 1, -1, 1, -1, 1, -1, 1};
-    const double sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
-    const double sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-    const double xi = stationCoords[(size_t)station * 3];
-    const double eta = stationCoords[(size_t)station * 3 + 1];
-    const double zeta = stationCoords[(size_t)station * 3 + 2];
     double pressure = 0.0;
     double weight = 0.0;
 
@@ -3420,10 +3757,7 @@ __global__ void kernelPorePressureStationInterpolate(
     for (int corner = 0; corner < 8; corner++) {
         const int32_t node = stationNodes[(size_t)station * 8 + corner];
         if ((double)porePressureMass[node] > 0.0) {
-            const double shape =
-                0.125 * (1.0 + sx[corner] * xi) *
-                (1.0 + sy[corner] * eta) *
-                (1.0 + sz[corner] * zeta);
+            const double shape = stationCoords[(size_t)station*8+corner];
             pressure += shape * (double)porePressureTm1[node];
             weight += shape;
         }

@@ -1,14 +1,38 @@
 # Poroelastic BrickUP (u-p) validation suite
 
 Validation cases for the reduced-Biot `u-p` (BrickUP-style) poroelastic element,
-against **analytical references** (no second code needed). Hercules' u-p formulation
-neglects fluid inertia / the slow P-wave, treats the input `Vp/Vs` as the **drained
-skeleton**, and uses `M = K_f/porosity`, `alpha=1`. The key fact that makes exact
-analytical references possible:
+using analytical wave-speed targets and equivalent-elastic Hercules runs.
+Hercules' u-p formulation neglects independent fluid inertia and the propagating
+slow P-wave, and treats input `Vp/Vs` as the **drained skeleton**. These existing
+cases use `alpha=1`, for which `M = K_f/porosity`; the solver also supports
+finite-grain storage for `alpha<1`. The continuum equivalence behind the
+sealed comparisons is:
 
 > In the undrained limit (`permeability = 0`), a poroelastic element is *exactly* an
 > elastic element with undrained moduli: `Vp_u = sqrt(Vp_drained^2 + alpha^2*M/rho)`,
 > `Vs` and `rho` unchanged.
+
+An elastic twin is a shared-code consistency check, not an independent
+validation of finite-permeability diffusion or drainage. See the
+[Wolf et al. (2022) validation assessment](WOLF_2022_VALIDATION.md) for the
+paper's full-Biot requirements, material conversion, adapted tests and current
+validation gaps. Investigation fixtures are local-only and are not shipped.
+
+The [BrickUP strong drainage validation](BRICKUP_STRONG_DRAIN_VALIDATION.md)
+records analytical diffusion, coupled GPU/MPI checks and cut-surface limitations
+for the opt-in strong pressure boundary. The existing weak treatment remains
+the BrickUP default.
+
+The [CPML alpha-only comparison](CPML_ALPHA_ONLY_VALIDATION.md) holds the mesh,
+source and other profile controls fixed for BrickUP and consistent full Biot,
+with surface and buried groundwater. Lowering alpha gives only small gains;
+increasing it does not reproduce the earlier improvement from changing several
+profile controls together.
+
+The subsequent [reflection/kappa/order study](CPML_PROFILE_VALIDATION.md) fixes
+alpha at 0.5 Hz and measures each remaining profile control separately before
+testing selected combinations. Kappa and reflection-target changes produce much
+larger improvements in these cases; the preferred values depend on the case.
 
 | Case | Folder | Reference | Status |
 |------|--------|-----------|--------|

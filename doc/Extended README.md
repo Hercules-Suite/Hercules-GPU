@@ -354,7 +354,7 @@ It also reports `source_directory` and `source_directory_output`, plus:
 - With explicit seabed geometry: `seabed_geometry_file`,
   `seabed_water_vp_m_s` and `seabed_water_density_kg_m3`.
 - For configured ASCII stations: `output_stations_directory`, including its
-  default when omitted. Binary stations do not use that directory.
+  default when omitted. Full-Biot binary runs also use that directory for fluid companions; other binary stations do not.
 - For configured planes: `output_planes_directory`, including its default.
 
 Topography controls and the source/ASCII-station paths are echoed from the
@@ -471,7 +471,7 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 - `HERCULES_TOPO_FORCE_MODE=cpu|gpu` (or `0|1`)
 	Selects CPU or GPU-native topography effective-force assembly. Default is `gpu`/`1`.
 	`gpu`/`1` computes eligible VT topography effective-force elements directly into the device force buffer before stiffness/damping. It skips nonlinear-topography and topo-BKT elements the same way the CPU effective-force path does.
-	Use `cpu`/`0` to force the legacy host topography effective-force path.
+	Use `cpu`/`0` to force the legacy host topography effective-force path. This requires both displacement time levels on the host at every topographic node, so `auto` and explicitly requested `boundary` synchronization fall back to `full`; the default GPU path remains device-resident. Both CPU and GPU paths exclude cells reassigned to Cartesian CPML; otherwise their solid stiffness would be counted twice.
 	For topography runs with `computation_method=fem`, there is no per-step effective-force topography assembly; the solver now treats that as no host-side topography force so the GPU source path can still skip the dense host-to-device force upload.
 	The run log prints a one-line `Force path:` summary showing whether source force is on CPU/GPU, whether host force upload is required, and which topography effective-force path was selected.
 - `HERCULES_DISP_SYNC_MODE=auto|full|boundary` (or `0|1`)
@@ -488,7 +488,7 @@ Defaults listed below are either exported by `run_phaseA_phaseB.sh` or selected 
 	not enter the every-step host output patch. The legacy plane backend and station fallback paths patch
 	only their interpolation nodes, including the separate tetrahedral station
 	stencil used by VT topography. For
-	correctness, `boundary` still falls back to `full` when checkpoint/DRM/
+	correctness, `boundary` still falls back to `full` when CPU VT/checkpoint/DRM/
 	nonlinear/fixed-base/geostatic/incident-plane-wave paths require full host
 	displacement arrays. Completed station and plane output files are flushed
 	and closed immediately after the solver time loop, before post-solver
@@ -661,6 +661,13 @@ sends. End-of-loop output reports cumulative rank average/min/max for solid
 force, displacement, acoustic RHS/field, pore RHS/field, open-pore target, and
 combined acoustic+pore RHS/field or pore RHS+target packets when active. The
 combined counters count actual packets and their concatenated bytes once.
+Consistent-mass mechanical and storage exchanges have separate categories;
+ordinary Biot relative-fluid exchanges are also counted. Mass storage traffic
+is no longer mixed with ordinary pore RHS/field traffic. The dedicated mass
+packet transport counts actual packets on both CUDA-aware and host MPI,
+including combined solid/fluid payloads. Earlier profiles omitted
+the mechanical mass exchanges using tags 180–183, so those reports cannot
+establish total mass-solver communication cost.
 It adds no per-step collective, allocation or GPU synchronization. With overlap,
 unpack time measures enqueue work; receive-wait time can overlap an interior
 GPU update. These CPU timings do not isolate kernel duration or network transfer.
@@ -866,7 +873,7 @@ fallback. This change does not add poroelastic CPML or validate those limits.
 Example (cluster case directory + external GPU binary):
 
 ```bash
-cd /scratch/08458/wz_tacc/share/hercules/Hercules_Example/Test_case
+cd /path/to/case
 
 export PHASE_A_OMP_NUM_THREADS=1
 export PHASE_B_OMP_NUM_THREADS=64
@@ -1542,6 +1549,9 @@ Notes:
 	option intended to reduce grid-scale interface forcing in
 	`acoustic_formulation=velocity_potential` runs. PML fragments retain the
 	selected quadrature, with independent cofactor histories at each point.
+	Full-Biot open pores support both options on flat/FEM Hex8 geometry.
+	Full-Biot VT requires `face_mass` for both `open_pore` and `no_flow`;
+	its tetrahedral interface weights are implemented only in that path.
 - `acoustic_interface_face_filter`
 	Optional. `all` (default), `bathymetry`, or `bottom_only`. This applies when
 	acoustic interface coupling is enabled. `all` couples every
@@ -1600,7 +1610,20 @@ Notes:
 	`include_acoustic=no`, the acoustic module is inactive.
 	Acoustic elements assemble scalar acoustic mass/stiffness instead of
 	displacement mass/stiffness, while elastic elements continue to use
-	displacement DOFs. On a flat model surface, acoustic scalar nodes on the top
+	displacement DOFs. The standard GPU solid stiffness kernel rejects scalar-acoustic
+	elements before gathering displacement. The solid displacement update reads
+	assembled solid mass first: nodes without positive solid mass are zeroed,
+	with previous-displacement history preserved for acceleration output and
+	coupling. Shared water–solid nodes with positive solid mass still receive
+	the mechanical update. This uses the existing classification and mass
+	arrays; it adds no input control, field exchange, or allocation. The legacy
+	`none` formulation retains its displacement stiffness path. The separate
+	fused BKT2 stiffness/history kernel is unchanged; its nodal displacement
+	update uses the same mass check. In single precision the standard stiffness
+	helper accumulates into its input buffer: rejecting scalar-acoustic cells
+	also removes an unintended solid-force contribution from that buffer when
+	their solid stiffness coefficients are zero. On a flat model
+	surface, acoustic scalar nodes on the top
 	external domain face use the condition selected by
 	`acoustic_free_surface_gravity`. When `acoustic_interface_coupling=yes`,
 	scalar acoustic formulations build an explicit acoustic-solid interface table. In octree
@@ -1783,22 +1806,39 @@ Notes:
 - `acoustic_poroelastic_interface`
 	Optional. Default `no_flow`, which keeps an acoustic-poroelastic contact
 	sealed for the pore fluid while the existing acoustic pressure traction
-	still acts on the solid skeleton. Set to `open_pore` to add weak
+	still acts on the solid skeleton. With `brick_up`, set `open_pore` to add weak
 	compliance-projected pressure continuity on detected acoustic-poroelastic
 	interface fragments, driving pore pressure toward the adjacent acoustic
 	pressure using four-point (2x2 Gauss) hydraulic quadrature, independently of
 	`acoustic_interface_projection`. The interface weight uses the adjacent poroelastic element's
 	`1/M`, matching the heterogeneous interior pressure capacity. This requires
 	`include_acoustic=yes`, the acoustic scalar formulation, and
-	`include_poroelastic=yes`.
+	`include_poroelastic=yes`. With `full_biot`, open pores instead use natural
+	fluid traction and return solid motion plus Darcy flux; the pressure penalty
+	is inactive. Flat/FEM accepts either projection; VT requires `face_mass`.
+	See [full-Biot hydraulic conditions](#full-biot-u-w-p-formulation).
 - `acoustic_poroelastic_pressure_penalty_factor`
 	Optional. Default `1.0`. Multiplies the open-pore weak interface compliance
 	used by `acoustic_poroelastic_interface=open_pore`. The target exchange
 	uses the existing device-resident scalar schedule when CUDA-aware MPI is
 	active, with sparse host staging as the fallback.
 
+The scalar-acoustic early exits were compared against commit `158a1d4` in
+an ignored local investigation on 2026-11-15. Two reversed-order comparisons
+on 16 Horizon nodes (64 GPU ranks) used a 4096 x 4096 x 2048 m water–elastic
+model, uniform 4 m cells, 256 m CPML and a 1 s pulse record. Fitted acoustic
+interior GPU work fell by 25–26%: its solid stiffness contribution fell by
+about 60% and its solid displacement contribution by about 28%. Elastic
+interior cost was essentially unchanged. Separate unprofiled solver times
+averaged 21.405 s before and 21.365 s after, so this CPML-dominated partition
+showed no meaningful whole-run speedup. Recorded waveforms agreed within
+`1.2e-13` aggregate relative L2. These double-precision before/after tests
+establish implementation consistency, not independent analytical accuracy
+or single-precision propagation validation; the fixtures are not distributed.
+
 ### Open-pore hydraulic quadrature
 
+With `poroelastic_formulation=brick_up`,
 `acoustic_poroelastic_interface=open_pore` always uses four-point (2x2 Gauss)
 integration on each detected rectangular interface fragment. No new input is
 required. `acoustic_interface_projection=point|face_mass` still selects only the
@@ -1856,7 +1896,9 @@ and performance validation on the target system are still required.
 `field-specific-constraints` for coupled pressure or velocity-potential acoustics.
 If acoustics, scalar acoustics or interface coupling is disabled, an omitted method
 uses `shared-geometric-constraints`; explicit unsupported choices still abort.
-Coupled VT topography requires explicit `shared-geometric-constraints`.
+Coupled VT also supports native `field-specific-constraints`; incompatible
+coarse P1 traces abort setup. Full-Biot open pores with porous CPML require
+`field-specific-constraints` on every geometry.
 Selecting a constraint method does not change `acoustic_interface_projection`
 (`point` or `face_mass`), `acoustic_interface_face_filter`,
 `acoustic_free_surface_gravity`, or `abc_type`.
@@ -1906,7 +1948,7 @@ full-duration Izmir stability. Existing geometric restrictions below still apply
 The two alternatives require `include_acoustic=yes`,
 `acoustic_interface_coupling=yes`, `acoustic_formulation=pressure` or
 `acoustic_formulation=velocity_potential`,
-and full Hex8 solids. Both alternatives accept `include_buildings=yes`,
+and supported solid traces. Both alternatives accept `include_buildings=yes`,
 `include_nonlinear_analysis=yes` and `include_poroelastic=yes`, separately or
 together, subject to the existing restrictions of those modules. Nonlinear
 geostatic initialization, tolerances, substeps, damping and
@@ -1918,7 +1960,10 @@ material cells still use regular Hex8 traces. Air cells (`Vp=-1`, zero density)
 and carved voids carry no field, including when their MPI owner is remote.
 Both `type_of_etree=sqd` and `full` retain their existing material-query meaning;
 the constraint map uses the actual mesh cells, not a new terrain interpolation.
-VT cut-tetrahedron topography remains unsupported by field-specific constraints.
+VT field-specific maps use native P1 solid/pore traces and Hex8 acoustic traces.
+The same positive weights distribute forces and assign fields. Face midpoints
+can use two diagonal parents from the existing geometric halo; inconsistent
+incident traces or missing parents abort and require remeshing.
 Local matching still requires `include_topography=no`. Stepped or sloping
 **material-defined** seabeds can be used within the full-Hex8 scope.
 Unknown values and unsupported combinations abort with an explanatory message.
@@ -1938,14 +1983,14 @@ refinement factor requires fresh meshing to change the existing resolution.
 
 Field maps resolve the actual incident leaves through batched MPI owner
 queries. Every retained stencil must equal the corresponding same-field Hex8
-trace; unsupported mixed-corner stencils abort rather than approximate it.
+or native VT P1 trace; unsupported mixed-corner stencils abort rather than approximate it.
 The same maps handle mass, damping, free-surface flags, force distribution and
 field assignment. Device arrays are uploaded once at setup. Existing CUDA
 adjustment kernels, CUDA-aware exchanges, host-staged fallback and owner
 schedules remain in use. Independently of `acoustic_interface_method`, a separate
 pore-pressure map is built for regular Hex8 and FEM-topography BrickUP models,
 including standalone poroelastic–elastic runs with `include_acoustic=no`.
-It uses final active BrickUP cells, excluding elastic-only CPML cells, and handles
+It uses final active porous cells, including porous CPML cells, and handles
 pore-pressure capacity, drained and open-pore boundary weights, pressure RHS
 distribution and pressure assignment on both MPI backends. Saturated solids
 carry both displacement and pore pressure; dry solids and buildings still carry
@@ -2530,9 +2575,9 @@ sampling. These ignored investigation fixtures are not shipped. They establish
 material-coordinate correctness, not new wave-propagation validation: standalone
 and coupled elastic/acoustic/poroelastic runs, applicable viscoelastic/nonlinear
 cases and both GPU/MPI backends still require supercomputer comparisons.
-Existing restrictions remain: field-specific coupled constraints require FEM
-topography; VT uses the supported shared-geometric path. No new coupled
-formulation or unsupported nonlinear/acoustic combination is enabled.
+Field-specific coupled constraints support FEM and compatible native VT traces;
+local matching still requires topography off. These material-reader changes
+do not alter the physical coupling formulation.
 
 ### Explicit seabed geometry
 
@@ -2952,6 +2997,26 @@ solver and regenerated mesh.
 
 ## Poroelastic U-P formulation
 
+The default `poroelastic_formulation=brick_up` is a reduced Biot
+displacement–pressure formulation. It does not evolve
+an independent relative-fluid velocity or fluid-inertia state, and cannot
+reproduce the inviscid propagating slow P-wave in a full-Biot solver. Positive
+fluid viscosity is required; zero permeability is a sealed limit, not an
+inviscid limit. Porosity, Biot coefficient and directional permeability are
+global controls, although storage can vary with the drained element modulus.
+Select `full_biot` for independent fluid inertia and relative motion; see the
+[full-Biot formulation](#full-biot-u-w-p-formulation) below. The current source
+interface does not supply the combined normal-stress and
+pore-pressure explosive injection used by Wolf et al. (2022).
+
+See the [paper validation assessment](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md)
+for the distinction between that paper's Figures 5–11 and supported reduced-Biot
+tests. The completed adapted homogeneous comparisons verify a limited scope;
+they do not validate every boundary or coupling path. For conversion from grain
+properties, use mixture density
+`rho=(1-phi)*rho_s+phi*rho_f` and derive drained `Vp/Vs` with the same density
+so that the desired skeleton moduli and bulk inertia are both preserved.
+
 - `include_poroelastic`
 	Optional. `no` (default) keeps the existing elastic/acoustic solver
 	behavior. `yes` enables the BrickUP-style U-P poroelastic path for saturated
@@ -2959,8 +3024,9 @@ solver and regenerated mesh.
 	nonlinear constitutive model; nonlinear use always selects the explicit
 	pressure-traction path described below.
 - `poroelastic_formulation`
-	Optional. Currently only `brick_up` is supported. The implementation
-	uses the input `Vp`, `Vs`, and density as the **dry/drained skeleton**
+	Optional. `brick_up` (default; alias `brickup`) or `full_biot`.
+	The reduced `brick_up` implementation
+	uses input `Vp`, `Vs` and density to form the **dry/drained skeleton**
 	elastic stiffness and evolves a scalar pore pressure from volumetric strain
 	increment plus optional Darcy diffusion. Do not provide saturated/undrained
 	`Vp` unless a future velocity-convention conversion is added; otherwise the
@@ -2986,7 +3052,8 @@ solver and regenerated mesh.
 - `poroelastic_undrained_fast_path`
 	Optional. `yes` (default) activates only when
 	`poroelastic_surface_pressure_bc = undrained` and all three permeability
-	values are exactly `0.0`, and nonlinear analysis is inactive. In that common
+	values are exactly `0.0`, nonlinear analysis is inactive, and the formulation
+	is `brick_up`. It is always inactive for `full_biot`. In that common
 	linear validation/undrained limit, the
 	solver folds `alpha^2 M` directly into the native elastic volumetric
 	stiffness (`lambda += alpha^2 M`) and skips the mechanical `Q p`
@@ -3003,7 +3070,7 @@ solver and regenerated mesh.
 	configured value remains `yes`, but the effective runtime path is the
 	explicit `Q p` coupling needed by the constitutive skeleton.
 - `poroelastic_depth_max_m`
-		Optional. Default `30.0`. Only solid, non-acoustic, non-PML elements
+		Optional. Default `30.0`. Only eligible solid, non-acoustic elements (including porous CPML cells)
 		within this depth below the local ground surface are eligible for
 		poroelastic classification. When nonlinear analysis is enabled, startup
 		prints a `Nonlinear/BrickUP map` summary showing how many nonlinear
@@ -3020,7 +3087,7 @@ solver and regenerated mesh.
 	Optional. `no` (default) means the groundwater level is the local
 	ground surface, so eligible shallow soil is saturated from the
 	surface down. `yes` reads a groundwater-level grid and only classifies
-	elements whose centroids are below that level.
+	elements whose centroids are below that level. Both formulations support this fixed classification; full Biot applies the hydraulic condition at the resulting mesh-face boundary, as detailed [below](#fixed-buried-groundwater-with-full-biot).
 - `groundwaterlevel_file`
 	Optional. Used only when `surface_groundwatertable=yes`. If unset,
 	the solver reads `groundwaterlevel.in` from the 3D material model
@@ -3028,13 +3095,10 @@ solver and regenerated mesh.
 	`inputfiles/materialfiles`). If set to a bare filename, it is resolved
 	relative to that materialfiles directory; if it contains `/`, it is
 	treated as an explicit path. The file format mirrors `topography.in`:
-	first value is grid spacing, followed by regular-grid values over the
-	full model footprint in the same ordering as `topography.in`. Values
-	are always positive depth below the local ground surface, so `100.0`
-	means the water table is 100 m below ground everywhere.
+	first value is finite positive grid spacing in metres, dividing both horizontal domain lengths, followed by `(L_north/spacing+1)*(L_east/spacing+1)` finite values over the full model footprint. North is the outer loop and east the inner loop, both increasing from zero. Bilinear interpolation gives ground-relative depth in metres. Full Biot requires nonnegative depths: `0` means surface saturation and `100.0` means 100 m below ground. Negative full-Biot depths abort; model overlying water using explicit acoustic geometry. Existing BrickUP file interpretation is retained.
 - `poroelastic_surface_pressure_bc`
-		Optional. `undrained` (default) leaves pore pressure unconstrained at
-		the saturated surface. `drained` applies a weak, compliance-projected
+		Optional. For `brick_up`, `undrained` (default) leaves pore pressure unconstrained at
+		the saturated surface. `drained` defaults to a weak, compliance-projected
 		Dirichlet condition on the groundwater/free-drainage plane: the solver
 		assembles a nodal drained-plane capacity from a 2x2 quadrature rule on the
 		water-table cut plane inside the first saturated element, then blends
@@ -3043,34 +3107,51 @@ solver and regenerated mesh.
 		interior pressure capacity even when `M` varies spatially. This avoids the
 		old nearest-node hard clamp when the water table cuts through an
 		element.
+- `poroelastic_surface_pressure_enforcement`
+	Optional, case-insensitive. `strong` (default) for active `full_biot` with
+	`poroelastic_surface_pressure_bc=drained` and flat/FEM geometry; `natural`
+	(default) otherwise, including VT, undrained surfaces and BrickUP. `weak`
+	is also available. Explicit `natural`, `weak` or `strong` overrides the default;
+	weak/strong require active poroelasticity and a drained surface. Omitted
+	enforcement is resolved on every rank after topography initialization, and
+	full-Biot startup reports the selected mode, geometry and whether it was
+	explicit. This does not change the hydraulic BC default of `undrained`.
+	See [weak drainage](#weak-full-biot-drained-surface) and
+	[strong drainage](#strong-full-biot-drained-surface). For BrickUP, `natural` remains the compatibility default and `weak` explicitly selects the same existing projection; opt-in `strong` selects [strong BrickUP drainage](#strong-brickup-drained-surface).
 - `poroelastic_surface_pressure_penalty_factor`
-		Optional. Default `1.0`. Scales the weak drained-plane capacity used by
+		Optional. Default `1.0`; finite and nonnegative. For BrickUP, scales the weak drained-plane capacity used by
 	`poroelastic_surface_pressure_bc = drained`; larger values enforce
 	closer-to-zero pore pressure on the plane, while `0.0` disables the
-	weak projection without changing the classification.
+	weak projection without changing the classification. For full Biot it is
+	active only with `poroelastic_surface_pressure_enforcement=weak`, where it
+	sets the dimensionless admittance coefficient described below. It is inactive
+	with `natural` full-Biot enforcement or `strong` in either formulation.
 - `poroelastic_elastic_interface`
 	Optional. Currently only `no_flow` is supported. Poroelastic and
 	elastic regions share displacement nodes mechanically, while pore
 	pressure exists only on poroelastic elements/nodes; Darcy diffusion is
 	assembled only through poroelastic elements, giving a no-flow
-	poroelastic-elastic boundary in V1.
+	poroelastic-elastic boundary. Full Biot distinguishes an above-groundwater dry cap: that contact follows `poroelastic_surface_pressure_bc` instead; other material and depth-limit contacts keep `no_flow`.
 	On regular Hex8 meshes (including FEM topography), pore-pressure hanging-node
 	constraints are built automatically from final active BrickUP elements,
 	independent of acoustic enablement and `acoustic_interface_method`. A node
-	constrained only by a coarser dry or elastic-only CPML cell remains independent
+	constrained only by a coarser dry cell remains independent
 	for pore pressure. A coarser active BrickUP cell retains its exact Hex8 trace
 	constraint; unsupported stencils abort setup. This applies to capacity,
 	drained/open-pore boundary weights, pressure RHS and field assignment on both
 	host and CUDA-aware MPI paths. Solid displacement keeps its selected map.
 	The startup monitor reports pore-pressure keep/release/absent counts.
-	VT cut-cell topography retains geometric pressure constraints and reports
-	that limitation; the Hex8 change does not extend to cut-cell pressure traces.
+	Full-Biot VT uses native P1 pressure constraints when coupled scalar acoustics selects
+	`field-specific-constraints`; other VT cases retain geometric constraints
+	with a startup notice.
 	No new input switch is required. For example, `include_acoustic=no` with
 	`include_poroelastic=yes` and `poroelastic_elastic_interface=no_flow` enables
 	the independent pore map on a regular Hex8 mesh.
-	The standalone extension requires new CUDA/MPI propagation and refinement
-	comparisons on the target system; earlier acoustic-module benchmarks do not
-	validate this newly enabled path.
+	The dashpot follow-up tests flat standalone and selected coupled cases on
+	Horizon with refinement and MPI controls. FEM/VT propagation, general
+	hydraulic interfaces and yielding/hysteretic response still require
+	separate matching references and refinement comparisons; the flat cases do
+	not validate those combinations.
 - Poroelastic material constants:
 	`poroelastic_porosity` (default `0.4`),
 	`poroelastic_biot_alpha` (default `1.0`; values below `1.0` derive
@@ -3095,11 +3176,1268 @@ times, or use a physically calibrated permeability and consolidation interval.
 The approximate-state path initializes the constitutive effective stress and
 keeps the pressure unknown as excess pressure.
 
-CPML policy for poroelasticity: PML elements are kept acoustic or
-elastic only. Any saturated poroelastic candidate inside the CPML zone is
-left as elastic CPML and reported in the startup line
-`Poroelastic BrickUP: ... saturated CPML candidates left as elastic CPML`,
-matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
+CPML retains saturated porous cells for both `brick_up` and `full_biot`; see
+[poroelastic CPML](#poroelastic-cpml). The reduced undrained fast path is
+automatically disabled with `abc_type=cpml`, so pressure coupling advances
+every step. Historical runs that converted porous bands to elastic material
+do not validate the current mixed absorber.
+With `abc_type=dashpot`, active sealed poroelastic boundary elements now use
+the initial undrained normal impedance, with unchanged shear impedance:
+
+```math
+Z_n=\rho V_{P,u},\qquad
+V_{P,u}=\sqrt{V_{P,d}^2+\alpha^2 M/\rho},\qquad Z_t=\rho V_S.
+```
+
+Eligibility requires all three directional permeabilities to be exactly zero,
+`poroelastic_surface_pressure_bc=undrained`, and no active scalar-acoustic
+`open_pore` coupling. Storage `M` is computed from each element's drained
+material using the same helper as the pressure and stiffness operators. Both
+`poroelastic_undrained_fast_path=yes` and explicit pressure coupling receive
+the correction; it is assembled once during initialization, including applicable
+nonlinear elastoplastic/plastic and hysteretic or attenuating solid paths.
+Their impedance uses initial moduli, with no nonlinear tangent or
+frequency-dependent attenuation update. Shear coefficients, free-top exclusion,
+edge/corner assembly, acoustic radiation damping and CPML are unchanged.
+No new input is required. Startup reports MPI-wide element counts for corrected
+and legacy coefficients.
+
+Finite permeability, a globally `drained` pressure surface or active `open_pore`
+coupling conservatively retain the legacy drained normal impedance. This is an
+explicit limitation, including sealed cells elsewhere in such a model; it is
+not a frequency-dependent porous absorber. No dashpot supplies a pore-pressure
+diffusion absorber: unconstrained exterior pressure boundaries remain no-flow.
+Local impedance damping can reflect oblique waves, and discretization error
+can mask or partly cancel the old mismatch on coarse meshes. Use mesh refinement,
+enlarged-domain and boundary-return checks. The sealed correction makes the
+fast-path mechanical boundary consistent with an exact undrained elastic twin;
+this does not independently validate surface, interface or nonlinear physics.
+See the [measured dashpot follow-up](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#sealed-dashpot-correction-follow-up).
+
+### Full Biot u-w-p formulation
+
+`poroelastic_formulation=full_biot` advances the solid displacement `$u$`,
+volume-weighted relative fluid displacement `$w=\phi(U_f-u)$`, and excess pore
+pressure `$p$`. It implements independent fluid inertia with constant Darcy
+drag, using the low-frequency Biot constitutive model; it does not implement
+frequency-dependent dynamic permeability. The equations are
+
+```math
+\rho\ddot u+\rho_f\ddot w=\nabla\cdot\sigma+f_u,\qquad
+\rho_f\ddot u+m\ddot w+B\dot w=-\nabla p,
+```
+
+```math
+\frac{\dot p}{M}+\alpha\nabla\cdot\dot u+\nabla\cdot\dot w=0,
+\qquad \sigma=\sigma'_d-\alpha p I,
+\qquad m=\tau\rho_f/\phi,\quad B_{ii}=\eta/\kappa_i.
+```
+
+Density in the elastic material table is the **saturated mixture density**;
+input `Vp` and `Vs` define drained skeleton moduli with that same density.
+`poroelastic_tortuosity` is optional, dimensionless, finite and at least `1`,
+with `1` (default). Tortuosity is isotropic; the diagonal permeability axes
+follow solver X, Y and Z. `brick_up` ignores tortuosity. Positive definiteness
+requires `$\rho m>\rho_f^2$`; initialization checks material and assembled
+nodal matrices. Material values still require physical calibration.
+
+`poroelastic_fluid_viscosity_pa_s=0` is allowed only for `full_biot`.
+With positive permeability this is the inviscid limit, permitting fast and
+slow compressional waves and the shear wave. A zero directional permeability
+instead imposes `$w_i=0$`, including when viscosity is zero. With all three
+permeabilities zero, the full formulation reduces to explicit undrained
+displacement–pressure coupling. It does not select the reduced fast path.
+
+The element pressure force and continuity update use adjoint 2x2x2 Gauss
+operators. With an explicit `poroelastic_mass_matrix=lumped`, pressure capacity is the assembled `$\int N_i/M_e\,dV$`;
+storage stays inside element integrals. Relative fluid inertia and drag are
+lumped and assembled with the solid hanging-node map. The coupled two-by-two
+mass system advances staggered velocities with an exact constant-force Darcy
+relaxation step. There is no additional Darcy diffusion term in this path.
+Exact relaxation removes the local drag timescale restriction; it does not
+remove the wave CFL restriction. Setup evaluates the fast eigenvalue of the
+full compressional stiffness/inertia pair for the CFL estimate.
+
+Meshing still follows the existing material-speed refinement criterion; it does
+not automatically resolve the full-Biot slow wave or its viscous penetration
+depth. Choose spatial resolution for both compressional branches over the
+source bandwidth, then verify pressure and relative fluid motion by refinement.
+
+#### Consistent full-Biot mass and storage
+
+`poroelastic_mass_matrix = consistent` (default) when `include_poroelastic=yes`
+and `poroelastic_formulation=full_biot`. Otherwise `lumped` (default) is retained.
+An explicit `lumped` preserves the local nodal update, and an explicit
+`consistent` still requires active full Biot. Selection occurs after parsing the
+formulation, before reading an optional mass-matrix override. Existing full-Biot
+inputs that omit this parameter now select consistent mass; set `lumped`
+explicitly to reproduce their previous mass treatment. This also applies to
+full-Biot FEM/VT topography, acoustic/elastic coupling and applicable
+viscoelastic or nonlinear solid interiors, subject to their existing restrictions.
+The consistent path retains the existing displacement,
+relative-fluid displacement and pressure fields. No Q2 nodes are introduced.
+Physical porous Hex8 cells use exact Q1 mass integrals; native VT cells use the
+P1 tetrahedral integrals with their existing retained-volume fractions.
+The consistent inertia couples $u$ and $w$ through the local material block
+$[\rho,\rho_f;\rho_f,m]$, where $m=\tau\rho_f/\phi$.
+Pressure storage integrates $N_iN_j/M$. The same storage inverse appears inside
+$K_a C^{-1}K_a$ pressure stabilization.
+
+The assembled operator includes the field-specific hanging-node prolongation
+and its transpose. Independent owned unknowns alone enter inner products.
+Sealed coordinate components, VT tangent-space constraints and CPML outer
+clamps are projected inside the mechanical solve, including the solid reaction.
+Elastic/nonlinear-solid and acoustic contributions outside porous cells remain
+lumped; acoustic traction/flux coupling and station definitions are unchanged.
+Both MPI backends use their existing field exchanges. The consistent pore
+update waits for the complete assembled RHS; it cannot use the independent
+interior/boundary nodal-update overlap. Acoustic updates retain that overlap.
+
+**Consistent full-Biot CPML:** regular porous CPML cells use exact Q1 inertia
+and pressure storage, including their matching polynomial and convolution
+history terms. No separate switch is required: `poroelastic_mass_matrix=consistent`
+selects this treatment in both the physical porous domain and CPML. An explicit
+`lumped` retains the existing lumped full-Biot CPML; `brick_up` is unchanged.
+For element-constant stretches, the Q1 shape mass multiplies the complete
+`J(s)*R*s^2` inertial operator, including solid/relative-fluid cross terms, and
+the complete `J(s)/M` pressure storage. A separable three-axis Q1 application
+integrates nodal memory outputs without adding histories or field exchanges.
+Physical solid mass damping and Darcy drag retain row-lumped operators and
+matching row-lumped CPML histories, as in the physical damping discretization.
+The CPML base polynomial velocity term keeps its existing explicit time
+difference but now has the same Q1 spatial integration as inertia. Shared nodes
+assemble consistent contributions from both sides; nonporous contributions
+remain lumped. Existing source, output and acoustic/elastic coupling contracts
+are retained. Reflection and long-time stability require measured checks.
+Existing restrictions on porous CPML, acoustic interfaces, subcell groundwater cuts,
+checkpointing, geostatic initialization, fixed-base and DRM remain in force.
+
+The [2026-11-17 consistent-CPML checks](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#consistent-full-biot-cpml-extension-2026-11-17)
+repeat matched 25 Hz, 8 m surface-saturated and buried-table controls. With the
+modified compact profile, shallow velocity/pressure errors fall from
+3.627%/2.615% to 0.0581%/0.0238% at the ground surface, and from
+2.897%/3.062% to 0.0483%/0.0444% at the buried table. These are larger-domain
+numerical comparisons, not continuum analytical errors. Separate viscous and
+inviscid default-profile controls completed 10 s with decaying receiver
+envelopes; profile-dependent inviscid pressure errors remain. Operator and MPI
+comparisons, material/coupling checks, provenance and scope are recorded there.
+
+A subsequent [alpha-only CPML study](../benchmark_inputs/poroelastic_up/CPML_ALPHA_ONLY_VALIDATION.md)
+holds the other profile controls, mesh, source and solver settings fixed.
+Across five BrickUP/consistent-full-Biot surface and buried-groundwater controls,
+increasing `cpml_alpha_max_hz` above 0.5 Hz increases reference differences.
+Lowering it to 0.0078125 Hz improves the worst-field error by only 0.04–0.25%
+relative to the original error. This does not explain the earlier improvement
+from changing several profile controls together; the default remains 0.5 Hz.
+
+The [reflection/kappa/order follow-up](../benchmark_inputs/poroelastic_up/CPML_PROFILE_VALIDATION.md)
+keeps alpha at 0.5 Hz and pressure stabilization at 0.0025. Separate changes to
+`cpml_kappa_max`, `cpml_reflection_target` and `cpml_poly_order` show larger,
+case-dependent effects: for the inviscid surface full-Biot control, kappa 1
+reduces worst-field error from 12.612% at kappa 5 to 0.773% with everything else fixed.
+Higher order is not uniformly better, and independently selected settings need
+combined-profile checks. The benchmark tables retain the original kappa 5 baseline.
+
+Darcy drag and physical porous-cell solid mass damping/dashpots remain lumped.
+Their velocity terms enter the same implicit solve. With neither term active
+the consistent option uses a central-difference mass solve; otherwise it uses
+two-stage, second-order L-stable SDIRK2, with
+$\gamma=1-1/\sqrt{2}$, for the velocity kick with force frozen at the central
+time. This integrator gamma is a fixed coefficient, unrelated to
+`poroelastic_pressure_stabilization`. For previous half-step increment $v_-$
+and $F=\Delta t^2 f_n$, the stages are:
+
+```math
+(M_c+\gamma\Delta t D)y_1=M_c v_-+\gamma F,
+\qquad
+(M_c+\gamma\Delta t D)v_+=M_c v_-+F-(1-\gamma)\Delta t D y_1.
+```
+
+This replaces exact **local** Darcy relaxation only in the consistent option;
+local relaxation does not commute with a heterogeneous consistent inertia.
+Here $D$ contains physical-interior solid mass damping/dashpots and fluid drag.
+Optional solid mass damping inside CPML retains the existing lumped backward
+difference, together with its matching lumped CPML memories.
+CPML polynomial-inertia damping retains its explicit time difference with
+consistent spatial integration; nonporous solid damping retains its existing
+integration. The leading Darcy term, including in CPML, participates
+in SDIRK2. Physical porous-cell stiffness-proportional damping remains explicit and receives an additional
+conservative timestep check. The implicit physical solid damping avoids imposing
+the old nodal damping update on the smaller consistent-mass eigenvalues.
+Source integration and the physical source time function are unchanged.
+
+Historical timing and tolerance measurements below predate consistent porous
+CPML: they used consistent physical cells and lumped porous CPML. The separate
+[consistent-CPML production calibration](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#consistent-full-biot-cpml-production-calibration-2026-11-17)
+compares the extended implementation at fixed inputs. Two 32-node Figure 5
+runs at weight `1` average 773.478 s complete Solver time, versus 817.262 s for
+the old hybrid (1.057 times faster), with essentially unchanged reference errors.
+Weight `1` is fastest among `1`, `1.5`, `2` and `4.38`; its repeat spread is
+0.115%, versus a 2.715% gap to `1.5`. This uses a 200-microsecond timestep and
+stabilization `0.0025`, unlike the historical 50-microsecond timing series below.
+The original-dispatch GPU service fit gives a conditional CPML/interior cost
+ratio of 1.865, including consistent operators and common nodal work, with
+0.728% relative fit RMS. CPU waits and packet helpers are separate. A summed
+GPU service ratio does not select the best synchronous partition: use the
+unprofiled complete-loop comparison. Omitted `cpml_partition_weight` now uses
+`1` for saturated porous CPML and `4.38` for elastic/acoustic CPML; this
+homogeneous inviscid model does not calibrate
+mixed physics, viscous production, adaptive meshes or topography.
+
+`poroelastic_mass_tolerance` is `1e-6` (default) in double precision or `1e-5`
+(default) in single precision. It is a finite, dimensionless relative
+preconditioned-residual tolerance in `[1e-13, 1e-2]` (single: `[1e-5, 1e-2]`).
+`poroelastic_mass_max_iterations` is `200` (default), integer >= 1. Projected
+PCG recomputes the true residual before accepting a solve and aborts
+on failure or loss of positive definiteness. Both controls are inactive with
+lumped mass. Monitor output records mean/maximum iterations and worst residual.
+The workspace adds six seven-component nodal vectors plus geometry/constraint
+metadata. Each iteration requires matrix applications, field exchanges and
+MPI reductions; measure production cost before large allocations. Setup checks
+a stricter wave/stabilization estimate, including when stabilization is zero.
+Exceeding it emits a rank-zero warning to stderr and the monitor file, preserving
+the requested timestep. The same advisory policy covers VT wave estimates and
+the consistent-mass stiffness-damping estimate. Algebraic failures still abort.
+
+The double-precision default is supported by the completed uniform 4 m,
+16 Hz inviscid Figure 5 comparison: changing only the tolerance from `1e-10`
+to `1e-6` changed native solid-velocity histories by at most 0.0113% relative
+L2 and Darcy-flux/pressure histories by at most 0.00473%, while reducing
+maximum-rank physics time by 47.55%. Reference errors and late oscillations
+were essentially unchanged. This establishes tolerance sensitivity for that
+case, not a universal error bound for other materials, geometries or interfaces;
+see [the completed comparison](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#completed-figure-5-tolerance-comparison-94436-versus-94445-2026-11-15).
+The single-precision default retains its existing admissible lower bound.
+
+The consistent-mass solver defaults use the production options verified by the
+completed Figure 5 runs: element-inverse preconditioning, quadratic guesses,
+automatic assembled rows, and full iterative vectors. The tolerance remains
+`1e-6` in double precision (`1e-5` in single precision), with standard CG, fused
+kernels and combined solid/fluid halo packets. Aggregate all-peer packing stays
+disabled. Every solve retains its original RHS norm and true-residual check.
+These solver defaults apply whenever consistent mass is selected, including the
+conditional default for active full Biot. Existing explicit input/environment
+settings override them. The following controls are inactive for `lumped` mass:
+
+- `poroelastic_mass_preconditioner = element_inverse` (default) or `lumped`.
+  The element-inverse option uses $B=L^{-1}HL^{-1}$, where $L$ is the existing
+  projected nodal block and $H=\sum_e L_e M_e^{-1}L_e+R+\gamma\Delta tD$. Here $L_e$
+  is the element row mass, $R$ the lumped remainder, and the damping term is
+  included only for an implicit damping stage. Hex8 and retained-volume P1
+  contributions use their exact element inverses. All assembly/projection and
+  MPI exchanges are retained. Each preconditioner application costs an extra
+  operator application; fewer iterations alone do not establish a speedup.
+- `poroelastic_mass_initial_guess = quadratic` (default), `zero`, `previous` or
+  `linear`. The linear and quadratic options extrapolate the solved increments
+  from two or three equally spaced prior solutions of the same role. Startup uses zero,
+  then previous, then linear as histories become available. A predictor whose
+  recomputed residual is nonfinite or worse than zero is discarded. All modes
+  retain the existing RHS normalization and per-solve true-residual check.
+  Separate prior solutions are kept for the two inertia stages and the two
+  pressure-storage roles. The stopping norm is relative to the projected RHS,
+  independent of the initial guess. A zero projected RHS returns zero.
+- `poroelastic_mass_krylov = standard` (default) or `single_reduction`.
+  The Chronopoulos-Gear recurrence combines $(r,Br)$ and $(Br,ABr)$ in one
+  blocking MPI reduction per ordinary iteration. It is not an asynchronous
+  pipeline. Recomputed true-residual acceptance and residual-replacement
+  restarts remain mandatory; checks/restarts add reductions. Loss of a positive
+  recurrence denominator triggers a true-residual restart, with a hard failure
+  if the restarted operator remains nonpositive.
+- `poroelastic_mass_operator = auto` (default) or `element`.
+  If all porous cells, including CPML, have identical Cartesian Hex8 spacing, density
+  and storage modulus, `auto` constructs partial assembled 27-neighbor nodal
+  rows. One thread writes each row, eliminating element atomics for both mass
+  and element-inverse applications. MPI still sums shared partial rows. VT,
+  variable spacing and variable material retain the element path. Purely physical
+  rows retain integer weights; rows touching porous CPML use separate double
+  weights for leading inertia and storage, including physical-cell contributions
+  at the transition. Both kernels have one writer per row, with no element
+  atomics. Nonporous remainders and constraints remain separate.
+
+These controls add GPU memory: element-inverse and single-reduction each need
+one seven-component workspace vector, previous guesses need six components
+per active inertia stage and two scalar storage histories. Linear and quadratic
+guesses retain two and three copies, respectively. Assembled rows
+need 27 neighbor indices/byte weights plus one node index per active local row.
+Rows touching porous CPML additionally need 27 double weights for inertia and
+27 for storage (432 bytes/row); this allocation is absent on purely physical rows.
+Allocation occurs at setup. Monitor output identifies the chosen paths. Keep
+`poroelastic_mass_tolerance` fixed when comparing algebraic implementations;
+changing its value requires a separate waveform/energy error assessment.
+
+#### Consistent-mass kernels and profiling
+
+`HERCULES_BIOT_MASS_PREDICTOR_CACHE=1` (default, double precision) reuses products of stored
+solutions when consistent mass and a nonzero initial-guess mode are selected.
+Single precision defaults to `0` (recomputed products); opting into `1` there
+is experimental because short VT waveform comparisons showed larger changes
+despite satisfying the algebraic residual tolerance.
+It stores both $Ax$ and $BAx$ separately for each inertia stage and each scalar
+storage role. Here $A$ includes that stage's damping and $B$ is the selected
+preconditioner. For a quadratic guess, for example:
+
+```math
+x_0=3x_n-3x_{n-1}+x_{n-2},\qquad
+r_0=b-(3Ax_n-3Ax_{n-1}+Ax_{n-2}),\qquad
+z_0=Bb-(3BAx_n-3BAx_{n-1}+BAx_{n-2}).
+```
+
+The original projected-RHS normalization is still computed. The final fresh
+residual supplies $Ax$ and $Br$; retaining $Bb$ in the oldest product slot gives
+$BAx=Bb-Br$ without another matrix application or scratch vector. Cached
+starting products are approximate in floating point. A cached guess that
+appears converged receives a fresh matrix/preconditioner residual evaluation
+before acceptance; invalid, negative or worse-than-zero cached norms are also
+refreshed before the existing predictor rejection test. Ordinary iterations,
+residual-replacement restarts and final true-residual checks remain unchanged.
+An accepted zero start has the exact products $A0=BA0=0$.
+
+Material mass/storage, constraint maps and preconditioner coefficients are
+fixed at setup. Products are discarded if the per-call damping coefficient
+changes; setup/restart starts with empty histories. Different roles never share
+products. Each stored solution needs two extra vectors of the same size;
+quadratic prediction therefore adds six vectors per active role. The oldest
+preconditioned-product slot temporarily holds the current $Bb$. Allocation
+and the maximum per-rank memory report occur at setup. Startup reports cached
+or recomputed products; shutdown reports reuse and initial refresh counts.
+Set the switch to `0` to retain recomputed starting products for comparisons.
+Both MPI backends, full/compact vectors, both preconditioners and CG recurrences
+use the same constraints and acceptance criterion. Lumped mass and `zero`
+guesses do not allocate product caches. This optimization changes neither the
+consistent storage inverse inside stabilization nor the physical equations.
+
+The completed 32-node, 1.5 s Figure 5 run with cached products and CPML history
+bypass took **2392.201 s** complete Solver time (**79.74 ms/step**), versus
+2892.591 s for the preceding quadratic-predictor run: **1.209x faster**, or
+17.30% less solver time. The same uniform 4 m, 4096 m cube, 256 m CPML,
+16 Hz inviscid source, stabilization `0.005` and case-specific CPML weight `1`
+were retained. All 90,000 solves passed their original fresh true-residual checks
+at `1e-6`, with mean inertia/storage iterations 1.743/1.859 and at most
+3.047 GiB/rank of product caches. Worst native velocity/flux/pressure differences
+from the preceding full run were **0.000523%/0.0000207%/0.0000202%** relative L2.
+Author-reference errors remain about 9.89% velocity and 9.71% flux, with existing
+late oscillations; this is optimization equivalence, not spatial convergence.
+
+In the common 0.0025–0.5975 s timing window, the baseline, CPML-only,
+cache-only and combined cases took 98.210, 90.857, 81.319 and 81.303 ms/step.
+The first three share an allocation; the combined full run used another.
+Thus there is no resolved additional whole-loop gain from combining the changes
+over caching alone in this comparison. Do not multiply individual speedups.
+The cumulative Solver improvement versus the original consistent `1e-10` run
+is 11.007x, including earlier implementation, control and tolerance changes.
+It remains 2.390x the historical lumped Solver time. The later acoustic solid-kernel
+skips are absent from these pinned executables. See the
+[completed comparison](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#completed-32-node-production-comparison-95105--95113)
+for timing scope, spectra, late-time differences and source/binary provenance.
+
+#### Experimental batched solves and owner-assembled rows
+
+Two optional execution experiments retain the original equations, RHS norm,
+per-solve tolerance and fresh true-residual verification. Both accept `0` (default)
+or `1`, must agree across solver ranks, and are inactive with lumped mass.
+They do not change the production defaults established above.
+
+`HERCULES_BIOT_MASS_BATCH_SOLVES=1` pairs the first inertia solve with the storage
+inverse used in pressure stabilization. The latter reads the old pressure and
+can be assembled before displacement advances. Each standard-PCG recurrence
+retains its own coefficients, convergence decision, restart and predictor history;
+a converged field leaves the batch. Matching iterations share seven-component
+packets, matrix topology traversal and global reductions. Initial predictor
+preparation remains sequential. The second viscous/damped inertia stage and
+the later continuity-driven pressure update keep their original order. With
+stabilization disabled there is no scalar solve to pair. Single-reduction CG
+reports a sequential fallback. Both preconditioners, fused/separate local kernels,
+full/compact vectors and the existing FEM/VT and interface constraint maps are
+retained. CUDA-aware MPI keeps packets on the device; host MPI stages packets.
+The joint packet uses a stable per-node receive order even when ordinary packet
+aggregation is disabled. The packet buffers gain one scalar component per node;
+no additional full-field solution histories are allocated.
+
+`HERCULES_BIOT_MASS_ONE_ROUND=1` assembles complete uniform Cartesian Q1 rows at
+node owners during setup. Every sharing rank contributes its integer element
+weights, including rows whose owner has no local physical porous cells. A new
+input halo requests all columns needed by those owner rows. Matrix and
+preconditioner applications exchange input values once and require no output
+assembly. Only owned algebraic rows are complete; the existing displacement,
+fluid-displacement, pressure and stabilization sharing still refreshes ghost
+copies before downstream element kernels use them. The same owned-node
+projections, physical boundary constraints, lumped nonporous remainder and
+dot-product ownership remain in force.
+Receive-storage reuse is protected by a CUDA event; MPI sends must complete
+before send buffers are reused. Both MPI backends and standalone or batched
+solves use this path. Setup needs additional host topology workspace and GPU
+halo packets. It requires `poroelastic_mass_operator=auto`, globally uniform
+porous Cartesian spacing/material, full vectors, no porous CPML weights and no
+geometric hanging constraints. Consistent porous CPML, VT, variable-material/spacing,
+compact-vector and constrained meshes
+explicitly retain the existing two-exchange operator; this switch does not add
+support for a previously unsupported physics or interface configuration.
+
+The joint solve has its own `Biot batched inertia/stabilization PCG` timer.
+Individual inertia/storage timers cover only sequential solves when batching is
+active; their sum no longer represents all mass work. Optional mass profiling
+adds a `joint` category for shared operator/exchange/reduction work. Existing
+GPU MPI packet counters charge joint seven-component packets to the storage
+category; the new owner-row input halo is covered by mass exchange timings,
+not those legacy packet counters. CPU waiting overlaps GPU work. Compare complete
+unprofiled Solver times over resolved pulses before drawing performance
+conclusions; correctness and speedup are not implied merely by enabling either
+experiment. In the 32-node, 0.6 s Figure 5 comparison, batching reduced complete
+Solver time by 3.14%, while owner-complete rows increased it by 4.95% alone and
+1.61% with batching. The larger gains on two nodes did not transfer to this
+billion-element model. Both experiments remain off by default. See the
+[measured comparisons](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#batched-mass-solves-and-owner-complete-rows--2026-11-15-investigation)
+for full-record results, coupled regression scope and provenance.
+
+Removing pressure stabilization is a numerical-scheme change, not a substitute
+for these execution optimizations. In the uniform 4 m, 16 Hz inviscid Figure 5
+case, `poroelastic_pressure_stabilization=0` completed through 1.5 s with finite
+fields and passing PCG residuals, but worst author-reference Darcy-flux L2 error
+rose from 9.71% to 173.86%. Late flux reached 31.83% of the reference pulse peak,
+versus 0.04776% with `0.005`. A small-domain tight-tolerance control preserves
+the large stabilization effect. That two-value comparison retained `0.005`
+for this benchmark pending the broader gamma sweep below; these data do
+not establish a universal calibration or uniquely identify the oscillation
+mechanism. The [stabilization comparison](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#removing-pressure-stabilization)
+records the waveform, spectral and tolerance evidence.
+
+The completed [homogeneous Wolf comparison](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#homogeneous-wolf-reruns-with-current-defaults-2026-11-16)
+uses the current performance defaults, uniform meshes, explicit consistent mass,
+stabilization `0.005`, 256 m CPML and partition weight `1`. Figure 5's 4 m
+inviscid/viscous worst-receiver velocity L2 errors are **9.89% / 6.77%**;
+Darcy-flux errors are **9.71% / 8.59%**. Viscous radial FAS errors over 1–48 Hz
+are smaller: **0.90% velocity / 1.14% flux**. These are reference errors, not
+optimization-equivalence differences.
+
+For Figure 7, joint refinement from 8 m / 100 microseconds to 4 m /
+50 microseconds reduces shallow displacement/velocity errors against
+Gar6More3D to **0.744% / 0.911%**. Deep errors remain **3.529% / 4.127%**;
+the archived SeisSol velocity itself differs from the differentiated primary
+reference by **3.846%** there. Both comparisons are retained without fitted
+alignment. Against SeisSol, the 4 m velocity differences are **0.987% shallow /
+0.821% deep**, and pressure differences are **16.36% / 0.287%**. The natural
+drained boundary does not strongly clamp surface pressure DOFs: the surface
+pressure peak decreases from **0.4731 Pa** to **0.1704 Pa** with refinement.
+Near-surface pressure remains a gap for that production natural condition, and
+no independent analytical pressure history is supplied in these archives.
+
+A subsequent [private drained-surface experiment](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#private-drained-surface-experiment-2026-11-16)
+removes top pressure unknowns from both consistent scalar solves, including the
+stabilization auxiliary, while retaining free normal fluid motion. At a separately
+qualified 200-microsecond step, shallow pressure error against SeisSol falls from
+**52.39% to 1.92%** at 8 m and **16.36% to 0.519%** at 4 m. Fine-mesh solid-motion
+changes are below 0.045%; the surface diagnostic pressure is exactly zero.
+Both coarse strong and matched natural controls complete 10 s without observed
+exponential station growth; the fine strong record covers 2 s. That experiment
+used a flat, all-porous Hex8 private build. The current [strong option](#strong-full-biot-drained-surface)
+extends the restriction to FEM faces and a conservative VT cut-layer
+approximation; those earlier flat results do not establish topography,
+interface or constitutive accuracy. Omitted drained full-Biot enforcement now
+selects `strong` for flat/FEM and `natural` for VT; explicit choices are preserved.
+
+The consistent-mass wave check uses a suggested `0.2*h/c_fast` estimate
+(`0.02*h/c_fast` for VT). These are heuristic warning thresholds, not
+measured critical timesteps. The subsequent
+[homogeneous timestep investigation](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#homogeneous-timestep-investigation-2026-11-16)
+uses isolated private builds to distinguish stability from accuracy. For the
+inviscid Figure 5 material, 4 m spacing and stabilization `0.005`, the periodic
+Q1 estimate is 501.466 microseconds, with instability bracketed between 500 and
+510 microseconds in a small stress model. A full-domain 400-microsecond control
+completes 10 s without observed exponential station growth. For accuracy,
+200 microseconds keeps displacement, velocity, pressure and Darcy flux within
+0.545% of the 50-microsecond numerical baseline and gives about 3x Solver speedup.
+This is a case-specific working step, not a universal stability factor. Figure 7
+qualifies its own 200-microsecond step against smaller-step controls before any
+boundary change. Those runs required private builds. The current solver instead warns when a
+requested timestep exceeds a setup estimate and continues without changing it.
+This policy does not validate every over-estimate step. The `0.2` coefficient
+is still a heuristic multiplying `h/c_fast`; the tested 200-microsecond step
+corresponds to approximately `0.1795*h/c_fast`. The ratio `200/501.466` is
+approximately `0.40` of the periodic limiting step, a different normalization.
+The suggested coefficient was raised from `0.08` to `0.2`; at 4 m this gives
+222.821 microseconds for the Figure 5 material. Stabilization or stiffness
+damping may still give a smaller advisory estimate. This coefficient is not
+an input parameter and does not select or change the requested timestep.
+The subsequent [matched stabilization study](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#matched-stabilization-investigation-2026-11-16)
+compares gamma at the same uniform 4 m spacing, 50-microsecond step and pinned
+consistent-mass executable. Gamma `0.05` completes with passing true residuals
+but gives worst velocity/flux/pressure L2 errors of **34.49%/41.51%/40.69%**,
+versus **9.89%/9.71%/9.25%** at `0.005`. The stronger numerical dissipation
+reduces late tails while attenuating the slow-P pulse. All seven values are
+complete. Gamma `0.001` has the smallest tested worst-receiver full-pulse/FAS
+errors, but its late flux peak is 1.080% of the reference pulse versus 0.135%
+at `0.0025`. For this case, `0.0025` is the recommended compromise between
+pulse agreement and a quieter tail: its velocity/flux/pressure L2 errors are
+**8.22%/7.79%/7.97%** at 50 microseconds. This criterion does not imply a
+unique optimum or improvement at every receiver. Following this comparison,
+the global default is `0.0025`; explicit parameter values are preserved. The
+benchmark evidence does not calibrate every material, interface or geometry.
+Matched 200-microsecond confirmations at both `0.001` and `0.0025` keep all
+four fields within 0.526% of their own 50-microsecond baselines. At `0.0025`,
+Solver time improves by **2.984x**, with reference velocity/flux/pressure
+errors **8.08%/7.46%/7.64%**. These confirmations cover 1.5 s; the separate
+ten-second evidence and Figure 7 boundary study retain their `0.005` scope.
+At `0.05`, the stabilization estimate is 58.456 microseconds. The completed
+gamma sweep therefore retained a common 50-microsecond step. A warning-only
+policy does not establish accuracy or stability at 200 microseconds for `0.05`.
+The heterogeneous half-space and layered LOHp cases remain outside this
+comparison and need hydraulic material fields; LOHp also needs its prescribed
+combined stress/pressure line source. The validation record distinguishes the
+pinned executable from the later parser-only conditional mass-default change.
+
+#### Other consistent-mass execution controls
+
+`HERCULES_BIOT_MASS_FUSION=1` (default) combines neighboring local operations
+in the consistent-mass solves. `0` retains the separate-kernel comparison path.
+The update of the solution/residual and first nodal preconditioner share a pass;
+after MPI assembly, the operator finish can combine the final nodal inverse
+and/or dot products. Both preconditioners, both CG recurrences, Cartesian/VT
+operators, damping stages, field constraints and true-residual acceptance are
+retained. Dot products occur only after shared contributions are assembled.
+Floating-point reduction order can change, so agreement is measured to tolerance,
+not assumed bitwise. Compaction and solid/relative-fluid packet batching have
+independent controls below. These changes preserve the Q1 spaces and physical
+mass/storage equations.
+
+`HERCULES_BIOT_MASS_COMPACT=0` (default) retains full iterative vectors, the
+faster option in the completed 32-node Figure 5 comparisons. Set `1` to retain
+only the union of nodes touching
+physical consistent-mass cells and all required solid/pore constraint parents
+and MPI owner/ghost copies. Setup iterates directed dependency closure and
+MPI mask sharing to a global fixed point, verifying peer node identities.
+A rank without local consistent cells can still own required unknowns. Nodes
+shared by physical and CPML cells remain in the compact set. Only independent
+nodal blocks with no consistent-cell coupling are removed from the iteration;
+they retain their lumped mass/storage and existing damping stages, evaluated
+by direct nodal inverses. Full-RHS normalization includes those direct blocks,
+and compact PCG still requires recomputed true-residual acceptance. Compact
+storage applies to Krylov work and previous-solution histories; physical fields,
+station/output indexing and the mesh remain unchanged. `0` retains full vectors.
+
+`HERCULES_BIOT_MASS_HALO_PACK=0` (default) retains per-peer/field packing.
+Set it to `1` to gather all peer packets in one GPU launch and unpack all
+received packets in one launch per exchange phase. Setup groups receive entries
+by destination node while preserving peer order and duplicate-entry order.
+Both CUDA-aware and host MPI, full/compact mappings, separate/combined mechanics
+packets and scalar storage are supported. CUDA-aware MPI keeps packets on the
+device; the host backend stages packets. Receive-reuse fences are retained.
+The setup metadata costs memory and the alternative needs timing validation
+on the intended model; it does not change convergence checks.
+Full 0.6 s inviscid pulse tests measured a 2.12x complete-loop improvement for
+quadratic versus previous guesses, and a separate 1.11x packing improvement
+with quadratic guesses. These small-domain ratios must not be multiplied or
+extended to production-size runs. Viscous relative-fluid flux can be sensitive
+at `1e-6`; the tested `1e-8` pulse differed from `1e-10` by at most 0.00231%
+q L2. See the [validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#optional-extrapolated-guesses-and-aggregate-halo-packing-2026-11-15)
+for assumptions, residual/operator checks and limits.
+
+Resolved-wave partition tests with quadratic guesses retained the original
+true-residual check on every solve. On 32 nodes, the 4096 m cube with uniform
+4 m cells, 256 m CPML and 0.6 s duration took 1163.445 s at
+`cpml_partition_weight=1` with per-peer packing. Aggregate packing at weight 1
+took 1170.265 and 1166.857 s in two runs; weights 1.5, 2 and 4.38 took
+1211.408, 1227.534 and 1467.198 s with aggregate packing. Weight 1 remains
+the fastest tested choice for this case; aggregate packing has no clear
+whole-loop benefit at this scale. These runs preceded the material-dependent
+weight defaults; aggregate packing remains disabled by default. These measurements do not define
+a universal CPML/interior element-cost ratio.
+
+The completed 1.5 s, 32-node production confirmation with quadratic guesses,
+weight 1 and per-peer packing took **2892.591 s** complete Solver time,
+versus **4456.752 s** with previous guesses: **1.541x faster**. All 90,000
+solves retained the original true-residual acceptance check at `1e-6`.
+Mean inertia/storage iterations fell from 6.111/5.939 to 1.747/1.861.
+Worst native v/q/p differences from the previous-guess run were
+0.01152%/0.00517%/0.00516% L2; differences from the full `1e-10` numerical
+reference were below 0.00460%/0.00224%/0.00224%. Author-reference errors
+remained about 9.89% v and 9.71% q. This validates the optimization for
+the tested case without establishing spatial convergence or a universal
+weak-field tolerance bound. Other stopping norms, periodic acceptance checks
+and implicit uniform-grid stencils remain local experiments.
+
+`HERCULES_BIOT_MASS_HALO_BATCH=1` (default) puts solid and relative-fluid vectors
+into one packet per neighbor for each mass exchange phase, reducing the two
+mechanical field rounds to one. `0` keeps separate field rounds. Pressure has
+its own scalar packet and constraint map. Both choices work with compact or
+full vectors. With `HERCULES_BIOT_MASS_HALO_PACK=0`, packing and unpacking
+reuse the existing GPU boundary kernels;
+CUDA-aware MPI passes device packets directly, while host MPI stages only the
+packets. Constraint adjustment stays on the GPU in this transport. Setup builds
+all buffers/maps; there is no per-step allocation. Pack readiness is synchronized
+before MPI reads, sends complete before packet reuse, and receive-buffer events
+protect asynchronous unpack. Fixed peer order and duplicate-map handling are
+retained. Setting both new switches to `0` restores the previous full-vector,
+separate-exchange path for comparisons. The ordinary physical-field exchanges
+outside consistent-mass solves are unaffected.
+
+`HERCULES_BIOT_MASS_PROFILE=0` (default) disables the optional mass-specific
+profiler; `1` records GPU event intervals for clears/copies, operator applications,
+separate nodal passes, fused local/finish passes, direct nodal blocks, scalar
+gather/scatter and dot products. It separately
+records CPU time in field exchanges, waiting for reduction data, and
+`MPI_Allreduce`. Results distinguish inertia and storage and give cumulative
+rank average/min/max seconds and calls per rank. A fixed event pool is allocated
+at setup and consumed after the existing reduction stream waits; a final
+teardown wait collects outstanding intervals. No synchronization or allocation
+is added inside a timestep. CPU waits include pending GPU work and rank imbalance
+and overlap GPU intervals: **do not add them together** or interpret them as
+isolated network latency. These are interval measurements, not hardware memory
+bandwidth counters. Use `HERCULES_GPU_MPI_PROFILE=1` as well for packet/helper
+counters, and compare unprofiled runs for production speedups.
+
+All six mass switches accept only `0|1`, must agree on all solver ranks, and are inactive
+with lumped mass. Startup output records the selected kernel path and profiling
+assumptions. For partition studies, hold mesh, physical inputs, tolerance and
+runtime controls fixed while varying `cpml_partition_weight`; its elastic/BKT2
+calibration does not establish an optimum for iterative consistent-mass work.
+
+In the completed 32-node, homogeneous Figure 5 timing study (4096 m cube,
+uniform 4 m mesh, 256 m CPML, inviscid full Biot, tolerance `1e-6`), the fastest
+tested settings used `cpml_partition_weight=1` and
+`HERCULES_BIOT_MASS_COMPACT=0`, with fusion and combined halos enabled.
+The complete 50-step `Solver` timer repeated at 8.919–8.937 s; compact vectors
+and the tested neighboring weights were slower. Original-launch GPU service
+fits give a CPML/ordinary cost ratio of 0.776 at `1e-10` and 0.980 at `1e-6`,
+including consistent solves and common nodal work. These fits exclude CPU
+waiting and report packet/constraint work separately; measured complete-loop
+time determines the selection. Full vectors are now the solver default; weight
+`1` remains an explicit case-specific setting. These measurements do not establish
+optimal performance for every material/interface configuration.
+Short prearrival timing pilots do not establish full-record waveform accuracy;
+see the [validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md)
+for scope, repeated controls and the separate complete Figure 5 confirmation.
+
+The completed 1.5 s confirmation on 32 nodes took **1:15:57** Slurm elapsed,
+with 4,444.796 s maximum-rank physics time: **1.990x** faster physics than the
+preceding optimized `1e-6` run and **5.913x** faster than the original `1e-10`
+consistent run. Complete solver-loop speedups are 1.996x and 5.908x. Across
+all eight receivers, native velocity, Darcy-flux and pressure histories differ
+from the preceding `1e-6` run by less than **0.0001% relative L2**. Worst
+author-reference errors remain **9.8878% velocity / 9.7103% Darcy flux**, and
+the existing late oscillations persist. This validates numerical agreement
+of the selected performance settings for that case, not spatial convergence
+or every coupling. Compact vectors were off; their separate pulse/integration
+checks are not replaced by this confirmation. The measured runtime ratios
+span different allocations and executable revisions and do not isolate each
+optimization's contribution.
+
+The fusion investigation reproduced an existing temporal-convergence limitation:
+for a manufactured viscous case with $\eta=0.001$ Pa s and
+$k=6\times10^{-13}$ m², halving the step from 100 to 50 microseconds reduced
+velocity error from 0.06249 to 0.02810, a factor 2.224 rather than four. Fused
+and separate kernels gave the same result. The established less-stiff fixture
+($k=6\times10^{-9}$ m²) retained factors 3.838 and 3.914. This is not evidence
+of a fusion regression; it also does not establish uniform second-order accuracy
+in the strongly stiff regime. Refine the timestep for that regime separately.
+See the [validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md)
+for the test scope and measured performance.
+
+Consistent mass can reduce smooth-wave dispersion but **does not remove the
+Q1 pressure nullspace or the spurious short-wave branch**. It does not establish
+an inf-sup-stable mixed element. Pressure, fluid flux, source sensitivity,
+refinement and boundary reflection still require validation. The historical
+Figure 5 and periodic results below describe the lumped implementation unless
+explicitly identified as the isolated consistent-mass experiment.
+
+#### Full-Biot stabilization, boundaries and validation
+
+The equal-order, collocated fluid/pressure pair has an additional grid branch.
+Unresolved point forces can excite large slow-wave pressure and fluid-motion
+oscillations even while solid motion converges. The full-Biot path therefore
+adds fourth-order numerical pressure dissipation, controlled by
+`poroelastic_pressure_stabilization`: `0.0025` (default), finite and nonnegative;
+`0` disables it for diagnostic comparisons. It is inactive for `brick_up` and
+fully sealed full-Biot material. It is not physical Darcy diffusion or an
+output filter. With lumped mass, define `$C_i=\sum_e\int N_i/M_e\,dV$`;
+consistent mass instead uses the assembled storage matrix described above. Define
+
+```math
+K_a=\sum_e\int_{\Omega_e}\frac{1}{M_e}
+       (\nabla N)^T\operatorname{diag}(\sqrt{\nu_{4,i}})\nabla N\,dV,
+\qquad
+\nu_{4,i}=\frac{\gamma c_{P,s}h^3}{1+\eta h/(\kappa_i m c_{P,s})}.
+```
+
+Here `$c_{P,s}$` is the inviscid slow-P speed and `$\nu_{4,i}=0$` when
+`$\kappa_i=0$`. Continuity receives `$-\Delta t K_a C^{-1}K_a p$`.
+This symmetric positive-semidefinite operator dissipates pressure energy,
+annihilates constant pressure and preserves assembled total fluid content.
+Its inviscid coefficient vanishes as `$h^3$`; increasing drag also reduces it.
+Two element applications surround a pressure-constraint reduction, storage
+solve (local division for lumped mass) and sharing step, using the existing
+pressure MPI maps. Initialization
+reports a conservative combined wave/dissipation timestep estimate. A requested
+step above it warns to stderr and the monitor file without rejection or automatic
+reduction. The default changed from `0.05` after the homogeneous 4 m, 16 Hz
+inviscid Wolf comparison; explicit values override it. Assess
+stabilization sensitivity and spatial convergence on raw output; successful
+solid-motion comparisons alone do not establish slow-wave accuracy.
+
+Solid and fluid force contributions are exchanged before the coupled update.
+Both displacements are shared and hanging nodes assigned before continuity or
+acoustic flux reads the new state. CUDA-aware MPI keeps fluid state resident;
+the host transport uses the same vector schedules and constraints. All ranks
+participate, including ranks with no local porous cells. Pressure always
+advances each step, irrespective of `HERCULES_PORE_PRESSURE_UPDATE`.
+
+Hydraulic conditions differ from the reduced pressure-penalty formulation:
+
+- `poroelastic_elastic_interface=no_flow` and acoustic `no_flow` constrain
+  normal relative fluid motion. Tangential fluid motion remains free.
+- `poroelastic_surface_pressure_bc=undrained` seals every exposed terrain face.
+  `drained` permits normal relative flow with natural zero excess fluid-pressure
+  traction. `poroelastic_surface_pressure_enforcement=natural` retains that
+  treatment and is the drained default on VT. On flat/FEM geometry, omitted
+  enforcement selects `strong`, additionally restricting pressure and auxiliary
+  trace support to zero. Explicit `natural` restores the unreinforced treatment.
+  The optional `weak` method adds the numerical drainage flux described below;
+  its penalty factor is inactive with `natural` or `strong`.
+- Acoustic `open_pore` applies water pressure as natural fluid traction and
+  returns `$\dot u_n+\dot w_n$` to the acoustic solver. Both acoustic pressure
+  and velocity-potential formulations are wired. It requires
+  `acoustic_interface_coupling=yes`. Flat/FEM Hex8 geometry accepts
+  `acoustic_interface_projection=point` (default) or `face_mass`. Both exchange
+  pressure traction and solid-plus-relative-fluid motion with reciprocal spatial
+  weights. One-point integration samples the fragment centre; `face_mass` uses
+  four Gauss points and better resolves within-face variation. Reciprocity does
+  not require four points and does not establish time-discrete stability or
+  spatial accuracy. VT still requires `face_mass` for either hydraulic condition.
+  `acoustic_poroelastic_pressure_penalty_factor` is inactive; pressure continuity
+  comes from the fluid momentum boundary condition.
+- Lateral and bottom fluid boundaries are sealed. The mechanical dashpot
+  retains its documented initial-modulus approximation. This is not a full-Biot
+  absorbing boundary. Use enlarged domains and exclude boundary returns in
+  continuum validation when using dashpots. With `abc_type=cpml`, porous
+  candidates remain active and use the mixed absorber described below.
+
+The open-pore `point` follow-up exercises both acoustic formulations, all three
+flat-mesh constraint methods and shared/field-specific FEM terrain. Localized-source
+`point`/`face_mass` differences decrease below 0.007% at 2 m, but the same case
+has about 72% pore-pressure difference between 4 m and 2 m meshes: agreement
+between projections does not establish absolute accuracy. One-second flat/coastal
+records remain finite, with projection differences up to 3.1% after boundary
+returns. See the [measured point-projection results](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#full-biot-open-pore-point-projection-follow-up)
+and [PDF report](Hercules_Full_Biot_Open_Pore_Point_Report_2026-11-13.pdf)
+for the analytical comparison, execution checks, reference provenance and limits.
+
+The implementation supports flat geometry and FEM topography:
+`include_topography=yes`, `computation_method=fem`. FEM uses whole axis-aligned
+Hex8 cells to approximate the terrain by stair steps. Solid/fluid inertia,
+adjoint pressure-force/continuity operators, stabilization and receiver
+interpolation therefore retain the regular Hex8 discretization. Every exposed
+face, including vertical risers, receives the selected surface hydraulic
+condition using its **mesh-face normal**, not the continuous terrain normal.
+Local air, owner-confirmed remote air and carved voids are treated consistently;
+lateral/bottom domain truncations stay sealed. At a stair corner, sealed
+incident faces constrain their respective normal components. Setup reports
+sealed/drained face areas separately for the X/Y/Z normals.
+
+Full-Biot saturation and `poroelastic_depth_max_m` follow the physical terrain
+independently of the `full`/`sqd` material sampling reference. Retained surface
+cubes are fully saturated with `surface_groundwatertable=no` or a zero-depth grid even if their centers lie above the continuous
+surface; saturation applies to FEM whole cells and the retained VT solid
+volumes, avoiding an artificial elastic cap. Depth is clamped to zero for those cubes. Refine the surface mesh
+to assess the geometric error. Sources and stations retain their existing
+depth conventions; station depths are below the local continuous surface.
+FEM acoustic coupling retains the existing complete-face, flat-water-surface
+requirements and supports field-specific or shared geometric constraints;
+`local-matching` still requires topography off.
+
+`computation_method=vt` is also supported with the native five-tetrahedron
+volume-fraction geometry. The partition and retained tetrahedral fractions are
+identical to the solid operator, including its minimum-volume cutoff. Fluid
+inertia, drag and pressure capacity use the corresponding lumped P1 nodal
+volumes. Cut-cell pressure force and continuity use the same adjoint P1 operator;
+pressure stabilization uses the symmetric tetrahedral gradient operator.
+Pressure and relative-fluid stations interpolate with tetrahedral barycentric
+weights in cut cells, matching solid receiver kinematics. A receiver in a
+discarded tetrahedron aborts; refine the mesh or move it into retained material.
+Setup keeps cube metadata separate from native four-vertex station records.
+Surface-cell property lookups use the existing sorted element mapping instead
+of scanning every surface cell for each volume cell.
+
+A drained VT surface has natural zero excess pressure. For undrained terrain,
+relative-fluid motion is constrained to the physical terrain tangent plane at
+nodes supporting retained cut cells. This is a **boundary approximation in an
+O(h)-thick support band**, not exact integration over reconstructed cut faces.
+Normals come from the bilinear height-grid derivatives. Coordinate locks from
+zero permeability and sealed material/domain interfaces are intersected with
+that tangent plane. Setup diagonalizes anisotropic drag in the allowed modes;
+the time step includes the corresponding fluid-inertia reaction on the solid.
+Shared geometric hanging-node interpolation approximates varying normals on
+curved surfaces. Refine the terrain and compare all three fields.
+
+VT supports shared geometric constraints or native field-specific solid/pore
+constraints with coupled scalar acoustics. `local-matching` remains unavailable
+for VT. Full-Biot open pores with porous CPML require field-specific constraints;
+shared constraints showed late growth in both FEM and VT coastal tests.
+Full-Biot VT acoustic coupling requires `acoustic_interface_projection=face_mass`
+for either hydraulic condition. At the existing four face quadrature points,
+tetrahedral solid/fluid trace weights are reciprocal in traction and flux,
+including remote neighbors; acoustic traces remain Hex8. Discarded/air portions
+supply no solid trace. Sampled partial-face integration at coastlines is an
+additional geometry approximation, so execution checks do not establish
+coastal scattering accuracy. Elastic and eligible nonlinear/attenuating solids
+continue to use their native force operators.
+
+The lumped VT setup reports `$\Delta t\le0.1h/c_{fast}$` even with stabilization zero.
+For nonzero numerical dissipation it also reports
+`$\Delta t\le h^4/(576\max_i\nu_{4,i})$`; the tetrahedral capacity-normalized
+gradient operator has a row-sum bound `$24\sqrt{\max_i\nu_{4,i}}/h^2$`.
+Exceeding these estimates warns and continues at the requested step; consistent
+mass has its additional advisory estimates. These conservative estimates use
+initial material properties; they neither resolve
+slow waves automatically nor bound every nonlinear tangent stiffness.
+
+Fixed buried or spatially varying groundwater is supported through whole-cell classification and the discrete boundary described [below](#fixed-buried-groundwater-with-full-biot). Subcell saturation cuts are not modeled. Checkpoint/restart,
+geostatic ramps, fixed-base forcing and DRM histories are rejected because
+their state/source contracts do not yet carry the independent fluid variables.
+Existing nonlinear effective-skeleton and attenuation force paths feed the
+solid equation; this alone does not validate yielding, hysteretic response or
+frequency-dependent attenuation with full Biot. Calibrated geostatic states,
+tolerances, substeps, damping and `material_properties_list` remain case-specific.
+Hydraulic constants are global; heterogeneous drained moduli and density are
+permitted. Layer-dependent hydraulic tables and simultaneous normal-stress/
+pore-pressure explosive sources remain gaps for direct Wolf et al. replication.
+
+The FEM follow-up adds independent sealed/drained free-surface comparisons:
+at 2 m spacing, maximum relative L2 errors across the receivers are 0.441% for
+solid velocity, 8.130% for pressure and 9.143% for Darcy flux. A 6 Hz hill's
+2 m versus 1 m differences are below 2.7%, 6.2% and 5.4%, respectively; these
+are self-convergence differences, not errors against an exact hill solution.
+The 25 Hz hill remains under-resolved at 2 m and is retained as a failed
+accuracy case. Adaptive-mesh transport, coastal acoustic coupling and
+before/after regression results are recorded in the
+[FEM topography validation addendum](Hercules_Full_Biot_FEM_Topography_Report_2026-11-13.pdf)
+and the [benchmark record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#fem-topography-follow-up-2026-11-13).
+
+The VT follow-up uses an off-grid planar surface at Z=67.2 m. At 2 m spacing,
+receivers 32, 64 and 192 m below the surface meet the selected 5% solid-velocity
+and 10% pressure/flux targets: sealed maxima are 0.406%, 7.920%, 8.501%; drained
+maxima are 0.242%, 5.188%, 4.471%. The additional 1 m receiver still has 64.0%
+sealed-flux error and fails the target. A 6 Hz hill's 2 m versus 1 m differences
+are 0.827%/14.492%/11.919% for sealed velocity/pressure/flux and
+0.206%/1.123%/0.359% for drained terrain. These are self-convergence differences,
+not exact hill errors; sealed pressure and flux remain insufficiently resolved
+at the 10% level. See the [VT implementation and validation addendum](Hercules_Full_Biot_VT_Topography_Report_2026-11-13.pdf)
+and [VT benchmark record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#vt-topography-follow-up-2026-11-13).
+
+Every station whose containing element is active full-Biot material writes
+an additional ASCII `station.fluid.ID` in `output_stations_directory`, also
+when ordinary stations use binary output. The header defines 13 columns:
+time, `$w_x,w_y,w_z$` (m), Darcy flux `$q=\dot w$` (m/s), intrinsic relative
+fluid velocity `$v_r=q/\phi$` (m/s), and absolute fluid velocity
+`$v_f=\dot u+v_r$` (m/s). Displacement is sampled at time `$t$`; velocities
+are at `$t-\Delta t/2$`, with a zero initial row. Coordinates remain X north,
+Y east, Z/depth positive downward. Files are overwritten for a new run.
+Only station interpolation results are downloaded at output steps; no full
+fluid field transfer is added to the CUDA-aware stepping path. Existing
+station and plane fields continue to describe solid motion and pressure.
+
+### Fixed buried groundwater with full Biot
+
+Set `surface_groundwatertable=yes` and provide `groundwaterlevel_file` to place
+saturation below the ground on flat, FEM or VT geometry. The file is a fixed
+bilinearly interpolated **depth below local physical ground**, in metres;
+submerged columns with explicit seabed geometry instead retain saturation from
+the water surface and ignore the groundwater values. `poroelastic_depth_max_m`
+is still measured below ground/bed, not below the water table. Ensure it reaches
+the intended saturated region. A model with no active porous elements aborts.
+
+A constant file value gives a constant burial depth and therefore follows
+topography. For a horizontal plane at solver depth `Z_w`, write each grid
+node's depth as `Z_w - Z_ground(X,Y)` (Z positive downward). Between grid nodes,
+Hercules interpolates the depth and adds the local ground elevation, so check
+the reconstructed plane when the ground and groundwater grids differ. Full
+Biot requires nonnegative depths; a plane above the ground needs explicit
+surface-water geometry rather than negative groundwater values.
+
+Classification uses each eligible element's center and the existing tolerance
+`max(1e-6 m, 0.01*h)`. For VT this is the parent cube center, not the centroid of its retained solid volume. A retained element is entirely dry or entirely porous;
+VT retains its native terrain fractions but does not cut an additional saturated
+volume at the water table. Positive buried depths use the actual center elevation.
+A zero-depth file reproduces surface saturation, including retained terrain
+cells whose centers are above the continuous surface. Refine to assess the
+stair-step position error; a water table moving within a cell need not change
+that cell's classification.
+
+The dry cap remains the configured single-phase elastic, viscoelastic or
+nonlinear solid. Supply suitable density and moduli for each material region;
+Hercules does not derive dry properties from the saturated mixture. Solid
+motion remains shared across the boundary. Pressure and independent relative
+fluid motion exist only on the active porous region. An owner-confirmed
+above-groundwater classification distinguishes this boundary from other
+porous/elastic contacts and depth-limit cutoffs, which retain `no_flow`.
+
+`poroelastic_surface_pressure_bc=undrained` (default) seals normal relative
+flow at the discrete dry-cap interface. `drained` permits normal flow with zero
+excess pressure, using `poroelastic_surface_pressure_enforcement`: `strong`
+(default) for drained flat/FEM, `natural` (default) for VT, or explicit `weak`.
+These are the existing full-Biot closures, applied on mesh subfaces rather than
+BrickUP's interior cut-plane capacity blend. Native VT groundwater faces use
+retained P1 face triangles clipped by terrain and neighbor subfaces; strong's
+support restriction still needs refinement. A sloping depth grid produces mesh
+stair steps. Startup reports the X/Y/Z dry-cap mesh-face areas; those areas count
+whole face fragments, whereas weak/strong permeable areas use their retained
+quadrature. Acoustic open/no-flow laws remain unchanged at water contacts.
+
+This is not unsaturated or capillary flow, a moving phreatic surface, or a
+hydrostatic initial-stress model. The unknown remains excess pore pressure.
+No new time-step exchange is added; groundwater classification and boundary
+assembly occur during setup. Both mass matrices use the same boundary map.
+Compatible regular full-Biot CPML can contain dry and saturated cells; native
+VT terrain cut cells remain excluded from porous CPML. Existing checkpoint,
+geostatic, fixed-base, DRM and acoustic-interface restrictions remain.
+
+For an illustrative **128 m by 128 m footprint**, this file places a constant
+32 m-deep table using 64 m horizontal grid spacing. It is a format example,
+not calibrated material data. A bare filename resolves under
+`3D_velocity_model_directory`; a path containing `/` is used as supplied.
+
+```text
+# parameters.in (other required geometry/material/source controls omitted)
+include_poroelastic = yes
+poroelastic_formulation = full_biot
+surface_groundwatertable = yes
+groundwaterlevel_file = material/groundwaterlevel.in
+poroelastic_depth_max_m = 128
+poroelastic_surface_pressure_bc = drained
+# Omitted enforcement: strong for flat/FEM, natural for VT.
+```
+
+```text
+64
+32 32 32
+32 32 32
+32 32 32
+```
+
+The grid itself contains numeric values only. There are nine depths: the first
+row is north 0 m with east 0/64/128 m; the next is north 64 m, then 128 m.
+Groundwater-enabled input or geometry changes require regenerated mesh/source
+setup. Dry-cap stations retain solid motion, but pore pressure is undefined
+(`NaN`) and no fluid companion is emitted. A porous station must also lie below
+the physical interpolated table; whole-cell activation does not make a point
+above that table a valid fluid receiver.
+
+The [groundwater validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#fixed-buried-groundwater-for-full-biot-2026-11-17)
+separates independent planar interface accuracy from terrain/coastal execution,
+MPI regressions and CPML boundedness controls. In the 12 Hz inviscid dry-cap
+comparison, natural enforcement at 4 m gives maximum velocity/pressure/flux
+errors of 0.127%/0.943%/1.311% over receivers 32/64/192 m below the table;
+pressure at the separate 0.5 m receiver still has 21.44% error. At the same
+4 m spacing, strong enforcement gives 0.127%/0.628%/0.771% bulk errors and
+4.05% shallow-pressure error. These scores use the boundary-isolated window
+before 0.27 s. The reference uses continuity of solid velocity and total traction, with the selected
+hydraulic condition. It is a dry-elastic/porous interface reference, not an
+acoustic open-pore reference. Off-grid tables, curved terrain, viscous accuracy
+and general long-time coastal behavior need case-specific refinement checks.
+
+### Strong BrickUP drained surface
+
+`poroelastic_formulation=brick_up` accepts opt-in
+`poroelastic_surface_pressure_enforcement=strong` with
+`poroelastic_surface_pressure_bc=drained`. The omitted `natural` (default)
+compatibility spelling and explicit `weak` retain the existing per-update
+compliance projection. They do not implement full Biot's natural fluid traction:
+the reduced pressure-diffusion equation has a no-flow natural boundary when
+no drainage term or pressure constraint is imposed. The hydraulic BC remains
+`undrained` (default).
+
+Strong enforcement fixes independent pressure nodes on positive dry-surface Q1
+trace support. The support is assembled through the existing positive pressure
+hanging-node maps and MPI owners. With lumped capacity `C`, free nodes retain
+`C_i*(p_i_new-p_i_old)=F_i`; fixed nodes retain `p_i=0`. The discarded boundary
+rows represent drainage reactions. No iterative mass solve, extra per-step
+exchange, fluid-inertia field or stabilization auxiliary is introduced.
+The existing host and CUDA-aware pressure exchanges reconstruct constrained
+and ghost values. Zero initial excess pressure is compatible. Restart rebuilds
+the mask and rejects nonzero saved pressure on its fixed independent nodes;
+keep the original geometry and hydraulic setup when restarting.
+
+Conforming flat/FEM exposed faces, including stair-step risers, give ordinary
+nodal Dirichlet conditions. VT reconstructs the terrain contour but uses
+BrickUP's Q1 pressure support, not full Biot's native P1 pressure interpolation.
+Buried tables retain center-based saturation and the existing horizontal plane
+in the upper half of the first active cell; where that plane lies outside the
+active cell, the discrete dry-cap face receives the condition. Center sampling
+of a varying table remains a geometric approximation. A zero-depth table uses
+the terrain treatment. No saturation classification is changed.
+
+**VT cuts and subcell groundwater planes use an experimental conservative
+support restriction.** An interior Q1 cut can fix every active pressure node
+of the brick and suppress its pressure gradient. Nonmatching faces and dry
+shoreline patches can also fix parent support beyond the exposed fragment.
+This is not a minimal multipoint cut-trace method: zero surface pressure alone
+does not establish accurate drainage. Refine the mesh and assess interior
+pressure and outflow, especially relative to the existing weak treatment.
+
+A wholly impermeable normal receives no strong restriction. Submerged traces,
+internal acoustic contacts and ordinary material/depth-limit terminations keep
+their existing hydraulic laws; dry-cap contacts are the exception. Strong
+suppresses the old drainage compliance in both physical and CPML cells,
+including its CPML memory contribution. Storage/diffusion histories and all
+mechanical operators retain their equations. The penalty factor and full-Biot
+weak balance diagnostic are inactive. No strong reaction budget is written by
+the production solver. Existing nonlinear geostatic, CPML, interface and restart
+restrictions remain in force; this option does not qualify unsupported physics.
+
+```text
+include_poroelastic = yes
+poroelastic_formulation = brick_up
+poroelastic_surface_pressure_bc = drained
+poroelastic_surface_pressure_enforcement = strong
+# Existing material, mesh, source and output settings are still required.
+# Explicit weak, or omitted enforcement, retains the previous drained treatment.
+```
+
+The [BrickUP drainage validation record](../benchmark_inputs/poroelastic_up/BRICKUP_STRONG_DRAIN_VALIDATION.md)
+includes an independent scalar diffusion reference and coupled GPU/MPI checks.
+In the aligned synthetic diffusion case, shallow pressure error decreases from
+25.919% to 5.910% to 1.523% on 4/2/1 m grids with strong enforcement; the 1 m
+weak result is 5.295%. Strong is not uniformly better on cuts: the 1 m buried
+plane gives 5.118% strong versus 2.023% weak error at its shallow receiver.
+These are scalar diffusion controls, not coupled-consolidation validation.
+The restart checks also exposed and corrected initialization of the previous
+GPU displacement and pre-swap host pressure levels. That restoration runs once
+at restart; the checkpoint format and ordinary timestep cost are unchanged.
+
+### Weak full-Biot drained surface
+
+`poroelastic_surface_pressure_enforcement=weak` is an opt-in numerical
+reinforcement of the drained condition. It requires `include_poroelastic=yes`,
+`poroelastic_formulation=full_biot`, and `poroelastic_surface_pressure_bc=drained`.
+The `natural` selection retains the existing zero excess fluid-pressure traction.
+It is the drained default on VT; flat/FEM drained full-Biot runs default to `strong`.
+Neither method locks normal relative fluid motion. BrickUP natural/weak keeps its existing
+per-update compliance blend; its coefficient is not interchangeable with this
+full-Biot flux coefficient.
+
+Let `C` be pressure storage, `K` the existing stabilization matrix, and `R`
+the positive row-lumped surface matrix on independent pressure unknowns.
+With dimensionless beta=`poroelastic_surface_pressure_penalty_factor`
+(`1` default, finite and nonnegative), the numerical surface flux is
+
+```math
+q_n^*=q_n+Yp,\qquad
+Y=\beta\frac{c_{\mathrm{fast}}}{M}
+\sum_{d:\,k_d>0}n_d^2,\qquad
+C\dot p=F-Rp-KC^{-1}Kp.
+```
+
+`Y` has units m/(Pa s), is independent of the timestep, and vanishes for an
+impermeable normal. It is a numerical penalty, not measured boundary leakage.
+An exact drained trace `p=0` satisfies the added term. With a constraint matrix
+`P`, the implementation uses `R=diag(P^T r)`, where
+`r_i=integral(Y*N_i dS)`. Nonnegative, constant-preserving constraints preserve
+integrated added flux and positivity; surface row lumping adds nonnegative
+dissipation relative to the consistent surface matrix.
+
+The pressure increment uses time-centered drainage:
+
+```math
+B=\frac{\Delta t}{2}R,\qquad
+(C+B)\Delta p=F_{\mathrm{step}}-2Bp_{\mathrm{old}}.
+```
+
+Both lumped and consistent storage include `B`. The consistent solve, its
+preconditioner, cached products, compact direct blocks and true-residual checks
+use `C+B` for this physical update. The stabilization auxiliary still uses
+`C`; its trace is not constrained to zero. Inertia, Darcy integration,
+acoustic traction/flux, solid attenuation and nonlinear constitutive updates
+retain their existing equations. The semi-discrete boundary energy term is
+`-p^T R p`. This identity is not a proof of stability for the complete explicit
+wave/CPML/coupled scheme. Time centering does not strongly damp arbitrarily
+stiff boundary modes: check beta and timestep sensitivity, especially for a
+large penalty. `beta=0` restores the natural condition.
+
+Flat and FEM surfaces use exposed mesh subfaces, including terrain stair-step
+risers. A buried groundwater dry-cap contact uses the same quadrature on its discrete mesh subface. Other internal elastic/acoustic contacts and sealed outer lateral/bottom
+truncations receive no drainage term. Native VT uses the zero contour of a
+linear terrain level set in each retained P1 tetrahedron, with positive
+triangle quadrature. It does not penalize fictitious cube faces. Explicit
+seabed coverage excludes submerged quadrature points. This is an approximation
+to curved terrain and shoreline geometry and requires mesh refinement. Setup
+rejects a partially retained tetrahedron whose terrain crossing cannot be
+reconstructed from its vertices. Existing full-Biot/CPML restrictions still
+apply; a free-surface penalty inside a CPML band does not establish perfect
+matching. Fixed groundwater uses mesh faces, including retained P1 face triangles on VT terrain cells, rather than a subcell groundwater cut. Restart remains unsupported.
+
+`HERCULES_BIOT_SURFACE_DIAGNOSTICS=1` enables an expensive optional audit;
+`0` (default) adds no diagnostic download or reduction. All ranks must agree.
+It operates only when a nonzero weak drainage matrix exists, with either mass
+treatment. It also works with `number_output_stations=0`; the configured
+`output_stations_directory` (or its default) is created during setup. Rank zero overwrites
+`output_stations_directory/biot_surface_balance.txt`. Each row contains:
+
+| Column | Quantity | Units |
+| --- | --- | --- |
+| 1 | End-of-step time | s |
+| 2 | Integrated pressure balance residual | m3 |
+| 3 | Sum of absolute nodal balance contributions | m3 |
+| 4 | Added numerical boundary outflow for this step, `dt*1^T*R*p_mid` | m3 |
+| 5 | Nonnegative penalty energy loss, `dt*p_mid^T*R*p_mid` | J |
+| 6 | Integrated pressure storage change, `1^T*C*delta_p` | m3 |
+| 7 | Unpenalized pressure RHS increment (divergence, sources and stabilization) | m3 |
+
+Column 2 equals column 6 plus column 4 minus column 7, up to summation and
+solver tolerance. These are step increments, not cumulative totals. The
+consistent-storage diagnostic uses row sums only for the global integral;
+it is not a pointwise residual. Column 3 sums
+`abs(C_row_i*delta_p_i)+abs(B_i*delta_p_i)+abs(F_step_i-2*B_i*p_old_i)`
+over independent owned pressure unknowns, where `C_row_i` is the storage row
+sum. This scale differs from the PCG stopping norm. The audit does not close a
+whole-system CPML energy budget. Existing `station.fluid.ID` output remains
+the volume Darcy flux `q`; the numerical surface flux adds `Y*p`. A small station pressure alone
+is insufficient evidence of correct fluid outflow.
+
+```text
+include_poroelastic = yes
+poroelastic_formulation = full_biot
+poroelastic_surface_pressure_bc = drained
+poroelastic_surface_pressure_enforcement = weak
+poroelastic_surface_pressure_penalty_factor = 1
+# Material, source, mesh and timestep still require case-specific values.
+```
+
+The matched flat, homogeneous, inviscid Figure 7 study at gamma `0.0025`
+reduces shallow pressure differences against archived SeisSol from `39.13%`
+to `6.65%` at 8 m and from `12.00%` to `2.91%` at 4 m with beta `1`. The
+4 m Darcy-flux difference is `0.20%`. Penalty/timestep sensitivity and ten-second
+8 m controls are recorded in the
+[weak-surface validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#matched-figure-7-results).
+These flat results do not establish terrain accuracy or universal boundary
+or CPML stability. Coupled execution/regression checks have a separate scope.
+The earlier private strong prototype removed both pressure and auxiliary
+surface unknowns; it is a different closure and is not selected by `weak`.
+
+The subsequent [VT natural-versus-weak accuracy study](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#vt-natural-versus-weak-accuracy-study-2026-11-17)
+supports keeping `natural` as the VT default for the tested homogeneous
+inviscid reference family. At 2 m spacing, the pressure error 1 m below the
+surface is 4.36% with natural versus 16.25% with weak beta `1`; maximum deeper
+pressure errors are 0.567% versus 1.284%, and flux errors 0.466% versus 1.043%.
+At 4 m, beta `0.25` improves shallow pressure but worsens deeper flux relative
+to natural. Larger beta is not reliably better, and the ranking changes with
+cut position. Curved-hill 4/2/1 m differences decrease with refinement for both
+closures but have no exact reference to rank them. Weak remains an explicit
+option whose benefit must be checked in pressure and flux together.
+
+### Strong full-Biot drained surface
+
+`poroelastic_surface_pressure_enforcement=strong` extends the flat private
+prototype to exposed FEM faces and native VT cut surfaces. It
+requires active `full_biot` and `poroelastic_surface_pressure_bc=drained`.
+When enforcement is omitted, `strong` is the default for this drained condition
+on flat/FEM geometry; VT retains `natural` by default. Explicit input overrides
+the selection, so VT strong remains an experimental opt-in. The hydraulic BC
+itself still defaults to `undrained`. Existing flat/FEM drained inputs that omitted
+this key now select strong; set `poroelastic_surface_pressure_enforcement=natural`
+to reproduce the previous default treatment. Normal relative fluid motion remains free;
+strong drainage is distinct from the undrained no-flow condition and from
+BrickUP's compliance blend or full Biot's weak numerical flux.
+
+Let `P` be the existing positive pressure hanging-constraint map. Integrate
+`r_i=integral(N_i dS)` over reconstructed permeable dry surface patches, using
+the same positive quadrature and wet-face exclusion as weak drainage. Mark
+independent pressure nodes for which `(P^T r)_i>0`. Both pressure and the
+stabilization auxiliary are zero on this support. With `E` embedding the
+remaining free independent pressure nodes, the consistent scalar equations use
+
+```math
+C_f=E^T C E,\qquad C_f\Delta p_f=E^T F_{\mathrm{step}},\qquad
+C_f z_f=E^T Kp,\qquad p=E p_f,\quad z=E z_f.
+```
+
+Here `C` and `K` already include the geometric hanging constraints. This is a
+restriction of the trial and test spaces, not a pressure clamp after solving
+the unconstrained consistent system. With zero initial pressure, the trace
+stays exactly zero. Lumped storage applies the same restriction to both scalar
+updates. Existing cached, fused, compact, batched and communication paths use
+the restricted scalar ownership mask; mechanical inertia and Darcy stages
+retain their equations. No additional per-step MPI exchange is introduced. The eliminated boundary
+rows have Dirichlet reactions; a strong-boundary reaction/total-fluid-content
+audit is not currently output, so a zero pressure trace alone does not verify
+the complete drainage balance.
+
+For conforming flat/FEM faces this is ordinary nodal Dirichlet enforcement.
+For VT, fixing every node supporting the reconstructed P1 cut trace is an
+**experimental conservative subspace restriction**: it also suppresses pressure variation
+throughout the affected cut tetrahedra. It does not preserve all possible
+normal pressure gradients and is not a minimal multipoint or cut-fitted
+Dirichlet method. Nonmatching face fragments can fix coarse parents outside
+the exposed fragment; near shorelines fixed support can extend into adjacent
+wet/interior regions. Refine the mesh and check near-surface pressure and flux,
+not just the zero surface value. No direct strong surface term is applied to
+internal acoustic/elastic contacts other than the identified groundwater dry cap, submerged traces, or sealed outer side
+and bottom truncations. A wholly impermeable normal receives no drained
+restriction. Existing full-Biot, subcell-groundwater, restart and VT/CPML restrictions
+remain in force; this option does not qualify previously unsupported cases.
+In particular, `acoustic_interface_method=local-matching` still rejects
+topography; eligible terrain interfaces use shared or field-specific constraints,
+with the existing additional field-specific requirement for porous CPML open pores.
+
+`poroelastic_surface_pressure_penalty_factor` and
+`HERCULES_BIOT_SURFACE_DIAGNOSTICS` are inactive for `strong`: no weak admittance
+or its balance file is introduced. Startup reports the global number of fixed
+independent pressure nodes, permeable dry surface area and the support
+approximation. Station pressure uses the restricted field; station fluid
+output continues to report volume relative motion and Darcy flux. A station
+at zero depth below the physical terrain need not lie on the FEM stair-step
+mesh face; its pressure therefore need not be zero. A VT station in a discarded
+tetrahedron still aborts, including a terrain point outside the reconstructed
+retained region. Sample the actual supported trace or refine the mesh.
+
+```text
+include_poroelastic = yes
+poroelastic_formulation = full_biot
+poroelastic_surface_pressure_bc = drained
+poroelastic_surface_pressure_enforcement = strong
+# Use supported flat geometry or include_topography=yes with FEM/VT.
+# Choose material, mesh and timestep for the physical case; refine VT cuts.
+```
+
+The [strong-surface validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#strong-drained-surface-with-fem-and-vt-2026-11-16)
+separates exact trace checks, independent planar reflection errors, curved-hill
+self-convergence and coupled implementation regressions. In the 12 Hz planar
+FEM control, maximum pressure error over 32/64/192 m receivers decreases from
+4.70% at 8 m to 0.65% at 4 m with strong enforcement. VT's conservative support
+restriction can instead worsen the wavefield: at 8 m, the corresponding maximum
+pressure error is 32.1% with strong versus 5.18% with natural, and the 1 m-deep
+strong receiver is inside the zero-pressure cut layer. Do not infer accuracy
+from a zero surface trace or apply the flat/FEM evidence to VT.
+
+The public strong option also reproduces the matched private 8 m Figure 7
+control within 0.00009% aggregate relative L2 over recorded fields. Its shallow
+pressure difference against archived SeisSol numerical data is 1.573%, with
+zero diagnostic surface pressure and nonzero normal fluid flow. This control
+covers two seconds; it does not extend the older flat prototype's ten-second
+evidence to arbitrary terrain or interfaces. A tight solve tolerance may be
+needed for very small viscous-fluid signals, independently of surface choice.
+
+### Full-Biot validation (2026-11-13)
+
+The [implementation and validation report](Hercules_Full_Biot_Implementation_Report_2026-11-13.pdf)
+and [recorded scientific scope](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#full-biot-implementation-follow-up)
+contain independent full-space and normal-incidence interface comparisons,
+raw waveforms, mesh/timestep checks, stabilization sensitivity and execution
+provenance. The resolved inviscid full-space case has maximum station relative
+L2 errors of **3.470% solid velocity, 3.167% pressure and 3.338% Darcy flux**.
+The viscous 1 m case gives **2.075%, 8.757% and 3.668%**, respectively.
+Coarse pressure and flux errors are much larger; solid-motion agreement alone
+is insufficient. These are configuration-specific results, not validation of
+every full-Biot mode, boundary, material or constitutive model.
+
+The investigation corrected a CUDA-aware receive-buffer reuse race: solid and
+fluid tags share messenger storage, so unpack fences now identify the schedule
+and direction rather than the tag. It also corrected a pre-existing host
+OpenMP hanging-node assignment race by making the node index private to each
+iteration. Final host/CUDA-aware adaptive comparisons agree within 4.8e-12
+relative L2. Scalar batching, one/four GPU, binary station companions and
+legacy standalone/coupled regressions are recorded separately. The helpers,
+fixtures and raw results are ignored local diagnostics and are unavailable in
+a clean checkout. Nonlinear tests stay in the elastic regime; independent
+free-surface, oblique-interface, yielding/hysteretic and BKT validation remain
+outstanding. The earlier reduced-Biot/dashpot PDF is a historical companion.
 
 ## Scalar acoustic corrections and limitations
 
@@ -3196,6 +4534,176 @@ matching the practical SPECFEM-style policy that avoids poroelastic PML in V1.
 	post-processing low-pass to the output pressure, or opt into the
 	in-model `acoustic_quality_factor` regularizer (see that flag).
 
+
+### Poroelastic CPML
+
+`abc_type=cpml` retains the selected `brick_up` or `full_biot` formulation in
+saturated absorbing cells. No new input switch is needed. Use
+`cpml_stiffness_mode=native` (default); reduced stiffness is rejected when a
+porous cell enters the layer. CPML retains its existing side/bottom placement,
+profile controls and checkpoint exclusions. Automatic `cpml_reference_vp`
+includes the full-Biot fast compressional speed, or the reduced undrained speed.
+Slow-wave resolution still requires a separate mesh check.
+
+For element-constant Cartesian stretches, the mixed weak equations use
+
+```math
+S_j(s)=\kappa_j+\frac{d_j}{s+\alpha_j},\qquad J=S_xS_yS_z,
+```
+
+```math
+R_e J(s)\ddot{\boldsymbol{x}}_e+B_e J(s)\dot{\boldsymbol{x}}_e
++K_e\!\left(\frac{J}{S_jS_l}\right)\boldsymbol{u}_e
+-Q_e\!\left(\frac{J}{S_j}\right)p_e=0,
+\qquad \boldsymbol{x}=(\boldsymbol{u},\boldsymbol{w}),
+```
+
+```math
+C_e J(s)\dot p_e+
+Q_e\!\left(\frac{J}{S_j}\right)^T
+(\alpha\dot{\boldsymbol{u}}_e+\dot{\boldsymbol{w}}_e)=0.
+```
+
+Here the momentum pressure term has solid/fluid weights `alpha` and `1`;
+`C_e` is Q1 storage `int(N_i*N_j/M)dV` for consistent full Biot, or
+row-lumped storage `int(N_i/M)dV` otherwise. The notation describes assembled
+operators, not multiplication of the physical force by a scalar damping factor.
+The reduced formulation omits independent fluid inertia and stretches its Darcy
+diffusion with `J/(S_j S_l)`. Solid stiffness reuses the existing Cartesian CPML.
+Full Biot adds cross inertia, relative-fluid inertia and the `J(s)*s` Darcy
+memory. Its leading drag uses local exact relaxation with lumped mass, or the
+existing two-stage SDIRK2 solve with consistent mass. Consistent full Biot
+spatially integrates the complete `J(s)*R*s^2` inertia and its memory terms
+with Q1; physical mass damping and Darcy drag keep their paired lumped operators.
+Coincident and zero poles use cascades without singular residue divisions.
+
+Pressure storage uses the same trapezoidal cascades as the coupling filters.
+For `Jp[n]=D*p[n]+tail[n]`, the assembled update subtracts the change in
+`tail`, spatially integrated with the same `C_e` as the leading update. Lumped
+storage divides by `sum(C_e*D_e)`; consistent storage solves the assembled
+matrix using the existing optimized pressure PCG. Thus cells with different
+stretches share one pressure unknown, with no additional solve or exchange
+beyond those of the selected mass treatment. All extra histories are
+element-local on the GPU: 372 scalars per full-Biot PML cell and 156 per reduced
+cell, in addition to elastic CPML storage. Setup reports this memory. Existing
+host and CUDA-aware vector/scalar exchanges carry the assembled contributions.
+The homogeneous inviscid consistent-full-Biot calibration selects an explicit
+`cpml_partition_weight=1` from complete production timings. Omitted weights
+now use `1` for saturated porous CPML and `4.38` for elastic/acoustic CPML.
+This also applies to BrickUP and lumped full Biot; their optimal weights and
+mixed-material performance require their own calibration.
+
+For `brick_up`, a drained groundwater plane retains the existing per-update
+compliance correction, including its timestep dependence. Its volume-scaled
+plane lift must continue through the same Cartesian `J` filter as storage.
+Writing `B_e` for the nodal drainage compliance and `r_e` for the other
+already-stretched pressure increments gives
+
+```math
+C_e\big[(Jp)^{n+1}-(Jp)^n\big]+B_e(Jp)^{n+1}=r_e.
+```
+
+The direct drainage capacity is `B_e*D_e`, and its additional right-hand-side
+term is `-B_e*tail_e[n+1]`. The existing storage cascade supplies that tail;
+no extra history variables, exchange or iterative solve is added. Eight
+setup coefficients per porous CPML cell retain the original nodal plane
+quadrature, including topographic nodal-volume weights. The full-Biot kernel
+does not apply this reduced-formulation correction. Undrained or zero-penalty
+BrickUP cells have `B_e=0`. Outside CPML the original update is retained.
+This also corrects the continuation of the existing surface-saturated BrickUP
+drained condition; it can change its absorbing-layer reflections compared
+with earlier builds that stretched storage but left drainage unstretched.
+
+The fixed grid still selects whole saturated elements by their center. BrickUP
+places its pressure correction on the existing locally horizontal plane inside
+the selected element; this differs from the full-Biot dry-cap mesh-face law.
+It does not introduce partially saturated elements, unsaturated flow, a moving
+water table or hydrostatic initialization. Dry-cap material properties remain
+those supplied by the user. Grid, timestep, penalty and boundary-distance
+convergence remain necessary, especially for a varying table or terrain.
+
+CPML filters with zero feed and zero-initialized histories bypass history
+loads/stores while preserving the direct stretch multiplier, including
+non-unit kappa. Porous storage applies the same bypass to its old/new memory
+tails; full-Biot CPML skips a Darcy memory cascade when that component's drag
+is exactly zero. Coefficients are fixed and CPML restart remains unsupported.
+History allocations/layouts are retained. Active cascades, including their
+intermediate poles, are unchanged. The shared filter path covers elastic,
+acoustic, interface and porous terms, including applicable damping paths.
+This is a reduction in arithmetic/memory work, not a new absorber formulation;
+floating-point results need not be bit-identical.
+
+Acoustic open pores apply the same interface cofactor `J/S_j` to solid and
+fluid traction; returning acoustic flux includes both velocities. Both acoustic
+formulations and flat/FEM `point`/`face_mass` projections retain their existing
+contracts. No-flow interfaces retain the normal fluid constraint. VT uses
+`face_mass`. Full-Biot open pores with any porous CPML require
+`acoustic_interface_method=field-specific-constraints`; shared constraints
+showed late growth, and local matching is unqualified for this combination.
+This setup guard applies even if the water interface is outside the layer.
+Native VT field maps retain compatible same-field tetrahedral traces.
+Porous/elastic contacts retain
+shared solid motion and zero normal relative flow, except a dry cap identified by the fixed groundwater grid, which follows the selected hydraulic surface condition. Elastic/acoustic regions
+keep their existing operators; nonlinear constitutive and BKT histories remain
+excluded from the layer. Eligible nonlinear/attenuating interiors retain their
+existing coupling, but execution tests do not certify yielded or hysteretic
+response accuracy.
+
+FEM stair-step geometry can enter the layer. **VT cut cells cannot enter
+poroelastic CPML:** keep curved terrain in the physical domain and extend a
+flat, mesh-aligned surface through a regular Cartesian buffer. Startup rejects
+an intersecting porous VT cut cell instead of replacing its retained volumes
+with full cubes. Both formulations support fixed groundwater classification through the regular layer: dry cells use ordinary solid CPML and saturated cells use porous CPML. `surface_groundwatertable=yes` and `groundwaterlevel_file` are supported with `brick_up` as well as `full_biot`. Geostatic ramps and the existing full-Biot fixed-base/DRM exclusions remain.
+With `cpml_clamp_outer=yes` (default), the outer solid and relative-fluid
+motions are both clamped; this termination can reflect residual energy.
+Pore pressure inside an active porous layer remains available for diagnostics,
+but absorbing-layer fields are not physical receiver predictions; `Ru` is
+undefined there.
+
+The [BrickUP groundwater CPML validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#brickup-fixed-groundwater-through-cpml--2026-11-17)
+reports matched larger-domain tests, terrain/coupled execution, MPI regressions
+and 10 s controls. In the tested 8 m, 25 Hz buried-table case, a 1024 m cube
+with 256 m CPML and default profile gives worst bulk velocity/pressure
+boundary differences of 0.168%/0.080%; the compact 512 m cube with 128 m CPML
+has a much larger velocity discrepancy. This is a geometry/profile-specific
+numerical comparison, not a universal accuracy guarantee or a new default.
+
+The full-Biot numerical pressure stabilization retains its existing spatial
+operator, with the stretched storage in the update. This finite-mesh
+perturbation is not an exactly matched continuum constitutive term. Check
+stabilization, timestep, thickness and mesh sensitivity. A successful run is
+not a universal stability proof, and the requested theoretical
+`cpml_reflection_target` is not a measured error guarantee.
+
+The Horizon follow-up compares CPML and dashpots against larger domains with
+identical near-source meshes and top surfaces. At 4 m spacing, the inviscid
+point-force case has worst receiver relative L2 differences of 0.191% solid
+velocity, 0.315% pressure and 0.252% Darcy flux. These measure finite-domain
+boundary error against a numerical reference, not absolute continuum accuracy.
+The native-field VT coastal case remains bounded for 10 s; at receiver 0 the
+last 0.5 s velocity peak is 0.0322% of the first 0.5 s peak. The failed shared-map
+cases are retained in the validation record. Stronger multiaxial damping only
+delayed growth and is not used as a substitute for the constraint change.
+A controlled 10 s thickness follow-up keeps the inner CPML boundary fixed:
+128 m remains bounded for the homogeneous case, but the shared-constraint coast
+still grows, with late/early peaks about 2.78e9 in velocity and 1.98e9 in pressure.
+Doubling thickness delays the coastal growth; it does not justify removing the
+field-specific-constraint requirement.
+Normal compressional/shear and near-grazing cases, viscous/sealed/reduced limits,
+coupled/topographic controls, MPI and long-time checks are recorded in the
+[validation record](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md).
+Investigation helpers and fixtures are local-only and unavailable in a clean
+checkout. CPML does not supply Wolf's missing exact source or heterogeneous
+hydraulic material interface, or resolve under-sampled slow waves.
+
+The mathematical basis is coordinate stretching of the mixed weak equations,
+using the existing second-order finite-element CPML realization. See
+[Martin, Komatitsch and Ezziani (2008)](https://doi.org/10.1190/1.2939484) for
+poroelastic CPML and [Xie et al. (2014)](https://doi.org/10.1093/gji/ggu219)
+for the second-order finite-element construction. This implementation is an
+adaptation to Hercules's mixed discretization, not a copy of those solvers.
+
+
 ## Absorbing boundaries and CPML
 
 Hercules supports two absorbing boundary conditions, selected at run
@@ -3237,27 +4745,43 @@ results are specific to the recorded configuration and implementation.
 	fix, changing absorption and material-extension bounds. A positive
 	`cpml_thickness_m` retains a specified physical width.
 - `cpml_partition_weight`
-	Optional dimensionless numeric value, at least `1`. Default `4.38`, using
-	the fixed work estimate below. An explicit numeric value overrides the
-	default; `1.0` restores the standard equal-leaf-count octree partition.
-	There is no calibration cache or automatic timing-based adjustment.
-	Values `> 1.0` count the CPML boundary band as heavier
-	work, so boundary-heavy solver ranks may receive fewer total elements.
+	Optional dimensionless numeric value, at least `1`. When omitted, saturated
+	poroelastic CPML uses `1` (default), and elastic/acoustic CPML uses `4.38`
+	(default). Applies to both `brick_up` and `full_biot` with any supported
+	mass option. The completed-cell material and saturation checks are shared
+	with solver enrollment, including terrain, groundwater and
+	`poroelastic_depth_max_m`. Dry caps and cells outside the porous depth
+	interval retain `4.38`; all ordinary cells retain base cost `1`.
+	An explicit numeric value overrides **every CPML material**; explicit `1`
+	restores standard equal-leaf-count partitioning. No new `auto` input value
+	is introduced, and there is no calibration cache or timing-based adjustment.
 
 ```math
-W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
+W=N_{\mathrm{ordinary}}+N_{\mathrm{porous\ CPML}}
+  +4.38N_{\mathrm{elastic/acoustic\ CPML}}.
 ```
 
-	The existing integer partitioner scales these costs by 100: ordinary
-	leaves have cost 100 and CPML-band leaves have cost 438 at the default.
-	The coefficient rounds a measured estimate of 4.3763 from equal-sized
-	ranks in one Horizon elastic/BKT2 case: a PML-free rank took 215.79 s of
-	force `kernel_wait`, while a rank with 47.4493% CPML elements took
-	561.49 s. This is an effective work estimate, not an isolated kernel cost
-	or a universal optimum. Earlier builds defaulted to `1.0`; rebuild to
-	adopt the new default. Existing inputs that explicitly set `1` or `4`
-	retain those values; set `cpml_partition_weight = 4.38` to request this
-	model explicitly.
+	With explicit weight $w$, the estimate instead becomes
+	$W=N_{\mathrm{ordinary}}+wN_{\mathrm{all\ CPML}}$.
+	The integer partitioner scales costs by 100: ordinary and default porous
+	CPML leaves cost 100, and default elastic/acoustic CPML leaves cost 438.
+	Values above `1` give boundary-heavy ranks fewer elements. Weight `1` was
+	fastest in the homogeneous inviscid consistent-Biot Figure 5 tests including
+	consistent CPML: two complete runs averaged 773.478 s at `1`, versus
+	794.480, 821.149 and 1000.412 s at `1.5`, `2` and `4.38`. The 1.865 GPU
+	service-cost ratio is not the optimal partition weight; synchronous stage
+	maxima and communication also affect runtime. These measurements do not
+	calibrate BrickUP, lumped full Biot or mixed-material performance.
+
+	The retained elastic/acoustic coefficient rounds an estimate of 4.3763
+	from equal-sized ranks in one Horizon elastic/BKT2 case: a PML-free rank
+	took 215.79 s of force `kernel_wait`, versus 561.49 s at 47.4493% CPML.
+	This is an effective work estimate, not an isolated kernel cost or universal
+	optimum. Explicit values such as `1` or `4` retain their behavior. Set
+	`cpml_partition_weight = 4.38` for a uniform override, or omit the parameter
+	for material-dependent defaults. Compare complete-step timings for the
+	intended model; these defaults do not model different ordinary-cell costs
+	or common nodal/MPI work.
 
 	**Ordinary partitions are always used during mesh construction**, including
 	progressive refinement, 2:1 balancing, building carving, and local acoustic
@@ -3274,15 +4798,14 @@ W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
 	stress) and rebuilds rank-local acoustic/porous interface metadata before
 	physics initialization. Mesh archive layout can change with ownership;
 	its physical leaves and payloads should remain equivalent. Existing
-	poroelastic/nonlinear restrictions inside CPML remain in effect.
-	The shared partition path applies the same fixed coefficient to elastic
-	and acoustic CPML bands, including acoustic–elastic, poroelastic–acoustic
+	nonlinear restrictions and the regular-buffer requirement for poroelastic CPML remain in effect.
+	The shared partition path applies these per-material defaults to elastic,
+	acoustic and poroelastic CPML bands, including acoustic–elastic, poroelastic–acoustic
 	and poroelastic–elastic models with applicable viscoelastic or nonlinear
 	elastoplastic/plastic and hysteretic solids. Boundary/interface operators,
 	time integration, both GPU/MPI exchange backends and station/output
-	definitions are unchanged. The elastic/BKT2 measurement does not validate
-	the coefficient for every formulation or coupling; full CUDA/MPI validation
-	of the new default remains outstanding.
+	definitions are unchanged. Neither timing calibration establishes an optimal
+	weight for every formulation or coupling.
 
 	This is a work-balancing surrogate, **not a GPU-memory cap**. Compare the
 	`CPML rank/load diagnostics`, communication waits, and setup memory reports.
@@ -3379,8 +4902,9 @@ W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
 	The setup change applies to elastic and acoustic material sampling,
 	including acoustic–elastic models and the elastic/acoustic CPML buffers
 	of poroelastic–elastic and poroelastic–acoustic models. CPML cells remain
-	linear: nonlinear elastoplastic/plastic and hysteretic solids and active
-	BrickUP poroelasticity stay outside CPML. Rayleigh damping may continue
+	linear: nonlinear elastoplastic/plastic and hysteretic constitutive histories
+	stay outside CPML. Saturated porous bands retain their linear mixed
+	poroelastic equations. Rayleigh damping may continue
 	inside elastic CPML; BKT histories retain their existing interior-only
 	policy. Interface geometry, initial material/Q and geostatic sampling can
 	change with the mesh; timestepping kernels, both host and CUDA-aware MPI
@@ -3409,7 +4933,8 @@ W=N_{\mathrm{ordinary}}+4.38N_{\mathrm{CPML}}.
 	K&M/SPECFEM3D choice). Controls how steeply the damping ramps up
 	across the PML.
 - `cpml_kappa_max`
-	Optional. `5.0` (default); must be at least one. Higher values change the
+	Optional, dimensionless. `3.0` (default). Values must be at least one.
+	The same value applies to elastic, acoustic and poroelastic CPML. Higher values change the
 	real stretch in all stiffness, inertia and surface products. Validate
 	thickness, resolution and incidence angle together; increasing kappa is
 	not a substitute for a resolved layer.
@@ -3994,12 +5519,18 @@ Checkpoint reads and writes are rejected with CPML: the legacy checkpoint
 format does not preserve absorber histories. Set `use_checkpoint=0` and
 `checkpointing_rate=0`. Non-PML checkpoint behavior is unchanged.
 
-The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=5`,
+The defaults select `cpml_stiffness_mode=native`, `cpml_kappa_max=3`,
 `cpml_reflection_target=0.01`, `cpml_acoustic_sponge_fraction=0`,
 automatic alpha `0.5` Hz, independent of `simulation_wave_max_freq_hz`,
 `cpml_mpml_cross_fraction=0`, and alpha floor `0.1`. These defaults
 are not a universal stability or accuracy guarantee; slow gravity packets can
-require a lower alpha. Explicit input values always take precedence. To reproduce
+require a lower alpha. Explicit input values always take precedence. Set
+`cpml_kappa_max=5` to reproduce the v14.0 default. In the homogeneous BKT2
+benchmark, changing only kappa from 5 to 3 reduced the worst three-component
+velocity error across eight receivers from 6.586% to 1.553% relative to the
+larger-domain solution over 0–0.5 s. See the
+[elastic waveform comparison](../benchmark_inputs/poroelastic_up/CPML_PROFILE_VALIDATION.md#homogeneous-elastic-bkt2-control).
+To reproduce
 the v13.2 CPML defaults, explicitly set `cpml_kappa_max=1`,
 `cpml_reflection_target=0.001`, `cpml_acoustic_sponge_fraction=0`, and a
 positive numeric `cpml_alpha_max_hz` equal to half the simulation maximum
@@ -4066,8 +5597,8 @@ These additions change only setup diagnostics. Acoustic pressure and
 velocity-potential formulations retain their existing coupling; elastic,
 viscoelastic, poroelastic and nonlinear elastoplastic/hysteretic updates,
 hydrostatic/geostatic initialization, GPU/MPI exchanges and output recovery
-are unchanged. Existing poroelastic and nonlinear exclusions inside CPML still
-apply. Host diagnostic checks do not replace CUDA/MPI propagation validation.
+are unchanged. The regular Cartesian buffer requirement for poroelastic CPML and the
+nonlinear-history exclusion inside CPML still apply. Host diagnostic checks do not replace CUDA/MPI propagation validation.
 
 Historical CPS results below describe earlier incomplete operators and are
 not acceptance evidence for the full formulation. Current implementation and
@@ -4216,6 +5747,112 @@ force-file header contains the complete node list, and each time sample uses
 that same ordering. Increasing the simulation duration must preserve the
 previously generated early-time forces. This batching is part of source setup;
 it does not change the GPU time-stepping path.
+
+### Coupled poroelastic explosive source
+
+`type_of_source=biot_explosion` prescribes an isotropic total-stress source and
+pore-pressure source together. Both `biot_stress_moment_nm` ($M_s$, N m) and
+`biot_pressure_moment_nm` ($M_p$, Pa m³ = N m) are required, finite, signed
+coefficients with no default. With tensile total stress positive and pore
+pressure positive in compression, the prescribed rates are
+
+```math
+\dot{\boldsymbol\sigma}^{\rm src}=-M_s S(t)\mathbf I\delta(\mathbf x-\mathbf x_s),
+\qquad \dot p^{\rm src}=M_p S(t)\delta(\mathbf x-\mathbf x_s).
+```
+
+Use the point/force location keys (`lonlat_or_cartesian`, the geographic or
+Cartesian hypocenter coordinates, and surface-relative `hypocenter_depth_m`).
+Set `source_function_type=discrete` and `source_is_filtered=0`. The fixed file
+`forcefunction.in` has the same `nt1`, `tinit`, `dt`, samples layout as the
+body-force format, but its samples are **rates in 1/s**, not moment histories.
+`nt1>=2`, finite positive `dt` in seconds, finite nonnegative `tinit` in seconds
+and finite samples are required. The rate is piecewise linear during the table
+and zero outside it. Its exact cumulative integral starts at zero and is held
+constant after the final sample. Do not integrate the samples before input.
+For example, three samples `0, 2, 0` at `dt=0.5 s` have final integral 1.
+
+```text
+source_is_filtered = 0
+type_of_source = biot_explosion
+source_function_type = discrete
+lonlat_or_cartesian = 1
+hypocenter_x = 4097
+hypocenter_y = 4097
+hypocenter_depth_m = 4097
+biot_stress_moment_nm = 1e10
+biot_pressure_moment_nm = 1e10
+```
+
+These coordinates and coefficients are benchmark values, not defaults. Wolf's
+archived diagonal stresses −1, pressure +1 and area factor 1e10 map to these
+positive coefficients. The existing `force` and `point` meanings are unchanged.
+With $H(t)=\int_0^t S(\tau)d\tau$, the mechanical load and pressure RHS are
+
+```math
+\mathbf f_a^{\rm src}(t)=(M_s-\alpha M_p)H(t)\nabla N_a(\mathbf x_s),
+\qquad
+\Delta r_a^p={M_p\over M}N_a(\mathbf x_s)[H(t_{n+1})-H(t_n)].
+```
+
+The factor $-\alpha M_p$ prevents double-counting the injected pressure in total
+stress. Pressure is added to the evolved continuity equation, before its normal
+constraint/MPI assembly, so receiver pressure includes the injection. The solid
+load uses the existing CPU or GPU source path; the scalar load is one small GPU
+kernel on the source-owning rank. It adds no MPI round or full-field transfer.
+The generated `force_process` vectors for this source contain the unit gradient
+history; the runtime applies the effective skeleton moment once.
+
+Both `brick_up` and `full_biot` require explicit pressure evolution. Set
+`poroelastic_undrained_fast_path=no` when the folded sealed path would activate.
+The source must have exactly one owning regular active porous Hex8 cell outside
+CPML and VT topographic tetrahedra. Flat/FEM geometries and regular interior
+sources beneath VT geometry can retain the existing eligible acoustic–porous
+and elastic–porous coupling. Pure elastic/acoustic source cells, restart and
+geostatic delays are rejected. Nonlinear effective-skeleton and attenuation
+forces retain their existing paths; an explosive source does not by itself
+validate yielding, hysteresis or every attenuation law. Hydraulic constants
+remain global, preventing exact two-material Wolf benchmarks at present.
+
+The [Wolf author-reference follow-up](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#wolf-author-reference-comparisons-2026-11-14)
+and [report](Hercules_Wolf_Reference_Validation_2026-11-14.pdf) compare this
+source with the supplied full-space and free-surface histories. These are
+absolute-amplitude comparisons, distinct from the earlier point-force tests.
+The tested meshes do not reproduce the paper's accuracy; CPML and finite
+output do not establish that the slow wave or shallow surface response is
+resolved. Reference processing, source verification and numerical convergence
+are documented separately.
+
+The subsequent [uniform-mesh boundary comparison](Hercules_Wolf_Figure5_Uniform_Boundary_Test_2026-11-14.pdf)
+removes the source patch and keeps 8 m cells throughout. Doubling the cube
+from 4096 m to 8192 m changes full-record solid velocity by at most 0.00368%
+with `poroelastic_pressure_stabilization=0.005` and 0.00354% with `0`.
+The reference errors and late ringing remain essentially unchanged. These
+controls rule out the moved lateral/bottom boundaries as the dominant error
+source for this homogeneous inviscid 1.5 s experiment; they do not establish
+slow-wave accuracy or general CPML/interface stability. Both cubes include
+256 m CPML, and the top remains fixed. The benchmark record gives geometry,
+normalizations, source spectra and executable provenance.
+
+The [inviscid diagnostics](../benchmark_inputs/poroelastic_up/WOLF_2022_VALIDATION.md#inviscid-propagation-and-source-diagnostics-2026-11-14)
+and [diagnostic report](Hercules_Wolf_Figure5_Inviscid_Diagnostics_2026-11-14.pdf)
+separate numerical implementation checks from continuum accuracy. Thirty
+source-free periodic production-GPU fixtures agree with independent discrete
+evolution within 3.36e-8 relative L2 and conserve the tested lossless energy
+within 1.44e-12, including ten-second slow/grid modes. Nevertheless, the
+64 m axial slow wave has 9.706% phase-speed error at 8 m and 2.476% at 4 m.
+The collocated scheme's extra short-wavelength branch persists without a
+source or CPML. These fixtures do not validate MPI, interfaces or boundaries.
+In the uniform Figure 5 runs with gamma 0.005, 8-to-4 m refinement improves
+early-fast solid-velocity error from 40.18% to 10.31%, but full-record
+solid-velocity/Darcy-flux errors change from 109.93%/201.87% to
+122.88%/157.05%. Cell placement strongly affects the unstabilized tail;
+halving the 8 m timestep changes velocity/flux by less than 0.013%.
+The complete slow response remains unresolved; these measurements do not
+justify relaxing CPML or hydraulic-interface restrictions.
+At gamma zero, uniform 4 m full-record velocity/flux errors remain
+289.61%/3052.52%; halving its timestep changes the numerical traces by at
+most 0.053%. The enlarged-domain control was performed at 8 m only.
 
 ### SRFH source depth reference
 
@@ -4560,10 +6197,8 @@ necessary.
 Checkpoint/restart, single precision, arbitrary heterogeneous materials,
 curved surfaces and attenuation combinations are not validated by this suite.
 
-Investigation harnesses and results are local-only under
-`.local-diagnostics/cpml-completion-20261002/`; they are not shipped in a clean
-checkout. Horizon inputs, executable and results are retained under
-`/scratch/08458/wz_tacc/hercules/cpml-completion-20261002`. Principal jobs are
+The private validation archive contains the harnesses, inputs, executable and results.
+Principal Horizon jobs are
 42115–42123 (domain comparisons), 42117 (P/S packets), 42129 (gravity packet),
 42130 (long run), 42136–42139 (backend/rank/projection and Rayleigh checks),
 42145 (matched old-binary timing), and 42152 (final-default executable check).
@@ -4659,10 +6294,7 @@ documented `nan` marker; finite physical fields were checked separately.
 Single-pass small-solver reference/fused time ratios ranged from `0.917` to
 `1.039`, including slower VT timing. These runs show no consistent end-to-end
 speedup; use a matched production benchmark before assigning an Izmir speedup.
-The local-only harness and retained results are under
-`.local-diagnostics/bkt2-shared-fused-20261007/` (unavailable in a clean checkout).
-The corresponding Horizon directory is
-`/scratch/08458/wz_tacc/hercules/bkt2-shared-fused-20261007/`; jobs 50973 and 51046
+The harness and results are retained privately. Horizon jobs 50973 and 51046
 contain the final CUDA-kernel checks and final guarded solver comparisons,
 respectively. The latter solver source includes the independent acoustic
 receiver-halo ordering fix from `5fd3d7e`.
@@ -4680,10 +6312,8 @@ limits above. Setup reason counts matched the requested overrides/backends.
 Extracted production-code checks also covered nonzero/NaN unused fields,
 genuine active-rate mismatches and BKT3/BKT3F third-mechanism mismatches.
 These checks establish small-case equivalence, not full-size Izmir timing or
-512-rank eligibility. Local-only evidence is under
-`.local-diagnostics/bkt2-inactive-20261007/` (unavailable in a clean checkout),
-with Horizon build/test jobs 51728, 51739 and 51744 under
-`/scratch/08458/wz_tacc/hercules/bkt2-inactive-20261007/`.
+512-rank eligibility. The private validation records include Horizon build/test
+jobs 51728, 51739 and 51744.
 
 ### VT and BKT operator history
 
@@ -4826,7 +6456,9 @@ The file contains native-endian float64 values in metres, shaped
 `[snapshot, station, XYZ]` in C order. XYZ means solver-local X/Y, Z down; see `coordinate_frame.txt` for the PROJ mapping.
 There is no header, timestamp, coordinate table, or per-station file. ASCII
 `print_station_*` flags and nonlinear diagnostic columns are ignored; binary
-mode does not create `station_mediums.txt` or use `output_stations_directory`.
+mode does not create `station_mediums.txt`. Full-Biot runs still use
+`output_stations_directory` for `station.fluid.ID` and `coordinate_frame.txt`;
+other binary runs do not use that directory.
 `station_output_binary_file` is required only in binary mode and is otherwise
 ignored. Its path must contain 1 to 240 bytes, relative to the run directory
 or absolute (`~` is not expanded). Parent directories are created automatically.

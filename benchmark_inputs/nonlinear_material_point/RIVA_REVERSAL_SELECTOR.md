@@ -95,7 +95,7 @@ were finite. The existing undefined surface-station Ru column remains NaN.
 The original case, earlier comparison outputs, and executables were preserved.
 This validates completion of this case, not timestep/mesh convergence or
 experimental agreement. Native MPI checkpoint file I/O was not tested. Comparison helpers and upstream snapshots stay
-local-only under `.local-diagnostics/rs02-biasvolume-20261009/`.
+local-only.
 
 The earlier type-3-only change passed 54 mode-0 host comparisons of the shared
 138 values and six GPU comparisons. Its field reproduction below retains

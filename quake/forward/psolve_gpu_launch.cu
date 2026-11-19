@@ -18,6 +18,86 @@
 
 #include "psolve_gpu_launch.h"
 #include "kernel.h"
+#include "poroelastic_mass.cuh"
+
+__global__ static void kernelBiotSurfaceRhs(int count,gpu_data_t* data) {
+  const int n=blockIdx.x*blockDim.x+threadIdx.x;
+  if (n<count)
+    data->porePressureForceDevice[n]-=
+        2*data->biotDrainCapacityDevice[n]*data->porePressureTm1Device[n];
+}
+void psolve_launch_biot_surface_rhs(cudaStream_t stream,int32_t nodes,
+    gpu_data_t* data) {
+  if (nodes) kernelBiotSurfaceRhs<<<(nodes+255)/256,256,0,stream>>>(nodes,data);
+}
+
+__global__ static void kernelBiotStations(int32_t count, const int32_t* nodes,
+    const double* coords, gpu_data_t* data, double dt, double porosity, double* output) {
+  const int s = blockIdx.x*blockDim.x + threadIdx.x;
+  if (s >= count) return;
+  double values[12] = {};
+  for (int i=0; i<8; ++i) {
+    const double weight = coords[8*s+i];
+    const int n = nodes[8*s+i];
+    for (int d=0; d<3; ++d) {
+      const double w = data->biotW1Device[n].f[d];
+      const double q = (w-data->biotW2Device[n].f[d])/dt;
+      const double v = ((double)data->tm1Device[n].f[d]-data->tm2Device[n].f[d])/dt;
+      values[d] += weight*w;
+      values[3+d] += weight*q;
+      values[6+d] += weight*q/porosity;
+      values[9+d] += weight*(v+q/porosity);
+    }
+  }
+  for (int d=0; d<12; ++d) output[12*s+d] = values[d];
+}
+
+void psolve_launch_biot_stations(cudaStream_t stream, int32_t count,
+    const int32_t* nodes, const double* coords, gpu_data_t* data,
+    double dt, double porosity, double* output) {
+  if (count) kernelBiotStations<<<(count+127)/128,128,0,stream>>>(
+      count,nodes,coords,data,dt,porosity,output);
+}
+
+void psolve_launch_biot_traction(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double dt2, double alpha) {
+  kernelBiotPressureTraction<<<grid, block, 0, stream>>>(count, data, dt2, alpha);
+}
+
+void psolve_launch_biot_continuity(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double alpha) {
+  kernelBiotPressureForce<<<grid, block, 0, stream>>>(count, data, alpha);
+}
+
+void psolve_launch_biot_displacement(int grid, int block, cudaStream_t stream,
+    int32_t count, gpu_data_t* data, double dt, int32_t boundaryCount) {
+  kernelBiotDisplacement<<<grid, block, 0, stream>>>(count, data, dt);
+  if (boundaryCount) kernelBiotBoundary<<<(boundaryCount+127)/128,128,0,stream>>>(
+      boundaryCount,data,dt);
+}
+
+void psolve_launch_biot_stabilization(cudaStream_t stream, int32_t count,
+    gpu_data_t* data, const solver_float* input, solver_float* output, double scale) {
+  if (count) kernelBiotStabilization<<<(count+127)/128,128,0,stream>>>(
+      count,data,input,output,scale);
+}
+
+void psolve_launch_biot_stabilization_normalize(cudaStream_t stream,
+    int32_t count, gpu_data_t* data) {
+  if (count) kernelBiotStabilizationNormalize<<<(count+255)/256,256,0,stream>>>(count,data);
+}
+
+__global__ static void kernelPoroelasticSource(poroelastic_source_t source,
+    double increment, solver_float* rhs) {
+  const int j=threadIdx.x;
+  if (j<8) atomicAdd(rhs+source.nodes[j],
+                    (solver_float)(source.weights[j]*increment));
+}
+
+void psolve_launch_poroelastic_source(cudaStream_t stream,
+    poroelastic_source_t source, double increment, solver_float* rhs) {
+  kernelPoroelasticSource<<<1,32,0,stream>>>(source,increment,rhs);
+}
 
 __global__ static void kernelSourceForceScatter(int32_t count,
                                                 const int32_t* lnidList,

@@ -51,6 +51,7 @@
 #include "octor.h"
 #include "acoustic_output.h"
 #include "cpml.h"
+#include "poroelastic_cpml.h"
 
 #define ERROR       HERC_ERROR
 
@@ -448,6 +449,31 @@ typedef struct gpu_data_t {
     double*       poroelasticElemDetJDevice;
     double*       poroelasticStorageMDevice;
     double*       poroelasticPressureShapeScaleDevice; /* [8][poroelasticElemCount] */
+
+    /* Full Biot only: volume-weighted relative fluid displacement w=phi(Uf-u).
+     * Mass entries are [assembled rho_f, assembled tau*rho_f/phi, reserved].
+     * Negative drag entries mark impermeable components. */
+    fvector_t*    biotW1Device;
+    fvector_t*    biotW2Device;
+    fvector_t*    biotW3Device;
+    fvector_t*    biotForceDevice;
+    fvector_t*    biotMassDevice;
+    fvector_t*    biotDragDevice;
+    fvector_t*    biotStabilizationCoeffDevice; /* per porous cell, sqrt(nu4) */
+    solver_float* biotStabilizationWorkDevice;
+    int32_t*     biotCutIndexDevice; /* porous index -> compact VT cell, or -1 */
+    struct biot_cut_t* biotCutsDevice;
+    int32_t      biotBoundaryCount;
+    struct biot_boundary_t* biotBoundaryDevice;
+    double*      biotInterfaceWeightsDevice; /* four quadrature points, 8 solid nodes */
+    solver_float* biotDrainCapacityDevice; /* dt/2 times row-lumped weak surface admittance */
+    unsigned char* biotSurfaceFixedDevice; /* strong dry-surface independent pressure nodes */
+    unsigned char* biotDrainOwnedDevice;   /* independent owned pore nodes; diagnostics only */
+    double*      biotDrainDiagnosticsDevice; /* six optional balance/dissipation sums */
+    int32_t      poroCpmlCount;
+    int32_t*     poroCpmlIndexDevice; /* porous index -> compact CPML cell, or -1 */
+    poro_cpml_t* poroCpmlCoeffDevice;
+    solver_float* poroCpmlStateDevice;
 
     fvector_t*   conv_shear_1Device;  /* Approximate Convolution Calculation */
     fvector_t*   conv_shear_2Device;
