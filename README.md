@@ -47,17 +47,17 @@ A typical GPU build requires:
 - zlib and bzip2
 - GNU Make
 
-Use compiler, library, CUDA architecture, and site-specific paths in `user.mk`.
-Do not place machine-specific settings in the shared makefiles.
-
 ## Build
 
-Start from the supplied MPI configuration and adapt it to the target system:
+From the repository root, copy [`user.mk.example`](user.mk.example) if you do
+not already have a `user.mk`. Set the MPI compiler wrappers, MPI and CUDA
+paths, target GPU architecture, and GSL and PROJ include and library paths for
+your system. Build with a job count suited to the build node.
 
 ```bash
-cp examples/user.mk-linux-mpich user.mk
-$EDITOR user.mk
-make
+cp user.mk.example user.mk
+${EDITOR:-vi} user.mk
+make -j 8
 ```
 
 The primary executables are generated under `quake/forward/`, including
@@ -106,7 +106,7 @@ layout.
 | `script/` | Input preparation, validation, output readers, and animation scripts |
 | `doc/` | Extended technical notes and specialized workflows |
 | [`docs-site/`](docs-site/README.md) | Documentation website source, tests, and publishing instructions |
-| `examples/` | Legacy examples and sample build configuration |
+| [`user.mk.example`](user.mk.example) | Starter build configuration for a Linux CUDA/MPI system |
 | `run_phaseA_phaseB.sh` | Unified Phase A and Phase B launcher |
 
 ## License

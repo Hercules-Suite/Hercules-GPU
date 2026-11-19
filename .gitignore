@@ -3,6 +3,7 @@
 .DS_Store
 .pnpm-store/
 AGENTS.md
+/user.mk
 quake/cvm/dumpcvm
 quake/cvm/pickrecord
 quake/cvm/querycvm

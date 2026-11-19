@@ -952,11 +952,16 @@ test("documents the phase launcher contract", async () => {
   assert.match(html, /Phase-A bindings must collectively cover the CPUs intended for Phase B/);
 });
 
-test("lists GSL as a required build dependency", async () => {
+test("documents the clean-checkout build and its GSL dependency", async () => {
   const response = await render("/docs/installation");
   assert.equal(response.status, 200);
 
   const html = await response.text();
+  assert.match(html, /cp user\.mk\.example user\.mk/);
+  assert.match(html, /ls quake\/forward\/qmesh quake\/forward\/psolve/);
+  assert.ok(existsSync(new URL("../../user.mk.example", import.meta.url)));
+  const gettingStarted = await (await render("/docs/getting-started")).text();
+  assert.match(gettingStarted, /cp user\.mk\.example user\.mk/);
   assert.match(html, /GNU Scientific Library \(GSL\)/);
   assert.match(html, /-lgsl -lgslcblas/);
   assert.match(html, /GSL include directory/);

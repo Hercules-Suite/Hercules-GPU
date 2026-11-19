@@ -119,10 +119,15 @@ const authoredPages: Record<string, DocPageContent> = {
         id: "configure",
         title: "1. Configure the build",
         paragraphs: [
-          "Copy an appropriate user configuration and update compiler, MPI, CUDA, and PROJ paths. Site-specific build choices belong in user.mk; systemdef.mk and common.mk supply shared rules.",
+          "From the repository root, copy the starter user.mk.example to user.mk for a first build. Edit the MPI compiler wrappers, installation paths, CUDA architecture, and GSL and PROJ include and library directories before running Make.",
         ],
+        links: [{
+          href: "/docs/installation/#user-mk",
+          title: "Configure user.mk",
+          description: "Choose the toolchain and paths for your target system.",
+        }],
         codeLabel: "shell",
-        code: "cp examples/user.mk-linux-mpich user.mk\n$EDITOR user.mk\nmake",
+        code: "cp user.mk.example user.mk\n${EDITOR:-vi} user.mk\nmake -j 8",
       },
       {
         id: "prepare-inputs",
@@ -180,17 +185,17 @@ const authoredPages: Record<string, DocPageContent> = {
         id: "user-mk",
         title: "Keep site settings in user.mk",
         paragraphs: [
-          "user.mk is the supported customization surface. Set compiler wrappers, include directories, library directories, optimization flags, and CUDA architecture there instead of editing shared makefiles.",
+          "Create user.mk in the repository root by copying user.mk.example. The starter selects SYSTEM=custom so your local settings control the build. Adjust the MPI wrappers and prefix to match the MPI installation that launches the jobs. Use the CUDA toolkit prefix and the architecture of the target GPU. Set the GSL and PROJ include and library directories to their actual locations; the library directory may be named lib or lib64.",
         ],
-        codeLabel: "user.mk — illustrative only",
-        code: "CC       = mpicc\nCXX      = mpicxx\nLD       = mpicxx\nNVCC     = nvcc\n\nGSL_DIR  = /path/to/gsl\nPROJ_DIR = /path/to/proj\nCUDA_DIR = /path/to/cuda\n\nCFLAGS   += -O3 -I$(GSL_DIR)/include\nCXXFLAGS += -O3 -I$(GSL_DIR)/include\nCPPFLAGS += -I$(GSL_DIR)/include -I$(PROJ_DIR)/include -DPROJ\nNVCC     += -I$(GSL_DIR)/include\nLDFLAGS  += -L$(GSL_DIR)/lib -lgsl -lgslcblas\nLDFLAGS  += -L$(PROJ_DIR)/lib -lproj",
-        note: "Exact variables differ across existing site configurations. Begin with the closest checked-in example and preserve your center's compiler-wrapper conventions.",
+        codeLabel: "shell — first build",
+        code: "cp user.mk.example user.mk\n${EDITOR:-vi} user.mk",
+        note: "If you already have a working user.mk, keep it. Load any required site modules before compiling and running.",
       },
       {
         id: "gsl",
         title: "Make GSL visible to every compiler stage",
         paragraphs: [
-          "Hercules compiles source that includes gsl_poly.h, gsl_vector.h, gsl_multiroots.h, gsl_roots.h, and related headers. The final solver is linked with libgsl and libgslcblas.",
+          "Hercules compiles source that includes gsl_poly.h, gsl_vector.h, gsl_multiroots.h, gsl_roots.h, and related headers. The starter links the solver with `-lgsl -lgslcblas`.",
           "On a module-based HPC system, load the GSL module before compiling and running. Otherwise, add its include and library directories to user.mk. CUDA compilation also needs the GSL include directory because solver headers are visible to nvcc.",
         ],
         codeLabel: "module-based environment",
@@ -206,7 +211,7 @@ const authoredPages: Record<string, DocPageContent> = {
           "PTX assembly is the expensive phase for nonlinear constitutive CUDA. Sources under quake/forward/nonlinear instantiate separate production kernels in nonlinear_gpu_classic.o, nonlinear_gpu_manzari_dafalias.o, nonlinear_gpu_pdmy03.o, nonlinear_gpu_riva_sand.o, and nonlinear_gpu_riva_sand_intermediate_bias_research.o, plus small runtime and material-point objects. The research successor has a dedicated material-point CUDA object for its 139-value state. The runtime launches only the family selected by material_model. Parallel make can therefore run independent NVCC/PTX-assembly jobs concurrently without relocatable device code, noinline annotations, or equation changes.",
         ],
         codeLabel: "shell",
-        code: "make clean\nmake -j 8\n\n# Expected executables\nls octor/octor quake/forward/psolve",
+        code: "make -j 8\n\n# Expected executables\nls quake/forward/qmesh quake/forward/psolve",
         bullets: [
           "Use a numeric -j limit. Bare make -j permits unbounded outer build concurrency and can oversubscribe a shared build node.",
           "Treat missing gsl headers as an include-path problem and missing gsl_* symbols as a GSL link-path or link-order problem.",

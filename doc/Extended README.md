@@ -299,6 +299,13 @@ equilibrium for a coarser mesh. Those require case-specific comparisons.
 
 ## Host and CUDA compilation
 
+From a fresh checkout, copy [`user.mk.example`](../user.mk.example) to `user.mk`
+in the repository root and edit the placeholders. Set the MPI wrappers and
+installation prefix to match the job launcher, and point CUDA, GSL, and PROJ
+settings at the headers and libraries for that toolchain. Choose a CUDA
+architecture supported by the target GPU and toolkit, and use the actual
+GSL and PROJ library directories, such as `lib` or `lib64`.
+
 The forward solver separates host orchestration from CUDA launch code:
 `quake/forward/psolve.cc` is compiled with the configured MPI C++ compiler,
 while `quake/forward/psolve_gpu_launch.cu` is compiled with NVCC. Use a parallel

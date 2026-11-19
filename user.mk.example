@@ -1,0 +1,22 @@
+# Copy to user.mk and set the paths and CUDA architecture for your system.
+# Use the MPI wrappers from the same MPI installation that will run Hercules.
+SYSTEM = custom
+CC = mpicc
+CXX = mpicxx
+LD = $(CXX)
+
+TACC_MPI_DIR = /path/to/mpi
+TACC_CUDA_DIR = /path/to/cuda
+GSL_INCLUDE_DIR = /path/to/gsl/include
+GSL_LIB_DIR = /path/to/gsl/lib
+PROJ_INCLUDE_DIR = /path/to/proj/include
+PROJ_LIB_DIR = /path/to/proj/lib
+
+# sm_100 targets NVIDIA B200 and GB200. Adjust this for your GPU and toolkit.
+CUDA_ARCH = sm_100
+NVCC = $(TACC_CUDA_DIR)/bin/nvcc -arch=$(CUDA_ARCH)
+
+CPPFLAGS += -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -DPROJ
+CPPFLAGS += -I$(TACC_CUDA_DIR)/include -I$(GSL_INCLUDE_DIR) -I$(PROJ_INCLUDE_DIR)
+LDFLAGS += -L$(GSL_LIB_DIR) -lgsl -lgslcblas
+LDFLAGS += -L$(PROJ_LIB_DIR) -lproj

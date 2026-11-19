@@ -11,9 +11,9 @@ contains the complete current input catalog; the parser under
 
 Use C/C++, CUDA, a supported NVIDIA GPU, MPI, GSL, PROJ, zlib, bzip2, and GNU
 Make. Put machine-specific compiler/library/CUDA settings in `user.mk`, starting
-from the closest [example](../examples/). Build with an explicit parallel job
-count, such as `make -j 8`. `USE_OPENMP`: `1` (default) enables OpenMP; `0`
-disables it. See
+from the [root build template](../user.mk.example). Build with an explicit
+parallel job count, such as `make -j 8`. `USE_OPENMP`: `1` (default) enables
+OpenMP; `0` disables it. See
 [compilation details](Extended%20README.md#host-and-cuda-compilation).
 
 Run the repository launcher from the case directory:
